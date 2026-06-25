@@ -46,6 +46,22 @@ pub type OwnedWatchRefsRequestView = ::buffa::view::OwnedView<
 pub type OwnedRefEventView = ::buffa::view::OwnedView<
     __buffa::view::RefEventView<'static>,
 >;
+///Shorthand for `OwnedView<PostMessageRequestView<'static>>`.
+pub type OwnedPostMessageRequestView = ::buffa::view::OwnedView<
+    __buffa::view::PostMessageRequestView<'static>,
+>;
+///Shorthand for `OwnedView<PostMessageResponseView<'static>>`.
+pub type OwnedPostMessageResponseView = ::buffa::view::OwnedView<
+    __buffa::view::PostMessageResponseView<'static>,
+>;
+///Shorthand for `OwnedView<ListMessagesRequestView<'static>>`.
+pub type OwnedListMessagesRequestView = ::buffa::view::OwnedView<
+    __buffa::view::ListMessagesRequestView<'static>,
+>;
+///Shorthand for `OwnedView<ListMessagesResponseView<'static>>`.
+pub type OwnedListMessagesResponseView = ::buffa::view::OwnedView<
+    __buffa::view::ListMessagesResponseView<'static>,
+>;
 impl ::connectrpc::Encodable<PutObjectResponse>
 for __buffa::view::PutObjectResponseView<'_> {
     fn encode(
@@ -152,6 +168,42 @@ for ::buffa::view::OwnedView<__buffa::view::RefEventView<'static>> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
 }
+impl ::connectrpc::Encodable<PostMessageResponse>
+for __buffa::view::PostMessageResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<PostMessageResponse>
+for ::buffa::view::OwnedView<__buffa::view::PostMessageResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
+impl ::connectrpc::Encodable<ListMessagesResponse>
+for __buffa::view::ListMessagesResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<ListMessagesResponse>
+for ::buffa::view::OwnedView<__buffa::view::ListMessagesResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
 /// Full service name for this service.
 pub const REPO_SERVICE_SERVICE_NAME: &str = "mkit.repo.v1.RepoService";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `PutObject` RPC.
@@ -206,6 +258,24 @@ pub const REPO_SERVICE_LIST_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::
 pub const REPO_SERVICE_WATCH_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/WatchRefs",
         ::connectrpc::StreamType::ServerStream,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `PostMessage` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_POST_MESSAGE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/PostMessage",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListMessages` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_LIST_MESSAGES_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/ListMessages",
+        ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Server trait for RepoService.
@@ -364,6 +434,42 @@ pub trait RepoService: Send + Sync + 'static {
             ::connectrpc::ServiceStream<
                 impl ::connectrpc::Encodable<RefEvent> + Send + use<Self>,
             >,
+        >,
+    > + Send;
+    /// Handle the PostMessage RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn post_message<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, PostMessageRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<PostMessageResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the ListMessages RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn list_messages<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, ListMessagesRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<ListMessagesResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -546,6 +652,56 @@ impl<S: RepoService> RepoServiceExt for S {
                 }),
             )
             .with_spec(REPO_SERVICE_WATCH_REFS_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "PostMessage",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::PostMessageRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                PostMessageRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.post_message(ctx, sreq)
+                                .await?
+                                .encode::<PostMessageResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_POST_MESSAGE_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "ListMessages",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::ListMessagesRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                ListMessagesRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.list_messages(ctx, sreq)
+                                .await?
+                                .encode::<ListMessagesResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_LIST_MESSAGES_SPEC)
     }
 }
 /// Monomorphic dispatcher for `RepoService`.
@@ -625,6 +781,18 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(REPO_SERVICE_WATCH_REFS_SPEC),
+                )
+            }
+            "PostMessage" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_POST_MESSAGE_SPEC),
+                )
+            }
+            "ListMessages" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_LIST_MESSAGES_SPEC),
                 )
             }
             _ => None,
@@ -715,6 +883,40 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                         ListRefsRequest,
                     >::from_parts(&req, &body);
                     svc.list_refs(ctx, req).await?.encode::<ListRefsResponse>(format)
+                })
+            }
+            "PostMessage" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        PostMessageRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::PostMessageRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        PostMessageRequest,
+                    >::from_parts(&req, &body);
+                    svc.post_message(ctx, req)
+                        .await?
+                        .encode::<PostMessageResponse>(format)
+                })
+            }
+            "ListMessages" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ListMessagesRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::ListMessagesRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ListMessagesRequest,
+                    >::from_parts(&req, &body);
+                    svc.list_messages(ctx, req)
+                        .await?
+                        .encode::<ListMessagesResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -1083,6 +1285,80 @@ where
                 &self.config,
                 REPO_SERVICE_SERVICE_NAME,
                 "WatchRefs",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the PostMessage RPC. Sends a request to /mkit.repo.v1.RepoService/PostMessage.
+    pub async fn post_message(
+        &self,
+        request: PostMessageRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::PostMessageResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.post_message_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the PostMessage RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn post_message_with_options(
+        &self,
+        request: PostMessageRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::PostMessageResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "PostMessage",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the ListMessages RPC. Sends a request to /mkit.repo.v1.RepoService/ListMessages.
+    pub async fn list_messages(
+        &self,
+        request: ListMessagesRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListMessagesResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.list_messages_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the ListMessages RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn list_messages_with_options(
+        &self,
+        request: ListMessagesRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListMessagesResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "ListMessages",
                 request,
                 options,
             )

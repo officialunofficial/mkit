@@ -25,9 +25,22 @@ use crate::hashing::blake3_hex;
 #[derive(Clone)]
 pub struct AuthorPubkey(pub String);
 
+/// The request's `Idempotency-Key` (verified as part of the signed envelope),
+/// placed on `ctx.extensions` for handlers that need replay protection. Empty
+/// when the request carried no key. PostMessage uses it to dedupe replays of a
+/// captured signature (UpdateRef/PutObject are naturally idempotent and ignore
+/// it).
+#[derive(Clone)]
+pub struct IdempotencyKey(pub String);
+
 /// Procedures that mutate state and therefore require a write envelope.
+/// PostMessage is a signed write too — the verified pubkey IS the chat
+/// author (same open-write/demo model as UpdateRef). ListMessages, like the
+/// other reads, is open.
 fn requires_write_auth(procedure: &str) -> bool {
-    procedure.ends_with("/PutObject") || procedure.ends_with("/UpdateRef")
+    procedure.ends_with("/PutObject")
+        || procedure.ends_with("/UpdateRef")
+        || procedure.ends_with("/PostMessage")
 }
 
 /// Normalize an incoming hex header: strip an optional `0x`, lowercase.
@@ -74,9 +87,10 @@ impl Interceptor for AuthInterceptor {
 
         let now = now_ms();
         match verify_envelope(&procedure, &actual_body_digest, now, &headers) {
-            VerifyEnvelope::Ok { public_key, .. } => {
+            VerifyEnvelope::Ok { public_key, idempotency_key, .. } => {
                 let mut req = req;
                 req.ctx.extensions_mut().insert(AuthorPubkey(public_key));
+                req.ctx.extensions_mut().insert(IdempotencyKey(idempotency_key));
                 next.run(req).await
             }
             VerifyEnvelope::Err { status: 400, error } => {

@@ -25,23 +25,55 @@ use serde::{Deserialize, Serialize};
 // `wasm_bindgen` must be in scope: the `#[durable_object]` macro emits glue
 // that references it by name. `DurableObject` is the trait we implement.
 use worker::{
-    durable_object, wasm_bindgen, DurableObject, Env, Request, Response, ResponseBuilder, Result,
-    State, WebSocket, WebSocketIncomingMessage, WebSocketPair,
+    durable_object, wasm_bindgen, Date, DurableObject, Env, Request, Response, ResponseBuilder,
+    Result, State, WebSocket, WebSocketIncomingMessage, WebSocketPair,
 };
 
+use crate::chat::is_rate_limited;
+use crate::envelope::FRESHNESS_WINDOW_MS;
 use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
-use super::wire::{GetReq, GetResp, ListEntry, ListReq, ListResp, UpdateReq, UpdateResp};
+use super::wire::{
+    GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp, MsgEntry, PostReq,
+    PostResp, UpdateReq, UpdateResp,
+};
 
-/// A live ref advance, broadcast to every WatchRefs subscriber. The hex
-/// fields are decoded back to raw bytes by the worker before re-encoding into
-/// the proto `RefEvent`.
+/// Default + max page size for `/messages` (the lobby backlog). A request for
+/// `limit=0` gets the default; anything above the max is clamped.
+const MESSAGES_DEFAULT_LIMIT: u32 = 50;
+const MESSAGES_MAX_LIMIT: u32 = 200;
+
+/// How many recent messages the DO's SQLite index retains. The permanent,
+/// content-addressed copy of every message lives in R2 (written by the worker
+/// before /post); this index is a bounded serving cache so the DO's storage
+/// can't grow without limit (a Cloudflare best practice) — generously larger
+/// than MESSAGES_MAX_LIMIT so paging is unaffected.
+const MESSAGES_RETAINED: i64 = 1_000;
+
+/// A live ref advance, broadcast to every `/watch` subscriber. `kind` tags the
+/// frame as a commit so the SAME socket can also carry chat frames (the lobby
+/// merges both into one feed); the hex fields are decoded back to raw bytes by
+/// the worker before re-encoding into the proto `RefEvent`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RefEventJson {
+    /// Always `"commit"` — distinguishes a ref advance from a `"chat"` frame.
+    pub kind: String,
     pub name: String,
     pub object_id: String,           // 64-hex
     pub author_pubkey: Option<String>, // 64-hex
+}
+
+/// A live chat message, broadcast to every `/watch` subscriber alongside ref
+/// advances. `kind` is `"chat"`; fields mirror the proto `ChatMessage`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ChatEventJson {
+    pub kind: String, // always "chat"
+    pub message_id: String,   // 64-hex content address
+    pub author_pubkey: String, // 64-hex
+    pub text: String,
+    pub created_at: i64,
+    pub seq: u64,
 }
 
 #[durable_object]
@@ -70,11 +102,16 @@ impl DurableObject for RefStore {
                 .empty());
         }
 
-        // Lazily create the refs table before any read/write op. On failure
+        // Lazily create the backing tables before any read/write op. On failure
         // return a clean 500 rather than panicking the isolate (H4).
         match path.as_str() {
             "/get" | "/update" | "/list" => {
                 if let Err(e) = self.ensure_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
+            "/post" | "/messages" => {
+                if let Err(e) = self.ensure_messages_table() {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
@@ -98,6 +135,15 @@ impl DurableObject for RefStore {
                 let body: ListReq = req.json().await?;
                 let refs = self.list_refs(&body.prefix);
                 Response::from_json(&ListResp { refs })
+            }
+            "/post" => {
+                let body: PostReq = req.json().await?;
+                self.handle_post(body)
+            }
+            "/messages" => {
+                let body: MessagesReq = req.json().await?;
+                let messages = self.list_messages(body.limit);
+                Response::from_json(&MessagesResp { messages })
             }
             _ => Response::error("not found", 404),
         }
@@ -189,6 +235,7 @@ impl RefStore {
                     vec![req.name.clone().into(), req.new.clone().into()],
                 )?;
                 self.broadcast(&RefEventJson {
+                    kind: "commit".to_string(),
                     name: req.name.clone(),
                     object_id: req.new.clone(),
                     author_pubkey: req.author.clone(),
@@ -239,13 +286,237 @@ impl RefStore {
             .collect()
     }
 
-    /// Push a ref event to every attached WatchRefs subscriber as a JSON frame.
+    /// Idempotently create the `messages` table — the room's chat log. `seq` is
+    /// the monotonic per-room order (AUTOINCREMENT) used to page the backlog and
+    /// to merge chat against commits in the feed; `created_at` is the DO's own
+    /// epoch-ms stamp (server-authoritative ordering, not client clocks). The
+    /// author index keeps the per-author rate-limit lookup cheap.
+    fn ensure_messages_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS messages (\
+               seq INTEGER PRIMARY KEY AUTOINCREMENT, \
+               id TEXT NOT NULL, \
+               author TEXT NOT NULL, \
+               text TEXT NOT NULL, \
+               created_at INTEGER NOT NULL);",
+            None,
+        )?;
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS messages_author ON messages(author);",
+            None,
+        )?;
+        // Replay-dedupe ledger: the (author, idempotency-key) of each accepted
+        // post, with the seq/created_at it produced. A replay of a captured
+        // signed request (same author+key) returns the ORIGINAL result instead
+        // of inserting a duplicate row. Bounded to the envelope freshness window
+        // (older keys can't pass envelope verification anyway).
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS idem_keys (\
+               author TEXT NOT NULL, \
+               idem TEXT NOT NULL, \
+               seq INTEGER NOT NULL, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (author, idem));",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Append a chat message under the per-author rate limit, serially (the DO's
+    /// single-threaded execution makes the read-then-insert atomic, so two posts
+    /// from one author can't both slip past the floor). On accept, stamp the
+    /// server clock + the new `seq`, then broadcast a `"chat"` frame to every
+    /// `/watch` subscriber. The worker has already content-addressed + stored
+    /// the message bytes in R2 and verified the author envelope.
+    fn handle_post(&self, req: PostReq) -> Result<Response> {
+        let now = Date::now().as_millis() as i64;
+
+        // Replay dedupe FIRST (before the rate limit): a re-submitted signed
+        // request (same author + idempotency-key) returns the ORIGINAL result,
+        // so a captured signature can't be amplified into duplicate messages and
+        // a client retry is idempotent. A genuinely new post carries a fresh key.
+        if !req.idem.is_empty() {
+            if let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem) {
+                return Response::from_json(&PostResp {
+                    accepted: true,
+                    rate_limited: false,
+                    seq,
+                    created_at,
+                });
+            }
+        }
+
+        let last = self.last_post_ms(&req.author);
+        if is_rate_limited(last, now) {
+            return Response::from_json(&PostResp {
+                accepted: false,
+                rate_limited: true,
+                seq: 0,
+                created_at: 0,
+            });
+        }
+
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "INSERT INTO messages (id, author, text, created_at) VALUES (?, ?, ?, ?);",
+            vec![
+                req.id.clone().into(),
+                req.author.clone().into(),
+                req.text.clone().into(),
+                now.into(),
+            ],
+        )?;
+
+        // The AUTOINCREMENT rowid of the row we just inserted IS its `seq`.
+        #[derive(Deserialize)]
+        struct Seq {
+            seq: i64,
+        }
+        let seq_rows: Vec<Seq> = sql
+            .exec("SELECT last_insert_rowid() AS seq;", None)
+            .and_then(|r| r.to_array())
+            .unwrap_or_default();
+        let seq: u64 = seq_rows.into_iter().next().map(|r| r.seq as u64).unwrap_or(0);
+
+        // Bound the serving index: drop rows older than the most-recent
+        // MESSAGES_RETAINED (R2 still holds every message permanently). seq is
+        // monotonic, so this keeps exactly the newest window.
+        let _ = sql.exec(
+            "DELETE FROM messages WHERE seq <= (SELECT MAX(seq) FROM messages) - ?;",
+            vec![MESSAGES_RETAINED.into()],
+        );
+
+        // Record this (author, idem) → result for replay dedupe, then drop keys
+        // older than the freshness window (a replay that old fails envelope
+        // verification, so its key is no longer needed).
+        if !req.idem.is_empty() {
+            let _ = sql.exec(
+                "INSERT OR REPLACE INTO idem_keys (author, idem, seq, created_at) VALUES (?, ?, ?, ?);",
+                vec![req.author.clone().into(), req.idem.clone().into(), (seq as i64).into(), now.into()],
+            );
+            let _ = sql.exec(
+                "DELETE FROM idem_keys WHERE created_at < ?;",
+                vec![(now - FRESHNESS_WINDOW_MS).into()],
+            );
+        }
+
+        self.broadcast_str(
+            &serde_json::to_string(&ChatEventJson {
+                kind: "chat".to_string(),
+                message_id: req.id.clone(),
+                author_pubkey: req.author.clone(),
+                text: req.text.clone(),
+                created_at: now,
+                seq,
+            })
+            .unwrap_or_default(),
+        );
+
+        Response::from_json(&PostResp {
+            accepted: true,
+            rate_limited: false,
+            seq,
+            created_at: now,
+        })
+    }
+
+    /// If this (author, idempotency-key) already produced a message, return its
+    /// (seq, created_at) so a replay can return the original result. None on a
+    /// first-seen key.
+    fn idem_lookup(&self, author: &str, idem: &str) -> Option<(u64, i64)> {
+        #[derive(Deserialize)]
+        struct Row {
+            seq: i64,
+            created_at: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT seq, created_at FROM idem_keys WHERE author = ? AND idem = ? LIMIT 1;",
+                vec![author.into(), idem.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| (r.seq as u64, r.created_at))
+    }
+
+    /// The author's most recent post time (epoch-ms), or None if they've never
+    /// posted — the input to the rate-limit decision.
+    fn last_post_ms(&self, author: &str) -> Option<i64> {
+        #[derive(Deserialize)]
+        struct Row {
+            created_at: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT created_at FROM messages WHERE author = ? ORDER BY seq DESC LIMIT 1;",
+                vec![author.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| r.created_at)
+    }
+
+    /// The most recent `limit` messages, returned OLDEST-FIRST (chat reading
+    /// order). `limit` is clamped to [1, MESSAGES_MAX_LIMIT]; 0 → default.
+    fn list_messages(&self, limit: u32) -> Vec<MsgEntry> {
+        let limit = match limit {
+            0 => MESSAGES_DEFAULT_LIMIT,
+            n => n.min(MESSAGES_MAX_LIMIT),
+        };
+        #[derive(Deserialize)]
+        struct Row {
+            seq: i64,
+            id: String,
+            author: String,
+            text: String,
+            created_at: i64,
+        }
+        // Newest `limit` rows, then reverse to oldest-first for the caller.
+        let mut rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT seq, id, author, text, created_at FROM messages \
+                 ORDER BY seq DESC LIMIT ?;",
+                vec![(limit as i64).into()],
+            )
+            .map(|r| r.to_array().unwrap_or_default())
+            .unwrap_or_default();
+        rows.reverse();
+        rows.into_iter()
+            .map(|r| MsgEntry {
+                id: r.id,
+                author: r.author,
+                text: r.text,
+                created_at: r.created_at,
+                seq: r.seq as u64,
+            })
+            .collect()
+    }
+
+    /// Push a ref event to every `/watch` subscriber as a JSON frame.
     fn broadcast(&self, event: &RefEventJson) {
         let Ok(payload) = serde_json::to_string(event) else { return };
+        self.broadcast_str(&payload);
+    }
+
+    /// Fan a pre-serialized JSON frame out to every attached `/watch` socket.
+    /// Shared by ref-advance and chat broadcasts so both ride the one stream.
+    fn broadcast_str(&self, payload: &str) {
         for ws in self.state.get_websockets() {
             // Best-effort: a closed/errored socket is simply skipped; the
             // runtime drops it from the set on the next cycle.
-            let _ = ws.send_with_str(&payload);
+            let _ = ws.send_with_str(payload);
         }
     }
 }

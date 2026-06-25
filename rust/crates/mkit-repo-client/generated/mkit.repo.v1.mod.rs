@@ -35,6 +35,11 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__WATCH_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__REF_EVENT_JSON_ANY);
+        reg.register_json_any(super::__POST_MESSAGE_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__POST_MESSAGE_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__LIST_MESSAGES_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__CHAT_MESSAGE_JSON_ANY);
+        reg.register_json_any(super::__LIST_MESSAGES_RESPONSE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -89,6 +94,26 @@ pub use self::__buffa::view::WatchRefsRequestOwnedView;
 pub use self::__buffa::view::RefEventView;
 #[doc(inline)]
 pub use self::__buffa::view::RefEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PostMessageRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::PostMessageRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PostMessageResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::PostMessageResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListMessagesRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::ListMessagesRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ChatMessageView;
+#[doc(inline)]
+pub use self::__buffa::view::ChatMessageOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListMessagesResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ListMessagesResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.repo.v1.repo.__connect.rs");

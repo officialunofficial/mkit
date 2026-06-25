@@ -33,6 +33,7 @@
     "@tanstack/query-sync-storage-persister": "^5.101.1",
     "@tanstack/react-query": "^5.101.1",
     "@tanstack/react-query-persist-client": "^5.101.1",
+    "@tanstack/react-virtual": "^3.13.12",
     "hono": "^4.12.25",
     "mkit-repo-client": "workspace:*",
     "mkit-wasm": "workspace:*",

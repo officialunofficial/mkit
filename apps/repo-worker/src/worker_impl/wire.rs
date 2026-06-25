@@ -64,3 +64,48 @@ pub struct ListEntry {
 pub struct ListResp {
     pub refs: Vec<ListEntry>,
 }
+
+// --- Chat (worker -> DO) ----------------------------------------------------
+//
+//   POST /post     PostReq     -> PostResp
+//   POST /messages MessagesReq -> MessagesResp
+//
+// The worker has already content-addressed + stored the message in R2 and
+// verified the author envelope; the DO owns ORDERING (the monotonic `seq`),
+// the server clock (`created_at`), rate-limiting, and the broadcast. `id` and
+// `author` are 64-hex; `text` is the raw UTF-8 message.
+
+#[derive(Serialize, Deserialize)]
+pub struct PostReq {
+    pub id: String,     // 64-hex BLAKE3 message id (content address)
+    pub author: String, // 64-hex Ed25519 pubkey of the verified signer
+    pub text: String,
+    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PostResp {
+    pub accepted: bool,
+    pub rate_limited: bool,
+    pub seq: u64,
+    pub created_at: i64, // server epoch-ms the DO stamped
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MessagesReq {
+    pub limit: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MsgEntry {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+    pub created_at: i64,
+    pub seq: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MessagesResp {
+    pub messages: Vec<MsgEntry>, // oldest-first
+}
