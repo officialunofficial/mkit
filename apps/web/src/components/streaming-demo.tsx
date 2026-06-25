@@ -235,7 +235,7 @@ function FileSidebar({
           onClick={onToggleAutoEdit}
           aria-pressed={autoEdit}
           className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
-            autoEdit ? 'border-fg bg-fg text-bg' : 'border-hairline hover:border-fg'
+            autoEdit ? 'border-fg bg-fg text-bg' : 'border-hairline hover:border-blue-500/50'
           }`}
         >
           <span aria-hidden className={`size-1.5 rounded-full ${autoEdit ? 'animate-pulse bg-bg' : 'bg-muted'}`} />
@@ -563,7 +563,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           type='button'
           onClick={start}
           disabled={playing}
-          className='inline-flex h-10 items-center justify-center rounded-lg border border-hairline px-3 text-sm font-medium transition-colors hover:border-fg active:translate-y-px disabled:opacity-40 sm:h-9'
+          className='inline-flex h-10 items-center justify-center rounded-lg border border-hairline px-3 text-sm font-medium transition-colors hover:border-blue-500/50 active:translate-y-px disabled:opacity-40 sm:h-9'
         >
           {playing ? 'Streaming…' : 'Start stream'}
         </button>

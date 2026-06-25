@@ -179,7 +179,7 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
         onClick={jumpToLatest}
         aria-hidden={atBottom || empty}
         tabIndex={atBottom || empty ? -1 : 0}
-        className={`absolute right-3 bottom-3 inline-flex h-8 items-center rounded-full border border-hairline bg-bg/90 px-3 text-xs shadow-sm backdrop-blur transition-[opacity,scale,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)] before:absolute before:inset-x-0 before:-inset-y-1 before:content-[""] hover:border-fg active:scale-[0.96] ${
+        className={`absolute right-3 bottom-3 inline-flex h-8 items-center rounded-full border border-hairline bg-bg/90 px-3 text-xs shadow-sm backdrop-blur transition-[opacity,scale,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)] before:absolute before:inset-x-0 before:-inset-y-1 before:content-[""] hover:border-blue-500/50 active:scale-[0.96] ${
           atBottom || empty ? 'pointer-events-none scale-95 opacity-0' : 'opacity-100'
         }`}
       >

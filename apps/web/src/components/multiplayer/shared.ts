@@ -2,7 +2,7 @@
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
 export const BTN =
-  'inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-fg active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
+  'inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-blue-500/50 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
 
 // Primary call-to-action: filled blue with white text + a 1px offset dark-blue
 // shadow, so the main action (create identity / sign & push) reads as clickable.
