@@ -250,7 +250,7 @@ function Composer({ room }: { room: string }) {
           // No `maxLength`: it counts UTF-16 code units and would truncate
           // emoji early, disagreeing with the code-point `over` check + counter
           // below (and the server's scalar-value cap). The over-check governs.
-          className='h-10 w-full rounded-lg border border-hairline bg-transparent px-3 text-sm outline-none transition-colors duration-200 focus:border-fg sm:h-9'
+          className='h-10 w-full rounded-lg border border-hairline bg-transparent px-3 text-base outline-none transition-colors duration-200 focus:border-fg sm:h-9 sm:text-sm'
           value={text}
           placeholder='Sign a message to the lobby…'
           onChange={(e) => setText(e.target.value)}
