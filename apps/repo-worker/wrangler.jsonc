@@ -6,12 +6,14 @@
   "name": "mkit-repo-worker",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
-  // Self-contained so the Cloudflare Workers Build image (which has cargo but not
-  // necessarily the wasm32 target or the `worker-build` binary — unlike the web
-  // worker, which only needs wasm-pack) can build this pure-Rust worker. Each
-  // step is idempotent: a no-op when already present (local dev, warm CI cache).
+  // The Cloudflare Workers Build image ships NO Rust toolchain (it's Node-based;
+  // the web worker only uploads prebuilt vendored wasm). So this pure-Rust worker
+  // installs rustup (pinned 1.95.0 + the wasm32 target) and worker-build, then
+  // compiles. Each install is guarded by a `command -v` check, so it's a no-op
+  // wherever they already exist (local `wrangler deploy`). Heavy (~minutes) on a
+  // cold CF builder, but self-contained — no committed binaries.
   "build": {
-    "command": "rustup target add wasm32-unknown-unknown && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
+    "command": "(command -v cargo >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0 -t wasm32-unknown-unknown) && . \"$HOME/.cargo/env\" && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
   },
 
   // Structured logs/metrics for the deployed Worker.
