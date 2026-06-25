@@ -84,6 +84,20 @@ service RepoService {
   // Server-streaming live ref advances for the room — one RefEvent per
   // successful UpdateRef, to every subscriber.
   rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);
+
+  // Post a signed chat message to the room. The write envelope (request
+  // metadata) authenticates the author exactly like UpdateRef — the verified
+  // Ed25519 pubkey IS the author, no accounts. The server content-addresses
+  // the canonical message bytes by BLAKE3 (stored once in the object store,
+  // like a commit), assigns a monotonic per-room sequence, and broadcasts a
+  // chat frame to every `/watch/<room>` subscriber. Rate-limited + length-
+  // capped server-side; `rate_limited=true` (with `accepted=false`) when the
+  // author posted too recently.
+  rpc PostMessage(PostMessageRequest) returns (PostMessageResponse);
+
+  // Recent messages for the room, oldest-first (chat reading order), capped by
+  // `limit`. Unauthenticated — reading the lobby is open to everyone.
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -157,4 +171,42 @@ message RefEvent {
   string name = 1;
   bytes object_id = 2;
   bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the writer
+}
+
+// ----------------------------------------------------------------------------
+// Chat — signed messages that share the room (and the live event stream) with
+// commits, so the front-page lobby renders one merged feed of a player's
+// signed activity (chatter + pushes). The message body the author signs is
+// just `{ room, text }`; the server stamps `created_at` + `seq` (ordering is
+// server-authoritative, not client-clock).
+
+message PostMessageRequest {
+  string room = 1;
+  string text = 2;             // UTF-8; server caps the character count
+}
+
+message PostMessageResponse {
+  bytes message_id = 1;        // 32-byte BLAKE3 of the canonical message bytes
+  bool accepted = 2;           // stored + broadcast
+  bool rate_limited = 3;       // refused: the author posted too recently
+}
+
+message ListMessagesRequest {
+  string room = 1;
+  uint32 limit = 2;            // 0 = server default; clamped to a server max
+}
+
+// One stored chat message. `message_id` is the content address (BLAKE3 of the
+// canonical bytes); `created_at` is server epoch-ms; `seq` is the monotonic
+// per-room order used to merge against commits in the feed.
+message ChatMessage {
+  bytes message_id = 1;
+  bytes author_pubkey = 2;     // 32-byte Ed25519 pubkey of the signer
+  string text = 3;
+  int64 created_at = 4;        // server-stamped epoch milliseconds
+  uint64 seq = 5;              // monotonic per-room sequence
+}
+
+message ListMessagesResponse {
+  repeated ChatMessage messages = 1;  // oldest-first
 }

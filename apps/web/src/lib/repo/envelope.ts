@@ -16,6 +16,8 @@ export const procedures = {
   UpdateRef: '/mkit.repo.v1.RepoService/UpdateRef',
   ListRefs: '/mkit.repo.v1.RepoService/ListRefs',
   WatchRefs: '/mkit.repo.v1.RepoService/WatchRefs',
+  PostMessage: '/mkit.repo.v1.RepoService/PostMessage',
+  ListMessages: '/mkit.repo.v1.RepoService/ListMessages',
 } as const
 
 // ---------------------------------------------------------------------------
@@ -55,17 +57,14 @@ export function blake3OfString(api: MkitApi, s: string): string {
 }
 
 /**
- * Build + sign the request envelope. `bodyDigest` is the BLAKE3 of the raw
- * (serialized) request body. The signature is raw Ed25519 over the BLAKE3 digest
- * of the canonical string — what the server's `ed25519_verify` checks. The real
- * Connect client attaches `publicKeyHex` / `signatureHex` / `createdAt` /
- * `idempotencyKey` as the X-* call headers.
+ * Build + sign the request envelope. `bodyDigest` is the BLAKE3 of the raw (serialized) request body. The signature is
+ * raw Ed25519 over the BLAKE3 digest of the canonical string — what the server's `ed25519_verify` checks. The real
+ * Connect client attaches `publicKeyHex` / `signatureHex` / `createdAt` / `idempotencyKey` as the X-* call headers.
  */
 export function buildSignedEnvelope(
   api: MkitApi,
   seedHex: string,
-  parts: Pick<EnvelopeParts, 'procedure' | 'bodyDigest'> &
-    Partial<Pick<EnvelopeParts, 'createdAt' | 'idempotencyKey'>>,
+  parts: Pick<EnvelopeParts, 'procedure' | 'bodyDigest'> & Partial<Pick<EnvelopeParts, 'createdAt' | 'idempotencyKey'>>,
 ): SignedEnvelope {
   // `createdAt` MUST be epoch-ms (`String(Date.now())`) to match the server's
   // `String(epoch ms)` canonical field — see apps/repo-worker/src/lib/envelope.ts.
@@ -103,20 +102,21 @@ export function envelopeHeaders(env: SignedEnvelope): Record<string, string> {
 // ---------------------------------------------------------------------------
 
 /**
- * The sign-callback the wasm client invokes per write. It receives the BLAKE3
- * hex of the RAW (serialized protobuf) request body — the EXACT bytes the
- * transport sends and the server re-hashes — and returns the signed-write
- * envelope. Computing the digest wasm-side (not in JS) is what guarantees
- * `X-Digest` matches `BLAKE3(actualBody)` on the server; JS could not reproduce
- * the protobuf bytes. See rust/crates/mkit-repo-client/README.md.
+ * The sign-callback the wasm client invokes per write. It receives the BLAKE3 hex of the RAW (serialized protobuf)
+ * request body — the EXACT bytes the transport sends and the server re-hashes — and returns the signed-write envelope.
+ * Computing the digest wasm-side (not in JS) is what guarantees `X-Digest` matches `BLAKE3(actualBody)` on the server;
+ * JS could not reproduce the protobuf bytes. See rust/crates/mkit-repo-client/README.md.
  *
- * The returned object's keys match what `SigningFetchTransport` reads:
- * `publicKeyHex`, `signatureHex`, `createdAt`, `idempotencyKey` (+ optional
- * `digestHex` echo, which must equal the supplied digest).
+ * The returned object's keys match what `SigningFetchTransport` reads: `publicKeyHex`, `signatureHex`, `createdAt`,
+ * `idempotencyKey` (+ optional `digestHex` echo, which must equal the supplied digest).
  */
-export type RepoSignFn = (
-  bodyDigestHex: string,
-) => { publicKeyHex: string; signatureHex: string; createdAt: string; idempotencyKey: string; digestHex: string }
+export type RepoSignFn = (bodyDigestHex: string) => {
+  publicKeyHex: string
+  signatureHex: string
+  createdAt: string
+  idempotencyKey: string
+  digestHex: string
+}
 
 /** Build a per-procedure sign-callback bound to the active identity seed. */
 export function makeSignFn(api: MkitApi, seedHex: string, procedure: string): RepoSignFn {

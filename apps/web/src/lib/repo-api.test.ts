@@ -4,8 +4,13 @@ import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
 import {
   CasConflictError,
+  type ChatMessageEntry,
   type CommitLogEntry,
+  IdentityLockedError,
   MockRepoBackend,
+  type FeedItem,
+  mergeFeed,
+  parseActivityFrame,
   type PushArgs,
   type RepoWasmClient,
   type SignedEnvelope,
@@ -18,6 +23,7 @@ import {
   isForkRef,
   makeSignFn,
   procedures,
+  postMessageMutationOptions,
   pushCommitMutationOptions,
   repoKeys,
 } from './repo-api'
@@ -60,11 +66,7 @@ describe('Connect-flavored envelope construction', () => {
     expect(env.digestHex).toBe(api.blake3_hex(new TextEncoder().encode(env.canonical)))
     expect(env.publicKeyHex).toBe(api.keypair_from_seed(SEED).pubkey_hex)
 
-    const ok = api.ed25519_verify(
-      hexToBytes(env.signatureHex),
-      hexToBytes(env.digestHex),
-      hexToBytes(env.publicKeyHex),
-    )
+    const ok = api.ed25519_verify(hexToBytes(env.signatureHex), hexToBytes(env.digestHex), hexToBytes(env.publicKeyHex))
     expect(ok).toBe(true)
 
     const bad = api.ed25519_verify(
@@ -370,7 +372,8 @@ describe('listRefs exposes all branches in the room', () => {
     // Reuse the wasm harness above via a fresh instance.
     const backend = new WasmRepoBackend(
       {
-        get_ref: async (_b: string, _r: string, n: string) => (n === 'main' ? 'm1' : n === 'feature' ? 'f1' : undefined),
+        get_ref: async (_b: string, _r: string, n: string) =>
+          n === 'main' ? 'm1' : n === 'feature' ? 'f1' : undefined,
         get_object: async (_b: string, _r: string, h: string) =>
           graph[h as keyof typeof graph] ? new TextEncoder().encode(h) : undefined,
         list_refs: async (_b: string, _r: string, prefix: string) =>
@@ -552,18 +555,14 @@ describe('decodeLogObject routes commits vs remixes via object_kind', () => {
   it('a remix decodes as kind="remix" carrying its upstream source', async () => {
     const api = await mkit()
     const upstream = api.commit_encode_and_sign(TREE, '', 'upstream', 1n, SEED2)
-    const sourcesJson = JSON.stringify([
-      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex },
-    ])
+    const sourcesJson = JSON.stringify([{ upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex }])
     const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'forked it', 2n, SEED2)
 
     const res = decodeLogObject(api, remix.bytes, remix.hash_hex, forkRefName(upstream.hash_hex))
     expect(res).not.toBeNull()
     expect(res!.entry.kind).toBe('remix')
     expect(res!.entry.message).toBe('forked it')
-    expect(res!.entry.sources).toEqual([
-      { upstreamIdHex: UPSTREAM_ID, commitHashHex: upstream.hash_hex },
-    ])
+    expect(res!.entry.sources).toEqual([{ upstreamIdHex: UPSTREAM_ID, commitHashHex: upstream.hash_hex }])
     // Root remix → no parent to continue the walk.
     expect(res!.firstParent).toBeUndefined()
   })
@@ -576,9 +575,7 @@ describe('decodeLogObject routes commits vs remixes via object_kind', () => {
   it('object_kind separates a commit from a remix', async () => {
     const api = await mkit()
     const commit = api.commit_encode_and_sign(TREE, '', 'c', 1n, SEED2)
-    const sourcesJson = JSON.stringify([
-      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: commit.hash_hex },
-    ])
+    const sourcesJson = JSON.stringify([{ upstream_id_hex: UPSTREAM_ID, commit_hash_hex: commit.hash_hex }])
     const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'r', 2n, SEED2)
     expect(api.object_kind(commit.bytes)).toBe('commit')
     expect(api.object_kind(remix.bytes)).toBe('remix')
@@ -593,9 +590,7 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
     const UPSTREAM_ID = '22'.repeat(32)
 
     const upstream = api.commit_encode_and_sign(TREE, '', 'upstream', 1n, SEED2)
-    const sourcesJson = JSON.stringify([
-      { upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex },
-    ])
+    const sourcesJson = JSON.stringify([{ upstream_id_hex: UPSTREAM_ID, commit_hash_hex: upstream.hash_hex }])
     const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'a fork', 2n, SEED2)
     const forkRef = forkRefName(upstream.hash_hex)
 
@@ -606,8 +601,7 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
       [upstream.hash_hex]: upstream.bytes,
     }
     const wasm = {
-      get_ref: async (_b: string, _r: string, name: string) =>
-        name === forkRef ? remix.hash_hex : undefined,
+      get_ref: async (_b: string, _r: string, name: string) => (name === forkRef ? remix.hash_hex : undefined),
       get_object: async (_b: string, _r: string, hash: string) => store[hash],
       list_refs: async (_b: string, _r: string, prefix: string) =>
         [{ name: forkRef, objectIdHex: remix.hash_hex }].filter((r) => r.name.startsWith(prefix)),
@@ -630,9 +624,8 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
   const REF = 'main'
 
   /**
-   * A backend whose updateRef we can make succeed or reject on demand, and
-   * (optionally) block on an external gate so we can assert the optimistic
-   * prepend is visible while the push is still in flight.
+   * A backend whose updateRef we can make succeed or reject on demand, and (optionally) block on an external gate so we
+   * can assert the optimistic prepend is visible while the push is still in flight.
    */
   function makeControllableBackend(opts: { failUpdate?: boolean; gate?: Promise<void> }) {
     return {
@@ -645,7 +638,10 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
       },
       listRefs: async () => [],
       watchRefs: () => () => {},
+      watchRoom: () => () => {},
       commitLog: async () => [],
+      postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
+      listMessages: async () => [],
     } satisfies import('./repo-api').RepoBackend
   }
 
@@ -888,8 +884,7 @@ describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () =
 
     const observer = new QueryObserver<CommitLogEntry[]>(qc, {
       queryKey: logKeyMain,
-      queryFn: async () =>
-        qc.getQueryData<CommitLogEntry[]>(logKeyMain) ?? [],
+      queryFn: async () => qc.getQueryData<CommitLogEntry[]>(logKeyMain) ?? [],
       placeholderData: keepPreviousData,
       enabled: true,
     })
@@ -915,5 +910,210 @@ describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () =
     await vi.waitFor(() => expect(observer.getCurrentResult().isPlaceholderData).toBe(false))
 
     unsub()
+  })
+})
+
+describe('parseActivityFrame dispatches commit vs chat frames', () => {
+  it('parses a server commit frame (kind=commit, snake_case)', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({ kind: 'commit', name: 'main', object_id: 'abc', author_pubkey: 'pk' }),
+    )
+    expect(f).toEqual({ kind: 'commit', ref: { name: 'main', objectIdHex: 'abc', authorPubkeyHex: 'pk' } })
+  })
+
+  it('parses a legacy commit frame with no kind (back-compat with deployed clients)', () => {
+    const f = parseActivityFrame(JSON.stringify({ name: 'main', object_id: 'abc' }))
+    expect(f?.kind).toBe('commit')
+  })
+
+  it('parses a chat frame (kind=chat, snake_case)', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({ kind: 'chat', message_id: 'mid', author_pubkey: 'pk', text: 'gm', created_at: 123, seq: 7 }),
+    )
+    expect(f).toEqual({
+      kind: 'chat',
+      message: { messageIdHex: 'mid', authorPubkeyHex: 'pk', text: 'gm', createdAt: 123, seq: 7 },
+    })
+  })
+
+  it('returns null for malformed or incomplete frames', () => {
+    expect(parseActivityFrame('not json')).toBeNull()
+    expect(parseActivityFrame(JSON.stringify({ name: 'main' }))).toBeNull() // commit missing object id
+    expect(parseActivityFrame(42 as unknown)).toBeNull()
+  })
+})
+
+describe('MockRepoBackend chat: post / list / watch', () => {
+  async function makeBackend() {
+    const api = await mkit()
+    return { api, backend: new MockRepoBackend(api, () => SEED) }
+  }
+
+  it('postMessage stores a content-addressed signed message; listMessages returns oldest-first', async () => {
+    const { backend } = await makeBackend()
+    const a = await backend.postMessage('lobby', 'gm')
+    const b = await backend.postMessage('lobby', 'hello')
+    expect(a.accepted).toBe(true)
+    expect(a.messageIdHex).toMatch(/^[0-9a-f]{64}$/)
+    expect(a.messageIdHex).not.toBe(b.messageIdHex)
+
+    const msgs: ChatMessageEntry[] = await backend.listMessages('lobby')
+    expect(msgs.map((m) => m.text)).toEqual(['gm', 'hello']) // oldest-first
+    expect(msgs[0]!.seq).toBeLessThan(msgs[1]!.seq)
+    expect(msgs[0]!.authorPubkeyHex).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('content address is deterministic for the same (room, author, text)', async () => {
+    const { backend } = await makeBackend()
+    const a = await backend.postMessage('lobby', 'same')
+    const { backend: backend2 } = await makeBackend()
+    const b = await backend2.postMessage('lobby', 'same')
+    expect(a.messageIdHex).toBe(b.messageIdHex)
+  })
+
+  it('rejects empty and over-long messages (≤280 chars)', async () => {
+    const { backend } = await makeBackend()
+    await expect(backend.postMessage('lobby', '   ')).rejects.toThrow()
+    await expect(backend.postMessage('lobby', 'x'.repeat(281))).rejects.toThrow()
+  })
+
+  it('watchRoom delivers chat to onChat, honouring unsubscribe', async () => {
+    const { backend } = await makeBackend()
+    const seen: string[] = []
+    const unsub = backend.watchRoom('lobby', '', { onChat: (m) => seen.push(m.text) })
+    await backend.postMessage('lobby', 'one')
+    expect(seen).toEqual(['one'])
+    unsub()
+    await backend.postMessage('lobby', 'two')
+    expect(seen).toEqual(['one']) // unsubscribed
+  })
+
+  it('a locked identity (no seed) cannot post', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => null)
+    await expect(backend.postMessage('lobby', 'hi')).rejects.toBeInstanceOf(IdentityLockedError)
+  })
+})
+
+describe('mergeFeed merges commits + chat oldest-first by timestamp', () => {
+  const commits: CommitLogEntry[] = [
+    { hash: 'c1', message: 'first commit', authorPubkey: 'a', ref: 'main', createdAt: new Date(1000).toISOString() },
+    { hash: 'c2', message: 'second commit', authorPubkey: 'a', ref: 'main', createdAt: new Date(3000).toISOString() },
+  ]
+  const messages: ChatMessageEntry[] = [
+    { messageIdHex: 'm1', authorPubkeyHex: 'b', text: 'hi', createdAt: 2000, seq: 1 },
+    { messageIdHex: 'm2', authorPubkeyHex: 'b', text: 'yo', createdAt: 4000, seq: 2 },
+  ]
+
+  it('interleaves commit + chat ascending by timestamp', () => {
+    const feed: FeedItem[] = mergeFeed(commits, messages)
+    expect(feed.map((f) => f.kind)).toEqual(['commit', 'chat', 'commit', 'chat'])
+    expect(feed.map((f) => f.ts)).toEqual([1000, 2000, 3000, 4000])
+  })
+
+  it('gives every item a stable, unique key', () => {
+    const feed = mergeFeed(commits, messages)
+    const keys = feed.map((f) => f.key)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('orders a commit before a chat message at an equal timestamp (stable tiebreak)', () => {
+    const sameTsCommit: CommitLogEntry[] = [
+      { hash: 'cx', message: 'x', authorPubkey: 'a', ref: 'main', createdAt: new Date(5000).toISOString() },
+    ]
+    const sameTsChat: ChatMessageEntry[] = [
+      { messageIdHex: 'mx', authorPubkeyHex: 'b', text: 'x', createdAt: 5000, seq: 9 },
+    ]
+    expect(mergeFeed(sameTsCommit, sameTsChat).map((f) => f.kind)).toEqual(['commit', 'chat'])
+  })
+
+  it('handles empty inputs', () => {
+    expect(mergeFeed([], [])).toEqual([])
+  })
+
+  it('orders two same-second commits oldest-first (reverses the newest-first walk input)', () => {
+    // commitLog yields newest-first: [head, parent]. Both share a unix-second ts.
+    const sameSecond: CommitLogEntry[] = [
+      { hash: 'head', message: 'newer', authorPubkey: 'a', ref: 'main', createdAt: new Date(7000).toISOString() },
+      { hash: 'parent', message: 'older', authorPubkey: 'a', ref: 'main', createdAt: new Date(7000).toISOString() },
+    ]
+    // Feed is oldest-first, so the parent must render above the head.
+    expect(mergeFeed(sameSecond, []).map((f) => (f.kind === 'commit' ? f.entry.hash : ''))).toEqual(['parent', 'head'])
+  })
+})
+
+describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
+  const ROOM = 'lobby'
+
+  function makeControllableBackend(opts: { fail?: boolean; rateLimited?: boolean; gate?: Promise<void> }) {
+    return {
+      putObject: async () => {},
+      getObject: async () => null,
+      getRef: async () => null,
+      updateRef: async () => {},
+      listRefs: async () => [],
+      watchRefs: () => () => {},
+      watchRoom: () => () => {},
+      commitLog: async () => [],
+      postMessage: async () => {
+        if (opts.gate) await opts.gate
+        if (opts.fail) throw new Error('post failed')
+        // A rate-limited post RESOLVES (does not throw) with accepted:false.
+        if (opts.rateLimited) return { messageIdHex: '', accepted: false, rateLimited: true }
+        return { messageIdHex: 'real', accepted: true, rateLimited: false }
+      },
+      listMessages: async () => [],
+    } satisfies import('./repo-api').RepoBackend
+  }
+
+  it('appends the message to the cache while the post is still in flight', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => {
+      release = r
+    })
+    const backend = makeControllableBackend({ gate })
+    const qc = new QueryClient()
+    const key = repoKeys.messages(ROOM)
+    qc.setQueryData<ChatMessageEntry[]>(key, [])
+
+    const observer = new MutationObserver(qc, postMessageMutationOptions(qc, backend, ROOM, 'mypk'))
+    const p = observer.mutate('hello there')
+    await new Promise((r) => setTimeout(r, 0)) // let onMutate run; post blocked on gate
+
+    const optimistic = qc.getQueryData<ChatMessageEntry[]>(key)
+    expect(optimistic?.map((m) => m.text)).toEqual(['hello there'])
+    expect(optimistic?.[0]?.authorPubkeyHex).toBe('mypk')
+    expect(optimistic?.[0]?.messageIdHex.startsWith('optimistic-')).toBe(true)
+
+    release()
+    await p
+  })
+
+  it('rolls the optimistic message back when the post is rejected', async () => {
+    const backend = makeControllableBackend({ fail: true })
+    const qc = new QueryClient()
+    const key = repoKeys.messages(ROOM)
+    const prior: ChatMessageEntry[] = [
+      { messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 },
+    ]
+    qc.setQueryData<ChatMessageEntry[]>(key, prior)
+
+    const observer = new MutationObserver(qc, postMessageMutationOptions(qc, backend, ROOM, 'mypk'))
+    await expect(observer.mutate('will fail')).rejects.toThrow()
+    expect(qc.getQueryData<ChatMessageEntry[]>(key)).toEqual(prior)
+  })
+
+  it('rolls the optimistic message back when the post RESOLVES rate-limited (no throw)', async () => {
+    const backend = makeControllableBackend({ rateLimited: true })
+    const qc = new QueryClient()
+    const key = repoKeys.messages(ROOM)
+    const prior: ChatMessageEntry[] = [{ messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 }]
+    qc.setQueryData<ChatMessageEntry[]>(key, prior)
+
+    const observer = new MutationObserver(qc, postMessageMutationOptions(qc, backend, ROOM, 'mypk'))
+    // Resolves (accepted:false) — onError never fires; onSuccess must remove the
+    // optimistic echo so it doesn't linger until the settle refetch.
+    await observer.mutate('too fast')
+    expect(qc.getQueryData<ChatMessageEntry[]>(key)).toEqual(prior)
   })
 })

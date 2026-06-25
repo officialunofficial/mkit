@@ -17,16 +17,20 @@ use serde::Serialize;
 use worker::send::SendFuture;
 use worker::{Env, Method, Request as WorkerRequest, RequestInit};
 
-use super::auth::AuthorPubkey;
+use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
-    GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse, ListRefsRequest,
-    ListRefsResponse, PutObjectRequest, PutObjectResponse, RefEntry, RefEvent, UpdateRefRequest,
-    UpdateRefResponse, WatchRefsRequest,
+    ChatMessage, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
+    ListMessagesRequest, ListMessagesResponse, ListRefsRequest, ListRefsResponse,
+    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, RefEntry,
+    RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
 };
 use super::refstore::RefEventJson;
-use super::wire::{GetReq, GetResp, ListReq, ListResp, UpdateReq, UpdateResp};
+use super::wire::{
+    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, UpdateReq,
+    UpdateResp,
+};
 
 const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
@@ -67,6 +71,37 @@ fn check_room(room: &str) -> Result<(), connectrpc::ConnectError> {
 /// R2 object key for a loose object: `{room}/objects/{hex(object_id)}`.
 fn object_key(room: &str, object_id: &[u8]) -> String {
     format!("{room}/objects/{}", hex::encode(object_id))
+}
+
+/// R2 key for a chat message: `{room}/messages/{hex(message_id)}`. A SEPARATE
+/// namespace from `objects/` so a chat id can never collide with — or be decoded
+/// as — an mkit object via GetObject (chat bytes are `mkit-chat:v1\n…`, not a
+/// decodable commit/tree/blob).
+fn message_key(room: &str, id: &[u8]) -> String {
+    format!("{room}/messages/{}", hex::encode(id))
+}
+
+/// Content-addressed, idempotent R2 store. A conditional put with
+/// `If-None-Match: *` writes the bytes only when `key` is absent; the key IS the
+/// content hash, so a re-put of identical bytes is a harmless no-op. Returns
+/// true when this call wrote (key was absent), false when it already existed.
+/// Shared by PutObject and PostMessage so the idempotent-store contract lives in
+/// ONE place.
+async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, connectrpc::ConnectError> {
+    let bucket = env
+        .bucket(STORAGE_BUCKET)
+        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+    let stored = bucket
+        .put(key, bytes)
+        .only_if(worker::Conditional {
+            etag_does_not_match: Some("*".to_string()),
+            ..Default::default()
+        })
+        .execute()
+        .await
+        .map_err(|e| ce_internal(format!("R2 put: {e}")))?
+        .is_some();
+    Ok(stored)
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
@@ -137,31 +172,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let bucket = env
-                .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
-            let key = object_key(&room, &object_id);
-
-            // Idempotent store in ONE round-trip: a conditional put with
-            // `If-None-Match: *` (etag_does_not_match = "*") writes only when
-            // the key is absent. This drops the prior head()+put() (two R2
-            // round-trips) for the common commit-push latency. Safe because
-            // the key IS the content hash — a re-put of identical bytes is
-            // harmless either way, and we already verified BLAKE3(bytes)==id.
-            //
-            // execute() returns Ok(Some(_)) when it stored (key was absent)
-            // and Ok(None) when the condition failed (key already present),
-            // so we still report `duplicate` accurately without the head.
-            let stored = bucket
-                .put(&key, bytes)
-                .only_if(worker::Conditional {
-                    etag_does_not_match: Some("*".to_string()),
-                    ..Default::default()
-                })
-                .execute()
-                .await
-                .map_err(|e| ce_internal(format!("R2 put: {e}")))?
-                .is_some();
+            // Idempotent content-addressed store in ONE round-trip (the key IS
+            // the verified hash; a re-put is a no-op). `put_addressed` returns
+            // false when the key already existed, so `duplicate` stays accurate
+            // without a separate head().
+            let stored = put_addressed(&env, &object_key(&room, &object_id), bytes).await?;
             Ok(Response::new(PutObjectResponse {
                 stored: Some(stored),
                 duplicate: Some(!stored),
@@ -350,5 +365,113 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             "WatchRefs is served over the WebSocket route GET /watch/<room>, \
              not Connect server-streaming (see README)",
         ))
+    }
+
+    async fn post_message(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, PostMessageRequest>,
+    ) -> ServiceResult<PostMessageResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let raw_text = msg.text.unwrap_or_default();
+
+        check_room(&room)?;
+        // Length + non-empty rule (the abuse floor; the passkey-gated, rate-
+        // limited write is the rest). Store the trimmed value.
+        let text = crate::chat::validate_text(&raw_text)
+            .map_err(ce_invalid)?
+            .to_string();
+
+        // The verified writer pubkey stashed by the auth interceptor IS the
+        // chat author. PostMessage requires write auth, so this is present;
+        // treat its absence as an auth failure rather than an anonymous post.
+        let author = ctx
+            .extensions()
+            .get::<AuthorPubkey>()
+            .map(|a| a.0.clone())
+            .ok_or_else(|| {
+                connectrpc::ConnectError::unauthenticated("missing verified author pubkey")
+            })?;
+        // The request's Idempotency-Key (verified in the envelope) — the DO uses
+        // it to dedupe a replayed signature into the original message.
+        let idem = ctx
+            .extensions()
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
+
+        // `message_id` is a CONTENT hash of the canonical message bytes (like a
+        // commit hash: identical content → identical id). It is NOT a unique
+        // per-post handle — the monotonic `seq` is the timeline key, and replays
+        // are deduped on (author, idempotency-key) in the DO.
+        let id = crate::chat::message_id(&room, &author, &text);
+        let canonical = crate::chat::canonical_message(&room, &author, &text);
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // Append to the room's ordered log FIRST — the DO enforces the rate
+            // limit, replay dedupe, monotonic seq, and broadcast. Only persist
+            // the bytes to R2 once the post is ACCEPTED, so a rate-limited or
+            // duplicate post does no wasted R2 write.
+            let resp: PostResp = do_call(
+                &env,
+                &room,
+                "/post",
+                &PostReq { id: hex::encode(id), author, text, idem },
+            )
+            .await?;
+
+            if resp.accepted {
+                // Durable content-addressed copy in its OWN namespace (the DO
+                // SQLite row is the serving source of truth for the feed).
+                put_addressed(&env, &message_key(&room, &id), canonical).await?;
+            }
+
+            Ok(Response::new(PostMessageResponse {
+                // Only surface a content address for a message that was actually
+                // stored; a rejected post returns an empty id so a client keying
+                // off message_id can't mistake a refusal for a stored message.
+                message_id: Some(if resp.accepted { id.to_vec() } else { Vec::new() }),
+                accepted: Some(resp.accepted),
+                rate_limited: Some(resp.rate_limited),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_messages(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListMessagesRequest>,
+    ) -> ServiceResult<ListMessagesResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let limit = msg.limit.unwrap_or(0);
+
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            let resp: MessagesResp = do_call(&env, &room, "/messages", &MessagesReq { limit }).await?;
+            let messages = resp
+                .messages
+                .into_iter()
+                .map(|m| ChatMessage {
+                    message_id: Some(hex::decode(&m.id).unwrap_or_default()),
+                    author_pubkey: Some(hex::decode(&m.author).unwrap_or_default()),
+                    text: Some(m.text),
+                    created_at: Some(m.created_at),
+                    seq: Some(m.seq),
+                    ..Default::default()
+                })
+                .collect();
+            Ok(Response::new(ListMessagesResponse {
+                messages,
+                ..Default::default()
+            }))
+        })
+        .await
     }
 }

@@ -10,6 +10,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { IDENTICON_GRID, identicon } from '../../lib/identity-avatar'
 import { playerName } from '../../lib/identity-name'
 import { useIdentityStore } from '../../lib/identity-store'
 import { getName, keysEnabled, setName } from '../../lib/keys-client'
@@ -45,6 +46,49 @@ export function useDisplayName(pubkeyHex: string | null): string {
 export function PlayerLabel({ pubkey, className }: { pubkey: string; className?: string }) {
   const name = useDisplayName(pubkey)
   return <span className={className}>{name}</span>
+}
+
+/**
+ * A pubkey's deterministic identicon avatar (the "pfp"). Derived purely from the
+ * key via {@link identicon} — same key, same mark, no upload/account. Renders a
+ * neutral tile for an empty/invalid key. `aria-hidden` since the adjacent
+ * {@link PlayerLabel} already names the player. The 1px ring is a pure
+ * black/white outline (never a tinted neutral) for consistent edge depth.
+ */
+export function PlayerAvatar({
+  pubkey,
+  size = 24,
+  className,
+}: {
+  pubkey: string
+  size?: number
+  className?: string
+}) {
+  const ic = identicon(pubkey)
+  const g = IDENTICON_GRID
+  const cell = 100 / g // 0..100 viewBox keeps rects crisp at any size
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox='0 0 100 100'
+      aria-hidden
+      className={`shrink-0 rounded-[4px] bg-muted/10 ring-1 ring-inset ring-black/10 dark:ring-white/10 ${className ?? ''}`}
+    >
+      {ic?.cells.map((on, i) =>
+        on ? (
+          <rect
+            key={`${i}`}
+            x={(i % g) * cell}
+            y={Math.floor(i / g) * cell}
+            width={cell}
+            height={cell}
+            fill={`hsl(${ic.hue} 62% 52%)`}
+          />
+        ) : null,
+      )}
+    </svg>
+  )
 }
 
 /** Mutation: set/rename the signed-in player's own handle (signed write). */

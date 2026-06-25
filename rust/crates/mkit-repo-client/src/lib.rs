@@ -149,6 +149,46 @@ pub async fn list_refs(base_url: &str, room: String, prefix: String) -> Result<J
     Ok(arr.into())
 }
 
+/// `ListMessages` — recent lobby messages (oldest-first), capped by `limit`
+/// (0 = server default). No auth. Returns a JS array of
+/// `{ messageIdHex, authorPubkeyHex, text, createdAt, seq }`. `createdAt` is
+/// server epoch-ms and `seq` the monotonic per-room order — both as JS numbers.
+#[wasm_bindgen]
+pub async fn list_messages(base_url: &str, room: String, limit: u32) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let resp = client
+        .list_messages(ListMessagesRequest {
+            room: Some(room),
+            limit: Some(limit),
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for m in resp.messages {
+        let obj = js_sys::Object::new();
+        set(
+            &obj,
+            "messageIdHex",
+            bytes_to_hex(m.message_id.as_deref().unwrap_or_default()).into(),
+        )?;
+        set(
+            &obj,
+            "authorPubkeyHex",
+            bytes_to_hex(m.author_pubkey.as_deref().unwrap_or_default()).into(),
+        )?;
+        set(&obj, "text", m.text.unwrap_or_default().into())?;
+        // i64/u64 -> f64 so JS sees a plain Number (not BigInt); exact for the
+        // epoch-ms + sequence magnitudes this demo produces.
+        set(&obj, "createdAt", (m.created_at.unwrap_or(0) as f64).into())?;
+        set(&obj, "seq", (m.seq.unwrap_or(0) as f64).into())?;
+        arr.push(&obj);
+    }
+    Ok(arr.into())
+}
+
 // ---------------------------------------------------------------------------
 // Writes (signed via JS callback)
 // ---------------------------------------------------------------------------
@@ -234,6 +274,42 @@ pub async fn update_ref(
         _ => JsValue::NULL,
     };
     set(&obj, "currentIdHex", current)?;
+    Ok(obj.into())
+}
+
+/// `PostMessage` — post a signed chat message. Signed via `sign` (same
+/// envelope contract as the other writes: the verified pubkey IS the author).
+/// Returns `{ messageIdHex, accepted, rateLimited }` — `rateLimited` is true
+/// (with `accepted` false) when the author posted too recently.
+#[wasm_bindgen]
+pub async fn post_message(
+    base_url: &str,
+    room: String,
+    text: String,
+    sign: js_sys::Function,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(SigningFetchTransport::new(sign), config(base_url)?);
+    let resp = client
+        .post_message_with_options(
+            PostMessageRequest {
+                room: Some(room),
+                text: Some(text),
+                ..Default::default()
+            },
+            CallOptions::default(),
+        )
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let obj = js_sys::Object::new();
+    set(
+        &obj,
+        "messageIdHex",
+        bytes_to_hex(resp.message_id.as_deref().unwrap_or_default()).into(),
+    )?;
+    set(&obj, "accepted", resp.accepted.unwrap_or(false).into())?;
+    set(&obj, "rateLimited", resp.rate_limited.unwrap_or(false).into())?;
     Ok(obj.into())
 }
 

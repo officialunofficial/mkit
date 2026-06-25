@@ -5,18 +5,21 @@
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import type { MkitApi } from '../mkit'
 import {
   BackendNotReadyError,
+  type ChatMessageEntry,
   type CommitLogEntry,
+  type FeedItem,
   type RefExpectation,
   type RemixSourceEntry,
   MockRepoBackend,
   type RepoBackend,
   WasmRepoBackend,
   decodeLogObject,
+  mergeFeed,
 } from './backend'
 import { useRepoBackend } from './store'
 
@@ -25,6 +28,7 @@ export const repoKeys = {
   refs: (room: string, prefix: string) => ['repo', room, 'refs', prefix] as const,
   object: (room: string, hash: string) => ['repo', room, 'object', hash] as const,
   log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
+  messages: (room: string) => ['repo', room, 'messages'] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,9 +92,8 @@ export type PushArgs = {
   room: string
   ref: string
   /**
-   * Raw mkit object bytes — a commit (from `commit_encode_and_sign`) or a
-   * remix (from `remix_encode_and_sign`). PutObject is content-addressed,
-   * so the same push path stores either kind.
+   * Raw mkit object bytes — a commit (from `commit_encode_and_sign`) or a remix (from `remix_encode_and_sign`).
+   * PutObject is content-addressed, so the same push path stores either kind.
    */
   commitBytes: Uint8Array
   commitHash: string
@@ -104,14 +107,12 @@ export type PushArgs = {
 }
 
 /**
- * Build the log entry recorded for a locally-originated push, SHAPE-IDENTICAL
- * to what a server ref-walk produces in {@link decodeLogObject}. We decode the
- * commit/remix bytes we already hold so `authorPubkey` (signer), `kind`,
- * `sources` and `createdAt` (ISO from the object's unix-seconds timestamp) all
- * match a walked entry exactly — so the optimistic entry we prepend renders
- * identically to the authoritative one and the later reconcile is a no-op for
- * our own commit. Falls back to args-derived fields if the bytes don't decode
- * (e.g. a test/mock that passes opaque bytes), so the entry is always usable.
+ * Build the log entry recorded for a locally-originated push, SHAPE-IDENTICAL to what a server ref-walk produces in
+ * {@link decodeLogObject}. We decode the commit/remix bytes we already hold so `authorPubkey` (signer), `kind`,
+ * `sources` and `createdAt` (ISO from the object's unix-seconds timestamp) all match a walked entry exactly — so the
+ * optimistic entry we prepend renders identically to the authoritative one and the later reconcile is a no-op for our
+ * own commit. Falls back to args-derived fields if the bytes don't decode (e.g. a test/mock that passes opaque bytes),
+ * so the entry is always usable.
  */
 export function buildPushLogEntry(args: PushArgs): CommitLogEntry {
   const decoded = decodeLogObject(args.api, args.commitBytes, args.commitHash, args.ref)
@@ -140,12 +141,11 @@ export function buildPushLogEntry(args: PushArgs): CommitLogEntry {
 }
 
 /**
- * Mutation options for {@link usePushCommit}, factored out so the optimistic
- * lifecycle (onMutate prepend → onError rollback → onSettled reconcile) is
- * unit-testable against a real QueryClient + MutationObserver without React.
+ * Mutation options for {@link usePushCommit}, factored out so the optimistic lifecycle (onMutate prepend → onError
+ * rollback → onSettled reconcile) is unit-testable against a real QueryClient + MutationObserver without React.
  *
- * The backend is an EXPLICIT parameter (no module global): the mutation writes
- * through exactly the instance passed in — directly testable by injecting a mock.
+ * The backend is an EXPLICIT parameter (no module global): the mutation writes through exactly the instance passed in —
+ * directly testable by injecting a mock.
  */
 export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>, backend: RepoBackend) {
   return {
@@ -198,16 +198,14 @@ export function pushCommitMutationOptions(qc: ReturnType<typeof useQueryClient>,
 }
 
 /**
- * Push a signed commit: PutObject (idempotent), then UpdateRef with an in-message
- * CAS expectation (§3 step 5). First commit (no parent) → `MISSING`; otherwise
- * `MATCH` on the parent. A failed precondition surfaces as `CasConflictError`
+ * Push a signed commit: PutObject (idempotent), then UpdateRef with an in-message CAS expectation (§3 step 5). First
+ * commit (no parent) → `MISSING`; otherwise `MATCH` on the parent. A failed precondition surfaces as `CasConflictError`
  * for the caller's fetch→re-parent→re-sign retry loop (§4).
  *
- * The signed-write envelope is NOT built here: each backend owns signing. The
- * `WasmRepoBackend` signs inside its sign-callback over the EXACT serialized
- * protobuf body the transport sends (so `X-Digest` matches the server); the mock
- * verifies the signing path in its own tests. This mutation only orchestrates
- * the two calls and records the commit-log entry.
+ * The signed-write envelope is NOT built here: each backend owns signing. The `WasmRepoBackend` signs inside its
+ * sign-callback over the EXACT serialized protobuf body the transport sends (so `X-Digest` matches the server); the
+ * mock verifies the signing path in its own tests. This mutation only orchestrates the two calls and records the
+ * commit-log entry.
  */
 export function usePushCommit() {
   const qc = useQueryClient()
@@ -223,9 +221,8 @@ export function usePushCommit() {
 }
 
 /**
- * Subscribe to live ref updates (WatchRefs server-stream) for a room and
- * invalidate the affected queries (§5) — turns a peer's push into a refetch so
- * the log updates within a frame.
+ * Subscribe to live ref updates (WatchRefs server-stream) for a room and invalidate the affected queries (§5) — turns a
+ * peer's push into a refetch so the log updates within a frame.
  */
 export function useRepoEvents(room: string, prefix = ''): void {
   const qc = useQueryClient()
@@ -243,4 +240,133 @@ export function useRepoEvents(room: string, prefix = ''): void {
       void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
     })
   }, [backend, room, prefix, qc])
+}
+
+// ---------------------------------------------------------------------------
+// Lobby: chat messages + the merged (commits + chat) feed
+// ---------------------------------------------------------------------------
+
+/** Recent lobby messages (oldest-first), capped. Gated on a ready backend. */
+export function useLobbyMessages(room: string) {
+  const backend = useRepoBackend()
+  return useQuery({
+    queryKey: repoKeys.messages(room),
+    queryFn: () => backend!.listMessages(room, 100),
+    enabled: !!backend,
+  })
+}
+
+export type PostMessageResult = { messageIdHex: string; accepted: boolean; rateLimited: boolean }
+
+/**
+ * Mutation options for {@link usePostMessage}, factored out (like {@link pushCommitMutationOptions}) so the optimistic
+ * lifecycle is testable against a real QueryClient without React. The optimistic echo appends the pending message to
+ * the messages cache so it shows instantly; `onSettled` invalidates so the authoritative server list (with the real id
+ * + seq + the server `created_at`) replaces it. `myPubkeyHex` attributes the optimistic row to the sender; the temp id
+ * keeps it distinct + rollback-able.
+ */
+export function postMessageMutationOptions(
+  qc: ReturnType<typeof useQueryClient>,
+  backend: RepoBackend,
+  room: string,
+  myPubkeyHex?: string,
+) {
+  // Remove ONLY our optimistic row (by its temp id) rather than restoring a
+  // snapshot, so a peer's message that streamed in during the post isn't
+  // clobbered on rollback.
+  const removeOptimistic = (key: readonly unknown[], id: string) =>
+    qc.setQueryData<ChatMessageEntry[]>(key, (prev) => prev?.filter((m) => m.messageIdHex !== id) ?? [])
+
+  return {
+    mutationFn: (text: string) => backend.postMessage(room, text),
+    onMutate: async (text: string) => {
+      const key = repoKeys.messages(room)
+      await qc.cancelQueries({ queryKey: key })
+      // Temp id (not a content hash) — replaced by the server's real id on the
+      // post-settle refetch; `optimistic-` prefix can never collide.
+      const optimisticId = `optimistic-${crypto.randomUUID()}`
+      const optimistic: ChatMessageEntry = {
+        messageIdHex: optimisticId,
+        authorPubkeyHex: myPubkeyHex ?? '',
+        text: text.trim(),
+        createdAt: Date.now(),
+        // Sort last (newest) until the server assigns the real seq.
+        seq: Number.MAX_SAFE_INTEGER,
+      }
+      qc.setQueryData<ChatMessageEntry[]>(key, (prev) => [...(prev ?? []), optimistic])
+      return { key, optimisticId }
+    },
+    onError: (_err: unknown, _text: string, context: { key: readonly unknown[]; optimisticId: string } | undefined) => {
+      if (context) removeOptimistic(context.key, context.optimisticId)
+    },
+    // A RATE-LIMITED post resolves `{accepted:false}` rather than throwing, so
+    // onError never fires — roll the optimistic echo back here too, otherwise it
+    // lingers until the settle refetch and the user sees it appear then vanish.
+    onSuccess: (
+      result: PostMessageResult,
+      _text: string,
+      context: { key: readonly unknown[]; optimisticId: string } | undefined,
+    ) => {
+      if (context && !result.accepted) removeOptimistic(context.key, context.optimisticId)
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
+    },
+  }
+}
+
+/**
+ * Post a signed chat message to the room. The signing identity is the author (server-verified). Optimistically echoes
+ * the message into the feed, then reconciles with the server on settle (the broadcast echo also invalidates, so this
+ * converges idempotently). Rejects with `BackendNotReadyError` if no backend is ready.
+ */
+export function usePostMessage(room: string, myPubkeyHex?: string) {
+  const qc = useQueryClient()
+  const backend = useRepoBackend()
+  const options = backend
+    ? postMessageMutationOptions(qc, backend, room, myPubkeyHex)
+    : { mutationFn: (_text: string) => Promise.reject<PostMessageResult>(new BackendNotReadyError()) }
+  return useMutation(options)
+}
+
+/**
+ * Subscribe to the live room stream (ONE WebSocket) and invalidate the right queries: a ref advance refreshes the
+ * log/refs (like {@link useRepoEvents}); a chat frame refreshes the messages query. The merged feed re-renders within a
+ * frame of either a peer's commit or a peer's message.
+ */
+export function useLobbyEvents(room: string): void {
+  const qc = useQueryClient()
+  const backend = useRepoBackend()
+  useEffect(() => {
+    if (!backend) return
+    return backend.watchRoom(room, '', {
+      onRef: (u) => {
+        void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
+        void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
+        void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+      },
+      onChat: () => {
+        void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
+      },
+    })
+  }, [backend, room, qc])
+}
+
+/**
+ * The merged lobby feed: the `ref` commit log + room chat, interleaved oldest-first by timestamp. Combines
+ * {@link useCommitLog} and {@link useLobbyMessages}; the merge itself is the pure {@link mergeFeed}.
+ */
+export function useLobbyFeed(room: string, ref = 'main'): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
+  const log = useCommitLog(room, ref)
+  const messages = useLobbyMessages(room)
+  const items = useMemo(() => mergeFeed(log.data ?? [], messages.data ?? []), [log.data, messages.data])
+  // `isPending` (not `isLoading`) so the gap where the backend is still null —
+  // queries are `enabled:false`, which reports isLoading=false in v5 — still
+  // reads as loading, not as an empty room. Only consulted when the feed is
+  // empty, so a half-loaded feed with items still renders them.
+  return {
+    items,
+    isLoading: log.isPending || messages.isPending,
+    isError: log.isError || messages.isError,
+  }
 }

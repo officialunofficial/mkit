@@ -148,8 +148,9 @@ export const ADJECTIVE_COUNT = ADJECTIVES.length
 export const ANIMAL_COUNT = ANIMALS.length
 
 /** Parse exactly the leading `n` bytes of a hex string; returns null if there
- * aren't enough valid hex digits. Tiny + local — no wasm dependency. */
-function leadingBytes(hex: string, n: number): Uint8Array | null {
+ * aren't enough valid hex digits. Tiny + local — no wasm dependency. Shared with
+ * `identity-avatar.ts` (both derive presentation affordances from a pubkey). */
+export function leadingBytes(hex: string, n: number): Uint8Array | null {
   const clean = hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex
   if (clean.length < n * 2) return null
   const out = new Uint8Array(n)
