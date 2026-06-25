@@ -54,7 +54,7 @@ export function SignDemo() {
           {'error' in keypair ? (
             <span className='text-red-600 dark:text-red-400'>{keypair.error}</span>
           ) : (
-            <code className='font-mono text-sm'>{keypair.pubkey_hex}</code>
+            <code className='font-mono text-sm break-all'>{keypair.pubkey_hex}</code>
           )}
         </Field>
       </FieldList>

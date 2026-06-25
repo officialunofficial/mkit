@@ -3,25 +3,21 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
+import { randomPetname } from '../lib/identity-name'
+import { keysEnabled } from '../lib/keys-client'
 import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/identity-store'
-import {
-  MockRepoBackend,
-  type RepoBackend,
-  RepoBackendProvider,
-  WasmRepoBackend,
-  useRepoEvents,
-} from '../lib/repo-api'
+import { MockRepoBackend, type RepoBackend, RepoBackendProvider, WasmRepoBackend, useRepoEvents } from '../lib/repo-api'
 import { repoWasm } from '../lib/repo-client'
 import { bytesToHex, hexToBytes, useMkit } from './use-mkit'
 import { AttestBinding, LockedView, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose } from './multiplayer/compose'
+import { useSetName } from './multiplayer/player-label'
 import { RepoBrowser } from './multiplayer/repo-browser'
 import { errMsg } from './multiplayer/shared'
 
 /**
- * Owns the repo backend as a VALUE and provides it to the tree. The backend is
- * computed (not imperatively installed): the mock is memoised; the wasm client
- * loads into state. `backend` is `null` in worker mode until wasm resolves, so
+ * Owns the repo backend as a VALUE and provides it to the tree. The backend is computed (not imperatively installed):
+ * the mock is memoised; the wasm client loads into state. `backend` is `null` in worker mode until wasm resolves, so
  * descendants gate on it (skeleton) — the behavior the old readiness flag gave.
  */
 export function MultiplayerDemo() {
@@ -91,9 +87,8 @@ export function MultiplayerDemo() {
 }
 
 /**
- * The demo body — a DESCENDANT of the provider so `useRepoEvents` and every
- * panel read the backend from context. (Kept separate from the component that
- * renders the provider: a component can't consume a context it provides.)
+ * The demo body — a DESCENDANT of the provider so `useRepoEvents` and every panel read the backend from context. (Kept
+ * separate from the component that renders the provider: a component can't consume a context it provides.)
  */
 function MultiplayerBody({
   api,
@@ -107,6 +102,7 @@ function MultiplayerBody({
   useMock: boolean
 }) {
   useRepoEvents(room)
+  const setNameMut = useSetName()
 
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -122,7 +118,12 @@ function MultiplayerBody({
     setStatus(null)
     setBusy(true)
     try {
-      const res = await createIdentity()
+      // Roll a friendly handle BEFORE creation so the passkey is saved as
+      // "slate-badger@<host>" (not "mkit player@<host>") in the OS passkey
+      // manager. The same handle is registered to the derived pubkey below so it
+      // survives recovery and is what other players see.
+      const petname = randomPetname()
+      const res = await createIdentity(petname)
       // Persist the credentialId ONLY for a real (passkey-backed) identity. The
       // ephemeral fallback returns the created credentialId too, but its seed is
       // RANDOM — not derived from that passkey — so persisting it would flip
@@ -132,6 +133,13 @@ function MultiplayerBody({
       if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
+      // Register the handle in keys.mkit.sh (signed write). Fire-and-forget and
+      // only for a recoverable identity with a configured registry — a failure
+      // here must not block identity creation (the name still renders via the
+      // deterministic fallback).
+      if (res.via !== 'ephemeral' && keysEnabled()) {
+        setNameMut.mutate({ pubkeyHex: pubkey, seedHex: res.seedHex, name: petname })
+      }
       setStatus(
         res.via === 'prf-create'
           ? 'Identity ready — one passkey prompt, Ed25519 derived via PRF.'
@@ -195,7 +203,7 @@ function MultiplayerBody({
 
   if (!id.unlocked || !id.seedHex || !id.ed25519PubkeyHex) {
     return (
-      <div className='grid gap-8 lg:grid-cols-2 lg:items-start'>
+      <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
         <LockedView
           onCreate={onCreate}
           onUnlock={onUnlock}
@@ -208,7 +216,7 @@ function MultiplayerBody({
     )
   }
   return (
-    <div className='grid gap-8 lg:grid-cols-2 lg:items-start'>
+    <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
       <div className='space-y-6'>
         <UnlockedHeader />
         <Compose api={api} seedHex={id.seedHex} room={room} targetRef={selectedRef} onTargetRef={setSelectedRef} />

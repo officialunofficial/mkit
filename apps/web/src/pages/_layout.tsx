@@ -17,7 +17,10 @@ export default async function RootLayout({ children }: RootLayoutProps) {
     <div>
       {/* Per-page <title>, description, and Open Graph / Twitter tags are set by
           <Seo> in each page (components/seo.tsx). */}
-      <link rel='icon' type='image/png' href={data.icon} />
+      {/* The static/SSR favicon is the deterministic mkit grid mark (same seed
+          as the header GridLogo's SSR fallback); GridLogo then randomizes it
+          per load on the client. Previously this was the Waku ⛩️ default. */}
+      <link rel='icon' type='image/svg+xml' href={data.icon} />
       <link rel='preconnect' href='https://fonts.googleapis.com' />
       <link rel='preconnect' href='https://fonts.gstatic.com' crossOrigin='' />
       {/* Geist + Geist Mono. */}
@@ -47,7 +50,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
 
 const getData = async () => {
   const data = {
-    icon: '/images/favicon.png',
+    icon: '/images/grid-fallback.svg',
   }
 
   return data
