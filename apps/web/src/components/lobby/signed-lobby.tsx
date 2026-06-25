@@ -3,8 +3,8 @@
 // The front-page signed lobby — ONE merged feed of a room's signed activity:
 // chat messages AND commits pushed in /multiplayer, plus signed emoji reactions,
 // all keyed to the same passkey-derived Ed25519 identity and labelled with the
-// player's keys.mkit.sh handle. Slack-structured (grouped rows, hover actions,
-// reactions) but in mkit's white/Geist palette. Reading is open; posting +
+// player's keys.mkit.sh handle. A grouped, chat-style feed (hover actions,
+// reactions) in mkit's white/Geist palette. Reading is open; posting +
 // reacting require an unlocked identity (shared with the multiplayer demo).
 
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -189,7 +189,7 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
   )
 }
 
-/** One Slack-style feed row: full header (avatar + name + time) for a run's
+/** One chat-style feed row: full header (avatar + name + time) for a run's
  * first message; a tight, indented continuation when `grouped` (timestamp shows
  * on hover). A reaction bar sits under the body. */
 function Row({
@@ -285,7 +285,7 @@ function ReactionBar({
       ))}
 
       {/* Add-reaction control: a small face that opens a picker. Hidden until
-          row hover (Slack-style) once there are already reactions. */}
+          row hover once there are already reactions. */}
       <div className='relative'>
         <button
           type='button'
@@ -409,7 +409,7 @@ function Composer({ room }: { room: string }) {
 }
 
 /**
- * Slack-style timestamp from an epoch-ms stamp, with a full-datetime `title` for
+ * Compact timestamp from an epoch-ms stamp, with a full-datetime `title` for
  * hover. GUARDS against a bogus `ts` (0 / negative / non-finite — which would
  * otherwise render an absurd "20629d"): such items get an empty label rather
  * than a wrong one. Recent → relative; today → clock time; older → a short date.
