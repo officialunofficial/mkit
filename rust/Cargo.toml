@@ -60,6 +60,10 @@ commonware-stream = { version = "=2026.5.0" }
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
+# Flag `pub` items not reachable from the crate root: in a workspace this
+# keeps internal APIs honestly scoped (`pub(crate)`) instead of leaking a
+# wider surface than callers can actually use.
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -83,13 +87,31 @@ multiple_crate_versions = "allow"
 # (`allow-unwrap-in-tests` in clippy.toml), where a failed unwrap *is* the
 # assertion.
 unwrap_used = "deny"
+# A stray `dbg!()` left in shipped code spams stderr and leaks internals.
+# It's only ever a debugging aid, so fail the build rather than warn.
+dbg_macro = "deny"
 
 [profile.release]
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
-panic = "abort"
+# Keep unwinding in release so a panic produces a real backtrace for users
+# (panics should be rare — production bans `unwrap()` and uses
+# `expect("reason")`). The byte-deterministic `reproducible` profile below
+# switches to `abort` to drop unwinding tables, the main source of
+# toolchain-version drift in a rebuild-and-hash comparison.
+panic = "unwind"
 overflow-checks = true
+
+# Byte-deterministic build for independent rebuilders to hash-compare against
+# a published release. Diverges from `release` only where nondeterminism or
+# unwinding tables would otherwise creep in. (No consumer wired yet — this is
+# the target a future reproducible-build pipeline should use.)
+[profile.reproducible]
+inherits = "release"
+panic = "abort"
+incremental = false
+strip = "symbols"
 
 # Profiling profile for `samply` (and other sampling profilers). Mirrors
 # release codegen (inherits `codegen-units = 1` + `lto = "thin"`) so the

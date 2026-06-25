@@ -26,7 +26,7 @@ use mkit_core::to_hex;
 
 /// Deterministic seed for the prewritten signing key, so commits don't depend
 /// on `keygen` randomness (faster + reproducible across runs).
-pub const KEY_SEED: [u8; 32] = [0x11; 32];
+pub(crate) const KEY_SEED: [u8; 32] = [0x11; 32];
 
 // ---------------------------------------------------------------------------
 // Driving the real binary
@@ -34,7 +34,7 @@ pub const KEY_SEED: [u8; 32] = [0x11; 32];
 
 /// Spawn the real `mkit` binary, fully isolated from the developer's
 /// environment, with a non-interactive editor so nothing ever blocks.
-pub fn mkit(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
+pub(crate) fn mkit(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_mkit"))
         .args(args)
         .current_dir(cwd)
@@ -49,7 +49,7 @@ pub fn mkit(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
 }
 
 /// Prewrite a deterministic Ed25519 signing key at the default path.
-pub fn install_fixed_key(root: &Path) -> Result<(), String> {
+pub(crate) fn install_fixed_key(root: &Path) -> Result<(), String> {
     let keys = root.join(".mkit").join("keys");
     std::fs::create_dir_all(&keys).map_err(|e| format!("mkdir keys: {e}"))?;
     let kp = KeyPair::from_seed(KEY_SEED);
@@ -60,10 +60,10 @@ pub fn install_fixed_key(root: &Path) -> Result<(), String> {
 /// Exit codes a well-behaved `mkit` command may return — `OK` plus the
 /// documented sysexits-style errors from `mkit-cli/src/exit.rs`. Anything else
 /// (notably 101 from a Rust panic, or `None` from a signal) is a violation.
-pub const ALLOWED_EXIT: &[i32] = &[0, 1, 64, 65, 66, 69, 73, 75, 76, 77, 78];
+pub(crate) const ALLOWED_EXIT: &[i32] = &[0, 1, 64, 65, 66, 69, 73, 75, 76, 77, 78];
 
 /// Assert a command exited with an allowlisted code and did not panic.
-pub fn check_exit(out: &Output, label: &str) -> Result<(), String> {
+pub(crate) fn check_exit(out: &Output, label: &str) -> Result<(), String> {
     let stderr = String::from_utf8_lossy(&out.stderr);
     match out.status.code() {
         Some(c) if ALLOWED_EXIT.contains(&c) => {}
@@ -95,7 +95,7 @@ pub fn check_exit(out: &Output, label: &str) -> Result<(), String> {
 /// [`check_invariants`] would correctly fail-closed: `live_objects()` →
 /// `collect_roots()` reads those sidecar files and errors on malformed roots,
 /// which is expected for a garbled state, not a sign of repo corruption.
-pub fn check_store_intact(root: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String> {
     let mkit_dir = root.join(".mkit");
     let store = ObjectStore::open(root).map_err(|e| format!("[{label}] open store: {e}"))?;
 
@@ -122,7 +122,7 @@ pub fn check_store_intact(root: &Path, label: &str) -> Result<(), String> {
 /// signed-root reachability + signature validity, gc-safety over mkit's own
 /// retention live-set, and no leaked lock files. Only valid on a *parseable*
 /// repo state (post-recovery / non-garbled).
-pub fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
     check_store_intact(root, label)?;
     let mkit_dir = root.join(".mkit");
     let store = ObjectStore::open(root).map_err(|e| format!("[{label}] open store: {e}"))?;
@@ -231,7 +231,7 @@ pub fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Which resumable operation, if any, is in progress (by sidecar presence).
-pub fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
+pub(crate) fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
     if mkit_dir.join("rebase-apply").exists() || mkit_dir.join("rebase-merge").exists() {
         Some("rebase")
     } else if mkit_dir.join("CHERRY_PICK_HEAD").exists() {
@@ -252,7 +252,7 @@ pub fn in_progress(mkit_dir: &Path) -> Option<&'static str> {
 /// `clear_*_state` helpers remove. `ORIG_HEAD` is deliberately NOT checked: a
 /// `reset` legitimately leaves it. Rebase keeps its sidecar/message *inside*
 /// `rebase-apply/`, which the directory check already covers.
-pub fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
+pub(crate) fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
     let (head, msg) = match verb {
         "merge" => ("MERGE_HEAD", "MERGE_MSG"),
         "cherry-pick" => ("CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"),
@@ -278,14 +278,14 @@ pub fn operation_residue(mkit_dir: &Path, verb: &str) -> Option<String> {
 
 /// A throwaway repo on a fresh temp dir, initialised with the fixed signing key
 /// (no `keygen`), plus an isolated XDG/HOME dir.
-pub struct Repo {
+pub(crate) struct Repo {
     pub dir: tempfile::TempDir,
     pub xdg: tempfile::TempDir,
 }
 
 impl Repo {
     /// `init` + install the fixed key.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let xdg = tempfile::tempdir().expect("xdg tempdir");
         let r = Repo { dir, xdg };
@@ -294,22 +294,22 @@ impl Repo {
         r
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.dir.path()
     }
-    pub fn xdg(&self) -> &Path {
+    pub(crate) fn xdg(&self) -> &Path {
         self.xdg.path()
     }
-    pub fn mkit_dir(&self) -> PathBuf {
+    pub(crate) fn mkit_dir(&self) -> PathBuf {
         self.path().join(".mkit")
     }
 
-    pub fn run(&self, args: &[&str]) -> Output {
+    pub(crate) fn run(&self, args: &[&str]) -> Output {
         mkit(self.path(), self.xdg(), args)
     }
 
     /// Run and assert success.
-    pub fn ok(&self, args: &[&str]) -> Output {
+    pub(crate) fn ok(&self, args: &[&str]) -> Output {
         let out = self.run(args);
         assert!(
             out.status.success(),
@@ -320,7 +320,7 @@ impl Repo {
         out
     }
 
-    pub fn write(&self, rel: &str, body: &[u8]) {
+    pub(crate) fn write(&self, rel: &str, body: &[u8]) {
         let p = self.path().join(rel);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -329,7 +329,7 @@ impl Repo {
     }
 
     /// write + `add` + `commit -m`.
-    pub fn commit_file(&self, rel: &str, body: &[u8], msg: &str) {
+    pub(crate) fn commit_file(&self, rel: &str, body: &[u8], msg: &str) {
         self.write(rel, body);
         self.ok(&["add", rel]);
         self.ok(&["commit", "-m", msg]);
@@ -346,7 +346,7 @@ impl Default for Repo {
 /// file divergently, leaving the repo checked out on `main` — so the next
 /// `merge`/`cherry-pick`/`revert feature` conflicts. Returns the `feature`
 /// branch name.
-pub fn diverge_on(repo: &Repo, path: &str) -> &'static str {
+pub(crate) fn diverge_on(repo: &Repo, path: &str) -> &'static str {
     repo.commit_file(path, b"base\n", "base");
     repo.ok(&["branch", "feature"]);
     repo.ok(&["checkout", "feature"]);
@@ -360,7 +360,7 @@ pub fn diverge_on(repo: &Repo, path: &str) -> &'static str {
 /// repo. `verb` ∈ {"merge","cherry-pick","revert","rebase"}. Returns the repo
 /// with the operation paused (its sidecars on disk). Panics if the op does not
 /// actually conflict (keeps the builders honest).
-pub fn conflicted(verb: &str) -> Repo {
+pub(crate) fn conflicted(verb: &str) -> Repo {
     let repo = Repo::new();
     let feature = diverge_on(&repo, "a.txt");
     let args: Vec<&str> = match verb {

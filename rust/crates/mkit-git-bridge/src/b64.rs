@@ -5,7 +5,7 @@
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-pub fn encode(data: &[u8]) -> String {
+pub(crate) fn encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = u32::from(chunk[0]);
@@ -30,7 +30,7 @@ pub fn encode(data: &[u8]) -> String {
 // The `as u8` casts below extract masked low bytes of a u32
 // accumulator; truncation is the point.
 #[allow(clippy::cast_possible_truncation)]
-pub fn decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode(s: &str) -> Option<Vec<u8>> {
     fn val(b: u8) -> Option<u32> {
         Some(match b {
             b'A'..=b'Z' => u32::from(b - b'A'),
