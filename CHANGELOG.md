@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`mkit blame` line ranges and revision argument.** `blame` now accepts
+  `-L`/`--lines` to restrict output to a line range — `<start>,<end>`,
+  `<start>,+<n>`, `<start>,`, `,<end>`, and a bare `<start>` — and an
+  optional `[<rev>]` argument (`mkit blame <rev> <file>`) to blame the file
+  as of any revision instead of only `HEAD`. Range semantics match
+  `git blame -L`: inclusive bounds, inverted ranges swap, and over-long
+  ends clamp to EOF. Attribution remains first-parent only, with no
+  `-w`/`-M`/`-C` yet (tracked in follow-up issues).
+
 ### Removed
 
 - **Operational slim-down.** Removed governance/process ceremony whose

@@ -334,6 +334,101 @@ fn blame_on_single_commit_attributes_every_line_to_it() {
     assert!(first_short.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+#[test]
+fn blame_l_range_slices_lines_and_keeps_numbering() {
+    // `-L <start>,<end>` restricts output to that inclusive range while
+    // preserving the file's own 1-based line numbers, matching git.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\nc\nd\ne\n", "first");
+    let out = run_in(td.path(), &["blame", "-L", "2,4", "f.txt"]);
+    assert!(out.status.success(), "blame -L failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "expected lines 2..=4, got {stdout:?}");
+    // Line numbers are the file's own (2,3,4), not 1,2,3.
+    assert!(lines[0].contains("\t2\t") && lines[0].ends_with("\tb"));
+    assert!(lines[1].contains("\t3\t") && lines[1].ends_with("\tc"));
+    assert!(lines[2].contains("\t4\t") && lines[2].ends_with("\td"));
+}
+
+#[test]
+fn blame_l_plus_offset_counts_lines() {
+    // `-L <start>,+<n>` is n lines starting at <start>: `2,+1` → line 2.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\nc\n", "first");
+    let out = run_in(td.path(), &["blame", "-L", "2,+1", "f.txt"]);
+    assert!(out.status.success(), "blame -L +n failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "expected just line 2, got {stdout:?}");
+    assert!(lines[0].contains("\t2\t") && lines[0].ends_with("\tb"));
+}
+
+#[test]
+fn blame_l_start_past_eof_is_usage_error() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\n", "first");
+    let out = run_in(td.path(), &["blame", "-L", "9,10", "f.txt"]);
+    assert!(!out.status.success(), "expected failure on out-of-range -L");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("only 2 lines"),
+        "expected line-count diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn blame_at_explicit_revision_uses_that_commit() {
+    // `mkit blame <rev> <file>` blames the file as of <rev>, not HEAD.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\nc\n", "first");
+    let first = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"a\nMOD\nc\n", "second");
+
+    // At HEAD, line 2 is attributed to the second commit.
+    let head = run_in(td.path(), &["blame", "f.txt"]);
+    let head_out = String::from_utf8(head.stdout).unwrap();
+    assert!(head_out.lines().nth(1).unwrap().ends_with("\tMOD"));
+
+    // At the first commit, the file is the original three lines, all
+    // attributed to `first`.
+    let out = run_in(td.path(), &["blame", &first, "f.txt"]);
+    assert!(out.status.success(), "blame <rev> failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(
+        lines[1].ends_with("\tb"),
+        "expected pre-MOD content: {stdout:?}"
+    );
+    let short = &first[..12];
+    assert!(
+        lines.iter().all(|l| l.starts_with(short)),
+        "every line should be attributed to the first commit: {stdout:?}"
+    );
+}
+
+#[test]
+fn blame_unknown_revision_errors() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "first");
+    let out = run_in(td.path(), &["blame", "no-such-rev", "f.txt"]);
+    assert!(
+        !out.status.success(),
+        "expected failure on unknown revision"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("unknown revision"),
+        "expected unknown-revision diagnostic, got: {stderr}"
+    );
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]
