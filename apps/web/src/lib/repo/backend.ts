@@ -48,17 +48,63 @@ export function chatCanonical(room: string, authorHex: string, text: string): Ui
   return TEXT_ENCODER.encode(`${CHAT_CANONICAL_PREFIX}\n${room}\n${authorHex}\n${text}`)
 }
 
+/** One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the
+ * hex id of the feed item (chat message id or commit hash). */
+export type ReactionEntry = { targetIdHex: string; emoji: string; authorPubkeyHex: string }
+
+/** A live reaction toggle frame (the new on/off state for one reactor). */
+export type ReactionUpdate = {
+  targetIdHex: string
+  emoji: string
+  authorPubkeyHex: string
+  active: boolean
+  count: number
+}
+
+/** Aggregated reactions for one feed item: emoji → count + whether I reacted. */
+export type ReactionAgg = { emoji: string; count: number; mine: boolean }
+
 /**
- * Live-stream handlers for a room: ref advances and/or chat messages. Both ride the ONE `/watch/<room>` socket so the
- * lobby renders a merged feed.
+ * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested.
+ * Emoji order within a target is the order they first appear (stable).
+ */
+export function aggregateReactions(
+  entries: ReactionEntry[],
+  myPubkeyHex?: string,
+): Map<string, ReactionAgg[]> {
+  const byTarget = new Map<string, ReactionAgg[]>()
+  for (const e of entries) {
+    let list = byTarget.get(e.targetIdHex)
+    if (!list) {
+      list = []
+      byTarget.set(e.targetIdHex, list)
+    }
+    let agg = list.find((a) => a.emoji === e.emoji)
+    if (!agg) {
+      agg = { emoji: e.emoji, count: 0, mine: false }
+      list.push(agg)
+    }
+    agg.count += 1
+    if (myPubkeyHex && e.authorPubkeyHex === myPubkeyHex) agg.mine = true
+  }
+  return byTarget
+}
+
+/**
+ * Live-stream handlers for a room: ref advances, chat messages, and reaction
+ * toggles. All ride the ONE `/watch/<room>` socket so the lobby stays live.
  */
 export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
   onChat?: (m: ChatMessageEntry) => void
+  onReaction?: (r: ReactionUpdate) => void
 }
 
-/** A parsed `/watch` frame — a ref advance (`commit`) or a `chat` message. */
-export type ActivityFrame = { kind: 'commit'; ref: RefUpdate } | { kind: 'chat'; message: ChatMessageEntry }
+/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, or a `reaction` toggle. */
+export type ActivityFrame =
+  | { kind: 'commit'; ref: RefUpdate }
+  | { kind: 'chat'; message: ChatMessageEntry }
+  | { kind: 'reaction'; reaction: ReactionUpdate }
 
 /**
  * Parse one raw `/watch` WebSocket frame. Accepts the server's snake_case fields and camelCase, dispatches on the
@@ -77,6 +123,21 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
   if (!f || typeof f !== 'object') return null
 
   const kind = f.kind
+  if (kind === 'reaction') {
+    const targetIdHex = (f.targetIdHex ?? f.target_id) as string | undefined
+    if (!targetIdHex) return null
+    return {
+      kind: 'reaction',
+      reaction: {
+        targetIdHex,
+        emoji: (f.emoji ?? '') as string,
+        authorPubkeyHex: (f.authorPubkeyHex ?? f.author_pubkey ?? '') as string,
+        active: f.active === true,
+        count: Number(f.count ?? 0),
+      },
+    }
+  }
+
   const messageIdHex = (f.messageIdHex ?? f.message_id) as string | undefined
   if (kind === 'chat' || (kind === undefined && messageIdHex)) {
     if (!messageIdHex) return null
@@ -184,6 +245,10 @@ export interface RepoBackend {
   postMessage(room: string, text: string): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }>
   /** ListMessages — recent room messages, oldest-first, capped by `limit`. */
   listMessages(room: string, limit?: number): Promise<ChatMessageEntry[]>
+  /** React — toggle the signing identity's emoji reaction on a feed item (`targetIdHex`). */
+  react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }>
+  /** ListReactions — every reaction in the room (client aggregates). */
+  listReactions(room: string): Promise<ReactionEntry[]>
 }
 
 /**
@@ -347,6 +412,9 @@ export class MockRepoBackend implements RepoBackend {
   private messages = new Map<string, ChatMessageEntry[]>()
   private seqByRoom = new Map<string, number>()
   private chatWatchers = new Map<string, Set<(m: ChatMessageEntry) => void>>()
+  // Reactions: raw rows per room + subscribers (keyed by room).
+  private reactions = new Map<string, ReactionEntry[]>()
+  private reactionWatchers = new Map<string, Set<(r: ReactionUpdate) => void>>()
   /** Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders
    * and room switches (the instance is reused, never recreated). */
   private seededRooms = new Set<string>()
@@ -433,9 +501,49 @@ export class MockRepoBackend implements RepoBackend {
       set.add(onChat)
       unsubs.push(() => set?.delete(onChat))
     }
+    if (handlers.onReaction) {
+      let set = this.reactionWatchers.get(room)
+      if (!set) {
+        set = new Set()
+        this.reactionWatchers.set(room, set)
+      }
+      const onReaction = handlers.onReaction
+      set.add(onReaction)
+      unsubs.push(() => set?.delete(onReaction))
+    }
     return () => {
       for (const u of unsubs) u()
     }
+  }
+
+  async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
+    const seed = this.seedHex?.() ?? null
+    if (!seed) throw new IdentityLockedError()
+    const authorPubkeyHex = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed)))
+    const list = this.reactions.get(room) ?? []
+    const idx = list.findIndex(
+      (r) => r.targetIdHex === targetIdHex && r.emoji === emoji && r.authorPubkeyHex === authorPubkeyHex,
+    )
+    let active: boolean
+    if (idx >= 0) {
+      list.splice(idx, 1) // toggle off
+      active = false
+    } else {
+      list.push({ targetIdHex, emoji, authorPubkeyHex }) // toggle on
+      active = true
+    }
+    this.reactions.set(room, list)
+    const count = list.filter((r) => r.targetIdHex === targetIdHex && r.emoji === emoji).length
+    this.broadcastReaction(room, { targetIdHex, emoji, authorPubkeyHex, active, count })
+    return { active, count }
+  }
+
+  async listReactions(room: string): Promise<ReactionEntry[]> {
+    return [...(this.reactions.get(room) ?? [])]
+  }
+
+  private broadcastReaction(room: string, u: ReactionUpdate): void {
+    for (const l of this.reactionWatchers.get(room) ?? []) l(u)
   }
 
   async postMessage(
@@ -481,9 +589,11 @@ export class MockRepoBackend implements RepoBackend {
       { seed: FOREIGN_SEEDS[0]!, text: 'gm — every message here is ed25519-signed' },
       { seed: FOREIGN_SEEDS[1]!, text: 'pushed a commit, say hi 👋' },
     ]
+    const ids: string[] = []
     samples.forEach(({ seed, text }, i) => {
       const authorPubkeyHex = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed)))
       const messageIdHex = this.api.blake3_hex(chatCanonical(room, authorPubkeyHex, text))
+      ids.push(messageIdHex)
       const seq = (this.seqByRoom.get(room) ?? 0) + 1
       this.seqByRoom.set(room, seq)
       const list = this.messages.get(room) ?? []
@@ -496,6 +606,16 @@ export class MockRepoBackend implements RepoBackend {
       })
       this.messages.set(room, list)
     })
+    // Seed a few reactions so the offline lobby shows the affordance.
+    const a0 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[0]!)))
+    const a1 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[1]!)))
+    const a2 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[2]!)))
+    const seeded: ReactionEntry[] = [
+      { targetIdHex: ids[0]!, emoji: '👋', authorPubkeyHex: a1 },
+      { targetIdHex: ids[0]!, emoji: '👋', authorPubkeyHex: a2 },
+      { targetIdHex: ids[1]!, emoji: '🚀', authorPubkeyHex: a0 },
+    ]
+    this.reactions.set(room, [...(this.reactions.get(room) ?? []), ...seeded])
   }
 
   async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
@@ -562,7 +682,11 @@ export class MockRepoBackend implements RepoBackend {
     let firstCommitHash: string | null = null
     FOREIGN_SEEDS.forEach((seed, i) => {
       const tree = api.tree_encode('[]')
-      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, BigInt(i), seed)
+      // Stamp a REAL recent unix-seconds timestamp into the signed object (not
+      // `BigInt(i)`, which decoded to ~1970 → an absurd "20629d" if any path
+      // reads the object's own timestamp).
+      const tsSecs = BigInt(Math.floor((Date.now() - (FOREIGN_SEEDS.length - i) * 60_000) / 1000))
+      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, tsSecs, seed)
       if (i === 0) firstCommitHash = commit.hash_hex
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seed)))
       void this.putObject(room, commit.hash_hex, commit.bytes)
@@ -639,6 +763,14 @@ export interface RepoWasmClient {
     sign: RepoSignFn,
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }>
   list_messages(baseUrl: string, room: string, limit: number): Promise<ChatMessageEntry[]>
+  react(
+    baseUrl: string,
+    room: string,
+    targetIdHex: string,
+    emoji: string,
+    sign: RepoSignFn,
+  ): Promise<{ active: boolean; count: number }>
+  list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
 }
 
 /**
@@ -742,6 +874,15 @@ export class WasmRepoBackend implements RepoBackend {
     return await this.wasm.list_messages(this.baseUrl, room, limit)
   }
 
+  async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.React)
+    return await this.wasm.react(this.baseUrl, room, targetIdHex, emoji, sign)
+  }
+
+  async listReactions(room: string): Promise<ReactionEntry[]> {
+    return await this.wasm.list_reactions(this.baseUrl, room)
+  }
+
   /**
    * Live ref updates over the raw WebSocket the worker exposes at `GET /watch/<room>` (WatchRefs server-streaming isn't
    * surfaceable over the buffered Fetch transport — see apps/repo-worker README §"WatchRefs / streaming"). The RefStore
@@ -772,6 +913,10 @@ export class WasmRepoBackend implements RepoBackend {
       if (!frame) return
       if (frame.kind === 'chat') {
         handlers.onChat?.(frame.message)
+        return
+      }
+      if (frame.kind === 'reaction') {
+        handlers.onReaction?.(frame.reaction)
         return
       }
       const u = frame.ref

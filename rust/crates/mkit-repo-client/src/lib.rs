@@ -189,6 +189,36 @@ pub async fn list_messages(base_url: &str, room: String, limit: u32) -> Result<J
     Ok(arr.into())
 }
 
+/// `ListReactions` — every reaction in the room. No auth. Returns a JS array of
+/// `{ targetIdHex, emoji, authorPubkeyHex }`; the client aggregates counts +
+/// "did I react".
+#[wasm_bindgen]
+pub async fn list_reactions(base_url: &str, room: String) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let resp = client
+        .list_reactions(ListReactionsRequest {
+            room: Some(room),
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for r in resp.reactions {
+        let obj = js_sys::Object::new();
+        set(&obj, "targetIdHex", r.target_id.unwrap_or_default().into())?;
+        set(&obj, "emoji", r.emoji.unwrap_or_default().into())?;
+        set(
+            &obj,
+            "authorPubkeyHex",
+            bytes_to_hex(r.author_pubkey.as_deref().unwrap_or_default()).into(),
+        )?;
+        arr.push(&obj);
+    }
+    Ok(arr.into())
+}
+
 // ---------------------------------------------------------------------------
 // Writes (signed via JS callback)
 // ---------------------------------------------------------------------------
@@ -310,6 +340,38 @@ pub async fn post_message(
     )?;
     set(&obj, "accepted", resp.accepted.unwrap_or(false).into())?;
     set(&obj, "rateLimited", resp.rate_limited.unwrap_or(false).into())?;
+    Ok(obj.into())
+}
+
+/// `React` — toggle a signed emoji reaction on a feed item (`target_id_hex`).
+/// Signed via `sign`. Returns `{ active, count }` — `active` is the new on/off
+/// state for the reactor, `count` the total reactors for (target, emoji).
+#[wasm_bindgen]
+pub async fn react(
+    base_url: &str,
+    room: String,
+    target_id_hex: String,
+    emoji: String,
+    sign: js_sys::Function,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(SigningFetchTransport::new(sign), config(base_url)?);
+    let resp = client
+        .react_with_options(
+            ReactRequest {
+                room: Some(room),
+                target_id: Some(target_id_hex),
+                emoji: Some(emoji),
+                ..Default::default()
+            },
+            CallOptions::default(),
+        )
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let obj = js_sys::Object::new();
+    set(&obj, "active", resp.active.unwrap_or(false).into())?;
+    set(&obj, "count", (resp.count.unwrap_or(0) as f64).into())?;
     Ok(obj.into())
 }
 

@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 import { hashColor } from '../lib/hash-color'
 
-/** Canonical input/textarea class string. `text-sm` by default; swap in `text-xs` variant for dense hex inputs. */
+/** Canonical input/textarea class string. `text-sm` by default; swap in `text-xs` variant for dense hex inputs.
+ * Focus is a soft blue highlight ring (works in light + dark) rather than a hard fg-colored border. */
 export const INPUT_CLASSES =
-  'w-full rounded-md border border-hairline bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-fg'
+  'w-full rounded-md border border-hairline bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
 export const INPUT_CLASSES_XS = INPUT_CLASSES.replace('text-sm', 'text-xs')
 
 /**

@@ -13,11 +13,13 @@ import {
   type ChatMessageEntry,
   type CommitLogEntry,
   type FeedItem,
+  type ReactionAgg,
   type RefExpectation,
   type RemixSourceEntry,
   MockRepoBackend,
   type RepoBackend,
   WasmRepoBackend,
+  aggregateReactions,
   decodeLogObject,
   mergeFeed,
 } from './backend'
@@ -29,6 +31,7 @@ export const repoKeys = {
   object: (room: string, hash: string) => ['repo', room, 'object', hash] as const,
   log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
   messages: (room: string) => ['repo', room, 'messages'] as const,
+  reactions: (room: string) => ['repo', room, 'reactions'] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -348,9 +351,73 @@ export function useLobbyEvents(room: string): void {
       onChat: () => {
         void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
       },
+      onReaction: () => {
+        void qc.invalidateQueries({ queryKey: repoKeys.reactions(room) })
+      },
     })
   }, [backend, room, qc])
 }
+
+/**
+ * Reactions for the room, aggregated per feed item: a `reactionsFor(targetId)`
+ * lookup returning `{ emoji, count, mine }[]`. Gated on a ready backend.
+ */
+export function useReactions(room: string, myPubkeyHex?: string): (targetId: string) => ReactionAgg[] {
+  const backend = useRepoBackend()
+  const q = useQuery({
+    queryKey: repoKeys.reactions(room),
+    queryFn: () => backend!.listReactions(room),
+    enabled: !!backend,
+  })
+  const byTarget = useMemo(() => aggregateReactions(q.data ?? [], myPubkeyHex), [q.data, myPubkeyHex])
+  return (targetId: string) => byTarget.get(targetId) ?? []
+}
+
+/**
+ * Toggle the signing identity's emoji reaction on a feed item. Optimistically
+ * flips the cached reaction list, then reconciles on settle (the broadcast echo
+ * also invalidates). Rejects with `BackendNotReadyError` if no backend is ready.
+ */
+export function useToggleReaction(room: string, myPubkeyHex?: string) {
+  const qc = useQueryClient()
+  const backend = useRepoBackend()
+  const key = repoKeys.reactions(room)
+  const options = backend
+    ? {
+        mutationFn: ({ targetId, emoji }: { targetId: string; emoji: string }) =>
+          backend.react(room, targetId, emoji),
+        onMutate: async ({ targetId, emoji }: { targetId: string; emoji: string }) => {
+          await qc.cancelQueries({ queryKey: key })
+          const previous = qc.getQueryData<ReactionEntryLike[]>(key)
+          // Optimistic toggle against my own pubkey row.
+          if (myPubkeyHex) {
+            qc.setQueryData<ReactionEntryLike[]>(key, (prev) => {
+              const list = prev ?? []
+              const i = list.findIndex(
+                (r) => r.targetIdHex === targetId && r.emoji === emoji && r.authorPubkeyHex === myPubkeyHex,
+              )
+              if (i >= 0) return list.filter((_, j) => j !== i)
+              return [...list, { targetIdHex: targetId, emoji, authorPubkeyHex: myPubkeyHex }]
+            })
+          }
+          return { previous }
+        },
+        onError: (_e: unknown, _v: unknown, ctx: { previous: ReactionEntryLike[] | undefined } | undefined) => {
+          if (ctx) qc.setQueryData(key, ctx.previous)
+        },
+        onSettled: () => {
+          void qc.invalidateQueries({ queryKey: key })
+        },
+      }
+    : {
+        mutationFn: (_v: { targetId: string; emoji: string }) =>
+          Promise.reject<{ active: boolean; count: number }>(new BackendNotReadyError()),
+      }
+  return useMutation(options)
+}
+
+/** Local mirror of the reaction row shape (avoids importing the type purely for the cache generic). */
+type ReactionEntryLike = { targetIdHex: string; emoji: string; authorPubkeyHex: string }
 
 /**
  * The merged lobby feed: the `ref` commit log + room chat, interleaved oldest-first by timestamp. Combines

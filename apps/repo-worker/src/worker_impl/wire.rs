@@ -109,3 +109,33 @@ pub struct MsgEntry {
 pub struct MessagesResp {
     pub messages: Vec<MsgEntry>, // oldest-first
 }
+
+// --- Reactions (worker -> DO) ----------------------------------------------
+//
+//   POST /react     ReactReq  -> ReactResp   (toggle (target, emoji, author))
+//   POST /reactions (no body) -> ReactionsResp
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactReq {
+    pub target: String, // hex id of the feed item
+    pub emoji: String,
+    pub author: String, // 64-hex Ed25519 pubkey of the verified reactor
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactResp {
+    pub active: bool, // reaction is now ON for this author
+    pub count: u32,   // reactors for (target, emoji) after the toggle
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactionEntry {
+    pub target: String,
+    pub emoji: String,
+    pub author: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactionsResp {
+    pub reactions: Vec<ReactionEntry>,
+}

@@ -22,14 +22,15 @@ use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
     ChatMessage, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListMessagesRequest, ListMessagesResponse, ListRefsRequest, ListRefsResponse,
-    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, RefEntry,
-    RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
+    ListMessagesRequest, ListMessagesResponse, ListReactionsRequest, ListReactionsResponse,
+    ListRefsRequest, ListRefsResponse, PostMessageRequest, PostMessageResponse, PutObjectRequest,
+    PutObjectResponse, ReactRequest, ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest,
+    UpdateRefResponse, WatchRefsRequest,
 };
 use super::refstore::RefEventJson;
 use super::wire::{
-    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, UpdateReq,
-    UpdateResp,
+    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq,
+    ReactResp, ReactionsResp, UpdateReq, UpdateResp,
 };
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -474,4 +475,77 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         })
         .await
     }
+
+    async fn react(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ReactRequest>,
+    ) -> ServiceResult<ReactResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let target = msg.target_id.unwrap_or_default();
+        let emoji = msg.emoji.unwrap_or_default();
+
+        check_room(&room)?;
+        if target.is_empty() || target.len() > 128 {
+            return Err(ce_invalid("target_id is empty or too long"));
+        }
+        // A reaction is a short emoji string; cap it so it can't carry a payload.
+        if emoji.is_empty() || emoji.len() > 32 {
+            return Err(ce_invalid("emoji is empty or exceeds 32 bytes"));
+        }
+
+        let author = ctx
+            .extensions()
+            .get::<AuthorPubkey>()
+            .map(|a| a.0.clone())
+            .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            let resp: ReactResp =
+                do_call(&env, &room, "/react", &ReactReq { target, emoji, author }).await?;
+            Ok(Response::new(ReactResponse {
+                active: Some(resp.active),
+                count: Some(resp.count),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_reactions(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListReactionsRequest>,
+    ) -> ServiceResult<ListReactionsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // `/reactions` ignores its body; send an empty object.
+            let resp: ReactionsResp = do_call(&env, &room, "/reactions", &EmptyBody {}).await?;
+            let reactions = resp
+                .reactions
+                .into_iter()
+                .map(|r| Reaction {
+                    target_id: Some(r.target),
+                    emoji: Some(r.emoji),
+                    author_pubkey: Some(hex::decode(&r.author).unwrap_or_default()),
+                    ..Default::default()
+                })
+                .collect();
+            Ok(Response::new(ListReactionsResponse {
+                reactions,
+                ..Default::default()
+            }))
+        })
+        .await
+    }
 }
+
+/// Empty request body for DO ops that take no parameters (e.g. `/reactions`).
+#[derive(serde::Serialize)]
+struct EmptyBody {}

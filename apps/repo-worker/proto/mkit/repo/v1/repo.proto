@@ -98,6 +98,16 @@ service RepoService {
   // Recent messages for the room, oldest-first (chat reading order), capped by
   // `limit`. Unauthenticated — reading the lobby is open to everyone.
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+
+  // Toggle a signed emoji reaction on a feed item (a chat message or a commit),
+  // keyed by its hex id. Signed like PostMessage — the verified Ed25519 pubkey
+  // is the reactor. Idempotent per (author, target, emoji): a second call from
+  // the same author removes it. Broadcasts a reaction frame to subscribers.
+  rpc React(ReactRequest) returns (ReactResponse);
+
+  // All reactions in the room (target_id → emoji → reactors); the client
+  // aggregates counts + "did I react". Unauthenticated read.
+  rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -209,4 +219,33 @@ message ChatMessage {
 
 message ListMessagesResponse {
   repeated ChatMessage messages = 1;  // oldest-first
+}
+
+// ----------------------------------------------------------------------------
+// Reactions — signed emoji on a feed item (chat message OR commit), keyed by
+// the item's hex id. One row per (target, emoji, author); React toggles it.
+
+message ReactRequest {
+  string room = 1;
+  string target_id = 2;  // hex id of the feed item (message_id or commit hash)
+  string emoji = 3;      // the reaction emoji (e.g. "👍")
+}
+
+message ReactResponse {
+  bool active = 1;       // true if the reaction is now ON for this author
+  uint32 count = 2;      // total reactors for (target, emoji) after the toggle
+}
+
+message ListReactionsRequest {
+  string room = 1;
+}
+
+message Reaction {
+  string target_id = 1;
+  string emoji = 2;
+  bytes author_pubkey = 3;  // 32-byte Ed25519 pubkey of the reactor
+}
+
+message ListReactionsResponse {
+  repeated Reaction reactions = 1;
 }

@@ -36,7 +36,7 @@ use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::wire::{
     GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp, MsgEntry, PostReq,
-    PostResp, UpdateReq, UpdateResp,
+    PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp, UpdateReq, UpdateResp,
 };
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
@@ -74,6 +74,19 @@ pub struct ChatEventJson {
     pub text: String,
     pub created_at: i64,
     pub seq: u64,
+}
+
+/// A live reaction toggle, broadcast to every `/watch` subscriber. `kind` is
+/// `"reaction"`; `active` is the new on/off state for `author_pubkey`, `count`
+/// the reactors for (target, emoji) after the toggle.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ReactionEventJson {
+    pub kind: String, // always "reaction"
+    pub target_id: String,
+    pub emoji: String,
+    pub author_pubkey: String, // 64-hex
+    pub active: bool,
+    pub count: u32,
 }
 
 #[durable_object]
@@ -115,6 +128,11 @@ impl DurableObject for RefStore {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
+            "/react" | "/reactions" => {
+                if let Err(e) = self.ensure_reactions_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
             _ => {}
         }
 
@@ -144,6 +162,14 @@ impl DurableObject for RefStore {
                 let body: MessagesReq = req.json().await?;
                 let messages = self.list_messages(body.limit);
                 Response::from_json(&MessagesResp { messages })
+            }
+            "/react" => {
+                let body: ReactReq = req.json().await?;
+                self.handle_react(body)
+            }
+            "/reactions" => {
+                let reactions = self.list_reactions();
+                Response::from_json(&ReactionsResp { reactions })
             }
             _ => Response::error("not found", 404),
         }
@@ -442,6 +468,103 @@ impl RefStore {
             .to_array()
             .ok()?;
         rows.into_iter().next().map(|r| (r.seq as u64, r.created_at))
+    }
+
+    /// Idempotently create the `reactions` table. One row per
+    /// (target, emoji, author); the PK makes a reaction unique per reactor and
+    /// makes toggling a single delete/insert.
+    fn ensure_reactions_table(&self) -> Result<()> {
+        self.state.storage().sql().exec(
+            "CREATE TABLE IF NOT EXISTS reactions (\
+               target TEXT NOT NULL, \
+               emoji TEXT NOT NULL, \
+               author TEXT NOT NULL, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (target, emoji, author));",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Toggle a reaction serially: delete it if the author already reacted,
+    /// else insert it. Returns the new on/off state + the reactor count, and
+    /// broadcasts a `"reaction"` frame.
+    fn handle_react(&self, req: ReactReq) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        let existing: Vec<Count> = sql
+            .exec(
+                "SELECT COUNT(*) AS n FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
+                vec![req.target.clone().into(), req.emoji.clone().into(), req.author.clone().into()],
+            )
+            .and_then(|r| r.to_array())
+            .unwrap_or_default();
+        let had = existing.into_iter().next().map(|c| c.n > 0).unwrap_or(false);
+
+        if had {
+            sql.exec(
+                "DELETE FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
+                vec![req.target.clone().into(), req.emoji.clone().into(), req.author.clone().into()],
+            )?;
+        } else {
+            let now = Date::now().as_millis() as i64;
+            sql.exec(
+                "INSERT INTO reactions (target, emoji, author, created_at) VALUES (?, ?, ?, ?);",
+                vec![
+                    req.target.clone().into(),
+                    req.emoji.clone().into(),
+                    req.author.clone().into(),
+                    now.into(),
+                ],
+            )?;
+        }
+        let active = !had;
+
+        let count_rows: Vec<Count> = sql
+            .exec(
+                "SELECT COUNT(*) AS n FROM reactions WHERE target = ? AND emoji = ?;",
+                vec![req.target.clone().into(), req.emoji.clone().into()],
+            )
+            .and_then(|r| r.to_array())
+            .unwrap_or_default();
+        let count = count_rows.into_iter().next().map(|c| c.n.max(0) as u32).unwrap_or(0);
+
+        self.broadcast_str(
+            &serde_json::to_string(&ReactionEventJson {
+                kind: "reaction".to_string(),
+                target_id: req.target.clone(),
+                emoji: req.emoji.clone(),
+                author_pubkey: req.author.clone(),
+                active,
+                count,
+            })
+            .unwrap_or_default(),
+        );
+
+        Response::from_json(&ReactResp { active, count })
+    }
+
+    /// Every reaction in the room (the client aggregates counts + "mine").
+    fn list_reactions(&self) -> Vec<ReactionEntry> {
+        #[derive(Deserialize)]
+        struct Row {
+            target: String,
+            emoji: String,
+            author: String,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec("SELECT target, emoji, author FROM reactions;", None)
+            .map(|r| r.to_array().unwrap_or_default())
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|r| ReactionEntry { target: r.target, emoji: r.emoji, author: r.author })
+            .collect()
     }
 
     /// The author's most recent post time (epoch-ms), or None if they've never

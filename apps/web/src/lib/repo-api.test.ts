@@ -9,6 +9,8 @@ import {
   IdentityLockedError,
   MockRepoBackend,
   type FeedItem,
+  type ReactionEntry,
+  aggregateReactions,
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
@@ -642,6 +644,8 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
       commitLog: async () => [],
       postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
       listMessages: async () => [],
+      react: async () => ({ active: true, count: 1 }),
+      listReactions: async () => [],
     } satisfies import('./repo-api').RepoBackend
   }
 
@@ -1063,6 +1067,8 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
         return { messageIdHex: 'real', accepted: true, rateLimited: false }
       },
       listMessages: async () => [],
+      react: async () => ({ active: true, count: 1 }),
+      listReactions: async () => [],
     } satisfies import('./repo-api').RepoBackend
   }
 
@@ -1115,5 +1121,60 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
     // optimistic echo so it doesn't linger until the settle refetch.
     await observer.mutate('too fast')
     expect(qc.getQueryData<ChatMessageEntry[]>(key)).toEqual(prior)
+  })
+})
+
+describe('aggregateReactions tallies per target with mine flag', () => {
+  it('groups by target then emoji, counts reactors, and marks mine', () => {
+    const rows: ReactionEntry[] = [
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'me' },
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'other' },
+      { targetIdHex: 't1', emoji: '🚀', authorPubkeyHex: 'other' },
+      { targetIdHex: 't2', emoji: '❤️', authorPubkeyHex: 'other' },
+    ]
+    const agg = aggregateReactions(rows, 'me')
+    expect(agg.get('t1')).toEqual([
+      { emoji: '👍', count: 2, mine: true },
+      { emoji: '🚀', count: 1, mine: false },
+    ])
+    expect(agg.get('t2')).toEqual([{ emoji: '❤️', count: 1, mine: false }])
+    expect(agg.get('nope')).toBeUndefined()
+  })
+
+  it('mine is false when no pubkey is supplied', () => {
+    const agg = aggregateReactions([{ targetIdHex: 't', emoji: '👍', authorPubkeyHex: 'me' }])
+    expect(agg.get('t')?.[0]?.mine).toBe(false)
+  })
+})
+
+describe('MockRepoBackend reactions: toggle / list / watch', () => {
+  async function makeBackend() {
+    const api = await mkit()
+    return new MockRepoBackend(api, () => SEED)
+  }
+
+  it('react toggles on then off, listReactions reflects it, and onReaction fires', async () => {
+    const backend = await makeBackend()
+    const seen: Array<{ emoji: string; active: boolean; count: number }> = []
+    backend.watchRoom('lobby', '', { onReaction: (r) => seen.push({ emoji: r.emoji, active: r.active, count: r.count }) })
+
+    const on = await backend.react('lobby', 'target1', '👍')
+    expect(on).toEqual({ active: true, count: 1 })
+    expect((await backend.listReactions('lobby')).map((r) => r.emoji)).toEqual(['👍'])
+
+    const off = await backend.react('lobby', 'target1', '👍')
+    expect(off).toEqual({ active: false, count: 0 })
+    expect(await backend.listReactions('lobby')).toEqual([])
+
+    expect(seen).toEqual([
+      { emoji: '👍', active: true, count: 1 },
+      { emoji: '👍', active: false, count: 0 },
+    ])
+  })
+
+  it('a locked identity (no seed) cannot react', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => null)
+    await expect(backend.react('lobby', 't', '👍')).rejects.toBeInstanceOf(IdentityLockedError)
   })
 })

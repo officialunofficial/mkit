@@ -14,6 +14,28 @@ export default function HomePage() {
         path='/'
         card='Version control that signs every commit.'
       />
+
+      {/* Signed lobby at the top — a live, public feed merging chat, /multiplayer
+          commits, and emoji reactions, all Ed25519-signed by the same passkey
+          identity. Reading is open; posting/reacting unlock that identity.
+          DemoBoundary lets the static prerender emit a fallback and hydrate the
+          wasm-backed client. */}
+      <section className='space-y-2'>
+        <p className='text-sm text-muted text-pretty'>
+          A live lobby — chat, commits from{' '}
+          <Link
+            to='/multiplayer'
+            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          >
+            multiplayer
+          </Link>
+          , and reactions, all in one place.
+        </p>
+        <DemoBoundary>
+          <SignedLobby />
+        </DemoBoundary>
+      </section>
+
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
         <p className='max-w-prose text-lg text-fg'>
@@ -85,27 +107,6 @@ export default function HomePage() {
           body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each a live wasm demo.'
         />
       </ul>
-
-      {/* Signed lobby: a live, public feed that merges chat messages and
-          /multiplayer commits — both Ed25519-signed by the same passkey-derived
-          identity. Reading is open; posting unlocks the same identity the
-          multiplayer demo uses. Wrapped in DemoBoundary so the static prerender
-          emits a fallback and hydrates the wasm-backed client on the client. */}
-      <section className='space-y-3'>
-        <p className='max-w-prose text-sm text-muted text-pretty'>
-          The same signing key powers a live lobby — chat and commits from{' '}
-          <Link
-            to='/multiplayer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            multiplayer
-          </Link>{' '}
-          on one feed, every entry signed.
-        </p>
-        <DemoBoundary>
-          <SignedLobby />
-        </DemoBoundary>
-      </section>
     </div>
   )
 }
