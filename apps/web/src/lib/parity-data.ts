@@ -52,13 +52,13 @@ export const categories: ParityCategory[] = [
       { cmd: 'rm', status: 'parity', note: '--cached, -r, -f. Refuses to destroy modified content without -f.' },
       {
         cmd: 'mv',
-        status: 'divergent',
-        note: 'Renames files and directories with clobber guards (`-f`), including move-into-directory and multi-source moves. Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).',
+        status: 'parity',
+        note: "Renames or moves files and directories — including move-into-directory and multi-source moves — with git's `-f` file-clobber guard (a directory destination is never overwritten). Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).",
       },
       {
-        cmd: 'checkout',
+        cmd: 'checkout / switch',
         status: 'parity',
-        note: 'Switch branches or restore files, guarded against clobbering dirty or colliding files.',
+        note: 'Switch branches (checkout -b/-B, switch -c/-C to create) or restore files, guarded against clobbering dirty or colliding files.',
       },
       { cmd: 'restore / reset', status: 'parity', note: '--staged, --worktree, --soft, --mixed, --hard.' },
     ],
@@ -96,10 +96,14 @@ export const categories: ParityCategory[] = [
       },
       {
         cmd: 'blame',
-        status: 'parity',
-        note: 'Line-level attribution. The JSON record carries an mkit Identity, not Name <email>.',
+        status: 'divergent',
+        note: 'Whole-file, HEAD-only line attribution — no -L ranges, no revision argument, no --porcelain. --format=json carries an mkit Identity, not Name <email>.',
       },
-      { cmd: 'bisect', status: 'parity', note: 'start, good, bad, skip, reset.' },
+      {
+        cmd: 'bisect',
+        status: 'divergent',
+        note: 'start, good, bad, skip, reset. Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); no bisect run.',
+      },
     ],
   },
   {
@@ -108,6 +112,11 @@ export const categories: ParityCategory[] = [
       { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
       { cmd: 'stash', status: 'parity', note: 'save, list, pop, apply, drop, clear, show.' },
       { cmd: 'gc', status: 'parity', note: 'Mark-and-sweep, recovery-aware, and fail-closed.' },
+      {
+        cmd: 'sparse-checkout',
+        status: 'parity',
+        note: 'set, list, disable, reapply over pattern sets (stored in .mkit/sparse-checkout). The sparse clone/fetch that transfers only matching paths is feature-gated.',
+      },
     ],
   },
   {
@@ -118,13 +127,23 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'ls-files / ls-tree',
         status: 'parity',
-        note: '-s, -z, -r, --others, --ignored. Output matches git modulo hash length.',
+        note: 'ls-files: -s, -z, --others, --ignored, --exclude-standard. ls-tree: -r, -z. Output matches git modulo hash length.',
       },
       { cmd: 'show-ref / for-each-ref', status: 'parity', note: '--heads, --tags, --format.' },
       {
         cmd: 'symbolic-ref / update-ref',
         status: 'parity',
         note: 'Read or repoint HEAD. CAS via <old>; -d refuses the current branch.',
+      },
+      {
+        cmd: 'merge-base',
+        status: 'parity',
+        note: '<a> <b> prints the common ancestor; --is-ancestor tests ancestry via exit code.',
+      },
+      {
+        cmd: 'rev-list',
+        status: 'parity',
+        note: 'Lists commit ids reachable from a revision; --count prints the number.',
       },
     ],
   },
@@ -134,10 +153,10 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'remote',
         status: 'parity',
-        note: 'show, add, set. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh bridge remotes.',
+        note: 'List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes.',
       },
       {
-        cmd: 'push / pull / clone',
+        cmd: 'push / pull / fetch / clone',
         status: 'parity',
         note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. They speak mkit's protocol, not git's wire protocol.",
       },
@@ -217,6 +236,7 @@ export const nonGoals: string[] = [
   'The full refspec grammar and wildcard push/fetch maps',
   'Wire protocol v2 and smart-HTTP negotiation',
   'git notes',
+  'Partial / shallow clone beyond what clone already exposes',
   '.git/ on-disk interop and SHA-1/SHA-256 objects',
   'Shadowing the git binary on PATH by default',
   'log --graph ASCII commit-graph rendering',
