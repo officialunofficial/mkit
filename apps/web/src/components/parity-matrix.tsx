@@ -2,7 +2,7 @@ import { categories, inherentDivergences, legend, nonGoals, safetyDivergences } 
 import type { ParityCategory, ParityStatus } from '../lib/parity-data'
 
 /**
- * Colored status glyph: filled green circle (parity), amber triangle (divergent), red outline circle (non-goal). Drawn
+ * Colored status glyph: filled green circle (parity), amber diamond (divergent), red outline circle (non-goal). Drawn
  * as inline SVG with explicit fills so the colors read the same in light and dark, independent of the theme tokens.
  */
 function StatusIcon({ status }: { status: ParityStatus }) {
@@ -16,7 +16,7 @@ function StatusIcon({ status }: { status: ParityStatus }) {
     case 'divergent':
       return (
         <svg width='10' height='10' viewBox='0 0 10 10' aria-hidden className='shrink-0'>
-          <path d='M5 0.6 L9.4 8.7 L0.6 8.7 Z' fill='#f59e0b' />
+          <path d='M5 1 L9 5 L5 9 L1 5 Z' fill='#f59e0b' />
         </svg>
       )
     case 'non-goal':
