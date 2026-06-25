@@ -6,7 +6,11 @@
   "name": "mkit-keys",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
-  "build": { "command": "worker-build --release" },
+  // Self-contained for the Cloudflare Workers Build image (cargo present, but not
+  // necessarily the wasm32 target or `worker-build`). Each step is idempotent.
+  "build": {
+    "command": "rustup target add wasm32-unknown-unknown && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
+  },
 
   "observability": { "enabled": true },
 

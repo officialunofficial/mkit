@@ -6,7 +6,13 @@
   "name": "mkit-repo-worker",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
-  "build": { "command": "worker-build --release" },
+  // Self-contained so the Cloudflare Workers Build image (which has cargo but not
+  // necessarily the wasm32 target or the `worker-build` binary — unlike the web
+  // worker, which only needs wasm-pack) can build this pure-Rust worker. Each
+  // step is idempotent: a no-op when already present (local dev, warm CI cache).
+  "build": {
+    "command": "rustup target add wasm32-unknown-unknown && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
+  },
 
   // Structured logs/metrics for the deployed Worker.
   "observability": { "enabled": true },
