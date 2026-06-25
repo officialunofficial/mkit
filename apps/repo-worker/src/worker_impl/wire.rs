@@ -120,6 +120,7 @@ pub struct ReactReq {
     pub target: String, // hex id of the feed item
     pub emoji: String,
     pub author: String, // 64-hex Ed25519 pubkey of the verified reactor
+    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
 }
 
 #[derive(Serialize, Deserialize)]

@@ -9,6 +9,7 @@
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef as useReactRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import {
   type FeedItem,
@@ -26,13 +27,17 @@ import {
 import { useIdentityActions } from '../use-identity-actions'
 import { useMkit } from '../use-mkit'
 import { PlayerAvatar, PlayerLabel } from '../multiplayer/player-label'
-import { BTN, PRIMARY_BTN, errMsg } from '../multiplayer/shared'
+import { BTN, FOCUS_RING, HOVER_BORDER, PRIMARY_BTN, errMsg } from '../multiplayer/shared'
 
 /** Message length cap — the SAME shared constant the server enforces. */
 const MAX_CHARS = MAX_MESSAGE_CHARS
 
 /** Emojis offered in the add-reaction picker. */
 const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅', '🔥']
+
+/** The picker's known height (one row of `h-7` buttons + `p-1`) — used to place
+ * it above/below its anchor without measuring a rendered ref. */
+const PICKER_H = 40
 
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
@@ -86,6 +91,7 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
   const atBottomRef = useReactRef(true)
   const lastTopRef = useReactRef(0)
   const didInitRef = useReactRef(false)
+  const prevLenRef = useReactRef(0)
 
   // Identity + reactions wiring (live signed reactions on any feed item).
   const myPubkey = useIdentityStore((s) => s.ed25519PubkeyHex)
@@ -118,18 +124,37 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
     else if (scrolledUp) setBottom(false)
   }
 
-  // START pinned to the newest row: the FIRST time the feed has rows, jump
-  // instantly (no animation — the user shouldn't watch it scroll). After that,
-  // smooth-follow only while pinned to the bottom.
+  // Depending on the virtualizer's total size (not just `items.length`) re-runs
+  // this when row heights change without the count changing — a reaction
+  // expanding the last row, or `measureElement` correcting an estimate.
+  const totalSize = virtualizer.getTotalSize()
+
+  // START pinned to the newest row, and STAY pinned. The FIRST time the feed has
+  // rows, jump INSTANTLY — and re-assert across the next few frames, because the
+  // initial jump runs against ESTIMATED row sizes and `measureElement` corrects
+  // them a frame or two later (without the re-assert the feed lands short of the
+  // true bottom — the "it scrolls to the end" effect). After init, follow while
+  // pinned: a genuinely new row gets a gentle smooth nudge; pure height growth (a
+  // reaction, a late measurement) re-pins INSTANTLY so it never animates.
   useEffect(() => {
     if (items.length === 0) return
+    const last = items.length - 1
+    const grew = items.length > prevLenRef.current
+    prevLenRef.current = items.length
+
     if (!didInitRef.current) {
       didInitRef.current = true
-      virtualizer.scrollToIndex(items.length - 1, { align: 'end' })
-    } else if (atBottomRef.current) {
-      virtualizer.scrollToIndex(items.length - 1, { align: 'end', behavior: 'smooth' })
+      let n = 0
+      let raf = requestAnimationFrame(function pin() {
+        virtualizer.scrollToIndex(last, { align: 'end' })
+        if (++n < 3) raf = requestAnimationFrame(pin)
+      })
+      return () => cancelAnimationFrame(raf)
     }
-  }, [items.length, virtualizer, atBottomRef, didInitRef])
+    if (atBottomRef.current) {
+      virtualizer.scrollToIndex(last, { align: 'end', behavior: grew ? 'smooth' : 'auto' })
+    }
+  }, [items.length, totalSize, virtualizer, atBottomRef, didInitRef, prevLenRef])
 
   const jumpToLatest = () => {
     setBottom(true)
@@ -179,7 +204,7 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
         onClick={jumpToLatest}
         aria-hidden={atBottom || empty}
         tabIndex={atBottom || empty ? -1 : 0}
-        className={`absolute right-3 bottom-3 inline-flex h-8 items-center rounded-full border border-hairline bg-bg/90 px-3 text-xs shadow-sm backdrop-blur transition-[opacity,scale,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)] before:absolute before:inset-x-0 before:-inset-y-1 before:content-[""] hover:border-blue-500/50 active:scale-[0.96] ${
+        className={`absolute right-3 bottom-3 inline-flex h-8 items-center rounded-full border border-hairline bg-bg/90 px-3 text-xs shadow-sm backdrop-blur transition-[opacity,scale,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)] before:absolute before:inset-x-0 before:-inset-y-1 before:content-[""] ${HOVER_BORDER} active:scale-[0.96] ${
           atBottom || empty ? 'pointer-events-none scale-95 opacity-0' : 'opacity-100'
         }`}
       >
@@ -264,6 +289,7 @@ function ReactionBar({
   onToggle: (emoji: string) => void
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
+  const triggerRef = useReactRef<HTMLButtonElement>(null)
 
   return (
     <div className='mt-1 flex flex-wrap items-center gap-1'>
@@ -276,7 +302,7 @@ function ReactionBar({
           className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
               ? 'border-blue-500/60 bg-blue-500/10 text-fg'
-              : 'border-hairline bg-muted/5 text-muted hover:border-blue-500/50 hover:text-fg'
+              : `border-hairline bg-muted/5 text-muted ${HOVER_BORDER} hover:text-fg`
           }`}
         >
           <span className='text-sm'>{r.emoji}</span>
@@ -285,48 +311,114 @@ function ReactionBar({
       ))}
 
       {/* Add-reaction control: a small face that opens a picker. Hidden until
-          row hover once there are already reactions. */}
-      <div className='relative'>
-        <button
-          type='button'
-          onClick={() => setPickerOpen((o) => !o)}
-          aria-label='Add reaction'
-          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all hover:border-blue-500/50 hover:text-fg active:scale-[0.96] ${
-            reactions.length > 0 ? 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100' : 'opacity-100'
-          }`}
-        >
-          <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
-            {/* smiley face (lower-left) */}
-            <circle cx='9.5' cy='13.5' r='7' />
-            <circle cx='7' cy='12' r='0.9' fill='currentColor' stroke='none' />
-            <circle cx='12' cy='12' r='0.9' fill='currentColor' stroke='none' />
-            <path d='M6.6 15.4c1.3 1.5 4 1.5 5.3 0' strokeLinecap='round' />
-            {/* plus (upper-right), clear of the face */}
-            <path d='M20 3.5v6M17 6.5h6' strokeWidth='2' strokeLinecap='round' />
-          </svg>
-        </button>
-        {pickerOpen ? (
-          <div
-            className='absolute bottom-7 left-0 z-10 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
-            onMouseLeave={() => setPickerOpen(false)}
-          >
-            {REACTION_EMOJI.map((e) => (
-              <button
-                key={e}
-                type='button'
-                onClick={() => {
-                  setPickerOpen(false)
-                  onToggle(e)
-                }}
-                className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
-              >
-                {e}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
+          row hover once there are already reactions. The picker itself renders in
+          a PORTAL (see EmojiPicker) so the feed's `overflow-y-auto` can't clip it. */}
+      <button
+        ref={triggerRef}
+        type='button'
+        onClick={() => setPickerOpen((o) => !o)}
+        aria-label='Add reaction'
+        aria-haspopup='menu'
+        aria-expanded={pickerOpen}
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] ${
+          reactions.length > 0 ? 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100' : 'opacity-100'
+        }`}
+      >
+        <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
+          {/* smiley face (lower-left) */}
+          <circle cx='9.5' cy='13.5' r='7' />
+          <circle cx='7' cy='12' r='0.9' fill='currentColor' stroke='none' />
+          <circle cx='12' cy='12' r='0.9' fill='currentColor' stroke='none' />
+          <path d='M6.6 15.4c1.3 1.5 4 1.5 5.3 0' strokeLinecap='round' />
+          {/* plus (upper-right), clear of the face */}
+          <path d='M20 3.5v6M17 6.5h6' strokeWidth='2' strokeLinecap='round' />
+        </svg>
+      </button>
+      {pickerOpen ? (
+        <EmojiPicker
+          anchor={triggerRef.current}
+          onPick={(e) => {
+            setPickerOpen(false)
+            onToggle(e)
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      ) : null}
     </div>
+  )
+}
+
+/**
+ * The emoji-pick popover, rendered in a PORTAL on `document.body` and positioned
+ * `fixed` against the trigger's viewport rect — so the scroll container's
+ * `overflow-y-auto` never clips it. Opens ABOVE the trigger, flipping below when
+ * there isn't room above. Closes on outside-click, scroll, resize, or Escape
+ * (any of which would otherwise leave it floating detached from its anchor).
+ */
+function EmojiPicker({
+  anchor,
+  onPick,
+  onClose,
+}: {
+  anchor: HTMLElement | null
+  onPick: (emoji: string) => void
+  onClose: () => void
+}) {
+  const popRef = useReactRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+
+  // Measure the anchor and decide above/below. The popover is a single fixed
+  // row, so its height is a known constant (`PICKER_H`) — no need to read it back
+  // off a rendered ref, which keeps placement deterministic on the first frame.
+  useEffect(() => {
+    if (!anchor) return
+    const a = anchor.getBoundingClientRect()
+    const placeAbove = a.top - PICKER_H - 8 >= 8
+    setPos({ left: Math.max(8, a.left), top: placeAbove ? a.top - PICKER_H - 6 : a.bottom + 6 })
+    // Any scroll (capture: catches the feed's inner scroller too) or resize
+    // detaches the fixed popover from its anchor — close rather than chase it.
+    const onScroll = () => onClose()
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onClose)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const onDown = (e: PointerEvent) => {
+      if (!popRef.current?.contains(e.target as Node) && !anchor.contains(e.target as Node)) onClose()
+    }
+    window.addEventListener('pointerdown', onDown, true)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onClose)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('pointerdown', onDown, true)
+    }
+    // `popRef` is a stable ref; reading `.current` in the outside-click handler
+    // isn't a dependency (it's only consulted when a click actually fires).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchor, onClose])
+
+  return createPortal(
+    <div
+      ref={popRef}
+      role='menu'
+      style={{ position: 'fixed', left: pos?.left ?? -9999, top: pos?.top ?? -9999, visibility: pos ? 'visible' : 'hidden' }}
+      className='z-50 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
+    >
+      {REACTION_EMOJI.map((e) => (
+        <button
+          key={e}
+          type='button'
+          role='menuitem'
+          onClick={() => onPick(e)}
+          className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+        >
+          {e}
+        </button>
+      ))}
+    </div>,
+    document.body,
   )
 }
 
@@ -373,7 +465,7 @@ function Composer({ room }: { room: string }) {
       <div className='flex items-center gap-2'>
         <PlayerAvatar pubkey={myPubkey ?? ''} size={26} />
         <input
-          className='h-10 w-full rounded-lg border border-hairline bg-transparent px-3 text-sm outline-none transition-colors duration-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 sm:h-9'
+          className={`h-10 w-full rounded-lg border border-hairline bg-transparent px-3 text-sm ${FOCUS_RING} sm:h-9`}
           value={text}
           placeholder='Message the lobby…'
           onChange={(e) => setText(e.target.value)}

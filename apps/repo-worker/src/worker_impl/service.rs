@@ -27,7 +27,7 @@ use crate::proto::mkit::repo::v1::{
     PutObjectResponse, ReactRequest, ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest,
     UpdateRefResponse, WatchRefsRequest,
 };
-use super::refstore::RefEventJson;
+use super::refstore::WatchFrame;
 use super::wire::{
     GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq,
     ReactResp, ReactionsResp, UpdateReq, UpdateResp,
@@ -361,7 +361,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         // WebSocket route, which is fully wired: the RefStore DO broadcasts a
         // JSON RefEvent frame to every `/watch` subscriber on each successful
         // UpdateRef. See README "WatchRefs / streaming".
-        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<RefEventJson>);
+        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<WatchFrame>);
         Err(connectrpc::ConnectError::unimplemented(
             "WatchRefs is served over the WebSocket route GET /watch/<room>, \
              not Connect server-streaming (see README)",
@@ -487,12 +487,15 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         let emoji = msg.emoji.unwrap_or_default();
 
         check_room(&room)?;
-        if target.is_empty() || target.len() > 128 {
-            return Err(ce_invalid("target_id is empty or too long"));
+        // target_id MUST be a real 64-hex feed-item id (not an arbitrary string),
+        // and emoji MUST be one of the allowed set — together these bound the
+        // reactions table's cardinality and stop arbitrary content being
+        // persisted + broadcast to every viewer.
+        if !crate::chat::is_valid_target_id(&target) {
+            return Err(ce_invalid("target_id must be a 64-char lowercase-hex feed-item id"));
         }
-        // A reaction is a short emoji string; cap it so it can't carry a payload.
-        if emoji.is_empty() || emoji.len() > 32 {
-            return Err(ce_invalid("emoji is empty or exceeds 32 bytes"));
+        if !crate::chat::is_allowed_emoji(&emoji) {
+            return Err(ce_invalid("emoji is not in the allowed reaction set"));
         }
 
         let author = ctx
@@ -500,11 +503,18 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .get::<AuthorPubkey>()
             .map(|a| a.0.clone())
             .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+        // The request's Idempotency-Key — the DO dedupes a replayed signed React
+        // (a toggle) into its original result rather than flipping state again.
+        let idem = ctx
+            .extensions()
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
 
         let env = self.env.clone();
         SendFuture::new(async move {
             let resp: ReactResp =
-                do_call(&env, &room, "/react", &ReactReq { target, emoji, author }).await?;
+                do_call(&env, &room, "/react", &ReactReq { target, emoji, author, idem }).await?;
             Ok(Response::new(ReactResponse {
                 active: Some(resp.active),
                 count: Some(resp.count),
@@ -525,8 +535,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            // `/reactions` ignores its body; send an empty object.
-            let resp: ReactionsResp = do_call(&env, &room, "/reactions", &EmptyBody {}).await?;
+            // `/reactions` ignores its body; `()` serializes to `null`.
+            let resp: ReactionsResp = do_call(&env, &room, "/reactions", &()).await?;
             let reactions = resp
                 .reactions
                 .into_iter()
@@ -545,7 +555,3 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         .await
     }
 }
-
-/// Empty request body for DO ops that take no parameters (e.g. `/reactions`).
-#[derive(serde::Serialize)]
-struct EmptyBody {}

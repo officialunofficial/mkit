@@ -14,6 +14,7 @@ import {
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
+  type RepoBackend,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -31,6 +32,30 @@ import {
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
+
+/**
+ * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to
+ * make just the method(s) under test do something. One factory so adding a
+ * method to the interface is a single edit here, not a sweep across every test's
+ * hand-rolled literal.
+ */
+function stubBackend(overrides: Partial<RepoBackend> = {}): RepoBackend {
+  return {
+    putObject: async () => {},
+    getObject: async () => null,
+    getRef: async () => null,
+    updateRef: async () => {},
+    listRefs: async () => [],
+    watchRefs: () => () => {},
+    watchRoom: () => () => {},
+    commitLog: async () => [],
+    postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
+    listMessages: async () => [],
+    react: async () => ({ active: true, count: 1 }),
+    listReactions: async () => [],
+    ...overrides,
+  }
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2)
@@ -630,23 +655,12 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
    * can assert the optimistic prepend is visible while the push is still in flight.
    */
   function makeControllableBackend(opts: { failUpdate?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
+    return stubBackend({
       updateRef: async () => {
         if (opts.gate) await opts.gate
         if (opts.failUpdate) throw new CasConflictError(null)
       },
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
-      postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
-      listMessages: async () => [],
-      react: async () => ({ active: true, count: 1 }),
-      listReactions: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   async function makePushArgs(message: string): Promise<PushArgs> {
@@ -1050,15 +1064,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
   const ROOM = 'lobby'
 
   function makeControllableBackend(opts: { fail?: boolean; rateLimited?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
-      updateRef: async () => {},
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
+    return stubBackend({
       postMessage: async () => {
         if (opts.gate) await opts.gate
         if (opts.fail) throw new Error('post failed')
@@ -1066,10 +1072,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
         if (opts.rateLimited) return { messageIdHex: '', accepted: false, rateLimited: true }
         return { messageIdHex: 'real', accepted: true, rateLimited: false }
       },
-      listMessages: async () => [],
-      react: async () => ({ active: true, count: 1 }),
-      listReactions: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   it('appends the message to the cache while the post is still in flight', async () => {

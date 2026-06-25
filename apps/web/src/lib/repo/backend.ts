@@ -398,6 +398,23 @@ const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a 
 const FOREIGN_REFS = ['main', 'main', 'feature']
 
 /**
+ * Register `handler` in the Set stored at `key` (creating the Set on first use)
+ * and return an unsubscribe that removes it. The one shape behind all three of
+ * `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
+ * A missing handler is a no-op (returns an unsubscribe that does nothing).
+ */
+function addWatcher<T>(map: Map<string, Set<T>>, key: string, handler: T | undefined): () => void {
+  if (!handler) return () => {}
+  let set = map.get(key)
+  if (!set) {
+    set = new Set()
+    map.set(key, set)
+  }
+  set.add(handler)
+  return () => set.delete(handler)
+}
+
+/**
  * In-memory backend implementing the Connect service shape. Mirrors server semantics: content-addressed idempotent
  * object writes, in-message CAS via `RefExpectation`, and a synchronous WatchRefs fan-out that drives Query
  * invalidation. Seeded with a couple of "other players'" commits so the live multiplayer log isn't empty.
@@ -479,38 +496,11 @@ export class MockRepoBackend implements RepoBackend {
   }
 
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-    const unsubs: Array<() => void> = []
-    if (handlers.onRef) {
-      const key = `${room}::${prefix}`
-      let set = this.watchers.get(key)
-      if (!set) {
-        set = new Set()
-        this.watchers.set(key, set)
-      }
-      const onRef = handlers.onRef
-      set.add(onRef)
-      unsubs.push(() => set?.delete(onRef))
-    }
-    if (handlers.onChat) {
-      let set = this.chatWatchers.get(room)
-      if (!set) {
-        set = new Set()
-        this.chatWatchers.set(room, set)
-      }
-      const onChat = handlers.onChat
-      set.add(onChat)
-      unsubs.push(() => set?.delete(onChat))
-    }
-    if (handlers.onReaction) {
-      let set = this.reactionWatchers.get(room)
-      if (!set) {
-        set = new Set()
-        this.reactionWatchers.set(room, set)
-      }
-      const onReaction = handlers.onReaction
-      set.add(onReaction)
-      unsubs.push(() => set?.delete(onReaction))
-    }
+    const unsubs = [
+      addWatcher(this.watchers, `${room}::${prefix}`, handlers.onRef),
+      addWatcher(this.chatWatchers, room, handlers.onChat),
+      addWatcher(this.reactionWatchers, room, handlers.onReaction),
+    ]
     return () => {
       for (const u of unsubs) u()
     }

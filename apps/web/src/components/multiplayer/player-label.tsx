@@ -16,7 +16,7 @@ import { useIdentityStore } from '../../lib/identity-store'
 import { getName, keysEnabled, setName } from '../../lib/keys-client'
 import { PERSIST_MAX_AGE } from '../../lib/query-persist'
 import { useMkit } from '../use-mkit'
-import { BTN, errMsg } from './shared'
+import { BTN, FOCUS_RING, errMsg } from './shared'
 
 /** React Query key for a single player's registry handle. */
 export function nameKey(pubkeyHex: string) {
@@ -115,7 +115,7 @@ export function OwnPlayerName() {
         <input
           // biome-ignore lint/a11y/noAutofocus: focus the field the user just opened
           autoFocus
-          className='w-32 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 sm:w-40'
+          className={`w-32 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm ${FOCUS_RING} sm:w-40`}
           value={value}
           maxLength={32}
           placeholder={current}
