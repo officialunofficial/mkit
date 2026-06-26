@@ -1,11 +1,16 @@
 import type { ReactNode } from 'react'
 import { hashColor } from '../lib/hash-color'
 
-/** Canonical input/textarea class string. `text-sm` by default; swap in `text-xs` variant for dense hex inputs.
- * Focus is a soft blue highlight ring (works in light + dark) rather than a hard fg-colored border. */
+/**
+ * Canonical input/textarea class string. Renders at 16px (`text-base`) on mobile so iOS Safari doesn't auto-zoom the
+ * viewport on focus — Apple zooms any focused field whose font-size is below 16px — then drops to the denser `text-sm`
+ * from the `sm:` breakpoint up, where desktop browsers don't auto-zoom. The `_XS` variant swaps in `text-xs` for dense
+ * hex inputs above `sm:`, keeping the same 16px mobile floor. Focus is a soft blue highlight ring (works in light +
+ * dark) rather than a hard fg-colored border.
+ */
 export const INPUT_CLASSES =
-  'w-full rounded-md border border-hairline bg-transparent p-2.5 font-mono text-sm outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
-export const INPUT_CLASSES_XS = INPUT_CLASSES.replace('text-sm', 'text-xs')
+  'w-full rounded-md border border-hairline bg-transparent p-2.5 font-mono text-base sm:text-sm outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+export const INPUT_CLASSES_XS = INPUT_CLASSES.replace('sm:text-sm', 'sm:text-xs')
 
 /**
  * Solid square coloured by the first byte of `hash` — same palette as the favicon. Edit anything below an object and

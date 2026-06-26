@@ -115,7 +115,7 @@ export function OwnPlayerName() {
         <input
           // biome-ignore lint/a11y/noAutofocus: focus the field the user just opened
           autoFocus
-          className={`w-32 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm ${FOCUS_RING} sm:w-40`}
+          className={`w-32 rounded-md border border-hairline bg-transparent px-2 py-1 text-base ${FOCUS_RING} sm:w-40 sm:text-sm`}
           value={value}
           maxLength={32}
           placeholder={current}
