@@ -82,6 +82,11 @@ function LobbyBody({ room }: { room: string }) {
           <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
         </span>
         <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
+        {/* The active channel — reads like a chat room. (A channel switcher is a
+            separate follow-up; the room itself is already a switchable value.) */}
+        <span className='font-mono text-sm text-muted' title='Current channel'>
+          #{room}
+        </span>
       </div>
       <div className='overflow-hidden rounded-md border border-hairline'>
         <Feed room={room} items={items} isLoading={isLoading} />
@@ -250,7 +255,9 @@ function Row({
     item.kind === 'chat' ? (
       <p className='break-words whitespace-pre-wrap text-fg'>{item.message.text}</p>
     ) : (
-      <p className='text-muted'>
+      // Commit lines read as secondary to chat messages — a notch smaller than
+      // the row's base `text-sm`.
+      <p className='text-xs text-muted'>
         pushed <code className='font-mono text-fg'>{item.entry.hash.slice(0, 10)}</code> to{' '}
         <code className='font-mono text-fg'>{item.entry.ref}</code>
         {item.entry.message ? <span className='text-muted'> — “{item.entry.message}”</span> : null}
