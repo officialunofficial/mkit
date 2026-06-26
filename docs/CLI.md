@@ -268,10 +268,11 @@ History / commits:
   "Divergences from Git" below.
 - `mkit blame [--format=json] [-L <start>,<end>] [<rev>] <file>` — show
   line-level commit attribution. `-L` restricts output to a line range —
-  `<start>,<end>`, `<start>,+<n>` (n lines from start), `<start>,` (to
-  EOF), `,<end>` (from start of file), or a bare `<start>` (to EOF);
-  bounds are 1-based and inclusive, an inverted range is swapped, and an
-  over-long end is clamped to EOF, matching `git blame -L`. An optional
+  `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
+  lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
+  start of file), or a bare `<start>` (to EOF); bounds are 1-based and
+  inclusive, an inverted range is swapped, and an over-long end is
+  clamped to EOF, matching `git blame -L`. An optional
   `<rev>` (a ref, hash, or `HEAD~2`-style spec) blames the file as of
   that revision instead of `HEAD`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL

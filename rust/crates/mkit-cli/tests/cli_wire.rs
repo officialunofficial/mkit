@@ -367,6 +367,21 @@ fn blame_l_plus_offset_counts_lines() {
 }
 
 #[test]
+fn blame_l_minus_offset_counts_lines_ending_at_start() {
+    // `-L <start>,-<n>` is n lines *ending* at <start>: `4,-2` → lines 3,4.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\nc\nd\ne\n", "first");
+    let out = run_in(td.path(), &["blame", "-L", "4,-2", "f.txt"]);
+    assert!(out.status.success(), "blame -L -n failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "expected lines 3,4, got {stdout:?}");
+    assert!(lines[0].contains("\t3\t") && lines[0].ends_with("\tc"));
+    assert!(lines[1].contains("\t4\t") && lines[1].ends_with("\td"));
+}
+
+#[test]
 fn blame_l_start_past_eof_is_usage_error() {
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
@@ -397,8 +412,18 @@ fn blame_l_zero_line_number_errors_without_panicking() {
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("invalid -L line number: 0"),
-        "expected git-style zero-line diagnostic, got: {stderr}"
+        stderr.contains("-L invalid line number: 0"),
+        "expected git-exact zero-line diagnostic, got: {stderr}"
+    );
+    // A negative start must reach the parser (allow_hyphen_values), not be
+    // intercepted by clap as an unknown flag — git reports it by token.
+    let neg = run_in(td.path(), &["blame", "-L", "-3,5", "f.txt"]);
+    assert!(!neg.status.success());
+    assert!(
+        String::from_utf8(neg.stderr)
+            .unwrap()
+            .contains("-L invalid line number: -3"),
+        "negative start should yield the git-exact diagnostic"
     );
 }
 

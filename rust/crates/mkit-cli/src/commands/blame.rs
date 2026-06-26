@@ -47,12 +47,21 @@ struct BlameOpts {
     #[arg(long, value_enum, default_value = "default")]
     format: BlameFormat,
     /// Restrict output to a line range, like `git blame -L`. Accepts
-    /// `<start>,<end>`, `<start>,+<n>` (n lines from start), `<start>,`
-    /// (start to EOF), `,<end>` (start of file to end), or a bare
-    /// `<start>` (start to EOF). Lines are 1-based and inclusive; an
-    /// inverted range is swapped and an over-long end is clamped to EOF,
-    /// matching git.
-    #[arg(short = 'L', long = "lines", value_name = "START,END")]
+    /// `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>`
+    /// (n lines back, ending at start), `<start>,` (start to EOF),
+    /// `,<end>` (start of file to end), or a bare `<start>` (start to
+    /// EOF). Lines are 1-based and inclusive; an inverted range is
+    /// swapped and an over-long end is clamped to EOF, matching git.
+    // `allow_hyphen_values` so a pathological negative start (`-3,5`)
+    // reaches the parser for a git-faithful diagnostic instead of clap
+    // mistaking `-3` for a flag. Valid values never start with `-` (the
+    // `-<n>` offset is always the second field).
+    #[arg(
+        short = 'L',
+        long = "lines",
+        value_name = "START,END",
+        allow_hyphen_values = true
+    )]
     lines: Option<String>,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
     /// revision to blame it at (a ref, hash, or `HEAD~2`-style spec).
@@ -137,82 +146,94 @@ pub fn run(args: &[String]) -> u8 {
 /// `(start, end)` pair validated against `total` (the file's line count).
 /// `file` only feeds git-faithful "has only N lines" diagnostics.
 ///
-/// Accepted forms — `<start>,<end>`, `<start>,+<n>`, `<start>,`,
+/// Accepted forms — `<start>,<end>`, `<start>,+<n>` (n lines forward),
+/// `<start>,-<n>` (n lines back, ending at `<start>`), `<start>,`,
 /// `,<end>`, and a bare `<start>` (treated as `<start>,` → to EOF).
 /// An omitted start defaults to line 1; an omitted end to `total`.
-/// To match git: an inverted range (`start > end`) is swapped, and an
-/// end past EOF is clamped to `total`. A start past EOF, a zero/empty
-/// start, or a non-numeric token is an error.
+/// To match git: an inverted absolute range (`5,2`) is swapped, a low
+/// bound past EOF errors `file <f> has only N lines`, and an over-long
+/// high bound is clamped to `total`. A zero/negative line number errors
+/// `-L invalid line number: <tok>` and a zero offset `-L invalid empty
+/// range`.
 ///
-/// Returns `Err(message)` with a git-flavored diagnostic on bad input.
+/// Returns `Err(message)` with a git-faithful diagnostic on bad input.
 fn parse_line_range(spec: &str, total: usize, file: &str) -> Result<(usize, usize), String> {
     let (start_tok, end_tok) = match spec.split_once(',') {
         Some((s, e)) => (s.trim(), Some(e.trim())),
         None => (spec.trim(), None),
     };
 
-    // Start: defaults to 1 when omitted (the `,<end>` form). An explicit
-    // `0` is rejected here; git: `-L invalid line number: 0`.
+    // Start anchor: defaults to 1 when omitted (the `,<end>` form).
     let start = if start_tok.is_empty() {
         1
     } else {
         parse_one_based(start_tok)?
     };
 
-    // End: omitted or empty → EOF; `+<n>` → n lines from start; else an
-    // absolute, also-1-based line number (`,0` / `3,0` are rejected).
-    let end = match end_tok {
-        None | Some("") => total,
-        Some(tok) if tok.starts_with('+') => {
-            let n = parse_line_num(&tok[1..])?;
-            if n == 0 {
-                return Err("line count after '+' must be at least 1".to_string());
-            }
-            // n lines starting at `start`, inclusive: `+2` from 3 → 3,4.
-            start.saturating_add(n - 1)
+    // Resolve the inclusive `(lo, hi)` bounds from the end token. git's
+    // end forms:
+    //   omitted / empty  → to EOF
+    //   absolute `<m>`   → swap with start if inverted (`5,2` → 2..5)
+    //   `+<n>`           → n lines forward from start (`5,+2` → 5..6)
+    //   `-<n>`           → n lines back, *ending* at start (`5,-2` → 4..5),
+    //                      the low bound clamped up to line 1
+    // A `+0` / `-0` offset is an empty range.
+    let (lo, hi) = match end_tok {
+        None | Some("") => (start, total),
+        Some(tok) if tok.starts_with('+') => (start, start.saturating_add(parse_offset(tok)? - 1)),
+        Some(tok) if tok.starts_with('-') => {
+            let n = parse_offset(tok)?;
+            (start.saturating_sub(n - 1).max(1), start)
         }
-        Some(tok) => parse_one_based(tok)?,
+        Some(tok) => {
+            let m = parse_one_based(tok)?;
+            if start > m { (m, start) } else { (start, m) }
+        }
     };
 
-    // Empty file: no blamable lines. git checks this *after* validating
-    // the line-number tokens, so an explicit zero (`-L ,0` / `-L 3,0`)
-    // reports `invalid -L line number: 0` above rather than this message,
-    // even on an empty file — matching git for every form. Returning here
-    // (before the swap) also keeps the slice provably safe: with
-    // `total > 0`, a defaulted end is >= 1 and every explicit token went
-    // through `parse_one_based`/`+n` (both reject 0), so both bounds are
-    // >= 1 and the swap can't yield line 0.
+    // Empty file: no blamable lines. Checked *after* token validation so
+    // an explicit zero / empty-range token reports its own error first,
+    // matching git for every form.
     if total == 0 {
         return Err(format!("file {file} has only 0 lines"));
     }
 
-    // git swaps an inverted range rather than erroring.
-    let (start, end) = if start > end {
-        (end, start)
-    } else {
-        (start, end)
-    };
-
-    if start > total {
+    // git validates the low bound (the actual range start) against EOF for
+    // every form — including `-<n>`, whose anchor may itself sit past EOF —
+    // and clamps an over-long high bound down to the last line. `lo >= 1`
+    // here by construction, so the `lines[lo - 1..hi]` slice is safe.
+    if lo > total {
         return Err(format!("file {file} has only {total} lines"));
     }
-    // Clamp an over-long end to EOF, like git.
-    Ok((start, end.min(total)))
+    Ok((lo, hi.min(total)))
 }
 
-/// Parse a single decimal line-number token, rejecting empty/non-numeric
-/// input with a git-flavored message.
+/// Parse a single decimal line-number token. Junk (non-integer) gets a
+/// clear mkit diagnostic; git instead dumps usage here.
 fn parse_line_num(tok: &str) -> Result<usize, String> {
     tok.parse::<usize>()
         .map_err(|_| format!("invalid line number '{tok}' in -L range"))
 }
 
-/// Parse a 1-based line-number token, rejecting both non-numeric input
-/// and an explicit `0`, mirroring git's `-L invalid line number: 0`.
+/// Parse a 1-based absolute line number, rejecting `0` and negatives the
+/// way git does: a parseable-but-invalid integer (e.g. `0`, `-3`) yields
+/// `-L invalid line number: <tok>`, while non-integer junk keeps the
+/// clearer [`parse_line_num`] message.
 fn parse_one_based(tok: &str) -> Result<usize, String> {
-    let n = parse_line_num(tok)?;
+    match tok.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        // `0`, or (via the usize parse failing) a negative integer.
+        _ if tok.parse::<i64>().is_ok() => Err(format!("-L invalid line number: {tok}")),
+        _ => Err(format!("invalid line number '{tok}' in -L range")),
+    }
+}
+
+/// Parse the `<n>` in a `+<n>` / `-<n>` end offset (the leading sign is
+/// included in `tok`). A zero offset is git's `-L invalid empty range`.
+fn parse_offset(tok: &str) -> Result<usize, String> {
+    let n = parse_line_num(&tok[1..])?;
     if n == 0 {
-        return Err("invalid -L line number: 0".to_string());
+        return Err("-L invalid empty range".to_string());
     }
     Ok(n)
 }
@@ -275,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn minus_n_is_n_lines_ending_at_start() {
+        // `git blame -L <start>,-<n>` → n lines ending at start, low bound
+        // clamped up to line 1. Verified against real git.
+        assert_eq!(range("5,-2", 8), Ok((4, 5)));
+        assert_eq!(range("8,-3", 8), Ok((6, 8)));
+        assert_eq!(range("3,-1", 8), Ok((3, 3)));
+        assert_eq!(range("2,-5", 8), Ok((1, 2))); // clamps to line 1
+    }
+
+    #[test]
+    fn minus_n_anchor_past_eof_still_validates_low_bound() {
+        // `12,-3` on an 8-line file → [10,12] → low bound 10 > 8: error,
+        // matching git (it validates the range start, not the anchor).
+        assert!(range("12,-3", 8).unwrap_err().contains("only 8 lines"));
+        // `8,-3` → [6,8] → fine; high bound already within EOF.
+        assert_eq!(range("8,-3", 8), Ok((6, 8)));
+    }
+
+    #[test]
     fn open_ended_start_runs_to_eof() {
         assert_eq!(range("4,", 8), Ok((4, 8)));
     }
@@ -320,38 +360,49 @@ mod tests {
         }
         for spec in [",0", "3,0"] {
             let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
-            assert_eq!(err, "invalid -L line number: 0", "spec {spec:?}");
+            assert_eq!(err, "-L invalid line number: 0", "spec {spec:?}");
         }
     }
 
     #[test]
     fn zero_start_errors() {
-        assert!(range("0,5", 8).is_err());
+        assert_eq!(range("0,5", 8).unwrap_err(), "-L invalid line number: 0");
     }
 
     #[test]
-    fn zero_end_errors_without_panicking() {
-        // Regression: `,0` defaults start to 1, parses end 0, then the
-        // inverted-range swap used to yield start == 0 and panic the
-        // debug assertion (and underflow the slice in release). git:
-        // `-L invalid line number: 0`.
-        for spec in [",0", "3,0", "0,0"] {
-            let err = range(spec, 8).unwrap_err();
-            assert!(
-                err.contains("invalid -L line number: 0"),
-                "spec {spec:?} → {err:?}"
+    fn zero_line_number_uses_git_message() {
+        // Regression: `,0` defaults start to 1, parses end 0, then the old
+        // inverted-range swap yielded start == 0 and panicked. git reports
+        // `-L invalid line number: 0` (exact word order) for every form
+        // carrying an explicit zero.
+        for spec in [",0", "3,0", "0,0", "0", "0,"] {
+            assert_eq!(
+                range(spec, 8).unwrap_err(),
+                "-L invalid line number: 0",
+                "spec {spec:?}"
             );
         }
     }
 
     #[test]
-    fn non_numeric_errors() {
-        assert!(range("a,b", 8).is_err());
-        assert!(range("3,+x", 8).is_err());
+    fn negative_line_number_uses_git_message() {
+        // A parseable-but-invalid integer reports its token, like git's
+        // `-L invalid line number: -3` (negatives only valid as `-<n>`
+        // *offsets*, handled separately).
+        assert_eq!(range("-3,5", 8).unwrap_err(), "-L invalid line number: -3");
     }
 
     #[test]
-    fn zero_plus_offset_errors() {
-        assert!(range("3,+0", 8).is_err());
+    fn zero_offset_is_invalid_empty_range() {
+        // git: `+0` / `-0` → `-L invalid empty range`.
+        assert_eq!(range("3,+0", 8).unwrap_err(), "-L invalid empty range");
+        assert_eq!(range("3,-0", 8).unwrap_err(), "-L invalid empty range");
+    }
+
+    #[test]
+    fn non_numeric_errors() {
+        // True junk keeps mkit's clearer message (git dumps usage here).
+        assert!(range("a,b", 8).is_err());
+        assert!(range("3,+x", 8).is_err());
     }
 }
