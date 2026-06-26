@@ -903,9 +903,29 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Ar file
-Line-level attribution of the committed state of
-.Ar file .
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Oo Fl L Ar start , end Oc Op Ar rev Ar file
+Line-level attribution of
+.Ar file
+as of
+.Ar rev
+.Pq a ref, hash, or Cm HEAD~2 Ns -style spec; default Cm HEAD .
+.Fl L
+restricts output to a line range:
+.Ar start , end ,
+.Ar start , Ns Cm + Ns Ar n
+.Pq n lines forward from start ,
+.Ar start , Ns Cm - Ns Ar n
+.Pq n lines back, ending at start ,
+.Ar start ,
+.Pq to end of file ,
+.Cm \&, Ns Ar end
+.Pq from start of file ,
+or a bare
+.Ar start
+.Pq to end of file .
+Bounds are 1-based and inclusive; an inverted range is swapped and an
+over-long end is clamped to the last line, matching
+.Xr git 1 Cm blame .
 The default output is
 .Ql <short12>\et<line_num>\et<text>
 per line;
