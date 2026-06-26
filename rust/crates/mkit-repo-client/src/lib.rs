@@ -120,6 +120,91 @@ pub async fn get_object(
         .then(|| resp.bytes.unwrap_or_default()))
 }
 
+/// `ListCommits` — walk the chain from `ref_name` (empty = "main"), or from a
+/// `start_id_hex` cursor, returning up to `page_size` RAW commit/remix objects in
+/// ONE round-trip (vs O(depth) sequential `GetObject` calls). Returns a JS object
+/// `{ commits: [{ idHex, bytes }], nextCursorHex }`; `nextCursorHex` is empty when
+/// the chain ended. The caller decodes `bytes` with the mkit wasm decoder.
+#[wasm_bindgen]
+pub async fn list_commits(
+    base_url: &str,
+    room: String,
+    ref_name: String,
+    start_id_hex: String,
+    page_size: u32,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let start_id = if start_id_hex.is_empty() {
+        Vec::new()
+    } else {
+        hex_to_bytes(&start_id_hex)?
+    };
+    let resp = client
+        .list_commits(ListCommitsRequest {
+            room: Some(room),
+            r#ref: Some(ref_name),
+            start_id: Some(start_id),
+            page_size: Some(page_size),
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for c in resp.commits {
+        let obj = js_sys::Object::new();
+        set(&obj, "idHex", bytes_to_hex(c.id.as_deref().unwrap_or_default()).into())?;
+        let bytes = c.object_bytes.unwrap_or_default();
+        set(&obj, "bytes", js_sys::Uint8Array::from(bytes.as_slice()).into())?;
+        arr.push(&obj);
+    }
+    let out = js_sys::Object::new();
+    set(&out, "commits", arr.into())?;
+    set(
+        &out,
+        "nextCursorHex",
+        bytes_to_hex(resp.next_cursor.as_deref().unwrap_or_default()).into(),
+    )?;
+    Ok(out.into())
+}
+
+/// `BatchGetObjects` — fetch many objects in ONE round-trip (the server fans the
+/// R2 reads out concurrently). Returns a JS array of `{ idHex, found, bytes }`,
+/// order-preserved; `bytes` is empty when `found` is false.
+#[wasm_bindgen]
+pub async fn batch_get_objects(
+    base_url: &str,
+    room: String,
+    object_ids_hex: Vec<String>,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let mut object_ids = Vec::with_capacity(object_ids_hex.len());
+    for h in &object_ids_hex {
+        object_ids.push(hex_to_bytes(h)?);
+    }
+    let resp = client
+        .batch_get_objects(BatchGetObjectsRequest {
+            room: Some(room),
+            object_ids,
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for o in resp.objects {
+        let obj = js_sys::Object::new();
+        set(&obj, "idHex", bytes_to_hex(o.id.as_deref().unwrap_or_default()).into())?;
+        set(&obj, "found", o.found.unwrap_or(false).into())?;
+        let bytes = o.bytes.unwrap_or_default();
+        set(&obj, "bytes", js_sys::Uint8Array::from(bytes.as_slice()).into())?;
+        arr.push(&obj);
+    }
+    Ok(arr.into())
+}
+
 /// `ListRefs` — refs in the room, optionally filtered by name prefix. Returns a
 /// JS array of `{ name, objectIdHex }` objects.
 #[wasm_bindgen]

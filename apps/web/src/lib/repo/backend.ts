@@ -777,6 +777,23 @@ export interface RepoWasmClient {
     sign: RepoSignFn,
   ): Promise<{ active: boolean; count: number }>
   list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
+  /**
+   * ListCommits — server-side first-parent walk; one round-trip returns a page of RAW commit/remix objects (the caller
+   * decodes them) plus a continuation cursor.
+   */
+  list_commits(
+    baseUrl: string,
+    room: string,
+    ref: string,
+    startIdHex: string,
+    pageSize: number,
+  ): Promise<{ commits: Array<{ idHex: string; bytes: Uint8Array }>; nextCursorHex: string }>
+  /** BatchGetObjects — fetch many objects in one round-trip (server fans the reads out). */
+  batch_get_objects(
+    baseUrl: string,
+    room: string,
+    objectIdsHex: string[],
+  ): Promise<Array<{ idHex: string; found: boolean; bytes: Uint8Array }>>
 }
 
 /**
@@ -1006,24 +1023,99 @@ export class WasmRepoBackend implements RepoBackend {
     const cached = this.walkCache.get(cacheKey)
     if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
-    // INCREMENTAL re-walk: when we already have a cached chain for this ref,
-    // walk from the NEW head by first-parent only until we reach a hash that
-    // is already in the cached chain, then splice that cached tail on. The
-    // common case (our push, a peer's single commit) fetches just the new
-    // object(s) instead of re-walking up to WALK_CAP. A cold walk (no cache)
-    // is bounded by WALK_CAP as before.
-    const tailByHash = new Map<string, number>() // hash → index in cached.entries
+    // PRIMARY: one server-side walk (ListCommits) returns the whole page of raw
+    // objects in ONE round-trip — O(1) round-trips instead of O(depth) sequential
+    // GetObject calls. Falls back to the per-object client walk if the worker
+    // doesn't support ListCommits yet (older deploy → the RPC throws).
+    try {
+      const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
+      this.walkCache.set(cacheKey, { head, entries })
+      return entries
+    } catch {
+      // Fall through to the legacy per-object walk.
+    }
+    return this.commitLogWalk(room, ref, cap, head, cacheKey, cached, opts)
+  }
+
+  /**
+   * O(1)-round-trip path: page through ListCommits, decode each raw object, warm the object cache, and splice the
+   * cached tail when the walk reaches a hash we already have. Throws (→ caller falls back) if the RPC is unsupported.
+   */
+  private async commitLogViaListCommits(
+    room: string,
+    ref: string,
+    cap: number,
+    cached: { head: string; entries: CommitLogEntry[] } | undefined,
+    opts?: CommitLogOpts,
+  ): Promise<CommitLogEntry[]> {
+    const tailByHash = new Map<string, number>()
     if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
 
     const fresh: CommitLogEntry[] = []
-    const seen = new Set<string>() // guard against a cyclic/self-parent chain
+    const seen = new Set<string>()
+    let spliced: CommitLogEntry[] | null = null
+    let cursor = '' // '' = walk from the ref head
+    let done = false
+
+    while (!done && fresh.length < cap) {
+      const page = await this.wasm.list_commits(this.baseUrl, room, ref, cursor, cap - fresh.length)
+      if (page.commits.length === 0) break
+      for (const c of page.commits) {
+        const tailIdx = tailByHash.get(c.idHex)
+        if (tailIdx !== undefined) {
+          // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
+          spliced = cached!.entries.slice(tailIdx)
+          done = true
+          break
+        }
+        if (seen.has(c.idHex)) {
+          done = true
+          break
+        } // cycle guard
+        seen.add(c.idHex)
+        this.objectCache.set(`${room}::${c.idHex}`, c.bytes) // warm the object cache
+        const decoded = decodeLogObject(this.api, c.bytes, c.idHex, ref)
+        if (!decoded) {
+          done = true
+          break
+        }
+        fresh.push(decoded.entry)
+        opts?.onProgress?.([...fresh])
+        if (fresh.length >= cap) {
+          done = true
+          break
+        }
+      }
+      cursor = page.nextCursorHex
+      if (!cursor) break
+    }
+
+    return spliced ? [...fresh, ...spliced] : fresh
+  }
+
+  /**
+   * Legacy O(depth) path: walk the chain one GetObject per commit. Kept as the fallback for workers without
+   * ListCommits, and shares the incremental cached-tail splice + onProgress streaming.
+   */
+  private async commitLogWalk(
+    room: string,
+    ref: string,
+    cap: number,
+    head: string,
+    cacheKey: string,
+    cached: { head: string; entries: CommitLogEntry[] } | undefined,
+    opts?: CommitLogOpts,
+  ): Promise<CommitLogEntry[]> {
+    const tailByHash = new Map<string, number>()
+    if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
+
+    const fresh: CommitLogEntry[] = []
+    const seen = new Set<string>()
     let hash: string | undefined = head
     let spliced: CommitLogEntry[] | null = null
     while (hash && fresh.length < cap && !seen.has(hash)) {
       const tailIdx = tailByHash.get(hash)
       if (tailIdx !== undefined) {
-        // Reached the cached chain — splice its tail (from this hash down)
-        // instead of re-fetching/decoding the immutable history again.
         // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
         spliced = cached!.entries.slice(tailIdx)
         break
@@ -1031,16 +1123,10 @@ export class WasmRepoBackend implements RepoBackend {
       seen.add(hash)
       const bytes = await this.cachedObject(room, hash)
       if (!bytes) break // object missing — stop the walk
-      // Route by the object's prologue type: a fork ref's head is a remix,
-      // not a commit. `decodeLogObject` handles both kinds (and stops the
-      // walk on anything else) so a fork chain renders alongside commits.
       const decoded = decodeLogObject(this.api, bytes, hash, ref)
       if (!decoded) break // not a commit/remix — stop rather than throw
       fresh.push(decoded.entry)
       hash = decoded.firstParent
-      // Stream what we have so far (newest-first) so the feed paints commits as
-      // each object lands — a cold walk is one network round-trip per commit, so
-      // without this the whole feed waits on the slowest (deepest) fetch.
       opts?.onProgress?.([...fresh])
     }
 
