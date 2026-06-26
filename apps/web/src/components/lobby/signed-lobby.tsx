@@ -32,14 +32,17 @@ import { BTN, FOCUS_RING, HOVER_BORDER, PRIMARY_BTN, errMsg } from '../multiplay
 /** Message length cap — the SAME shared constant the server enforces. */
 const MAX_CHARS = MAX_MESSAGE_CHARS
 
-/** Emojis offered in the add-reaction picker. MUST stay in sync with the server
- * allowlist `REACTION_EMOJI` in apps/repo-worker/src/chat.rs (the authority — it
- * rejects anything else): a reaction with an emoji missing here can't be sent,
- * and one only listed here would be refused server-side. Edit both together. */
+/**
+ * Emojis offered in the add-reaction picker. MUST stay in sync with the server allowlist `REACTION_EMOJI` in
+ * apps/repo-worker/src/chat.rs (the authority — it rejects anything else): a reaction with an emoji missing here can't
+ * be sent, and one only listed here would be refused server-side. Edit both together.
+ */
 const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅', '🔥']
 
-/** The picker's known height (one row of `h-7` buttons + `p-1`) — used to place
- * it above/below its anchor without measuring a rendered ref. */
+/**
+ * The picker's known height (one row of `h-7` buttons + `p-1`) — used to place it above/below its anchor without
+ * measuring a rendered ref.
+ */
 const PICKER_H = 40
 
 /** Group a row under the previous one if same author within this window. */
@@ -185,7 +188,13 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
                   key={vrow.key}
                   data-index={vrow.index}
                   ref={virtualizer.measureElement}
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vrow.start}px)` }}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${vrow.start}px)`,
+                  }}
                 >
                   <Row
                     item={item}
@@ -217,10 +226,11 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
   )
 }
 
-/** One chat-style feed row: full header (avatar + name + time) for a run's
- * first message; a tight, indented continuation when `grouped` (timestamp shows
- * on hover). The add-reaction trigger sits inline at the end of the content line
- * (hover-revealed); any existing reaction pills sit on their own line below. */
+/**
+ * One chat-style feed row: full header (avatar + name + time) for a run's first message; a tight, indented continuation
+ * when `grouped` (timestamp shows on hover). The add-reaction trigger sits inline at the end of the content line
+ * (hover-revealed); any existing reaction pills sit on their own line below.
+ */
 function Row({
   item,
   grouped,
@@ -248,7 +258,9 @@ function Row({
     )
 
   return (
-    <div className={`group/row relative flex gap-2.5 px-4 text-sm transition-colors hover:bg-muted/10 ${grouped ? 'py-0.5' : 'mt-1 py-1'}`}>
+    <div
+      className={`group/row relative flex gap-2.5 px-4 text-sm transition-colors hover:bg-muted/10 ${grouped ? 'py-0.5' : 'mt-1 py-1'}`}
+    >
       {grouped ? (
         // Continuation: reserve the avatar gutter; reveal the time on hover.
         <span className='w-[26px] shrink-0 pt-0.5 text-right text-[10px] text-muted opacity-0 transition-opacity tabular-nums group-hover/row:opacity-100'>
@@ -283,10 +295,11 @@ function Row({
   )
 }
 
-/** Existing-reaction pills, shown on their own line BELOW the content when a
- * message has any reactions. Pills highlight when you've reacted; clicking
- * toggles. (The add-emoji trigger lives inline on the content line — see
- * AddReaction — not here.) */
+/**
+ * Existing-reaction pills, shown on their own line BELOW the content when a message has any reactions. Pills highlight
+ * when you've reacted; clicking toggles. (The add-emoji trigger lives inline on the content line — see AddReaction —
+ * not here.)
+ */
 function ReactionPills({
   reactions,
   canReact,
@@ -318,11 +331,13 @@ function ReactionPills({
   )
 }
 
-/** The add-reaction trigger: a small face that sits INLINE at the end of the
- * content line and opens an emoji picker. Hidden until row hover (or keyboard
- * focus / an open picker) so it isn't a persistent distraction on every row. The
- * picker itself renders in a PORTAL (see EmojiPicker) so the feed's
- * `overflow-y-auto` can't clip it. */
+/**
+ * The add-reaction trigger: a small face that sits INLINE at the end of the content line and opens an emoji picker. On
+ * hover-capable pointers it's hidden until row hover (or keyboard focus / an open picker) so it isn't a persistent
+ * distraction on every row; on coarse/touch pointers — where there's no hover to reveal it —
+ * `pointer-coarse:opacity-100` keeps it always visible so it stays reachable. The picker itself renders in a PORTAL
+ * (see EmojiPicker) so the feed's `overflow-y-auto` can't clip it.
+ */
 function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const triggerRef = useReactRef<HTMLButtonElement>(null)
@@ -339,7 +354,7 @@ function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
         aria-label='Add reaction'
         aria-haspopup='menu'
         aria-expanded={pickerOpen}
-        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 ${
+        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100 ${
           pickerOpen ? 'opacity-100' : 'opacity-0'
         }`}
       >
@@ -368,11 +383,10 @@ function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
 }
 
 /**
- * The emoji-pick popover, rendered in a PORTAL on `document.body` and positioned
- * `fixed` against the trigger's viewport rect — so the scroll container's
- * `overflow-y-auto` never clips it. Opens ABOVE the trigger, flipping below when
- * there isn't room above. Closes on outside-click, scroll, resize, or Escape
- * (any of which would otherwise leave it floating detached from its anchor).
+ * The emoji-pick popover, rendered in a PORTAL on `document.body` and positioned `fixed` against the trigger's viewport
+ * rect — so the scroll container's `overflow-y-auto` never clips it. Opens ABOVE the trigger, flipping below when there
+ * isn't room above. Closes on outside-click, scroll, resize, or Escape (any of which would otherwise leave it floating
+ * detached from its anchor).
  */
 function EmojiPicker({
   anchor,
@@ -422,7 +436,12 @@ function EmojiPicker({
     <div
       ref={popRef}
       role='menu'
-      style={{ position: 'fixed', left: pos?.left ?? -9999, top: pos?.top ?? -9999, visibility: pos ? 'visible' : 'hidden' }}
+      style={{
+        position: 'fixed',
+        left: pos?.left ?? -9999,
+        top: pos?.top ?? -9999,
+        visibility: pos ? 'visible' : 'hidden',
+      }}
       className='z-50 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
     >
       {REACTION_EMOJI.map((e) => (
@@ -524,14 +543,11 @@ function Composer({ room }: { room: string }) {
 }
 
 /**
- * Timestamp from an epoch-ms stamp, in two forms plus a full-datetime `title`
- * for hover:
- *   - `label` — compact/relative, for the tight continuation-row gutter: recent
- *     → "now"/"Xm"; today → clock time; older → a short date.
- *   - `clock` — absolute wall-clock for the row header: today → "2:10 PM";
- *     older → a short date (with year when it differs).
- * GUARDS against a bogus `ts` (0 / negative / non-finite — which would otherwise
- * render an absurd "20629d"): such items get empty strings rather than wrong ones.
+ * Timestamp from an epoch-ms stamp, in two forms plus a full-datetime `title` for hover: - `label` — compact/relative,
+ * for the tight continuation-row gutter: recent → "now"/"Xm"; today → clock time; older → a short date. - `clock` —
+ * absolute wall-clock for the row header: today → "2:10 PM"; older → a short date (with year when it differs). GUARDS
+ * against a bogus `ts` (0 / negative / non-finite — which would otherwise render an absurd "20629d"): such items get
+ * empty strings rather than wrong ones.
  */
 function fmtTime(ms: number): { label: string; clock: string; title: string } {
   if (!Number.isFinite(ms) || ms <= 0) return { label: '', clock: '', title: '' }
