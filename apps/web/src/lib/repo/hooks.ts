@@ -15,14 +15,17 @@ import {
   type FeedItem,
   type ReactionAgg,
   type ReactionEntry,
+  type ReactionUpdate,
   type RefExpectation,
   type RemixSourceEntry,
+  type RoomWatchHandlers,
   MockRepoBackend,
   type RepoBackend,
   WasmRepoBackend,
   aggregateReactions,
   decodeLogObject,
   mergeFeed,
+  subscribeRoom,
 } from './backend'
 import { useRepoBackend } from './store'
 
@@ -346,29 +349,74 @@ export function usePostMessage(room: string, myPubkeyHex?: string) {
 }
 
 /**
- * Subscribe to the live room stream (ONE WebSocket) and invalidate the right queries: a ref advance refreshes the
- * log/refs (like {@link useRepoEvents}); a chat frame refreshes the messages query. The merged feed re-renders within a
- * frame of either a peer's commit or a peer's message.
+ * Apply a live chat frame to the cached message list (newest appended), deduped by content-addressed id so our own echo
+ * or a replay is idempotent. Also drops our optimistic placeholder for the SAME (author, text) that this server echo
+ * now supersedes, so the poster never sees a transient duplicate.
+ */
+export function applyChatFrame(prev: ChatMessageEntry[] | undefined, m: ChatMessageEntry): ChatMessageEntry[] {
+  const list = prev ?? []
+  if (list.some((x) => x.messageIdHex === m.messageIdHex)) return list
+  const deopt = list.filter(
+    (x) => !(x.messageIdHex.startsWith('optimistic-') && x.authorPubkeyHex === m.authorPubkeyHex && x.text === m.text),
+  )
+  return [...deopt, m]
+}
+
+/**
+ * Apply a live reaction toggle to the cached reaction rows: add the (target, emoji, author) row when active, drop it
+ * when inactive. Idempotent — a repeated add/remove is a no-op.
+ */
+export function applyReactionFrame(prev: ReactionEntry[] | undefined, r: ReactionUpdate): ReactionEntry[] {
+  const list = prev ?? []
+  const matches = (x: ReactionEntry) =>
+    x.targetIdHex === r.targetIdHex && x.emoji === r.emoji && x.authorPubkeyHex === r.authorPubkeyHex
+  if (r.active)
+    return list.some(matches)
+      ? list
+      : [...list, { targetIdHex: r.targetIdHex, emoji: r.emoji, authorPubkeyHex: r.authorPubkeyHex }]
+  return list.filter((x) => !matches(x))
+}
+
+/**
+ * Subscribe to the live room stream (ONE WebSocket) and update the cache. Chat and reaction frames carry their FULL
+ * payload, so they're applied straight to the cache — O(1), no refetch round-trip per event. Ref/commit frames carry
+ * only id+author, so they trigger the (incremental) log re-walk.
+ *
+ * In worker mode the socket is opened off the STATIC backend URL on mount, in PARALLEL with the wasm load — the live
+ * stream needs no wasm, so it's no longer serialized behind backend readiness (which delayed first delivery ~800ms). In
+ * mock/offline mode it drives off the in-memory backend's watcher.
  */
 export function useLobbyEvents(room: string): void {
   const qc = useQueryClient()
   const backend = useRepoBackend()
-  useEffect(() => {
-    if (!backend) return
-    return backend.watchRoom(room, '', {
+  const backendUrl = import.meta.env.VITE_REPO_BACKEND_URL as string | undefined
+
+  const handlers: RoomWatchHandlers = useMemo(
+    () => ({
+      onChat: (m) => qc.setQueryData<ChatMessageEntry[]>(repoKeys.messages(room), (prev) => applyChatFrame(prev, m)),
+      onReaction: (r) =>
+        qc.setQueryData<ReactionEntry[]>(repoKeys.reactions(room), (prev) => applyReactionFrame(prev, r)),
       onRef: (u) => {
         void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
+        // Prefix match covers both the uncapped log key and the lobby's capped one.
         void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
         void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
       },
-      onChat: () => {
-        void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
-      },
-      onReaction: () => {
-        void qc.invalidateQueries({ queryKey: repoKeys.reactions(room) })
-      },
-    })
-  }, [backend, room, qc])
+    }),
+    [qc, room],
+  )
+
+  // Worker mode: open the socket immediately off the static URL (no wasm dep).
+  useEffect(() => {
+    if (!backendUrl) return
+    return subscribeRoom(backendUrl, room, '', handlers)
+  }, [backendUrl, room, handlers])
+
+  // Mock/offline mode: drive updates off the in-memory backend's watcher.
+  useEffect(() => {
+    if (backendUrl || !backend) return
+    return backend.watchRoom(room, '', handlers)
+  }, [backendUrl, backend, room, handlers])
 }
 
 /**

@@ -788,6 +788,64 @@ export interface RepoWasmClient {
  * frame out to `onUpdate` (which drives Query invalidation via `useRepoEvents`). `commitLog` is accumulated in-memory
  * on push (the service has no log RPC).
  */
+/**
+ * Open the live room WebSocket the worker exposes at `GET /watch/<room>` and dispatch parsed frames to `handlers`. PURE
+ * transport — it needs only the backend BASE URL, NO wasm — so a consumer (the lobby) can open it on mount, in PARALLEL
+ * with the wasm load, instead of waiting for the wasm backend to resolve (which serialized ~800ms onto first live
+ * delivery). Reconnects with bounded exponential backoff; returns an unsubscribe that closes the socket.
+ */
+export function subscribeRoom(baseUrl: string, room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
+  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
+  let closed = false
+  let ws: WebSocket | null = null
+  let attempt = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
+
+  const handleMessage = (ev: MessageEvent) => {
+    const frame = parseActivityFrame(ev.data)
+    if (!frame) return
+    if (frame.kind === 'chat') return void handlers.onChat?.(frame.message)
+    if (frame.kind === 'reaction') return void handlers.onReaction?.(frame.reaction)
+    const u = frame.ref
+    if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
+    handlers.onRef?.(u)
+  }
+
+  const scheduleReconnect = () => {
+    if (closed || attempt >= MAX_ATTEMPTS) return
+    const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
+    attempt += 1
+    reconnectTimer = setTimeout(connect, delay)
+  }
+
+  function connect() {
+    if (closed) return
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch {
+      ws = null // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
+      return
+    }
+    ws.addEventListener('open', () => {
+      attempt = 0 // reset backoff once a connection is established
+    })
+    ws.addEventListener('message', handleMessage)
+    ws.addEventListener('close', () => {
+      if (!closed) scheduleReconnect()
+    })
+  }
+
+  connect()
+
+  return () => {
+    if (closed) return
+    closed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close()
+  }
+}
+
 export class WasmRepoBackend implements RepoBackend {
   private log = new Map<string, CommitLogEntry[]>()
   /**
@@ -907,82 +965,23 @@ export class WasmRepoBackend implements RepoBackend {
    * that closes the socket.
    */
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
-    let closed = false
-    let ws: WebSocket | null = null
-    let attempt = 0
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
-
-    const handleMessage = (ev: MessageEvent) => {
-      const frame = parseActivityFrame(ev.data)
-      if (!frame) return
-      if (frame.kind === 'chat') {
-        handlers.onChat?.(frame.message)
-        return
-      }
-      if (frame.kind === 'reaction') {
-        handlers.onReaction?.(frame.reaction)
-        return
-      }
-      const u = frame.ref
-      if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
-      // Surface peers' pushes in the live log so a signed-out viewer sees others
-      // contributing. The ref event carries the commit id + author but not the
-      // message, so peers show a placeholder; our own commits keep their real
-      // message (recorded on push) and are deduped by hash here.
-      this.recordCommit(room, {
-        hash: u.objectIdHex,
-        message: 'pushed by a peer',
-        authorPubkey: u.authorPubkeyHex,
-        ref: u.name,
-        createdAt: new Date().toISOString(),
-      })
-      handlers.onRef?.(u)
-    }
-
-    // Schedule a bounded, exponentially-backed-off reconnect. The socket can
-    // drop (DO hibernation, transient network) without the user closing it.
-    const scheduleReconnect = () => {
-      if (closed || attempt >= MAX_ATTEMPTS) return
-      const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
-      attempt += 1
-      reconnectTimer = setTimeout(connect, delay)
-    }
-
-    function connect() {
-      if (closed) return
-      try {
-        ws = new WebSocket(wsUrl)
-      } catch {
-        // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
-        ws = null
-        return
-      }
-      ws.addEventListener('open', () => {
-        attempt = 0 // reset backoff once a connection is established
-      })
-      ws.addEventListener('message', handleMessage)
-      // On error/close, retry with backoff (unless the caller unsubscribed).
-      ws.addEventListener('error', () => {
-        // `error` is followed by `close`; let `close` drive the reconnect.
-      })
-      ws.addEventListener('close', () => {
-        if (!closed) scheduleReconnect()
-      })
-    }
-
-    connect()
-
-    return () => {
-      if (closed) return
-      closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      // CLOSING (2) / CLOSED (3) need no action; otherwise close the socket.
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close()
-      }
-    }
+    // Delegate to the shared, wasm-free socket. Wrap `onRef` to also record the
+    // peer's push into the in-memory log (a placeholder message) so callers that
+    // read `this.log` still see others contributing; the lobby instead drives the
+    // socket via `subscribeRoom` directly (no wasm dependency).
+    return subscribeRoom(this.baseUrl, room, prefix, {
+      ...handlers,
+      onRef: (u) => {
+        this.recordCommit(room, {
+          hash: u.objectIdHex,
+          message: 'pushed by a peer',
+          authorPubkey: u.authorPubkeyHex,
+          ref: u.name,
+          createdAt: new Date().toISOString(),
+        })
+        handlers.onRef?.(u)
+      },
+    })
   }
 
   /**
