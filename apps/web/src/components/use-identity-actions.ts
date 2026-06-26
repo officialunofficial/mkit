@@ -8,7 +8,8 @@
 // global identity store, so unlocking in either surface unlocks the other.
 
 import { useState } from 'react'
-import { randomPetname } from '../lib/identity-name'
+import { recordActivity } from '../lib/activity-log'
+import { playerName, randomPetname } from '../lib/identity-name'
 import { useIdentityStore } from '../lib/identity-store'
 import { keysEnabled } from '../lib/keys-client'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
@@ -52,7 +53,12 @@ export function useIdentityActions(): IdentityActions {
       // not derived from that passkey — so persisting it would flip `hasPasskey`
       // true and surface an "Unlock" that derives a DIFFERENT seed.
       if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
+      // Time ONLY the local key-derivation compute (seed → Ed25519 pubkey) — NOT
+      // the passkey ceremony, which is user/OS-gated and would misrepresent the
+      // "fast" story. This is the genuinely sub-ms part worth flexing.
+      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
+      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
       // Register the handle in keys.mkit.sh (signed write). Fire-and-forget and
       // only for a recoverable identity with a configured registry.
@@ -66,6 +72,18 @@ export function useIdentityActions(): IdentityActions {
             ? 'Identity ready — Ed25519 derived from your passkey via PRF.'
             : 'PRF unavailable — using a random in-memory key (won’t persist across sessions or devices).',
       )
+      recordActivity({
+        kind: 'create',
+        title: `New player: ${petname}`,
+        durationMs: deriveMs,
+        lines: [
+          res.via === 'ephemeral'
+            ? 'No passkey PRF here, so this is a random in-memory key — it won’t persist or recover.'
+            : 'Your passkey’s PRF secret was HKDF-expanded into a 32-byte Ed25519 seed, all in one prompt with no key file.',
+          `Signer pubkey ${pubkey.slice(0, 12)}… (renders as ${petname}).`,
+          'The seed is held in memory only and is re-derivable from the same passkey — same passkey → same player, on any device.',
+        ],
+      })
     } catch (e) {
       setStatus(errMsg(e))
     } finally {
@@ -83,9 +101,20 @@ export function useIdentityActions(): IdentityActions {
     try {
       const res = await deriveEd25519Seed(id.credentialId ?? undefined)
       if (res.credentialId) id.setCredentialId(res.credentialId)
+      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
+      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
       setStatus('Unlocked — recovered your existing player from the passkey via PRF.')
+      recordActivity({
+        kind: 'unlock',
+        title: `Recovered ${playerName(pubkey)} — same key, no key file`,
+        durationMs: deriveMs,
+        lines: [
+          'Re-ran the passkey PRF → same HKDF seed → same Ed25519 key. No new passkey was minted.',
+          `Signer pubkey ${pubkey.slice(0, 12)}… — identical to before, because it’s derived, not stored.`,
+        ],
+      })
     } catch (e) {
       if (e instanceof PrfUnsupportedError) {
         setStatus('This passkey can’t derive a key (no PRF). Create a new identity instead.')

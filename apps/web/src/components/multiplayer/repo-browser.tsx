@@ -5,6 +5,7 @@
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
 import { useMemo, useState } from 'react'
+import { recordActivity } from '../../lib/activity-log'
 import {
   CasConflictError,
   type CommitLogEntry,
@@ -55,19 +56,30 @@ export function RepoBrowser({
   // the user sees the remix land in the Refs panel + log.
   const onFork = async (upstreamCommit: string) => {
     setForkStatus(null)
+    const t0 = performance.now()
     try {
       const ref = await fork(upstreamCommit)
       if (ref) {
         onSelectRef(ref)
         onSelectCommit(null)
         setForkStatus(`Forked → ${ref}`)
+        recordActivity({
+          kind: 'fork',
+          title: `Forked ${upstreamCommit.slice(0, 10)}… → ${ref}`,
+          durationMs: performance.now() - t0,
+          lines: [
+            'Built + signed a remix object referencing the upstream commit, then pushed it to a new fork branch under a create-only CAS.',
+            'A remix is a first-class fork object — it took the SAME sign → PutObject → UpdateRef path a commit does.',
+            `fork branch ${ref}`,
+          ],
+        })
       }
     } catch (e) {
       setForkStatus(
         // The fork ref is unique per (commit, you), so a conflict here means a
         // concurrent re-fork raced your push — your fork chain moved under you.
         e instanceof CasConflictError
-          ? 'Your fork ref just moved (a concurrent push) — try forking again.'
+          ? 'Your fork branch just moved (a concurrent push) — try forking again.'
           : e instanceof IdentityLockedError
             ? 'Unlock (create an identity) before forking.'
             : errMsg(e),
@@ -153,13 +165,13 @@ function RefsPanel({
   return (
     <section className='space-y-3'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-sm font-semibold'>Refs · room “{room}”</h2>
+        <h2 className='text-sm font-semibold'>Branches · repo “{room}”</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
       {showSkeleton ? (
         <SkeletonRows rows={3} />
       ) : entries.length === 0 ? (
-        <p className='text-sm text-muted'>No refs yet — push a commit to create one.</p>
+        <p className='text-sm text-muted'>No branches yet — push a commit to create one.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
           {entries.map((r) => {
@@ -234,7 +246,7 @@ function LiveLog({
       {showSkeleton ? (
         <SkeletonRows rows={5} />
       ) : entries.length === 0 ? (
-        <p className='text-sm text-muted'>No commits on this ref yet — push one above.</p>
+        <p className='text-sm text-muted'>No commits on this branch yet — push one above.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
           {entries.map((e) => (
@@ -399,7 +411,7 @@ function CommitDetail({
       {obj.isLoading ? (
         <p className='text-sm text-muted'>Loading object…</p>
       ) : !obj.data ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>Object not found in this room.</p>
+        <p className='text-sm text-amber-700 dark:text-amber-400'>Object not found in this repository.</p>
       ) : !decoded?.ok ? (
         <p className='text-red-600 dark:text-red-400'>Could not decode object: {decoded?.error}</p>
       ) : (

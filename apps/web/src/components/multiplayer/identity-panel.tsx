@@ -4,11 +4,13 @@
 // flourish, the locked create/unlock actions, and the unlocked player header.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { type BindingCredential, attestEd25519Binding, enrollBindingPasskey, rpId } from '../../lib/passkey'
+import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
-import { Field, FieldList } from '../result-panel'
+import { Field, FieldList, INPUT_CLASSES } from '../result-panel'
 import { useMkit } from '../use-mkit'
+import { InfoTip } from './info-tip'
 import { OwnPlayerName } from './player-label'
 import { BTN, PRIMARY_BTN, errMsg } from './shared'
 
@@ -49,11 +51,20 @@ export function AttestBinding({
 
   return (
     <section className='space-y-4'>
-      <div className='flex flex-wrap items-center gap-2'>
+      <div className='flex flex-wrap items-center gap-1.5'>
         <button type='button' className={BTN} onClick={onAttest} disabled={busy}>
           {busy ? 'Attesting…' : 'Attest with a passkey'}
         </button>
-        <span className='text-xs text-muted'>A P-256 passkey vouches this Ed25519 key is yours.</span>
+        <InfoTip label='About attesting'>
+          <p>
+            <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge vouching that this
+            Ed25519 signing key is yours — cryptographically linking the two keys.
+          </p>
+          <p className='mt-2'>
+            It’s optional. The binding is verified in WASM with the RP-ID pinned, so a green check proves the two keys
+            belong together — a stronger “same person” signal than the signing key alone.
+          </p>
+        </InfoTip>
       </div>
       {result || binding ? (
         <FieldList>
@@ -133,9 +144,27 @@ export function LockedView({
   )
 }
 
-/** UNLOCKED header: the player identity, a lock control, and the room selector. */
+/**
+ * UNLOCKED header: the player identity + a lock control. (The room selector now lives in the left column — see
+ * {@link RoomSelector}.)
+ */
 export function UnlockedHeader() {
   const id = useIdentityStore()
+
+  // Narrate the lock so the "I can wipe my key and re-derive it" property is
+  // legible — capture the player name before clearing for the detail line.
+  const onLock = () => {
+    recordActivity({
+      kind: 'lock',
+      title: 'Signing key wiped from memory',
+      lines: [
+        'The in-memory Ed25519 seed is gone — you can still read the repository, but can’t sign a push until you Unlock.',
+        'Your passkey and pubkey stay, so Unlock re-derives the SAME player. No key was ever written to disk.',
+      ],
+    })
+    id.lock()
+  }
+
   return (
     <section className='space-y-3'>
       {/* Stacks on mobile (the identity gets its own full-width line so the name
@@ -147,19 +176,9 @@ export function UnlockedHeader() {
           <OwnPlayerName />{' '}
           <code className='font-mono text-xs break-all text-muted'>{(id.ed25519PubkeyHex ?? '').slice(0, 10)}…</code>
         </span>
-        <div className='flex flex-wrap items-center gap-2'>
-          <button type='button' className={BTN} onClick={() => id.lock()}>
-            Lock
-          </button>
-          <label className='flex items-center gap-2 text-sm text-muted'>
-            Room
-            <input
-              className='w-28 rounded-md border border-hairline bg-transparent px-2 py-1 text-base outline-none focus:border-fg sm:w-32 sm:text-sm'
-              value={id.room}
-              onChange={(e) => id.setRoom(e.target.value)}
-            />
-          </label>
-        </div>
+        <button type='button' className={BTN} onClick={onLock}>
+          Lock
+        </button>
       </div>
       {id.ephemeral ? (
         <p className='text-sm text-amber-700 dark:text-amber-400'>
@@ -167,5 +186,42 @@ export function UnlockedHeader() {
         </p>
       ) : null}
     </section>
+  )
+}
+
+/**
+ * Room selector — which shared repo you're pointed at. Lives in the left column (alongside compose), independent of
+ * identity: you can switch rooms and browse their shared history whether or not you've unlocked a signing key.
+ */
+export function RoomSelector() {
+  const room = useIdentityStore((s) => s.room)
+  const setRoom = useIdentityStore((s) => s.setRoom)
+  const fieldId = useId()
+  return (
+    <div className='space-y-1.5'>
+      <div className='flex items-center gap-1.5'>
+        <label htmlFor={fieldId} className='text-sm text-muted'>
+          Repository
+        </label>
+        <InfoTip label='About the repository'>
+          <p>
+            <strong className='text-fg'>Everyone here shares one repository.</strong> It’s identified only by its name —
+            anyone with the name can read and write it. No accounts: your anonymous key <em>is</em> your identity.
+          </p>
+          <p className='mt-2'>
+            Any number of keys contribute to the same <strong className='text-fg'>shared history</strong>. Because the
+            key is derived from your passkey, the same contributor comes back on any device.
+          </p>
+        </InfoTip>
+      </div>
+      <input
+        id={fieldId}
+        className={INPUT_CLASSES}
+        value={room}
+        onChange={(e) => setRoom(e.target.value)}
+        placeholder='lobby'
+        spellCheck={false}
+      />
+    </div>
   )
 }

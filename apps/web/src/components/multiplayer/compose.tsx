@@ -3,7 +3,8 @@
 // Compose surface (build + sign + push a commit) and the fork/remix hook.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
+import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
 import {
   CasConflictError,
@@ -12,10 +13,12 @@ import {
   forkRefName,
   usePushCommit,
   useRef,
+  useRefs,
   useRepoBackend,
 } from '../../lib/repo-api'
 import { Field, FieldList, INPUT_CLASSES } from '../result-panel'
 import { bytesToHex, hexToBytes, useMkit } from '../use-mkit'
+import { InfoTip } from './info-tip'
 import { PRIMARY_BTN, errMsg } from './shared'
 
 export function Compose({
@@ -33,7 +36,21 @@ export function Compose({
   onTargetRef: (r: string) => void
 }) {
   const [message, setMessage] = useState('gm, multiplayer mkit')
+  const messageId = useId()
+  const refId = useId()
   const push = usePushCommit()
+  // Existing refs in the room drive the dropdown. `main` is always offered even
+  // before the room has any refs, so there's always a sensible default target.
+  const refsQuery = useRefs(room)
+  const refOptions = useMemo(() => {
+    const names = (refsQuery.data ?? []).map((r) => r.name)
+    return [...new Set(['main', ...names])]
+  }, [refsQuery.data])
+  // The select sits on `__new__` whenever the target isn't an existing ref —
+  // which is exactly the case while typing a brand-new branch name, so the
+  // free-text input stays visible without any extra mode state.
+  const NEW_REF = '__new__'
+  const selectValue = refOptions.includes(targetRef) ? targetRef : NEW_REF
   // Build on the head of the TARGET ref: pushing to a fresh branch name has no
   // head yet (parentHash = '' → MISSING → first commit), an existing one MATCHes.
   const headRef = useRef(room, targetRef)
@@ -60,7 +77,7 @@ export function Compose({
     }
   }, [api, message, parentHash, seedHex])
 
-  const onPush = () => {
+  const onPush = async () => {
     if (!built.ok || !targetRef) return
     // Re-build + re-sign AT CLICK TIME so the pushed object's timestamp == push
     // time (the memo above captured render time). Stamp a fresh unix-seconds
@@ -76,16 +93,28 @@ export function Compose({
     } catch {
       return // a build failure is already surfaced via `built.error`
     }
-    push.mutate({
-      api,
-      seedHex,
-      room,
-      ref: targetRef,
-      commitBytes,
-      commitHash,
-      message,
-      parentHash,
-    })
+    // Time the whole sign → upload → CAS-advance round-trip for the speed badge.
+    const t0 = performance.now()
+    try {
+      await push.mutateAsync({ api, seedHex, room, ref: targetRef, commitBytes, commitHash, message, parentHash })
+      recordActivity({
+        kind: 'push',
+        title: `Signed in your browser → pushed to branch “${targetRef}”`,
+        durationMs: performance.now() - t0,
+        lines: [
+          'Ed25519-signed the commit in WASM, uploaded it content-addressed (PutObject), then advanced the branch under a compare-and-set.',
+          <span key='hashes'>
+            commit <code className='font-mono'>{commitHash.slice(0, 12)}…</code> · parent{' '}
+            {parentHash ? <code className='font-mono'>{parentHash.slice(0, 12)}…</code> : '∅ (first commit)'}
+          </span>,
+          'tree ∅ — no files in this demo, so this commit is really a signed message.',
+          'The server verified the signature, but anyone can write: it proves “same key”, not who you are.',
+        ],
+      })
+    } catch {
+      // A rejected push (e.g. a CAS conflict) already surfaces via `push.error`
+      // below and the optimistic entry rolled back — nothing to narrate.
+    }
   }
 
   const pushErr =
@@ -99,34 +128,79 @@ export function Compose({
 
   return (
     <section className='space-y-4'>
-      <label className='block'>
-        <span className='mb-1.5 block text-sm text-muted'>Commit message</span>
+      <div className='space-y-1.5'>
+        <div className='flex items-center gap-1.5'>
+          <label htmlFor={messageId} className='text-sm text-muted'>
+            Commit message
+          </label>
+          <InfoTip label='About the commit message'>
+            <p>
+              The text you’re signing. In this demo the commit points at an{' '}
+              <strong className='text-fg'>empty tree</strong> (no files), so a push is really a{' '}
+              <strong className='text-fg'>signed message</strong>.
+            </p>
+            <p className='mt-2'>
+              Your Ed25519 key vouches that this exact text came from you — the signature proves “same key”, not who you
+              are.
+            </p>
+          </InfoTip>
+        </div>
         <textarea
+          id={messageId}
           className={INPUT_CLASSES}
           rows={3}
           value={message}
           onChange={(e) => setMessage(e.target.value)}
         />
-      </label>
-      <label className='block'>
-        <span className='mb-1.5 block text-sm text-muted'>
-          Branch / ref — type a new name to start a branch
-        </span>
-        <input
+      </div>
+      <div className='space-y-1.5'>
+        <div className='flex items-center gap-1.5'>
+          <label htmlFor={refId} className='text-sm text-muted'>
+            Branch
+          </label>
+          <InfoTip label='About branches'>
+            <p>
+              A <strong className='text-fg'>branch</strong> is a line of history, just like git. Pushing advances it
+              under a <strong className='text-fg'>compare-and-set</strong>, so concurrent pushes serialize cleanly.
+            </p>
+            <p className='mt-2'>
+              Pick an existing branch to add onto it, or start a new one. Forks land under{' '}
+              <code className='font-mono'>forks/…</code>.
+            </p>
+          </InfoTip>
+        </div>
+        <select
+          id={refId}
           className={INPUT_CLASSES}
-          value={targetRef}
-          onChange={(e) => onTargetRef(e.target.value)}
-          placeholder='main'
-          spellCheck={false}
-        />
-      </label>
+          value={selectValue}
+          onChange={(e) => onTargetRef(e.target.value === NEW_REF ? '' : e.target.value)}
+        >
+          <option value={NEW_REF}>New branch…</option>
+          {refOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        {selectValue === NEW_REF ? (
+          <input
+            className={INPUT_CLASSES}
+            value={targetRef}
+            onChange={(e) => onTargetRef(e.target.value)}
+            placeholder='new-branch-name'
+            spellCheck={false}
+            // biome-ignore lint/a11y/noAutofocus: focus follows the explicit "New branch" choice
+            autoFocus
+          />
+        ) : null}
+      </div>
       <button
         type='button'
         className={PRIMARY_BTN}
         onClick={onPush}
         disabled={!built.ok || push.isPending || !unlocked || !targetRef}
       >
-        {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : `Sign & push → ${targetRef || '…'}`}
+        {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign & push'}
       </button>
 
       {built.ok ? (
@@ -138,7 +212,7 @@ export function Compose({
             <code className='font-mono text-xs break-all'>{built.commit.signature_hex}</code>
           </Field>
           <Field label={`Parent (head of “${targetRef || 'main'}”)`}>
-            <code className='font-mono text-xs break-all'>{parentHash || '∅ (first commit on this ref)'}</code>
+            <code className='font-mono text-xs break-all'>{parentHash || '∅ (first commit on this branch)'}</code>
           </Field>
         </FieldList>
       ) : (
@@ -151,16 +225,48 @@ export function Compose({
 }
 
 /**
- * A "Fork / Remix" action: builds + signs a remix referencing a given
- * upstream commit (one source = `{ upstream_id = blake3(room), commit_hash
- * = the clicked commit }`), then pushes it onto a per-forker
- * `forks/<upstreamShort>-<forkerShort>` ref so it appears in the Refs panel
- * as a fork. Reuses the same PutObject + CAS UpdateRef + envelope-signing
- * flow commits use (`usePushCommit`).
+ * The compose surface in its NOT-AVAILABLE-YET state, shown before an identity is unlocked. It mirrors {@link Compose}'s
+ * layout (message + branch + push) but every control is inert and dimmed, so the section keeps its shape and the user
+ * can see what they'll be able to do once they create or unlock a passkey identity.
+ */
+export function ComposeDisabled() {
+  return (
+    <section className='space-y-4 opacity-60' aria-disabled>
+      <div className='space-y-1.5'>
+        <span className='block text-sm text-muted'>Commit message</span>
+        <textarea
+          className={INPUT_CLASSES}
+          rows={3}
+          disabled
+          value=''
+          placeholder='Create or unlock an identity to write commits.'
+        />
+      </div>
+      <div className='space-y-1.5'>
+        <span className='block text-sm text-muted'>Branch</span>
+        <select className={INPUT_CLASSES} disabled value='main'>
+          <option value='main'>main</option>
+        </select>
+      </div>
+      <button type='button' className={PRIMARY_BTN} disabled>
+        Sign & push
+      </button>
+      <p className='text-sm text-muted'>
+        Create or unlock an identity above to write commits. You can still browse this repository’s shared history on
+        the right.
+      </p>
+    </section>
+  )
+}
+
+/**
+ * A "Fork / Remix" action: builds + signs a remix referencing a given upstream commit (one source = `{ upstream_id =
+ * blake3(room), commit_hash = the clicked commit }`), then pushes it onto a per-forker
+ * `forks/<upstreamShort>-<forkerShort>` ref so it appears in the Refs panel as a fork. Reuses the same PutObject + CAS
+ * UpdateRef + envelope-signing flow commits use (`usePushCommit`).
  *
- * Returns `{ fork, pending, error }`: call `fork(upstreamCommit)` to fork
- * that commit; it resolves to the new fork ref so the caller can select it
- * after a successful push.
+ * Returns `{ fork, pending, error }`: call `fork(upstreamCommit)` to fork that commit; it resolves to the new fork ref
+ * so the caller can select it after a successful push.
  */
 export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: string | null) {
   const push = usePushCommit()

@@ -7,6 +7,9 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
+import { recordActivity } from '../activity-log'
+import { playerName } from '../identity-name'
+import { useIdentityStore } from '../identity-store'
 import type { MkitApi } from '../mkit'
 import {
   BackendNotReadyError,
@@ -233,11 +236,29 @@ export function useRepoEvents(room: string, prefix = ''): void {
   const backend = useRepoBackend()
   useEffect(() => {
     if (!backend) return
+    // Warmup gate: the mock broadcasts its seeded "foreign" commits at mount,
+    // and our own pushes echo back here too. Only ref advances that arrive after
+    // a brief warmup, from a pubkey that isn't ours, count as a live PEER event
+    // worth narrating in the activity overlay. (Query invalidation always runs.)
+    const subscribedAt = Date.now()
     return backend.watchRefs(room, prefix, (u) => {
       void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
       void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
       // The advanced ref may be new (a peer created a branch) → refresh the panel.
       void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+
+      const mine = useIdentityStore.getState().ed25519PubkeyHex
+      const author = u.authorPubkeyHex
+      if (author && author !== mine && Date.now() - subscribedAt > 1200) {
+        recordActivity({
+          kind: 'peer',
+          title: `${playerName(author)} advanced branch “${u.name}” — live`,
+          lines: [
+            'A peer’s push arrived over the repository’s WebSocket — the Durable Object broadcast it, and your log re-walked to include it.',
+            `commit ${u.objectIdHex.slice(0, 12)}…  ·  by ${author.slice(0, 12)}…`,
+          ],
+        })
+      }
     })
   }, [backend, room, prefix, qc])
 }

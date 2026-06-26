@@ -8,7 +8,7 @@ export default function MultiplayerPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — multiplayer'
-        description='Enroll a passkey, derive an Ed25519 signing key from it in your browser, sign an mkit commit in wasm, and push it to a shared room — then watch other players’ commits arrive live. Anonymous, no accounts: the key is the identity.'
+        description='Enroll a passkey, derive an Ed25519 signing key from it in your browser, sign an mkit commit in wasm, and push it to a shared repository — then watch other players’ commits arrive live. Anonymous, no accounts: the key is the identity.'
         path='/multiplayer'
         card='Multiplayer mkit'
       />
@@ -16,7 +16,7 @@ export default function MultiplayerPage() {
         <h1 className='text-4xl font-semibold tracking-tight'>Multiplayer mkit</h1>
         <p className='max-w-prose text-base text-fg'>
           Create a passkey identity — one prompt derives an Ed25519 signing key from it via the WebAuthn PRF extension —
-          then sign commits in wasm and push them to a shared room with no further prompts. Anyone can push; the
+          then sign commits in wasm and push them to a shared repository with no further prompts. Anyone can push; the
           signature proves “the same key made these commits,” not who you are. Watch other players&rsquo; commits arrive
           live below.
         </p>
@@ -32,9 +32,9 @@ export default function MultiplayerPage() {
         </p>
         <p>
           Every push carries a signed request envelope (Ed25519 over a BLAKE3 digest of the canonical request), and the
-          ref advances under a compare-and-set so concurrent pushes serialize cleanly. The wasm ConnectRPC client talks
-          to a Cloudflare Worker (R2 objects + a Durable Object ref store); with no backend configured it falls back to
-          an in-memory mock so the flow still runs offline.
+          branch advances under a compare-and-set so concurrent pushes serialize cleanly. The wasm ConnectRPC client
+          talks to a Cloudflare Worker (R2 objects + a Durable Object ref store); with no backend configured it falls
+          back to an in-memory mock so the flow still runs offline.
         </p>
         <p>
           Curious about the underlying signature primitive? See the{' '}
