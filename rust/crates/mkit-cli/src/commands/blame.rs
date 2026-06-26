@@ -146,16 +146,6 @@ pub fn run(args: &[String]) -> u8 {
 ///
 /// Returns `Err(message)` with a git-flavored diagnostic on bad input.
 fn parse_line_range(spec: &str, total: usize, file: &str) -> Result<(usize, usize), String> {
-    // An empty file has no blamable lines under any -L form, and git
-    // prints `file <f> has only 0 lines` regardless of the range shape.
-    // Checking it first also makes the post-swap bounds provably >= 1:
-    // with `total > 0`, the default end is >= 1 and `parse_one_based` /
-    // the `+n` path both reject 0, so the swap can't yield line 0 and the
-    // `lines[start - 1..end]` slice in `run` can't underflow.
-    if total == 0 {
-        return Err(format!("file {file} has only 0 lines"));
-    }
-
     let (start_tok, end_tok) = match spec.split_once(',') {
         Some((s, e)) => (s.trim(), Some(e.trim())),
         None => (spec.trim(), None),
@@ -184,9 +174,19 @@ fn parse_line_range(spec: &str, total: usize, file: &str) -> Result<(usize, usiz
         Some(tok) => parse_one_based(tok)?,
     };
 
-    // git swaps an inverted range rather than erroring. Both bounds are
-    // >= 1 by construction (see the empty-file note above), so no zero
-    // can survive the swap.
+    // Empty file: no blamable lines. git checks this *after* validating
+    // the line-number tokens, so an explicit zero (`-L ,0` / `-L 3,0`)
+    // reports `invalid -L line number: 0` above rather than this message,
+    // even on an empty file — matching git for every form. Returning here
+    // (before the swap) also keeps the slice provably safe: with
+    // `total > 0`, a defaulted end is >= 1 and every explicit token went
+    // through `parse_one_based`/`+n` (both reject 0), so both bounds are
+    // >= 1 and the swap can't yield line 0.
+    if total == 0 {
+        return Err(format!("file {file} has only 0 lines"));
+    }
+
+    // git swaps an inverted range rather than erroring.
     let (start, end) = if start > end {
         (end, start)
     } else {
@@ -309,13 +309,18 @@ mod tests {
 
     #[test]
     fn empty_file_message_is_git_faithful_for_every_form() {
-        // git prints `file <f> has only 0 lines` regardless of the -L
-        // form. The empty-file guard runs before any token parsing, so
-        // even forms that would otherwise reach line-number validation
-        // (`,0`, bare start) get the same message — no divergence by form.
-        for spec in ["1,", "3", "1,3", ",0", "3,0"] {
+        // git validates explicit line-number tokens *before* the
+        // line-count check, so on an empty file the "has only 0 lines"
+        // message applies only to forms without an explicit zero; an
+        // explicit `0` (`,0` / `3,0`) still reports the invalid-zero error
+        // first. Both halves are pinned against real git.
+        for spec in ["1,", "3", "1,3", "2,5"] {
             let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
             assert_eq!(err, "file empty.txt has only 0 lines", "spec {spec:?}");
+        }
+        for spec in [",0", "3,0"] {
+            let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
+            assert_eq!(err, "invalid -L line number: 0", "spec {spec:?}");
         }
     }
 
