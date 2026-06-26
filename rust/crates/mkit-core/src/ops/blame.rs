@@ -184,9 +184,14 @@ pub fn blame_file_with(
             // older attribution); the raw `new_lines` are still what gets
             // emitted, so output bytes are unchanged.
             let mapping = if opts.ignore_whitespace {
+                // Enforce the size cap *before* allocating the stripped-key
+                // buffers, so an oversized blob fails fast without copying
+                // every line; `match_lines` is then safe to call directly.
+                check_line_count(old_lines.len())?;
+                check_line_count(new_lines.len())?;
                 let old_keys: Vec<Vec<u8>> = old_lines.iter().map(|l| strip_ws(l)).collect();
                 let new_keys: Vec<Vec<u8>> = new_lines.iter().map(|l| strip_ws(l)).collect();
-                match_lines_checked(&old_keys, &new_keys)?
+                match_lines(&old_keys, &new_keys)
             } else {
                 match_lines_checked(&old_lines, &new_lines)?
             };
@@ -329,17 +334,19 @@ pub fn match_lines_checked<T: AsRef<[u8]>>(
     old_lines: &[T],
     new_lines: &[T],
 ) -> BlameOutcome<Vec<Option<usize>>> {
-    if old_lines.len() > BLAME_MAX_LINES {
-        return Err(BlameError::FileTooLarge {
-            lines: old_lines.len(),
-        });
-    }
-    if new_lines.len() > BLAME_MAX_LINES {
-        return Err(BlameError::FileTooLarge {
-            lines: new_lines.len(),
-        });
-    }
+    check_line_count(old_lines.len())?;
+    check_line_count(new_lines.len())?;
     Ok(match_lines(old_lines, new_lines))
+}
+
+/// Reject a side whose line count would drive the O(m*n) DP table past
+/// [`BLAME_MAX_LINES`]. Pulled out so callers (e.g. the `-w` path) can
+/// fail fast *before* allocating derived per-line buffers.
+fn check_line_count(lines: usize) -> BlameOutcome<()> {
+    if lines > BLAME_MAX_LINES {
+        return Err(BlameError::FileTooLarge { lines });
+    }
+    Ok(())
 }
 
 /// LCS line matching. For each line in `new_lines`, returns the index
@@ -366,14 +373,23 @@ fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<u
     let mut mapping: Vec<Option<usize>> = vec![None; n];
     let mut i = m;
     let mut j = n;
+    // Reconstruct via the dp relations rather than a greedy diagonal-first
+    // rule. When `new[j-1]` isn't required for an optimal LCS
+    // (`dp[i][j] == dp[i][j-1]`), leave it unmatched so that an *earlier*
+    // equal line takes the match instead; likewise drop an unneeded
+    // `old[i-1]`. Only when neither can be dropped is it a true diagonal
+    // match. This keeps duplicate lines — and, under `-w`, lines that are
+    // only whitespace-equal — position-stable, so a unchanged line keeps
+    // its original commit while a genuinely new duplicate is attributed to
+    // the newer one (matching git).
     while i > 0 && j > 0 {
-        if old_lines[i - 1].as_ref() == new_lines[j - 1].as_ref() {
-            mapping[j - 1] = Some(i - 1);
-            i -= 1;
+        if dp[i][j] == dp[i][j - 1] {
             j -= 1;
-        } else if dp[i - 1][j] >= dp[i][j - 1] {
+        } else if dp[i][j] == dp[i - 1][j] {
             i -= 1;
         } else {
+            mapping[j - 1] = Some(i - 1);
+            i -= 1;
             j -= 1;
         }
     }
@@ -523,6 +539,40 @@ mod tests {
     }
 
     #[test]
+    fn blame_w_keeps_position_for_whitespace_equal_duplicate() {
+        // Regression (PR #464 review P1): old `ab`, new `ab` + `a b`.
+        // Stripping whitespace collapses both new lines to the key `ab`,
+        // so a position-blind LCS would pair the *second* new line with
+        // the old one and report line 1 as new — the reverse of git.
+        // `git blame -w` keeps line 1 on the original commit and line 2 on
+        // the new one; assert mkit matches.
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"ab\n", vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", b"ab\na b\n", vec![c_a], 2, 200);
+        let opts = BlameOptions {
+            ignore_whitespace: true,
+        };
+        let w = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(w.lines.len(), 2);
+        assert_eq!(w.lines[0].commit_hash, c_a, "unchanged line 1 keeps c_a");
+        assert_eq!(w.lines[1].commit_hash, c_b, "added line 2 is c_b");
+        assert_eq!(w.lines[1].text, b"a b", "output keeps the current bytes");
+    }
+
+    #[test]
+    fn blame_duplicate_line_addition_is_position_stable() {
+        // Same stability property without `-w`: appending a genuine
+        // duplicate of an existing line must attribute the *new* (second)
+        // occurrence to the newer commit, not the first.
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"x\n", vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", b"x\nx\n", vec![c_a], 2, 200);
+        let r = blame_file(&store, c_b, "f.txt").unwrap();
+        assert_eq!(r.lines[0].commit_hash, c_a, "original line keeps c_a");
+        assert_eq!(r.lines[1].commit_hash, c_b, "appended duplicate is c_b");
+    }
+
+    #[test]
     fn blame_two_commits_with_modified_middle() {
         let (_d, store) = fresh_store();
         let c_a = put_file_commit(&store, "f.txt", b"a\nb\nc\n", vec![], 42, 1000);
@@ -592,6 +642,17 @@ mod tests {
         let new: Vec<&[u8]> = vec![b"x", b"y", b"z"];
         let m = match_lines(&old, &new);
         assert_eq!(m, vec![None, None, None]);
+    }
+
+    #[test]
+    fn lcs_duplicate_key_matches_earliest_new_line() {
+        // One old line, two identical new lines: the matcher must pair the
+        // *first* new line (the unchanged one) and leave the second as an
+        // insertion, so blame keeps the original on line 1. A greedy
+        // diagonal-first backtrack would instead pair the last occurrence.
+        let old: Vec<&[u8]> = vec![b"ab"];
+        let new: Vec<&[u8]> = vec![b"ab", b"ab"];
+        assert_eq!(match_lines(&old, &new), vec![Some(0), None]);
     }
 
     #[test]
