@@ -266,8 +266,12 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-L <start>,<end>] [<rev>] <file>` — show
-  line-level commit attribution. `-L` restricts output to a line range —
+- `mkit blame [--format=json] [-w] [-L <start>,<end>] [<rev>] <file>` —
+  show line-level commit attribution. `-w` ignores whitespace when
+  matching lines across revisions (like `git blame -w`, ignoring *all*
+  whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
+  tweak — doesn't reattribute the line; output still shows the file's
+  current bytes. `-L` restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
   start of file), or a bare `<start>` (to EOF); bounds are 1-based and

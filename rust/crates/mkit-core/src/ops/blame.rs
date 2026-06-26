@@ -47,6 +47,19 @@ pub struct BlameResult {
     pub lines: Vec<BlameLine>,
 }
 
+/// Knobs controlling how [`blame_file_with`] attributes lines. The
+/// default (all-false) reproduces [`blame_file`]'s exact-match behavior;
+/// this struct is the extension point for the blame parity work (`-w`
+/// today; `-M`/`-C`/ignore-revs to follow).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlameOptions {
+    /// Ignore whitespace when matching a line against its parent
+    /// revision, so a whitespace-only edit (reindent, tab↔space, spacing
+    /// tweak) does not reattribute the line. Mirrors `git blame -w`,
+    /// which ignores *all* whitespace, not just runs of it.
+    pub ignore_whitespace: bool,
+}
+
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
 pub enum BlameError {
@@ -70,8 +83,22 @@ pub enum BlameError {
 /// Fallible-result alias for this module's operations.
 pub type BlameOutcome<T> = Result<T, BlameError>;
 
+/// Blame `file_path` at `head_hash` with default options (exact line
+/// matching). Convenience wrapper over [`blame_file_with`].
+///
+/// # Errors
+/// See [`blame_file_with`].
+pub fn blame_file(
+    store: &ObjectStore,
+    head_hash: Hash,
+    file_path: &str,
+) -> BlameOutcome<BlameResult> {
+    blame_file_with(store, head_hash, file_path, &BlameOptions::default())
+}
+
 /// Blame `file_path` at `head_hash`. Walks first-parent ancestry,
 /// stops when the file disappears, and uses LCS to map lines forward.
+/// `opts` tunes matching (see [`BlameOptions`]).
 ///
 /// # Errors
 /// - [`BlameError::FileNotFound`] if the file does not exist at `head_hash`.
@@ -83,10 +110,11 @@ pub type BlameOutcome<T> = Result<T, BlameError>;
 /// Panics only on internal logic violations: it is unreachable for the
 /// "oldest entry" lookup below to fail, since we early-return on an
 /// empty history just above it.
-pub fn blame_file(
+pub fn blame_file_with(
     store: &ObjectStore,
     head_hash: Hash,
     file_path: &str,
+    opts: &BlameOptions,
 ) -> BlameOutcome<BlameResult> {
     #[derive(Clone)]
     struct HistoryEntry {
@@ -151,7 +179,17 @@ pub fn blame_file(
 
             let old_lines = load_blob_lines(store, older.blob_hash)?;
             let new_lines = load_blob_lines(store, newer.blob_hash)?;
-            let mapping = match_lines_checked(&old_lines, &new_lines)?;
+            // With `-w`, match on whitespace-stripped keys so a
+            // whitespace-only edit pairs the lines (and thus inherits the
+            // older attribution); the raw `new_lines` are still what gets
+            // emitted, so output bytes are unchanged.
+            let mapping = if opts.ignore_whitespace {
+                let old_keys: Vec<Vec<u8>> = old_lines.iter().map(|l| strip_ws(l)).collect();
+                let new_keys: Vec<Vec<u8>> = new_lines.iter().map(|l| strip_ws(l)).collect();
+                match_lines_checked(&old_keys, &new_keys)?
+            } else {
+                match_lines_checked(&old_lines, &new_lines)?
+            };
 
             let mut new_attrs: Vec<Attribution> = Vec::with_capacity(new_lines.len());
             for (ni, _) in new_lines.iter().enumerate() {
@@ -254,6 +292,17 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         _ => return Err(BlameError::NotABlob),
     };
     Ok(split_lines(&data))
+}
+
+/// Whitespace-insensitive comparison key for a line: every ASCII
+/// whitespace byte removed. Matches `git blame -w` (ignore-all-space),
+/// which collapses `foo(a, b)`, `foo(a,b)`, and `    foo(a,  b)` to the
+/// same key so a whitespace-only edit doesn't reattribute the line.
+fn strip_ws(line: &[u8]) -> Vec<u8> {
+    line.iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect()
 }
 
 fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
@@ -422,6 +471,55 @@ mod tests {
         assert_eq!(r.lines[0].text, b"l1");
         assert_eq!(r.lines[1].text, b"l2");
         assert_eq!(r.lines[2].text, b"l3");
+    }
+
+    #[test]
+    fn strip_ws_removes_all_whitespace() {
+        assert_eq!(strip_ws(b"  foo(a,  b)\t"), b"foo(a,b)".to_vec());
+        assert_eq!(strip_ws(b"abc"), b"abc".to_vec());
+        assert_eq!(strip_ws(b" \t "), b"".to_vec());
+    }
+
+    #[test]
+    fn blame_w_ignores_whitespace_only_change() {
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"foo(a, b)\nkeep\n", vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", b"foo(a,b)\nkeep\n", vec![c_a], 2, 200);
+
+        // Default: the whitespace-only edit reattributes line 1 to c_b.
+        let plain = blame_file(&store, c_b, "f.txt").unwrap();
+        assert_eq!(plain.lines[0].commit_hash, c_b);
+
+        // -w: line 1 keeps c_a, but output still shows the current bytes.
+        let opts = BlameOptions {
+            ignore_whitespace: true,
+        };
+        let w = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(
+            w.lines[0].commit_hash, c_a,
+            "a whitespace-only change must not steal blame"
+        );
+        assert_eq!(
+            w.lines[0].text, b"foo(a,b)",
+            "output keeps the current bytes"
+        );
+        assert_eq!(w.lines[1].commit_hash, c_a);
+    }
+
+    #[test]
+    fn blame_w_still_attributes_real_content_change() {
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"a\nb\n", vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", b"a\nB CHANGED\n", vec![c_a], 2, 200);
+        let opts = BlameOptions {
+            ignore_whitespace: true,
+        };
+        let w = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(w.lines[0].commit_hash, c_a);
+        assert_eq!(
+            w.lines[1].commit_hash, c_b,
+            "a non-whitespace change is still attributed normally under -w"
+        );
     }
 
     #[test]
