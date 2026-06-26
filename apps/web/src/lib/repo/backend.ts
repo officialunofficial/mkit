@@ -1031,8 +1031,9 @@ export class WasmRepoBackend implements RepoBackend {
       const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
       this.walkCache.set(cacheKey, { head, entries })
       return entries
-    } catch {
+    } catch (e) {
       // Fall through to the legacy per-object walk.
+      console.warn('[lobby] ListCommits path failed, falling back to walk:', e)
     }
     return this.commitLogWalk(room, ref, cap, head, cacheKey, cached, opts)
   }
