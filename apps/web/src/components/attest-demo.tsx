@@ -72,7 +72,7 @@ export function AttestDemo() {
           {ALGOS.map((a) => (
             <label
               key={a.value}
-              className='flex cursor-pointer items-start gap-3 rounded-md border border-hairline p-3 transition-colors hover:border-fg'
+              className='flex cursor-pointer items-start gap-3 rounded-md border border-hairline p-3 transition-colors hover:border-blue-500/50'
             >
               <input
                 type='radio'

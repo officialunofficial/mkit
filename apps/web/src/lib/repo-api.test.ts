@@ -9,9 +9,12 @@ import {
   IdentityLockedError,
   MockRepoBackend,
   type FeedItem,
+  type ReactionEntry,
+  aggregateReactions,
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
+  type RepoBackend,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -29,6 +32,30 @@ import {
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
+
+/**
+ * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to
+ * make just the method(s) under test do something. One factory so adding a
+ * method to the interface is a single edit here, not a sweep across every test's
+ * hand-rolled literal.
+ */
+function stubBackend(overrides: Partial<RepoBackend> = {}): RepoBackend {
+  return {
+    putObject: async () => {},
+    getObject: async () => null,
+    getRef: async () => null,
+    updateRef: async () => {},
+    listRefs: async () => [],
+    watchRefs: () => () => {},
+    watchRoom: () => () => {},
+    commitLog: async () => [],
+    postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
+    listMessages: async () => [],
+    react: async () => ({ active: true, count: 1 }),
+    listReactions: async () => [],
+    ...overrides,
+  }
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2)
@@ -628,21 +655,12 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
    * can assert the optimistic prepend is visible while the push is still in flight.
    */
   function makeControllableBackend(opts: { failUpdate?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
+    return stubBackend({
       updateRef: async () => {
         if (opts.gate) await opts.gate
         if (opts.failUpdate) throw new CasConflictError(null)
       },
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
-      postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
-      listMessages: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   async function makePushArgs(message: string): Promise<PushArgs> {
@@ -1046,15 +1064,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
   const ROOM = 'lobby'
 
   function makeControllableBackend(opts: { fail?: boolean; rateLimited?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
-      updateRef: async () => {},
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
+    return stubBackend({
       postMessage: async () => {
         if (opts.gate) await opts.gate
         if (opts.fail) throw new Error('post failed')
@@ -1062,8 +1072,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
         if (opts.rateLimited) return { messageIdHex: '', accepted: false, rateLimited: true }
         return { messageIdHex: 'real', accepted: true, rateLimited: false }
       },
-      listMessages: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   it('appends the message to the cache while the post is still in flight', async () => {
@@ -1115,5 +1124,60 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
     // optimistic echo so it doesn't linger until the settle refetch.
     await observer.mutate('too fast')
     expect(qc.getQueryData<ChatMessageEntry[]>(key)).toEqual(prior)
+  })
+})
+
+describe('aggregateReactions tallies per target with mine flag', () => {
+  it('groups by target then emoji, counts reactors, and marks mine', () => {
+    const rows: ReactionEntry[] = [
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'me' },
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'other' },
+      { targetIdHex: 't1', emoji: '🚀', authorPubkeyHex: 'other' },
+      { targetIdHex: 't2', emoji: '❤️', authorPubkeyHex: 'other' },
+    ]
+    const agg = aggregateReactions(rows, 'me')
+    expect(agg.get('t1')).toEqual([
+      { emoji: '👍', count: 2, mine: true },
+      { emoji: '🚀', count: 1, mine: false },
+    ])
+    expect(agg.get('t2')).toEqual([{ emoji: '❤️', count: 1, mine: false }])
+    expect(agg.get('nope')).toBeUndefined()
+  })
+
+  it('mine is false when no pubkey is supplied', () => {
+    const agg = aggregateReactions([{ targetIdHex: 't', emoji: '👍', authorPubkeyHex: 'me' }])
+    expect(agg.get('t')?.[0]?.mine).toBe(false)
+  })
+})
+
+describe('MockRepoBackend reactions: toggle / list / watch', () => {
+  async function makeBackend() {
+    const api = await mkit()
+    return new MockRepoBackend(api, () => SEED)
+  }
+
+  it('react toggles on then off, listReactions reflects it, and onReaction fires', async () => {
+    const backend = await makeBackend()
+    const seen: Array<{ emoji: string; active: boolean; count: number }> = []
+    backend.watchRoom('lobby', '', { onReaction: (r) => seen.push({ emoji: r.emoji, active: r.active, count: r.count }) })
+
+    const on = await backend.react('lobby', 'target1', '👍')
+    expect(on).toEqual({ active: true, count: 1 })
+    expect((await backend.listReactions('lobby')).map((r) => r.emoji)).toEqual(['👍'])
+
+    const off = await backend.react('lobby', 'target1', '👍')
+    expect(off).toEqual({ active: false, count: 0 })
+    expect(await backend.listReactions('lobby')).toEqual([])
+
+    expect(seen).toEqual([
+      { emoji: '👍', active: true, count: 1 },
+      { emoji: '👍', active: false, count: 0 },
+    ])
+  })
+
+  it('a locked identity (no seed) cannot react', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => null)
+    await expect(backend.react('lobby', 't', '👍')).rejects.toBeInstanceOf(IdentityLockedError)
   })
 })

@@ -5,7 +5,7 @@
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import type { MkitApi } from '../mkit'
 import {
@@ -13,11 +13,14 @@ import {
   type ChatMessageEntry,
   type CommitLogEntry,
   type FeedItem,
+  type ReactionAgg,
+  type ReactionEntry,
   type RefExpectation,
   type RemixSourceEntry,
   MockRepoBackend,
   type RepoBackend,
   WasmRepoBackend,
+  aggregateReactions,
   decodeLogObject,
   mergeFeed,
 } from './backend'
@@ -29,6 +32,7 @@ export const repoKeys = {
   object: (room: string, hash: string) => ['repo', room, 'object', hash] as const,
   log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
   messages: (room: string) => ['repo', room, 'messages'] as const,
+  reactions: (room: string) => ['repo', room, 'reactions'] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +352,96 @@ export function useLobbyEvents(room: string): void {
       onChat: () => {
         void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
       },
+      onReaction: () => {
+        void qc.invalidateQueries({ queryKey: repoKeys.reactions(room) })
+      },
     })
   }, [backend, room, qc])
+}
+
+/**
+ * Reactions for the room, aggregated per feed item: a `reactionsFor(targetId)`
+ * lookup returning `{ emoji, count, mine }[]`. Gated on a ready backend.
+ */
+export function useReactions(room: string, myPubkeyHex?: string): (targetId: string) => ReactionAgg[] {
+  const backend = useRepoBackend()
+  const q = useQuery({
+    queryKey: repoKeys.reactions(room),
+    queryFn: () => backend!.listReactions(room),
+    enabled: !!backend,
+  })
+  const byTarget = useMemo(() => aggregateReactions(q.data ?? [], myPubkeyHex), [q.data, myPubkeyHex])
+  // Stable identity: only changes when the aggregation does, so callers using it
+  // as an effect/memo dependency don't re-run on every render. `NO_REACTIONS` is
+  // a shared frozen empty array so the "no reactions" case is referentially
+  // stable too (a fresh `[]` per call would defeat downstream memoization).
+  return useCallback((targetId: string) => byTarget.get(targetId) ?? NO_REACTIONS, [byTarget])
+}
+
+/** Shared empty result for feed items with no reactions — one stable reference
+ * so the "no reactions" case doesn't defeat memoization. Frozen so a consumer
+ * can't mutate the shared singleton (the cast-through-unknown is the compiler's
+ * own escape hatch for assigning `readonly never[]` to the array type). */
+const NO_REACTIONS: ReactionAgg[] = Object.freeze([]) as unknown as ReactionAgg[]
+
+/**
+ * Toggle the signing identity's emoji reaction on a feed item. Optimistically
+ * flips the cached reaction list, then reconciles on settle (the broadcast echo
+ * also invalidates). Rejects with `BackendNotReadyError` if no backend is ready.
+ */
+export function useToggleReaction(room: string, myPubkeyHex?: string) {
+  const qc = useQueryClient()
+  const backend = useRepoBackend()
+  const key = repoKeys.reactions(room)
+  const options = backend
+    ? {
+        mutationFn: ({ targetId, emoji }: { targetId: string; emoji: string }) =>
+          backend.react(room, targetId, emoji),
+        onMutate: async ({ targetId, emoji }: { targetId: string; emoji: string }) => {
+          await qc.cancelQueries({ queryKey: key })
+          // Optimistic toggle against my own pubkey row. Remember whether we
+          // added or removed so a failure can be undone SURGICALLY (just my row)
+          // rather than restoring a whole snapshot — restoring a snapshot would
+          // clobber any peer reactions the live stream merged in meanwhile.
+          let added = false
+          if (myPubkeyHex) {
+            qc.setQueryData<ReactionEntry[]>(key, (prev) => {
+              const list = prev ?? []
+              const i = list.findIndex(
+                (r) => r.targetIdHex === targetId && r.emoji === emoji && r.authorPubkeyHex === myPubkeyHex,
+              )
+              if (i >= 0) return list.filter((_, j) => j !== i)
+              added = true
+              return [...list, { targetIdHex: targetId, emoji, authorPubkeyHex: myPubkeyHex }]
+            })
+          }
+          return { targetId, emoji, added }
+        },
+        onError: (
+          _e: unknown,
+          _v: unknown,
+          ctx: { targetId: string; emoji: string; added: boolean } | undefined,
+        ) => {
+          // Invert ONLY our own optimistic change, leaving peer reactions intact.
+          if (!ctx || !myPubkeyHex) return
+          qc.setQueryData<ReactionEntry[]>(key, (prev) => {
+            const list = prev ?? []
+            const isMine = (r: ReactionEntry) =>
+              r.targetIdHex === ctx.targetId && r.emoji === ctx.emoji && r.authorPubkeyHex === myPubkeyHex
+            if (ctx.added) return list.filter((r) => !isMine(r)) // we added → remove
+            if (list.some(isMine)) return list // already back (echo raced us)
+            return [...list, { targetIdHex: ctx.targetId, emoji: ctx.emoji, authorPubkeyHex: myPubkeyHex }]
+          })
+        },
+        onSettled: () => {
+          void qc.invalidateQueries({ queryKey: key })
+        },
+      }
+    : {
+        mutationFn: (_v: { targetId: string; emoji: string }) =>
+          Promise.reject<{ active: boolean; count: number }>(new BackendNotReadyError()),
+      }
+  return useMutation(options)
 }
 
 /**

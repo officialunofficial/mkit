@@ -29,14 +29,14 @@ use worker::{
     Result, State, WebSocket, WebSocketIncomingMessage, WebSocketPair,
 };
 
-use crate::chat::is_rate_limited;
+use crate::chat::{is_rate_limited, REACT_MIN_INTERVAL_MS};
 use crate::envelope::FRESHNESS_WINDOW_MS;
 use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::wire::{
     GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp, MsgEntry, PostReq,
-    PostResp, UpdateReq, UpdateResp,
+    PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp, UpdateReq, UpdateResp,
 };
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
@@ -51,29 +51,40 @@ const MESSAGES_MAX_LIMIT: u32 = 200;
 /// than MESSAGES_MAX_LIMIT so paging is unaffected.
 const MESSAGES_RETAINED: i64 = 1_000;
 
-/// A live ref advance, broadcast to every `/watch` subscriber. `kind` tags the
-/// frame as a commit so the SAME socket can also carry chat frames (the lobby
-/// merges both into one feed); the hex fields are decoded back to raw bytes by
-/// the worker before re-encoding into the proto `RefEvent`.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RefEventJson {
-    /// Always `"commit"` — distinguishes a ref advance from a `"chat"` frame.
-    pub kind: String,
-    pub name: String,
-    pub object_id: String,           // 64-hex
-    pub author_pubkey: Option<String>, // 64-hex
-}
+/// How many reaction rows the DO keeps per room. Like the messages index this
+/// bounds the DO's SQLite so a flood of (target, emoji, author) tuples can't
+/// grow it without limit; `list_reactions` reads at most this many.
+const REACTIONS_RETAINED: i64 = 5_000;
 
-/// A live chat message, broadcast to every `/watch` subscriber alongside ref
-/// advances. `kind` is `"chat"`; fields mirror the proto `ChatMessage`.
+/// A live frame broadcast to every `/watch` subscriber. The SAME socket carries
+/// commit / chat / reaction frames so the lobby renders one merged feed; the
+/// `kind` discriminator is the serde tag (set by the enum, not by hand), so a
+/// variant and its tag can't drift. Hex fields are decoded back to raw bytes by
+/// the worker before re-encoding into the proto where needed. Wire shape is
+/// `{"kind":"commit"|"chat"|"reaction", …variant fields}` — matched 1:1 by the
+/// client's `parseActivityFrame`.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ChatEventJson {
-    pub kind: String, // always "chat"
-    pub message_id: String,   // 64-hex content address
-    pub author_pubkey: String, // 64-hex
-    pub text: String,
-    pub created_at: i64,
-    pub seq: u64,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WatchFrame {
+    Commit {
+        name: String,
+        object_id: String,                 // 64-hex
+        author_pubkey: Option<String>,     // 64-hex
+    },
+    Chat {
+        message_id: String,                // 64-hex content address
+        author_pubkey: String,             // 64-hex
+        text: String,
+        created_at: i64,
+        seq: u64,
+    },
+    Reaction {
+        target_id: String,
+        emoji: String,
+        author_pubkey: String,             // 64-hex
+        active: bool,
+        count: u32,
+    },
 }
 
 #[durable_object]
@@ -115,6 +126,11 @@ impl DurableObject for RefStore {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
+            "/react" | "/reactions" => {
+                if let Err(e) = self.ensure_reactions_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
             _ => {}
         }
 
@@ -144,6 +160,14 @@ impl DurableObject for RefStore {
                 let body: MessagesReq = req.json().await?;
                 let messages = self.list_messages(body.limit);
                 Response::from_json(&MessagesResp { messages })
+            }
+            "/react" => {
+                let body: ReactReq = req.json().await?;
+                self.handle_react(body)
+            }
+            "/reactions" => {
+                let reactions = self.list_reactions();
+                Response::from_json(&ReactionsResp { reactions })
             }
             _ => Response::error("not found", 404),
         }
@@ -234,8 +258,7 @@ impl RefStore {
                      ON CONFLICT(path) DO UPDATE SET value = excluded.value;",
                     vec![req.name.clone().into(), req.new.clone().into()],
                 )?;
-                self.broadcast(&RefEventJson {
-                    kind: "commit".to_string(),
+                self.broadcast(&WatchFrame::Commit {
                     name: req.name.clone(),
                     object_id: req.new.clone(),
                     author_pubkey: req.author.clone(),
@@ -402,8 +425,7 @@ impl RefStore {
         }
 
         self.broadcast_str(
-            &serde_json::to_string(&ChatEventJson {
-                kind: "chat".to_string(),
+            &serde_json::to_string(&WatchFrame::Chat {
                 message_id: req.id.clone(),
                 author_pubkey: req.author.clone(),
                 text: req.text.clone(),
@@ -442,6 +464,256 @@ impl RefStore {
             .to_array()
             .ok()?;
         rows.into_iter().next().map(|r| (r.seq as u64, r.created_at))
+    }
+
+    /// Idempotently create the `reactions` table. One row per
+    /// (target, emoji, author); the PK makes a reaction unique per reactor and
+    /// makes toggling a single delete/insert.
+    fn ensure_reactions_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS reactions (\
+               target TEXT NOT NULL, \
+               emoji TEXT NOT NULL, \
+               author TEXT NOT NULL, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (target, emoji, author));",
+            None,
+        )?;
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS reactions_created ON reactions(created_at);",
+            None,
+        )?;
+        // Replay-dedupe for React: the (author, idempotency-key) of each accepted
+        // toggle and the result it produced. A replay returns the original result
+        // (no re-toggle). Bounded to the freshness window. NOTE: this is keyed on
+        // a PRESENT idempotency key, so it can't be the rate-limit input — a
+        // client may omit the key. The rate floor reads `react_rate` instead.
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS react_idem (\
+               author TEXT NOT NULL, \
+               idem TEXT NOT NULL, \
+               active INTEGER NOT NULL, \
+               count INTEGER NOT NULL, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (author, idem));",
+            None,
+        )?;
+        // Per-author rate ledger: the time of each author's last ACCEPTED toggle,
+        // recorded UNCONDITIONALLY (independent of any idempotency key) so the
+        // anti-flood floor can't be sidestepped by omitting the key. One row per
+        // author; pruned by the freshness window alongside `react_idem`.
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS react_rate (\
+               author TEXT PRIMARY KEY, \
+               last_ms INTEGER NOT NULL);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Toggle a reaction serially, with the same guards the chat write path has:
+    /// replay dedupe (a re-submitted signed toggle returns its original result),
+    /// a per-author anti-flood rate limit, and a bound on the reactions table.
+    fn handle_react(&self, req: ReactReq) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        let now = Date::now().as_millis() as i64;
+
+        // 1) Replay dedupe: a re-submitted signed React (same author + idem)
+        // returns the ORIGINAL result instead of toggling state again.
+        if !req.idem.is_empty() {
+            if let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem) {
+                return Response::from_json(&ReactResp { active, count });
+            }
+        }
+
+        let had = self.reaction_exists(&req.target, &req.emoji, &req.author);
+
+        // 2) Per-author anti-flood floor. On refusal, return the CURRENT state
+        // unchanged (no toggle, no broadcast); the optimistic client reconciles
+        // on its settle refetch.
+        let last = self.last_react_ms(&req.author);
+        if last.is_some_and(|l| now - l < REACT_MIN_INTERVAL_MS) {
+            let count = self.reaction_count(&req.target, &req.emoji);
+            return Response::from_json(&ReactResp { active: had, count });
+        }
+
+        // 3) Toggle.
+        if had {
+            sql.exec(
+                "DELETE FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
+                vec![req.target.clone().into(), req.emoji.clone().into(), req.author.clone().into()],
+            )?;
+        } else {
+            sql.exec(
+                "INSERT INTO reactions (target, emoji, author, created_at) VALUES (?, ?, ?, ?);",
+                vec![
+                    req.target.clone().into(),
+                    req.emoji.clone().into(),
+                    req.author.clone().into(),
+                    now.into(),
+                ],
+            )?;
+        }
+        let active = !had;
+        let count = self.reaction_count(&req.target, &req.emoji);
+
+        // 4a) Record the rate-limit timestamp UNCONDITIONALLY — this is the only
+        // input to the anti-flood floor, so it must run whether or not the client
+        // supplied an idempotency key (otherwise the floor is trivially bypassed).
+        let _ = sql.exec(
+            "INSERT OR REPLACE INTO react_rate (author, last_ms) VALUES (?, ?);",
+            vec![req.author.clone().into(), now.into()],
+        );
+
+        // 4b) Record the idem result for replay dedupe (only when a key was sent),
+        // then prune both ledgers by freshness and bound the reactions table.
+        if !req.idem.is_empty() {
+            let _ = sql.exec(
+                "INSERT OR REPLACE INTO react_idem (author, idem, active, count, created_at) VALUES (?, ?, ?, ?, ?);",
+                vec![
+                    req.author.clone().into(),
+                    req.idem.clone().into(),
+                    i64::from(active).into(),
+                    i64::from(count).into(),
+                    now.into(),
+                ],
+            );
+        }
+        let _ = sql.exec(
+            "DELETE FROM react_idem WHERE created_at < ?;",
+            vec![(now - FRESHNESS_WINDOW_MS).into()],
+        );
+        let _ = sql.exec(
+            "DELETE FROM react_rate WHERE last_ms < ?;",
+            vec![(now - FRESHNESS_WINDOW_MS).into()],
+        );
+        // Keep only the newest REACTIONS_RETAINED rows by insert time.
+        let _ = sql.exec(
+            "DELETE FROM reactions WHERE created_at < \
+               (SELECT MIN(created_at) FROM \
+                  (SELECT created_at FROM reactions ORDER BY created_at DESC LIMIT ?));",
+            vec![REACTIONS_RETAINED.into()],
+        );
+
+        // 5) Broadcast + respond.
+        self.broadcast_str(
+            &serde_json::to_string(&WatchFrame::Reaction {
+                target_id: req.target.clone(),
+                emoji: req.emoji.clone(),
+                author_pubkey: req.author.clone(),
+                active,
+                count,
+            })
+            .unwrap_or_default(),
+        );
+
+        Response::from_json(&ReactResp { active, count })
+    }
+
+    /// Whether (target, emoji, author) currently has a reaction row.
+    fn reaction_exists(&self, target: &str, emoji: &str, author: &str) -> bool {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        self.state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT COUNT(*) AS n FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
+                vec![target.into(), emoji.into(), author.into()],
+            )
+            .and_then(|r| r.to_array::<Count>())
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|c| c.n > 0)
+            .unwrap_or(false)
+    }
+
+    /// The number of reactors for (target, emoji).
+    fn reaction_count(&self, target: &str, emoji: &str) -> u32 {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        self.state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT COUNT(*) AS n FROM reactions WHERE target = ? AND emoji = ?;",
+                vec![target.into(), emoji.into()],
+            )
+            .and_then(|r| r.to_array::<Count>())
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|c| c.n.max(0) as u32)
+            .unwrap_or(0)
+    }
+
+    /// A prior (author, idem) React result, so a replay returns it unchanged.
+    fn react_idem_lookup(&self, author: &str, idem: &str) -> Option<(bool, u32)> {
+        #[derive(Deserialize)]
+        struct Row {
+            active: i64,
+            count: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT active, count FROM react_idem WHERE author = ? AND idem = ? LIMIT 1;",
+                vec![author.into(), idem.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| (r.active != 0, r.count.max(0) as u32))
+    }
+
+    /// The author's most recent React time (epoch-ms) — the rate-limit input.
+    fn last_react_ms(&self, author: &str) -> Option<i64> {
+        #[derive(Deserialize)]
+        struct Row {
+            last_ms: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT last_ms FROM react_rate WHERE author = ? LIMIT 1;",
+                vec![author.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| r.last_ms)
+    }
+
+    /// Up to REACTIONS_RETAINED reactions in the room (the client aggregates
+    /// counts + "mine"). Capped so a poll can't materialize an unbounded set.
+    fn list_reactions(&self) -> Vec<ReactionEntry> {
+        #[derive(Deserialize)]
+        struct Row {
+            target: String,
+            emoji: String,
+            author: String,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT target, emoji, author FROM reactions ORDER BY created_at DESC LIMIT ?;",
+                vec![REACTIONS_RETAINED.into()],
+            )
+            .map(|r| r.to_array().unwrap_or_default())
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|r| ReactionEntry { target: r.target, emoji: r.emoji, author: r.author })
+            .collect()
     }
 
     /// The author's most recent post time (epoch-ms), or None if they've never
@@ -504,9 +776,9 @@ impl RefStore {
             .collect()
     }
 
-    /// Push a ref event to every `/watch` subscriber as a JSON frame.
-    fn broadcast(&self, event: &RefEventJson) {
-        let Ok(payload) = serde_json::to_string(event) else { return };
+    /// Serialize a `WatchFrame` and fan it out to every `/watch` subscriber.
+    fn broadcast(&self, frame: &WatchFrame) {
+        let Ok(payload) = serde_json::to_string(frame) else { return };
         self.broadcast_str(&payload);
     }
 

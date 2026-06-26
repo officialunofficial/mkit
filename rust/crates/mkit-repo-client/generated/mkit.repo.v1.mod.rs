@@ -40,6 +40,11 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_MESSAGES_REQUEST_JSON_ANY);
         reg.register_json_any(super::__CHAT_MESSAGE_JSON_ANY);
         reg.register_json_any(super::__LIST_MESSAGES_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__REACT_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__REACT_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__LIST_REACTIONS_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__REACTION_JSON_ANY);
+        reg.register_json_any(super::__LIST_REACTIONS_RESPONSE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -114,6 +119,26 @@ pub use self::__buffa::view::ChatMessageOwnedView;
 pub use self::__buffa::view::ListMessagesResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::ListMessagesResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReactionsRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReactionsRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReactionsResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::ListReactionsResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.repo.v1.repo.__connect.rs");

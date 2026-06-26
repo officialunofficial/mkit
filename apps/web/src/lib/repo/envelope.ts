@@ -18,6 +18,8 @@ export const procedures = {
   WatchRefs: '/mkit.repo.v1.RepoService/WatchRefs',
   PostMessage: '/mkit.repo.v1.RepoService/PostMessage',
   ListMessages: '/mkit.repo.v1.RepoService/ListMessages',
+  React: '/mkit.repo.v1.RepoService/React',
+  ListReactions: '/mkit.repo.v1.RepoService/ListReactions',
 } as const
 
 // ---------------------------------------------------------------------------

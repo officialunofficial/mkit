@@ -154,7 +154,7 @@ export function UnlockedHeader() {
           <label className='flex items-center gap-2 text-sm text-muted'>
             Room
             <input
-              className='w-28 rounded-md border border-hairline bg-transparent px-2 py-1 text-base outline-none focus:border-fg sm:w-32 sm:text-sm'
+              className='w-28 rounded-md border border-hairline bg-transparent px-2 py-1 text-base outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25 sm:w-32 sm:text-sm'
               value={id.room}
               onChange={(e) => id.setRoom(e.target.value)}
             />

@@ -22,14 +22,15 @@ use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
     ChatMessage, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListMessagesRequest, ListMessagesResponse, ListRefsRequest, ListRefsResponse,
-    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, RefEntry,
-    RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
+    ListMessagesRequest, ListMessagesResponse, ListReactionsRequest, ListReactionsResponse,
+    ListRefsRequest, ListRefsResponse, PostMessageRequest, PostMessageResponse, PutObjectRequest,
+    PutObjectResponse, ReactRequest, ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest,
+    UpdateRefResponse, WatchRefsRequest,
 };
-use super::refstore::RefEventJson;
+use super::refstore::WatchFrame;
 use super::wire::{
-    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, UpdateReq,
-    UpdateResp,
+    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq,
+    ReactResp, ReactionsResp, UpdateReq, UpdateResp,
 };
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -360,7 +361,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         // WebSocket route, which is fully wired: the RefStore DO broadcasts a
         // JSON RefEvent frame to every `/watch` subscriber on each successful
         // UpdateRef. See README "WatchRefs / streaming".
-        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<RefEventJson>);
+        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<WatchFrame>);
         Err(connectrpc::ConnectError::unimplemented(
             "WatchRefs is served over the WebSocket route GET /watch/<room>, \
              not Connect server-streaming (see README)",
@@ -469,6 +470,85 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .collect();
             Ok(Response::new(ListMessagesResponse {
                 messages,
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn react(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ReactRequest>,
+    ) -> ServiceResult<ReactResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let target = msg.target_id.unwrap_or_default();
+        let emoji = msg.emoji.unwrap_or_default();
+
+        check_room(&room)?;
+        // target_id MUST be a real 64-hex feed-item id (not an arbitrary string),
+        // and emoji MUST be one of the allowed set — together these bound the
+        // reactions table's cardinality and stop arbitrary content being
+        // persisted + broadcast to every viewer.
+        if !crate::chat::is_valid_target_id(&target) {
+            return Err(ce_invalid("target_id must be a 64-char lowercase-hex feed-item id"));
+        }
+        if !crate::chat::is_allowed_emoji(&emoji) {
+            return Err(ce_invalid("emoji is not in the allowed reaction set"));
+        }
+
+        let author = ctx
+            .extensions()
+            .get::<AuthorPubkey>()
+            .map(|a| a.0.clone())
+            .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+        // The request's Idempotency-Key — the DO dedupes a replayed signed React
+        // (a toggle) into its original result rather than flipping state again.
+        let idem = ctx
+            .extensions()
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            let resp: ReactResp =
+                do_call(&env, &room, "/react", &ReactReq { target, emoji, author, idem }).await?;
+            Ok(Response::new(ReactResponse {
+                active: Some(resp.active),
+                count: Some(resp.count),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_reactions(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListReactionsRequest>,
+    ) -> ServiceResult<ListReactionsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // `/reactions` ignores its body; `()` serializes to `null`.
+            let resp: ReactionsResp = do_call(&env, &room, "/reactions", &()).await?;
+            let reactions = resp
+                .reactions
+                .into_iter()
+                .map(|r| Reaction {
+                    target_id: Some(r.target),
+                    emoji: Some(r.emoji),
+                    author_pubkey: Some(hex::decode(&r.author).unwrap_or_default()),
+                    ..Default::default()
+                })
+                .collect();
+            Ok(Response::new(ListReactionsResponse {
+                reactions,
                 ..Default::default()
             }))
         })
