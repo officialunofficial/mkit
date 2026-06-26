@@ -89,24 +89,34 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     serve_connect(req, env).await
 }
 
+/// The Connect `invalid_argument` 400 returned when a request body exceeds the cap.
+fn body_too_large() -> Result<Response> {
+    let payload =
+        format!("{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}");
+    let mut resp = Response::error(payload, 400)?;
+    let _ = resp.headers_mut().set("Content-Type", "application/json");
+    Ok(resp)
+}
+
 /// Drive a ConnectRPC request through the Router-backed tower::Service.
 async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Read raw body + method/uri/headers up front. The envelope auth
     // interceptor needs the raw body, and `Full<Bytes>` is the simplest
     // `http_body::Body<Data = Bytes>` (error = Infallible) that satisfies the
     // ConnectRpcService bound.
+    // H2: cap the request body. Reject by Content-Length BEFORE buffering, so an
+    // oversized POST is refused in O(1) instead of `req.bytes()` materializing the
+    // whole payload in the isolate first (the only large input is PutObject
+    // `bytes`). The post-buffer check below is the backstop for chunked/
+    // unknown-length requests where Content-Length is absent.
+    if let Ok(Some(len)) = req.headers().get("content-length") {
+        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
+            return Ok(with_cors(body_too_large()?));
+        }
+    }
     let body = req.bytes().await.unwrap_or_default();
-
-    // H2: cap the buffered request body. The only large input is the PutObject
-    // `bytes` payload; reject anything oversized with a Connect `invalid_argument`
-    // before doing any further work.
     if body.len() > MAX_BODY_BYTES {
-        let payload = format!(
-            "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
-        );
-        let mut resp = Response::error(payload, 400)?;
-        let _ = resp.headers_mut().set("Content-Type", "application/json");
-        return Ok(with_cors(resp));
+        return Ok(with_cors(body_too_large()?));
     }
 
     let method = match req.method() {

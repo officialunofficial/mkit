@@ -21,12 +21,15 @@ use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
-    ChatMessage, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListMessagesRequest, ListMessagesResponse, ListReactionsRequest, ListReactionsResponse,
-    ListRefsRequest, ListRefsResponse, PostMessageRequest, PostMessageResponse, PutObjectRequest,
-    PutObjectResponse, ReactRequest, ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest,
-    UpdateRefResponse, WatchRefsRequest,
+    BatchGetObjectsRequest, BatchGetObjectsResponse, ChatMessage, CommitObject, FoundObject,
+    GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse, ListCommitsRequest,
+    ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
+    ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
+    PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
+    RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
 };
+use mkit_core::object::Object;
+use std::collections::HashSet;
 use super::refstore::WatchFrame;
 use super::wire::{
     GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq,
@@ -549,6 +552,165 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .collect();
             Ok(Response::new(ListReactionsResponse {
                 reactions,
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_commits(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListCommitsRequest>,
+    ) -> ServiceResult<ListCommitsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let mut ref_name = msg.r#ref.unwrap_or_default();
+        if ref_name.is_empty() {
+            ref_name = "main".to_string();
+        }
+        let start_id = msg.start_id.unwrap_or_default();
+        // Bound the page so one request can't walk unbounded history into memory.
+        const DEFAULT_PAGE: usize = 100;
+        const MAX_PAGE: usize = 512;
+        let cap = match msg.page_size.unwrap_or(0) as usize {
+            0 => DEFAULT_PAGE,
+            n => n.min(MAX_PAGE),
+        };
+
+        check_room(&room)?;
+        if !is_valid_ref_name(&ref_name) {
+            return Err(ce_invalid("ref name is invalid (SPEC-REFS §3)"));
+        }
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // Resolve the walk head: an explicit cursor wins, else the ref value.
+            let head: Vec<u8> = if !start_id.is_empty() {
+                start_id
+            } else {
+                let resp: GetResp = do_call(&env, &room, "/get", &GetReq { name: ref_name }).await?;
+                if !resp.exists {
+                    return Ok(Response::new(ListCommitsResponse::default()));
+                }
+                hex_to_bytes_opt(&resp.value).unwrap_or_default()
+            };
+            if head.len() != 32 {
+                return Ok(Response::new(ListCommitsResponse::default()));
+            }
+
+            let bucket = env
+                .bucket(STORAGE_BUCKET)
+                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+
+            let mut commits: Vec<CommitObject> = Vec::with_capacity(cap);
+            let mut seen: HashSet<Vec<u8>> = HashSet::new();
+            let mut current = head;
+            let mut next_cursor: Vec<u8> = Vec::new();
+
+            loop {
+                // Hit the page cap with chain remaining → expose `current` as the
+                // cursor so the client pages on without re-walking.
+                if commits.len() >= cap {
+                    next_cursor = current;
+                    break;
+                }
+                if !seen.insert(current.clone()) {
+                    break; // cycle guard (self/loop parent)
+                }
+                let bytes = match bucket.get(&object_key(&room, &current)).execute().await {
+                    Ok(Some(obj)) => obj
+                        .body()
+                        .ok_or_else(|| ce_internal("R2 object had no body"))?
+                        .bytes()
+                        .await
+                        .map_err(|e| ce_internal(format!("R2 read: {e}")))?,
+                    Ok(None) => break, // object missing — stop the walk
+                    Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
+                };
+
+                // Decode ONLY to follow the first parent; the client decodes the
+                // raw bytes for display, so the server needs no field parity.
+                let first_parent = match mkit_core::serialize::deserialize(&bytes) {
+                    Ok(Object::Commit(c)) => c.parents.first().map(|p| p.to_vec()),
+                    Ok(Object::Remix(r)) => r.parents.first().map(|p| p.to_vec()),
+                    _ => None, // not a commit/remix (or undecodable) — stop after this
+                };
+
+                commits.push(CommitObject {
+                    id: Some(current.clone()),
+                    object_bytes: Some(bytes),
+                    ..Default::default()
+                });
+
+                match first_parent {
+                    Some(p) if p.len() == 32 => current = p,
+                    _ => break, // root, or a non-commit object — chain ended
+                }
+            }
+
+            Ok(Response::new(ListCommitsResponse {
+                commits,
+                next_cursor: Some(next_cursor),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn batch_get_objects(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, BatchGetObjectsRequest>,
+    ) -> ServiceResult<BatchGetObjectsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let ids = msg.object_ids;
+        const MAX_BATCH: usize = 256;
+        if ids.len() > MAX_BATCH {
+            return Err(ce_invalid("too many object_ids in one batch"));
+        }
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            let bucket = env
+                .bucket(STORAGE_BUCKET)
+                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+            // Fan the reads out CONCURRENTLY — total R2 work stays O(n) but the n
+            // WAN round-trips (and n auth checks) collapse into one client request.
+            let reads = ids.into_iter().map(|id| {
+                let bucket = &bucket;
+                let room = &room;
+                async move {
+                    match bucket.get(&object_key(room, &id)).execute().await {
+                        Ok(Some(obj)) => {
+                            let bytes = obj
+                                .body()
+                                .ok_or_else(|| ce_internal("R2 object had no body"))?
+                                .bytes()
+                                .await
+                                .map_err(|e| ce_internal(format!("R2 read: {e}")))?;
+                            Ok(FoundObject {
+                                id: Some(id),
+                                found: Some(true),
+                                bytes: Some(bytes),
+                                ..Default::default()
+                            })
+                        }
+                        Ok(None) => Ok(FoundObject {
+                            id: Some(id),
+                            found: Some(false),
+                            bytes: Some(Vec::new()),
+                            ..Default::default()
+                        }),
+                        Err(e) => Err(ce_internal(format!("R2 get: {e}"))),
+                    }
+                }
+            });
+            let objects = futures::future::try_join_all(reads).await?;
+            Ok(Response::new(BatchGetObjectsResponse {
+                objects,
                 ..Default::default()
             }))
         })

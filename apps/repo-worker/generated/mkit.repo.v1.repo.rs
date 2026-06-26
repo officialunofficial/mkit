@@ -1139,6 +1139,1200 @@ pub const __GET_OBJECT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
+pub struct ListCommitsRequest {
+    /// Field 1: `room`
+    #[serde(rename = "room", skip_serializing_if = "::core::option::Option::is_none")]
+    pub room: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `ref`
+    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 3: `start_id`
+    #[serde(
+        rename = "startId",
+        alias = "start_id",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub start_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 4: `page_size`
+    #[serde(
+        rename = "pageSize",
+        alias = "page_size",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub page_size: ::core::option::Option<u32>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ListCommitsRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ListCommitsRequest")
+            .field("room", &self.room)
+            .field("ref", &self.r#ref)
+            .field("start_id", &self.start_id)
+            .field("page_size", &self.page_size)
+            .finish()
+    }
+}
+impl ListCommitsRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.ListCommitsRequest";
+}
+impl ListCommitsRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::room`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_room(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.room = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets `ref` to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.r#ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::start_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_start_id(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.start_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::page_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_page_size(mut self, value: u32) -> Self {
+        self.page_size = Some(value);
+        self
+    }
+}
+impl ::buffa::DefaultInstance for ListCommitsRequest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<ListCommitsRequest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for ListCommitsRequest {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "ListCommitsRequest";
+    const FULL_NAME: &'static str = "mkit.repo.v1.ListCommitsRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.ListCommitsRequest";
+}
+impl ::buffa::Message for ListCommitsRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.room {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.r#ref {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.start_id {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.page_size {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.room {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.r#ref {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.start_id {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        if let Some(v) = self.page_size {
+            ::buffa::encoding::Tag::new(4u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_uint32(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self.room.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self.r#ref.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.start_id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.page_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.room = ::core::option::Option::None;
+        self.r#ref = ::core::option::Option::None;
+        self.start_id = ::core::option::Option::None;
+        self.page_size = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ListCommitsRequest {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.ListCommitsRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for ListCommitsRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __LIST_COMMITS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.ListCommitsRequest",
+    to_json: ::buffa::type_registry::any_to_json::<ListCommitsRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<ListCommitsRequest>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CommitObject {
+    /// Field 1: `id`
+    #[serde(
+        rename = "id",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `object_bytes`
+    #[serde(
+        rename = "objectBytes",
+        alias = "object_bytes",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub object_bytes: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for CommitObject {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CommitObject")
+            .field("id", &self.id)
+            .field("object_bytes", &self.object_bytes)
+            .finish()
+    }
+}
+impl CommitObject {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitObject";
+}
+impl CommitObject {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_id(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::object_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_object_bytes(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.object_bytes = Some(value.into());
+        self
+    }
+}
+impl ::buffa::DefaultInstance for CommitObject {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<CommitObject> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for CommitObject {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "CommitObject";
+    const FULL_NAME: &'static str = "mkit.repo.v1.CommitObject";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitObject";
+}
+impl ::buffa::Message for CommitObject {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.id {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.object_bytes {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.id {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        if let Some(ref v) = self.object_bytes {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.object_bytes.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.id = ::core::option::Option::None;
+        self.object_bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for CommitObject {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.CommitObject";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CommitObject {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __COMMIT_OBJECT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.CommitObject",
+    to_json: ::buffa::type_registry::any_to_json::<CommitObject>,
+    from_json: ::buffa::type_registry::any_from_json::<CommitObject>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct ListCommitsResponse {
+    /// Field 1: `commits`
+    #[serde(
+        rename = "commits",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub commits: ::buffa::alloc::vec::Vec<CommitObject>,
+    /// Field 2: `next_cursor`
+    #[serde(
+        rename = "nextCursor",
+        alias = "next_cursor",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub next_cursor: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ListCommitsResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ListCommitsResponse")
+            .field("commits", &self.commits)
+            .field("next_cursor", &self.next_cursor)
+            .finish()
+    }
+}
+impl ListCommitsResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.ListCommitsResponse";
+}
+impl ListCommitsResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::next_cursor`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_next_cursor(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.next_cursor = Some(value.into());
+        self
+    }
+}
+impl ::buffa::DefaultInstance for ListCommitsResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<ListCommitsResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for ListCommitsResponse {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "ListCommitsResponse";
+    const FULL_NAME: &'static str = "mkit.repo.v1.ListCommitsResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.ListCommitsResponse";
+}
+impl ::buffa::Message for ListCommitsResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        for v in &self.commits {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        if let Some(ref v) = self.next_cursor {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.commits {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+            v.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.next_cursor {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                let mut elem = ::core::default::Default::default();
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
+                self.commits.push(elem);
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.next_cursor.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.commits.clear();
+        self.next_cursor = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ListCommitsResponse {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.ListCommitsResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for ListCommitsResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __LIST_COMMITS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.ListCommitsResponse",
+    to_json: ::buffa::type_registry::any_to_json::<ListCommitsResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<ListCommitsResponse>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct BatchGetObjectsRequest {
+    /// Field 1: `room`
+    #[serde(rename = "room", skip_serializing_if = "::core::option::Option::is_none")]
+    pub room: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `object_ids`
+    #[serde(
+        rename = "objectIds",
+        alias = "object_ids",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub object_ids: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for BatchGetObjectsRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BatchGetObjectsRequest")
+            .field("room", &self.room)
+            .field("object_ids", &self.object_ids)
+            .finish()
+    }
+}
+impl BatchGetObjectsRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.BatchGetObjectsRequest";
+}
+impl BatchGetObjectsRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::room`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_room(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.room = Some(value.into());
+        self
+    }
+}
+impl ::buffa::DefaultInstance for BatchGetObjectsRequest {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<BatchGetObjectsRequest> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for BatchGetObjectsRequest {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "BatchGetObjectsRequest";
+    const FULL_NAME: &'static str = "mkit.repo.v1.BatchGetObjectsRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.BatchGetObjectsRequest";
+}
+impl ::buffa::Message for BatchGetObjectsRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.room {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        for v in &self.object_ids {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.room {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        for v in &self.object_ids {
+            ::buffa::encoding::Tag::new(
+                    2u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self.room.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.object_ids.push(::buffa::types::decode_bytes(buf)?);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.room = ::core::option::Option::None;
+        self.object_ids.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for BatchGetObjectsRequest {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.BatchGetObjectsRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for BatchGetObjectsRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __BATCH_GET_OBJECTS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.BatchGetObjectsRequest",
+    to_json: ::buffa::type_registry::any_to_json::<BatchGetObjectsRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<BatchGetObjectsRequest>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct FoundObject {
+    /// Field 1: `id`
+    #[serde(
+        rename = "id",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `found`
+    #[serde(rename = "found", skip_serializing_if = "::core::option::Option::is_none")]
+    pub found: ::core::option::Option<bool>,
+    /// Field 3: `bytes`
+    #[serde(
+        rename = "bytes",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub bytes: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for FoundObject {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("FoundObject")
+            .field("id", &self.id)
+            .field("found", &self.found)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+impl FoundObject {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.FoundObject";
+}
+impl FoundObject {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_id(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::found`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_found(mut self, value: bool) -> Self {
+        self.found = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_bytes(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
+        self.bytes = Some(value.into());
+        self
+    }
+}
+impl ::buffa::DefaultInstance for FoundObject {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<FoundObject> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for FoundObject {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "FoundObject";
+    const FULL_NAME: &'static str = "mkit.repo.v1.FoundObject";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.FoundObject";
+}
+impl ::buffa::Message for FoundObject {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.id {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if self.found.is_some() {
+            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+        }
+        if let Some(ref v) = self.bytes {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.id {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        if let Some(v) = self.found {
+            ::buffa::encoding::Tag::new(2u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_bool(v, buf);
+        }
+        if let Some(ref v) = self.bytes {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_bytes(v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 2u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.found = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_bytes(
+                    self.bytes.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.id = ::core::option::Option::None;
+        self.found = ::core::option::Option::None;
+        self.bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for FoundObject {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.FoundObject";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for FoundObject {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __FOUND_OBJECT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.FoundObject",
+    to_json: ::buffa::type_registry::any_to_json::<FoundObject>,
+    from_json: ::buffa::type_registry::any_from_json::<FoundObject>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct BatchGetObjectsResponse {
+    /// Field 1: `objects`
+    #[serde(
+        rename = "objects",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub objects: ::buffa::alloc::vec::Vec<FoundObject>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for BatchGetObjectsResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BatchGetObjectsResponse")
+            .field("objects", &self.objects)
+            .finish()
+    }
+}
+impl BatchGetObjectsResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.BatchGetObjectsResponse";
+}
+impl ::buffa::DefaultInstance for BatchGetObjectsResponse {
+    fn default_instance() -> &'static Self {
+        static VALUE: ::buffa::__private::OnceBox<BatchGetObjectsResponse> = ::buffa::__private::OnceBox::new();
+        VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
+    }
+}
+impl ::buffa::MessageName for BatchGetObjectsResponse {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "BatchGetObjectsResponse";
+    const FULL_NAME: &'static str = "mkit.repo.v1.BatchGetObjectsResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.BatchGetObjectsResponse";
+}
+impl ::buffa::Message for BatchGetObjectsResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        for v in &self.objects {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.objects {
+            ::buffa::encoding::Tag::new(
+                    1u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::encoding::encode_varint(__cache.consume_next() as u64, buf);
+            v.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        depth: u32,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 1u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                let mut elem = ::core::default::Default::default();
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, depth)?;
+                self.objects.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, depth)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.objects.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for BatchGetObjectsResponse {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.BatchGetObjectsResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for BatchGetObjectsResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __BATCH_GET_OBJECTS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.BatchGetObjectsResponse",
+    to_json: ::buffa::type_registry::any_to_json::<BatchGetObjectsResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<BatchGetObjectsResponse>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
 pub struct GetRefRequest {
     /// Field 1: `room`
     #[serde(rename = "room", skip_serializing_if = "::core::option::Option::is_none")]

@@ -82,6 +82,11 @@ function LobbyBody({ room }: { room: string }) {
           <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
         </span>
         <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
+        {/* The active channel — reads like a chat room. (A channel switcher is a
+            separate follow-up; the room itself is already a switchable value.) */}
+        <span className='font-mono text-sm text-muted' title='Current channel'>
+          #{room}
+        </span>
       </div>
       <div className='overflow-hidden rounded-md border border-hairline'>
         <Feed room={room} items={items} isLoading={isLoading} />
@@ -250,7 +255,9 @@ function Row({
     item.kind === 'chat' ? (
       <p className='break-words whitespace-pre-wrap text-fg'>{item.message.text}</p>
     ) : (
-      <p className='text-muted'>
+      // Commit lines read as secondary to chat messages — a notch smaller than
+      // the row's base `text-sm`.
+      <p className='text-xs text-muted'>
         pushed <code className='font-mono text-fg'>{item.entry.hash.slice(0, 10)}</code> to{' '}
         <code className='font-mono text-fg'>{item.entry.ref}</code>
         {item.entry.message ? <span className='text-muted'> — “{item.entry.message}”</span> : null}
@@ -476,7 +483,36 @@ function Composer({ room }: { room: string }) {
           disabled={actions.busy}
           onClick={() => void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())}
         >
-          {actions.busy ? 'One moment…' : actions.hasPasskey ? 'Unlock to post' : 'Join to post'}
+          {actions.busy ? (
+            'One moment…'
+          ) : (
+            <span className='inline-flex items-center gap-1.5'>
+              {/* Fingerprint — the passkey/biometric this action unlocks with
+                  (reads as "passkey" better than a generic padlock). */}
+              <svg
+                width='14'
+                height='14'
+                viewBox='0 0 24 24'
+                fill='none'
+                stroke='currentColor'
+                strokeWidth='2'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+                aria-hidden
+              >
+                <path d='M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4' />
+                <path d='M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2' />
+                <path d='M17.29 21.02c.12-.6.43-2.3.5-3.02' />
+                <path d='M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4' />
+                <path d='M8.65 22c.21-.66.45-1.32.57-2' />
+                <path d='M14 13.12c0 2.38 0 6.38-1 8.88' />
+                <path d='M2 16h.01' />
+                <path d='M21.8 16c.2-2 .131-5.354 0-6' />
+                <path d='M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2' />
+              </svg>
+              {actions.hasPasskey ? 'Unlock to chat' : 'Join to chat'}
+            </span>
+          )}
         </button>
         <span className='text-xs text-muted'>
           {actions.status ?? 'Set up a passkey to join — it stays on your device.'}

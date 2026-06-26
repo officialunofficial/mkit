@@ -108,6 +108,19 @@ service RepoService {
   // All reactions in the room (target_id → emoji → reactors); the client
   // aggregates counts + "did I react". Unauthenticated read.
   rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
+
+  // Walk the commit chain server-side from a ref head (or a `start_id` cursor)
+  // by first-parent, returning a bounded page of RAW commit/remix objects in ONE
+  // round-trip — instead of the client issuing O(depth) sequential GetObject
+  // calls that can't be pipelined (each parent id is only known after decoding
+  // the previous object). The client decodes the bytes with its existing
+  // decoder, so the server needs no field-by-field parity. Unauthenticated read.
+  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+
+  // Fetch many loose objects in ONE round-trip; the server fans the R2 GETs out
+  // concurrently. Collapses an N+1 read (e.g. a checkout reading every entry of
+  // a tree) from N round-trips + N auth checks to 1. Unauthenticated read.
+  rpc BatchGetObjects(BatchGetObjectsRequest) returns (BatchGetObjectsResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -132,6 +145,40 @@ message GetObjectRequest {
 message GetObjectResponse {
   bool found = 1;
   bytes bytes = 2;        // empty when found=false
+}
+
+// Server-side commit-log walk (one round-trip per page).
+message ListCommitsRequest {
+  string room = 1;
+  string ref = 2;         // ref name to resolve as the head; empty = "main"
+  bytes start_id = 3;     // optional cursor: walk from here instead of the ref head
+  uint32 page_size = 4;   // max commits to return; the server caps this
+}
+
+message CommitObject {
+  bytes id = 1;           // 32-byte commit/remix hash
+  bytes object_bytes = 2; // raw mkit object bytes (the client decodes them)
+}
+
+message ListCommitsResponse {
+  repeated CommitObject commits = 1;
+  bytes next_cursor = 2;  // first-parent of the last commit; empty when the chain ended
+}
+
+// Concurrent batch object read (one round-trip for N objects).
+message BatchGetObjectsRequest {
+  string room = 1;
+  repeated bytes object_ids = 2; // 32-byte ids; the server caps the count
+}
+
+message FoundObject {
+  bytes id = 1;
+  bool found = 2;
+  bytes bytes = 3;        // empty when found=false
+}
+
+message BatchGetObjectsResponse {
+  repeated FoundObject objects = 1;
 }
 
 // ----------------------------------------------------------------------------

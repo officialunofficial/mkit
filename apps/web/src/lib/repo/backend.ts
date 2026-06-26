@@ -48,8 +48,10 @@ export function chatCanonical(room: string, authorHex: string, text: string): Ui
   return TEXT_ENCODER.encode(`${CHAT_CANONICAL_PREFIX}\n${room}\n${authorHex}\n${text}`)
 }
 
-/** One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the
- * hex id of the feed item (chat message id or commit hash). */
+/**
+ * One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the hex id of the feed item (chat message id or
+ * commit hash).
+ */
 export type ReactionEntry = { targetIdHex: string; emoji: string; authorPubkeyHex: string }
 
 /** A live reaction toggle frame (the new on/off state for one reactor). */
@@ -65,13 +67,10 @@ export type ReactionUpdate = {
 export type ReactionAgg = { emoji: string; count: number; mine: boolean }
 
 /**
- * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested.
- * Emoji order within a target is the order they first appear (stable).
+ * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested. Emoji order within a target is the
+ * order they first appear (stable).
  */
-export function aggregateReactions(
-  entries: ReactionEntry[],
-  myPubkeyHex?: string,
-): Map<string, ReactionAgg[]> {
+export function aggregateReactions(entries: ReactionEntry[], myPubkeyHex?: string): Map<string, ReactionAgg[]> {
   const byTarget = new Map<string, ReactionAgg[]>()
   for (const e of entries) {
     let list = byTarget.get(e.targetIdHex)
@@ -91,8 +90,8 @@ export function aggregateReactions(
 }
 
 /**
- * Live-stream handlers for a room: ref advances, chat messages, and reaction
- * toggles. All ride the ONE `/watch/<room>` socket so the lobby stays live.
+ * Live-stream handlers for a room: ref advances, chat messages, and reaction toggles. All ride the ONE `/watch/<room>`
+ * socket so the lobby stays live.
  */
 export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
@@ -204,6 +203,17 @@ export function isForkRef(name: string): boolean {
 // Transport-agnostic backend interface (maps 1:1 to the Connect service)
 // ---------------------------------------------------------------------------
 
+/**
+ * Options for {@link RepoBackend.commitLog}. A cold walk fetches each commit object over its own network round-trip, so:
+ * - `limit` caps how many commits to walk (the front-page lobby only needs recent activity, not the full history); and
+ * - `onProgress` streams the entries gathered so far (newest-first) after each object resolves, so a consumer can paint
+ * commits incrementally instead of waiting for the whole chain.
+ */
+export interface CommitLogOpts {
+  limit?: number
+  onProgress?: (entries: CommitLogEntry[]) => void
+}
+
 export interface RepoBackend {
   /** PutObject — content-addressed, idempotent (re-put of the same id is a no-op). */
   putObject(room: string, objectIdHex: string, bytes: Uint8Array): Promise<void>
@@ -234,9 +244,9 @@ export interface RepoBackend {
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void
   /**
    * Commit log for the demo UI — the chain reachable from `ref` (default `main`), newest-first. The mock derives it; a
-   * server walk sources it.
+   * server walk sources it. `opts` bounds the walk (`limit`) and/or streams partial results (`onProgress`).
    */
-  commitLog(room: string, ref?: string): Promise<CommitLogEntry[]>
+  commitLog(room: string, ref?: string, opts?: CommitLogOpts): Promise<CommitLogEntry[]>
   /**
    * PostMessage — post a signed chat message to the room. The signing identity is the author (server-verified). Throws
    * `IdentityLockedError` when no seed is available; resolves `{ rateLimited: true, accepted: false }` when the author
@@ -341,9 +351,11 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
     // oldest-first so two commits sharing a timestamp (unix-second precision)
     // render oldest-first under the stable sort, consistent with the rest of the
     // feed — not newest-first like the raw walk.
-    ...[...commits].reverse().map(
-      (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
-    ),
+    ...[...commits]
+      .reverse()
+      .map(
+        (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
+      ),
     ...messages.map(
       (message): FeedItem => ({
         kind: 'chat',
@@ -398,9 +410,8 @@ const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a 
 const FOREIGN_REFS = ['main', 'main', 'feature']
 
 /**
- * Register `handler` in the Set stored at `key` (creating the Set on first use)
- * and return an unsubscribe that removes it. The one shape behind all three of
- * `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
+ * Register `handler` in the Set stored at `key` (creating the Set on first use) and return an unsubscribe that removes
+ * it. The one shape behind all three of `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
  * A missing handler is a no-op (returns an unsubscribe that does nothing).
  */
 function addWatcher<T>(map: Map<string, Set<T>>, key: string, handler: T | undefined): () => void {
@@ -432,8 +443,10 @@ export class MockRepoBackend implements RepoBackend {
   // Reactions: raw rows per room + subscribers (keyed by room).
   private reactions = new Map<string, ReactionEntry[]>()
   private reactionWatchers = new Map<string, Set<(r: ReactionUpdate) => void>>()
-  /** Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders
-   * and room switches (the instance is reused, never recreated). */
+  /**
+   * Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders and room switches (the instance is
+   * reused, never recreated).
+   */
   private seededRooms = new Set<string>()
 
   /**
@@ -608,8 +621,13 @@ export class MockRepoBackend implements RepoBackend {
     this.reactions.set(room, [...(this.reactions.get(room) ?? []), ...seeded])
   }
 
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
-    return (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    const all = (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+    const entries = opts?.limit != null ? all.slice(0, opts.limit) : all
+    // Local/in-memory: no round-trips, so just emit the final set once (lets the
+    // shared `onProgress` consumer treat mock and wasm backends identically).
+    opts?.onProgress?.(entries)
+    return entries
   }
 
   private broadcast(room: string, name: string, u: RefUpdate): void {
@@ -640,12 +658,10 @@ export class MockRepoBackend implements RepoBackend {
   }
 
   /**
-   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to
-   * call on every render: the `seededRooms` guard makes repeat calls (and a room
-   * switch back) no-ops, so the long-lived mock instance is never recreated and
-   * a user's session posts survive a room change. Called during render (lazy
-   * initialization), not from an Effect, so the data exists before the first
-   * query reads it.
+   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to call on every render: the `seededRooms`
+   * guard makes repeat calls (and a room switch back) no-ops, so the long-lived mock instance is never recreated and a
+   * user's session posts survive a room change. Called during render (lazy initialization), not from an Effect, so the
+   * data exists before the first query reads it.
    */
   seedDemoOnce(room: string): void {
     if (this.seededRooms.has(room)) return
@@ -761,6 +777,23 @@ export interface RepoWasmClient {
     sign: RepoSignFn,
   ): Promise<{ active: boolean; count: number }>
   list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
+  /**
+   * ListCommits — server-side first-parent walk; one round-trip returns a page of RAW commit/remix objects (the caller
+   * decodes them) plus a continuation cursor.
+   */
+  list_commits(
+    baseUrl: string,
+    room: string,
+    ref: string,
+    startIdHex: string,
+    pageSize: number,
+  ): Promise<{ commits: Array<{ idHex: string; bytes: Uint8Array }>; nextCursorHex: string }>
+  /** BatchGetObjects — fetch many objects in one round-trip (server fans the reads out). */
+  batch_get_objects(
+    baseUrl: string,
+    room: string,
+    objectIdsHex: string[],
+  ): Promise<Array<{ idHex: string; found: boolean; bytes: Uint8Array }>>
 }
 
 /**
@@ -772,6 +805,64 @@ export interface RepoWasmClient {
  * frame out to `onUpdate` (which drives Query invalidation via `useRepoEvents`). `commitLog` is accumulated in-memory
  * on push (the service has no log RPC).
  */
+/**
+ * Open the live room WebSocket the worker exposes at `GET /watch/<room>` and dispatch parsed frames to `handlers`. PURE
+ * transport — it needs only the backend BASE URL, NO wasm — so a consumer (the lobby) can open it on mount, in PARALLEL
+ * with the wasm load, instead of waiting for the wasm backend to resolve (which serialized ~800ms onto first live
+ * delivery). Reconnects with bounded exponential backoff; returns an unsubscribe that closes the socket.
+ */
+export function subscribeRoom(baseUrl: string, room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
+  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
+  let closed = false
+  let ws: WebSocket | null = null
+  let attempt = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
+
+  const handleMessage = (ev: MessageEvent) => {
+    const frame = parseActivityFrame(ev.data)
+    if (!frame) return
+    if (frame.kind === 'chat') return void handlers.onChat?.(frame.message)
+    if (frame.kind === 'reaction') return void handlers.onReaction?.(frame.reaction)
+    const u = frame.ref
+    if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
+    handlers.onRef?.(u)
+  }
+
+  const scheduleReconnect = () => {
+    if (closed || attempt >= MAX_ATTEMPTS) return
+    const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
+    attempt += 1
+    reconnectTimer = setTimeout(connect, delay)
+  }
+
+  function connect() {
+    if (closed) return
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch {
+      ws = null // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
+      return
+    }
+    ws.addEventListener('open', () => {
+      attempt = 0 // reset backoff once a connection is established
+    })
+    ws.addEventListener('message', handleMessage)
+    ws.addEventListener('close', () => {
+      if (!closed) scheduleReconnect()
+    })
+  }
+
+  connect()
+
+  return () => {
+    if (closed) return
+    closed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close()
+  }
+}
+
 export class WasmRepoBackend implements RepoBackend {
   private log = new Map<string, CommitLogEntry[]>()
   /**
@@ -891,82 +982,23 @@ export class WasmRepoBackend implements RepoBackend {
    * that closes the socket.
    */
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
-    let closed = false
-    let ws: WebSocket | null = null
-    let attempt = 0
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
-
-    const handleMessage = (ev: MessageEvent) => {
-      const frame = parseActivityFrame(ev.data)
-      if (!frame) return
-      if (frame.kind === 'chat') {
-        handlers.onChat?.(frame.message)
-        return
-      }
-      if (frame.kind === 'reaction') {
-        handlers.onReaction?.(frame.reaction)
-        return
-      }
-      const u = frame.ref
-      if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
-      // Surface peers' pushes in the live log so a signed-out viewer sees others
-      // contributing. The ref event carries the commit id + author but not the
-      // message, so peers show a placeholder; our own commits keep their real
-      // message (recorded on push) and are deduped by hash here.
-      this.recordCommit(room, {
-        hash: u.objectIdHex,
-        message: 'pushed by a peer',
-        authorPubkey: u.authorPubkeyHex,
-        ref: u.name,
-        createdAt: new Date().toISOString(),
-      })
-      handlers.onRef?.(u)
-    }
-
-    // Schedule a bounded, exponentially-backed-off reconnect. The socket can
-    // drop (DO hibernation, transient network) without the user closing it.
-    const scheduleReconnect = () => {
-      if (closed || attempt >= MAX_ATTEMPTS) return
-      const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
-      attempt += 1
-      reconnectTimer = setTimeout(connect, delay)
-    }
-
-    function connect() {
-      if (closed) return
-      try {
-        ws = new WebSocket(wsUrl)
-      } catch {
-        // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
-        ws = null
-        return
-      }
-      ws.addEventListener('open', () => {
-        attempt = 0 // reset backoff once a connection is established
-      })
-      ws.addEventListener('message', handleMessage)
-      // On error/close, retry with backoff (unless the caller unsubscribed).
-      ws.addEventListener('error', () => {
-        // `error` is followed by `close`; let `close` drive the reconnect.
-      })
-      ws.addEventListener('close', () => {
-        if (!closed) scheduleReconnect()
-      })
-    }
-
-    connect()
-
-    return () => {
-      if (closed) return
-      closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      // CLOSING (2) / CLOSED (3) need no action; otherwise close the socket.
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close()
-      }
-    }
+    // Delegate to the shared, wasm-free socket. Wrap `onRef` to also record the
+    // peer's push into the in-memory log (a placeholder message) so callers that
+    // read `this.log` still see others contributing; the lobby instead drives the
+    // socket via `subscribeRoom` directly (no wasm dependency).
+    return subscribeRoom(this.baseUrl, room, prefix, {
+      ...handlers,
+      onRef: (u) => {
+        this.recordCommit(room, {
+          hash: u.objectIdHex,
+          message: 'pushed by a peer',
+          authorPubkey: u.authorPubkeyHex,
+          ref: u.name,
+          createdAt: new Date().toISOString(),
+        })
+        handlers.onRef?.(u)
+      },
+    })
   }
 
   /**
@@ -979,32 +1011,111 @@ export class WasmRepoBackend implements RepoBackend {
    * repeated calls (and other branches) don't re-walk; a new head (push or WS event) invalidates the cache and
    * re-walks. Stops at no parent, a missing object, or {@link WasmRepoBackend.WALK_CAP}.
    */
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    // Never walk past the safety cap; a caller (e.g. the front-page lobby) can
+    // ask for fewer so a cold load isn't N sequential object round-trips deep.
+    const cap = Math.min(opts?.limit ?? WasmRepoBackend.WALK_CAP, WasmRepoBackend.WALK_CAP)
+
     const head = await this.wasm.get_ref(this.baseUrl, room, ref)
     if (!head) return []
 
     const cacheKey = `${room}::${ref}`
     const cached = this.walkCache.get(cacheKey)
-    if (cached && cached.head === head) return cached.entries
+    if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
-    // INCREMENTAL re-walk: when we already have a cached chain for this ref,
-    // walk from the NEW head by first-parent only until we reach a hash that
-    // is already in the cached chain, then splice that cached tail on. The
-    // common case (our push, a peer's single commit) fetches just the new
-    // object(s) instead of re-walking up to WALK_CAP. A cold walk (no cache)
-    // is bounded by WALK_CAP as before.
-    const tailByHash = new Map<string, number>() // hash → index in cached.entries
+    // PRIMARY: one server-side walk (ListCommits) returns the whole page of raw
+    // objects in ONE round-trip — O(1) round-trips instead of O(depth) sequential
+    // GetObject calls. Falls back to the per-object client walk if the worker
+    // doesn't support ListCommits yet (older deploy → the RPC throws).
+    try {
+      const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
+      this.walkCache.set(cacheKey, { head, entries })
+      return entries
+    } catch {
+      // Fall through to the legacy per-object walk.
+    }
+    return this.commitLogWalk(room, ref, cap, head, cacheKey, cached, opts)
+  }
+
+  /**
+   * O(1)-round-trip path: page through ListCommits, decode each raw object, warm the object cache, and splice the
+   * cached tail when the walk reaches a hash we already have. Throws (→ caller falls back) if the RPC is unsupported.
+   */
+  private async commitLogViaListCommits(
+    room: string,
+    ref: string,
+    cap: number,
+    cached: { head: string; entries: CommitLogEntry[] } | undefined,
+    opts?: CommitLogOpts,
+  ): Promise<CommitLogEntry[]> {
+    const tailByHash = new Map<string, number>()
     if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
 
     const fresh: CommitLogEntry[] = []
-    const seen = new Set<string>() // guard against a cyclic/self-parent chain
+    const seen = new Set<string>()
+    let spliced: CommitLogEntry[] | null = null
+    let cursor = '' // '' = walk from the ref head
+    let done = false
+
+    while (!done && fresh.length < cap) {
+      const page = await this.wasm.list_commits(this.baseUrl, room, ref, cursor, cap - fresh.length)
+      if (page.commits.length === 0) break
+      for (const c of page.commits) {
+        const tailIdx = tailByHash.get(c.idHex)
+        if (tailIdx !== undefined) {
+          // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
+          spliced = cached!.entries.slice(tailIdx)
+          done = true
+          break
+        }
+        if (seen.has(c.idHex)) {
+          done = true
+          break
+        } // cycle guard
+        seen.add(c.idHex)
+        this.objectCache.set(`${room}::${c.idHex}`, c.bytes) // warm the object cache
+        const decoded = decodeLogObject(this.api, c.bytes, c.idHex, ref)
+        if (!decoded) {
+          done = true
+          break
+        }
+        fresh.push(decoded.entry)
+        opts?.onProgress?.([...fresh])
+        if (fresh.length >= cap) {
+          done = true
+          break
+        }
+      }
+      cursor = page.nextCursorHex
+      if (!cursor) break
+    }
+
+    return spliced ? [...fresh, ...spliced] : fresh
+  }
+
+  /**
+   * Legacy O(depth) path: walk the chain one GetObject per commit. Kept as the fallback for workers without
+   * ListCommits, and shares the incremental cached-tail splice + onProgress streaming.
+   */
+  private async commitLogWalk(
+    room: string,
+    ref: string,
+    cap: number,
+    head: string,
+    cacheKey: string,
+    cached: { head: string; entries: CommitLogEntry[] } | undefined,
+    opts?: CommitLogOpts,
+  ): Promise<CommitLogEntry[]> {
+    const tailByHash = new Map<string, number>()
+    if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
+
+    const fresh: CommitLogEntry[] = []
+    const seen = new Set<string>()
     let hash: string | undefined = head
     let spliced: CommitLogEntry[] | null = null
-    while (hash && fresh.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
+    while (hash && fresh.length < cap && !seen.has(hash)) {
       const tailIdx = tailByHash.get(hash)
       if (tailIdx !== undefined) {
-        // Reached the cached chain — splice its tail (from this hash down)
-        // instead of re-fetching/decoding the immutable history again.
         // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
         spliced = cached!.entries.slice(tailIdx)
         break
@@ -1012,13 +1123,11 @@ export class WasmRepoBackend implements RepoBackend {
       seen.add(hash)
       const bytes = await this.cachedObject(room, hash)
       if (!bytes) break // object missing — stop the walk
-      // Route by the object's prologue type: a fork ref's head is a remix,
-      // not a commit. `decodeLogObject` handles both kinds (and stops the
-      // walk on anything else) so a fork chain renders alongside commits.
       const decoded = decodeLogObject(this.api, bytes, hash, ref)
       if (!decoded) break // not a commit/remix — stop rather than throw
       fresh.push(decoded.entry)
       hash = decoded.firstParent
+      opts?.onProgress?.([...fresh])
     }
 
     const entries = spliced ? [...fresh, ...spliced] : fresh

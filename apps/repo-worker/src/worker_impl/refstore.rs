@@ -87,6 +87,26 @@ pub enum WatchFrame {
     },
 }
 
+/// The smallest string strictly greater than every string having `prefix` as a
+/// prefix — used as the exclusive upper bound of a prefix range scan. Clone the
+/// bytes, drop trailing `0xFF`, and increment the last remaining byte. Returns
+/// `None` when the prefix is empty or all-`0xFF` (no finite successor), or when
+/// the increment would break UTF-8 — callers then fall back to a lower-bound-only
+/// scan (still correct, just not upper-bounded).
+fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    while let Some(&last) = bytes.last() {
+        if last == 0xFF {
+            bytes.pop();
+        } else {
+            let n = bytes.len();
+            bytes[n - 1] = last + 1;
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
+}
+
 #[durable_object]
 pub struct RefStore {
     state: State,
@@ -293,17 +313,28 @@ impl RefStore {
             path: String,
             value: String,
         }
-        let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
-        let rows: Vec<Row> = self
-            .state
-            .storage()
-            .sql()
-            .exec(
-                "SELECT path, value FROM refs WHERE path LIKE ? ESCAPE '\\' ORDER BY path;",
-                vec![pattern.into()],
+        // Prefix match as a HALF-OPEN RANGE over the `path` PRIMARY KEY so SQLite
+        // seeks the index and scans only matching rows. A `LIKE 'p%' ESCAPE` can
+        // NOT use the BINARY-collated PK index (the ESCAPE clause and the
+        // case-insensitive default both disable the LIKE-prefix optimization), so
+        // it full-scans every ref. `hi` is the prefix successor; an empty prefix
+        // (or an all-0xFF one with no finite successor) drops the upper bound.
+        let sql = self.state.storage().sql();
+        let rows: Vec<Row> = if prefix.is_empty() {
+            sql.exec("SELECT path, value FROM refs ORDER BY path;", None)
+        } else if let Some(hi) = prefix_successor(prefix) {
+            sql.exec(
+                "SELECT path, value FROM refs WHERE path >= ? AND path < ? ORDER BY path;",
+                vec![prefix.into(), hi.into()],
             )
-            .map(|r| r.to_array().unwrap_or_default())
-            .unwrap_or_default();
+        } else {
+            sql.exec(
+                "SELECT path, value FROM refs WHERE path >= ? ORDER BY path;",
+                vec![prefix.into()],
+            )
+        }
+        .map(|r| r.to_array().unwrap_or_default())
+        .unwrap_or_default();
         rows.into_iter()
             .map(|r| ListEntry { name: r.path, value: r.value })
             .collect()
@@ -341,6 +372,13 @@ impl RefStore {
                seq INTEGER NOT NULL, \
                created_at INTEGER NOT NULL, \
                PRIMARY KEY (author, idem));",
+            None,
+        )?;
+        // Index the time column so the per-post freshness prune
+        // (`DELETE … WHERE created_at < ?`) seeks the expired tail instead of
+        // full-scanning the whole room-wide ledger on every accepted post.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS idem_keys_created ON idem_keys(created_at);",
             None,
         )?;
         Ok(())
@@ -400,7 +438,16 @@ impl RefStore {
             .exec("SELECT last_insert_rowid() AS seq;", None)
             .and_then(|r| r.to_array())
             .unwrap_or_default();
-        let seq: u64 = seq_rows.into_iter().next().map(|r| r.seq as u64).unwrap_or(0);
+        let seq: u64 = match seq_rows.into_iter().next() {
+            Some(r) => r.seq as u64,
+            // The row WAS inserted (the INSERT above used `?`); a missing rowid
+            // here means the SELECT itself failed — surface it rather than
+            // silently shipping a seq=0 that downstream can't order.
+            None => {
+                worker::console_error!("post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0");
+                0
+            }
+        };
 
         // Bound the serving index: drop rows older than the most-recent
         // MESSAGES_RETAINED (R2 still holds every message permanently). seq is
@@ -424,16 +471,15 @@ impl RefStore {
             );
         }
 
-        self.broadcast_str(
-            &serde_json::to_string(&WatchFrame::Chat {
-                message_id: req.id.clone(),
-                author_pubkey: req.author.clone(),
-                text: req.text.clone(),
-                created_at: now,
-                seq,
-            })
-            .unwrap_or_default(),
-        );
+        // Use the typed `broadcast` helper (like the Commit path) so a serialize
+        // failure SKIPS the frame rather than fanning out an empty string "".
+        self.broadcast(&WatchFrame::Chat {
+            message_id: req.id.clone(),
+            author_pubkey: req.author.clone(),
+            text: req.text.clone(),
+            created_at: now,
+            seq,
+        });
 
         Response::from_json(&PostResp {
             accepted: true,
@@ -507,6 +553,18 @@ impl RefStore {
             "CREATE TABLE IF NOT EXISTS react_rate (\
                author TEXT PRIMARY KEY, \
                last_ms INTEGER NOT NULL);",
+            None,
+        )?;
+        // Index the time columns both per-React prunes filter on, so each
+        // `DELETE … WHERE created_at < ?` / `WHERE last_ms < ?` seeks the expired
+        // tail instead of full-scanning the whole table on every accepted toggle
+        // (a reaction storm was O(reactions × authors) without these).
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS react_idem_created ON react_idem(created_at);",
+            None,
+        )?;
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS react_rate_last ON react_rate(last_ms);",
             None,
         )?;
         Ok(())
@@ -596,17 +654,15 @@ impl RefStore {
             vec![REACTIONS_RETAINED.into()],
         );
 
-        // 5) Broadcast + respond.
-        self.broadcast_str(
-            &serde_json::to_string(&WatchFrame::Reaction {
-                target_id: req.target.clone(),
-                emoji: req.emoji.clone(),
-                author_pubkey: req.author.clone(),
-                active,
-                count,
-            })
-            .unwrap_or_default(),
-        );
+        // 5) Broadcast + respond. Typed `broadcast` (like Commit/Chat) so a
+        // serialize failure skips the frame rather than fanning out "".
+        self.broadcast(&WatchFrame::Reaction {
+            target_id: req.target.clone(),
+            emoji: req.emoji.clone(),
+            author_pubkey: req.author.clone(),
+            active,
+            count,
+        });
 
         Response::from_json(&ReactResp { active, count })
     }
@@ -778,17 +834,29 @@ impl RefStore {
 
     /// Serialize a `WatchFrame` and fan it out to every `/watch` subscriber.
     fn broadcast(&self, frame: &WatchFrame) {
-        let Ok(payload) = serde_json::to_string(frame) else { return };
-        self.broadcast_str(&payload);
+        match serde_json::to_string(frame) {
+            Ok(payload) => self.broadcast_str(&payload),
+            Err(e) => worker::console_error!("broadcast: failed to serialize WatchFrame: {e}"),
+        }
     }
 
     /// Fan a pre-serialized JSON frame out to every attached `/watch` socket.
     /// Shared by ref-advance and chat broadcasts so both ride the one stream.
+    /// Best-effort per socket (a closed/errored one is skipped; the runtime drops
+    /// it on the next cycle), but failures are COUNTED and logged — a broadcast
+    /// that reaches nobody is the signature of "messages persist but never reach
+    /// other viewers", so it must be observable, not silent.
     fn broadcast_str(&self, payload: &str) {
-        for ws in self.state.get_websockets() {
-            // Best-effort: a closed/errored socket is simply skipped; the
-            // runtime drops it from the set on the next cycle.
-            let _ = ws.send_with_str(payload);
+        let sockets = self.state.get_websockets();
+        let total = sockets.len();
+        let mut failed = 0usize;
+        for ws in &sockets {
+            if ws.send_with_str(payload).is_err() {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            worker::console_error!("broadcast: {failed}/{total} /watch socket sends failed");
         }
     }
 }
