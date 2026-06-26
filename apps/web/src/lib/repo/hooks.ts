@@ -66,11 +66,23 @@ export function useObject(room: string, hash: string | null) {
   })
 }
 
-export function useCommitLog(room: string, ref = 'main') {
+export function useCommitLog(room: string, ref = 'main', limit?: number) {
   const backend = useRepoBackend()
+  const qc = useQueryClient()
+  // A capped walk (the lobby) gets its own cache entry so it never collides with
+  // an uncapped reader of the same ref. Invalidation still matches by prefix
+  // (`['repo', room, 'log', ref]`), so a push refreshes both.
+  const key = limit != null ? ([...repoKeys.log(room, ref), limit] as const) : repoKeys.log(room, ref)
   return useQuery({
-    queryKey: repoKeys.log(room, ref),
-    queryFn: () => backend!.commitLog(room, ref),
+    queryKey: key,
+    queryFn: () =>
+      backend!.commitLog(room, ref, {
+        ...(limit != null ? { limit } : {}),
+        // Paint commits as the walk fetches them (one round-trip each) instead of
+        // blocking the feed on the full chain — this clears the "Loading…" gate at
+        // the FIRST commit. The final resolve overwrites with the complete list.
+        onProgress: (partial) => qc.setQueryData(key, partial),
+      }),
     enabled: !!backend,
     // Switching branches keeps the previous ref's list on screen during the
     // fetch (no skeleton/empty flash); replaced once the new ref's log resolves.
@@ -360,8 +372,8 @@ export function useLobbyEvents(room: string): void {
 }
 
 /**
- * Reactions for the room, aggregated per feed item: a `reactionsFor(targetId)`
- * lookup returning `{ emoji, count, mine }[]`. Gated on a ready backend.
+ * Reactions for the room, aggregated per feed item: a `reactionsFor(targetId)` lookup returning `{ emoji, count, mine
+ * }[]`. Gated on a ready backend.
  */
 export function useReactions(room: string, myPubkeyHex?: string): (targetId: string) => ReactionAgg[] {
   const backend = useRepoBackend()
@@ -378,16 +390,17 @@ export function useReactions(room: string, myPubkeyHex?: string): (targetId: str
   return useCallback((targetId: string) => byTarget.get(targetId) ?? NO_REACTIONS, [byTarget])
 }
 
-/** Shared empty result for feed items with no reactions — one stable reference
- * so the "no reactions" case doesn't defeat memoization. Frozen so a consumer
- * can't mutate the shared singleton (the cast-through-unknown is the compiler's
- * own escape hatch for assigning `readonly never[]` to the array type). */
+/**
+ * Shared empty result for feed items with no reactions — one stable reference so the "no reactions" case doesn't defeat
+ * memoization. Frozen so a consumer can't mutate the shared singleton (the cast-through-unknown is the compiler's own
+ * escape hatch for assigning `readonly never[]` to the array type).
+ */
 const NO_REACTIONS: ReactionAgg[] = Object.freeze([]) as unknown as ReactionAgg[]
 
 /**
- * Toggle the signing identity's emoji reaction on a feed item. Optimistically
- * flips the cached reaction list, then reconciles on settle (the broadcast echo
- * also invalidates). Rejects with `BackendNotReadyError` if no backend is ready.
+ * Toggle the signing identity's emoji reaction on a feed item. Optimistically flips the cached reaction list, then
+ * reconciles on settle (the broadcast echo also invalidates). Rejects with `BackendNotReadyError` if no backend is
+ * ready.
  */
 export function useToggleReaction(room: string, myPubkeyHex?: string) {
   const qc = useQueryClient()
@@ -395,8 +408,7 @@ export function useToggleReaction(room: string, myPubkeyHex?: string) {
   const key = repoKeys.reactions(room)
   const options = backend
     ? {
-        mutationFn: ({ targetId, emoji }: { targetId: string; emoji: string }) =>
-          backend.react(room, targetId, emoji),
+        mutationFn: ({ targetId, emoji }: { targetId: string; emoji: string }) => backend.react(room, targetId, emoji),
         onMutate: async ({ targetId, emoji }: { targetId: string; emoji: string }) => {
           await qc.cancelQueries({ queryKey: key })
           // Optimistic toggle against my own pubkey row. Remember whether we
@@ -417,11 +429,7 @@ export function useToggleReaction(room: string, myPubkeyHex?: string) {
           }
           return { targetId, emoji, added }
         },
-        onError: (
-          _e: unknown,
-          _v: unknown,
-          ctx: { targetId: string; emoji: string; added: boolean } | undefined,
-        ) => {
+        onError: (_e: unknown, _v: unknown, ctx: { targetId: string; emoji: string; added: boolean } | undefined) => {
           // Invert ONLY our own optimistic change, leaving peer reactions intact.
           if (!ctx || !myPubkeyHex) return
           qc.setQueryData<ReactionEntry[]>(key, (prev) => {
@@ -448,8 +456,18 @@ export function useToggleReaction(room: string, myPubkeyHex?: string) {
  * The merged lobby feed: the `ref` commit log + room chat, interleaved oldest-first by timestamp. Combines
  * {@link useCommitLog} and {@link useLobbyMessages}; the merge itself is the pure {@link mergeFeed}.
  */
-export function useLobbyFeed(room: string, ref = 'main'): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
-  const log = useCommitLog(room, ref)
+/**
+ * How many commits the front-page lobby walks. It shows RECENT activity, not the whole history, so a cold load is
+ * bounded to this many sequential object round-trips instead of up to WALK_CAP (100).
+ */
+const LOBBY_LOG_LIMIT = 30
+
+export function useLobbyFeed(
+  room: string,
+  ref = 'main',
+  limit = LOBBY_LOG_LIMIT,
+): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
+  const log = useCommitLog(room, ref, limit)
   const messages = useLobbyMessages(room)
   const items = useMemo(() => mergeFeed(log.data ?? [], messages.data ?? []), [log.data, messages.data])
   // `isPending` (not `isLoading`) so the gap where the backend is still null —

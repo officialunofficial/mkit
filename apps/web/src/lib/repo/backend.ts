@@ -48,8 +48,10 @@ export function chatCanonical(room: string, authorHex: string, text: string): Ui
   return TEXT_ENCODER.encode(`${CHAT_CANONICAL_PREFIX}\n${room}\n${authorHex}\n${text}`)
 }
 
-/** One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the
- * hex id of the feed item (chat message id or commit hash). */
+/**
+ * One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the hex id of the feed item (chat message id or
+ * commit hash).
+ */
 export type ReactionEntry = { targetIdHex: string; emoji: string; authorPubkeyHex: string }
 
 /** A live reaction toggle frame (the new on/off state for one reactor). */
@@ -65,13 +67,10 @@ export type ReactionUpdate = {
 export type ReactionAgg = { emoji: string; count: number; mine: boolean }
 
 /**
- * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested.
- * Emoji order within a target is the order they first appear (stable).
+ * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested. Emoji order within a target is the
+ * order they first appear (stable).
  */
-export function aggregateReactions(
-  entries: ReactionEntry[],
-  myPubkeyHex?: string,
-): Map<string, ReactionAgg[]> {
+export function aggregateReactions(entries: ReactionEntry[], myPubkeyHex?: string): Map<string, ReactionAgg[]> {
   const byTarget = new Map<string, ReactionAgg[]>()
   for (const e of entries) {
     let list = byTarget.get(e.targetIdHex)
@@ -91,8 +90,8 @@ export function aggregateReactions(
 }
 
 /**
- * Live-stream handlers for a room: ref advances, chat messages, and reaction
- * toggles. All ride the ONE `/watch/<room>` socket so the lobby stays live.
+ * Live-stream handlers for a room: ref advances, chat messages, and reaction toggles. All ride the ONE `/watch/<room>`
+ * socket so the lobby stays live.
  */
 export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
@@ -204,6 +203,17 @@ export function isForkRef(name: string): boolean {
 // Transport-agnostic backend interface (maps 1:1 to the Connect service)
 // ---------------------------------------------------------------------------
 
+/**
+ * Options for {@link RepoBackend.commitLog}. A cold walk fetches each commit object over its own network round-trip, so:
+ * - `limit` caps how many commits to walk (the front-page lobby only needs recent activity, not the full history); and
+ * - `onProgress` streams the entries gathered so far (newest-first) after each object resolves, so a consumer can paint
+ * commits incrementally instead of waiting for the whole chain.
+ */
+export interface CommitLogOpts {
+  limit?: number
+  onProgress?: (entries: CommitLogEntry[]) => void
+}
+
 export interface RepoBackend {
   /** PutObject — content-addressed, idempotent (re-put of the same id is a no-op). */
   putObject(room: string, objectIdHex: string, bytes: Uint8Array): Promise<void>
@@ -234,9 +244,9 @@ export interface RepoBackend {
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void
   /**
    * Commit log for the demo UI — the chain reachable from `ref` (default `main`), newest-first. The mock derives it; a
-   * server walk sources it.
+   * server walk sources it. `opts` bounds the walk (`limit`) and/or streams partial results (`onProgress`).
    */
-  commitLog(room: string, ref?: string): Promise<CommitLogEntry[]>
+  commitLog(room: string, ref?: string, opts?: CommitLogOpts): Promise<CommitLogEntry[]>
   /**
    * PostMessage — post a signed chat message to the room. The signing identity is the author (server-verified). Throws
    * `IdentityLockedError` when no seed is available; resolves `{ rateLimited: true, accepted: false }` when the author
@@ -341,9 +351,11 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
     // oldest-first so two commits sharing a timestamp (unix-second precision)
     // render oldest-first under the stable sort, consistent with the rest of the
     // feed — not newest-first like the raw walk.
-    ...[...commits].reverse().map(
-      (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
-    ),
+    ...[...commits]
+      .reverse()
+      .map(
+        (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
+      ),
     ...messages.map(
       (message): FeedItem => ({
         kind: 'chat',
@@ -398,9 +410,8 @@ const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a 
 const FOREIGN_REFS = ['main', 'main', 'feature']
 
 /**
- * Register `handler` in the Set stored at `key` (creating the Set on first use)
- * and return an unsubscribe that removes it. The one shape behind all three of
- * `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
+ * Register `handler` in the Set stored at `key` (creating the Set on first use) and return an unsubscribe that removes
+ * it. The one shape behind all three of `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
  * A missing handler is a no-op (returns an unsubscribe that does nothing).
  */
 function addWatcher<T>(map: Map<string, Set<T>>, key: string, handler: T | undefined): () => void {
@@ -432,8 +443,10 @@ export class MockRepoBackend implements RepoBackend {
   // Reactions: raw rows per room + subscribers (keyed by room).
   private reactions = new Map<string, ReactionEntry[]>()
   private reactionWatchers = new Map<string, Set<(r: ReactionUpdate) => void>>()
-  /** Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders
-   * and room switches (the instance is reused, never recreated). */
+  /**
+   * Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders and room switches (the instance is
+   * reused, never recreated).
+   */
   private seededRooms = new Set<string>()
 
   /**
@@ -608,8 +621,13 @@ export class MockRepoBackend implements RepoBackend {
     this.reactions.set(room, [...(this.reactions.get(room) ?? []), ...seeded])
   }
 
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
-    return (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    const all = (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+    const entries = opts?.limit != null ? all.slice(0, opts.limit) : all
+    // Local/in-memory: no round-trips, so just emit the final set once (lets the
+    // shared `onProgress` consumer treat mock and wasm backends identically).
+    opts?.onProgress?.(entries)
+    return entries
   }
 
   private broadcast(room: string, name: string, u: RefUpdate): void {
@@ -640,12 +658,10 @@ export class MockRepoBackend implements RepoBackend {
   }
 
   /**
-   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to
-   * call on every render: the `seededRooms` guard makes repeat calls (and a room
-   * switch back) no-ops, so the long-lived mock instance is never recreated and
-   * a user's session posts survive a room change. Called during render (lazy
-   * initialization), not from an Effect, so the data exists before the first
-   * query reads it.
+   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to call on every render: the `seededRooms`
+   * guard makes repeat calls (and a room switch back) no-ops, so the long-lived mock instance is never recreated and a
+   * user's session posts survive a room change. Called during render (lazy initialization), not from an Effect, so the
+   * data exists before the first query reads it.
    */
   seedDemoOnce(room: string): void {
     if (this.seededRooms.has(room)) return
@@ -979,13 +995,17 @@ export class WasmRepoBackend implements RepoBackend {
    * repeated calls (and other branches) don't re-walk; a new head (push or WS event) invalidates the cache and
    * re-walks. Stops at no parent, a missing object, or {@link WasmRepoBackend.WALK_CAP}.
    */
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    // Never walk past the safety cap; a caller (e.g. the front-page lobby) can
+    // ask for fewer so a cold load isn't N sequential object round-trips deep.
+    const cap = Math.min(opts?.limit ?? WasmRepoBackend.WALK_CAP, WasmRepoBackend.WALK_CAP)
+
     const head = await this.wasm.get_ref(this.baseUrl, room, ref)
     if (!head) return []
 
     const cacheKey = `${room}::${ref}`
     const cached = this.walkCache.get(cacheKey)
-    if (cached && cached.head === head) return cached.entries
+    if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
     // INCREMENTAL re-walk: when we already have a cached chain for this ref,
     // walk from the NEW head by first-parent only until we reach a hash that
@@ -1000,7 +1020,7 @@ export class WasmRepoBackend implements RepoBackend {
     const seen = new Set<string>() // guard against a cyclic/self-parent chain
     let hash: string | undefined = head
     let spliced: CommitLogEntry[] | null = null
-    while (hash && fresh.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
+    while (hash && fresh.length < cap && !seen.has(hash)) {
       const tailIdx = tailByHash.get(hash)
       if (tailIdx !== undefined) {
         // Reached the cached chain — splice its tail (from this hash down)
@@ -1019,6 +1039,10 @@ export class WasmRepoBackend implements RepoBackend {
       if (!decoded) break // not a commit/remix — stop rather than throw
       fresh.push(decoded.entry)
       hash = decoded.firstParent
+      // Stream what we have so far (newest-first) so the feed paints commits as
+      // each object lands — a cold walk is one network round-trip per commit, so
+      // without this the whole feed waits on the slowest (deepest) fetch.
+      opts?.onProgress?.([...fresh])
     }
 
     const entries = spliced ? [...fresh, ...spliced] : fresh
