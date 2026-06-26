@@ -484,10 +484,11 @@ impl RefStore {
             "CREATE INDEX IF NOT EXISTS reactions_created ON reactions(created_at);",
             None,
         )?;
-        // Replay-dedupe + rate ledger for React: the (author, idempotency-key)
-        // of each accepted toggle and the result it produced. A replay returns
-        // the original result (no re-toggle); the newest `created_at` per author
-        // is also the rate-limit input. Bounded to the freshness window.
+        // Replay-dedupe for React: the (author, idempotency-key) of each accepted
+        // toggle and the result it produced. A replay returns the original result
+        // (no re-toggle). Bounded to the freshness window. NOTE: this is keyed on
+        // a PRESENT idempotency key, so it can't be the rate-limit input — a
+        // client may omit the key. The rate floor reads `react_rate` instead.
         sql.exec(
             "CREATE TABLE IF NOT EXISTS react_idem (\
                author TEXT NOT NULL, \
@@ -496,6 +497,16 @@ impl RefStore {
                count INTEGER NOT NULL, \
                created_at INTEGER NOT NULL, \
                PRIMARY KEY (author, idem));",
+            None,
+        )?;
+        // Per-author rate ledger: the time of each author's last ACCEPTED toggle,
+        // recorded UNCONDITIONALLY (independent of any idempotency key) so the
+        // anti-flood floor can't be sidestepped by omitting the key. One row per
+        // author; pruned by the freshness window alongside `react_idem`.
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS react_rate (\
+               author TEXT PRIMARY KEY, \
+               last_ms INTEGER NOT NULL);",
             None,
         )?;
         Ok(())
@@ -547,8 +558,16 @@ impl RefStore {
         let active = !had;
         let count = self.reaction_count(&req.target, &req.emoji);
 
-        // 4) Record the idem result (dedupe + the rate-limit timestamp), prune
-        // the ledger by freshness, and bound the reactions table.
+        // 4a) Record the rate-limit timestamp UNCONDITIONALLY — this is the only
+        // input to the anti-flood floor, so it must run whether or not the client
+        // supplied an idempotency key (otherwise the floor is trivially bypassed).
+        let _ = sql.exec(
+            "INSERT OR REPLACE INTO react_rate (author, last_ms) VALUES (?, ?);",
+            vec![req.author.clone().into(), now.into()],
+        );
+
+        // 4b) Record the idem result for replay dedupe (only when a key was sent),
+        // then prune both ledgers by freshness and bound the reactions table.
         if !req.idem.is_empty() {
             let _ = sql.exec(
                 "INSERT OR REPLACE INTO react_idem (author, idem, active, count, created_at) VALUES (?, ?, ?, ?, ?);",
@@ -563,6 +582,10 @@ impl RefStore {
         }
         let _ = sql.exec(
             "DELETE FROM react_idem WHERE created_at < ?;",
+            vec![(now - FRESHNESS_WINDOW_MS).into()],
+        );
+        let _ = sql.exec(
+            "DELETE FROM react_rate WHERE last_ms < ?;",
             vec![(now - FRESHNESS_WINDOW_MS).into()],
         );
         // Keep only the newest REACTIONS_RETAINED rows by insert time.
@@ -653,20 +676,20 @@ impl RefStore {
     fn last_react_ms(&self, author: &str) -> Option<i64> {
         #[derive(Deserialize)]
         struct Row {
-            created_at: i64,
+            last_ms: i64,
         }
         let rows: Vec<Row> = self
             .state
             .storage()
             .sql()
             .exec(
-                "SELECT created_at FROM react_idem WHERE author = ? ORDER BY created_at DESC LIMIT 1;",
+                "SELECT last_ms FROM react_rate WHERE author = ? LIMIT 1;",
                 vec![author.into()],
             )
             .ok()?
             .to_array()
             .ok()?;
-        rows.into_iter().next().map(|r| r.created_at)
+        rows.into_iter().next().map(|r| r.last_ms)
     }
 
     /// Up to REACTIONS_RETAINED reactions in the room (the client aggregates

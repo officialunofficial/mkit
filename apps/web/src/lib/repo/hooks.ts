@@ -379,8 +379,10 @@ export function useReactions(room: string, myPubkeyHex?: string): (targetId: str
 }
 
 /** Shared empty result for feed items with no reactions — one stable reference
- * (never mutated) so the "no reactions" case doesn't defeat memoization. */
-const NO_REACTIONS: ReactionAgg[] = []
+ * so the "no reactions" case doesn't defeat memoization. Frozen so a consumer
+ * can't mutate the shared singleton (the cast-through-unknown is the compiler's
+ * own escape hatch for assigning `readonly never[]` to the array type). */
+const NO_REACTIONS: ReactionAgg[] = Object.freeze([]) as unknown as ReactionAgg[]
 
 /**
  * Toggle the signing identity's emoji reaction on a feed item. Optimistically

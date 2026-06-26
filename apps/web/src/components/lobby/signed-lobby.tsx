@@ -8,7 +8,7 @@
 // reacting require an unlocked identity (shared with the multiplayer demo).
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useRef as useReactRef, useState } from 'react'
+import { useCallback, useEffect, useRef as useReactRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import {
@@ -32,7 +32,10 @@ import { BTN, FOCUS_RING, HOVER_BORDER, PRIMARY_BTN, errMsg } from '../multiplay
 /** Message length cap — the SAME shared constant the server enforces. */
 const MAX_CHARS = MAX_MESSAGE_CHARS
 
-/** Emojis offered in the add-reaction picker. */
+/** Emojis offered in the add-reaction picker. MUST stay in sync with the server
+ * allowlist `REACTION_EMOJI` in apps/repo-worker/src/chat.rs (the authority — it
+ * rejects anything else): a reaction with an emoji missing here can't be sent,
+ * and one only listed here would be refused server-side. Edit both together. */
 const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅', '🔥']
 
 /** The picker's known height (one row of `h-7` buttons + `p-1`) — used to place
@@ -290,6 +293,9 @@ function ReactionBar({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const triggerRef = useReactRef<HTMLButtonElement>(null)
+  // Stable identity so EmojiPicker's effect (deps include onClose) doesn't tear
+  // down and re-bind its window listeners on every ReactionBar re-render.
+  const closePicker = useCallback(() => setPickerOpen(false), [])
 
   return (
     <div className='mt-1 flex flex-wrap items-center gap-1'>
@@ -341,7 +347,7 @@ function ReactionBar({
             setPickerOpen(false)
             onToggle(e)
           }}
-          onClose={() => setPickerOpen(false)}
+          onClose={closePicker}
         />
       ) : null}
     </div>
