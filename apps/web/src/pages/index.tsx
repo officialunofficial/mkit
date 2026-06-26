@@ -15,70 +15,66 @@ export default function HomePage() {
         card='Version control that signs every commit.'
       />
 
-      {/* Signed lobby at the top — a live, public feed merging chat, /multiplayer
-          commits, and emoji reactions, all Ed25519-signed by the same passkey
-          identity. Reading is open; posting/reacting unlock that identity.
-          DemoBoundary lets the static prerender emit a fallback and hydrate the
-          wasm-backed client. */}
-      <section className='space-y-2'>
-        <p className='text-sm text-muted text-pretty'>
-          A live lobby — chat, commits from{' '}
-          <Link
-            to='/multiplayer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            multiplayer
-          </Link>
-          , and reactions, all in one place.
-        </p>
-        <DemoBoundary>
-          <SignedLobby />
-        </DemoBoundary>
-      </section>
+      {/* Above-the-fold: the live lobby beside the hero. Two columns on lg+
+          (lobby left, hero right); stacks to one column below that with the
+          LOBBY on top, then the hero. `items-start` so each column sizes to its
+          own content instead of stretching to match the taller one. */}
+      <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
+        {/* Signed lobby — a live, public feed merging chat, /multiplayer commits,
+            and emoji reactions, all Ed25519-signed by the same passkey identity.
+            Reading is open; posting/reacting unlock that identity. DemoBoundary
+            lets the static prerender emit a fallback and hydrate the wasm-backed
+            client. */}
+        <section>
+          <DemoBoundary>
+            <SignedLobby />
+          </DemoBoundary>
+        </section>
 
-      <section className='space-y-5'>
-        <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
-        <p className='max-w-prose text-lg text-fg'>
-          mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash — change a byte, get a new
-          name. Claims about a commit (reviewed, tested, deployed) travel as signed statements anyone can verify.
-          It&rsquo;s written in Rust, so it runs anywhere — including this browser.
-        </p>
-        <div className='max-w-prose space-y-3'>
-          <p className='text-sm text-muted'>
-            mkit is git-like{' '}
-            <Link
-              to='/parity'
-              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-            >
-              where it can be
-            </Link>
-            , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
-            first-class objects.
+        <section className='space-y-5'>
+          <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
+          <p className='max-w-prose text-lg text-fg'>
+            mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash — change a byte, get a
+            new name. Claims about a commit (reviewed, tested, deployed) travel as signed statements anyone can verify.
+            It&rsquo;s written in Rust, so it runs anywhere — including this browser.
           </p>
-          <p className='text-sm text-muted'>
-            open source (alpha):{' '}
-            <a
-              href='https://github.com/officialunofficial/mkit'
-              target='_blank'
-              rel='noreferrer'
-              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-            >
-              officialunofficial/mkit
-            </a>{' '}
-            on GitHub.
-          </p>
-          <div className='flex flex-col items-start gap-2'>
-            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
+          <div className='max-w-prose space-y-3'>
+            <p className='text-sm text-muted'>
+              mkit is git-like{' '}
+              <Link
+                to='/parity'
+                className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+              >
+                where it can be
+              </Link>
+              , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
+              first-class objects.
+            </p>
+            <p className='text-sm text-muted'>
+              open source (alpha):{' '}
+              <a
+                href='https://github.com/officialunofficial/mkit'
+                target='_blank'
+                rel='noreferrer'
+                className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+              >
+                officialunofficial/mkit
+              </a>{' '}
+              on GitHub.
+            </p>
+            <div className='flex flex-col items-start gap-2'>
+              {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
                 curl User-Agent and serves the signed installer (see
                 src/install-route.ts); it detects your platform, verifies the
                 cosign signature, and drops `mkit` into ~/.local/bin. */}
-            <InstallCommand command='curl mkit.sh | sh' />
-            {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
+              <InstallCommand command='curl mkit.sh | sh' />
+              {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
                 / Cursor / etc. via the vercel-labs `skills` CLI. */}
-            <InstallCommand command='npx skills add officialunofficial/mkit' />
+              <InstallCommand command='npx skills add officialunofficial/mkit' />
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <ul className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4'>
         <Demo

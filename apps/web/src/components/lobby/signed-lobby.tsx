@@ -167,7 +167,7 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
   const empty = items.length === 0
   return (
     <div className='relative'>
-      <div ref={scrollRef} onScroll={onScroll} className='max-h-96 min-h-44 overflow-y-auto bg-muted/5 py-1'>
+      <div ref={scrollRef} onScroll={onScroll} className='max-h-96 min-h-44 overflow-y-auto py-1'>
         {empty ? (
           <p className='p-4 text-sm text-muted text-pretty'>
             {isLoading ? 'Loading the lobby…' : 'No activity yet — say hi or push a commit in multiplayer.'}
@@ -219,7 +219,8 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
 
 /** One chat-style feed row: full header (avatar + name + time) for a run's
  * first message; a tight, indented continuation when `grouped` (timestamp shows
- * on hover). A reaction bar sits under the body. */
+ * on hover). The add-reaction trigger sits inline at the end of the content line
+ * (hover-revealed); any existing reaction pills sit on their own line below. */
 function Row({
   item,
   grouped,
@@ -260,29 +261,33 @@ function Row({
         {grouped ? null : (
           <div className='flex items-baseline gap-2'>
             <PlayerLabel pubkey={pubkey} className='truncate font-medium' />
+            <time title={time.title} className='shrink-0 text-xs text-muted tabular-nums'>
+              {time.clock}
+            </time>
             {item.kind === 'commit' ? (
               <span className='rounded-sm border border-hairline px-1 text-[10px] uppercase tracking-wide text-muted'>
                 {isForkRef(item.entry.ref) ? 'fork' : 'commit'}
               </span>
             ) : null}
-            <time
-              title={time.title}
-              className='ml-auto shrink-0 text-xs text-muted tabular-nums'
-            >
-              {time.label}
-            </time>
           </div>
         )}
-        <div className={grouped ? '' : 'mt-0.5'}>{body}</div>
-        <ReactionBar reactions={reactions} canReact={canReact} onToggle={onToggle} />
+        <div className={grouped ? '' : 'mt-0.5'}>
+          <div className='flex items-start gap-2'>
+            <div className='min-w-0 flex-1'>{body}</div>
+            <AddReaction onToggle={onToggle} />
+          </div>
+        </div>
+        {reactions.length > 0 ? <ReactionPills reactions={reactions} canReact={canReact} onToggle={onToggle} /> : null}
       </div>
     </div>
   )
 }
 
-/** The reaction row under a message: existing reaction pills + an add-emoji
- * picker. Pills highlight when you've reacted; clicking toggles. */
-function ReactionBar({
+/** Existing-reaction pills, shown on their own line BELOW the content when a
+ * message has any reactions. Pills highlight when you've reacted; clicking
+ * toggles. (The add-emoji trigger lives inline on the content line — see
+ * AddReaction — not here.) */
+function ReactionPills({
   reactions,
   canReact,
   onToggle,
@@ -291,12 +296,6 @@ function ReactionBar({
   canReact: boolean
   onToggle: (emoji: string) => void
 }) {
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const triggerRef = useReactRef<HTMLButtonElement>(null)
-  // Stable identity so EmojiPicker's effect (deps include onClose) doesn't tear
-  // down and re-bind its window listeners on every ReactionBar re-render.
-  const closePicker = useCallback(() => setPickerOpen(false), [])
-
   return (
     <div className='mt-1 flex flex-wrap items-center gap-1'>
       {reactions.map((r) => (
@@ -315,10 +314,24 @@ function ReactionBar({
           {r.count}
         </button>
       ))}
+    </div>
+  )
+}
 
-      {/* Add-reaction control: a small face that opens a picker. Hidden until
-          row hover once there are already reactions. The picker itself renders in
-          a PORTAL (see EmojiPicker) so the feed's `overflow-y-auto` can't clip it. */}
+/** The add-reaction trigger: a small face that sits INLINE at the end of the
+ * content line and opens an emoji picker. Hidden until row hover (or keyboard
+ * focus / an open picker) so it isn't a persistent distraction on every row. The
+ * picker itself renders in a PORTAL (see EmojiPicker) so the feed's
+ * `overflow-y-auto` can't clip it. */
+function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const triggerRef = useReactRef<HTMLButtonElement>(null)
+  // Stable identity so EmojiPicker's effect (deps include onClose) doesn't tear
+  // down and re-bind its window listeners on every re-render.
+  const closePicker = useCallback(() => setPickerOpen(false), [])
+
+  return (
+    <>
       <button
         ref={triggerRef}
         type='button'
@@ -326,8 +339,8 @@ function ReactionBar({
         aria-label='Add reaction'
         aria-haspopup='menu'
         aria-expanded={pickerOpen}
-        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] ${
-          reactions.length > 0 ? 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100' : 'opacity-100'
+        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 ${
+          pickerOpen ? 'opacity-100' : 'opacity-0'
         }`}
       >
         <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
@@ -350,7 +363,7 @@ function ReactionBar({
           onClose={closePicker}
         />
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -511,25 +524,32 @@ function Composer({ room }: { room: string }) {
 }
 
 /**
- * Compact timestamp from an epoch-ms stamp, with a full-datetime `title` for
- * hover. GUARDS against a bogus `ts` (0 / negative / non-finite — which would
- * otherwise render an absurd "20629d"): such items get an empty label rather
- * than a wrong one. Recent → relative; today → clock time; older → a short date.
+ * Timestamp from an epoch-ms stamp, in two forms plus a full-datetime `title`
+ * for hover:
+ *   - `label` — compact/relative, for the tight continuation-row gutter: recent
+ *     → "now"/"Xm"; today → clock time; older → a short date.
+ *   - `clock` — absolute wall-clock for the row header: today → "2:10 PM";
+ *     older → a short date (with year when it differs).
+ * GUARDS against a bogus `ts` (0 / negative / non-finite — which would otherwise
+ * render an absurd "20629d"): such items get empty strings rather than wrong ones.
  */
-function fmtTime(ms: number): { label: string; title: string } {
-  if (!Number.isFinite(ms) || ms <= 0) return { label: '', title: '' }
+function fmtTime(ms: number): { label: string; clock: string; title: string } {
+  if (!Number.isFinite(ms) || ms <= 0) return { label: '', clock: '', title: '' }
   const now = Date.now()
   const d = new Date(ms)
   const title = d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+  const sameDay = new Date(now).toDateString() === d.toDateString()
+  const sameYear = new Date(now).getFullYear() === d.getFullYear()
+  const clockLabel = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+  const dateLabel = d.toLocaleDateString(
+    undefined,
+    sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' },
+  )
+  const clock = sameDay ? clockLabel : dateLabel
   const diff = Math.max(0, now - ms)
   const sec = Math.floor(diff / 1000)
-  if (sec < 60) return { label: 'now', title }
-  if (sec < 3600) return { label: `${Math.floor(sec / 60)}m`, title }
-  const sameDay = new Date(now).toDateString() === d.toDateString()
-  if (sameDay) return { label: d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), title }
-  const sameYear = new Date(now).getFullYear() === d.getFullYear()
-  return {
-    label: d.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' }),
-    title,
-  }
+  if (sec < 60) return { label: 'now', clock, title }
+  if (sec < 3600) return { label: `${Math.floor(sec / 60)}m`, clock, title }
+  if (sameDay) return { label: clockLabel, clock, title }
+  return { label: dateLabel, clock, title }
 }
