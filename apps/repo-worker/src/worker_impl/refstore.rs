@@ -400,7 +400,16 @@ impl RefStore {
             .exec("SELECT last_insert_rowid() AS seq;", None)
             .and_then(|r| r.to_array())
             .unwrap_or_default();
-        let seq: u64 = seq_rows.into_iter().next().map(|r| r.seq as u64).unwrap_or(0);
+        let seq: u64 = match seq_rows.into_iter().next() {
+            Some(r) => r.seq as u64,
+            // The row WAS inserted (the INSERT above used `?`); a missing rowid
+            // here means the SELECT itself failed — surface it rather than
+            // silently shipping a seq=0 that downstream can't order.
+            None => {
+                worker::console_error!("post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0");
+                0
+            }
+        };
 
         // Bound the serving index: drop rows older than the most-recent
         // MESSAGES_RETAINED (R2 still holds every message permanently). seq is
@@ -424,16 +433,15 @@ impl RefStore {
             );
         }
 
-        self.broadcast_str(
-            &serde_json::to_string(&WatchFrame::Chat {
-                message_id: req.id.clone(),
-                author_pubkey: req.author.clone(),
-                text: req.text.clone(),
-                created_at: now,
-                seq,
-            })
-            .unwrap_or_default(),
-        );
+        // Use the typed `broadcast` helper (like the Commit path) so a serialize
+        // failure SKIPS the frame rather than fanning out an empty string "".
+        self.broadcast(&WatchFrame::Chat {
+            message_id: req.id.clone(),
+            author_pubkey: req.author.clone(),
+            text: req.text.clone(),
+            created_at: now,
+            seq,
+        });
 
         Response::from_json(&PostResp {
             accepted: true,
@@ -596,17 +604,15 @@ impl RefStore {
             vec![REACTIONS_RETAINED.into()],
         );
 
-        // 5) Broadcast + respond.
-        self.broadcast_str(
-            &serde_json::to_string(&WatchFrame::Reaction {
-                target_id: req.target.clone(),
-                emoji: req.emoji.clone(),
-                author_pubkey: req.author.clone(),
-                active,
-                count,
-            })
-            .unwrap_or_default(),
-        );
+        // 5) Broadcast + respond. Typed `broadcast` (like Commit/Chat) so a
+        // serialize failure skips the frame rather than fanning out "".
+        self.broadcast(&WatchFrame::Reaction {
+            target_id: req.target.clone(),
+            emoji: req.emoji.clone(),
+            author_pubkey: req.author.clone(),
+            active,
+            count,
+        });
 
         Response::from_json(&ReactResp { active, count })
     }
@@ -778,17 +784,29 @@ impl RefStore {
 
     /// Serialize a `WatchFrame` and fan it out to every `/watch` subscriber.
     fn broadcast(&self, frame: &WatchFrame) {
-        let Ok(payload) = serde_json::to_string(frame) else { return };
-        self.broadcast_str(&payload);
+        match serde_json::to_string(frame) {
+            Ok(payload) => self.broadcast_str(&payload),
+            Err(e) => worker::console_error!("broadcast: failed to serialize WatchFrame: {e}"),
+        }
     }
 
     /// Fan a pre-serialized JSON frame out to every attached `/watch` socket.
     /// Shared by ref-advance and chat broadcasts so both ride the one stream.
+    /// Best-effort per socket (a closed/errored one is skipped; the runtime drops
+    /// it on the next cycle), but failures are COUNTED and logged — a broadcast
+    /// that reaches nobody is the signature of "messages persist but never reach
+    /// other viewers", so it must be observable, not silent.
     fn broadcast_str(&self, payload: &str) {
-        for ws in self.state.get_websockets() {
-            // Best-effort: a closed/errored socket is simply skipped; the
-            // runtime drops it from the set on the next cycle.
-            let _ = ws.send_with_str(payload);
+        let sockets = self.state.get_websockets();
+        let total = sockets.len();
+        let mut failed = 0usize;
+        for ws in &sockets {
+            if ws.send_with_str(payload).is_err() {
+                failed += 1;
+            }
+        }
+        if failed > 0 {
+            worker::console_error!("broadcast: {failed}/{total} /watch socket sends failed");
         }
     }
 }
