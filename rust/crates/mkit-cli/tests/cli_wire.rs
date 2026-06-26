@@ -374,9 +374,10 @@ fn blame_l_start_past_eof_is_usage_error() {
     let out = run_in(td.path(), &["blame", "-L", "9,10", "f.txt"]);
     assert!(!out.status.success(), "expected failure on out-of-range -L");
     let stderr = String::from_utf8(out.stderr).unwrap();
+    // git-faithful, colon-free phrasing: `file f.txt has only 2 lines`.
     assert!(
-        stderr.contains("only 2 lines"),
-        "expected line-count diagnostic, got: {stderr}"
+        stderr.contains("file f.txt has only 2 lines"),
+        "expected git-faithful line-count diagnostic, got: {stderr}"
     );
 }
 

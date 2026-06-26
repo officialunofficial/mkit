@@ -112,11 +112,13 @@ pub fn run(args: &[String]) -> u8 {
     // `-L` slices the per-line attributions to the requested range,
     // preserving the file's own 1-based line numbers in the output.
     let result = match &opts.lines {
-        Some(spec) => match parse_line_range(spec, result.lines.len()) {
+        Some(spec) => match parse_line_range(spec, result.lines.len(), file) {
             Ok((start, end)) => BlameResult {
                 lines: result.lines[start - 1..end].to_vec(),
             },
-            Err(msg) => return emit_err(&format!("file {file}: {msg}"), exit::USAGE),
+            // The message is already git-faithful and self-contained
+            // (it carries `file` where git does), so it prints verbatim.
+            Err(msg) => return emit_err(&msg, exit::USAGE),
         },
         None => result,
     };
@@ -133,6 +135,7 @@ pub fn run(args: &[String]) -> u8 {
 
 /// Parse a `git blame -L` style range spec into an inclusive, 1-based
 /// `(start, end)` pair validated against `total` (the file's line count).
+/// `file` only feeds git-faithful "has only N lines" diagnostics.
 ///
 /// Accepted forms — `<start>,<end>`, `<start>,+<n>`, `<start>,`,
 /// `,<end>`, and a bare `<start>` (treated as `<start>,` → to EOF).
@@ -142,14 +145,24 @@ pub fn run(args: &[String]) -> u8 {
 /// start, or a non-numeric token is an error.
 ///
 /// Returns `Err(message)` with a git-flavored diagnostic on bad input.
-fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> {
+fn parse_line_range(spec: &str, total: usize, file: &str) -> Result<(usize, usize), String> {
+    // An empty file has no blamable lines under any -L form, and git
+    // prints `file <f> has only 0 lines` regardless of the range shape.
+    // Checking it first also makes the post-swap bounds provably >= 1:
+    // with `total > 0`, the default end is >= 1 and `parse_one_based` /
+    // the `+n` path both reject 0, so the swap can't yield line 0 and the
+    // `lines[start - 1..end]` slice in `run` can't underflow.
+    if total == 0 {
+        return Err(format!("file {file} has only 0 lines"));
+    }
+
     let (start_tok, end_tok) = match spec.split_once(',') {
         Some((s, e)) => (s.trim(), Some(e.trim())),
         None => (spec.trim(), None),
     };
 
     // Start: defaults to 1 when omitted (the `,<end>` form). An explicit
-    // `0` is rejected here; git: `fatal: -L invalid line number: 0`.
+    // `0` is rejected here; git: `-L invalid line number: 0`.
     let start = if start_tok.is_empty() {
         1
     } else {
@@ -171,31 +184,20 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
         Some(tok) => parse_one_based(tok)?,
     };
 
-    // git swaps an inverted range rather than erroring.
-    let (start, mut end) = if start > end {
+    // git swaps an inverted range rather than erroring. Both bounds are
+    // >= 1 by construction (see the empty-file note above), so no zero
+    // can survive the swap.
+    let (start, end) = if start > end {
         (end, start)
     } else {
         (start, end)
     };
 
-    // Validate the final bounds after the swap. Zero tokens are rejected
-    // above, so this is belt-and-suspenders against an internal slip —
-    // but it must be a real error, not a debug assert: in release the
-    // `lines[start - 1..end]` slice would underflow and panic on start 0.
-    if start == 0 || end == 0 {
-        return Err("invalid -L line number: 0".to_string());
-    }
-    if total == 0 {
-        return Err("has only 0 lines".to_string());
-    }
     if start > total {
-        return Err(format!("has only {total} lines"));
+        return Err(format!("file {file} has only {total} lines"));
     }
     // Clamp an over-long end to EOF, like git.
-    if end > total {
-        end = total;
-    }
-    Ok((start, end))
+    Ok((start, end.min(total)))
 }
 
 /// Parse a single decimal line-number token, rejecting empty/non-numeric
@@ -250,65 +252,76 @@ use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
-    use super::parse_line_range;
-
     // Semantics here are pinned against real `git blame -L` behavior
     // (verified empirically): inclusive bounds, `+n` = n lines, bare
     // start runs to EOF, inverted ranges swap, over-long ends clamp.
 
+    /// Thin wrapper supplying a fixed filename so the range cases read
+    /// cleanly; the filename only colors the "has only N lines" message.
+    fn range(spec: &str, total: usize) -> Result<(usize, usize), String> {
+        super::parse_line_range(spec, total, "f.txt")
+    }
+
     #[test]
     fn explicit_range_is_inclusive() {
-        assert_eq!(parse_line_range("3,5", 8), Ok((3, 5)));
+        assert_eq!(range("3,5", 8), Ok((3, 5)));
     }
 
     #[test]
     fn plus_n_is_n_lines_from_start() {
         // `git blame -L 3,+2` → lines 3,4.
-        assert_eq!(parse_line_range("3,+2", 8), Ok((3, 4)));
-        assert_eq!(parse_line_range("1,+1", 8), Ok((1, 1)));
+        assert_eq!(range("3,+2", 8), Ok((3, 4)));
+        assert_eq!(range("1,+1", 8), Ok((1, 1)));
     }
 
     #[test]
     fn open_ended_start_runs_to_eof() {
-        assert_eq!(parse_line_range("4,", 8), Ok((4, 8)));
+        assert_eq!(range("4,", 8), Ok((4, 8)));
     }
 
     #[test]
     fn bare_start_runs_to_eof() {
         // `git blame -L 3` → 3..EOF.
-        assert_eq!(parse_line_range("3", 8), Ok((3, 8)));
+        assert_eq!(range("3", 8), Ok((3, 8)));
     }
 
     #[test]
     fn open_ended_end_starts_at_one() {
-        assert_eq!(parse_line_range(",3", 8), Ok((1, 3)));
+        assert_eq!(range(",3", 8), Ok((1, 3)));
     }
 
     #[test]
     fn inverted_range_is_swapped() {
         // `git blame -L 5,2` → 2..5.
-        assert_eq!(parse_line_range("5,2", 8), Ok((2, 5)));
+        assert_eq!(range("5,2", 8), Ok((2, 5)));
     }
 
     #[test]
     fn end_past_eof_is_clamped() {
-        assert_eq!(parse_line_range("3,99", 8), Ok((3, 8)));
+        assert_eq!(range("3,99", 8), Ok((3, 8)));
     }
 
     #[test]
     fn start_past_eof_errors() {
-        let err = parse_line_range("99,100", 8).unwrap_err();
+        let err = range("99,100", 8).unwrap_err();
         assert!(err.contains("only 8 lines"), "got {err:?}");
     }
 
     #[test]
-    fn empty_file_errors() {
-        assert!(parse_line_range("1,", 0).is_err());
+    fn empty_file_message_is_git_faithful_for_every_form() {
+        // git prints `file <f> has only 0 lines` regardless of the -L
+        // form. The empty-file guard runs before any token parsing, so
+        // even forms that would otherwise reach line-number validation
+        // (`,0`, bare start) get the same message — no divergence by form.
+        for spec in ["1,", "3", "1,3", ",0", "3,0"] {
+            let err = super::parse_line_range(spec, 0, "empty.txt").unwrap_err();
+            assert_eq!(err, "file empty.txt has only 0 lines", "spec {spec:?}");
+        }
     }
 
     #[test]
     fn zero_start_errors() {
-        assert!(parse_line_range("0,5", 8).is_err());
+        assert!(range("0,5", 8).is_err());
     }
 
     #[test]
@@ -316,9 +329,9 @@ mod tests {
         // Regression: `,0` defaults start to 1, parses end 0, then the
         // inverted-range swap used to yield start == 0 and panic the
         // debug assertion (and underflow the slice in release). git:
-        // `fatal: -L invalid line number: 0`.
+        // `-L invalid line number: 0`.
         for spec in [",0", "3,0", "0,0"] {
-            let err = parse_line_range(spec, 8).unwrap_err();
+            let err = range(spec, 8).unwrap_err();
             assert!(
                 err.contains("invalid -L line number: 0"),
                 "spec {spec:?} → {err:?}"
@@ -328,12 +341,12 @@ mod tests {
 
     #[test]
     fn non_numeric_errors() {
-        assert!(parse_line_range("a,b", 8).is_err());
-        assert!(parse_line_range("3,+x", 8).is_err());
+        assert!(range("a,b", 8).is_err());
+        assert!(range("3,+x", 8).is_err());
     }
 
     #[test]
     fn zero_plus_offset_errors() {
-        assert!(parse_line_range("3,+0", 8).is_err());
+        assert!(range("3,+0", 8).is_err());
     }
 }
