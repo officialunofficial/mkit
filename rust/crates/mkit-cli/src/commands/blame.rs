@@ -148,17 +148,16 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
         None => (spec.trim(), None),
     };
 
-    // Start: defaults to 1 when omitted (the `,<end>` form).
+    // Start: defaults to 1 when omitted (the `,<end>` form). An explicit
+    // `0` is rejected here; git: `fatal: -L invalid line number: 0`.
     let start = if start_tok.is_empty() {
         1
     } else {
-        parse_line_num(start_tok)?
+        parse_one_based(start_tok)?
     };
-    if start == 0 {
-        return Err("line numbers are 1-based; line 0 is invalid".to_string());
-    }
 
-    // End: omitted or empty → EOF; `+<n>` → n lines from start; else absolute.
+    // End: omitted or empty → EOF; `+<n>` → n lines from start; else an
+    // absolute, also-1-based line number (`,0` / `3,0` are rejected).
     let end = match end_tok {
         None | Some("") => total,
         Some(tok) if tok.starts_with('+') => {
@@ -169,7 +168,7 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
             // n lines starting at `start`, inclusive: `+2` from 3 → 3,4.
             start.saturating_add(n - 1)
         }
-        Some(tok) => parse_line_num(tok)?,
+        Some(tok) => parse_one_based(tok)?,
     };
 
     // git swaps an inverted range rather than erroring.
@@ -179,6 +178,13 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
         (start, end)
     };
 
+    // Validate the final bounds after the swap. Zero tokens are rejected
+    // above, so this is belt-and-suspenders against an internal slip —
+    // but it must be a real error, not a debug assert: in release the
+    // `lines[start - 1..end]` slice would underflow and panic on start 0.
+    if start == 0 || end == 0 {
+        return Err("invalid -L line number: 0".to_string());
+    }
     if total == 0 {
         return Err("has only 0 lines".to_string());
     }
@@ -189,7 +195,6 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
     if end > total {
         end = total;
     }
-    debug_assert!(start >= 1 && start <= end && end <= total);
     Ok((start, end))
 }
 
@@ -198,6 +203,16 @@ fn parse_line_range(spec: &str, total: usize) -> Result<(usize, usize), String> 
 fn parse_line_num(tok: &str) -> Result<usize, String> {
     tok.parse::<usize>()
         .map_err(|_| format!("invalid line number '{tok}' in -L range"))
+}
+
+/// Parse a 1-based line-number token, rejecting both non-numeric input
+/// and an explicit `0`, mirroring git's `-L invalid line number: 0`.
+fn parse_one_based(tok: &str) -> Result<usize, String> {
+    let n = parse_line_num(tok)?;
+    if n == 0 {
+        return Err("invalid -L line number: 0".to_string());
+    }
+    Ok(n)
 }
 
 /// JSONL output for `--format=json`. One record per source line:
@@ -294,6 +309,21 @@ mod tests {
     #[test]
     fn zero_start_errors() {
         assert!(parse_line_range("0,5", 8).is_err());
+    }
+
+    #[test]
+    fn zero_end_errors_without_panicking() {
+        // Regression: `,0` defaults start to 1, parses end 0, then the
+        // inverted-range swap used to yield start == 0 and panic the
+        // debug assertion (and underflow the slice in release). git:
+        // `fatal: -L invalid line number: 0`.
+        for spec in [",0", "3,0", "0,0"] {
+            let err = parse_line_range(spec, 8).unwrap_err();
+            assert!(
+                err.contains("invalid -L line number: 0"),
+                "spec {spec:?} → {err:?}"
+            );
+        }
     }
 
     #[test]

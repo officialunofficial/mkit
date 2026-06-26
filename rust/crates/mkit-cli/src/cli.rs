@@ -235,8 +235,10 @@ commands:
                     (--fork-audit re-derives referenced content) (feature: git-bridge)
   git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
   git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
-  blame [--format=json] <file>
-                    Show line-level commit attribution (JSONL with --format=json)
+  blame [--format=json] [-L <start>,<end>] [<rev>] <file>
+                    Show line-level commit attribution; -L limits output to a
+                    line range, <rev> blames as of a revision (default HEAD;
+                    JSONL with --format=json)
   verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]... [--external-signer-arg <V>]...

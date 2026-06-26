@@ -381,6 +381,27 @@ fn blame_l_start_past_eof_is_usage_error() {
 }
 
 #[test]
+fn blame_l_zero_line_number_errors_without_panicking() {
+    // Regression: `-L ,0` once panicked (exit 101) via an inverted-range
+    // swap that produced line 0. It must be a clean usage error instead.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\nc\n", "first");
+    let out = run_in(td.path(), &["blame", "-L", ",0", "f.txt"]);
+    assert!(!out.status.success(), "expected failure on -L ,0");
+    assert_ne!(
+        out.status.code(),
+        Some(101),
+        "must not panic; got a 101 exit"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid -L line number: 0"),
+        "expected git-style zero-line diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
 fn blame_at_explicit_revision_uses_that_commit() {
     // `mkit blame <rev> <file>` blames the file as of <rev>, not HEAD.
     let td = tempfile::tempdir().unwrap();
