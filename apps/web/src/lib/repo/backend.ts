@@ -795,8 +795,8 @@ export interface RepoWasmClient {
   ): Promise<{ active: boolean; count: number }>
   list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
   /**
-   * ListCommits — server-side first-parent walk; one round-trip returns a page of RAW commit/remix objects (the caller
-   * decodes them) plus a continuation cursor.
+   * ListCommits — server-side first-parent walk; one round-trip returns a page of denormalized commit metadata
+   * (already decoded server-side, no object bytes) plus a continuation cursor. The client renders it directly.
    */
   list_commits(
     baseUrl: string,
