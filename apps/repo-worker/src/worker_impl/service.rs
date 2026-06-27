@@ -21,8 +21,8 @@ use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
-    BatchGetObjectsRequest, BatchGetObjectsResponse, ChatMessage, CommitEntry, FoundObject,
-    GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse, ListCommitsRequest,
+    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
+    ListCommitsRequest,
     ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
     ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
     PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
@@ -732,65 +732,6 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             Ok(Response::new(ListCommitsResponse {
                 commits,
                 next_cursor: Some(next_cursor),
-                ..Default::default()
-            }))
-        })
-        .await
-    }
-
-    async fn batch_get_objects(
-        &self,
-        _ctx: RequestContext,
-        request: ServiceRequest<'_, BatchGetObjectsRequest>,
-    ) -> ServiceResult<BatchGetObjectsResponse> {
-        let msg = request.to_owned_message();
-        let room = msg.room.unwrap_or_default();
-        let ids = msg.object_ids;
-        const MAX_BATCH: usize = 256;
-        if ids.len() > MAX_BATCH {
-            return Err(ce_invalid("too many object_ids in one batch"));
-        }
-        check_room(&room)?;
-
-        let env = self.env.clone();
-        SendFuture::new(async move {
-            let bucket = env
-                .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
-            // Fan the reads out CONCURRENTLY — total R2 work stays O(n) but the n
-            // WAN round-trips (and n auth checks) collapse into one client request.
-            let reads = ids.into_iter().map(|id| {
-                let bucket = &bucket;
-                let room = &room;
-                async move {
-                    match bucket.get(&object_key(room, &id)).execute().await {
-                        Ok(Some(obj)) => {
-                            let bytes = obj
-                                .body()
-                                .ok_or_else(|| ce_internal("R2 object had no body"))?
-                                .bytes()
-                                .await
-                                .map_err(|e| ce_internal(format!("R2 read: {e}")))?;
-                            Ok(FoundObject {
-                                id: Some(id),
-                                found: Some(true),
-                                bytes: Some(bytes),
-                                ..Default::default()
-                            })
-                        }
-                        Ok(None) => Ok(FoundObject {
-                            id: Some(id),
-                            found: Some(false),
-                            bytes: Some(Vec::new()),
-                            ..Default::default()
-                        }),
-                        Err(e) => Err(ce_internal(format!("R2 get: {e}"))),
-                    }
-                }
-            });
-            let objects = futures::future::try_join_all(reads).await?;
-            Ok(Response::new(BatchGetObjectsResponse {
-                objects,
                 ..Default::default()
             }))
         })

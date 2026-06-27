@@ -86,14 +86,6 @@ pub type OwnedListCommitsRequestView = ::buffa::view::OwnedView<
 pub type OwnedListCommitsResponseView = ::buffa::view::OwnedView<
     __buffa::view::ListCommitsResponseView<'static>,
 >;
-///Shorthand for `OwnedView<BatchGetObjectsRequestView<'static>>`.
-pub type OwnedBatchGetObjectsRequestView = ::buffa::view::OwnedView<
-    __buffa::view::BatchGetObjectsRequestView<'static>,
->;
-///Shorthand for `OwnedView<BatchGetObjectsResponseView<'static>>`.
-pub type OwnedBatchGetObjectsResponseView = ::buffa::view::OwnedView<
-    __buffa::view::BatchGetObjectsResponseView<'static>,
->;
 impl ::connectrpc::Encodable<PutObjectResponse>
 for __buffa::view::PutObjectResponseView<'_> {
     fn encode(
@@ -289,24 +281,6 @@ for ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
 }
-impl ::connectrpc::Encodable<BatchGetObjectsResponse>
-for __buffa::view::BatchGetObjectsResponseView<'_> {
-    fn encode(
-        &self,
-        codec: ::connectrpc::CodecFormat,
-    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
-        ::connectrpc::__codegen::encode_view_body(self, codec)
-    }
-}
-impl ::connectrpc::Encodable<BatchGetObjectsResponse>
-for ::buffa::view::OwnedView<__buffa::view::BatchGetObjectsResponseView<'static>> {
-    fn encode(
-        &self,
-        codec: ::connectrpc::CodecFormat,
-    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
-        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
-    }
-}
 /// Full service name for this service.
 pub const REPO_SERVICE_SERVICE_NAME: &str = "mkit.repo.v1.RepoService";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `PutObject` RPC.
@@ -405,15 +379,6 @@ pub const REPO_SERVICE_LIST_REACTIONS_SPEC: ::connectrpc::Spec = ::connectrpc::S
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const REPO_SERVICE_LIST_COMMITS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListCommits",
-        ::connectrpc::StreamType::Unary,
-    )
-    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `BatchGetObjects` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
-pub const REPO_SERVICE_BATCH_GET_OBJECTS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
-        "/mkit.repo.v1.RepoService/BatchGetObjects",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -663,24 +628,6 @@ pub trait RepoService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<ListCommitsResponse> + Send + use<'a, Self>,
-        >,
-    > + Send;
-    /// Handle the BatchGetObjects RPC.
-    ///
-    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
-    ///
-    /// `request` is borrowed from the request body and is valid for the
-    /// duration of the call; message fields are read directly on it
-    /// (zero-copy). The response cannot borrow from `request` — use
-    /// `.to_owned_message()` (or copy the specific fields) for anything
-    /// returned, stored, or moved into `tokio::spawn`.
-    fn batch_get_objects<'a>(
-        &'a self,
-        ctx: ::connectrpc::RequestContext,
-        request: ::connectrpc::ServiceRequest<'_, BatchGetObjectsRequest>,
-    ) -> impl ::std::future::Future<
-        Output = ::connectrpc::ServiceResult<
-            impl ::connectrpc::Encodable<BatchGetObjectsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -986,31 +933,6 @@ impl<S: RepoService> RepoServiceExt for S {
                 },
             )
             .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC)
-            .route_view(
-                REPO_SERVICE_SERVICE_NAME,
-                "BatchGetObjects",
-                {
-                    let svc = ::std::sync::Arc::clone(&self);
-                    ::connectrpc::view_handler_fn(move |
-                        ctx,
-                        req: ::buffa::view::OwnedView<
-                            __buffa::view::BatchGetObjectsRequestView<'static>,
-                        >,
-                        format|
-                    {
-                        let svc = ::std::sync::Arc::clone(&svc);
-                        async move {
-                            let sreq = ::connectrpc::ServiceRequest::<
-                                BatchGetObjectsRequest,
-                            >::from_parts(req.reborrow(), req.bytes());
-                            svc.batch_get_objects(ctx, sreq)
-                                .await?
-                                .encode::<BatchGetObjectsResponse>(format)
-                        }
-                    })
-                },
-            )
-            .with_spec(REPO_SERVICE_BATCH_GET_OBJECTS_SPEC)
     }
 }
 /// Monomorphic dispatcher for `RepoService`.
@@ -1120,12 +1042,6 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
                         .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC),
-                )
-            }
-            "BatchGetObjects" => {
-                Some(
-                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
-                        .with_spec(REPO_SERVICE_BATCH_GET_OBJECTS_SPEC),
                 )
             }
             _ => None,
@@ -1299,23 +1215,6 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     svc.list_commits(ctx, req)
                         .await?
                         .encode::<ListCommitsResponse>(format)
-                })
-            }
-            "BatchGetObjects" => {
-                let svc = ::std::sync::Arc::clone(&self.inner);
-                Box::pin(async move {
-                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
-                        BatchGetObjectsRequest,
-                    >(request.encoded()?, format)?;
-                    let req: __buffa::view::BatchGetObjectsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
-                        &body,
-                    )?;
-                    let req = ::connectrpc::ServiceRequest::<
-                        BatchGetObjectsRequest,
-                    >::from_parts(&req, &body);
-                    svc.batch_get_objects(ctx, req)
-                        .await?
-                        .encode::<BatchGetObjectsResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -1866,43 +1765,6 @@ where
                 &self.config,
                 REPO_SERVICE_SERVICE_NAME,
                 "ListCommits",
-                request,
-                options,
-            )
-            .await
-    }
-    /// Call the BatchGetObjects RPC. Sends a request to /mkit.repo.v1.RepoService/BatchGetObjects.
-    pub async fn batch_get_objects(
-        &self,
-        request: BatchGetObjectsRequest,
-    ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::BatchGetObjectsResponseView<'static>>,
-        >,
-        ::connectrpc::ConnectError,
-    > {
-        self.batch_get_objects_with_options(
-                request,
-                ::connectrpc::client::CallOptions::default(),
-            )
-            .await
-    }
-    /// Call the BatchGetObjects RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
-    pub async fn batch_get_objects_with_options(
-        &self,
-        request: BatchGetObjectsRequest,
-        options: ::connectrpc::client::CallOptions,
-    ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::BatchGetObjectsResponseView<'static>>,
-        >,
-        ::connectrpc::ConnectError,
-    > {
-        ::connectrpc::client::call_unary(
-                &self.transport,
-                &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "BatchGetObjects",
                 request,
                 options,
             )

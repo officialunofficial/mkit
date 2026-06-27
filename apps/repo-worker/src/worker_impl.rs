@@ -15,6 +15,7 @@ use worker::send::SendFuture;
 use worker::{event, Context, Env, Method, Request, Response, Result};
 
 pub mod auth;
+pub mod commit_index;
 pub mod refstore;
 pub mod service;
 pub mod wire;

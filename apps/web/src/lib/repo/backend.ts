@@ -816,12 +816,6 @@ export interface RepoWasmClient {
     }>
     nextCursorHex: string
   }>
-  /** BatchGetObjects — fetch many objects in one round-trip (server fans the reads out). */
-  batch_get_objects(
-    baseUrl: string,
-    room: string,
-    objectIdsHex: string[],
-  ): Promise<Array<{ idHex: string; found: boolean; bytes: Uint8Array }>>
 }
 
 /**
@@ -1051,24 +1045,17 @@ export class WasmRepoBackend implements RepoBackend {
     const cached = this.walkCache.get(cacheKey)
     if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
-    // PRIMARY: one server-side walk (ListCommits) returns the whole page of raw
-    // objects in ONE round-trip — O(1) round-trips instead of O(depth) sequential
-    // GetObject calls. Falls back to the per-object client walk if the worker
-    // doesn't support ListCommits yet (older deploy → the RPC throws).
-    try {
-      const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
-      this.walkCache.set(cacheKey, { head, entries })
-      return entries
-    } catch (e) {
-      // Fall through to the legacy per-object walk.
-      console.warn('[lobby] ListCommits path failed, falling back to walk:', e)
-    }
-    return this.commitLogWalk(room, ref, cap, head, cacheKey, cached, opts)
+    // The worker owns the commit-log walk: ListCommits returns the whole page of
+    // denormalized metadata in ONE round-trip (O(1) round-trips, no per-object
+    // GetObject + decode). The client just renders what it's handed.
+    const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
+    this.walkCache.set(cacheKey, { head, entries })
+    return entries
   }
 
   /**
-   * O(1)-round-trip path: page through ListCommits, decode each raw object, warm the object cache, and splice the
-   * cached tail when the walk reaches a hash we already have. Throws (→ caller falls back) if the RPC is unsupported.
+   * Page through ListCommits, mapping each denormalized entry straight to a log entry, and splice the cached tail when
+   * the walk reaches a hash we already have. No object bytes, no decode — the worker serves the metadata.
    */
   private async commitLogViaListCommits(
     room: string,
@@ -1126,48 +1113,6 @@ export class WasmRepoBackend implements RepoBackend {
     }
 
     return spliced ? [...fresh, ...spliced] : fresh
-  }
-
-  /**
-   * Legacy O(depth) path: walk the chain one GetObject per commit. Kept as the fallback for workers without
-   * ListCommits, and shares the incremental cached-tail splice + onProgress streaming.
-   */
-  private async commitLogWalk(
-    room: string,
-    ref: string,
-    cap: number,
-    head: string,
-    cacheKey: string,
-    cached: { head: string; entries: CommitLogEntry[] } | undefined,
-    opts?: CommitLogOpts,
-  ): Promise<CommitLogEntry[]> {
-    const tailByHash = new Map<string, number>()
-    if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
-
-    const fresh: CommitLogEntry[] = []
-    const seen = new Set<string>()
-    let hash: string | undefined = head
-    let spliced: CommitLogEntry[] | null = null
-    while (hash && fresh.length < cap && !seen.has(hash)) {
-      const tailIdx = tailByHash.get(hash)
-      if (tailIdx !== undefined) {
-        // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
-        spliced = cached!.entries.slice(tailIdx)
-        break
-      }
-      seen.add(hash)
-      const bytes = await this.cachedObject(room, hash)
-      if (!bytes) break // object missing — stop the walk
-      const decoded = decodeLogObject(this.api, bytes, hash, ref)
-      if (!decoded) break // not a commit/remix — stop rather than throw
-      fresh.push(decoded.entry)
-      hash = decoded.firstParent
-      opts?.onProgress?.([...fresh])
-    }
-
-    const entries = spliced ? [...fresh, ...spliced] : fresh
-    this.walkCache.set(cacheKey, { head, entries })
-    return entries
   }
 
   /**

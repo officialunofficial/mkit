@@ -116,11 +116,6 @@ service RepoService {
   // the previous object). The client decodes the bytes with its existing
   // decoder, so the server needs no field-by-field parity. Unauthenticated read.
   rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
-
-  // Fetch many loose objects in ONE round-trip; the server fans the R2 GETs out
-  // concurrently. Collapses an N+1 read (e.g. a checkout reading every entry of
-  // a tree) from N round-trips + N auth checks to 1. Unauthenticated read.
-  rpc BatchGetObjects(BatchGetObjectsRequest) returns (BatchGetObjectsResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -171,22 +166,6 @@ message CommitEntry {
 message ListCommitsResponse {
   repeated CommitEntry commits = 1;
   string next_cursor = 2; // 64-hex first-parent of the last entry; empty when the chain ended
-}
-
-// Concurrent batch object read (one round-trip for N objects).
-message BatchGetObjectsRequest {
-  string room = 1;
-  repeated bytes object_ids = 2; // 32-byte ids; the server caps the count
-}
-
-message FoundObject {
-  bytes id = 1;
-  bool found = 2;
-  bytes bytes = 3;        // empty when found=false
-}
-
-message BatchGetObjectsResponse {
-  repeated FoundObject objects = 1;
 }
 
 // ----------------------------------------------------------------------------
