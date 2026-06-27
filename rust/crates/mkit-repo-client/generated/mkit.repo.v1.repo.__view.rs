@@ -2049,14 +2049,24 @@ impl ::serde::Serialize for ListCommitsRequestOwnedView {
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct CommitObjectView<'a> {
-    /// Field 1: `id`
-    pub id: ::core::option::Option<&'a [u8]>,
-    /// Field 2: `object_bytes`
-    pub object_bytes: ::core::option::Option<&'a [u8]>,
+pub struct CommitEntryView<'a> {
+    /// Field 1: `hash`
+    pub hash: ::core::option::Option<&'a str>,
+    /// Field 2: `parent`
+    pub parent: ::core::option::Option<&'a str>,
+    /// Field 3: `author_pubkey`
+    pub author_pubkey: ::core::option::Option<&'a str>,
+    /// Field 4: `message`
+    pub message: ::core::option::Option<&'a str>,
+    /// Field 5: `created_at_unix`
+    pub created_at_unix: ::core::option::Option<i64>,
+    /// Field 6: `kind`
+    pub kind: ::core::option::Option<&'a str>,
+    /// Field 7: `sources_json`
+    pub sources_json: ::core::option::Option<&'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
-impl<'a> CommitObjectView<'a> {
+impl<'a> CommitEntryView<'a> {
     /// Decode from `buf`, enforcing a recursion depth limit for nested messages.
     ///
     /// Called by [`::buffa::MessageView::decode_view`] with [`::buffa::RECURSION_LIMIT`]
@@ -2102,7 +2112,7 @@ impl<'a> CommitObjectView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.id = Some(::buffa::types::borrow_bytes(&mut cur)?);
+                    view.hash = Some(::buffa::types::borrow_str(&mut cur)?);
                 }
                 2u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -2112,7 +2122,57 @@ impl<'a> CommitObjectView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.object_bytes = Some(::buffa::types::borrow_bytes(&mut cur)?);
+                    view.parent = Some(::buffa::types::borrow_str(&mut cur)?);
+                }
+                3u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 3u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.author_pubkey = Some(::buffa::types::borrow_str(&mut cur)?);
+                }
+                4u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 4u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.message = Some(::buffa::types::borrow_str(&mut cur)?);
+                }
+                5u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 5u32,
+                            expected: 0u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.created_at_unix = Some(::buffa::types::decode_int64(&mut cur)?);
+                }
+                6u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 6u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.kind = Some(::buffa::types::borrow_str(&mut cur)?);
+                }
+                7u32 => {
+                    if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                        return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                            field_number: 7u32,
+                            expected: 2u8,
+                            actual: tag.wire_type() as u8,
+                        });
+                    }
+                    view.sources_json = Some(::buffa::types::borrow_str(&mut cur)?);
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, depth)?;
@@ -2124,8 +2184,8 @@ impl<'a> CommitObjectView<'a> {
         ::core::result::Result::Ok(())
     }
 }
-impl<'a> ::buffa::MessageView<'a> for CommitObjectView<'a> {
-    type Owned = super::super::CommitObject;
+impl<'a> ::buffa::MessageView<'a> for CommitEntryView<'a> {
+    type Owned = super::super::CommitEntry;
     fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, ::buffa::RECURSION_LIMIT)
     }
@@ -2135,20 +2195,25 @@ impl<'a> ::buffa::MessageView<'a> for CommitObjectView<'a> {
     ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         Self::_decode_depth(buf, depth)
     }
-    fn to_owned_message(&self) -> super::super::CommitObject {
+    fn to_owned_message(&self) -> super::super::CommitEntry {
         self.to_owned_from_source(None)
     }
     #[allow(clippy::useless_conversion, clippy::needless_update)]
     fn to_owned_from_source(
         &self,
         __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-    ) -> super::super::CommitObject {
+    ) -> super::super::CommitEntry {
         #[allow(unused_imports)]
         use ::buffa::alloc::string::ToString as _;
         let _ = __buffa_src;
-        super::super::CommitObject {
-            id: self.id.map(|b| (b).to_vec()),
-            object_bytes: self.object_bytes.map(|b| (b).to_vec()),
+        super::super::CommitEntry {
+            hash: self.hash.map(|s| s.to_string()),
+            parent: self.parent.map(|s| s.to_string()),
+            author_pubkey: self.author_pubkey.map(|s| s.to_string()),
+            message: self.message.map(|s| s.to_string()),
+            created_at_unix: self.created_at_unix,
+            kind: self.kind.map(|s| s.to_string()),
+            sources_json: self.sources_json.map(|s| s.to_string()),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -2158,17 +2223,32 @@ impl<'a> ::buffa::MessageView<'a> for CommitObjectView<'a> {
         }
     }
 }
-impl<'a> ::buffa::ViewEncode<'a> for CommitObjectView<'a> {
+impl<'a> ::buffa::ViewEncode<'a> for CommitEntryView<'a> {
     #[allow(clippy::needless_borrow, clippy::let_and_return)]
     fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if let Some(ref v) = self.id {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        if let Some(ref v) = self.hash {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
-        if let Some(ref v) = self.object_bytes {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        if let Some(ref v) = self.parent {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.author_pubkey {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.message {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.created_at_unix {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.kind {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.sources_json {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
@@ -2181,21 +2261,58 @@ impl<'a> ::buffa::ViewEncode<'a> for CommitObjectView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if let Some(ref v) = self.id {
+        if let Some(ref v) = self.hash {
             ::buffa::encoding::Tag::new(
                     1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
         }
-        if let Some(ref v) = self.object_bytes {
+        if let Some(ref v) = self.parent {
             ::buffa::encoding::Tag::new(
                     2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.author_pubkey {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.message {
+            ::buffa::encoding::Tag::new(
+                    4u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(v) = self.created_at_unix {
+            ::buffa::encoding::Tag::new(5u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_int64(v, buf);
+        }
+        if let Some(ref v) = self.kind {
+            ::buffa::encoding::Tag::new(
+                    6u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.sources_json {
+            ::buffa::encoding::Tag::new(
+                    7u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2211,72 +2328,78 @@ impl<'a> ::buffa::ViewEncode<'a> for CommitObjectView<'a> {
 /// fields depends on default-omission rules; serializers that require
 /// known map lengths (e.g. `bincode`) will return a runtime error.
 /// Use the owned message type for those formats.
-impl<'__a> ::serde::Serialize for CommitObjectView<'__a> {
+impl<'__a> ::serde::Serialize for CommitEntryView<'__a> {
     fn serialize<__S: ::serde::Serializer>(
         &self,
         __s: __S,
     ) -> ::core::result::Result<__S::Ok, __S::Error> {
         use ::serde::ser::SerializeMap as _;
         let mut __map = __s.serialize_map(::core::option::Option::None)?;
-        if let ::core::option::Option::Some(__v) = self.id {
-            struct _W<'__x>(&'__x [u8]);
-            impl ::serde::Serialize for _W<'_> {
-                fn serialize<__S: ::serde::Serializer>(
-                    &self,
-                    __s: __S,
-                ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                    ::buffa::json_helpers::bytes::serialize(self.0, __s)
-                }
-            }
-            __map.serialize_entry("id", &_W(__v))?;
+        if let ::core::option::Option::Some(__v) = self.hash {
+            __map.serialize_entry("hash", __v)?;
         }
-        if let ::core::option::Option::Some(__v) = self.object_bytes {
-            struct _W<'__x>(&'__x [u8]);
-            impl ::serde::Serialize for _W<'_> {
+        if let ::core::option::Option::Some(__v) = self.parent {
+            __map.serialize_entry("parent", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.author_pubkey {
+            __map.serialize_entry("authorPubkey", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.message {
+            __map.serialize_entry("message", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.created_at_unix {
+            struct _W(i64);
+            impl ::serde::Serialize for _W {
                 fn serialize<__S: ::serde::Serializer>(
                     &self,
                     __s: __S,
                 ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                    ::buffa::json_helpers::bytes::serialize(self.0, __s)
+                    ::buffa::json_helpers::int64::serialize(&self.0, __s)
                 }
             }
-            __map.serialize_entry("objectBytes", &_W(__v))?;
+            __map.serialize_entry("createdAtUnix", &_W(__v))?;
+        }
+        if let ::core::option::Option::Some(__v) = self.kind {
+            __map.serialize_entry("kind", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.sources_json {
+            __map.serialize_entry("sourcesJson", __v)?;
         }
         __map.end()
     }
 }
-impl<'a> ::buffa::MessageName for CommitObjectView<'a> {
+impl<'a> ::buffa::MessageName for CommitEntryView<'a> {
     const PACKAGE: &'static str = "mkit.repo.v1";
-    const NAME: &'static str = "CommitObject";
-    const FULL_NAME: &'static str = "mkit.repo.v1.CommitObject";
-    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitObject";
+    const NAME: &'static str = "CommitEntry";
+    const FULL_NAME: &'static str = "mkit.repo.v1.CommitEntry";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitEntry";
 }
-impl<'v> ::buffa::DefaultViewInstance for CommitObjectView<'v> {
+impl<'v> ::buffa::DefaultViewInstance for CommitEntryView<'v> {
     fn default_view_instance<'a>() -> &'a Self
     where
         Self: 'a,
     {
-        static VALUE: ::buffa::__private::OnceBox<CommitObjectView<'static>> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<CommitEntryView<'static>> = ::buffa::__private::OnceBox::new();
         VALUE
             .get_or_init(|| ::buffa::alloc::boxed::Box::new(
-                <CommitObjectView<'static>>::default(),
+                <CommitEntryView<'static>>::default(),
             ))
     }
 }
-impl ::buffa::ViewReborrow for CommitObjectView<'static> {
-    type Reborrowed<'b> = CommitObjectView<'b>;
+impl ::buffa::ViewReborrow for CommitEntryView<'static> {
+    type Reborrowed<'b> = CommitEntryView<'b>;
     fn reborrow<'b>(this: &'b Self) -> &'b Self::Reborrowed<'b> {
         this
     }
 }
-/** Self-contained, `'static` owned view of a `CommitObject` message.
+/** Self-contained, `'static` owned view of a `CommitEntry` message.
 
- Wraps [`::buffa::OwnedView`]`<`[`CommitObjectView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+ Wraps [`::buffa::OwnedView`]`<`[`CommitEntryView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
 
- Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CommitObjectView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CommitEntryView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
 #[derive(Clone, Debug)]
-pub struct CommitObjectOwnedView(::buffa::OwnedView<CommitObjectView<'static>>);
-impl CommitObjectOwnedView {
+pub struct CommitEntryOwnedView(::buffa::OwnedView<CommitEntryView<'static>>);
+impl CommitEntryOwnedView {
     /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
     ///
     /// The view borrows directly from the buffer's data; the buffer is
@@ -2290,7 +2413,7 @@ impl CommitObjectOwnedView {
         bytes: ::buffa::bytes::Bytes,
     ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         ::core::result::Result::Ok(
-            CommitObjectOwnedView(::buffa::OwnedView::decode(bytes)?),
+            CommitEntryOwnedView(::buffa::OwnedView::decode(bytes)?),
         )
     }
     /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
@@ -2305,7 +2428,7 @@ impl CommitObjectOwnedView {
         opts: &::buffa::DecodeOptions,
     ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         ::core::result::Result::Ok(
-            CommitObjectOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+            CommitEntryOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
         )
     }
     /// Build from an owned message via an encode → decode round-trip.
@@ -2315,20 +2438,20 @@ impl CommitObjectOwnedView {
     /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
     /// somehow invalid (should not happen for well-formed messages).
     pub fn from_owned(
-        msg: &super::super::CommitObject,
+        msg: &super::super::CommitEntry,
     ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
         ::core::result::Result::Ok(
-            CommitObjectOwnedView(::buffa::OwnedView::from_owned(msg)?),
+            CommitEntryOwnedView(::buffa::OwnedView::from_owned(msg)?),
         )
     }
-    /// Borrow the full [`CommitObjectView`] with its lifetime tied to `&self`.
+    /// Borrow the full [`CommitEntryView`] with its lifetime tied to `&self`.
     #[must_use]
-    pub fn view(&self) -> &CommitObjectView<'_> {
+    pub fn view(&self) -> &CommitEntryView<'_> {
         self.0.reborrow()
     }
     /// Convert to the owned message type.
     #[must_use]
-    pub fn to_owned_message(&self) -> super::super::CommitObject {
+    pub fn to_owned_message(&self) -> super::super::CommitEntry {
         self.0.to_owned_message()
     }
     /// The underlying bytes buffer.
@@ -2341,40 +2464,65 @@ impl CommitObjectOwnedView {
     pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
         self.0.into_bytes()
     }
-    /// Field 1: `id`
+    /// Field 1: `hash`
     #[must_use]
-    pub fn id(&self) -> ::core::option::Option<&'_ [u8]> {
-        self.0.reborrow().id
+    pub fn hash(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().hash
     }
-    /// Field 2: `object_bytes`
+    /// Field 2: `parent`
     #[must_use]
-    pub fn object_bytes(&self) -> ::core::option::Option<&'_ [u8]> {
-        self.0.reborrow().object_bytes
+    pub fn parent(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().parent
+    }
+    /// Field 3: `author_pubkey`
+    #[must_use]
+    pub fn author_pubkey(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().author_pubkey
+    }
+    /// Field 4: `message`
+    #[must_use]
+    pub fn message(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().message
+    }
+    /// Field 5: `created_at_unix`
+    #[must_use]
+    pub fn created_at_unix(&self) -> ::core::option::Option<i64> {
+        self.0.reborrow().created_at_unix
+    }
+    /// Field 6: `kind`
+    #[must_use]
+    pub fn kind(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().kind
+    }
+    /// Field 7: `sources_json`
+    #[must_use]
+    pub fn sources_json(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().sources_json
     }
 }
-impl ::core::convert::From<::buffa::OwnedView<CommitObjectView<'static>>>
-for CommitObjectOwnedView {
-    fn from(inner: ::buffa::OwnedView<CommitObjectView<'static>>) -> Self {
-        CommitObjectOwnedView(inner)
+impl ::core::convert::From<::buffa::OwnedView<CommitEntryView<'static>>>
+for CommitEntryOwnedView {
+    fn from(inner: ::buffa::OwnedView<CommitEntryView<'static>>) -> Self {
+        CommitEntryOwnedView(inner)
     }
 }
-impl ::core::convert::From<CommitObjectOwnedView>
-for ::buffa::OwnedView<CommitObjectView<'static>> {
-    fn from(wrapper: CommitObjectOwnedView) -> Self {
+impl ::core::convert::From<CommitEntryOwnedView>
+for ::buffa::OwnedView<CommitEntryView<'static>> {
+    fn from(wrapper: CommitEntryOwnedView) -> Self {
         wrapper.0
     }
 }
-impl ::core::convert::AsRef<::buffa::OwnedView<CommitObjectView<'static>>>
-for CommitObjectOwnedView {
-    fn as_ref(&self) -> &::buffa::OwnedView<CommitObjectView<'static>> {
+impl ::core::convert::AsRef<::buffa::OwnedView<CommitEntryView<'static>>>
+for CommitEntryOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<CommitEntryView<'static>> {
         &self.0
     }
 }
-impl ::buffa::HasMessageView for super::super::CommitObject {
-    type View<'a> = CommitObjectView<'a>;
-    type ViewHandle = CommitObjectOwnedView;
+impl ::buffa::HasMessageView for super::super::CommitEntry {
+    type View<'a> = CommitEntryView<'a>;
+    type ViewHandle = CommitEntryOwnedView;
 }
-impl ::serde::Serialize for CommitObjectOwnedView {
+impl ::serde::Serialize for CommitEntryOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,
         __s: __S,
@@ -2387,10 +2535,10 @@ pub struct ListCommitsResponseView<'a> {
     /// Field 1: `commits`
     pub commits: ::buffa::RepeatedView<
         'a,
-        super::super::__buffa::view::CommitObjectView<'a>,
+        super::super::__buffa::view::CommitEntryView<'a>,
     >,
     /// Field 2: `next_cursor`
-    pub next_cursor: ::core::option::Option<&'a [u8]>,
+    pub next_cursor: ::core::option::Option<&'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ListCommitsResponseView<'a> {
@@ -2439,7 +2587,7 @@ impl<'a> ListCommitsResponseView<'a> {
                             actual: tag.wire_type() as u8,
                         });
                     }
-                    view.next_cursor = Some(::buffa::types::borrow_bytes(&mut cur)?);
+                    view.next_cursor = Some(::buffa::types::borrow_str(&mut cur)?);
                 }
                 1u32 => {
                     if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
@@ -2455,7 +2603,7 @@ impl<'a> ListCommitsResponseView<'a> {
                     let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                     view.commits
                         .push(
-                            super::super::__buffa::view::CommitObjectView::_decode_depth(
+                            super::super::__buffa::view::CommitEntryView::_decode_depth(
                                 sub,
                                 depth - 1,
                             )?,
@@ -2499,7 +2647,7 @@ impl<'a> ::buffa::MessageView<'a> for ListCommitsResponseView<'a> {
                 .iter()
                 .map(|v| v.to_owned_from_source(__buffa_src))
                 .collect(),
-            next_cursor: self.next_cursor.map(|b| (b).to_vec()),
+            next_cursor: self.next_cursor.map(|s| s.to_string()),
             __buffa_unknown_fields: self
                 .__buffa_unknown_fields
                 .to_owned()
@@ -2524,7 +2672,7 @@ impl<'a> ::buffa::ViewEncode<'a> for ListCommitsResponseView<'a> {
                     + inner_size;
         }
         if let Some(ref v) = self.next_cursor {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
@@ -2552,7 +2700,7 @@ impl<'a> ::buffa::ViewEncode<'a> for ListCommitsResponseView<'a> {
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2579,16 +2727,7 @@ impl<'__a> ::serde::Serialize for ListCommitsResponseView<'__a> {
             __map.serialize_entry("commits", &*self.commits)?;
         }
         if let ::core::option::Option::Some(__v) = self.next_cursor {
-            struct _W<'__x>(&'__x [u8]);
-            impl ::serde::Serialize for _W<'_> {
-                fn serialize<__S: ::serde::Serializer>(
-                    &self,
-                    __s: __S,
-                ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                    ::buffa::json_helpers::bytes::serialize(self.0, __s)
-                }
-            }
-            __map.serialize_entry("nextCursor", &_W(__v))?;
+            __map.serialize_entry("nextCursor", __v)?;
         }
         __map.end()
     }
@@ -2697,12 +2836,12 @@ impl ListCommitsResponseOwnedView {
     #[must_use]
     pub fn commits(
         &self,
-    ) -> &::buffa::RepeatedView<'_, super::super::__buffa::view::CommitObjectView<'_>> {
+    ) -> &::buffa::RepeatedView<'_, super::super::__buffa::view::CommitEntryView<'_>> {
         &self.0.reborrow().commits
     }
     /// Field 2: `next_cursor`
     #[must_use]
-    pub fn next_cursor(&self) -> ::core::option::Option<&'_ [u8]> {
+    pub fn next_cursor(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().next_cursor
     }
 }

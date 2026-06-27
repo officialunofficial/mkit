@@ -28,7 +28,7 @@ pub mod __buffa {
         reg.register_json_any(super::__GET_OBJECT_REQUEST_JSON_ANY);
         reg.register_json_any(super::__GET_OBJECT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__LIST_COMMITS_REQUEST_JSON_ANY);
-        reg.register_json_any(super::__COMMIT_OBJECT_JSON_ANY);
+        reg.register_json_any(super::__COMMIT_ENTRY_JSON_ANY);
         reg.register_json_any(super::__LIST_COMMITS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__BATCH_GET_OBJECTS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__FOUND_OBJECT_JSON_ANY);
@@ -78,9 +78,9 @@ pub use self::__buffa::view::ListCommitsRequestView;
 #[doc(inline)]
 pub use self::__buffa::view::ListCommitsRequestOwnedView;
 #[doc(inline)]
-pub use self::__buffa::view::CommitObjectView;
+pub use self::__buffa::view::CommitEntryView;
 #[doc(inline)]
-pub use self::__buffa::view::CommitObjectOwnedView;
+pub use self::__buffa::view::CommitEntryOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ListCommitsResponseView;
 #[doc(inline)]

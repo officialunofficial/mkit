@@ -155,14 +155,22 @@ message ListCommitsRequest {
   uint32 page_size = 4;   // max commits to return; the server caps this
 }
 
-message CommitObject {
-  bytes id = 1;           // 32-byte commit/remix hash
-  bytes object_bytes = 2; // raw mkit object bytes (the client decodes them)
+// A denormalized commit-log entry served straight from the DO index — the
+// fields the client renders, so it needs NO raw object bytes and NO decode.
+// Hex strings throughout (matches the client's row shape 1:1).
+message CommitEntry {
+  string hash = 1;            // 64-hex commit/remix id
+  string parent = 2;          // 64-hex first parent; empty if root
+  string author_pubkey = 3;   // 64-hex signer
+  string message = 4;
+  int64 created_at_unix = 5;  // unix seconds (client renders ISO)
+  string kind = 6;            // "commit" | "remix"
+  string sources_json = 7;    // [[upstreamHex, commitHex], …]; "[]" for a commit
 }
 
 message ListCommitsResponse {
-  repeated CommitObject commits = 1;
-  bytes next_cursor = 2;  // first-parent of the last commit; empty when the chain ended
+  repeated CommitEntry commits = 1;
+  string next_cursor = 2; // 64-hex first-parent of the last entry; empty when the chain ended
 }
 
 // Concurrent batch object read (one round-trip for N objects).
