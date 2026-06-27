@@ -345,7 +345,7 @@ function CommitDetail({
     // remix_decode and returns the kind + sources, so the detail view
     // never has to guess which decoder to call.
     const res = decodeLogObject(api, obj.data, hash, '')
-    if (!res) return { ok: false as const, error: 'unknown object kind' }
+    if (!res) return { ok: false as const, error: "This commit is in a format we don't recognize." }
     try {
       const info = res.entry.kind === 'remix' ? api.remix_decode(obj.data) : api.commit_decode(obj.data)
       const parents: string[] = []
@@ -397,11 +397,11 @@ function CommitDetail({
       </div>
 
       {obj.isLoading ? (
-        <p className='text-sm text-muted'>Loading object…</p>
+        <p className='text-sm text-muted'>Loading…</p>
       ) : !obj.data ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>Object not found in this room.</p>
+        <p className='text-sm text-amber-700 dark:text-amber-400'>We couldn't find this commit.</p>
       ) : !decoded?.ok ? (
-        <p className='text-red-600 dark:text-red-400'>Could not decode object: {decoded?.error}</p>
+        <p className='text-red-600 dark:text-red-400'>We couldn't open this commit. Try again.</p>
       ) : (
         <FieldList>
           <Field label='Hash'>
@@ -472,7 +472,7 @@ function CommitDetail({
               </ul>
             )}
           </Field>
-          <Field label='Signature (Ed25519)'>
+          <Field label='Signature'>
             <code className='font-mono text-xs break-all'>{decoded.signatureHex}</code>
           </Field>
         </FieldList>

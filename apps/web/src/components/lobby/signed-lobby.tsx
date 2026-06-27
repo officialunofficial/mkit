@@ -323,7 +323,7 @@ function ReactionPills({
           key={r.emoji}
           type='button'
           onClick={() => onToggle(r.emoji)}
-          title={canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Unlock to react'}
+          title={canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Sign in with your passkey to react'}
           className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
               ? 'border-blue-500/60 bg-blue-500/10 text-fg'
@@ -552,7 +552,7 @@ function Composer({ room }: { room: string }) {
           }}
         />
         <button type='button' className={BTN} onClick={send} disabled={!canSend}>
-          {post.isPending ? 'Signing…' : 'Send'}
+          {post.isPending ? 'Sending…' : 'Send'}
         </button>
       </div>
       <p className='text-xs text-muted'>

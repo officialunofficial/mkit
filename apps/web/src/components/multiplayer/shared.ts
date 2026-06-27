@@ -20,7 +20,7 @@ export const BTN =
 export const PRIMARY_BTN =
   'inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-blue-600 px-3 text-sm font-medium text-white transition-all duration-200 hover:bg-blue-700 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
 
-export function errMsg(e: unknown): string {
-  if (e instanceof Error) return e.message
-  return String(e)
-}
+// Every passkey / sign / push / chat error surfaces through `errMsg`, so this is
+// the single place to keep raw browser strings (WebAuthn DOMExceptions, fetch
+// failures) out of the UI. It delegates to the shared humanizer.
+export { humanizeError as errMsg } from '../../lib/humanize-error'

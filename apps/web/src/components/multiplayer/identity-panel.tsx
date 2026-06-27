@@ -53,7 +53,7 @@ export function AttestBinding({
         <button type='button' className={BTN} onClick={onAttest} disabled={busy}>
           {busy ? 'Attesting…' : 'Attest with a passkey'}
         </button>
-        <span className='text-xs text-muted'>A P-256 passkey vouches this Ed25519 key is yours.</span>
+        <span className='text-xs text-muted'>Your passkey confirms this identity is yours.</span>
       </div>
       {result || binding ? (
         <FieldList>
@@ -62,12 +62,12 @@ export function AttestBinding({
               <span
                 className={result.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}
               >
-                {result.verified ? 'verified ✓ (WebAuthn assertion checked in WASM)' : 'failed ✗'}
+                {result.verified ? 'Verified ✓' : "Couldn't verify ✗"}
               </span>
             </Field>
           ) : null}
           {binding ? (
-            <Field label='Binding passkey (P-256) public key'>
+            <Field label='Binding passkey public key'>
               <code className='font-mono text-xs break-all'>{binding.pubkeyHex}</code>
             </Field>
           ) : null}
@@ -163,7 +163,7 @@ export function UnlockedHeader() {
       </div>
       {id.ephemeral ? (
         <p className='text-sm text-amber-700 dark:text-amber-400'>
-          Ephemeral key: no passkey PRF available, so this identity is random and won&rsquo;t persist.
+          This browser can&rsquo;t save your passkey, so this is a temporary identity that won&rsquo;t be here next time.
         </p>
       ) : null}
     </section>

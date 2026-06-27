@@ -388,7 +388,7 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
 
 export class CasConflictError extends Error {
   constructor(public current: string | null) {
-    super('ref CAS failed: the ref moved under you — refetch, re-parent, re-sign, retry')
+    super('Someone else changed this first. Refresh and try again.')
     this.name = 'CasConflictError'
   }
 }
@@ -399,7 +399,7 @@ export class CasConflictError extends Error {
  */
 export class IdentityLockedError extends Error {
   constructor() {
-    super('cannot sign write: identity is locked (no seed in memory)')
+    super('Unlock your identity before signing.')
     this.name = 'IdentityLockedError'
   }
 }
@@ -410,7 +410,7 @@ export class IdentityLockedError extends Error {
  */
 export class BackendNotReadyError extends Error {
   constructor() {
-    super('push requires a ready backend — none is available yet')
+    super('Not ready yet. Try again in a moment.')
     this.name = 'BackendNotReadyError'
   }
 }
@@ -571,8 +571,8 @@ export class MockRepoBackend implements RepoBackend {
     text: string,
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }> {
     const trimmed = text.trim()
-    if (!trimmed) throw new Error('message is empty')
-    if ([...trimmed].length > MAX_MESSAGE_CHARS) throw new Error('message exceeds the length cap')
+    if (!trimmed) throw new Error('Add a message before sending.')
+    if ([...trimmed].length > MAX_MESSAGE_CHARS) throw new Error('Your message is too long. Shorten it and try again.')
     const seed = this.seedHex?.() ?? null
     if (!seed) throw new IdentityLockedError()
 
