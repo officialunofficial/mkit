@@ -170,42 +170,6 @@ pub async fn list_commits(
     Ok(out.into())
 }
 
-/// `BatchGetObjects` — fetch many objects in ONE round-trip (the server fans the
-/// R2 reads out concurrently). Returns a JS array of `{ idHex, found, bytes }`,
-/// order-preserved; `bytes` is empty when `found` is false.
-#[wasm_bindgen]
-pub async fn batch_get_objects(
-    base_url: &str,
-    room: String,
-    object_ids_hex: Vec<String>,
-) -> Result<JsValue, JsError> {
-    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
-    let mut object_ids = Vec::with_capacity(object_ids_hex.len());
-    for h in &object_ids_hex {
-        object_ids.push(hex_to_bytes(h)?);
-    }
-    let resp = client
-        .batch_get_objects(BatchGetObjectsRequest {
-            room: Some(room),
-            object_ids,
-            ..Default::default()
-        })
-        .await
-        .map_err(rpc_err)?
-        .into_owned();
-
-    let arr = js_sys::Array::new();
-    for o in resp.objects {
-        let obj = js_sys::Object::new();
-        set(&obj, "idHex", bytes_to_hex(o.id.as_deref().unwrap_or_default()).into())?;
-        set(&obj, "found", o.found.unwrap_or(false).into())?;
-        let bytes = o.bytes.unwrap_or_default();
-        set(&obj, "bytes", js_sys::Uint8Array::from(bytes.as_slice()).into())?;
-        arr.push(&obj);
-    }
-    Ok(arr.into())
-}
-
 /// `ListRefs` — refs in the room, optionally filtered by name prefix. Returns a
 /// JS array of `{ name, objectIdHex }` objects.
 #[wasm_bindgen]

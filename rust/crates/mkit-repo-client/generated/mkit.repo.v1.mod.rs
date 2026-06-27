@@ -30,9 +30,6 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_COMMITS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__COMMIT_ENTRY_JSON_ANY);
         reg.register_json_any(super::__LIST_COMMITS_RESPONSE_JSON_ANY);
-        reg.register_json_any(super::__BATCH_GET_OBJECTS_REQUEST_JSON_ANY);
-        reg.register_json_any(super::__FOUND_OBJECT_JSON_ANY);
-        reg.register_json_any(super::__BATCH_GET_OBJECTS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__GET_REF_REQUEST_JSON_ANY);
         reg.register_json_any(super::__GET_REF_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__UPDATE_REF_REQUEST_JSON_ANY);
@@ -85,18 +82,6 @@ pub use self::__buffa::view::CommitEntryOwnedView;
 pub use self::__buffa::view::ListCommitsResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::ListCommitsResponseOwnedView;
-#[doc(inline)]
-pub use self::__buffa::view::BatchGetObjectsRequestView;
-#[doc(inline)]
-pub use self::__buffa::view::BatchGetObjectsRequestOwnedView;
-#[doc(inline)]
-pub use self::__buffa::view::FoundObjectView;
-#[doc(inline)]
-pub use self::__buffa::view::FoundObjectOwnedView;
-#[doc(inline)]
-pub use self::__buffa::view::BatchGetObjectsResponseView;
-#[doc(inline)]
-pub use self::__buffa::view::BatchGetObjectsResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::GetRefRequestView;
 #[doc(inline)]
