@@ -1404,73 +1404,147 @@ pub const __LIST_COMMITS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
-pub struct CommitObject {
-    /// Field 1: `id`
+pub struct CommitEntry {
+    /// Field 1: `hash`
+    #[serde(rename = "hash", skip_serializing_if = "::core::option::Option::is_none")]
+    pub hash: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `parent`
+    #[serde(rename = "parent", skip_serializing_if = "::core::option::Option::is_none")]
+    pub parent: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 3: `author_pubkey`
     #[serde(
-        rename = "id",
-        with = "::buffa::json_helpers::opt_bytes",
+        rename = "authorPubkey",
+        alias = "author_pubkey",
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// Field 2: `object_bytes`
+    pub author_pubkey: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 4: `message`
+    #[serde(rename = "message", skip_serializing_if = "::core::option::Option::is_none")]
+    pub message: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 5: `created_at_unix`
     #[serde(
-        rename = "objectBytes",
-        alias = "object_bytes",
-        with = "::buffa::json_helpers::opt_bytes",
+        rename = "createdAtUnix",
+        alias = "created_at_unix",
+        with = "::buffa::json_helpers::opt_int64",
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub object_bytes: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    pub created_at_unix: ::core::option::Option<i64>,
+    /// Field 6: `kind`
+    #[serde(rename = "kind", skip_serializing_if = "::core::option::Option::is_none")]
+    pub kind: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 7: `sources_json`
+    #[serde(
+        rename = "sourcesJson",
+        alias = "sources_json",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub sources_json: ::core::option::Option<::buffa::alloc::string::String>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
-impl ::core::fmt::Debug for CommitObject {
+impl ::core::fmt::Debug for CommitEntry {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("CommitObject")
-            .field("id", &self.id)
-            .field("object_bytes", &self.object_bytes)
+        f.debug_struct("CommitEntry")
+            .field("hash", &self.hash)
+            .field("parent", &self.parent)
+            .field("author_pubkey", &self.author_pubkey)
+            .field("message", &self.message)
+            .field("created_at_unix", &self.created_at_unix)
+            .field("kind", &self.kind)
+            .field("sources_json", &self.sources_json)
             .finish()
     }
 }
-impl CommitObject {
+impl CommitEntry {
     /// Protobuf type URL for this message, for use with `Any::pack` and
     /// `Any::unpack_if`.
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitObject";
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitEntry";
 }
-impl CommitObject {
+impl CommitEntry {
     #[must_use = "with_* setters return `self` by value; assign or chain the result"]
     #[inline]
-    ///Sets [`Self::id`] to `Some(value)`, consuming and returning `self`.
-    pub fn with_id(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
-        self.id = Some(value.into());
-        self
-    }
-    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
-    #[inline]
-    ///Sets [`Self::object_bytes`] to `Some(value)`, consuming and returning `self`.
-    pub fn with_object_bytes(
+    ///Sets [`Self::hash`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_hash(
         mut self,
-        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+        value: impl Into<::buffa::alloc::string::String>,
     ) -> Self {
-        self.object_bytes = Some(value.into());
+        self.hash = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::parent`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_parent(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.parent = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::author_pubkey`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_author_pubkey(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.author_pubkey = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::message`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_message(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.message = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::created_at_unix`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_created_at_unix(mut self, value: i64) -> Self {
+        self.created_at_unix = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::kind`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_kind(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.kind = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::sources_json`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_sources_json(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.sources_json = Some(value.into());
         self
     }
 }
-impl ::buffa::DefaultInstance for CommitObject {
+impl ::buffa::DefaultInstance for CommitEntry {
     fn default_instance() -> &'static Self {
-        static VALUE: ::buffa::__private::OnceBox<CommitObject> = ::buffa::__private::OnceBox::new();
+        static VALUE: ::buffa::__private::OnceBox<CommitEntry> = ::buffa::__private::OnceBox::new();
         VALUE.get_or_init(|| ::buffa::alloc::boxed::Box::new(Self::default()))
     }
 }
-impl ::buffa::MessageName for CommitObject {
+impl ::buffa::MessageName for CommitEntry {
     const PACKAGE: &'static str = "mkit.repo.v1";
-    const NAME: &'static str = "CommitObject";
-    const FULL_NAME: &'static str = "mkit.repo.v1.CommitObject";
-    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitObject";
+    const NAME: &'static str = "CommitEntry";
+    const FULL_NAME: &'static str = "mkit.repo.v1.CommitEntry";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.CommitEntry";
 }
-impl ::buffa::Message for CommitObject {
+impl ::buffa::Message for CommitEntry {
     /// Returns the total encoded size in bytes.
     ///
     /// The result is a `u32`; the protobuf specification requires all
@@ -1481,11 +1555,26 @@ impl ::buffa::Message for CommitObject {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u32;
-        if let Some(ref v) = self.id {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        if let Some(ref v) = self.hash {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
-        if let Some(ref v) = self.object_bytes {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        if let Some(ref v) = self.parent {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.author_pubkey {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.message {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.created_at_unix {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.kind {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.sources_json {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
@@ -1497,21 +1586,58 @@ impl ::buffa::Message for CommitObject {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if let Some(ref v) = self.id {
+        if let Some(ref v) = self.hash {
             ::buffa::encoding::Tag::new(
                     1u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
         }
-        if let Some(ref v) = self.object_bytes {
+        if let Some(ref v) = self.parent {
             ::buffa::encoding::Tag::new(
                     2u32,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.author_pubkey {
+            ::buffa::encoding::Tag::new(
+                    3u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.message {
+            ::buffa::encoding::Tag::new(
+                    4u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(v) = self.created_at_unix {
+            ::buffa::encoding::Tag::new(5u32, ::buffa::encoding::WireType::Varint)
+                .encode(buf);
+            ::buffa::types::encode_int64(v, buf);
+        }
+        if let Some(ref v) = self.kind {
+            ::buffa::encoding::Tag::new(
+                    6u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
+        }
+        if let Some(ref v) = self.sources_json {
+            ::buffa::encoding::Tag::new(
+                    7u32,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )
+                .encode(buf);
+            ::buffa::types::encode_string(v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1534,8 +1660,8 @@ impl ::buffa::Message for CommitObject {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                ::buffa::types::merge_bytes(
-                    self.id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                ::buffa::types::merge_string(
+                    self.hash.get_or_insert_with(::buffa::alloc::string::String::new),
                     buf,
                 )?;
             }
@@ -1547,8 +1673,76 @@ impl ::buffa::Message for CommitObject {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                ::buffa::types::merge_bytes(
-                    self.object_bytes.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                ::buffa::types::merge_string(
+                    self.parent.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            3u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 3u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self
+                        .author_pubkey
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            4u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 4u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self.message.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            5u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::Varint {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 5u32,
+                        expected: 0u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                self.created_at_unix = ::core::option::Option::Some(
+                    ::buffa::types::decode_int64(buf)?,
+                );
+            }
+            6u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 6u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self.kind.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            7u32 => {
+                if tag.wire_type() != ::buffa::encoding::WireType::LengthDelimited {
+                    return ::core::result::Result::Err(::buffa::DecodeError::WireTypeMismatch {
+                        field_number: 7u32,
+                        expected: 2u8,
+                        actual: tag.wire_type() as u8,
+                    });
+                }
+                ::buffa::types::merge_string(
+                    self
+                        .sources_json
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
                     buf,
                 )?;
             }
@@ -1560,13 +1754,18 @@ impl ::buffa::Message for CommitObject {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.id = ::core::option::Option::None;
-        self.object_bytes = ::core::option::Option::None;
+        self.hash = ::core::option::Option::None;
+        self.parent = ::core::option::Option::None;
+        self.author_pubkey = ::core::option::Option::None;
+        self.message = ::core::option::Option::None;
+        self.created_at_unix = ::core::option::Option::None;
+        self.kind = ::core::option::Option::None;
+        self.sources_json = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
-impl ::buffa::ExtensionSet for CommitObject {
-    const PROTO_FQN: &'static str = "mkit.repo.v1.CommitObject";
+impl ::buffa::ExtensionSet for CommitEntry {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.CommitEntry";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -1574,7 +1773,7 @@ impl ::buffa::ExtensionSet for CommitObject {
         &mut self.__buffa_unknown_fields
     }
 }
-impl ::buffa::json_helpers::ProtoElemJson for CommitObject {
+impl ::buffa::json_helpers::ProtoElemJson for CommitEntry {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
         s: S,
@@ -1588,10 +1787,10 @@ impl ::buffa::json_helpers::ProtoElemJson for CommitObject {
     }
 }
 #[doc(hidden)]
-pub const __COMMIT_OBJECT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/mkit.repo.v1.CommitObject",
-    to_json: ::buffa::type_registry::any_to_json::<CommitObject>,
-    from_json: ::buffa::type_registry::any_from_json::<CommitObject>,
+pub const __COMMIT_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.CommitEntry",
+    to_json: ::buffa::type_registry::any_to_json::<CommitEntry>,
+    from_json: ::buffa::type_registry::any_from_json::<CommitEntry>,
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
@@ -1604,15 +1803,14 @@ pub struct ListCommitsResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub commits: ::buffa::alloc::vec::Vec<CommitObject>,
+    pub commits: ::buffa::alloc::vec::Vec<CommitEntry>,
     /// Field 2: `next_cursor`
     #[serde(
         rename = "nextCursor",
         alias = "next_cursor",
-        with = "::buffa::json_helpers::opt_bytes",
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub next_cursor: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    pub next_cursor: ::core::option::Option<::buffa::alloc::string::String>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1638,7 +1836,7 @@ impl ListCommitsResponse {
     ///Sets [`Self::next_cursor`] to `Some(value)`, consuming and returning `self`.
     pub fn with_next_cursor(
         mut self,
-        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+        value: impl Into<::buffa::alloc::string::String>,
     ) -> Self {
         self.next_cursor = Some(value.into());
         self
@@ -1676,7 +1874,7 @@ impl ::buffa::Message for ListCommitsResponse {
                     + inner_size;
         }
         if let Some(ref v) = self.next_cursor {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
@@ -1703,7 +1901,7 @@ impl ::buffa::Message for ListCommitsResponse {
                     ::buffa::encoding::WireType::LengthDelimited,
                 )
                 .encode(buf);
-            ::buffa::types::encode_bytes(v, buf);
+            ::buffa::types::encode_string(v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1738,8 +1936,10 @@ impl ::buffa::Message for ListCommitsResponse {
                         actual: tag.wire_type() as u8,
                     });
                 }
-                ::buffa::types::merge_bytes(
-                    self.next_cursor.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                ::buffa::types::merge_string(
+                    self
+                        .next_cursor
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
                     buf,
                 )?;
             }

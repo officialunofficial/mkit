@@ -154,18 +154,19 @@ pub async fn list_commits(
     let arr = js_sys::Array::new();
     for c in resp.commits {
         let obj = js_sys::Object::new();
-        set(&obj, "idHex", bytes_to_hex(c.id.as_deref().unwrap_or_default()).into())?;
-        let bytes = c.object_bytes.unwrap_or_default();
-        set(&obj, "bytes", js_sys::Uint8Array::from(bytes.as_slice()).into())?;
+        // Metadata straight from the DO index — no object bytes, no decode.
+        set(&obj, "hash", c.hash.unwrap_or_default().into())?;
+        set(&obj, "parent", c.parent.unwrap_or_default().into())?;
+        set(&obj, "authorPubkeyHex", c.author_pubkey.unwrap_or_default().into())?;
+        set(&obj, "message", c.message.unwrap_or_default().into())?;
+        set(&obj, "createdAtUnix", (c.created_at_unix.unwrap_or(0) as f64).into())?;
+        set(&obj, "kind", c.kind.unwrap_or_default().into())?;
+        set(&obj, "sourcesJson", c.sources_json.unwrap_or_default().into())?;
         arr.push(&obj);
     }
     let out = js_sys::Object::new();
     set(&out, "commits", arr.into())?;
-    set(
-        &out,
-        "nextCursorHex",
-        bytes_to_hex(resp.next_cursor.as_deref().unwrap_or_default()).into(),
-    )?;
+    set(&out, "nextCursorHex", resp.next_cursor.unwrap_or_default().into())?;
     Ok(out.into())
 }
 

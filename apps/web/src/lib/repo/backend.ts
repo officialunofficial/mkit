@@ -177,6 +177,23 @@ export type CommitLogEntry = {
 }
 
 /**
+ * Parse the DO index's `sources_json` (`[[upstreamHex, commitHex], …]`, `"[]"` for a plain commit) back into
+ * {@link RemixSourceEntry}[]. Tolerant of malformed input (returns `[]`).
+ */
+export function parseSourcesJson(json: string): RemixSourceEntry[] {
+  if (!json || json === '[]') return []
+  try {
+    const arr: unknown = JSON.parse(json)
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter((p): p is [string, string] => Array.isArray(p) && p.length === 2)
+      .map(([upstreamIdHex, commitHashHex]) => ({ upstreamIdHex, commitHashHex }))
+  } catch {
+    return []
+  }
+}
+
+/**
  * Fork ref name for a remix derived from `upstreamCommitHash` by the forker whose Ed25519 pubkey is `forkerPubkeyHex`.
  * Lands under the `forks/` prefix so the Refs panel can mark it as a fork (distinct from `main` / feature branches).
  *
@@ -787,7 +804,18 @@ export interface RepoWasmClient {
     ref: string,
     startIdHex: string,
     pageSize: number,
-  ): Promise<{ commits: Array<{ idHex: string; bytes: Uint8Array }>; nextCursorHex: string }>
+  ): Promise<{
+    commits: Array<{
+      hash: string
+      parent: string
+      authorPubkeyHex: string
+      message: string
+      createdAtUnix: number
+      kind: string
+      sourcesJson: string
+    }>
+    nextCursorHex: string
+  }>
   /** BatchGetObjects — fetch many objects in one round-trip (server fans the reads out). */
   batch_get_objects(
     baseUrl: string,
@@ -1062,25 +1090,31 @@ export class WasmRepoBackend implements RepoBackend {
       const page = await this.wasm.list_commits(this.baseUrl, room, ref, cursor, cap - fresh.length)
       if (page.commits.length === 0) break
       for (const c of page.commits) {
-        const tailIdx = tailByHash.get(c.idHex)
+        const tailIdx = tailByHash.get(c.hash)
         if (tailIdx !== undefined) {
           // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
           spliced = cached!.entries.slice(tailIdx)
           done = true
           break
         }
-        if (seen.has(c.idHex)) {
+        if (seen.has(c.hash)) {
           done = true
           break
         } // cycle guard
-        seen.add(c.idHex)
-        this.objectCache.set(`${room}::${c.idHex}`, c.bytes) // warm the object cache
-        const decoded = decodeLogObject(this.api, c.bytes, c.idHex, ref)
-        if (!decoded) {
-          done = true
-          break
+        seen.add(c.hash)
+        // Metadata from the DO index maps STRAIGHT to a log entry — no object
+        // bytes, no decode.
+        const sources = parseSourcesJson(c.sourcesJson)
+        const entry: CommitLogEntry = {
+          hash: c.hash,
+          message: c.message,
+          authorPubkey: c.authorPubkeyHex,
+          ref,
+          kind: c.kind === 'remix' ? 'remix' : 'commit',
+          createdAt: new Date(c.createdAtUnix * 1000).toISOString(),
+          ...(sources.length > 0 ? { sources } : {}),
         }
-        fresh.push(decoded.entry)
+        fresh.push(entry)
         opts?.onProgress?.([...fresh])
         if (fresh.length >= cap) {
           done = true

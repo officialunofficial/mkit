@@ -21,7 +21,7 @@ use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
-    BatchGetObjectsRequest, BatchGetObjectsResponse, ChatMessage, CommitObject, FoundObject,
+    BatchGetObjectsRequest, BatchGetObjectsResponse, ChatMessage, CommitEntry, FoundObject,
     GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse, ListCommitsRequest,
     ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
     ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
@@ -129,6 +129,21 @@ async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<C
         kind,
         sources,
     })
+}
+
+/// Map a DO commit-index row (hex fields) straight to the proto `CommitEntry`
+/// the client renders — no object bytes, no decode. Field-for-field.
+fn row_to_entry(row: CommitRowWire) -> CommitEntry {
+    CommitEntry {
+        hash: Some(row.hash),
+        parent: Some(row.parent),
+        author_pubkey: Some(row.signer),
+        message: Some(row.message),
+        created_at_unix: Some(row.timestamp),
+        kind: Some(row.kind),
+        sources_json: Some(row.sources),
+        ..Default::default()
+    }
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
@@ -611,12 +626,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let bucket = env
-                .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
-
-            // 1) Serve from the colocated DO commit index: ONE SQLite query for the
-            //    ordered page (no per-read R2 walk).
+            // 1) Serve METADATA straight from the colocated DO index — ONE SQLite
+            //    query, NO R2, NO object bytes, NO client decode.
             let idx: ListCommitsResp = do_call(
                 &env,
                 &room,
@@ -630,36 +641,20 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .await?;
 
             if idx.complete {
-                // Fully indexed: fetch the page's raw bytes from R2 CONCURRENTLY
-                // (the client decodes them) — no sequential parent-chain latency.
-                let reads = idx.commits.iter().map(|row| {
-                    let bucket = &bucket;
-                    let room = &room;
-                    let hash = row.hash.clone();
-                    async move {
-                        let id = match hex::decode(&hash) {
-                            Ok(b) if b.len() == 32 => b,
-                            _ => return None,
-                        };
-                        let bytes = match bucket.get(&object_key(room, &id)).execute().await {
-                            Ok(Some(obj)) => obj.body()?.bytes().await.ok()?,
-                            _ => return None,
-                        };
-                        Some(CommitObject { id: Some(id), object_bytes: Some(bytes), ..Default::default() })
-                    }
-                });
-                let commits: Vec<CommitObject> =
-                    futures::future::join_all(reads).await.into_iter().flatten().collect();
-                let next_cursor = hex::decode(&idx.next_cursor).unwrap_or_default();
+                let commits: Vec<CommitEntry> = idx.commits.into_iter().map(row_to_entry).collect();
                 return Ok(Response::new(ListCommitsResponse {
                     commits,
-                    next_cursor: Some(next_cursor),
+                    next_cursor: Some(idx.next_cursor),
                     ..Default::default()
                 }));
             }
 
             // 2) Pre-index history (index incomplete) → the authoritative sequential
-            //    R2 walk, then BACKFILL the index so the next read is fully local.
+            //    R2 walk to DECODE the metadata, return it, AND backfill the index so
+            //    the next read is fully local.
+            let bucket = env
+                .bucket(STORAGE_BUCKET)
+                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
             let head: Vec<u8> = if !start_id.is_empty() {
                 start_id
             } else {
@@ -674,14 +669,13 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 return Ok(Response::new(ListCommitsResponse::default()));
             }
 
-            let mut commits: Vec<CommitObject> = Vec::with_capacity(cap);
-            let mut backfill: Vec<CommitRowWire> = Vec::with_capacity(cap);
+            let mut rows: Vec<CommitRowWire> = Vec::with_capacity(cap);
             let mut seen: HashSet<Vec<u8>> = HashSet::new();
             let mut current = head;
-            let mut next_cursor: Vec<u8> = Vec::new();
+            let mut next_cursor = String::new();
             loop {
-                if commits.len() >= cap {
-                    next_cursor = current;
+                if rows.len() >= cap {
+                    next_cursor = hex::encode(&current);
                     break;
                 }
                 if !seen.insert(current.clone()) {
@@ -697,41 +691,44 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     Ok(None) => break,
                     Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
                 };
-                let meta = crate::commit_log::extract_commit_meta(&bytes);
-                let first_parent = meta.as_ref().and_then(|m| m.parent.map(|p| p.to_vec()));
-                if let Some(m) = &meta {
-                    backfill.push(CommitRowWire {
-                        hash: hex::encode(&current),
-                        parent: m.parent.map(hex::encode).unwrap_or_default(),
-                        signer: m.signer_hex.clone(),
-                        message: m.message.clone(),
-                        timestamp: m.timestamp as i64,
-                        kind: m.kind.as_str().to_string(),
-                        sources: m.sources_json(),
-                    });
-                }
-                commits.push(CommitObject {
-                    id: Some(current.clone()),
-                    object_bytes: Some(bytes),
-                    ..Default::default()
+                let Some(m) = crate::commit_log::extract_commit_meta(&bytes) else {
+                    break;
+                };
+                // Compute borrowing fields before moving the owned `String`s out of `m`.
+                let parent_hex = m.parent.map(hex::encode).unwrap_or_default();
+                let kind = m.kind.as_str().to_string();
+                let sources = m.sources_json();
+                let timestamp = m.timestamp as i64;
+                rows.push(CommitRowWire {
+                    hash: hex::encode(&current),
+                    parent: parent_hex.clone(),
+                    signer: m.signer_hex,
+                    message: m.message,
+                    timestamp,
+                    kind,
+                    sources,
                 });
-                match first_parent {
-                    Some(p) if p.len() == 32 => current = p,
-                    _ => break,
+                if parent_hex.is_empty() {
+                    break;
                 }
+                current = match hex::decode(&parent_hex) {
+                    Ok(b) if b.len() == 32 => b,
+                    _ => break,
+                };
             }
 
             // Best-effort backfill (a failure just means a slow next read).
-            if !backfill.is_empty() {
+            if !rows.is_empty() {
                 let _ = do_call::<_, RecordCommitsResp>(
                     &env,
                     &room,
                     "/record-commits",
-                    &RecordCommitsReq { r#ref: ref_name, commits: backfill },
+                    &RecordCommitsReq { r#ref: ref_name, commits: rows.clone() },
                 )
                 .await;
             }
 
+            let commits: Vec<CommitEntry> = rows.into_iter().map(row_to_entry).collect();
             Ok(Response::new(ListCommitsResponse {
                 commits,
                 next_cursor: Some(next_cursor),
