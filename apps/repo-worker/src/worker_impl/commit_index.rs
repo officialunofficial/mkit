@@ -115,16 +115,6 @@ pub(super) fn record_batch(sql: &SqlStorage, ref_name: &str, commits: &[CommitRo
 /// from colocated SQLite — no R2. `complete=false` if it reaches a hash that
 /// isn't indexed yet (pre-index history), so the caller can finish + backfill.
 pub(super) fn walk(sql: &SqlStorage, head: String, cap: usize) -> ListCommitsResp {
-    #[derive(serde::Deserialize)]
-    struct Row {
-        hash: String,
-        parent: String,
-        signer: String,
-        message: String,
-        timestamp: i64,
-        kind: String,
-        sources: String,
-    }
     let mut commits: Vec<CommitRowWire> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut current = head;
@@ -138,7 +128,7 @@ pub(super) fn walk(sql: &SqlStorage, head: String, cap: usize) -> ListCommitsRes
         if !seen.insert(current.clone()) {
             break; // cycle guard
         }
-        let found: Vec<Row> = sql
+        let found: Vec<CommitRowWire> = sql
             .exec(
                 "SELECT hash, parent, signer, message, timestamp, kind, sources \
                  FROM commits WHERE hash = ? LIMIT 1;",
@@ -151,15 +141,7 @@ pub(super) fn walk(sql: &SqlStorage, head: String, cap: usize) -> ListCommitsRes
             break;
         };
         let parent = row.parent.clone();
-        commits.push(CommitRowWire {
-            hash: row.hash,
-            parent: row.parent,
-            signer: row.signer,
-            message: row.message,
-            timestamp: row.timestamp,
-            kind: row.kind,
-            sources: row.sources,
-        });
+        commits.push(row);
         if parent.is_empty() {
             break; // root
         }
