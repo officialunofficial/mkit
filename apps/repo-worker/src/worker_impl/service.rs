@@ -31,8 +31,8 @@ use crate::proto::mkit::repo::v1::{
 use std::collections::HashSet;
 use super::refstore::WatchFrame;
 use super::wire::{
-    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq,
-    ReactResp, ReactionsResp, UpdateReq, UpdateResp,
+    CommitMetaWire, GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq,
+    PostResp, ReactReq, ReactResp, ReactionsResp, UpdateReq, UpdateResp,
 };
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -105,6 +105,29 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, con
         .map_err(|e| ce_internal(format!("R2 put: {e}")))?
         .is_some();
     Ok(stored)
+}
+
+/// Read the just-pushed object from R2 and decode its commit metadata into the
+/// DO-index wire shape — so a ref update can dual-write the `commits` index.
+/// `None` on any miss/read error or a non-commit/remix target; the caller then
+/// indexes nothing (the index is backfillable), never failing the update.
+async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<CommitMetaWire> {
+    let bucket = env.bucket(STORAGE_BUCKET).ok()?;
+    let obj = bucket.get(&object_key(room, new_id)).execute().await.ok()??;
+    let bytes = obj.body()?.bytes().await.ok()?;
+    let m = crate::commit_log::extract_commit_meta(&bytes)?;
+    // Compute the borrowing fields before moving the owned `String`s out of `m`.
+    let parent = m.parent.map(hex::encode).unwrap_or_default();
+    let kind = m.kind.as_str().to_string();
+    let sources = m.sources_json();
+    Some(CommitMetaWire {
+        parent,
+        signer: m.signer_hex,
+        message: m.message,
+        timestamp: m.timestamp as i64,
+        kind,
+        sources,
+    })
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
@@ -287,6 +310,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
+            // Decode the pushed object once to dual-write the DO commit index.
+            let commit = read_commit_meta_wire(&env, &room, &new_id).await;
             let body = UpdateReq {
                 name,
                 new: hex::encode(&new_id),
@@ -297,6 +322,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     Some(hex::encode(&expected_id))
                 },
                 author,
+                commit,
             };
             let resp: UpdateResp = do_call(&env, &room, "/update", &body).await?;
             let current = hex_to_bytes_opt(&resp.current).unwrap_or_default();

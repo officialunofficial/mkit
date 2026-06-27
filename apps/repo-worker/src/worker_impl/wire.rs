@@ -33,6 +33,20 @@ pub struct GetResp {
     pub value: Option<String>,
 }
 
+/// Denormalized commit-log metadata recorded into the DO's `commits` index
+/// alongside a ref update — so `ListCommits` can later serve from colocated
+/// SQLite instead of walking R2. The worker decodes the pushed object once
+/// (see `commit_log::extract_commit_meta`) and passes the fields here.
+#[derive(Serialize, Deserialize, Default)]
+pub struct CommitMetaWire {
+    pub parent: String,  // 64-hex first parent, empty if root
+    pub signer: String,  // 64-hex author pubkey
+    pub message: String,
+    pub timestamp: i64,  // unix seconds
+    pub kind: String,    // "commit" | "remix"
+    pub sources: String, // JSON [[upstreamHex, commitHex], …]; "[]" for a commit
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct UpdateReq {
     pub name: String,
@@ -40,6 +54,10 @@ pub struct UpdateReq {
     pub expectation: i32,         // proto wire number
     pub expected: Option<String>, // 64-hex (MATCH only)
     pub author: Option<String>,   // 64-hex Ed25519 pubkey of the writer
+    /// Commit metadata to index on a successful CAS (absent for a
+    /// non-commit/remix target, or from an older worker — `default` = None).
+    #[serde(default)]
+    pub commit: Option<CommitMetaWire>,
 }
 
 #[derive(Serialize, Deserialize)]
