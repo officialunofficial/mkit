@@ -34,10 +34,8 @@ export default function HomePage() {
         <section className='space-y-5'>
           <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
           <p className='max-w-prose text-lg text-fg'>
-            Every file, folder, and commit is named by its BLAKE3 hash, so changing a single byte changes the name —
-            tampering can&rsquo;t hide. Every commit carries an Ed25519 signature anyone can verify, and claims like
-            reviewed, tested, or deployed travel as signed statements of their own. It&rsquo;s built in Rust, so it runs
-            anywhere — including this browser.
+            Every file and commit is named by its BLAKE3 hash and signed with Ed25519, so tampering can&rsquo;t hide and
+            claims like reviewed or deployed travel as their own verifiable statements.
           </p>
           <div className='max-w-prose space-y-3'>
             <p className='text-sm text-muted'>
@@ -96,7 +94,7 @@ export default function HomePage() {
         <Demo
           to='/push'
           title='push'
-          body='Store a file whole, or chunk and pack it. Why mkit packs, hashes, and signs every push instead of leaving blobs browsable.'
+          body='Why mkit chunks, packs, hashes, and signs every push instead of leaving blobs browsable.'
         />
         <Demo
           to='/demos'

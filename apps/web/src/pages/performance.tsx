@@ -9,16 +9,15 @@ export default function PerformancePage() {
       <div className='space-y-8'>
         <Seo
           title='mkit — performance'
-          description='mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks. Benchmarked head to head against git.'
+          description='mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, benchmarked head to head against git.'
           path='/performance'
           card='Measured against git'
         />
         <header className='space-y-3'>
           <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
           <p className='max-w-prose text-base text-fg'>
-            mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks. The numbers
-            below are real <code className='font-mono text-sm'>hyperfine</code> runs of both CLIs on one machine —
-            git&rsquo;s wins included.
+            The numbers below are real <code className='font-mono text-sm'>hyperfine</code> runs of both CLIs on one
+            machine, git&rsquo;s wins included.
           </p>
         </header>
         <PerfSection />

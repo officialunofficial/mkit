@@ -47,7 +47,7 @@ function DefaultFallback({ reset }: { reset: () => void }) {
     <div role='alert' className='space-y-3 rounded-md border border-hairline p-4'>
       <p className='text-sm font-medium text-fg'>This demo couldn&rsquo;t load.</p>
       <p className='max-w-prose text-sm text-muted'>
-        Reloading the page usually fixes it. If it keeps happening, your browser may be blocking part of this page.
+        Reloading usually fixes it; if it keeps happening, your browser may be blocking part of this page.
       </p>
       <button
         type='button'

@@ -15,9 +15,8 @@ export default function MultiplayerPage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Multiplayer mkit</h1>
         <p className='max-w-prose text-base text-fg'>
-          Set up a passkey, then sign commits and push them to a shared room — one prompt, no accounts, no further
-          sign-ins. Anyone can push; the signature proves the same person made these commits, not who you are. Watch
-          other players&rsquo; commits arrive live below.
+          Set up a passkey, then sign and push commits to a shared room — anyone can push, the signature proves the same
+          person made them (not who you are), and other players&rsquo; commits arrive live below.
         </p>
       </header>
       <DemoBoundary>
@@ -25,13 +24,12 @@ export default function MultiplayerPage() {
       </DemoBoundary>
       <div className='max-w-prose space-y-3 text-sm text-muted'>
         <p>
-          Your passkey is synced by your device&rsquo;s platform and anchors your identity; the signing key is rebuilt
-          from it each session and never written to disk. Same passkey → same player, on every device.
+          Your passkey anchors your identity and rebuilds your signing key each session without ever writing it to disk,
+          so the same passkey is the same player on every device.
         </p>
         <p>
-          Every push is signed, and updates apply one at a time so concurrent pushes never clobber each other. It talks
-          to a small server that stores the commits and tracks where each room&rsquo;s history points; with no server
-          configured it runs against an in-browser stand-in, so the flow still works offline.
+          Every push is signed and updates apply one at a time, so concurrent pushes never clobber each other — and with
+          no server it runs against an in-browser stand-in that still works offline.
         </p>
         <p>
           Curious how the signing works? See the{' '}
