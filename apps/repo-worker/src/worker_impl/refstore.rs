@@ -35,10 +35,11 @@ use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::wire::{
-    CommitMetaWire, GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp,
-    MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp, UpdateReq,
-    UpdateResp,
+    CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListEntry,
+    ListReq, ListResp, MessagesReq, MessagesResp, MsgEntry, PostReq, PostResp, ReactReq, ReactResp,
+    ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
+use std::collections::HashSet;
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
 /// `limit=0` gets the default; anything above the max is clamped.
@@ -157,6 +158,11 @@ impl DurableObject for RefStore {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
+            "/list-commits" | "/record-commits" => {
+                if let Err(e) = self.ensure_commits_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
             _ => {}
         }
 
@@ -194,6 +200,14 @@ impl DurableObject for RefStore {
             "/reactions" => {
                 let reactions = self.list_reactions();
                 Response::from_json(&ReactionsResp { reactions })
+            }
+            "/list-commits" => {
+                let body: ListCommitsReq = req.json().await?;
+                self.handle_list_commits(body)
+            }
+            "/record-commits" => {
+                let body: RecordCommitsReq = req.json().await?;
+                self.handle_record_commits(body)
             }
             _ => Response::error("not found", 404),
         }
@@ -266,9 +280,20 @@ impl RefStore {
         Ok(())
     }
 
-    /// Record one commit into the `commits` index (idempotent — a re-push of the
-    /// same hash is a no-op since the object is immutable).
-    fn record_commit(&self, hash: &str, ref_name: &str, m: &CommitMetaWire) -> Result<()> {
+    /// Insert one row into the `commits` index. Idempotent (`OR IGNORE`) — the
+    /// object is immutable, so a re-push or backfill of the same hash is a no-op.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_commit(
+        &self,
+        hash: &str,
+        ref_name: &str,
+        parent: &str,
+        signer: &str,
+        message: &str,
+        timestamp: i64,
+        kind: &str,
+        sources: &str,
+    ) -> Result<()> {
         self.state.storage().sql().exec(
             "INSERT OR IGNORE INTO commits \
                (hash, ref, parent, signer, message, timestamp, kind, sources) \
@@ -276,15 +301,109 @@ impl RefStore {
             vec![
                 hash.into(),
                 ref_name.into(),
-                m.parent.clone().into(),
-                m.signer.clone().into(),
-                m.message.clone().into(),
-                m.timestamp.into(),
-                m.kind.clone().into(),
-                m.sources.clone().into(),
+                parent.into(),
+                signer.into(),
+                message.into(),
+                timestamp.into(),
+                kind.into(),
+                sources.into(),
             ],
         )?;
         Ok(())
+    }
+
+    /// Record a commit from the on-write metadata (the `UpdateRef` dual-write).
+    fn record_commit(&self, hash: &str, ref_name: &str, m: &CommitMetaWire) -> Result<()> {
+        self.insert_commit(hash, ref_name, &m.parent, &m.signer, &m.message, m.timestamp, &m.kind, &m.sources)
+    }
+
+    /// Walk the `commits` index from a ref head (or `start_id`) by first-parent,
+    /// returning a bounded page entirely from colocated SQLite — no R2. Sets
+    /// `complete=false` if it reaches a hash that isn't indexed yet (pre-index
+    /// history), so the caller can finish + backfill from R2.
+    fn handle_list_commits(&self, req: ListCommitsReq) -> Result<Response> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            hash: String,
+            parent: String,
+            signer: String,
+            message: String,
+            timestamp: i64,
+            kind: String,
+            sources: String,
+        }
+        let cap = req.page_size.clamp(1, 512) as usize;
+        let head = if !req.start_id.is_empty() {
+            req.start_id.clone()
+        } else {
+            match self.read_ref(&req.r#ref) {
+                Some(h) => h,
+                None => {
+                    return Response::from_json(&ListCommitsResp {
+                        commits: Vec::new(),
+                        next_cursor: String::new(),
+                        complete: true,
+                    });
+                }
+            }
+        };
+
+        let sql = self.state.storage().sql();
+        let mut commits: Vec<CommitRowWire> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut current = head;
+        let mut next_cursor = String::new();
+        let mut complete = true;
+        loop {
+            if commits.len() >= cap {
+                next_cursor = current;
+                break;
+            }
+            if !seen.insert(current.clone()) {
+                break; // cycle guard
+            }
+            let found: Vec<Row> = sql
+                .exec(
+                    "SELECT hash, parent, signer, message, timestamp, kind, sources \
+                     FROM commits WHERE hash = ? LIMIT 1;",
+                    vec![current.clone().into()],
+                )
+                .and_then(|r| r.to_array())
+                .unwrap_or_default();
+            let Some(row) = found.into_iter().next() else {
+                complete = false; // not indexed → caller completes from R2
+                break;
+            };
+            let parent = row.parent.clone();
+            commits.push(CommitRowWire {
+                hash: row.hash,
+                parent: row.parent,
+                signer: row.signer,
+                message: row.message,
+                timestamp: row.timestamp,
+                kind: row.kind,
+                sources: row.sources,
+            });
+            if parent.is_empty() {
+                break; // root
+            }
+            current = parent;
+        }
+        Response::from_json(&ListCommitsResp { commits, next_cursor, complete })
+    }
+
+    /// Backfill rows the worker decoded from R2 (pre-index history).
+    fn handle_record_commits(&self, req: RecordCommitsReq) -> Result<Response> {
+        let mut recorded = 0u32;
+        for c in &req.commits {
+            if self
+                .insert_commit(&c.hash, &req.r#ref, &c.parent, &c.signer, &c.message, c.timestamp, &c.kind, &c.sources)
+                .is_ok()
+            {
+                recorded += 1;
+            }
+        }
+        Response::from_json(&RecordCommitsResp { recorded })
     }
 
     /// Read a ref's current hex value, or None if absent.

@@ -158,3 +158,49 @@ pub struct ReactionEntry {
 pub struct ReactionsResp {
     pub reactions: Vec<ReactionEntry>,
 }
+
+// ---- Commit-log index (denormalized) -------------------------------------
+
+/// Ask the DO to walk its `commits` index from a ref head (or a `start_id`
+/// cursor) by first-parent, returning a bounded page.
+#[derive(Serialize, Deserialize)]
+pub struct ListCommitsReq {
+    pub r#ref: String,
+    pub start_id: String, // empty = walk from the ref head
+    pub page_size: u32,
+}
+
+/// One indexed commit row — the denormalized metadata plus its hash. Shared by
+/// the list response and the backfill request.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct CommitRowWire {
+    pub hash: String,
+    pub parent: String,
+    pub signer: String,
+    pub message: String,
+    pub timestamp: i64,
+    pub kind: String,
+    pub sources: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ListCommitsResp {
+    pub commits: Vec<CommitRowWire>,
+    pub next_cursor: String, // first-parent of the last row; empty when the chain ended
+    /// `false` when the walk hit a hash NOT in the index (pre-index history) —
+    /// the worker then completes + backfills from R2.
+    pub complete: bool,
+}
+
+/// Backfill: record rows the worker decoded from R2 (for history pushed before
+/// the index existed), so subsequent reads are fully local.
+#[derive(Serialize, Deserialize)]
+pub struct RecordCommitsReq {
+    pub r#ref: String,
+    pub commits: Vec<CommitRowWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RecordCommitsResp {
+    pub recorded: u32,
+}
