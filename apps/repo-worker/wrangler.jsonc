@@ -19,6 +19,11 @@
   // Structured logs/metrics for the deployed Worker.
   "observability": { "enabled": true },
 
+  // Smart Placement: run the Worker close to its back-end (the RefStore DO + R2),
+  // not just at the edge nearest the client — so the many worker→DO and worker→R2
+  // round-trips per request don't each pay the full client-to-DO distance.
+  "placement": { "mode": "smart" },
+
   // Production origin. Serving at api.mkit.sh gives the web app a deterministic
   // host for its CSP `connect-src` and `VITE_REPO_BACKEND_URL` (see
   // apps/web/src/security-policy.js). `custom_domain` auto-provisions DNS + cert
