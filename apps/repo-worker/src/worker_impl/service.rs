@@ -31,8 +31,9 @@ use crate::proto::mkit::repo::v1::{
 use std::collections::HashSet;
 use super::refstore::WatchFrame;
 use super::wire::{
-    CommitMetaWire, GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq,
-    PostResp, ReactReq, ReactResp, ReactionsResp, UpdateReq, UpdateResp,
+    CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
+    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
+    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -610,11 +611,60 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            // Resolve the walk head: an explicit cursor wins, else the ref value.
+            let bucket = env
+                .bucket(STORAGE_BUCKET)
+                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+
+            // 1) Serve from the colocated DO commit index: ONE SQLite query for the
+            //    ordered page (no per-read R2 walk).
+            let idx: ListCommitsResp = do_call(
+                &env,
+                &room,
+                "/list-commits",
+                &ListCommitsReq {
+                    r#ref: ref_name.clone(),
+                    start_id: if start_id.is_empty() { String::new() } else { hex::encode(&start_id) },
+                    page_size: cap as u32,
+                },
+            )
+            .await?;
+
+            if idx.complete {
+                // Fully indexed: fetch the page's raw bytes from R2 CONCURRENTLY
+                // (the client decodes them) — no sequential parent-chain latency.
+                let reads = idx.commits.iter().map(|row| {
+                    let bucket = &bucket;
+                    let room = &room;
+                    let hash = row.hash.clone();
+                    async move {
+                        let id = match hex::decode(&hash) {
+                            Ok(b) if b.len() == 32 => b,
+                            _ => return None,
+                        };
+                        let bytes = match bucket.get(&object_key(room, &id)).execute().await {
+                            Ok(Some(obj)) => obj.body()?.bytes().await.ok()?,
+                            _ => return None,
+                        };
+                        Some(CommitObject { id: Some(id), object_bytes: Some(bytes), ..Default::default() })
+                    }
+                });
+                let commits: Vec<CommitObject> =
+                    futures::future::join_all(reads).await.into_iter().flatten().collect();
+                let next_cursor = hex::decode(&idx.next_cursor).unwrap_or_default();
+                return Ok(Response::new(ListCommitsResponse {
+                    commits,
+                    next_cursor: Some(next_cursor),
+                    ..Default::default()
+                }));
+            }
+
+            // 2) Pre-index history (index incomplete) → the authoritative sequential
+            //    R2 walk, then BACKFILL the index so the next read is fully local.
             let head: Vec<u8> = if !start_id.is_empty() {
                 start_id
             } else {
-                let resp: GetResp = do_call(&env, &room, "/get", &GetReq { name: ref_name }).await?;
+                let resp: GetResp =
+                    do_call(&env, &room, "/get", &GetReq { name: ref_name.clone() }).await?;
                 if !resp.exists {
                     return Ok(Response::new(ListCommitsResponse::default()));
                 }
@@ -624,24 +674,18 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 return Ok(Response::new(ListCommitsResponse::default()));
             }
 
-            let bucket = env
-                .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
-
             let mut commits: Vec<CommitObject> = Vec::with_capacity(cap);
+            let mut backfill: Vec<CommitRowWire> = Vec::with_capacity(cap);
             let mut seen: HashSet<Vec<u8>> = HashSet::new();
             let mut current = head;
             let mut next_cursor: Vec<u8> = Vec::new();
-
             loop {
-                // Hit the page cap with chain remaining → expose `current` as the
-                // cursor so the client pages on without re-walking.
                 if commits.len() >= cap {
                     next_cursor = current;
                     break;
                 }
                 if !seen.insert(current.clone()) {
-                    break; // cycle guard (self/loop parent)
+                    break;
                 }
                 let bytes = match bucket.get(&object_key(&room, &current)).execute().await {
                     Ok(Some(obj)) => obj
@@ -650,27 +694,42 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                         .bytes()
                         .await
                         .map_err(|e| ce_internal(format!("R2 read: {e}")))?,
-                    Ok(None) => break, // object missing — stop the walk
+                    Ok(None) => break,
                     Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
                 };
-
-                // Decode ONLY to follow the first parent (the client decodes the
-                // raw bytes for display). `extract_commit_meta` is the shared,
-                // unit-tested decoder that will also populate the per-room commit
-                // index in the next step of the denormalization redesign.
-                let first_parent = crate::commit_log::extract_commit_meta(&bytes)
-                    .and_then(|m| m.parent.map(|p| p.to_vec()));
-
+                let meta = crate::commit_log::extract_commit_meta(&bytes);
+                let first_parent = meta.as_ref().and_then(|m| m.parent.map(|p| p.to_vec()));
+                if let Some(m) = &meta {
+                    backfill.push(CommitRowWire {
+                        hash: hex::encode(&current),
+                        parent: m.parent.map(hex::encode).unwrap_or_default(),
+                        signer: m.signer_hex.clone(),
+                        message: m.message.clone(),
+                        timestamp: m.timestamp as i64,
+                        kind: m.kind.as_str().to_string(),
+                        sources: m.sources_json(),
+                    });
+                }
                 commits.push(CommitObject {
                     id: Some(current.clone()),
                     object_bytes: Some(bytes),
                     ..Default::default()
                 });
-
                 match first_parent {
                     Some(p) if p.len() == 32 => current = p,
-                    _ => break, // root, or a non-commit object — chain ended
+                    _ => break,
                 }
+            }
+
+            // Best-effort backfill (a failure just means a slow next read).
+            if !backfill.is_empty() {
+                let _ = do_call::<_, RecordCommitsResp>(
+                    &env,
+                    &room,
+                    "/record-commits",
+                    &RecordCommitsReq { r#ref: ref_name, commits: backfill },
+                )
+                .await;
             }
 
             Ok(Response::new(ListCommitsResponse {
