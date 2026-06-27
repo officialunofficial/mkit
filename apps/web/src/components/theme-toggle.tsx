@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { Tooltip } from './tooltip'
 
 // The user's explicit choice, mirrored onto <html data-theme> (see _root.tsx).
 type Theme = 'light' | 'dark'
@@ -62,17 +63,18 @@ export function ThemeToggle() {
 
   const shown: Theme = mounted ? theme : 'light'
   return (
-    <button
-      type='button'
-      onClick={toggle}
-      aria-label={`${shown === 'dark' ? 'Dark' : 'Light'} theme. Switch to ${shown === 'dark' ? 'light' : 'dark'}.`}
-      title={`Switch to ${shown === 'dark' ? 'light' : 'dark'} theme`}
-      suppressHydrationWarning
-      className='-m-1.5 inline-flex size-9 items-center justify-center rounded-md p-1.5 text-fg/80 transition-colors duration-200 hover:bg-muted/10 hover:text-fg'
-    >
-      <span suppressHydrationWarning>
-        <Icon theme={shown} />
-      </span>
-    </button>
+    <Tooltip content={`Switch to ${shown === 'dark' ? 'light' : 'dark'} theme`} side='bottom'>
+      <button
+        type='button'
+        onClick={toggle}
+        aria-label={`${shown === 'dark' ? 'Dark' : 'Light'} theme. Switch to ${shown === 'dark' ? 'light' : 'dark'}.`}
+        suppressHydrationWarning
+        className='-m-1.5 inline-flex size-9 items-center justify-center rounded-md p-1.5 text-fg/80 transition-colors duration-200 hover:bg-muted/10 hover:text-fg'
+      >
+        <span suppressHydrationWarning>
+          <Icon theme={shown} />
+        </span>
+      </button>
+    </Tooltip>
   )
 }

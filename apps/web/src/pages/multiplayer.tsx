@@ -8,14 +8,14 @@ export default function MultiplayerPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — multiplayer'
-        description='Set up a passkey, sign a commit right in your browser, and push it to a shared room — then watch other players’ commits arrive live. Anonymous, no accounts: your passkey is your identity.'
+        description='Set up a passkey, sign a commit right in your browser, and push it to a shared repo — then watch other players’ commits arrive live. Anonymous, no accounts: your passkey is your identity.'
         path='/multiplayer'
         card='Multiplayer mkit'
       />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Multiplayer mkit</h1>
         <p className='max-w-prose text-base text-fg'>
-          Set up a passkey, then sign and push commits to a shared room — anyone can push, the signature proves the same
+          Set up a passkey, then sign and push commits to a shared repo — anyone can push, the signature proves the same
           person made them (not who you are), and other players&rsquo; commits arrive live below.
         </p>
       </header>

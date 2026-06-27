@@ -32,7 +32,7 @@ export function Compose({
   targetRef: string
   onTargetRef: (r: string) => void
 }) {
-  const [message, setMessage] = useState('gm, multiplayer mkit')
+  const [message, setMessage] = useState('gm')
   const push = usePushCommit()
   // Build on the head of the TARGET ref: pushing to a fresh branch name has no
   // head yet (parentHash = '' → MISSING → first commit), an existing one MATCHes.

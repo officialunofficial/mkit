@@ -8,8 +8,9 @@
 // reacting require an unlocked identity (shared with the multiplayer demo).
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useCallback, useEffect, useRef as useReactRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as Popover from '@radix-ui/react-popover'
+import { useEffect, useRef as useReactRef, useState } from 'react'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import {
   type FeedItem,
@@ -39,12 +40,6 @@ const MAX_CHARS = MAX_MESSAGE_CHARS
  */
 const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅', '🔥']
 
-/**
- * The picker's known height (one row of `h-7` buttons + `p-1`) — used to place it above/below its anchor without
- * measuring a rendered ref.
- */
-const PICKER_H = 40
-
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
 
@@ -58,19 +53,70 @@ function targetIdOf(item: FeedItem): string {
   return item.kind === 'chat' ? item.message.messageIdHex : item.entry.hash
 }
 
+/** Channels the lobby can switch between — each is its own room (own feed + live
+ *  stream), so the header reads as a real chat room with channels. */
+const CHANNELS = ['lobby', 'general', 'random'] as const
+
 export function SignedLobby() {
   const api = useMkit()
-  const room = useIdentityStore((s) => s.room) || DEFAULT_ROOM
+  const storeRoom = useIdentityStore((s) => s.room) || DEFAULT_ROOM
+  // Channel selection is local to the lobby; switching just re-points the feed +
+  // backend at a different room.
+  const [room, setRoom] = useState(storeRoom)
   const { backend } = useResolvedRepoBackend(api, room)
 
   return (
     <RepoBackendProvider backend={backend}>
-      <LobbyBody room={room} />
+      <LobbyBody room={room} onSelectChannel={setRoom} />
     </RepoBackendProvider>
   )
 }
 
-function LobbyBody({ room }: { room: string }) {
+/** Header dropdown to switch the active channel. */
+function ChannelSwitcher({ room, onSelect }: { room: string; onSelect: (channel: string) => void }) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type='button'
+          title='Switch channel'
+          className='group inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-sm text-muted transition-colors hover:bg-muted/10 data-[state=open]:text-fg'
+        >
+          #{room}
+          <span aria-hidden className='text-[10px] opacity-70 transition-transform group-data-[state=open]:rotate-180'>
+            ▾
+          </span>
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align='start'
+          sideOffset={4}
+          className='z-50 min-w-[9rem] overflow-hidden rounded-lg border border-hairline bg-bg p-1 shadow-md'
+        >
+          {CHANNELS.map((c) => (
+            <DropdownMenu.Item
+              key={c}
+              onSelect={() => onSelect(c)}
+              className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 font-mono text-sm outline-none transition-colors data-[highlighted]:bg-muted/10 ${
+                c === room ? 'text-fg' : 'text-muted'
+              }`}
+            >
+              #{c}
+              {c === room ? (
+                <span aria-hidden className='ml-auto text-[10px]'>
+                  ✓
+                </span>
+              ) : null}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
+}
+
+function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (channel: string) => void }) {
   useLobbyEvents(room)
   const { items, isLoading } = useLobbyFeed(room, 'main')
 
@@ -82,11 +128,7 @@ function LobbyBody({ room }: { room: string }) {
           <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
         </span>
         <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
-        {/* The active channel — reads like a chat room. (A channel switcher is a
-            separate follow-up; the room itself is already a switchable value.) */}
-        <span className='font-mono text-sm text-muted' title='Current channel'>
-          #{room}
-        </span>
+        <ChannelSwitcher room={room} onSelect={onSelectChannel} />
       </div>
       <div className='overflow-hidden rounded-md border border-hairline'>
         <Feed room={room} items={items} isLoading={isLoading} />
@@ -255,9 +297,9 @@ function Row({
     item.kind === 'chat' ? (
       <p className='break-words whitespace-pre-wrap text-fg'>{item.message.text}</p>
     ) : (
-      // Commit lines read as secondary to chat messages — a notch smaller than
-      // the row's base `text-sm`.
-      <p className='text-xs text-muted'>
+      // Commit lines read as secondary to chat messages — smaller than the
+      // row's base `text-sm`.
+      <p className='text-[11px] leading-snug text-muted'>
         pushed <code className='font-mono text-fg'>{item.entry.hash.slice(0, 10)}</code> to{' '}
         <code className='font-mono text-fg'>{item.entry.ref}</code>
         {item.entry.message ? <span className='text-muted'> — “{item.entry.message}”</span> : null}
@@ -346,124 +388,54 @@ function ReactionPills({
  * (see EmojiPicker) so the feed's `overflow-y-auto` can't clip it.
  */
 function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const triggerRef = useReactRef<HTMLButtonElement>(null)
-  // Stable identity so EmojiPicker's effect (deps include onClose) doesn't tear
-  // down and re-bind its window listeners on every re-render.
-  const closePicker = useCallback(() => setPickerOpen(false), [])
-
+  const [open, setOpen] = useState(false)
   return (
-    <>
-      <button
-        ref={triggerRef}
-        type='button'
-        onClick={() => setPickerOpen((o) => !o)}
-        aria-label='Add reaction'
-        aria-haspopup='menu'
-        aria-expanded={pickerOpen}
-        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100 ${
-          pickerOpen ? 'opacity-100' : 'opacity-0'
-        }`}
-      >
-        <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
-          {/* smiley face (lower-left) */}
-          <circle cx='9.5' cy='13.5' r='7' />
-          <circle cx='7' cy='12' r='0.9' fill='currentColor' stroke='none' />
-          <circle cx='12' cy='12' r='0.9' fill='currentColor' stroke='none' />
-          <path d='M6.6 15.4c1.3 1.5 4 1.5 5.3 0' strokeLinecap='round' />
-          {/* plus (upper-right), clear of the face */}
-          <path d='M20 3.5v6M17 6.5h6' strokeWidth='2' strokeLinecap='round' />
-        </svg>
-      </button>
-      {pickerOpen ? (
-        <EmojiPicker
-          anchor={triggerRef.current}
-          onPick={(e) => {
-            setPickerOpen(false)
-            onToggle(e)
-          }}
-          onClose={closePicker}
-        />
-      ) : null}
-    </>
-  )
-}
-
-/**
- * The emoji-pick popover, rendered in a PORTAL on `document.body` and positioned `fixed` against the trigger's viewport
- * rect — so the scroll container's `overflow-y-auto` never clips it. Opens ABOVE the trigger, flipping below when there
- * isn't room above. Closes on outside-click, scroll, resize, or Escape (any of which would otherwise leave it floating
- * detached from its anchor).
- */
-function EmojiPicker({
-  anchor,
-  onPick,
-  onClose,
-}: {
-  anchor: HTMLElement | null
-  onPick: (emoji: string) => void
-  onClose: () => void
-}) {
-  const popRef = useReactRef<HTMLDivElement>(null)
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
-
-  // Measure the anchor and decide above/below. The popover is a single fixed
-  // row, so its height is a known constant (`PICKER_H`) — no need to read it back
-  // off a rendered ref, which keeps placement deterministic on the first frame.
-  useEffect(() => {
-    if (!anchor) return
-    const a = anchor.getBoundingClientRect()
-    const placeAbove = a.top - PICKER_H - 8 >= 8
-    setPos({ left: Math.max(8, a.left), top: placeAbove ? a.top - PICKER_H - 6 : a.bottom + 6 })
-    // Any scroll (capture: catches the feed's inner scroller too) or resize
-    // detaches the fixed popover from its anchor — close rather than chase it.
-    const onScroll = () => onClose()
-    window.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', onClose)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    const onDown = (e: PointerEvent) => {
-      if (!popRef.current?.contains(e.target as Node) && !anchor.contains(e.target as Node)) onClose()
-    }
-    window.addEventListener('pointerdown', onDown, true)
-    return () => {
-      window.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', onClose)
-      window.removeEventListener('keydown', onKey)
-      window.removeEventListener('pointerdown', onDown, true)
-    }
-    // `popRef` is a stable ref; reading `.current` in the outside-click handler
-    // isn't a dependency (it's only consulted when a click actually fires).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchor, onClose])
-
-  return createPortal(
-    <div
-      ref={popRef}
-      role='menu'
-      style={{
-        position: 'fixed',
-        left: pos?.left ?? -9999,
-        top: pos?.top ?? -9999,
-        visibility: pos ? 'visible' : 'hidden',
-      }}
-      className='z-50 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
-    >
-      {REACTION_EMOJI.map((e) => (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
         <button
-          key={e}
           type='button'
-          role='menuitem'
-          onClick={() => onPick(e)}
-          className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+          aria-label='Add reaction'
+          className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted opacity-0 transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100 data-[state=open]:opacity-100`}
         >
-          {e}
+          <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
+            {/* smiley face (lower-left) */}
+            <circle cx='9.5' cy='13.5' r='7' />
+            <circle cx='7' cy='12' r='0.9' fill='currentColor' stroke='none' />
+            <circle cx='12' cy='12' r='0.9' fill='currentColor' stroke='none' />
+            <path d='M6.6 15.4c1.3 1.5 4 1.5 5.3 0' strokeLinecap='round' />
+            {/* plus (upper-right), clear of the face */}
+            <path d='M20 3.5v6M17 6.5h6' strokeWidth='2' strokeLinecap='round' />
+          </svg>
         </button>
-      ))}
-    </div>,
-    document.body,
+      </Popover.Trigger>
+      {/* Portaled + collision-aware: opens above, flips below when there's no room,
+          and follows the anchor through the feed's own scroller — no manual rect
+          math. Dismiss on outside-click / Escape is built in. */}
+      <Popover.Portal>
+        <Popover.Content
+          side='top'
+          align='start'
+          sideOffset={6}
+          collisionPadding={8}
+          onCloseAutoFocus={(e) => e.preventDefault()}
+          className='z-50 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
+        >
+          {REACTION_EMOJI.map((e) => (
+            <button
+              key={e}
+              type='button'
+              onClick={() => {
+                onToggle(e)
+                setOpen(false)
+              }}
+              className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+            >
+              {e}
+            </button>
+          ))}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -515,7 +487,7 @@ function Composer({ room }: { room: string }) {
           )}
         </button>
         <span className='text-xs text-muted'>
-          {actions.status ?? 'Set up a passkey to join — it stays on your device.'}
+          {actions.status ?? 'Set up a passkey. No email, no passwords.'}
         </span>
       </div>
     )

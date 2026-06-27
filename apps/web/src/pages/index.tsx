@@ -32,10 +32,9 @@ export default function HomePage() {
         </section>
 
         <section className='space-y-5'>
-          <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
+          <h1 className='text-5xl font-semibold tracking-tight'>Sign every commit. Know every contributor.</h1>
           <p className='max-w-prose text-lg text-fg'>
-            Every file and commit is named by its BLAKE3 hash and signed with Ed25519, so tampering can&rsquo;t hide and
-            claims like reviewed or deployed travel as their own verifiable statements.
+            Every commit is cryptographically signed, so anyone can contribute and everyone can verify who did what.
           </p>
           <div className='max-w-prose space-y-3'>
             <p className='text-sm text-muted'>

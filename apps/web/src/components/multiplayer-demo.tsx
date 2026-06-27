@@ -1,5 +1,6 @@
 'use client'
 
+import * as Collapsible from '@radix-ui/react-collapsible'
 import { useState } from 'react'
 import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/identity-store'
 import { RepoBackendProvider, useRepoEvents, useResolvedRepoBackend } from '../lib/repo-api'
@@ -95,18 +96,18 @@ function MultiplayerBody({
   }
   return (
     <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
-      <div className='space-y-6'>
+      <div className='space-y-4'>
         <UnlockedHeader />
         <Compose api={api} seedHex={id.seedHex} room={room} targetRef={selectedRef} onTargetRef={setSelectedRef} />
-        <details className='group'>
-          <summary className='flex cursor-pointer list-none items-center gap-1 text-sm text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
-            <span className='inline-block transition-transform group-open:rotate-90'>›</span> Attest this Ed25519 with a
-            passkey (optional)
-          </summary>
-          <div className='mt-3'>
+        <Collapsible.Root className='group'>
+          <Collapsible.Trigger className='flex items-center gap-1 text-sm text-muted transition-colors select-none hover:text-fg'>
+            <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span> Attest this
+            Ed25519 with a passkey (optional)
+          </Collapsible.Trigger>
+          <Collapsible.Content className='mt-3'>
             <AttestBinding api={api} ed25519PubkeyHex={id.ed25519PubkeyHex} />
-          </div>
-        </details>
+          </Collapsible.Content>
+        </Collapsible.Root>
       </div>
       {browser}
     </div>
