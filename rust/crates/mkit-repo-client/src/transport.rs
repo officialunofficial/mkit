@@ -279,5 +279,29 @@ async fn fetch(
 
     let body_buf = JsFuture::from(js_resp.array_buffer()?).await?;
     let body_bytes = Bytes::from(js_sys::Uint8Array::new(&body_buf).to_vec());
+    // A Cloudflare Workers quirk: the browser can hand us a STILL-gzipped body
+    // while stripping the `content-encoding` header, so ConnectRPC (seeing no
+    // encoding) would decode raw gzip → "invalid wire type". Re-assert the
+    // encoding from the gzip magic so ConnectRPC's own gzip decompressor runs; a
+    // plain/already-decompressed body has no magic and passes through untouched.
+    if is_gzip(&body_bytes) {
+        builder = builder.header(http::header::CONTENT_ENCODING, "gzip");
+    }
     Ok(builder.body(http_body_util::Full::new(body_bytes))?)
+}
+
+/// True if `bytes` begins with the gzip magic number (`0x1f 0x8b`).
+fn is_gzip(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn detects_gzip_magic() {
+        assert!(super::is_gzip(&[0x1f, 0x8b, 0x08, 0x00]));
+        assert!(!super::is_gzip(b"\x0a\x05proto")); // plain protobuf
+        assert!(!super::is_gzip(&[0x1f])); // too short
+        assert!(!super::is_gzip(&[]));
+    }
 }
