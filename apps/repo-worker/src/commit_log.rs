@@ -42,6 +42,28 @@ pub struct CommitMeta {
     pub sources: Vec<(String, String)>,
 }
 
+impl CommitMeta {
+    /// Encode `sources` as the compact JSON the DO column stores and the client
+    /// reads back: `[[upstreamHex, commitHex], …]` (`"[]"` for a plain commit).
+    pub fn sources_json(&self) -> String {
+        // Hand-built (no serde needed): each pair is two 64-hex strings, so
+        // there's nothing to escape.
+        let mut s = String::from("[");
+        for (i, (up, c)) in self.sources.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str("[\"");
+            s.push_str(up);
+            s.push_str("\",\"");
+            s.push_str(c);
+            s.push_str("\"]");
+        }
+        s.push(']');
+        s
+    }
+}
+
 /// Decode a raw object's bytes into commit-log metadata, or `None` if the bytes
 /// aren't a commit/remix (the walk stops there, exactly like the client decoder).
 pub fn extract_commit_meta(bytes: &[u8]) -> Option<CommitMeta> {
@@ -119,6 +141,35 @@ mod tests {
         assert_eq!(m.kind, CommitKind::Remix);
         assert_eq!(m.sources, vec![("aa".repeat(32), "bb".repeat(32))]);
         assert_eq!(m.parent, Some([9u8; 32]));
+    }
+
+    #[test]
+    fn sources_json_for_commit_is_empty_array() {
+        let m = extract_commit_meta(&commit_bytes()).unwrap();
+        assert_eq!(m.sources_json(), "[]");
+    }
+
+    #[test]
+    fn sources_json_encodes_remix_pairs() {
+        let signer = [3u8; 32];
+        let r = Remix {
+            tree_hash: [1u8; 32],
+            parents: vec![[9u8; 32]],
+            sources: vec![
+                RemixSource { upstream_id: [0xaa; 32], commit_hash: [0xbb; 32] },
+                RemixSource { upstream_id: [0xcc; 32], commit_hash: [0xdd; 32] },
+            ],
+            author: Identity::ed25519(signer),
+            signer,
+            message: b"r".to_vec(),
+            timestamp: 1,
+            signature: [0u8; 64],
+        };
+        let m = extract_commit_meta(&serialize(&Object::Remix(r)).unwrap()).unwrap();
+        assert_eq!(
+            m.sources_json(),
+            format!("[[\"{}\",\"{}\"],[\"{}\",\"{}\"]]", "aa".repeat(32), "bb".repeat(32), "cc".repeat(32), "dd".repeat(32))
+        );
     }
 
     #[test]

@@ -35,8 +35,9 @@ use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::wire::{
-    GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp, MsgEntry, PostReq,
-    PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp, UpdateReq, UpdateResp,
+    CommitMetaWire, GetReq, GetResp, ListEntry, ListReq, ListResp, MessagesReq, MessagesResp,
+    MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp, UpdateReq,
+    UpdateResp,
 };
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
@@ -140,6 +141,11 @@ impl DurableObject for RefStore {
                 if let Err(e) = self.ensure_table() {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
+                if path == "/update" {
+                    if let Err(e) = self.ensure_commits_table() {
+                        return Response::error(format!("storage init failed: {e}"), 500);
+                    }
+                }
             }
             "/post" | "/messages" => {
                 if let Err(e) = self.ensure_messages_table() {
@@ -238,6 +244,49 @@ impl RefStore {
         Ok(())
     }
 
+    /// Idempotently create the `commits` index — the denormalized commit-log
+    /// (one row per commit/remix, keyed by its hash, with first `parent` for the
+    /// chain walk + the fields the lobby renders). Populated on each ref update
+    /// (and backfilled from R2 on demand) so `ListCommits` can be served from
+    /// this colocated table instead of a per-read R2 walk.
+    fn ensure_commits_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS commits (\
+               hash TEXT PRIMARY KEY, \
+               ref TEXT NOT NULL, \
+               parent TEXT NOT NULL, \
+               signer TEXT NOT NULL, \
+               message TEXT NOT NULL, \
+               timestamp INTEGER NOT NULL, \
+               kind TEXT NOT NULL, \
+               sources TEXT NOT NULL);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Record one commit into the `commits` index (idempotent — a re-push of the
+    /// same hash is a no-op since the object is immutable).
+    fn record_commit(&self, hash: &str, ref_name: &str, m: &CommitMetaWire) -> Result<()> {
+        self.state.storage().sql().exec(
+            "INSERT OR IGNORE INTO commits \
+               (hash, ref, parent, signer, message, timestamp, kind, sources) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            vec![
+                hash.into(),
+                ref_name.into(),
+                m.parent.clone().into(),
+                m.signer.clone().into(),
+                m.message.clone().into(),
+                m.timestamp.into(),
+                m.kind.clone().into(),
+                m.sources.clone().into(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Read a ref's current hex value, or None if absent.
     fn read_ref(&self, name: &str) -> Option<String> {
         #[derive(Deserialize)]
@@ -278,6 +327,14 @@ impl RefStore {
                      ON CONFLICT(path) DO UPDATE SET value = excluded.value;",
                     vec![req.name.clone().into(), req.new.clone().into()],
                 )?;
+                // Dual-write the denormalized commit index. Best-effort: a record
+                // failure must NOT fail the (already-committed) ref update — the
+                // index is rebuildable by backfill from R2.
+                if let Some(m) = &req.commit {
+                    if let Err(e) = self.record_commit(&req.new, &req.name, m) {
+                        worker::console_error!("record_commit failed for {}: {e}", req.name);
+                    }
+                }
                 self.broadcast(&WatchFrame::Commit {
                     name: req.name.clone(),
                     object_id: req.new.clone(),
