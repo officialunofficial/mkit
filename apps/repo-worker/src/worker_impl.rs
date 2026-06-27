@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use connectrpc::{CompressionPolicy, ConnectRpcService, Router};
+use connectrpc::{ConnectRpcService, Router};
 use http_body_util::{BodyExt, Full};
 use tower::ServiceExt;
 use worker::send::SendFuture;
@@ -152,15 +152,11 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Build the service fresh per request — `Env` is Send and cheap to clone;
     // the service holds no cross-request state.
     let router: Router = Arc::new(RepoServer::new(env)).register(Router::new());
-    // Disable response compression. The browser auto-sends `Accept-Encoding: gzip`
-    // (JS can't suppress it), so without this the server gzips large responses
-    // (e.g. a ListCommits page) — but the browser strips `content-encoding` while
-    // handing the wasm client the STILL-gzipped bytes, so the ConnectRPC client
-    // (seeing no encoding header) decodes raw gzip → "invalid wire type". Bodies
-    // here are small, so plain proto is the right trade.
-    let svc = ConnectRpcService::new(router)
-        .with_compression_policy(CompressionPolicy::disabled())
-        .with_interceptor(AuthInterceptor);
+    // Default compression policy (gzip large responses). The wasm client now
+    // re-asserts `content-encoding` from the gzip magic and decompresses, so the
+    // earlier "browser strips the header → client decodes raw gzip" bug is fixed
+    // at the source (see mkit-repo-client transport `is_gzip`).
+    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
     // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`
