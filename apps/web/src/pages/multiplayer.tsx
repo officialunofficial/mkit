@@ -8,17 +8,16 @@ export default function MultiplayerPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — multiplayer'
-        description='Enroll a passkey, derive an Ed25519 signing key from it in your browser, sign an mkit commit in wasm, and push it to a shared room — then watch other players’ commits arrive live. Anonymous, no accounts: the key is the identity.'
+        description='Set up a passkey, sign a commit right in your browser, and push it to a shared room — then watch other players’ commits arrive live. Anonymous, no accounts: your passkey is your identity.'
         path='/multiplayer'
         card='Multiplayer mkit'
       />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Multiplayer mkit</h1>
         <p className='max-w-prose text-base text-fg'>
-          Create a passkey identity — one prompt derives an Ed25519 signing key from it via the WebAuthn PRF extension —
-          then sign commits in wasm and push them to a shared room with no further prompts. Anyone can push; the
-          signature proves “the same key made these commits,” not who you are. Watch other players&rsquo; commits arrive
-          live below.
+          Set up a passkey, then sign commits and push them to a shared room — one prompt, no accounts, no further
+          sign-ins. Anyone can push; the signature proves the same person made these commits, not who you are. Watch
+          other players&rsquo; commits arrive live below.
         </p>
       </header>
       <DemoBoundary>
@@ -26,18 +25,16 @@ export default function MultiplayerPage() {
       </DemoBoundary>
       <div className='max-w-prose space-y-3 text-sm text-muted'>
         <p>
-          The passkey is a P-256 identity anchor synced by your platform; the Ed25519 signing key is re-derived from it
-          each session and held only in memory — there&rsquo;s no key file. Same passkey → same Ed25519 public key → the
-          same anonymous player, across devices.
+          Your passkey is synced by your device&rsquo;s platform and anchors your identity; the signing key is rebuilt
+          from it each session and never written to disk. Same passkey → same player, on every device.
         </p>
         <p>
-          Every push carries a signed request envelope (Ed25519 over a BLAKE3 digest of the canonical request), and the
-          ref advances under a compare-and-set so concurrent pushes serialize cleanly. The wasm ConnectRPC client talks
-          to a Cloudflare Worker (R2 objects + a Durable Object ref store); with no backend configured it falls back to
-          an in-memory mock so the flow still runs offline.
+          Every push is signed, and updates apply one at a time so concurrent pushes never clobber each other. It talks
+          to a small server that stores the commits and tracks where each room&rsquo;s history points; with no server
+          configured it runs against an in-browser stand-in, so the flow still works offline.
         </p>
         <p>
-          Curious about the underlying signature primitive? See the{' '}
+          Curious how the signing works? See the{' '}
           <a
             href='/demos#sign'
             className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'

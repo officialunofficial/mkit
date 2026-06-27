@@ -101,7 +101,7 @@ export default function HomePage() {
         <Demo
           to='/demos'
           title='demos'
-          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each a live wasm demo.'
+          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each one live, right in your browser.'
         />
       </ul>
     </div>

@@ -7,7 +7,7 @@ export default function DemosPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — demos'
-        description='Four interactive demos of mkit in one place: BLAKE3 content addressing, Ed25519 signatures, content-defined chunked streaming, and signed attestations — each running in your browser via wasm.'
+        description='Four interactive demos of mkit in one place: BLAKE3 content addressing, Ed25519 signatures, content-defined chunked streaming, and signed attestations — all running right in your browser.'
         path='/demos'
         card='See it work'
       />
