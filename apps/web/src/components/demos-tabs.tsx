@@ -1,5 +1,6 @@
 'use client'
 
+import * as Tabs from '@radix-ui/react-tabs'
 import type { ComponentType, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
 import { AttestDemo } from './attest-demo'
@@ -65,54 +66,50 @@ const TABS: Tab[] = [
 ]
 
 export function DemosTabs() {
-  const [active, setActive] = useState(0)
+  const [active, setActive] = useState(TABS[0]!.id)
 
   // Honour a `#hash | #sign | #streaming | #attest` deep link on first load —
   // keeps the old per-page URLs meaningful as anchors into the combined page.
   useEffect(() => {
     const id = window.location.hash.slice(1)
-    const i = TABS.findIndex((t) => t.id === id)
-    if (i >= 0) setActive(i)
+    if (TABS.some((t) => t.id === id)) setActive(id)
   }, [])
 
-  const select = (i: number) => {
-    setActive(i)
-    const id = TABS[i]?.id
-    if (id) window.history.replaceState(null, '', `#${id}`)
+  const onValueChange = (id: string) => {
+    setActive(id)
+    window.history.replaceState(null, '', `#${id}`)
   }
 
-  const tab = TABS[active] ?? TABS[0]!
-  const ActiveDemo = tab.Demo
-
   return (
-    <div className='space-y-8'>
-      <div role='tablist' aria-label='Demos' className='flex flex-wrap gap-1 border-b border-hairline'>
-        {TABS.map((t, i) => (
-          <button
+    <Tabs.Root value={active} onValueChange={onValueChange} className='space-y-8'>
+      <Tabs.List aria-label='Demos' className='flex flex-wrap gap-1 border-b border-hairline'>
+        {TABS.map((t) => (
+          <Tabs.Trigger
             key={t.id}
-            type='button'
-            role='tab'
-            aria-selected={i === active}
-            onClick={() => select(i)}
-            className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-              i === active ? 'border-fg font-medium text-fg' : 'border-transparent text-muted hover:text-fg'
-            }`}
+            value={t.id}
+            className='-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-muted transition-colors hover:text-fg data-[state=active]:border-fg data-[state=active]:font-medium data-[state=active]:text-fg'
           >
             {t.label}
-          </button>
+          </Tabs.Trigger>
         ))}
-      </div>
+      </Tabs.List>
 
-      <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>{tab.title}</h1>
-        <p className='max-w-prose text-base text-fg'>{tab.body}</p>
-      </header>
-
-      {/* Keyed by tab so the previous demo unmounts (and its wasm work stops)
-          and the next one mounts fresh — only the active demo ever runs. */}
-      <DemoBoundary key={tab.id}>
-        <ActiveDemo />
-      </DemoBoundary>
-    </div>
+      {/* Radix unmounts inactive content, so only the active demo is mounted —
+          the previous one's wasm work stops when you switch. */}
+      {TABS.map((t) => {
+        const Demo = t.Demo
+        return (
+          <Tabs.Content key={t.id} value={t.id} className='space-y-8 focus-visible:outline-none'>
+            <header className='space-y-3'>
+              <h1 className='text-4xl font-semibold tracking-tight'>{t.title}</h1>
+              <p className='max-w-prose text-base text-fg'>{t.body}</p>
+            </header>
+            <DemoBoundary>
+              <Demo />
+            </DemoBoundary>
+          </Tabs.Content>
+        )
+      })}
+    </Tabs.Root>
   )
 }

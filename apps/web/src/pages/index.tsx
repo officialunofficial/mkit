@@ -32,12 +32,9 @@ export default function HomePage() {
         </section>
 
         <section className='space-y-5'>
-          <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
+          <h1 className='text-5xl font-semibold tracking-tight'>Sign every commit. Know every contributor.</h1>
           <p className='max-w-prose text-lg text-fg'>
-            Every file, folder, and commit is named by its BLAKE3 hash, so changing a single byte changes the name —
-            tampering can&rsquo;t hide. Every commit carries an Ed25519 signature anyone can verify, and claims like
-            reviewed, tested, or deployed travel as signed statements of their own. It&rsquo;s built in Rust, so it runs
-            anywhere — including this browser.
+            Every commit is cryptographically signed, so anyone can contribute and everyone can verify who did what.
           </p>
           <div className='max-w-prose space-y-3'>
             <p className='text-sm text-muted'>
@@ -96,12 +93,12 @@ export default function HomePage() {
         <Demo
           to='/push'
           title='push'
-          body='Store a file whole, or chunk and pack it. Why mkit packs, hashes, and signs every push instead of leaving blobs browsable.'
+          body='Why mkit chunks, packs, hashes, and signs every push instead of leaving blobs browsable.'
         />
         <Demo
           to='/demos'
           title='demos'
-          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each a live wasm demo.'
+          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each one live, right in your browser.'
         />
       </ul>
     </div>

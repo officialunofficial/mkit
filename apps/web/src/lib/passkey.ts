@@ -75,7 +75,7 @@ export function webauthnAvailable(): boolean {
  * authenticator confirmed PRF support. A `null` return means PRF is unsupported.
  */
 export async function enroll(displayName = 'mkit player'): Promise<EnrollResult> {
-  if (!webauthnAvailable()) throw new Error('WebAuthn is not available in this environment')
+  if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
 
   const userId = crypto.getRandomValues(new Uint8Array(16))
   const cred = (await navigator.credentials.create({
@@ -90,7 +90,7 @@ export async function enroll(displayName = 'mkit player'): Promise<EnrollResult>
     },
   })) as PublicKeyCredential | null
 
-  if (!cred) throw new Error('Passkey creation was cancelled')
+  if (!cred) throw new Error('Passkey setup was canceled. Try again.')
 
   const ext = cred.getClientExtensionResults() as { prf?: { enabled?: boolean } }
   return {
@@ -154,7 +154,7 @@ export type DeriveResult = {
  * the caller can fall back to an in-memory random seed with a visible notice.
  */
 export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveResult> {
-  if (!webauthnAvailable()) throw new Error('WebAuthn is not available in this environment')
+  if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
 
   const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
   const assertion = (await navigator.credentials.get({
@@ -170,7 +170,7 @@ export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveRe
     },
   })) as PublicKeyCredential | null
 
-  if (!assertion) throw new Error('Passkey assertion was cancelled')
+  if (!assertion) throw new Error('Sign-in was canceled. Try again.')
 
   const ext = assertion.getClientExtensionResults() as {
     prf?: { results?: { first?: BufferSource } }
@@ -237,7 +237,7 @@ export async function createIdentity(displayName = 'mkit player'): Promise<Ident
       extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
     },
   })) as PublicKeyCredential | null
-  if (!cred) throw new Error('Passkey creation was cancelled')
+  if (!cred) throw new Error('Passkey setup was canceled. Try again.')
 
   const credentialId = b64url(new Uint8Array(cred.rawId))
   const ext = cred.getClientExtensionResults() as {

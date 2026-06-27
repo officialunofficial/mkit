@@ -8,16 +8,15 @@ export default function TreePage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — tree'
-        description="A folder is a list of BLAKE3-named entries; a parent's hash is computed from its children's. The repo is a Merkle tree — edit a file and the hashes ripple to the root."
+        description="A folder lists BLAKE3-named entries and each parent's hash is built from its children's, so the whole repo is one Merkle tree where editing a file ripples to the root."
         path='/tree'
         card='Folders, all the way down'
       />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-fg'>
-          A folder lists its entries by their BLAKE3 hashes, and each parent's hash is built from its children's — so
-          the whole repo is one Merkle tree, fingerprinted by a single root hash. Edit any file and watch the change
-          ripple up: file → folder → commit.
+          A folder lists its entries by their BLAKE3 hashes and each parent's hash is built from its children's, so the
+          whole repo is one Merkle tree where editing a file ripples up: file → folder → commit.
         </p>
       </header>
       <DemoBoundary>

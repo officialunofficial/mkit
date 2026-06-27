@@ -1,5 +1,6 @@
 'use client'
 
+import * as Collapsible from '@radix-ui/react-collapsible'
 import { useMemo, useState } from 'react'
 import { Field, FieldList, INPUT_CLASSES, INPUT_CLASSES_XS } from './result-panel'
 import { DEMO_SEED, TEXT_ENCODER, useMkit } from './use-mkit'
@@ -91,11 +92,11 @@ export function AttestDemo() {
         </div>
       </div>
 
-      <details className='group'>
-        <summary className='cursor-pointer text-sm text-muted select-none hover:text-fg'>
-          <span className='inline-block transition-transform group-open:rotate-90'>›</span> Advanced
-        </summary>
-        <div className='mt-3 space-y-4'>
+      <Collapsible.Root className='group'>
+        <Collapsible.Trigger className='flex items-center gap-1 text-sm text-muted transition-colors select-none hover:text-fg'>
+          <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span> Advanced
+        </Collapsible.Trigger>
+        <Collapsible.Content className='mt-3 space-y-4'>
           <label className='block'>
             <span className='mb-2 block text-sm text-muted'>Commit being attested (64 hex)</span>
             <input className={INPUT_CLASSES_XS} value={commitHash} onChange={(e) => setCommitHash(e.target.value)} />
@@ -104,8 +105,8 @@ export function AttestDemo() {
             <span className='mb-2 block text-sm text-muted'>Private key (32 bytes, 64 hex)</span>
             <input className={INPUT_CLASSES_XS} value={seed} onChange={(e) => setSeed(e.target.value)} />
           </label>
-        </div>
-      </details>
+        </Collapsible.Content>
+      </Collapsible.Root>
 
       {built.ok && keypair.ok ? (
         <FieldList>

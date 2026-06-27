@@ -4,6 +4,8 @@
 // individual log rows, the commit/remix detail view, and the loading skeleton.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import * as ScrollArea from '@radix-ui/react-scroll-area'
 import { useMemo, useState } from 'react'
 import {
   CasConflictError,
@@ -17,6 +19,7 @@ import {
   useRefs,
 } from '../../lib/repo-api'
 import { Field, FieldList, HashChip } from '../result-panel'
+import { Tooltip } from '../tooltip'
 import { useMkit } from '../use-mkit'
 import { useFork } from './compose'
 import { PlayerLabel } from './player-label'
@@ -78,7 +81,7 @@ export function RepoBrowser({
   const canFork = !!seedHex && forkReady
 
   return (
-    <div className='space-y-6'>
+    <div className='space-y-4'>
       <RefsPanel room={room} useMock={useMock} selectedRef={selectedRef} onSelectRef={onSelectRef} />
       {selectedCommit ? (
         <CommitDetail
@@ -151,47 +154,97 @@ function RefsPanel({
   const showSkeleton = refs.isPending || (refs.isFetching && (refs.data?.length ?? 0) === 0)
 
   return (
-    <section className='space-y-3'>
+    <section className='space-y-2'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-sm font-semibold'>Refs · room “{room}”</h2>
+        <h2 className='text-sm font-semibold'>Refs</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
       {showSkeleton ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows rows={1} />
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No refs yet — push a commit to create one.</p>
       ) : (
-        <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
-          {entries.map((r) => {
-            const active = r.name === selectedRef
-            return (
-              <li key={r.name}>
-                <button
-                  type='button'
-                  onClick={() => onSelectRef(r.name)}
-                  aria-pressed={active}
-                  className={`flex w-full items-center gap-3 py-2.5 text-left transition-colors ${
-                    active ? 'text-fg' : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  <HashChip hash={r.objectIdHex} size={14} />
-                  <span className={`truncate font-mono text-sm ${active ? 'font-semibold' : 'font-medium'}`}>
-                    {r.name}
-                  </span>
-                  {isForkRef(r.name) ? (
-                    <span className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'>
-                      fork
-                    </span>
-                  ) : null}
-                  {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
-                  <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 10)}…</code>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+        <RefMenu entries={entries} selectedRef={selectedRef} onSelect={onSelectRef} />
       )}
     </section>
+  )
+}
+
+/** A single dropdown over every ref (branches + forks). The trigger shows the
+ *  active ref, so the panel stays one line and the commit log gets the room. */
+function RefMenu({
+  entries,
+  selectedRef,
+  onSelect,
+}: {
+  entries: { name: string; objectIdHex: string }[]
+  selectedRef: string
+  onSelect: (r: string) => void
+}) {
+  const selected = entries.find((e) => e.name === selectedRef) ?? entries[0]
+  const branches = entries.filter((e) => !isForkRef(e.name))
+  const forks = entries.filter((e) => isForkRef(e.name))
+
+  const item = (r: { name: string; objectIdHex: string }) => (
+    <DropdownMenu.Item
+      key={r.name}
+      onSelect={() => onSelect(r.name)}
+      className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-mono text-xs outline-none transition-colors data-[highlighted]:bg-muted/10 ${
+        r.name === selectedRef ? 'text-fg' : 'text-muted'
+      }`}
+    >
+      <HashChip hash={r.objectIdHex} size={12} />
+      <span className='truncate'>{r.name}</span>
+      {r.name === selectedRef ? (
+        <span aria-hidden className='ml-auto pl-2 text-[10px]'>
+          ✓
+        </span>
+      ) : null}
+    </DropdownMenu.Item>
+  )
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type='button'
+          className='group inline-flex max-w-full items-center gap-1.5 rounded-full border border-hairline px-2.5 py-1 font-mono text-xs font-semibold text-fg transition-colors hover:border-blue-500/40 data-[state=open]:border-blue-500/50'
+        >
+          {selected ? (
+            <>
+              <HashChip hash={selected.objectIdHex} size={12} />
+              <span className='truncate'>{selected.name}</span>
+            </>
+          ) : (
+            <span className='font-normal text-muted'>select a ref</span>
+          )}
+          <span
+            aria-hidden
+            className='ml-0.5 text-[10px] font-normal opacity-70 transition-transform group-data-[state=open]:rotate-180'
+          >
+            ▾
+          </span>
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align='start'
+          sideOffset={4}
+          className='z-50 max-h-72 min-w-[14rem] overflow-y-auto rounded-lg border border-hairline bg-bg p-1 shadow-md'
+        >
+          {branches.map(item)}
+          {forks.length > 0 ? (
+            <>
+              <DropdownMenu.Separator className='my-1 border-t border-hairline' />
+              <DropdownMenu.Label className='px-2 py-1 text-[10px] tracking-wide text-muted uppercase'>
+                Forks
+              </DropdownMenu.Label>
+              {forks.map(item)}
+            </>
+          ) : null}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   )
 }
 
@@ -224,6 +277,7 @@ function LiveLog({
       <div className='flex items-baseline justify-between'>
         <h2 className='text-sm font-semibold'>
           {isForkRef(selectedRef) ? 'Fork log' : 'Commit log'} · “{selectedRef}”
+          {entries.length > 0 ? <span className='ml-1.5 font-normal text-muted'>{entries.length}</span> : null}
         </h2>
         <span className='font-mono text-xs text-muted'>
           {/* Show "head …" while the head is loading/refetching; only show ∅ once
@@ -236,19 +290,32 @@ function LiveLog({
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No commits on this ref yet — push one above.</p>
       ) : (
-        <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
-          {entries.map((e) => (
-            <LogRow
-              key={e.hash}
-              entry={e}
-              mine={!!myPubkey && e.authorPubkey === myPubkey}
-              onSelect={() => onSelectCommit(e.hash)}
-              onFork={onFork}
-              canFork={canFork}
-              forkPending={forkPending}
-            />
-          ))}
-        </ul>
+        // Bound the log so a long history scrolls inside the panel instead of
+        // growing the whole page. Radix ScrollArea gives a consistent, themeable
+        // scrollbar across browsers.
+        <ScrollArea.Root type='auto' className='relative max-h-[30rem] overflow-hidden'>
+          <ScrollArea.Viewport className='h-full max-h-[30rem] w-full'>
+            <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
+              {entries.map((e) => (
+                <LogRow
+                  key={e.hash}
+                  entry={e}
+                  mine={!!myPubkey && e.authorPubkey === myPubkey}
+                  onSelect={() => onSelectCommit(e.hash)}
+                  onFork={onFork}
+                  canFork={canFork}
+                  forkPending={forkPending}
+                />
+              ))}
+            </ul>
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar
+            orientation='vertical'
+            className='flex w-1.5 touch-none select-none p-px transition-opacity data-[state=hidden]:opacity-0'
+          >
+            <ScrollArea.Thumb className='flex-1 rounded-full bg-muted/40 hover:bg-muted/60' />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
       )}
     </section>
   )
@@ -271,11 +338,11 @@ function LogRow({
 }) {
   const isRemix = entry.kind === 'remix'
   return (
-    <li className='flex items-center gap-2 py-2.5'>
+    <li className='flex items-center gap-2 py-1.5'>
       <button
         type='button'
         onClick={onSelect}
-        className='flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:text-fg'
+        className='flex min-w-0 flex-1 items-center gap-2.5 text-left transition-colors hover:text-fg'
       >
         <HashChip hash={entry.hash} size={14} />
         <div className='min-w-0 flex-1'>
@@ -290,23 +357,17 @@ function LogRow({
           </div>
           <div className='text-xs text-muted' title={entry.authorPubkey}>
             <PlayerLabel pubkey={entry.authorPubkey} className='font-medium text-fg' />{' '}
-            <code className='font-mono break-all'>
-              {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 16)}…
-            </code>
+            <code className='font-mono'>{entry.hash.slice(0, 12)}…</code>
           </div>
         </div>
       </button>
       {/* Fork a COMMIT (not a remix — that would fork a fork; out of scope for the demo). */}
       {canFork && !isRemix ? (
-        <button
-          type='button'
-          onClick={() => onFork(entry.hash)}
-          disabled={forkPending}
-          className={`${BTN} shrink-0`}
-          title='Build + sign a remix of this commit and push it to a fork ref'
-        >
-          Fork
-        </button>
+        <Tooltip content='Build + sign a remix of this commit and push it to a fork ref'>
+          <button type='button' onClick={() => onFork(entry.hash)} disabled={forkPending} className={`${BTN} shrink-0`}>
+            Fork
+          </button>
+        </Tooltip>
       ) : null}
     </li>
   )
@@ -345,7 +406,7 @@ function CommitDetail({
     // remix_decode and returns the kind + sources, so the detail view
     // never has to guess which decoder to call.
     const res = decodeLogObject(api, obj.data, hash, '')
-    if (!res) return { ok: false as const, error: 'unknown object kind' }
+    if (!res) return { ok: false as const, error: "This commit is in a format we don't recognize." }
     try {
       const info = res.entry.kind === 'remix' ? api.remix_decode(obj.data) : api.commit_decode(obj.data)
       const parents: string[] = []
@@ -397,11 +458,11 @@ function CommitDetail({
       </div>
 
       {obj.isLoading ? (
-        <p className='text-sm text-muted'>Loading object…</p>
+        <p className='text-sm text-muted'>Loading…</p>
       ) : !obj.data ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>Object not found in this room.</p>
+        <p className='text-sm text-amber-700 dark:text-amber-400'>We couldn't find this commit.</p>
       ) : !decoded?.ok ? (
-        <p className='text-red-600 dark:text-red-400'>Could not decode object: {decoded?.error}</p>
+        <p className='text-red-600 dark:text-red-400'>We couldn't open this commit. Try again.</p>
       ) : (
         <FieldList>
           <Field label='Hash'>
@@ -416,14 +477,15 @@ function CommitDetail({
                   {decoded.sources.map((s) => (
                     <li key={s.commitHashHex} className='flex items-center gap-2'>
                       <HashChip hash={s.commitHashHex} size={12} />
-                      <button
-                        type='button'
-                        onClick={() => onSelectCommit(s.commitHashHex)}
-                        className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
-                        title='Open the upstream commit this fork derives from'
-                      >
-                        {s.commitHashHex}
-                      </button>
+                      <Tooltip content='Open the upstream commit this fork derives from'>
+                        <button
+                          type='button'
+                          onClick={() => onSelectCommit(s.commitHashHex)}
+                          className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
+                        >
+                          {s.commitHashHex}
+                        </button>
+                      </Tooltip>
                     </li>
                   ))}
                 </ul>
@@ -472,7 +534,7 @@ function CommitDetail({
               </ul>
             )}
           </Field>
-          <Field label='Signature (Ed25519)'>
+          <Field label='Signature'>
             <code className='font-mono text-xs break-all'>{decoded.signatureHex}</code>
           </Field>
         </FieldList>

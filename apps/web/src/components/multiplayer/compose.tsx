@@ -32,7 +32,7 @@ export function Compose({
   targetRef: string
   onTargetRef: (r: string) => void
 }) {
-  const [message, setMessage] = useState('gm, multiplayer mkit')
+  const [message, setMessage] = useState('gm')
   const push = usePushCommit()
   // Build on the head of the TARGET ref: pushing to a fresh branch name has no
   // head yet (parentHash = '' → MISSING → first commit), an existing one MATCHes.
@@ -92,7 +92,7 @@ export function Compose({
     push.error instanceof CasConflictError
       ? 'Someone pushed first — the preview re-parented onto the new head. Push again.'
       : push.error instanceof IdentityLockedError
-        ? 'Identity is locked — unlock (derive) before pushing.'
+        ? 'Your identity is locked. Unlock it before pushing.'
         : push.error
           ? errMsg(push.error)
           : null
@@ -134,7 +134,7 @@ export function Compose({
           <Field label='Commit hash'>
             <code className='font-mono text-sm break-all'>{built.commit.hash_hex}</code>
           </Field>
-          <Field label='Signature (Ed25519, in WASM)'>
+          <Field label='Signature'>
             <code className='font-mono text-xs break-all'>{built.commit.signature_hex}</code>
           </Field>
           <Field label={`Parent (head of “${targetRef || 'main'}”)`}>

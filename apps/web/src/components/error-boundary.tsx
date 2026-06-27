@@ -38,19 +38,17 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     const { error } = this.state
     if (error === null) return this.props.children
     if (this.props.fallback) return this.props.fallback(error, this.reset)
-    return <DefaultFallback error={error} reset={this.reset} />
+    return <DefaultFallback reset={this.reset} />
   }
 }
 
-function DefaultFallback({ error, reset }: { error: Error; reset: () => void }) {
+function DefaultFallback({ reset }: { reset: () => void }) {
   return (
     <div role='alert' className='space-y-3 rounded-md border border-hairline p-4'>
-      <p className='text-sm font-medium text-fg'>This demo failed to load.</p>
+      <p className='text-sm font-medium text-fg'>This demo couldn&rsquo;t load.</p>
       <p className='max-w-prose text-sm text-muted'>
-        The mkit WebAssembly module couldn&rsquo;t start in your browser. Reloading usually fixes it; if it keeps
-        happening, your browser may be blocking WebAssembly.
+        Reloading usually fixes it; if it keeps happening, your browser may be blocking part of this page.
       </p>
-      {error.message ? <p className='font-mono text-xs break-words text-subtle'>{error.message}</p> : null}
       <button
         type='button'
         onClick={reset}

@@ -240,6 +240,11 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const { graph, counters } = opts
     let head = opts.head
     const refs = opts.refs ?? {}
+    // The worker now owns the commit-log walk (ListCommits), so the client just
+    // calls `list_commits` and renders the denormalized metadata. The harness
+    // serves that walk straight from `graph`; `listCommitsCalls` lets the
+    // head-keyed cache tests assert round-trips the way they used to with decode.
+    const listCommitsCalls: string[] = []
 
     const wasm = {
       get_ref: async (_base: string, _room: string, name: string) => {
@@ -251,6 +256,28 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
         counters.getObject++
         // Encode the hash itself as the "bytes" so commit_decode can map back.
         return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_commits: async (_base: string, _room: string, ref: string, startIdHex: string, pageSize: number) => {
+        listCommitsCalls.push(ref)
+        let cur: string | undefined = startIdHex || (ref === 'main' ? head : refs[ref])
+        const commits: Array<Record<string, unknown>> = []
+        const seen = new Set<string>()
+        while (cur && commits.length < pageSize && !seen.has(cur)) {
+          seen.add(cur)
+          const node = graph[cur]
+          if (!node) break // not indexed → stop (the real worker backfills from R2)
+          commits.push({
+            hash: cur,
+            parent: node.parent ?? '',
+            authorPubkeyHex: node.signer,
+            message: node.message,
+            createdAtUnix: 1,
+            kind: 'commit',
+            sourcesJson: '[]',
+          })
+          cur = node.parent
+        }
+        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
       },
       list_refs: async (_base: string, _room: string, prefix: string) => {
         const all = [
@@ -287,7 +314,7 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     } as unknown as MkitApi
 
     const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
-    return { backend, setHead: (h: string | undefined) => (head = h) }
+    return { backend, listCommitsCalls, setHead: (h: string | undefined) => (head = h) }
   }
 
   it('returns [] when the room has no `main` ref', async () => {
@@ -321,16 +348,15 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const h = harness({ head: 'c1', graph, counters })
 
     await h.backend.commitLog('room') // walks c1
-    const afterFirst = counters.decode
-    expect(afterFirst).toBe(1)
+    expect(h.listCommitsCalls.length).toBe(1)
 
-    await h.backend.commitLog('room') // same head → cache hit, no decode
-    expect(counters.decode).toBe(afterFirst)
+    await h.backend.commitLog('room') // same head → cache hit, no round-trip
+    expect(h.listCommitsCalls.length).toBe(1)
 
     h.setHead('c2') // a peer pushed → head advanced → re-walk
     const log = await h.backend.commitLog('room')
     expect(log.map((e) => e.hash)).toEqual(['c2', 'c1'])
-    expect(counters.decode).toBeGreaterThan(afterFirst)
+    expect(h.listCommitsCalls.length).toBe(2)
   })
 
   it('stops the walk on a missing object rather than throwing', async () => {
@@ -366,17 +392,16 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
       m1: { message: 'main', signer: 's' },
       f1: { message: 'feature', signer: 's' },
     }
-    const { backend } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
+    const { backend, listCommitsCalls } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
 
     await backend.commitLog('room', 'main')
     await backend.commitLog('room', 'feature')
-    const afterBoth = counters.decode
-    expect(afterBoth).toBe(2) // each ref walked once
+    expect(listCommitsCalls.length).toBe(2) // each ref walked once
 
-    // Repeat calls hit each ref's own cache — no extra decodes.
+    // Repeat calls hit each ref's own cache — no extra round-trips.
     await backend.commitLog('room', 'main')
     await backend.commitLog('room', 'feature')
-    expect(counters.decode).toBe(afterBoth)
+    expect(listCommitsCalls.length).toBe(2)
   })
 
   it('decodes a single commit by hash for the detail view (tree + signature)', async () => {
@@ -630,6 +655,22 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
     const wasm = {
       get_ref: async (_b: string, _r: string, name: string) => (name === forkRef ? remix.hash_hex : undefined),
       get_object: async (_b: string, _r: string, hash: string) => store[hash],
+      // The worker's ListCommits index serves the remix's denormalized metadata
+      // (kind + sources), so the client renders it with no client-side decode.
+      list_commits: async () => ({
+        commits: [
+          {
+            hash: remix.hash_hex,
+            parent: '',
+            authorPubkeyHex: 'sig',
+            message: 'a fork',
+            createdAtUnix: 2,
+            kind: 'remix',
+            sourcesJson: JSON.stringify([[UPSTREAM_ID, upstream.hash_hex]]),
+          },
+        ],
+        nextCursorHex: '',
+      }),
       list_refs: async (_b: string, _r: string, prefix: string) =>
         [{ name: forkRef, objectIdHex: remix.hash_hex }].filter((r) => r.name.startsWith(prefix)),
     } as unknown as RepoWasmClient
@@ -788,11 +829,34 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
   function harness(graph: Record<string, Node>, initialHead: string) {
     let head = initialHead
     const getObjectCalls: string[] = []
+    const listCommitsCalls: string[] = []
     const wasm = {
       get_ref: async () => head,
       get_object: async (_b: string, _r: string, hash: string) => {
         getObjectCalls.push(hash)
         return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_commits: async (_b: string, _r: string, _ref: string, startIdHex: string, pageSize: number) => {
+        listCommitsCalls.push(startIdHex || head)
+        let cur: string | undefined = startIdHex || head
+        const commits: Array<Record<string, unknown>> = []
+        const seen = new Set<string>()
+        while (cur && commits.length < pageSize && !seen.has(cur)) {
+          seen.add(cur)
+          const row: Node | undefined = graph[cur]
+          if (!row) break
+          commits.push({
+            hash: cur,
+            parent: row.parent ?? '',
+            authorPubkeyHex: row.signer,
+            message: row.message,
+            createdAtUnix: 1,
+            kind: 'commit',
+            sourcesJson: '[]',
+          })
+          cur = row.parent
+        }
+        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
       },
       list_refs: async () => [],
     } as unknown as RepoWasmClient
@@ -817,10 +881,10 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
       },
     } as unknown as MkitApi
     const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
-    return { backend, getObjectCalls, setHead: (h: string) => (head = h) }
+    return { backend, getObjectCalls, listCommitsCalls, setHead: (h: string) => (head = h) }
   }
 
-  it('after a cached 3-commit walk, a 4th-commit re-walk fetches only the new object', async () => {
+  it('after a cached 3-commit walk, a 4th-commit re-walk is one round-trip that splices the cached tail', async () => {
     const graph: Record<string, Node> = {
       c3: { message: 'c3', signer: 's', parent: 'c2' },
       c2: { message: 'c2', signer: 's', parent: 'c1' },
@@ -830,17 +894,15 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
 
     const first = await h.backend.commitLog('room')
     expect(first.map((e) => e.hash)).toEqual(['c3', 'c2', 'c1'])
-    const afterCold = h.getObjectCalls.length
-    expect(afterCold).toBe(3) // cold walk fetched all 3
 
     // Push a 4th commit on top → head advances.
     graph.c4 = { message: 'c4', signer: 's', parent: 'c3' }
     h.setHead('c4')
 
-    h.getObjectCalls.length = 0
+    h.listCommitsCalls.length = 0
     const second = await h.backend.commitLog('room')
     expect(second.map((e) => e.hash)).toEqual(['c4', 'c3', 'c2', 'c1']) // newest-first, full chain
-    expect(h.getObjectCalls).toEqual(['c4']) // ONLY the new object, not 4
+    expect(h.listCommitsCalls.length).toBe(1) // one round-trip; the cached tail (c3,c2,c1) is spliced, not re-walked
   })
 })
 
