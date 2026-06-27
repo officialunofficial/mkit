@@ -28,7 +28,6 @@ use crate::proto::mkit::repo::v1::{
     PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
     RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
 };
-use mkit_core::object::Object;
 use std::collections::HashSet;
 use super::refstore::WatchFrame;
 use super::wire::{
@@ -629,13 +628,12 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
                 };
 
-                // Decode ONLY to follow the first parent; the client decodes the
-                // raw bytes for display, so the server needs no field parity.
-                let first_parent = match mkit_core::serialize::deserialize(&bytes) {
-                    Ok(Object::Commit(c)) => c.parents.first().map(|p| p.to_vec()),
-                    Ok(Object::Remix(r)) => r.parents.first().map(|p| p.to_vec()),
-                    _ => None, // not a commit/remix (or undecodable) — stop after this
-                };
+                // Decode ONLY to follow the first parent (the client decodes the
+                // raw bytes for display). `extract_commit_meta` is the shared,
+                // unit-tested decoder that will also populate the per-room commit
+                // index in the next step of the denormalization redesign.
+                let first_parent = crate::commit_log::extract_commit_meta(&bytes)
+                    .and_then(|m| m.parent.map(|p| p.to_vec()));
 
                 commits.push(CommitObject {
                     id: Some(current.clone()),
