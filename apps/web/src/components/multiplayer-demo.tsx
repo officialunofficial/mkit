@@ -7,12 +7,15 @@ import { useIdentityActions } from './use-identity-actions'
 import { useMkit } from './use-mkit'
 import { AttestBinding, LockedView, RoomSelector, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose, ComposeDisabled } from './multiplayer/compose'
+import { FloatingDock } from './multiplayer/floating-dock'
+import { PresencePanel } from './multiplayer/presence-panel'
 import { RepoBrowser } from './multiplayer/repo-browser'
 import { WhatJustHappened } from './multiplayer/what-just-happened'
 
 /**
- * Owns the repo backend as a VALUE and provides it to the tree. `useResolvedRepoBackend` returns the mock offline (seeded
- * with demo activity at creation) or the wasm-backed client once it loads; descendants gate on `backend` being non-null.
+ * Owns the repo backend as a VALUE and provides it to the tree. `useResolvedRepoBackend` returns the mock offline
+ * (seeded with demo activity at creation) or the wasm-backed client once it loads; descendants gate on `backend` being
+ * non-null.
  */
 export function MultiplayerDemo() {
   const api = useMkit()
@@ -24,9 +27,13 @@ export function MultiplayerDemo() {
   return (
     <RepoBackendProvider backend={backend}>
       <MultiplayerBody api={api} id={id} room={room} useMock={useMock} />
-      {/* Retrospective, non-blocking play-by-play (bottom-right). Reads its own
-          global store, so no props — every action emits into it directly. */}
-      <WhatJustHappened />
+      {/* Draggable dock (snaps to one of 8 anchors, persisted): collapsed both are
+          emoji circles in a ROW; expanding one collapses the other (mutual
+          exclusion). Each renders null when empty, so the row collapses cleanly. */}
+      <FloatingDock>
+        <WhatJustHappened />
+        <PresencePanel room={room} />
+      </FloatingDock>
     </RepoBackendProvider>
   )
 }

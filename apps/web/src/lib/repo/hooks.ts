@@ -10,6 +10,7 @@ import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import { recordActivity } from '../activity-log'
 import { playerName } from '../identity-name'
 import { useIdentityStore } from '../identity-store'
+import { usePresenceStore } from '../presence-store'
 import type { MkitApi } from '../mkit'
 import {
   BackendNotReadyError,
@@ -234,6 +235,11 @@ export function useRepoEvents(room: string, prefix = ''): void {
   // When the backend instance changes (null → mock/wasm, or mock → wasm), the
   // effect re-runs and (re-)subscribes — `backend!` is never dereferenced null.
   const backend = useRepoBackend()
+  // The current key (a member when unlocked, else a signed-out viewer). Changing
+  // it re-runs the effect → the socket reconnects with the new `?pubkey`, so
+  // lock/unlock moves you between "online" and "viewer" in everyone's roster.
+  const myPubkey = useIdentityStore((s) => (s.unlocked ? s.ed25519PubkeyHex : null))
+  const setPresence = usePresenceStore((s) => s.set)
   useEffect(() => {
     if (!backend) return
     // Warmup gate: the mock broadcasts its seeded "foreign" commits at mount,
@@ -241,26 +247,35 @@ export function useRepoEvents(room: string, prefix = ''): void {
     // a brief warmup, from a pubkey that isn't ours, count as a live PEER event
     // worth narrating in the activity overlay. (Query invalidation always runs.)
     const subscribedAt = Date.now()
-    return backend.watchRefs(room, prefix, (u) => {
-      void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
-      void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
-      // The advanced ref may be new (a peer created a branch) → refresh the panel.
-      void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+    return backend.watchRoom(
+      room,
+      prefix,
+      {
+        onRef: (u) => {
+          void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
+          void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
+          // The advanced ref may be new (a peer created a branch) → refresh the panel.
+          void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
 
-      const mine = useIdentityStore.getState().ed25519PubkeyHex
-      const author = u.authorPubkeyHex
-      if (author && author !== mine && Date.now() - subscribedAt > 1200) {
-        recordActivity({
-          kind: 'peer',
-          title: `${playerName(author)} advanced branch “${u.name}” — live`,
-          lines: [
-            'A peer’s push arrived over the repository’s WebSocket — the Durable Object broadcast it, and your log re-walked to include it.',
-            `commit ${u.objectIdHex.slice(0, 12)}…  ·  by ${author.slice(0, 12)}…`,
-          ],
-        })
-      }
-    })
-  }, [backend, room, prefix, qc])
+          const mine = useIdentityStore.getState().ed25519PubkeyHex
+          const author = u.authorPubkeyHex
+          if (author && author !== mine && Date.now() - subscribedAt > 1200) {
+            recordActivity({
+              kind: 'peer',
+              title: `${playerName(author)} advanced branch “${u.name}” — live`,
+              lines: [
+                'A peer’s push arrived over the repository’s WebSocket — the Durable Object broadcast it, and your log re-walked to include it.',
+                `commit ${u.objectIdHex.slice(0, 12)}…  ·  by ${author.slice(0, 12)}…`,
+              ],
+            })
+          }
+        },
+        // Live "who's online" roster → the presence store the panel reads.
+        onPresence: (p) => setPresence(room, p),
+      },
+      myPubkey,
+    )
+  }, [backend, room, prefix, qc, myPubkey, setPresence])
 }
 
 // ---------------------------------------------------------------------------

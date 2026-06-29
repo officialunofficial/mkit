@@ -52,13 +52,23 @@ export function chatCanonical(room: string, authorHex: string, text: string): Ui
  * Live-stream handlers for a room: ref advances and/or chat messages. Both ride the ONE `/watch/<room>` socket so the
  * lobby renders a merged feed.
  */
+/** One online participant — an Ed25519 key present in the room right now. */
+export type PresenceMember = { pubkeyHex: string; since: number }
+/** Live room presence: distinct online keys + the count of identity-less viewers. */
+export type PresenceState = { members: PresenceMember[]; viewers: number }
+export const EMPTY_PRESENCE: PresenceState = { members: [], viewers: 0 }
+
 export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
   onChat?: (m: ChatMessageEntry) => void
+  onPresence?: (p: PresenceState) => void
 }
 
-/** A parsed `/watch` frame — a ref advance (`commit`) or a `chat` message. */
-export type ActivityFrame = { kind: 'commit'; ref: RefUpdate } | { kind: 'chat'; message: ChatMessageEntry }
+/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, or a `presence` roster. */
+export type ActivityFrame =
+  | { kind: 'commit'; ref: RefUpdate }
+  | { kind: 'chat'; message: ChatMessageEntry }
+  | { kind: 'presence'; presence: PresenceState }
 
 /**
  * Parse one raw `/watch` WebSocket frame. Accepts the server's snake_case fields and camelCase, dispatches on the
@@ -77,6 +87,17 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
   if (!f || typeof f !== 'object') return null
 
   const kind = f.kind
+  if (kind === 'presence') {
+    const raw = Array.isArray(f.members) ? f.members : []
+    const members: PresenceMember[] = raw
+      .map((m) => {
+        const o = (m ?? {}) as Record<string, unknown>
+        return { pubkeyHex: String(o.pubkey ?? o.pubkeyHex ?? ''), since: Number(o.since ?? 0) }
+      })
+      .filter((m) => m.pubkeyHex)
+    return { kind: 'presence', presence: { members, viewers: Number(f.viewers ?? 0) } }
+  }
+
   const messageIdHex = (f.messageIdHex ?? f.message_id) as string | undefined
   if (kind === 'chat' || (kind === undefined && messageIdHex)) {
     if (!messageIdHex) return null
@@ -170,7 +191,7 @@ export interface RepoBackend {
    * Live room stream — ref advances AND chat messages over ONE subscription (the merged lobby feed). Returns an
    * unsubscribe fn. `watchRefs` is the refs-only special case (`{ onRef }`).
    */
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void
   /**
    * Commit log for the demo UI — the chain reachable from `ref` (default `main`), newest-first. The mock derives it; a
    * server walk sources it.
@@ -276,9 +297,11 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
     // oldest-first so two commits sharing a timestamp (unix-second precision)
     // render oldest-first under the stable sort, consistent with the rest of the
     // feed — not newest-first like the raw walk.
-    ...[...commits].reverse().map(
-      (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
-    ),
+    ...[...commits]
+      .reverse()
+      .map(
+        (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
+      ),
     ...messages.map(
       (message): FeedItem => ({
         kind: 'chat',
@@ -347,8 +370,10 @@ export class MockRepoBackend implements RepoBackend {
   private messages = new Map<string, ChatMessageEntry[]>()
   private seqByRoom = new Map<string, number>()
   private chatWatchers = new Map<string, Set<(m: ChatMessageEntry) => void>>()
-  /** Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders
-   * and room switches (the instance is reused, never recreated). */
+  /**
+   * Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders and room switches (the instance is
+   * reused, never recreated).
+   */
   private seededRooms = new Set<string>()
 
   /**
@@ -410,7 +435,7 @@ export class MockRepoBackend implements RepoBackend {
     return this.watchRoom(room, prefix, { onRef: onUpdate })
   }
 
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
     const unsubs: Array<() => void> = []
     if (handlers.onRef) {
       const key = `${room}::${prefix}`
@@ -433,9 +458,28 @@ export class MockRepoBackend implements RepoBackend {
       set.add(onChat)
       unsubs.push(() => set?.delete(onChat))
     }
+    if (handlers.onPresence) {
+      // Offline parity: there are no real peers on the mock, so synthesise a
+      // small roster — a couple of seeded "online" keys, plus YOU as a member
+      // when unlocked (or an extra viewer when signed out). Re-emitted whenever
+      // the subscription re-runs (i.e. on lock/unlock), so the panel visibly
+      // moves you between member and viewer.
+      handlers.onPresence(this.mockPresence(pubkeyHex ?? null))
+    }
     return () => {
       for (const u of unsubs) u()
     }
+  }
+
+  /** Synthetic roster for offline (mock) presence — see `watchRoom`. */
+  private mockPresence(pubkeyHex: string | null): PresenceState {
+    const now = Date.now()
+    const members: PresenceMember[] = [FOREIGN_SEEDS[0]!, FOREIGN_SEEDS[1]!].map((seed, i) => ({
+      pubkeyHex: bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed))),
+      since: now - (i + 1) * 90_000,
+    }))
+    if (pubkeyHex) members.unshift({ pubkeyHex, since: now })
+    return { members, viewers: pubkeyHex ? 1 : 2 }
   }
 
   async postMessage(
@@ -530,12 +574,10 @@ export class MockRepoBackend implements RepoBackend {
   }
 
   /**
-   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to
-   * call on every render: the `seededRooms` guard makes repeat calls (and a room
-   * switch back) no-ops, so the long-lived mock instance is never recreated and
-   * a user's session posts survive a room change. Called during render (lazy
-   * initialization), not from an Effect, so the data exists before the first
-   * query reads it.
+   * Seed a room's offline demo activity (commits + chat) exactly once. Safe to call on every render: the `seededRooms`
+   * guard makes repeat calls (and a room switch back) no-ops, so the long-lived mock instance is never recreated and a
+   * user's session posts survive a room change. Called during render (lazy initialization), not from an Effect, so the
+   * data exists before the first query reads it.
    */
   seedDemoOnce(room: string): void {
     if (this.seededRooms.has(room)) return
@@ -759,8 +801,11 @@ export class WasmRepoBackend implements RepoBackend {
    * PostMessage. `parseActivityFrame` normalises both; `prefix` filters ref frames client-side. Returns an unsubscribe
    * that closes the socket.
    */
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
+    // Attribute this connection's presence to the current key when one is
+    // provided + well-formed; absent → the DO counts it as a signed-out viewer.
+    const pk = pubkeyHex && /^[0-9a-f]{64}$/.test(pubkeyHex) ? `?pubkey=${pubkeyHex}` : ''
+    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}${pk}`
     let closed = false
     let ws: WebSocket | null = null
     let attempt = 0
@@ -770,6 +815,10 @@ export class WasmRepoBackend implements RepoBackend {
     const handleMessage = (ev: MessageEvent) => {
       const frame = parseActivityFrame(ev.data)
       if (!frame) return
+      if (frame.kind === 'presence') {
+        handlers.onPresence?.(frame.presence)
+        return
+      }
       if (frame.kind === 'chat') {
         handlers.onChat?.(frame.message)
         return

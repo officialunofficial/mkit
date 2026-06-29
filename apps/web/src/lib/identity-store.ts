@@ -4,10 +4,10 @@
 // store owns *who I am this session*. Only client-side, UI-owned, synchronous
 // identity lives here — never server data (refs, objects, commit logs).
 //
-// PERSISTENCE INVARIANT: only `{ credentialId, room }` are written to
-// localStorage (see `partialize`). The Ed25519 `seedHex` — and the derived
-// `ed25519PubkeyHex` / `unlocked` flags — are transient and held in memory
-// ONLY: re-derived from the passkey each session, NEVER persisted to disk.
+// PERSISTENCE INVARIANT: only `{ credentialId, room, name }` are written to
+// localStorage (see `partialize`) — all non-secret. The Ed25519 `seedHex` — and
+// the derived `ed25519PubkeyHex` / `unlocked` flags — are transient and held in
+// memory ONLY: re-derived from the passkey each session, NEVER persisted to disk.
 // Persisting the credentialId lets a returning user RECOVER the same player
 // (deriveEd25519Seed re-mints the same seed from the same passkey) without
 // ever putting signing material on disk.
@@ -28,10 +28,18 @@ export type IdentityState = {
   ephemeral: boolean
   /** Selected room / repo for the multiplayer demo. */
   room: string
+  /**
+   * The chosen petname for THIS player (e.g. "amber-wren"), set at create time — the same handle written to the OS
+   * passkey. Persisted so the app displays the SAME name as the passkey manager even without a keys.mkit.sh registry;
+   * the registry value (when configured) still takes precedence for display.
+   */
+  name: string | null
 
   setCredentialId: (id: string | null) => void
   /** Set the derived seed + pubkey together and mark unlocked. */
   unlock: (args: { seedHex: string; ed25519PubkeyHex: string; ephemeral?: boolean }) => void
+  /** Record this player's own handle (the petname written to the passkey). */
+  setName: (name: string | null) => void
   /** Wipe the in-memory seed (keeps credentialId so the player can re-derive). */
   lock: () => void
   setRoom: (room: string) => void
@@ -41,22 +49,23 @@ export type IdentityState = {
 
 export const DEFAULT_ROOM = 'lobby'
 
-/** localStorage key the persisted slice lives under. */
+/** LocalStorage key the persisted slice lives under. */
 export const IDENTITY_STORAGE_KEY = 'mkit-identity'
 
 /** The ONLY fields written to disk — never the seed/pubkey/unlock flags. */
-export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'room'>
+export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'room' | 'name'>
 
-/** Persisted slice: which passkey to recover + the last room. Exported so the
- * invariant (no seed material on disk) is directly testable. */
+/**
+ * Persisted slice: which passkey to recover, the last room, and this player's own handle. Exported so the invariant (no
+ * seed material on disk) is directly testable.
+ */
 export function partializeIdentity(s: IdentityState): PersistedIdentity {
-  return { credentialId: s.credentialId, room: s.room }
+  return { credentialId: s.credentialId, room: s.room, name: s.name }
 }
 
 /**
- * localStorage-backed JSON storage that degrades to a no-op when there's no
- * `localStorage` (SSR build, the node test env) — so importing the store never
- * throws and the SSR bundle doesn't break.
+ * LocalStorage-backed JSON storage that degrades to a no-op when there's no `localStorage` (SSR build, the node test
+ * env) — so importing the store never throws and the SSR bundle doesn't break.
  */
 function identityStorage(): PersistStorage<PersistedIdentity> | undefined {
   try {
@@ -83,10 +92,12 @@ export const useIdentityStore = create<IdentityState>()(
       unlocked: false,
       ephemeral: false,
       room: DEFAULT_ROOM,
+      name: null,
 
       setCredentialId: (id) => set({ credentialId: id }),
       unlock: ({ seedHex, ed25519PubkeyHex, ephemeral = false }) =>
         set({ seedHex, ed25519PubkeyHex, unlocked: true, ephemeral }),
+      setName: (name) => set({ name }),
       // Clearing the seed also clears `ephemeral`: that flag describes the
       // now-gone in-memory seed, so leaving it stuck `true` would mislabel the
       // locked state.
@@ -102,6 +113,7 @@ export const useIdentityStore = create<IdentityState>()(
           unlocked: false,
           ephemeral: false,
           room: DEFAULT_ROOM,
+          name: null,
         }),
     }),
     {

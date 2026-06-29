@@ -9,6 +9,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { type ActivityEvent, type ActivityKind, formatMs, useActivityLog } from '../../lib/activity-log'
+import { useDockExpansion } from '../../lib/dock-expansion'
 
 // The 15s countdown lives in the CSS `wjh-countdown` animation (styles.css +
 // the bar's `[animation:wjh-countdown_15s_…]` class); the bar's `animationend`
@@ -32,8 +33,6 @@ const KIND_LABEL: Record<ActivityKind, string> = {
   fork: 'fork',
   peer: 'live',
 }
-
-type Mode = 'closed' | 'expanded' | 'collapsed'
 
 /** Disclosure caret — a real chevron SVG that rotates from ▸ (closed) to ▾ (open). */
 function Caret({ open, className = '' }: { open: boolean; className?: string }) {
@@ -68,7 +67,6 @@ export function WhatJustHappened() {
   const clear = useActivityLog((s) => s.clear)
   const latest = events[0]
 
-  const [mode, setMode] = useState<Mode>('closed')
   const [runId, setRunId] = useState(0) // bump to restart the countdown animation
   // The 15s countdown only runs on a FRESH action. A manual re-expand from the
   // collapsed pill opens the card "sticky" (no bar, no auto-collapse).
@@ -78,9 +76,18 @@ export function WhatJustHappened() {
   const [frozen, setFrozen] = useState(false) // mobile tap-to-pause toggle
   const paused = hovering || frozen
 
-  // A FRESH event (its id changes) expands the card and starts the countdown.
-  // A clean load stays empty until the first action; closing then re-acting
-  // brings it back.
+  // Mutual exclusion across the dock: the shared store is the SINGLE source of
+  // truth for whether our card is open, so opening the other panel collapses us
+  // with NO effect race. `dismissed` (local) hides us until the next action.
+  const expanded = useDockExpansion((s) => s.expanded)
+  const openSlot = useDockExpansion((s) => s.open)
+  const closeSlot = useDockExpansion((s) => s.close)
+  const isOpen = expanded === 'activity'
+  const [dismissed, setDismissed] = useState(false)
+
+  // A FRESH event (its id changes) opens the card and starts the countdown. A
+  // clean load stays empty until the first action; closing then re-acting brings
+  // it back.
   const lastIdRef = useRef<string | null>(null)
   useEffect(() => {
     if (!latest) return
@@ -90,44 +97,38 @@ export function WhatJustHappened() {
     setFrozen(false)
     setRunId((n) => n + 1)
     setCountdown(true)
-    setMode('expanded')
-  }, [latest])
+    setDismissed(false)
+    openSlot('activity')
+  }, [latest, openSlot])
 
-  if (!latest || mode === 'closed') return null
+  if (!latest) return null
 
-  // Re-expand from the collapsed pill: NO timer this time — it stays open until
-  // you collapse or close it.
+  // Re-open from the collapsed circle: NO timer this time — stays open until you
+  // collapse or close it.
   const expand = () => {
     setFrozen(false)
     setCountdown(false)
-    setMode('expanded')
+    openSlot('activity')
   }
 
-  if (mode === 'collapsed') {
+  if (!isOpen) {
+    if (dismissed) return null
+    // Collapsed = a single emoji circle in the dock row. Click to reopen; the
+    // close (✕) lives inside the expanded card now, not as a separate button.
     return (
-      <div className='fixed right-4 bottom-4 z-50 flex items-center gap-2'>
-        <button
-          type='button'
-          onClick={expand}
-          className='inline-flex h-9 items-center gap-1.5 rounded-full border border-hairline bg-bg px-3 text-xs font-medium shadow-lg transition-colors hover:border-fg'
-          aria-label='Reopen the “what just happened” panel'
-        >
-          <span aria-hidden>⚡</span>
-          <span>What just happened</span>
-        </button>
-        <button
-          type='button'
-          onClick={() => setMode('closed')}
-          aria-label='Close'
-          className='inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-hairline bg-bg text-muted shadow-lg transition-colors hover:border-fg hover:text-fg'
-        >
-          ✕
-        </button>
-      </div>
+      <button
+        type='button'
+        onClick={expand}
+        title='What just happened'
+        aria-label='Reopen the “what just happened” panel'
+        className='inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
+      >
+        <span aria-hidden>⚡</span>
+      </button>
     )
   }
 
-  // mode === 'expanded'
+  // isOpen → the card.
   const older = events.slice(1)
 
   return (
@@ -140,7 +141,7 @@ export function WhatJustHappened() {
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
       onTouchStart={() => setFrozen((v) => !v)}
-      className='fixed right-4 bottom-4 z-50 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'
+      className='w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'
     >
       {/* Countdown bar, clipped to the top edge — only on a fresh action. `key`
           restarts the animation each time; `animationend` collapses the card;
@@ -149,10 +150,11 @@ export function WhatJustHappened() {
         <span
           key={runId}
           aria-hidden
-          onAnimationEnd={() => setMode('collapsed')}
+          onAnimationEnd={() => closeSlot('activity')}
           style={{ animationPlayState: paused ? 'paused' : 'running' }}
-          className={`absolute top-0 left-0 h-[3px] w-full origin-left [animation:wjh-countdown_15s_linear_forwards] ${paused ? 'bg-amber-400' : 'bg-blue-500'
-            }`}
+          className={`absolute top-0 left-0 h-[3px] w-full origin-left [animation:wjh-countdown_15s_linear_forwards] ${
+            paused ? 'bg-amber-400' : 'bg-blue-500'
+          }`}
         />
       ) : null}
 
@@ -162,7 +164,7 @@ export function WhatJustHappened() {
         <div className='ml-auto flex items-center gap-0.5'>
           <button
             type='button'
-            onClick={() => setMode('collapsed')}
+            onClick={() => closeSlot('activity')}
             className='inline-flex h-6 w-6 items-center justify-center rounded-md text-sm leading-none text-muted transition-colors hover:bg-fg/10 hover:text-fg'
             aria-label='Collapse the panel'
           >
@@ -170,7 +172,10 @@ export function WhatJustHappened() {
           </button>
           <button
             type='button'
-            onClick={() => setMode('closed')}
+            onClick={() => {
+              setDismissed(true)
+              closeSlot('activity')
+            }}
             className='inline-flex h-6 w-6 items-center justify-center rounded-md text-xs leading-none text-muted transition-colors hover:bg-fg/10 hover:text-fg'
             aria-label='Close the panel'
           >

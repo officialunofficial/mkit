@@ -47,6 +47,11 @@ export function useIdentityActions(): IdentityActions {
       // manager. The same handle is registered to the derived pubkey below so it
       // survives recovery and is what other players see.
       const petname = randomPetname()
+      // Record the chosen handle locally so the app shows the SAME name the OS
+      // passkey manager does — even without a keys.mkit.sh registry (where it
+      // would otherwise be lost and the UI would fall back to a DIFFERENT,
+      // pubkey-derived `playerName`).
+      id.setName(petname)
       const res = await createIdentity(petname)
       // Persist the credentialId ONLY for a real (passkey-backed) identity. The
       // ephemeral fallback returns a credentialId too, but its seed is RANDOM —

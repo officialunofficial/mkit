@@ -38,8 +38,12 @@ export function useDisplayName(pubkeyHex: string | null): string {
     // evicted before hydration surfaces them.
     gcTime: PERSIST_MAX_AGE,
   })
+  // For the signed-in user's OWN key, the locally-stored petname (the one written
+  // to the passkey) is a better fallback than the pubkey-derived `playerName` — it
+  // matches what the OS passkey manager shows. The registry value still wins.
+  const ownName = useIdentityStore((s) => (pubkeyHex && s.ed25519PubkeyHex === pubkeyHex ? s.name : null))
   if (!pubkeyHex) return 'anonymous'
-  return q.data ?? playerName(pubkeyHex)
+  return q.data ?? ownName ?? playerName(pubkeyHex)
 }
 
 /** A pubkey's handle as a span. Used wherever a player is shown in the UI. */
@@ -49,21 +53,12 @@ export function PlayerLabel({ pubkey, className }: { pubkey: string; className?:
 }
 
 /**
- * A pubkey's deterministic identicon avatar (the "pfp"). Derived purely from the
- * key via {@link identicon} — same key, same mark, no upload/account. Renders a
- * neutral tile for an empty/invalid key. `aria-hidden` since the adjacent
- * {@link PlayerLabel} already names the player. The 1px ring is a pure
- * black/white outline (never a tinted neutral) for consistent edge depth.
+ * A pubkey's deterministic identicon avatar (the "pfp"). Derived purely from the key via {@link identicon} — same key,
+ * same mark, no upload/account. Renders a neutral tile for an empty/invalid key. `aria-hidden` since the adjacent
+ * {@link PlayerLabel} already names the player. The 1px ring is a pure black/white outline (never a tinted neutral) for
+ * consistent edge depth.
  */
-export function PlayerAvatar({
-  pubkey,
-  size = 24,
-  className,
-}: {
-  pubkey: string
-  size?: number
-  className?: string
-}) {
+export function PlayerAvatar({ pubkey, size = 24, className }: { pubkey: string; size?: number; className?: string }) {
   const ic = identicon(pubkey)
   const g = IDENTICON_GRID
   const cell = 100 / g // 0..100 viewBox keeps rects crisp at any size
