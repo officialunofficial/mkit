@@ -4,11 +4,10 @@ import * as RadixTooltip from '@radix-ui/react-tooltip'
 import type { ReactNode } from 'react'
 
 /**
- * Hover/focus tooltip on an interactive element. Self-contained (carries its own
- * provider) so it can be dropped anywhere without an app-level wrapper, and
- * portaled + collision-aware via Radix. Use for buttons/links where a short hint
- * helps; for revealing a full value (e.g. a complete hash) on a non-interactive
- * text node, a native `title` is the right tool instead.
+ * Hover/focus tooltip on an interactive element. Self-contained (carries its own provider) so it can be dropped
+ * anywhere without an app-level wrapper, and portaled + collision-aware via Radix. Use for buttons/links where a short
+ * hint helps; for revealing a full value (e.g. a complete hash) on a non-interactive text node, a native `title` is the
+ * right tool instead.
  */
 export function Tooltip({
   content,

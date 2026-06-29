@@ -117,7 +117,17 @@ export function Row({ label, value }: { label: string; value: string }) {
  * going two-column above it. Children render into the value slot so a row can host code, a verdict pill, or plain
  * text.
  */
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children, compact }: { label: string; children: ReactNode; compact?: boolean }) {
+  if (compact) {
+    // Condensed: label inline with the value, small font, tight rows — for dense
+    // previews (e.g. the compose hash/signature/parent readout).
+    return (
+      <div className='flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1.5 text-xs'>
+        <dt className='shrink-0 text-muted'>{label}</dt>
+        <dd className='min-w-0 flex-1 break-all'>{children}</dd>
+      </div>
+    )
+  }
   return (
     <div className='grid gap-1 py-4 sm:grid-cols-[minmax(0,14rem),1fr] sm:gap-6'>
       <dt className='text-sm text-muted'>{label}</dt>

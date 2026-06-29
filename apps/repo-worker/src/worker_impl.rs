@@ -79,11 +79,18 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             if !is_valid_room(room) {
                 return Ok(with_cors(Response::error("invalid room", 400)?));
             }
+            // Forward the optional `?pubkey=<hex>` so the DO can attribute live
+            // presence to a key (absent → a signed-out viewer).
+            let pubkey = req.url().ok().and_then(|u| {
+                u.query_pairs()
+                    .find(|(k, _)| k == "pubkey")
+                    .map(|(_, v)| v.into_owned())
+            });
             // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
             // NOT run `with_cors` on it: CORS headers are meaningless on a 101
             // handshake, and mutating the upgrade response can drop the
             // `webSocket` it carries. CORS stays on the unary/JSON path only.
-            return watch_fallback(env, room).await;
+            return watch_fallback(env, room, pubkey).await;
         }
     }
 
@@ -187,12 +194,18 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
 }
 
 /// Raw-WebSocket fallback: proxy the client straight to the room DO `/watch`.
-async fn watch_fallback(env: Env, room: &str) -> Result<Response> {
+async fn watch_fallback(env: Env, room: &str, pubkey: Option<String>) -> Result<Response> {
     let room = room.to_owned();
     SendFuture::new(async move {
         let ns = env.durable_object("REFSTORE")?;
         let stub = ns.id_from_name(&room)?.get_stub()?;
-        let mut req = Request::new("https://refstore/watch", Method::Get)?;
+        // Only forward a well-formed pubkey, and only after validating it — a
+        // stray value (`&`, spaces) must not break the DO's URL query parsing.
+        let url = match pubkey.as_deref().filter(|p| refstore::is_valid_pubkey(p)) {
+            Some(pk) => format!("https://refstore/watch?pubkey={pk}"),
+            None => "https://refstore/watch".to_string(),
+        };
+        let mut req = Request::new(&url, Method::Get)?;
         req.headers_mut()?.set("upgrade", "websocket")?;
         stub.fetch_with_request(req).await
     })

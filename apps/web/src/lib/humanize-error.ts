@@ -19,9 +19,9 @@ function looksTechnical(message: string): boolean {
 }
 
 /**
- * Map a thrown value to user-facing copy. Matches on `.name` (stable across
- * browsers) rather than `.message` (which carries the localized spec text), then
- * falls back to passing through a trusted Error message, then to a generic line.
+ * Map a thrown value to user-facing copy. Matches on `.name` (stable across browsers) rather than `.message` (which
+ * carries the localized spec text), then falls back to passing through a trusted Error message, then to a generic
+ * line.
  */
 export function humanizeError(e: unknown, fallback: string = GENERIC): string {
   const name = e instanceof DOMException ? e.name : (e as { name?: unknown })?.name

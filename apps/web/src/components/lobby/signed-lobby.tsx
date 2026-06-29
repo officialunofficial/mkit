@@ -53,8 +53,10 @@ function targetIdOf(item: FeedItem): string {
   return item.kind === 'chat' ? item.message.messageIdHex : item.entry.hash
 }
 
-/** Channels the lobby can switch between — each is its own room (own feed + live
- *  stream), so the header reads as a real chat room with channels. */
+/**
+ * Channels the lobby can switch between — each is its own room (own feed + live stream), so the header reads as a real
+ * chat room with channels.
+ */
 const CHANNELS = ['lobby', 'general', 'random'] as const
 
 export function SignedLobby() {
@@ -365,7 +367,9 @@ function ReactionPills({
           key={r.emoji}
           type='button'
           onClick={() => onToggle(r.emoji)}
-          title={canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Sign in with your passkey to react'}
+          title={
+            canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Sign in with your passkey to react'
+          }
           className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
               ? 'border-blue-500/60 bg-blue-500/10 text-fg'
@@ -397,7 +401,15 @@ function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
           aria-label='Add reaction'
           className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-muted/5 text-muted opacity-0 transition-all ${HOVER_BORDER} hover:text-fg active:scale-[0.96] focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:opacity-100 data-[state=open]:opacity-100`}
         >
-          <svg width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='1.6' aria-hidden>
+          <svg
+            width='15'
+            height='15'
+            viewBox='0 0 24 24'
+            fill='none'
+            stroke='currentColor'
+            strokeWidth='1.6'
+            aria-hidden
+          >
             {/* smiley face (lower-left) */}
             <circle cx='9.5' cy='13.5' r='7' />
             <circle cx='7' cy='12' r='0.9' fill='currentColor' stroke='none' />
@@ -486,9 +498,7 @@ function Composer({ room }: { room: string }) {
             </span>
           )}
         </button>
-        <span className='text-xs text-muted'>
-          {actions.status ?? 'Set up a passkey. No email, no passwords.'}
-        </span>
+        <span className='text-xs text-muted'>{actions.status ?? 'Set up a passkey. No email, no passwords.'}</span>
       </div>
     )
   }

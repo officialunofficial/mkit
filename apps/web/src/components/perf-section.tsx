@@ -182,7 +182,9 @@ export function PerfSection() {
           ))}
         </ul>
         <Collapsible.Root className='text-xs text-muted'>
-          <Collapsible.Trigger className='select-none transition-colors hover:text-fg'>Exact commands</Collapsible.Trigger>
+          <Collapsible.Trigger className='select-none transition-colors hover:text-fg'>
+            Exact commands
+          </Collapsible.Trigger>
           <Collapsible.Content>
             <pre className='mt-2 overflow-x-auto rounded-md border border-hairline p-3 font-mono text-[11px] leading-relaxed'>
               {methodology.commands.join('\n')}

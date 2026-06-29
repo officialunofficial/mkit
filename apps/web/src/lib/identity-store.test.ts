@@ -89,14 +89,15 @@ describe('identity store', () => {
   })
 
   describe('persistence partialize', () => {
-    it('persists ONLY credentialId + room', () => {
+    it('persists ONLY credentialId + room + name', () => {
       const s = useIdentityStore.getState()
       s.setCredentialId('cred-1')
       s.setRoom('arena')
+      s.setName('amber-wren')
       s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
       const persisted = partializeIdentity(useIdentityStore.getState())
-      expect(persisted).toEqual({ credentialId: 'cred-1', room: 'arena' })
-      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'room'])
+      expect(persisted).toEqual({ credentialId: 'cred-1', room: 'arena', name: 'amber-wren' })
+      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'name', 'room'])
     })
 
     it('NEVER persists seedHex / pubkey / unlocked (no signing material on disk)', () => {

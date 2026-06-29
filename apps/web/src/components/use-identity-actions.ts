@@ -8,7 +8,8 @@
 // global identity store, so unlocking in either surface unlocks the other.
 
 import { useState } from 'react'
-import { randomPetname } from '../lib/identity-name'
+import { recordActivity } from '../lib/activity-log'
+import { playerName, randomPetname } from '../lib/identity-name'
 import { useIdentityStore } from '../lib/identity-store'
 import { keysEnabled } from '../lib/keys-client'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
@@ -46,13 +47,23 @@ export function useIdentityActions(): IdentityActions {
       // manager. The same handle is registered to the derived pubkey below so it
       // survives recovery and is what other players see.
       const petname = randomPetname()
+      // Record the chosen handle locally so the app shows the SAME name the OS
+      // passkey manager does — even without a keys.mkit.sh registry (where it
+      // would otherwise be lost and the UI would fall back to a DIFFERENT,
+      // pubkey-derived `playerName`).
+      id.setName(petname)
       const res = await createIdentity(petname)
       // Persist the credentialId ONLY for a real (passkey-backed) identity. The
       // ephemeral fallback returns a credentialId too, but its seed is RANDOM —
       // not derived from that passkey — so persisting it would flip `hasPasskey`
       // true and surface an "Unlock" that derives a DIFFERENT seed.
       if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
+      // Time ONLY the local key-derivation compute (seed → Ed25519 pubkey) — NOT
+      // the passkey ceremony, which is user/OS-gated and would misrepresent the
+      // "fast" story. This is the genuinely sub-ms part worth flexing.
+      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
+      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
       // Register the handle in keys.mkit.sh (signed write). Fire-and-forget and
       // only for a recoverable identity with a configured registry.
@@ -64,6 +75,18 @@ export function useIdentityActions(): IdentityActions {
           ? "Your device can't save this identity, so it'll only last until you close this tab."
           : 'Your identity is ready.',
       )
+      recordActivity({
+        kind: 'create',
+        title: `New player: ${petname}`,
+        durationMs: deriveMs,
+        lines: [
+          res.via === 'ephemeral'
+            ? 'No passkey PRF here, so this is a random in-memory key — it won’t persist or recover.'
+            : 'Your passkey derived a 32-byte Ed25519 seed in a single prompt — no key file, nothing stored to disk.',
+          `Signer pubkey ${pubkey.slice(0, 12)}… (renders as ${petname}).`,
+          'The seed stays in memory only, and the same passkey always re-derives it: same passkey, same player, any device.',
+        ],
+      })
     } catch (e) {
       setStatus(errMsg(e))
     } finally {
@@ -81,9 +104,20 @@ export function useIdentityActions(): IdentityActions {
     try {
       const res = await deriveEd25519Seed(id.credentialId ?? undefined)
       if (res.credentialId) id.setCredentialId(res.credentialId)
+      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
+      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
       setStatus('Welcome back — your identity is unlocked.')
+      recordActivity({
+        kind: 'unlock',
+        title: `Recovered ${playerName(pubkey)} — same key, no key file`,
+        durationMs: deriveMs,
+        lines: [
+          'The same passkey re-derived the same seed, so you get the same Ed25519 key — no new passkey created.',
+          `Signer pubkey ${pubkey.slice(0, 12)}… — identical to before, because it’s derived, not stored.`,
+        ],
+      })
     } catch (e) {
       if (e instanceof PrfUnsupportedError) {
         setStatus("This passkey can't unlock your signing key. Create a new identity instead.")

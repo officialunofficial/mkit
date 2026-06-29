@@ -9,9 +9,9 @@
 import { leadingBytes } from './identity-name'
 
 /**
- * A deterministic mesh-gradient `background-image` value for a pubkey hex (three
- * radial blooms over a base tint). Returns null for empty / invalid / too-short
- * hex (fewer than 8 bytes) so the caller can render a neutral placeholder.
+ * A deterministic mesh-gradient `background-image` value for a pubkey hex (three radial blooms over a base tint).
+ * Returns null for empty / invalid / too-short hex (fewer than 8 bytes) so the caller can render a neutral
+ * placeholder.
  */
 export function avatarMesh(pubkeyHex: string): string | null {
   const b = leadingBytes(pubkeyHex, 8)

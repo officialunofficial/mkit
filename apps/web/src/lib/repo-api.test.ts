@@ -34,9 +34,8 @@ import {
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
 
 /**
- * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to
- * make just the method(s) under test do something. One factory so adding a
- * method to the interface is a single edit here, not a sweep across every test's
+ * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to make just the method(s) under test do
+ * something. One factory so adding a method to the interface is a single edit here, not a sweep across every test's
  * hand-rolled literal.
  */
 function stubBackend(overrides: Partial<RepoBackend> = {}): RepoBackend {
@@ -1178,7 +1177,9 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
     const backend = makeControllableBackend({ rateLimited: true })
     const qc = new QueryClient()
     const key = repoKeys.messages(ROOM)
-    const prior: ChatMessageEntry[] = [{ messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 }]
+    const prior: ChatMessageEntry[] = [
+      { messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 },
+    ]
     qc.setQueryData<ChatMessageEntry[]>(key, prior)
 
     const observer = new MutationObserver(qc, postMessageMutationOptions(qc, backend, ROOM, 'mypk'))
@@ -1221,7 +1222,9 @@ describe('MockRepoBackend reactions: toggle / list / watch', () => {
   it('react toggles on then off, listReactions reflects it, and onReaction fires', async () => {
     const backend = await makeBackend()
     const seen: Array<{ emoji: string; active: boolean; count: number }> = []
-    backend.watchRoom('lobby', '', { onReaction: (r) => seen.push({ emoji: r.emoji, active: r.active, count: r.count }) })
+    backend.watchRoom('lobby', '', {
+      onReaction: (r) => seen.push({ emoji: r.emoji, active: r.active, count: r.count }),
+    })
 
     const on = await backend.react('lobby', 'target1', '👍')
     expect(on).toEqual({ active: true, count: 1 })

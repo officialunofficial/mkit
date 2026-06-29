@@ -93,16 +93,24 @@ export function aggregateReactions(entries: ReactionEntry[], myPubkeyHex?: strin
  * Live-stream handlers for a room: ref advances, chat messages, and reaction toggles. All ride the ONE `/watch/<room>`
  * socket so the lobby stays live.
  */
+/** One online participant — an Ed25519 key present in the room right now. */
+export type PresenceMember = { pubkeyHex: string; since: number }
+/** Live room presence: distinct online keys + the count of identity-less viewers. */
+export type PresenceState = { members: PresenceMember[]; viewers: number }
+export const EMPTY_PRESENCE: PresenceState = { members: [], viewers: 0 }
+
 export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
   onChat?: (m: ChatMessageEntry) => void
+  onPresence?: (p: PresenceState) => void
   onReaction?: (r: ReactionUpdate) => void
 }
 
-/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, or a `reaction` toggle. */
+/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, a `presence` roster, or a `reaction` toggle. */
 export type ActivityFrame =
   | { kind: 'commit'; ref: RefUpdate }
   | { kind: 'chat'; message: ChatMessageEntry }
+  | { kind: 'presence'; presence: PresenceState }
   | { kind: 'reaction'; reaction: ReactionUpdate }
 
 /**
@@ -122,6 +130,16 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
   if (!f || typeof f !== 'object') return null
 
   const kind = f.kind
+  if (kind === 'presence') {
+    const raw = Array.isArray(f.members) ? f.members : []
+    const members: PresenceMember[] = raw
+      .map((m) => {
+        const o = (m ?? {}) as Record<string, unknown>
+        return { pubkeyHex: String(o.pubkey ?? o.pubkeyHex ?? ''), since: Number(o.since ?? 0) }
+      })
+      .filter((m) => m.pubkeyHex)
+    return { kind: 'presence', presence: { members, viewers: Number(f.viewers ?? 0) } }
+  }
   if (kind === 'reaction') {
     const targetIdHex = (f.targetIdHex ?? f.target_id) as string | undefined
     if (!targetIdHex) return null
@@ -216,6 +234,16 @@ export function isForkRef(name: string): boolean {
   return name.startsWith(FORKS_PREFIX)
 }
 
+/**
+ * Branch-off (NO attribution) ref name: a plain branch pointing AT a commit (git `branch <name> <commit>`) — no remix
+ * object, no recorded source. A distinct `b/` namespace from remix `forks/` so the two never collide, and unique per
+ * (commit, brancher) so two people branching the same commit get distinct branches.
+ */
+export const BRANCH_PREFIX = 'b/'
+export function branchRefName(upstreamCommitHash: string, brancherPubkeyHex: string): string {
+  return `${BRANCH_PREFIX}${upstreamCommitHash.slice(0, 12)}-${brancherPubkeyHex.slice(0, 12)}`
+}
+
 // ---------------------------------------------------------------------------
 // Transport-agnostic backend interface (maps 1:1 to the Connect service)
 // ---------------------------------------------------------------------------
@@ -258,7 +286,7 @@ export interface RepoBackend {
    * Live room stream — ref advances AND chat messages over ONE subscription (the merged lobby feed). Returns an
    * unsubscribe fn. `watchRefs` is the refs-only special case (`{ onRef }`).
    */
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void
   /**
    * Commit log for the demo UI — the chain reachable from `ref` (default `main`), newest-first. The mock derives it; a
    * server walk sources it. `opts` bounds the walk (`limit`) and/or streams partial results (`onProgress`).
@@ -525,15 +553,34 @@ export class MockRepoBackend implements RepoBackend {
     return this.watchRoom(room, prefix, { onRef: onUpdate })
   }
 
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
     const unsubs = [
       addWatcher(this.watchers, `${room}::${prefix}`, handlers.onRef),
       addWatcher(this.chatWatchers, room, handlers.onChat),
       addWatcher(this.reactionWatchers, room, handlers.onReaction),
     ]
+    if (handlers.onPresence) {
+      // Offline parity: there are no real peers on the mock, so synthesise a
+      // small roster — a couple of seeded "online" keys, plus YOU as a member
+      // when unlocked (or an extra viewer when signed out). Re-emitted whenever
+      // the subscription re-runs (i.e. on lock/unlock), so the panel visibly
+      // moves you between member and viewer.
+      handlers.onPresence(this.mockPresence(pubkeyHex ?? null))
+    }
     return () => {
       for (const u of unsubs) u()
     }
+  }
+
+  /** Synthetic roster for offline (mock) presence — see `watchRoom`. */
+  private mockPresence(pubkeyHex: string | null): PresenceState {
+    const now = Date.now()
+    const members: PresenceMember[] = [FOREIGN_SEEDS[0]!, FOREIGN_SEEDS[1]!].map((seed, i) => ({
+      pubkeyHex: bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed))),
+      since: now - (i + 1) * 90_000,
+    }))
+    if (pubkeyHex) members.unshift({ pubkeyHex, since: now })
+    return { members, viewers: pubkeyHex ? 1 : 2 }
   }
 
   async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
@@ -795,8 +842,8 @@ export interface RepoWasmClient {
   ): Promise<{ active: boolean; count: number }>
   list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
   /**
-   * ListCommits — server-side first-parent walk; one round-trip returns a page of denormalized commit metadata
-   * (already decoded server-side, no object bytes) plus a continuation cursor. The client renders it directly.
+   * ListCommits — server-side first-parent walk; one round-trip returns a page of denormalized commit metadata (already
+   * decoded server-side, no object bytes) plus a continuation cursor. The client renders it directly.
    */
   list_commits(
     baseUrl: string,
@@ -833,8 +880,17 @@ export interface RepoWasmClient {
  * with the wasm load, instead of waiting for the wasm backend to resolve (which serialized ~800ms onto first live
  * delivery). Reconnects with bounded exponential backoff; returns an unsubscribe that closes the socket.
  */
-export function subscribeRoom(baseUrl: string, room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}`
+export function subscribeRoom(
+  baseUrl: string,
+  room: string,
+  prefix: string,
+  handlers: RoomWatchHandlers,
+  pubkeyHex?: string | null,
+): () => void {
+  // Attribute this connection's presence to the current key when one is provided
+  // + well-formed; absent → the DO counts it as a signed-out viewer.
+  const pk = pubkeyHex && /^[0-9a-f]{64}$/.test(pubkeyHex) ? `?pubkey=${pubkeyHex}` : ''
+  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}${pk}`
   let closed = false
   let ws: WebSocket | null = null
   let attempt = 0
@@ -844,6 +900,7 @@ export function subscribeRoom(baseUrl: string, room: string, prefix: string, han
   const handleMessage = (ev: MessageEvent) => {
     const frame = parseActivityFrame(ev.data)
     if (!frame) return
+    if (frame.kind === 'presence') return void handlers.onPresence?.(frame.presence)
     if (frame.kind === 'chat') return void handlers.onChat?.(frame.message)
     if (frame.kind === 'reaction') return void handlers.onReaction?.(frame.reaction)
     const u = frame.ref
@@ -1003,24 +1060,31 @@ export class WasmRepoBackend implements RepoBackend {
    * PostMessage. `parseActivityFrame` normalises both; `prefix` filters ref frames client-side. Returns an unsubscribe
    * that closes the socket.
    */
-  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers): () => void {
-    // Delegate to the shared, wasm-free socket. Wrap `onRef` to also record the
-    // peer's push into the in-memory log (a placeholder message) so callers that
-    // read `this.log` still see others contributing; the lobby instead drives the
-    // socket via `subscribeRoom` directly (no wasm dependency).
-    return subscribeRoom(this.baseUrl, room, prefix, {
-      ...handlers,
-      onRef: (u) => {
-        this.recordCommit(room, {
-          hash: u.objectIdHex,
-          message: 'pushed by a peer',
-          authorPubkey: u.authorPubkeyHex,
-          ref: u.name,
-          createdAt: new Date().toISOString(),
-        })
-        handlers.onRef?.(u)
+  watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
+    // Delegate to the shared, wasm-free socket (which carries presence + the
+    // `?pubkey=` attribution). Wrap `onRef` to also record the peer's push into
+    // the in-memory log (a placeholder message) so callers that read `this.log`
+    // still see others contributing; the lobby instead drives the socket via
+    // `subscribeRoom` directly (no wasm dependency).
+    return subscribeRoom(
+      this.baseUrl,
+      room,
+      prefix,
+      {
+        ...handlers,
+        onRef: (u) => {
+          this.recordCommit(room, {
+            hash: u.objectIdHex,
+            message: 'pushed by a peer',
+            authorPubkey: u.authorPubkeyHex,
+            ref: u.name,
+            createdAt: new Date().toISOString(),
+          })
+          handlers.onRef?.(u)
+        },
       },
-    })
+      pubkeyHex,
+    )
   }
 
   /**

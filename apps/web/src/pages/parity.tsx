@@ -18,7 +18,8 @@ export default function ParityPage() {
           <p className='max-w-prose text-base text-fg'>
             mkit matches the git commands and flags you would type while keeping its own improvements — BLAKE3 content
             addressing, a signature on every commit, and guards against silent data loss — but it never shares bytes
-            with a <code className='font-mono text-sm'>.git</code> repo, so this is parity of behavior, not wire interop.
+            with a <code className='font-mono text-sm'>.git</code> repo, so this is parity of behavior, not wire
+            interop.
           </p>
         </header>
         <ParityMatrix />

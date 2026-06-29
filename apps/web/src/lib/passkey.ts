@@ -70,9 +70,8 @@ export function webauthnAvailable(): boolean {
 }
 
 /**
- * Enroll an identity passkey (§2 step 1). Creates a P-256 (`alg: -7`) discoverable
- * credential with the PRF extension requested, then reports whether the
- * authenticator confirmed PRF support. A `null` return means PRF is unsupported.
+ * Enroll an identity passkey (§2 step 1). Creates a P-256 (`alg: -7`) discoverable credential with the PRF extension
+ * requested, then reports whether the authenticator confirmed PRF support. A `null` return means PRF is unsupported.
  */
 export async function enroll(displayName = 'mkit player'): Promise<EnrollResult> {
   if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
@@ -117,8 +116,8 @@ export async function sha256(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer>
 }
 
 /**
- * HKDF-SHA256 over `ikm` with `info`, fixed empty salt, 32-byte output — exactly the
- * Ed25519 seed length. WebCrypto does extract-and-expand in one `deriveBits` call.
+ * HKDF-SHA256 over `ikm` with `info`, fixed empty salt, 32-byte output — exactly the Ed25519 seed length. WebCrypto
+ * does extract-and-expand in one `deriveBits` call.
  */
 export async function hkdfSha256(ikm: Uint8Array, info: string, length = 32): Promise<Uint8Array> {
   const ikmBuf = ikm.buffer.slice(ikm.byteOffset, ikm.byteOffset + ikm.byteLength) as ArrayBuffer
@@ -137,21 +136,19 @@ export type DeriveResult = {
   /** The raw 32-byte PRF output, for display/debugging only. */
   prfHex: string
   /**
-   * Base64url credential id of the passkey the assertion actually used. For a
-   * discoverable (no `allowCredentials`) recovery `get()`, this reveals WHICH
-   * resident key the user picked, so the caller can persist it. Absent only
-   * from the random `ephemeral` fallback.
+   * Base64url credential id of the passkey the assertion actually used. For a discoverable (no `allowCredentials`)
+   * recovery `get()`, this reveals WHICH resident key the user picked, so the caller can persist it. Absent only from
+   * the random `ephemeral` fallback.
    */
   credentialId?: string
 }
 
 /**
- * Derive the Ed25519 signing seed from an enrolled passkey (§2 step 2).
- * Performs a `get()` with the PRF salt = SHA-256("<host>/ed25519-identity/v1"),
- * reads `prf.results.first`, then HKDF-expands it under `info=HKDF_INFO`.
+ * Derive the Ed25519 signing seed from an enrolled passkey (§2 step 2). Performs a `get()` with the PRF salt =
+ * SHA-256("<host>/ed25519-identity/v1"), reads `prf.results.first`, then HKDF-expands it under `info=HKDF_INFO`.
  *
- * Throws `PrfUnsupportedError` if the authenticator returned no PRF output, so
- * the caller can fall back to an in-memory random seed with a visible notice.
+ * Throws `PrfUnsupportedError` if the authenticator returned no PRF output, so the caller can fall back to an in-memory
+ * random seed with a visible notice.
  */
 export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveResult> {
   if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
@@ -163,9 +160,7 @@ export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveRe
       rpId: rpId(),
       userVerification: 'preferred',
       timeout: 60_000,
-      ...(credentialId
-        ? { allowCredentials: [{ type: 'public-key', id: fromB64url(credentialId) }] }
-        : {}),
+      ...(credentialId ? { allowCredentials: [{ type: 'public-key', id: fromB64url(credentialId) }] } : {}),
       extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
     },
   })) as PublicKeyCredential | null
@@ -194,12 +189,10 @@ export type IdentityResult = DeriveResult & {
 }
 
 /**
- * Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array` of EXACTLY the
- * view's bytes. A typed-array view can sit at a non-zero `byteOffset` inside a
- * larger backing `ArrayBuffer` (and span only part of it); reading `.buffer`
- * alone would return the WHOLE buffer, corrupting the derived seed. Slice the
- * view's `[byteOffset, byteOffset + byteLength)` window so only its own bytes
- * are used.
+ * Coerce a WebAuthn `BufferSource` PRF result to a `Uint8Array` of EXACTLY the view's bytes. A typed-array view can sit
+ * at a non-zero `byteOffset` inside a larger backing `ArrayBuffer` (and span only part of it); reading `.buffer` alone
+ * would return the WHOLE buffer, corrupting the derived seed. Slice the view's `[byteOffset, byteOffset + byteLength)`
+ * window so only its own bytes are used.
  */
 export function toPrfBytes(first: BufferSource): Uint8Array {
   return ArrayBuffer.isView(first)
@@ -210,13 +203,11 @@ export function toPrfBytes(first: BufferSource): Uint8Array {
 /**
  * Create a passkey identity AND derive its Ed25519 seed in ONE ceremony.
  *
- * Collapses the old enroll()+derive() two-prompt flow: the PRF is evaluated AT
- * creation (`prf.eval` on `create()`), so platforms that support PRF-on-create
- * (synced Apple/Google passkeys, ~100% as of 2026) return the seed material in
- * the single registration prompt — no follow-up `get()`. Falls back to one
- * `get()` if the platform withholds PRF on create, and to a random in-memory
- * seed (`via: 'ephemeral'`) if WebAuthn or PRF is unavailable, so the caller
- * always gets a usable signing key with a `via` it can surface.
+ * Collapses the old enroll()+derive() two-prompt flow: the PRF is evaluated AT creation (`prf.eval` on `create()`), so
+ * platforms that support PRF-on-create (synced Apple/Google passkeys, ~100% as of 2026) return the seed material in the
+ * single registration prompt — no follow-up `get()`. Falls back to one `get()` if the platform withholds PRF on create,
+ * and to a random in-memory seed (`via: 'ephemeral'`) if WebAuthn or PRF is unavailable, so the caller always gets a
+ * usable signing key with a `via` it can surface.
  */
 export async function createIdentity(displayName = 'mkit player'): Promise<IdentityResult> {
   if (!webauthnAvailable()) {
@@ -266,9 +257,8 @@ export async function createIdentity(displayName = 'mkit player'): Promise<Ident
 }
 
 /**
- * Fallback when PRF is unavailable: a random in-memory seed. NOT derived from a
- * passkey — it won't persist across sessions or devices. The UI must surface
- * this as a degraded "no hardware identity" mode.
+ * Fallback when PRF is unavailable: a random in-memory seed. NOT derived from a passkey — it won't persist across
+ * sessions or devices. The UI must surface this as a degraded "no hardware identity" mode.
  */
 export function randomSeed(): DeriveResult {
   const seed = crypto.getRandomValues(new Uint8Array(32))
@@ -280,16 +270,15 @@ export function randomSeed(): DeriveResult {
 // ---------------------------------------------------------------------------
 
 export type BindingCredential = {
-  /** ox credential id (base64url), reused for the assertion. */
+  /** Ox credential id (base64url), reused for the assertion. */
   id: string
   /** SEC1 uncompressed P-256 public key as hex (no 0x), the WASM verify input. */
   pubkeyHex: string
 }
 
 /**
- * Enroll a *separate* P-256 passkey used only to vouch for an Ed25519 pubkey.
- * Uses `ox`'s WebAuthnP256 (COSE→SEC1 key extraction handled for us). This is
- * the optional "binding" flourish — it shows the full passkey lifecycle, not
+ * Enroll a _separate_ P-256 passkey used only to vouch for an Ed25519 pubkey. Uses `ox`'s WebAuthnP256 (COSE→SEC1 key
+ * extraction handled for us). This is the optional "binding" flourish — it shows the full passkey lifecycle, not
  * required for contribution.
  */
 export async function enrollBindingPasskey(name = 'mkit binding'): Promise<BindingCredential> {
@@ -300,13 +289,12 @@ export async function enrollBindingPasskey(name = 'mkit binding'): Promise<Bindi
 }
 
 /**
- * Sign a DSSE-PAE challenge with the binding passkey and verify the assertion
- * through the WASM WebAuthn verifier (`verify_webauthn_wrapping[_with_policy]`),
- * proving the P-256 passkey vouched for the Ed25519 pubkey. The WebAuthn
+ * Sign a DSSE-PAE challenge with the binding passkey and verify the assertion through the WASM WebAuthn verifier
+ * (`verify_webauthn_wrapping[_with_policy]`), proving the P-256 passkey vouched for the Ed25519 pubkey. The WebAuthn
  * challenge is the PAE itself (design note §4, option A: keep payloads small).
  *
- * Returns the live `authenticatorData` / `clientDataJSON` so the ceremony is
- * legible in the UI, and a verdict. Throws on a verifier rejection.
+ * Returns the live `authenticatorData` / `clientDataJSON` so the ceremony is legible in the UI, and a verdict. Throws
+ * on a verifier rejection.
  */
 export async function attestEd25519Binding(
   api: MkitApi,

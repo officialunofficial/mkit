@@ -6,8 +6,10 @@
 // the same friendly name — no lookup, no state, no extra round-trips. The raw
 // hex stays the source of truth; the name is a presentation affordance only.
 
-/** Pleasant colors / adjectives. Keep curated + ~64-long; order is load-bearing
- * (it pins the golden vectors in identity-name.test.ts — append, never reorder). */
+/**
+ * Pleasant colors / adjectives. Keep curated + ~64-long; order is load-bearing (it pins the golden vectors in
+ * identity-name.test.ts — append, never reorder).
+ */
 const ADJECTIVES = [
   'amber',
   'azure',
@@ -147,9 +149,10 @@ const ANIMALS = [
 export const ADJECTIVE_COUNT = ADJECTIVES.length
 export const ANIMAL_COUNT = ANIMALS.length
 
-/** Parse exactly the leading `n` bytes of a hex string; returns null if there
- * aren't enough valid hex digits. Tiny + local — no wasm dependency. Shared with
- * `identity-avatar.ts` (both derive presentation affordances from a pubkey). */
+/**
+ * Parse exactly the leading `n` bytes of a hex string; returns null if there aren't enough valid hex digits. Tiny +
+ * local — no wasm dependency. Shared with `identity-avatar.ts` (both derive presentation affordances from a pubkey).
+ */
 export function leadingBytes(hex: string, n: number): Uint8Array | null {
   const clean = hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex
   if (clean.length < n * 2) return null
@@ -163,28 +166,25 @@ export function leadingBytes(hex: string, n: number): Uint8Array | null {
 }
 
 /**
- * Deterministic friendly name for an Ed25519 pubkey hex, e.g. "amber-unicorn".
- * Maps the first two bytes → adjective index, next two → animal index. Returns
- * `"anonymous"` for empty / invalid / too-short hex (fewer than 4 bytes).
+ * Deterministic friendly name for an Ed25519 pubkey hex, e.g. "amber-unicorn". Maps the first two bytes → adjective
+ * index, next two → animal index. Returns `"anonymous"` for empty / invalid / too-short hex (fewer than 4 bytes).
  */
 export function playerName(pubkeyHex: string): string {
   if (!pubkeyHex) return 'anonymous'
   const b = leadingBytes(pubkeyHex, 4)
   if (!b) return 'anonymous'
-  const adj = (((b[0]! << 8) | b[1]!) % ADJECTIVES.length + ADJECTIVES.length) % ADJECTIVES.length
-  const animal = (((b[2]! << 8) | b[3]!) % ANIMALS.length + ANIMALS.length) % ANIMALS.length
+  const adj = ((((b[0]! << 8) | b[1]!) % ADJECTIVES.length) + ADJECTIVES.length) % ADJECTIVES.length
+  const animal = ((((b[2]! << 8) | b[3]!) % ANIMALS.length) + ANIMALS.length) % ANIMALS.length
   return `${ADJECTIVES[adj]}-${ANIMALS[animal]}`
 }
 
 /**
- * A fresh, RANDOM adjective-animal handle (e.g. "slate-badger"), used as the
- * default petname a player is given the moment they create an identity — set as
- * the passkey's `user.name` (so the OS passkey manager reads "slate-badger@host"
- * instead of "mkit player@host") and stored in the repo so it survives recovery.
+ * A fresh, RANDOM adjective-animal handle (e.g. "slate-badger"), used as the default petname a player is given the
+ * moment they create an identity — set as the passkey's `user.name` (so the OS passkey manager reads
+ * "slate-badger@host" instead of "mkit player@host") and stored in the repo so it survives recovery.
  *
- * Unlike {@link playerName} this is NOT derived from a key (the pubkey doesn't
- * exist yet at passkey-creation time), so the chosen name must be persisted to
- * be recoverable — see `lib/repo/player-names.ts`.
+ * Unlike {@link playerName} this is NOT derived from a key (the pubkey doesn't exist yet at passkey-creation time), so
+ * the chosen name must be persisted to be recoverable — see `lib/repo/player-names.ts`.
  */
 export function randomPetname(): string {
   const b = crypto.getRandomValues(new Uint8Array(2))

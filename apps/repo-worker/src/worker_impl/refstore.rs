@@ -21,6 +21,9 @@
 // CAS decision itself is the pure `refs::evaluate_cas` shared with the unit
 // tests, so the DO and the conformance vectors agree by construction.
 
+use std::cell::Cell;
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 // `wasm_bindgen` must be in scope: the `#[durable_object]` macro emits glue
 // that references it by name. `DurableObject` is the trait we implement.
@@ -109,9 +112,51 @@ fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
+/// Per-socket presence, stored as the hibernatable WebSocket attachment so the
+/// roster survives DO hibernation (it's rebuilt from `get_websockets()` on
+/// demand rather than held in memory).
+#[derive(Serialize, Deserialize, Clone)]
+struct PresenceAttachment {
+    /// Unique per connection — lets `websocket_close` drop exactly this socket
+    /// from the roster even when several share a pubkey (or are all viewers).
+    id: String,
+    /// 64-hex Ed25519 pubkey, or `None` for a signed-out viewer.
+    pubkey: Option<String>,
+    /// Epoch-ms the socket joined.
+    since: i64,
+}
+
+/// Live presence roster, broadcast to every `/watch` subscriber on join/leave.
+/// `kind: "presence"` distinguishes it from `"commit"` / `"chat"` frames so the
+/// one socket can carry all three.
+#[derive(Serialize)]
+struct PresenceJson {
+    kind: &'static str,
+    /// Distinct online keys (deduped by pubkey across tabs), earliest `since`.
+    members: Vec<PresenceMember>,
+    /// Connections with no identity yet — the "N viewers" count.
+    viewers: u32,
+}
+
+#[derive(Serialize)]
+struct PresenceMember {
+    pubkey: String,
+    since: i64,
+}
+
+/// A 64-char lowercase-hex Ed25519 pubkey. Shared with the worker so an invalid
+/// `?pubkey=` is treated as a viewer rather than trusted.
+pub(crate) fn is_valid_pubkey(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[durable_object]
 pub struct RefStore {
     state: State,
+    /// Per-isolate connection counter, combined with the wall clock in
+    /// `next_conn_id` to mint a unique id per `/watch` socket (single-threaded
+    /// wasm, so a `Cell` is enough — no synchronisation needed).
+    conn_seq: Cell<u64>,
 }
 
 impl DurableObject for RefStore {
@@ -119,7 +164,10 @@ impl DurableObject for RefStore {
         // Defer table creation to the first storage op (`ensure_table`). A DDL
         // failure here would panic the isolate at construction; instead it now
         // surfaces as a clean error on the first fetch.
-        Self { state }
+        Self {
+            state,
+            conn_seq: Cell::new(0),
+        }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
@@ -127,8 +175,29 @@ impl DurableObject for RefStore {
 
         // WatchRefs subscription: accept a hibernatable server WebSocket.
         if path == "/watch" {
+            // Optional `?pubkey=<64-hex>` attributes this connection to a key;
+            // absent or malformed → a signed-out viewer. Read it before the
+            // upgrade (the URL query isn't available afterwards).
+            let pubkey = req
+                .url()
+                .ok()
+                .and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "pubkey")
+                        .map(|(_, v)| v.into_owned())
+                })
+                .filter(|p| is_valid_pubkey(p));
+
             let pair = WebSocketPair::new()?;
             self.state.accept_web_socket(&pair.server);
+            // Stash the presence info ON the socket so it survives hibernation.
+            let _ = pair.server.serialize_attachment(PresenceAttachment {
+                id: self.next_conn_id(),
+                pubkey,
+                since: Date::now().as_millis() as i64,
+            });
+            // Tell everyone (including the newcomer) the updated roster.
+            self.broadcast_presence(None);
             return Ok(ResponseBuilder::new()
                 .with_status(101)
                 .with_websocket(pair.client)
@@ -216,11 +285,9 @@ impl DurableObject for RefStore {
     // --- Hibernatable-WebSocket lifecycle handlers --------------------------
     //
     // WatchRefs subscribers attach via `accept_web_socket` (above). The default
-    // trait impls of these handlers `unimplemented!()` (panic → "unreachable"),
-    // so a subscriber merely connecting and disconnecting would crash the DO.
-    // The fan-out is strictly server→client (broadcast on UpdateRef), so:
-    //   - inbound frames are ignored (clients never send),
-    //   - close/error are no-ops (the runtime drops the socket from the set).
+    // trait impls `unimplemented!()` (panic → "unreachable"), so they must be
+    // provided. Ref/chat fan-out is server→client, so inbound frames are
+    // ignored; close/error update the presence roster for everyone else.
 
     async fn websocket_message(
         &self,
@@ -232,17 +299,29 @@ impl DurableObject for RefStore {
 
     async fn websocket_close(
         &self,
-        _ws: WebSocket,
+        ws: WebSocket,
         _code: usize,
         _reason: String,
         _was_clean: bool,
     ) -> Result<()> {
+        // The closing socket is still in `get_websockets()` here, so drop it by
+        // id when recomputing the roster.
+        self.broadcast_presence(closing_id(&ws).as_deref());
         Ok(())
     }
 
-    async fn websocket_error(&self, _ws: WebSocket, _error: worker::Error) -> Result<()> {
+    async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        self.broadcast_presence(closing_id(&ws).as_deref());
         Ok(())
     }
+}
+
+/// The presence id stashed on a socket (or `None` if it carried no attachment).
+fn closing_id(ws: &WebSocket) -> Option<String> {
+    ws.deserialize_attachment::<PresenceAttachment>()
+        .ok()
+        .flatten()
+        .map(|a| a.id)
 }
 
 impl RefStore {
@@ -914,6 +993,56 @@ impl RefStore {
         }
         if failed > 0 {
             worker::console_error!("broadcast: {failed}/{total} /watch socket sends failed");
+        }
+    }
+
+    /// Mint a unique id per `/watch` connection: wall clock (unique across
+    /// hibernations) + an isolate-local counter (unique within one isolate).
+    fn next_conn_id(&self) -> String {
+        let n = self.conn_seq.get();
+        self.conn_seq.set(n.wrapping_add(1));
+        format!("{:x}-{:x}", Date::now().as_millis(), n)
+    }
+
+    /// Recompute the live roster from every attached socket's presence
+    /// attachment and broadcast a `"presence"` frame to all. `exclude_id` drops
+    /// a socket that is mid-close (still present in `get_websockets()` during
+    /// `websocket_close`). Keys are deduped across tabs (earliest `since` wins);
+    /// identity-less connections are tallied as `viewers`.
+    fn broadcast_presence(&self, exclude_id: Option<&str>) {
+        let mut by_key: BTreeMap<String, i64> = BTreeMap::new();
+        let mut viewers: u32 = 0;
+        for ws in self.state.get_websockets() {
+            let Some(att) = ws
+                .deserialize_attachment::<PresenceAttachment>()
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if exclude_id == Some(att.id.as_str()) {
+                continue;
+            }
+            match att.pubkey {
+                Some(pk) => {
+                    by_key
+                        .entry(pk)
+                        .and_modify(|s| *s = (*s).min(att.since))
+                        .or_insert(att.since);
+                }
+                None => viewers = viewers.saturating_add(1),
+            }
+        }
+        let members = by_key
+            .into_iter()
+            .map(|(pubkey, since)| PresenceMember { pubkey, since })
+            .collect();
+        if let Ok(payload) = serde_json::to_string(&PresenceJson {
+            kind: "presence",
+            members,
+            viewers,
+        }) {
+            self.broadcast_str(&payload);
         }
     }
 }
