@@ -251,6 +251,16 @@ _mkit() {
                         '--no-edit[keep the existing message on amend]' \
                         '--help[show help]'
                     ;;
+                blame)
+                    _arguments \
+                        '--format[output format]:format:(default json)' \
+                        '-L[restrict to a line range]:range:' \
+                        '--lines[restrict to a line range]:range:' \
+                        '-w[ignore whitespace when matching]' \
+                        '--ignore-whitespace[ignore whitespace when matching]' \
+                        '--help[show help]' \
+                        '*:file:_files'
+                    ;;
                 log)
                     _arguments \
                         '--oneline[condensed output]' \

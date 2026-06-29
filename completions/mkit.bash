@@ -83,6 +83,9 @@ _mkit_complete() {
         commit)
             COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet -S --gpg-sign --no-verify --no-edit --help" -- "$cur") )
             ;;
+        blame)
+            COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace --help" -- "$cur") )
+            ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
             ;;

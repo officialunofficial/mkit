@@ -179,22 +179,10 @@ pub fn blame_file_with(
 
             let old_lines = load_blob_lines(store, older.blob_hash)?;
             let new_lines = load_blob_lines(store, newer.blob_hash)?;
-            // With `-w`, match on whitespace-stripped keys so a
-            // whitespace-only edit pairs the lines (and thus inherits the
-            // older attribution); the raw `new_lines` are still what gets
-            // emitted, so output bytes are unchanged.
-            let mapping = if opts.ignore_whitespace {
-                // Enforce the size cap *before* allocating the stripped-key
-                // buffers, so an oversized blob fails fast without copying
-                // every line; `match_lines` is then safe to call directly.
-                check_line_count(old_lines.len())?;
-                check_line_count(new_lines.len())?;
-                let old_keys: Vec<Vec<u8>> = old_lines.iter().map(|l| strip_ws(l)).collect();
-                let new_keys: Vec<Vec<u8>> = new_lines.iter().map(|l| strip_ws(l)).collect();
-                match_lines(&old_keys, &new_keys)
-            } else {
-                match_lines_checked(&old_lines, &new_lines)?
-            };
+            // All matching policy (size guard, `-w` normalization,
+            // tie-breaking) lives in the matcher; the replay below only
+            // consumes the resulting mapping.
+            let mapping = match_lines_with_options(&old_lines, &new_lines, *opts)?;
 
             let mut new_attrs: Vec<Attribution> = Vec::with_capacity(new_lines.len());
             for (ni, _) in new_lines.iter().enumerate() {
@@ -319,6 +307,38 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
         out.pop();
     }
     out
+}
+
+/// Line-correspondence matcher used by the blame replay: given the parent
+/// and child blob lines plus [`BlameOptions`], return for each child line
+/// the matched parent index, or `None` if it is new/changed.
+///
+/// This is the single place that owns *matching policy* — the
+/// [`BLAME_MAX_LINES`] fast-fail (enforced **before** any normalization
+/// allocation), `-w` whitespace normalization, and the position-stable
+/// LCS tie-breaking — so [`blame_file_with`] only has to replay the
+/// mapping. It is the extension point for future matching modes.
+///
+/// # Errors
+/// - [`BlameError::FileTooLarge`] if either side exceeds [`BLAME_MAX_LINES`].
+fn match_lines_with_options(
+    old_lines: &[Vec<u8>],
+    new_lines: &[Vec<u8>],
+    opts: BlameOptions,
+) -> BlameOutcome<Vec<Option<usize>>> {
+    // Fast-fail on oversized input first, before allocating any derived
+    // (e.g. whitespace-stripped) per-line buffers.
+    check_line_count(old_lines.len())?;
+    check_line_count(new_lines.len())?;
+    if opts.ignore_whitespace {
+        // Match on whitespace-stripped keys so a whitespace-only edit
+        // pairs the lines; the caller still emits the raw bytes.
+        let old_keys: Vec<Vec<u8>> = old_lines.iter().map(|l| strip_ws(l)).collect();
+        let new_keys: Vec<Vec<u8>> = new_lines.iter().map(|l| strip_ws(l)).collect();
+        Ok(match_lines(&old_keys, &new_keys))
+    } else {
+        Ok(match_lines(old_lines, new_lines))
+    }
 }
 
 /// Size-checked LCS line matcher. Returns
@@ -557,6 +577,26 @@ mod tests {
         assert_eq!(w.lines[0].commit_hash, c_a, "unchanged line 1 keeps c_a");
         assert_eq!(w.lines[1].commit_hash, c_b, "added line 2 is c_b");
         assert_eq!(w.lines[1].text, b"a b", "output keeps the current bytes");
+    }
+
+    #[test]
+    fn blame_w_blank_line_duplicate_is_position_stable() {
+        // The same duplicate-key hazard with blank lines (review P1 calls
+        // it out explicitly): inserting a second blank line must credit the
+        // *added* blank to the new commit and leave the original blank on
+        // its commit, matching `git blame -w` (verified against real git).
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"x\n\ny\n", vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", b"x\n\n\ny\n", vec![c_a], 2, 200);
+        let opts = BlameOptions {
+            ignore_whitespace: true,
+        };
+        let w = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(w.lines.len(), 4);
+        assert_eq!(w.lines[0].commit_hash, c_a, "x");
+        assert_eq!(w.lines[1].commit_hash, c_a, "original blank");
+        assert_eq!(w.lines[2].commit_hash, c_b, "added blank is new");
+        assert_eq!(w.lines[3].commit_hash, c_a, "y");
     }
 
     #[test]
