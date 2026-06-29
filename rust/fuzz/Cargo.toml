@@ -37,7 +37,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = "1"
-buffa = "0.7.1"
+buffa = "0.8.0"
 mkit-core = { path = "../crates/mkit-core" }
 mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
