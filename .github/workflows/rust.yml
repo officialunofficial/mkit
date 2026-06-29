@@ -320,23 +320,60 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: cargo check --workspace --locked --all-targets
 
+  codegen-fresh:
+    name: Vendored codegen freshness
+    # Same trigger gating as the core suite: runs on main pushes and every PR
+    # into main, and on an approved main-targeted review.
+    if: >-
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' &&
+       github.event.pull_request.base.ref == 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # buffa-build / connectrpc-build shell out to protoc (Edition 2023 needs
+      # protoc >= 27); the repo-worker regen builds for wasm32. setup-rust
+      # installs protoc 31.0 by default.
+      - name: Set up Rust, protoc, and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+          cache-prefix: "rust-codegen-fresh"
+
+      # mkit-rpc / repo-client can pull native deps under default features;
+      # mirror the core suite's deps so the regen build links. This job is
+      # ubuntu-only, so (unlike build-and-test's matrix) no runner.os guard is
+      # needed — cf. the single-OS msrv job, which is likewise unguarded.
+      - name: Install native signer deps
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
+
+      # Regenerate the vendored buffa/connectrpc codegen and fail if the
+      # committed copy drifted (stale generated/ vs the protos + *-build crates).
+      - name: Assert vendored codegen is fresh
+        run: ./scripts/check-generated-fresh.sh
+
   # Aggregator gate — the single stable check to mark "required" in branch
   # protection. It `needs` every critical Rust job and runs with
   # `if: always()`, so it reports a real success/failure even when an
-  # upstream job fails, is cancelled, or is skipped. Because the core suite
-  # (build-and-test) runs on every pull_request but the heavier jobs
-  # (keystore-backends, msrv) are approval-gated and legitimately skip on
-  # PR-only events, the gate's rules are:
-  #   - keystore-backends / msrv: 'skipped' is acceptable (cost-gated);
-  #     only 'failure' / 'cancelled' fail the gate.
-  #   - build-and-test: MUST be 'success' — a skipped core suite means the
-  #     Rust build/test/clippy/fmt never ran, which must not pass the gate.
+  # upstream job fails, is cancelled, or is skipped. The jobs split into two
+  # gating categories:
+  #   - build-and-test / codegen-fresh: MUST be 'success'. They run on every
+  #     pull_request, so a skip means the Rust suite or the codegen-freshness
+  #     guard never ran — which must not pass the gate.
+  #   - keystore-backends / msrv: approval-gated and legitimately skip on
+  #     PR-only events, so 'skipped' is acceptable; only 'failure' /
+  #     'cancelled' fail the gate.
   # This guarantees a green required check actually exercised the suite,
   # closing the "green rollup but nothing ran" trust gap.
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends, msrv]
+    needs: [build-and-test, keystore-backends, msrv, codegen-fresh]
     runs-on: ubuntu-latest
     steps:
       - name: Verify core suite ran and no critical job failed
@@ -345,27 +382,32 @@ jobs:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
           MSRV: ${{ needs.msrv.result }}
+          CODEGEN_FRESH: ${{ needs.codegen-fresh.result }}
         run: |
           echo "build-and-test:    ${BUILD_AND_TEST}"
+          echo "codegen-fresh:     ${CODEGEN_FRESH}"
           echo "keystore-backends: ${KEYSTORE_BACKENDS}"
           echo "msrv:              ${MSRV}"
 
           fail=0
 
-          # The core suite must have actually run and passed.
-          if [ "${BUILD_AND_TEST}" != "success" ]; then
-            echo "::error::core suite (build-and-test) did not succeed (result=${BUILD_AND_TEST})"
-            fail=1
-          fi
+          # Must-run jobs share the core suite's trigger gating, so they have to
+          # have actually run and passed — a skip is a gate failure (no silent
+          # "green rollup but nothing ran").
+          for job in BUILD_AND_TEST CODEGEN_FRESH; do
+            if [ "${!job}" != "success" ]; then
+              echo "::error::${job} did not succeed (result=${!job}) — required job must run and pass"
+              fail=1
+            fi
+          done
 
           # Cost-gated jobs may be skipped on PR-only events, but must not
           # have failed or been cancelled when they did run.
           for job in KEYSTORE_BACKENDS MSRV; do
-            result="${!job}"
-            case "${result}" in
+            case "${!job}" in
               success|skipped) ;;
               *)
-                echo "::error::${job} did not succeed (result=${result})"
+                echo "::error::${job} did not succeed (result=${!job})"
                 fail=1
                 ;;
             esac
