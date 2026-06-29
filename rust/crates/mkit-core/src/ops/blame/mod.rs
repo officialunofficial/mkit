@@ -1,9 +1,14 @@
 //! Blame.
 //!
-//! Walks the first-parent chain from a head commit, collecting the
-//! `(commit, blob)` pair for the file path at each step. Then replays
-//! the diffs forward (oldest → newest), attributing each line in the
-//! final blob to the commit that introduced it.
+//! Attributes each line of a file to the commit that introduced it. The walk
+//! is **merge-aware** (git's default): it collects the file's ancestor
+//! subgraph from the head commit, processes commits oldest → newest (parents
+//! before children), and at a merge passes each line to the first parent
+//! that still contains it — so a line merged in from a side branch is
+//! credited to the commit that wrote it, not the merge.
+//! [`BlameOptions::first_parent`] restricts the walk to first parents,
+//! reproducing the older linear-history attribution. Reverse blame
+//! ([`blame_file_reverse`]) is first-parent only by definition.
 //!
 //! Line matching uses a simple LCS DP table. For typical source files
 //! (a few thousand lines) this is fine; binary blobs / generated code
@@ -13,7 +18,7 @@
 //! where `<short>` is the 12-char prefix of the commit hash. See
 //! [`format_blame_text`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -140,6 +145,15 @@ pub struct BlameOptions {
     /// (it inherits the active ignore-revs) with an `O(1)` refcount bump
     /// rather than deep-cloning the whole set per source.
     pub ignore_revs: Arc<HashSet<Hash>>,
+    /// Follow only each commit's first parent, like `git blame
+    /// --first-parent`. The default (`false`) is git's merge-aware walk:
+    /// at a merge, a line is credited to whichever parent's side actually
+    /// wrote it (the first parent that still contains it), so a line merged
+    /// in from a side branch is attributed to its authoring commit rather
+    /// than the merge. With `--first-parent`, the walk follows the
+    /// first-parent chain only, so such a line is credited to the merge
+    /// commit — the older linear-history behavior.
+    pub first_parent: bool,
 }
 
 impl BlameOptions {
@@ -176,16 +190,6 @@ struct Attribution {
     commit_hash: Hash,
     author: Identity,
     timestamp: u64,
-}
-
-impl From<&HistoryEntry> for Attribution {
-    fn from(h: &HistoryEntry) -> Self {
-        Self {
-            commit_hash: h.commit_hash,
-            author: h.author.clone(),
-            timestamp: h.timestamp,
-        }
-    }
 }
 
 impl From<BlameLine> for Attribution {
@@ -238,183 +242,342 @@ pub fn blame_file(
     blame_file_with(store, head_hash, file_path, &BlameOptions::default())
 }
 
-/// One step of the file's first-parent ancestry: the commit and the blob
-/// the target path resolved to there.
-#[derive(Clone)]
-struct HistoryEntry {
-    commit_hash: Hash,
+/// A commit in the file's ancestor subgraph: the blob the path resolves to
+/// there, the author/timestamp for the output, and the **relevant** parents
+/// — the parents that still contain the file. Following all parents makes
+/// blame merge-aware; with `--first-parent` only the first parent is kept,
+/// so every node has at most one relevant parent and the walk degenerates to
+/// the old linear first-parent replay.
+struct DagNode {
     blob_hash: Hash,
     author: Identity,
     timestamp: u64,
+    parents: Vec<Hash>,
 }
 
-/// Walk first-parent ancestry from `head_hash`, collecting one
-/// [`HistoryEntry`] per commit until `file_path` disappears (newest first).
-fn collect_history(
+impl DagNode {
+    /// This commit as the origin for one of its own lines.
+    fn own_attribution(&self, commit_hash: Hash) -> Attribution {
+        Attribution {
+            commit_hash,
+            author: self.author.clone(),
+            timestamp: self.timestamp,
+        }
+    }
+}
+
+/// The file's blob at `commit` (cached). Reads the commit only when the
+/// blob is not already known, so a parent probed for relevance and later
+/// processed costs one tree walk, not two.
+fn file_blob_at(
+    store: &ObjectStore,
+    blob_of: &mut HashMap<Hash, Option<Hash>>,
+    commit: Hash,
+    file_path: &str,
+) -> BlameOutcome<Option<Hash>> {
+    if let Some(&blob) = blob_of.get(&commit) {
+        return Ok(blob);
+    }
+    let Object::Commit(c) = store.read_object(&commit)? else {
+        return Err(BlameError::NotACommit);
+    };
+    let blob = find_blob_in_tree(store, c.tree_hash, file_path)?;
+    blob_of.insert(commit, blob);
+    Ok(blob)
+}
+
+/// Build the file's ancestor subgraph from `head_hash`: every commit at which
+/// `file_path` resolves to a blob, reachable through parents that also still
+/// contain the file. All parents are followed (merge-aware) unless
+/// `first_parent`. Returns the node map and, for each commit, its number of
+/// subgraph children, so the caller can release a node's attribution memo
+/// once all of its children have been processed.
+///
+/// The child→parent edges recorded here — including the non-first-parent
+/// edges of a merge — are exactly the merge-DAG edges the blame walk visits;
+/// a future provable-blame ancestry accumulator (#495) can be built from this
+/// same traversal instead of a second ancestor-set pass. They are not
+/// surfaced as public API, since #458 has no consumer for them yet.
+fn build_file_dag(
     store: &ObjectStore,
     head_hash: Hash,
     file_path: &str,
-) -> BlameOutcome<Vec<HistoryEntry>> {
-    let mut history: Vec<HistoryEntry> = Vec::new();
-    let mut current = Some(head_hash);
-    while let Some(commit_hash) = current {
+    first_parent: bool,
+) -> BlameOutcome<(HashMap<Hash, DagNode>, HashMap<Hash, usize>)> {
+    let mut nodes: HashMap<Hash, DagNode> = HashMap::new();
+    let mut children: HashMap<Hash, usize> = HashMap::new();
+    let mut blob_of: HashMap<Hash, Option<Hash>> = HashMap::new();
+
+    let mut stack = vec![head_hash];
+    while let Some(commit_hash) = stack.pop() {
+        if nodes.contains_key(&commit_hash) {
+            continue;
+        }
         let Object::Commit(commit) = store.read_object(&commit_hash)? else {
             return Err(BlameError::NotACommit);
         };
         let Some(blob_hash) = find_blob_in_tree(store, commit.tree_hash, file_path)? else {
-            break;
+            // Reachable only for `head_hash` (parents are probed before being
+            // pushed); the caller has already rejected a fileless head.
+            continue;
         };
-        history.push(HistoryEntry {
+        blob_of.entry(commit_hash).or_insert(Some(blob_hash));
+        let raw_parents: &[Hash] = if first_parent {
+            commit.parents.get(..1).unwrap_or(&[])
+        } else {
+            &commit.parents
+        };
+        let mut relevant = Vec::new();
+        for &parent in raw_parents {
+            if file_blob_at(store, &mut blob_of, parent, file_path)?.is_some() {
+                relevant.push(parent);
+                *children.entry(parent).or_insert(0) += 1;
+                if !nodes.contains_key(&parent) {
+                    stack.push(parent);
+                }
+            }
+        }
+        nodes.insert(
             commit_hash,
-            blob_hash,
-            author: commit.author.clone(),
-            timestamp: commit.timestamp,
-        });
-        current = commit.parents.first().copied();
+            DagNode {
+                blob_hash,
+                author: commit.author.clone(),
+                timestamp: commit.timestamp,
+                parents: relevant,
+            },
+        );
     }
-    Ok(history)
+    Ok((nodes, children))
 }
 
-/// Blame `file_path` at `head_hash`. Walks first-parent ancestry,
-/// stops when the file disappears, and uses LCS to map lines forward.
-/// `opts` tunes matching (see [`BlameOptions`]).
+/// Topologically order `nodes` so every commit appears after all of its
+/// relevant parents (DFS post-order from `head`). Parents-before-children
+/// lets the forward replay read a parent's resolved attribution before the
+/// child needs it.
+fn topo_order(nodes: &HashMap<Hash, DagNode>, head: Hash) -> Vec<Hash> {
+    let mut order = Vec::with_capacity(nodes.len());
+    let mut visited: HashSet<Hash> = HashSet::new();
+    let mut stack: Vec<(Hash, bool)> = vec![(head, false)];
+    while let Some((commit, emit)) = stack.pop() {
+        if emit {
+            order.push(commit);
+            continue;
+        }
+        if !visited.insert(commit) {
+            continue;
+        }
+        stack.push((commit, true));
+        for &parent in &nodes[&commit].parents {
+            if !visited.contains(&parent) {
+                stack.push((parent, false));
+            }
+        }
+    }
+    order
+}
+
+/// Read-mostly context threaded into [`attribute_commit`].
+struct WalkCtx<'a> {
+    store: &'a ObjectStore,
+    opts: &'a BlameOptions,
+    nodes: &'a HashMap<Hash, DagNode>,
+    file_path: &'a str,
+}
+
+/// Resolve the attribution of every line of `commit`'s blob from its parents'
+/// already-resolved attributions in `memo`.
+///
+/// With one relevant parent this is exactly the old single-parent step
+/// (match → inherit, unmatched → this commit or `--ignore-rev` fall-through,
+/// then the `-M`/`-C` detector). At a **merge**, each line is explained by
+/// the first parent — in parent order — that still contains it (so a line on
+/// both sides is credited to the first parent, matching git); lines no parent
+/// explains are introduced here, then offered to ignore-rev fall-through and
+/// the detector against the first parent.
+fn attribute_commit(
+    ctx: &WalkCtx,
+    memo: &HashMap<Hash, Vec<Attribution>>,
+    detector: &mut move_copy::Detector,
+    commit: Hash,
+) -> BlameOutcome<Vec<Attribution>> {
+    let node = &ctx.nodes[&commit];
+    let lines = load_blob_lines(ctx.store, node.blob_hash)?;
+    let own = node.own_attribution(commit);
+
+    // Root: the file first appears here, so every line is introduced — but a
+    // block may have been copied from other files in the real parent (`-C`).
+    if node.parents.is_empty() {
+        let mut attrs = vec![own; lines.len()];
+        let boundary_parent = if matches!(ctx.opts.copies, CopyDetection::On { .. }) {
+            move_copy::commit_parent(ctx.store, commit)?
+        } else {
+            None
+        };
+        if let Some(parent) = boundary_parent {
+            detector.reassign(
+                &move_copy::ReassignRequest {
+                    file_path: ctx.file_path,
+                    source_commit: parent,
+                    attributed_commit: commit,
+                    new_lines: &lines,
+                    unmatched: &vec![true; lines.len()],
+                    within_file: None,
+                },
+                &mut attrs,
+            )?;
+        }
+        return Ok(attrs);
+    }
+
+    let first_parent = node.parents[0];
+    // Fast path: a single parent with the identical blob contributes every
+    // line unchanged (the old `newer.blob == older.blob` skip).
+    if node.parents.len() == 1 && ctx.nodes[&first_parent].blob_hash == node.blob_hash {
+        return Ok(memo[&first_parent].clone());
+    }
+
+    let mut attrs = vec![own; lines.len()];
+    let mut matched = vec![false; lines.len()];
+    let first_parent_lines = load_blob_lines(ctx.store, ctx.nodes[&first_parent].blob_hash)?;
+    let mut first_parent_mapping: Vec<Option<usize>> = Vec::new();
+
+    for (k, &parent) in node.parents.iter().enumerate() {
+        let parent_lines = if k == 0 {
+            first_parent_lines.clone()
+        } else {
+            load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?
+        };
+        // `mapping[ni]` = the parent index that this commit's line `ni` is
+        // unchanged from, or `None` if changed/introduced.
+        let mapping = match_lines_with_options(&parent_lines, &lines, ctx.opts)?;
+        let parent_attrs = &memo[&parent];
+        for (ni, m) in mapping.iter().enumerate() {
+            if matched[ni] {
+                continue; // already explained by an earlier parent
+            }
+            let Some(oi) = *m else { continue };
+            if oi < parent_attrs.len() {
+                attrs[ni] = parent_attrs[oi].clone();
+                matched[ni] = true;
+            }
+        }
+        if k == 0 {
+            first_parent_mapping = mapping;
+        }
+    }
+
+    // `--ignore-rev`: a line this (ignored) commit would keep falls through to
+    // the first parent's corresponding line. A line the fall-through resolves
+    // is marked `matched` so the detector below does not overwrite it —
+    // `--ignore-rev` takes precedence over `-M`/`-C` on the lines it resolves.
+    if ctx.opts.is_ignored(&commit) {
+        let fall = ignore_fallthrough(&first_parent_mapping, first_parent_lines.len());
+        let parent_attrs = &memo[&first_parent];
+        for (ni, &paired) in fall.iter().enumerate() {
+            if matched[ni] {
+                continue;
+            }
+            let Some(oi) = paired else { continue };
+            if oi < parent_attrs.len() {
+                attrs[ni] = parent_attrs[oi].clone();
+                matched[ni] = true;
+            }
+        }
+    }
+
+    // `-M`/`-C`: reassign blocks no parent explained, against the first parent
+    // (its lines and resolved origins are the move/copy source).
+    if ctx.opts.detection_enabled() {
+        let unmatched: Vec<bool> = matched.iter().map(|&m| !m).collect();
+        detector.reassign(
+            &move_copy::ReassignRequest {
+                file_path: ctx.file_path,
+                source_commit: first_parent,
+                attributed_commit: commit,
+                new_lines: &lines,
+                unmatched: &unmatched,
+                within_file: Some((&first_parent_lines, memo[&first_parent].as_slice())),
+            },
+            &mut attrs,
+        )?;
+    }
+
+    Ok(attrs)
+}
+
+/// Blame `file_path` at `head_hash`. Walks the file's ancestor subgraph in
+/// topological order, attributing each line to the commit that introduced it.
+/// The default is git's **merge-aware** walk (a line merged from a side branch
+/// is credited to the commit that wrote it); [`BlameOptions::first_parent`]
+/// restricts the walk to first parents. `opts` also tunes matching (`-w`,
+/// `-M`/`-C`, `--ignore-rev`).
 ///
 /// # Errors
 /// - [`BlameError::FileNotFound`] if the file does not exist at `head_hash`.
 /// - [`BlameError::NotACommit`] if `head_hash` is not a commit object.
-/// - [`BlameError::FileTooLarge`] if any blob on the history chain has
-///   more than [`BLAME_MAX_LINES`] lines.
+/// - [`BlameError::FileTooLarge`] if any blob fed to the matcher has more than
+///   [`BLAME_MAX_LINES`] lines.
+///
+/// # Note
+/// The merge-aware walk processes the file's whole ancestor subgraph (every
+/// merge parent that still has the file), so it reads more commits than a
+/// first-parent-only walk; per-commit attribution memos are released as soon
+/// as a commit's children are done. A future optimization could prune to
+/// line-owning commits the way git's backward blame queue does.
 ///
 /// # Panics
-/// Panics only on internal logic violations: it is unreachable for the
-/// "oldest entry" lookup below to fail, since we early-return on an
-/// empty history just above it.
+/// Never in practice: the head commit is the last node in topological order
+/// and is never another commit's parent, so its attribution memo is still
+/// present when the result is materialized.
 pub fn blame_file_with(
     store: &ObjectStore,
     head_hash: Hash,
     file_path: &str,
     opts: &BlameOptions,
 ) -> BlameOutcome<BlameResult> {
-    let history = collect_history(store, head_hash, file_path)?;
-    // Oldest entry: every line attributed to it. An empty history means the
-    // file was never present in any commit along the walk.
-    let Some(oldest) = history.last().cloned() else {
+    // The head must contain the file (`FileNotFound` otherwise).
+    let Object::Commit(head_commit) = store.read_object(&head_hash)? else {
+        return Err(BlameError::NotACommit);
+    };
+    if find_blob_in_tree(store, head_commit.tree_hash, file_path)?.is_none() {
         return Err(BlameError::FileNotFound(file_path.to_string()));
-    };
-    let oldest_lines = load_blob_lines(store, oldest.blob_hash)?;
-    let mut attributions: Vec<Attribution> = vec![Attribution::from(&oldest); oldest_lines.len()];
-
-    // The move/copy detector owns its own caches and is a no-op when
-    // detection is off. The blame pass below stays "boring": it replays the
-    // line matcher, then hands the unmatched lines to the detector.
-    let mut detector = move_copy::Detector::new(store, opts);
-
-    // Boundary copy detection: the file first appears at `oldest`, so every
-    // line is credited there by default — but a block may have been *copied*
-    // from other files in `oldest`'s parent (a new file split out of an
-    // existing one). The forward walk can't see this (there is no earlier
-    // version of *this* file). There is no within-file `-M` source here, so
-    // this only matters when `-C` is on.
-    let boundary_parent = if matches!(opts.copies, CopyDetection::On { .. }) {
-        move_copy::commit_parent(store, oldest.commit_hash)?
-    } else {
-        None
-    };
-    if let Some(parent) = boundary_parent {
-        detector.reassign(
-            &move_copy::ReassignRequest {
-                file_path,
-                source_commit: parent,
-                attributed_commit: oldest.commit_hash,
-                new_lines: &oldest_lines,
-                unmatched: &vec![true; oldest_lines.len()],
-                within_file: None,
-            },
-            &mut attributions,
-        )?;
     }
 
-    // Walk from second-oldest to newest, applying LCS-based attribution.
-    if history.len() > 1 {
-        let mut idx = history.len() - 1;
-        while idx > 0 {
-            idx -= 1;
-            let newer = &history[idx];
-            let older = &history[idx + 1];
+    let (nodes, children) = build_file_dag(store, head_hash, file_path, opts.first_parent)?;
+    let order = topo_order(&nodes, head_hash);
 
-            if newer.blob_hash == older.blob_hash {
-                continue;
+    let ctx = WalkCtx {
+        store,
+        opts,
+        nodes: &nodes,
+        file_path,
+    };
+    // The detector owns its own caches and is a no-op when detection is off.
+    let mut detector = move_copy::Detector::new(store, opts);
+    let mut memo: HashMap<Hash, Vec<Attribution>> = HashMap::with_capacity(nodes.len());
+    let mut remaining = children;
+
+    for &commit in &order {
+        let attrs = attribute_commit(&ctx, &memo, &mut detector, commit)?;
+        memo.insert(commit, attrs);
+        // Release a parent's memo once its last child has been attributed.
+        for &parent in &nodes[&commit].parents {
+            if let Some(left) = remaining.get_mut(&parent) {
+                *left -= 1;
+                if *left == 0 {
+                    memo.remove(&parent);
+                }
             }
-
-            let old_lines = load_blob_lines(store, older.blob_hash)?;
-            let new_lines = load_blob_lines(store, newer.blob_hash)?;
-            // All matching policy (size guard, `-w` normalization,
-            // tie-breaking) lives in the matcher; the replay below only
-            // consumes the resulting mapping.
-            let mapping = match_lines_with_options(&old_lines, &new_lines, opts)?;
-
-            // `git blame --ignore-rev`: if `newer` is an ignored commit,
-            // its unmatched lines fall through to the parent line they
-            // correspond to instead of being credited here. `None` when
-            // `newer` is not ignored (the common path), in which case
-            // unmatched lines are credited to `newer` as usual.
-            let fallthrough = if opts.is_ignored(&newer.commit_hash) {
-                Some(ignore_fallthrough(&mapping, old_lines.len()))
-            } else {
-                None
-            };
-            let newer_attr = Attribution::from(newer);
-
-            // Provisional attribution: a matched line inherits the parent's
-            // origin. An unmatched line is normally credited to `newer`;
-            // when `newer` is ignored (`--ignore-rev`) it instead inherits
-            // the parent line it pairs with (a genuine insertion has no pair
-            // → stays on `newer`). Move (-M) / copy (-C) detection then
-            // reassigns any unmatched block to its true origin below.
-            let mut new_attrs: Vec<Attribution> = (0..new_lines.len())
-                .map(|ni| {
-                    let src = mapping[ni].or_else(|| fallthrough.as_ref().and_then(|f| f[ni]));
-                    match src {
-                        Some(oi) if oi < attributions.len() => attributions[oi].clone(),
-                        _ => newer_attr.clone(),
-                    }
-                })
-                .collect();
-
-            if opts.detection_enabled() {
-                // A detection candidate is LCS-unmatched *and* not already
-                // resolved by ignore-rev fallthrough — otherwise the move/
-                // copy detector would overwrite a fallthrough attribution
-                // (a fallthrough line is `mapping[ni] == None`, so it would
-                // stay flagged unmatched). `--ignore-rev` takes precedence
-                // over `-M`/`-C` on the lines it resolves.
-                let unmatched: Vec<bool> = (0..new_lines.len())
-                    .map(|ni| {
-                        mapping[ni].is_none()
-                            && fallthrough.as_ref().is_none_or(|f| f[ni].is_none())
-                    })
-                    .collect();
-                detector.reassign(
-                    &move_copy::ReassignRequest {
-                        file_path,
-                        source_commit: older.commit_hash,
-                        attributed_commit: newer.commit_hash,
-                        new_lines: &new_lines,
-                        unmatched: &unmatched,
-                        within_file: Some((&old_lines, attributions.as_slice())),
-                    },
-                    &mut new_attrs,
-                )?;
-            }
-            attributions = new_attrs;
         }
     }
 
-    let head_blob = history[0].blob_hash;
-    let final_lines = load_blob_lines(store, head_blob)?;
+    let head_attrs = memo
+        .get(&head_hash)
+        .expect("head is processed last and is never a parent, so never freed");
+    let final_lines = load_blob_lines(store, nodes[&head_hash].blob_hash)?;
     let mut out = Vec::with_capacity(final_lines.len());
     for (i, text) in final_lines.into_iter().enumerate() {
-        let a = &attributions[i];
+        let a = &head_attrs[i];
         out.push(BlameLine {
             line_num: i + 1,
             commit_hash: a.commit_hash,
@@ -2046,6 +2209,126 @@ mod tests {
         let err =
             blame_file_reverse(&store, c1, c2, "f.txt", &BlameOptions::default()).unwrap_err();
         assert!(matches!(err, BlameError::FileNotFound(_)), "got {err:?}");
+    }
+
+    // ---- merge-aware walk (#458) -----------------------------------------
+    // All scenarios verified against real `git blame` / `git blame
+    // --first-parent` (2.50.1); mkit hashes differ, so assert by commit.
+
+    /// base → {main adds main-line, feature adds feature-line} → merge.
+    /// Returns (base, main, feat, merge). P1 of the merge is `main`.
+    fn diamond_distinct(store: &ObjectStore) -> (Hash, Hash, Hash, Hash) {
+        let base = put_file_commit(store, "f.txt", b"base1\nbase2\n", vec![], 1, 100);
+        let feat = put_file_commit(
+            store,
+            "f.txt",
+            b"base1\nbase2\nfeature\n",
+            vec![base],
+            2,
+            200,
+        );
+        let main = put_file_commit(store, "f.txt", b"main\nbase1\nbase2\n", vec![base], 3, 300);
+        let merge = put_file_commit(
+            store,
+            "f.txt",
+            b"main\nbase1\nbase2\nfeature\n",
+            vec![main, feat],
+            4,
+            400,
+        );
+        (base, main, feat, merge)
+    }
+
+    #[test]
+    fn blame_merge_aware_credits_side_branch_lines() {
+        // Default (merge-aware): the side-branch line is credited to the
+        // commit that wrote it, not the merge.
+        let (_d, store) = fresh_store();
+        let (base, main, feat, merge) = diamond_distinct(&store);
+        let r = blame_file(&store, merge, "f.txt").unwrap();
+        assert_eq!(r.lines[0].commit_hash, main, "main-line → main");
+        assert_eq!(r.lines[1].commit_hash, base, "base1 → base");
+        assert_eq!(r.lines[2].commit_hash, base, "base2 → base");
+        assert_eq!(r.lines[3].commit_hash, feat, "feature → feature commit");
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash != merge),
+            "none → merge"
+        );
+    }
+
+    #[test]
+    fn blame_first_parent_credits_merge_for_side_branch_line() {
+        // `--first-parent`: the side branch is never followed, so the
+        // feature line first appears (to that walk) at the merge.
+        let (_d, store) = fresh_store();
+        let (base, main, _feat, merge) = diamond_distinct(&store);
+        let opts = BlameOptions {
+            first_parent: true,
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "f.txt", &opts).unwrap();
+        assert_eq!(r.lines[0].commit_hash, main, "main-line → main");
+        assert_eq!(r.lines[1].commit_hash, base);
+        assert_eq!(r.lines[3].commit_hash, merge, "feature line → merge");
+    }
+
+    #[test]
+    fn blame_merge_identical_line_goes_to_first_parent() {
+        // Both branches add the SAME line; git credits the first parent.
+        let (_d, store) = fresh_store();
+        let base = put_file_commit(&store, "f.txt", b"base\n", vec![], 1, 100);
+        let feat = put_file_commit(&store, "f.txt", b"base\nshared\n", vec![base], 2, 200);
+        let main = put_file_commit(&store, "f.txt", b"base\nshared\n", vec![base], 3, 300);
+        let merge = put_file_commit(&store, "f.txt", b"base\nshared\n", vec![main, feat], 4, 400);
+        let r = blame_file(&store, merge, "f.txt").unwrap();
+        assert_eq!(r.lines[1].commit_hash, main, "shared line → first parent");
+        assert!(r.lines.iter().all(|l| l.commit_hash != feat));
+    }
+
+    #[test]
+    fn blame_evil_merge_attributes_new_line_to_merge() {
+        // The merge blob introduces a line present in neither parent: it is
+        // introduced by the merge commit.
+        let (_d, store) = fresh_store();
+        let base = put_file_commit(&store, "f.txt", b"base\n", vec![], 1, 100);
+        let feat = put_file_commit(&store, "f.txt", b"base\nfeat\n", vec![base], 2, 200);
+        let main = put_file_commit(&store, "f.txt", b"main\nbase\n", vec![base], 3, 300);
+        let merge = put_file_commit(
+            &store,
+            "f.txt",
+            b"main\nbase\nfeat\nEVIL\n",
+            vec![main, feat],
+            4,
+            400,
+        );
+        let r = blame_file(&store, merge, "f.txt").unwrap();
+        assert_eq!(r.lines[0].commit_hash, main);
+        assert_eq!(r.lines[1].commit_hash, base);
+        assert_eq!(r.lines[2].commit_hash, feat);
+        assert_eq!(r.lines[3].commit_hash, merge, "the evil line → merge");
+    }
+
+    #[test]
+    fn blame_octopus_merge_credits_each_branch() {
+        // A 3-parent merge: each branch's line is credited to its commit.
+        let (_d, store) = fresh_store();
+        let base = put_file_commit(&store, "f.txt", b"base\n", vec![], 1, 100);
+        let b1 = put_file_commit(&store, "f.txt", b"base\nb1\n", vec![base], 2, 200);
+        let b2 = put_file_commit(&store, "f.txt", b"base\nb2\n", vec![base], 3, 300);
+        let b3 = put_file_commit(&store, "f.txt", b"base\nb3\n", vec![base], 4, 400);
+        let merge = put_file_commit(
+            &store,
+            "f.txt",
+            b"base\nb1\nb2\nb3\n",
+            vec![b1, b2, b3],
+            5,
+            500,
+        );
+        let r = blame_file(&store, merge, "f.txt").unwrap();
+        assert_eq!(r.lines[0].commit_hash, base);
+        assert_eq!(r.lines[1].commit_hash, b1);
+        assert_eq!(r.lines[2].commit_hash, b2);
+        assert_eq!(r.lines[3].commit_hash, b3);
     }
 
     #[test]

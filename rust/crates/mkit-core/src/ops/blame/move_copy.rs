@@ -309,12 +309,12 @@ impl<'a> Detector<'a> {
     /// Per-line origins for a source file, by blaming it at `commit`
     /// (cached; expensive).
     ///
-    /// The source blame keeps the *active* `-w`, (effective) `-M`, and
-    /// `--ignore-rev` set so a copied block is credited through a prior
-    /// whitespace-only edit, same-file move, or ignored noise commit in the
-    /// source — matching git. Only `-C` is dropped, which both prevents
-    /// unbounded recursion and matches git (a copy source is blamed without
-    /// further cross-file copy detection).
+    /// The source blame keeps the *active* `-w`, (effective) `-M`,
+    /// `--ignore-rev` set, and first-parent mode so a copied block is credited
+    /// through a prior whitespace-only edit, same-file move, ignored noise
+    /// commit, or merge in the source — matching git. Only `-C` is dropped,
+    /// which both prevents unbounded recursion and matches git (a copy source
+    /// is blamed without further cross-file copy detection).
     fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
         let key = (commit, path.to_string());
         if !self.attrs_cache.contains_key(&key) {
@@ -323,6 +323,7 @@ impl<'a> Detector<'a> {
                 moves: self.opts.effective_move(),
                 copies: CopyDetection::Off,
                 ignore_revs: self.opts.ignore_revs.clone(),
+                first_parent: self.opts.first_parent,
             };
             let res = blame_file_with(self.store, commit, path, &source_opts)?;
             let attrs = res.lines.into_iter().map(Attribution::from).collect();
