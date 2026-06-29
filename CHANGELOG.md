@@ -45,6 +45,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through its diff); and within a single unmatched run longer than 10,000
   lines only the whole run is matched, not sub-blocks (a cost bound; the
   matcher already caps inputs).
+- **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
+  commits — mass reformats, license-header sweeps, renames — during
+  attribution, like `git blame --ignore-rev`. A line that would be credited
+  to an ignored commit falls through to the commit that previously changed
+  it; a line the ignored commit genuinely inserted stays put (git's default,
+  no marker). `--ignore-rev` is repeatable and accepts any revision (short
+  hash, ref, `HEAD~2`); `--ignore-revs-file` reads full hex object names one
+  per line, skipping blank lines and `#` comments (including inline) — both
+  verified against real `git`. Unknown or malformed inputs reproduce git's
+  messages (`cannot find revision <rev> to ignore`, `invalid object name:
+  <token>`, `could not open object name list: <path>`), though mkit returns
+  its sysexits-style exit codes rather than git's blanket `128`. mkit does
+  not auto-read `.git-blame-ignore-revs` or a `blame.ignoreRevsFile` config
+  key — pass the file explicitly.
 
 ### Removed
 

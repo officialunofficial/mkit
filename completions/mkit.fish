@@ -153,6 +153,10 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s M -l find-moves -d "Detect lines moved within the file"
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s C -l find-copies -d "Detect lines copied from other files (repeatable)"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l ignore-rev -d "Skip a noise commit during attribution" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l ignore-revs-file -d "Skip commits listed in a file" -r -F
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
