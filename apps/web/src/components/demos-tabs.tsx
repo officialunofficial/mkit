@@ -39,12 +39,12 @@ const TABS: Tab[] = [
   {
     id: 'streaming',
     label: 'streaming',
-    title: 'Verifiable at gigabyte scale',
+    title: 'Verify gigabytes, one chunk at a time',
     body: (
       <>
         mkit cuts big files into content-defined chunks (FastCDC), ships only the chunks that changed, and verifies each
-        one as it arrives — where git re-stores the whole binary on every edit. Drop a file, or let the auto-editor run,
-        and watch it work.
+        one as it arrives. git re-stores the whole binary on every edit. Watch the auto-editor run, or drop in your own
+        large file.
       </>
     ),
     Demo: StreamingDemo,

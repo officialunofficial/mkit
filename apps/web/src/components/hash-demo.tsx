@@ -159,7 +159,7 @@ export function HashDemo() {
             {tooLarge ? (
               <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
                 <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
-                files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading them. The
+                files as data URLs and rejects anything over {formatBytes(MAX_IMAGE_BYTES)} before reading it. The
                 streaming tab handles larger files.
               </p>
             ) : null}
