@@ -509,6 +509,94 @@ fn blame_w_ignores_whitespace_only_change() {
     );
 }
 
+#[test]
+fn blame_m_attributes_within_file_move() {
+    // A long line (over the 20-char -M threshold) moved to the end of the
+    // file is credited to its original commit under -M.
+    let long = "let quick_brown_fox_total = 1;";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "f.txt",
+        format!("{long}\nB\nC\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+    make_commit(
+        td.path(),
+        "f.txt",
+        format!("B\nC\n{long}\n").as_bytes(),
+        "shuffle",
+    );
+    let second = head_hash(td.path());
+
+    let plain = run_in(td.path(), &["blame", "f.txt"]);
+    let plain_out = String::from_utf8(plain.stdout).unwrap();
+    let plain_line = plain_out.lines().find(|l| l.ends_with(long)).unwrap();
+    assert!(
+        plain_line.starts_with(&second[..12]),
+        "default: moved line is new: {plain_out:?}"
+    );
+
+    let out = run_in(td.path(), &["blame", "-M", "f.txt"]);
+    assert!(out.status.success(), "blame -M failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let line = stdout.lines().find(|l| l.ends_with(long)).unwrap();
+    assert!(
+        line.starts_with(&first[..12]),
+        "-M credits the moved line to its origin: {stdout:?}"
+    );
+}
+
+#[test]
+fn blame_c_attributes_copy_from_other_file() {
+    // A block (over the 40-char -C threshold) is moved from a.txt into a
+    // new b.txt; both files change in the commit, so -C (level 1) credits
+    // b.txt's lines to the original commit.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "a.txt",
+        format!("{b1}\n{b2}\nzzz\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    // Second commit: shrink a.txt and add b.txt with the block.
+    fs::write(td.path().join("a.txt"), b"zzz\n").unwrap();
+    fs::write(td.path().join("b.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "a.txt", "b.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "split"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    let plain = run_in(td.path(), &["blame", "b.txt"]);
+    let plain_out = String::from_utf8(plain.stdout).unwrap();
+    assert!(
+        plain_out.lines().all(|l| l.starts_with(&second[..12])),
+        "default: copied block is new: {plain_out:?}"
+    );
+
+    let out = run_in(td.path(), &["blame", "-C", "b.txt"]);
+    assert!(out.status.success(), "blame -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().all(|l| l.starts_with(&first[..12])),
+        "-C credits the copied block to its origin commit: {stdout:?}"
+    );
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]

@@ -1,8 +1,10 @@
-//! `mkit blame [-w] [<rev>] [-L <range>] <file>` — line-level attribution.
+//! `mkit blame [-w] [-M] [-C] [<rev>] [-L <range>] <file>` — line-level
+//! attribution.
 //!
 //! Blames `<file>` as of `<rev>` (default `HEAD`), optionally restricted
 //! to a line range with `-L`. `-w` ignores whitespace when matching
-//! lines across revisions (git `-w`).
+//! lines across revisions (git `-w`); `-M`/`-C` detect lines moved within
+//! the file / copied from other files (git `-M`/`-C`).
 //!
 //! Output modes:
 //!
@@ -70,6 +72,17 @@ struct BlameOpts {
         allow_hyphen_values = true
     )]
     lines: Option<String>,
+    /// Detect lines moved *within* the file, like `git blame -M`: a moved
+    /// block of at least 20 alphanumeric characters is credited to its
+    /// origin commit rather than the editing one.
+    #[arg(short = 'M', long = "find-moves")]
+    find_moves: bool,
+    /// Detect lines copied *from other files*, like `git blame -C`
+    /// (implies `-M`). Repeat to widen the search: `-C` covers files
+    /// changed in the same commit, `-C -C` every file in the parent
+    /// commit. A copied block needs at least 40 alphanumeric characters.
+    #[arg(short = 'C', long = "find-copies", action = clap::ArgAction::Count)]
+    find_copies: u8,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
     /// revision to blame it at (a ref, hash, or `HEAD~2`-style spec).
     /// Without a revision the file is blamed against HEAD. A `--`
@@ -122,6 +135,11 @@ pub fn run(args: &[String]) -> u8 {
 
     let blame_opts = BlameOptions {
         ignore_whitespace: opts.ignore_whitespace,
+        detect_moves: opts.find_moves,
+        copy_detection: opts.find_copies,
+        // git's default detection thresholds (alphanumeric chars).
+        move_threshold: 20,
+        copy_threshold: 40,
     };
     let result = match blame_file_with(&store, head, file, &blame_opts) {
         Ok(r) => r,

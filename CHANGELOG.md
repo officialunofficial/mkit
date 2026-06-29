@@ -23,8 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — no longer steals attribution; output still shows the file's
-  current bytes. Attribution remains first-parent only, with no `-M`/`-C`
-  yet (tracked in follow-up issues).
+  current bytes.
+- **`mkit blame -M` / `-C` move & copy detection.** `-M` (`--find-moves`)
+  credits a block moved *within* the file to its origin commit; `-C`
+  (`--find-copies`, repeatable, implies `-M`) credits a block copied *from
+  another file*, resolving the true origin by blaming the source file.
+  Repeating `-C` widens the search from files changed in the commit to
+  every file in the parent commit. Detection honors git's default
+  alphanumeric-character thresholds (20 for `-M`, 40 for `-C`), so
+  sub-threshold blocks stay with the editing commit, matching `git blame`.
+  Attribution remains first-parent only.
 
 ### Removed
 
