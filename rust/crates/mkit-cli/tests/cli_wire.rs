@@ -767,6 +767,139 @@ fn blame_ignore_revs_file_errors_are_git_faithful() {
     );
 }
 
+#[test]
+fn blame_reverse_attributes_lines_to_last_surviving_commit() {
+    // `--reverse <start>..<end>` blames the start version and attributes
+    // each line to the last commit it survived in. Mirrors real
+    // `git blame --reverse` (verified field-by-field).
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"keep\ndoomed\nalso\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"keep\ndoomed\nalso\nextra\n", "c2");
+    let c2 = head_hash(td.path());
+    make_commit(
+        td.path(),
+        "f.txt",
+        b"keep\nalso\nextra\n",
+        "c3_removes_doomed",
+    );
+    make_commit(td.path(), "f.txt", b"keep\nalso\nextra2\n", "c4");
+    let c4 = head_hash(td.path());
+
+    let out = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("{c1}..{c4}"), "f.txt"],
+    );
+    assert!(out.status.success(), "blame --reverse failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "blames the start (c1) version: {stdout:?}");
+    assert!(lines[0].starts_with(&c4[..12]) && lines[0].ends_with("\tkeep"));
+    assert!(
+        lines[1].starts_with(&c2[..12]) && lines[1].ends_with("\tdoomed"),
+        "doomed last existed in c2: {stdout:?}"
+    );
+    assert!(lines[2].starts_with(&c4[..12]) && lines[2].ends_with("\talso"));
+}
+
+#[test]
+fn blame_reverse_open_end_defaults_to_head() {
+    // `<start>..` defaults <end> to HEAD.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"a\nB2\n", "c2");
+    let c2 = head_hash(td.path());
+
+    let out = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("{c1}.."), "f.txt"],
+    );
+    assert!(out.status.success(), "open-end reverse failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    // `a` survives to HEAD (c2); `b` is changed in c2 → last in c1.
+    assert!(
+        lines[0].starts_with(&c2[..12]),
+        "a survives to HEAD: {stdout:?}"
+    );
+    assert!(
+        lines[1].starts_with(&c1[..12]),
+        "b last existed in c1: {stdout:?}"
+    );
+}
+
+#[test]
+fn blame_reverse_requires_a_range() {
+    // Clear, non-cryptic errors (a deliberate divergence from git's
+    // "dig up from" phrasing) for the three malformed-argument cases.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "c1");
+    let c1 = head_hash(td.path());
+
+    // No range at all.
+    let none = run_in(td.path(), &["blame", "--reverse", "f.txt"]);
+    assert!(!none.status.success());
+    assert!(
+        String::from_utf8(none.stderr)
+            .unwrap()
+            .contains("requires a <start>..<end>"),
+        "expected a clear missing-range error"
+    );
+    // A bare revision (no `..`).
+    let bare = run_in(td.path(), &["blame", "--reverse", &c1, "f.txt"]);
+    assert!(!bare.status.success());
+    assert!(
+        String::from_utf8(bare.stderr)
+            .unwrap()
+            .contains("<start>..<end>"),
+        "expected a clear bare-revision error"
+    );
+    // An open start.
+    let open = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("..{c1}"), "f.txt"],
+    );
+    assert!(!open.status.success());
+    assert!(
+        String::from_utf8(open.stderr)
+            .unwrap()
+            .contains("explicit <start>"),
+        "expected a clear open-start error"
+    );
+}
+
+#[test]
+fn blame_reverse_rejects_detection_flags() {
+    // `--reverse` resolves survival via the LCS matcher only, so combining
+    // it with -M/-C or --ignore-rev is rejected rather than silently
+    // ignored.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "c1");
+    let c1 = head_hash(td.path());
+    let range = format!("{c1}..");
+
+    for flag in [vec!["-M"], vec!["-C"], vec!["--ignore-rev", &c1]] {
+        let mut args = vec!["blame", "--reverse", &range, "f.txt"];
+        args.extend(flag.iter().copied());
+        let out = run_in(td.path(), &args);
+        assert!(
+            !out.status.success(),
+            "expected --reverse + {flag:?} to be rejected"
+        );
+        assert!(
+            String::from_utf8(out.stderr)
+                .unwrap()
+                .contains("--reverse cannot be combined"),
+            "expected a clear combination error for {flag:?}"
+        );
+    }
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]

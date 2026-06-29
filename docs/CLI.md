@@ -267,7 +267,7 @@ History / commits:
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
 - `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
-  [--ignore-revs-file <file>] [-L <start>,<end>] [<rev>] <file>` —
+  [--ignore-revs-file <file>] [--reverse] [-L <start>,<end>] [<rev>] <file>` —
   show line-level commit attribution. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
@@ -302,7 +302,18 @@ History / commits:
   inclusive, an inverted range is swapped, and an over-long end is
   clamped to EOF, matching `git blame -L`. An optional
   `<rev>` (a ref, hash, or `HEAD~2`-style spec) blames the file as of
-  that revision instead of `HEAD`. Default emits
+  that revision instead of `HEAD`. `--reverse <start>..<end>` walks
+  history *forward* instead of backward (like `git blame --reverse`):
+  it blames the `<start>` version of the file and attributes each line to
+  the **last** commit in the range in which it still existed — useful for
+  "which commit removed or last touched this line." `<start>..` defaults
+  `<end>` to `HEAD`; an explicit `<start>` is required (mkit reports a
+  clear error for a missing range or open start, where `git` prints a
+  cryptic "dig up from" message — a deliberate divergence, like the `-L`
+  diagnostics). A line that never survives a step stays on `<start>`
+  (git marks such lines with a leading `^`; mkit's tab format carries no
+  `^`, consistent with its existing boundary-marker omission). `-w` and
+  `-L` compose with `--reverse`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `mkit verify <rev>` — verify the signature on a commit, remix, or

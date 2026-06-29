@@ -207,6 +207,10 @@ pub enum BlameError {
     NotABlob,
     #[error("file '{0}' was not found at any commit in history")]
     FileNotFound(String),
+    /// `--reverse`: the requested `<start>` is not a first-parent ancestor
+    /// of `<end>`, so there is no forward chain to walk between them.
+    #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
+    ReverseRange { start: String, end: String },
     /// Either side of the LCS input exceeded [`BLAME_MAX_LINES`].
     /// Returned rather than allocating a DP table proportional to the
     /// attacker-supplied line counts.
@@ -410,6 +414,185 @@ pub fn blame_file_with(
     let final_lines = load_blob_lines(store, head_blob)?;
     let mut out = Vec::with_capacity(final_lines.len());
     for (i, text) in final_lines.into_iter().enumerate() {
+        let a = &attributions[i];
+        out.push(BlameLine {
+            line_num: i + 1,
+            commit_hash: a.commit_hash,
+            author: a.author.clone(),
+            timestamp: a.timestamp,
+            text,
+        });
+    }
+    Ok(BlameResult { lines: out })
+}
+
+/// One step of the reverse blame's forward chain: the commit and the blob
+/// the path resolves to there (`None` if the file is absent at that commit).
+struct ReverseEntry {
+    commit_hash: Hash,
+    blob: Option<Hash>,
+    author: Identity,
+    timestamp: u64,
+}
+
+impl From<&ReverseEntry> for Attribution {
+    fn from(e: &ReverseEntry) -> Self {
+        Self {
+            commit_hash: e.commit_hash,
+            author: e.author.clone(),
+            timestamp: e.timestamp,
+        }
+    }
+}
+
+/// Collect the first-parent chain from `end` down to `start`, returned
+/// **oldest-first** (`[0]` is `start`, last is `end`). Unlike forward blame
+/// this does not stop where the file disappears — a gap in the file's
+/// presence kills lines but must not truncate the walk before `start`.
+///
+/// # Errors
+/// [`BlameError::ReverseRange`] if `start` is not reached on `end`'s
+/// first-parent chain.
+fn collect_reverse_chain(
+    store: &ObjectStore,
+    start_hash: Hash,
+    end_hash: Hash,
+    file_path: &str,
+) -> BlameOutcome<Vec<ReverseEntry>> {
+    let mut chain: Vec<ReverseEntry> = Vec::new();
+    let mut current = Some(end_hash);
+    let mut reached_start = false;
+    while let Some(commit_hash) = current {
+        let Object::Commit(commit) = store.read_object(&commit_hash)? else {
+            return Err(BlameError::NotACommit);
+        };
+        let blob = find_blob_in_tree(store, commit.tree_hash, file_path)?;
+        chain.push(ReverseEntry {
+            commit_hash,
+            blob,
+            author: commit.author.clone(),
+            timestamp: commit.timestamp,
+        });
+        if commit_hash == start_hash {
+            reached_start = true;
+            break;
+        }
+        current = commit.parents.first().copied();
+    }
+    if !reached_start {
+        return Err(BlameError::ReverseRange {
+            start: hash::to_hex(&start_hash),
+            end: hash::to_hex(&end_hash),
+        });
+    }
+    // Reorder to oldest-first so the caller can walk it forward.
+    chain.reverse();
+    Ok(chain)
+}
+
+/// Reverse blame (`git blame --reverse <start>..<end>`): instead of "which
+/// commit introduced each line," answer "what is the **last** commit, in the
+/// range, in which each line of `<start>` still existed."
+///
+/// The lines blamed (and the text in the output) are `<start>`'s version of
+/// `file_path`. The range is followed along `<end>`'s **first-parent** chain
+/// down to `<start>` (mkit blame is first-parent only, like its forward
+/// pass), then walked **forward** (oldest → newest); each start line advances
+/// its attribution to every commit it survives into, and freezes at the last
+/// one before it is changed or removed. A line that does not survive even
+/// the first step stays on `<start>` itself (git prints such a line with a
+/// `^` boundary marker; mkit's tab format carries no `^`, matching its
+/// existing boundary-marker omission). `opts` tunes matching, so `-w`
+/// traces a line through a whitespace-only edit the same way it does for
+/// forward blame.
+///
+/// Independent of `-M`/`-C` and `--ignore-rev`: reverse blame walks line
+/// survival via the LCS matcher only, so those detection options do not
+/// apply here (the CLI rejects the combination).
+///
+/// # Errors
+/// - [`BlameError::ReverseRange`] if `<start>` is not a first-parent
+///   ancestor of `<end>`.
+/// - [`BlameError::FileNotFound`] if `file_path` does not exist at `<start>`.
+/// - [`BlameError::NotACommit`] if either endpoint is not a commit.
+/// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
+///   [`BLAME_MAX_LINES`].
+pub fn blame_file_reverse(
+    store: &ObjectStore,
+    start_hash: Hash,
+    end_hash: Hash,
+    file_path: &str,
+    opts: &BlameOptions,
+) -> BlameOutcome<BlameResult> {
+    let chain = collect_reverse_chain(store, start_hash, end_hash, file_path)?;
+
+    // The blamed content is `start`'s version of the file.
+    let Some(start_blob) = chain[0].blob else {
+        return Err(BlameError::FileNotFound(file_path.to_string()));
+    };
+    let start_lines = load_blob_lines(store, start_blob)?;
+    check_line_count(start_lines.len())?;
+
+    // For each start line, track its index in the *current* commit's blob
+    // (`None` once the line is gone) and its last-seen attribution, which
+    // begins at `start` and advances forward as the line survives.
+    let mut cur_idx: Vec<Option<usize>> = (0..start_lines.len()).map(Some).collect();
+    let mut attributions: Vec<Attribution> = vec![Attribution::from(&chain[0]); start_lines.len()];
+
+    let mut prev_blob = start_blob;
+    let mut prev_lines = start_lines.clone();
+    for entry in &chain[1..] {
+        // Every start line is dead and a dead line never resurrects, so
+        // there is nothing left to attribute — stop walking the range.
+        if cur_idx.iter().all(Option::is_none) {
+            break;
+        }
+        let newer_attr = Attribution::from(entry);
+        let Some(blob) = entry.blob else {
+            // File absent here: every still-alive line is last seen at the
+            // previous commit. Once dead a line never resurrects.
+            cur_idx.fill(None);
+            continue;
+        };
+        if blob == prev_blob {
+            // Unchanged file: every alive line survives and advances.
+            for (j, c) in cur_idx.iter().enumerate() {
+                if c.is_some() {
+                    attributions[j] = newer_attr.clone();
+                }
+            }
+            continue;
+        }
+        let new_lines = load_blob_lines(store, blob)?;
+        // `mapping[ni]` = the prev-blob index that new line `ni` came from;
+        // invert it to "where did each prev line go?".
+        let mapping = match_lines_with_options(&prev_lines, &new_lines, opts)?;
+        let mut prev_to_new: Vec<Option<usize>> = vec![None; prev_lines.len()];
+        for (ni, m) in mapping.iter().enumerate() {
+            if let Some(oi) = *m {
+                prev_to_new[oi] = Some(ni);
+            }
+        }
+        for (j, c) in cur_idx.iter_mut().enumerate() {
+            if let Some(p) = *c {
+                match prev_to_new.get(p).copied().flatten() {
+                    // Line survives into this commit: advance attribution.
+                    Some(q) => {
+                        *c = Some(q);
+                        attributions[j] = newer_attr.clone();
+                    }
+                    // Line is gone here: it was last seen at the previous
+                    // commit, so its attribution stays put.
+                    None => *c = None,
+                }
+            }
+        }
+        prev_blob = blob;
+        prev_lines = new_lines;
+    }
+
+    let mut out = Vec::with_capacity(start_lines.len());
+    for (i, text) in start_lines.into_iter().enumerate() {
         let a = &attributions[i];
         out.push(BlameLine {
             line_num: i + 1,
@@ -1699,6 +1882,151 @@ mod tests {
             super::ignore_fallthrough(&mapping, 2),
             vec![None, None, None, None]
         );
+    }
+
+    #[test]
+    fn reverse_attributes_each_line_to_last_commit_it_survived() {
+        // Verified against `git blame --reverse c1..c4`: blames c1's lines
+        // (keep, doomed, also); survivors go to the end, the removed line
+        // freezes at the last commit it existed in.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"keep\ndoomed\nalso\n", vec![], 1, 100);
+        let c2 = put_file_commit(
+            &store,
+            "f.txt",
+            b"keep\ndoomed\nalso\nextra\n",
+            vec![c1],
+            2,
+            200,
+        );
+        let c3 = put_file_commit(&store, "f.txt", b"keep\nalso\nextra\n", vec![c2], 3, 300);
+        let c4 = put_file_commit(&store, "f.txt", b"keep\nalso\nextra2\n", vec![c3], 4, 400);
+
+        let r = blame_file_reverse(&store, c1, c4, "f.txt", &BlameOptions::default()).unwrap();
+        assert_eq!(r.lines.len(), 3, "blames the start (c1) version's 3 lines");
+        assert_eq!(r.lines[0].text, b"keep");
+        assert_eq!(r.lines[0].commit_hash, c4, "keep survives to the end");
+        assert_eq!(r.lines[1].text, b"doomed");
+        assert_eq!(r.lines[1].commit_hash, c2, "doomed last existed in c2");
+        assert_eq!(r.lines[2].text, b"also");
+        assert_eq!(r.lines[2].commit_hash, c4, "also survives to the end");
+    }
+
+    #[test]
+    fn reverse_line_removed_immediately_stays_on_start() {
+        // A start line removed in the very first included commit never
+        // survives a step, so it is attributed to `start` itself (git marks
+        // it with `^`). Verified against real git.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"keep\ngone\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"keep\n", vec![c1], 2, 200);
+        let c3 = put_file_commit(&store, "f.txt", b"keep\nnew\n", vec![c2], 3, 300);
+
+        let r = blame_file_reverse(&store, c1, c3, "f.txt", &BlameOptions::default()).unwrap();
+        assert_eq!(r.lines[0].commit_hash, c3, "keep survives to the end");
+        assert_eq!(
+            r.lines[1].commit_hash, c1,
+            "gone never survived a step → stays on start"
+        );
+        assert_eq!(r.lines[1].text, b"gone");
+    }
+
+    #[test]
+    fn reverse_modified_line_freezes_before_the_edit() {
+        // A line modified every commit: the start version last exists in
+        // start (it is changed in the next commit). Verified against git.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"a\nMOD\nc\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"a\nMOD2\nc\n", vec![c1], 2, 200);
+        let c3 = put_file_commit(&store, "f.txt", b"a\nMOD3\nc\n", vec![c2], 3, 300);
+
+        let r = blame_file_reverse(&store, c1, c3, "f.txt", &BlameOptions::default()).unwrap();
+        assert_eq!(r.lines[0].commit_hash, c3, "a survives");
+        assert_eq!(r.lines[1].commit_hash, c1, "MOD changed in c2 → last in c1");
+        assert_eq!(r.lines[2].commit_hash, c3, "c survives");
+    }
+
+    #[test]
+    fn reverse_unchanged_commit_advances_attribution() {
+        // A commit that does not touch the file still counts as a commit the
+        // line existed in, so attribution advances through it.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"a\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"a\n", vec![c1], 2, 200); // identical
+        let c3 = put_file_commit(&store, "f.txt", b"b\n", vec![c2], 3, 300); // a removed
+
+        let r = blame_file_reverse(&store, c1, c3, "f.txt", &BlameOptions::default()).unwrap();
+        assert_eq!(
+            r.lines[0].commit_hash, c2,
+            "a last existed in the unchanged c2, gone by c3"
+        );
+    }
+
+    #[test]
+    fn reverse_open_end_walks_to_provided_end() {
+        // Sanity that the range is honored: stopping the range at c2 freezes
+        // every still-living line at c2.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"keep\ndoomed\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"keep\ndoomed\nx\n", vec![c1], 2, 200);
+        let _c3 = put_file_commit(&store, "f.txt", b"keep\nx\n", vec![c2], 3, 300);
+
+        let r = blame_file_reverse(&store, c1, c2, "f.txt", &BlameOptions::default()).unwrap();
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == c2),
+            "with the range ending at c2 both start lines last exist in c2"
+        );
+    }
+
+    #[test]
+    fn reverse_traces_through_whitespace_edit_under_w() {
+        // `-w`: a whitespace-only reformat should not count as the line
+        // disappearing, so the line survives past the reformat.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"foo(a, b)\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"foo(a,b)\n", vec![c1], 2, 200); // ws-only
+        let c3 = put_file_commit(&store, "f.txt", b"changed\n", vec![c2], 3, 300);
+
+        // Without -w the reformat in c2 "ends" the original line at c1.
+        let plain = blame_file_reverse(&store, c1, c3, "f.txt", &BlameOptions::default()).unwrap();
+        assert_eq!(
+            plain.lines[0].commit_hash, c1,
+            "ws edit ends the line at c1"
+        );
+
+        let w = BlameOptions {
+            ignore_whitespace: true,
+            ..Default::default()
+        };
+        let rw = blame_file_reverse(&store, c1, c3, "f.txt", &w).unwrap();
+        assert_eq!(
+            rw.lines[0].commit_hash, c2,
+            "-w traces the line through the reformat → last exists in c2"
+        );
+    }
+
+    #[test]
+    fn reverse_start_not_ancestor_errors() {
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"a\n", vec![], 1, 100);
+        // A sibling commit not on c1's first-parent chain.
+        let other = put_file_commit(&store, "f.txt", b"z\n", vec![], 9, 900);
+        let err =
+            blame_file_reverse(&store, other, c1, "f.txt", &BlameOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, BlameError::ReverseRange { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reverse_missing_path_in_start_errors() {
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "other.txt", b"x\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"y\n", vec![c1], 2, 200);
+        let err =
+            blame_file_reverse(&store, c1, c2, "f.txt", &BlameOptions::default()).unwrap_err();
+        assert!(matches!(err, BlameError::FileNotFound(_)), "got {err:?}");
     }
 
     #[test]

@@ -157,6 +157,8 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l ignore-rev -d "Skip a noise commit during attribution" -r
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l ignore-revs-file -d "Skip commits listed in a file" -r -F
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l reverse -d "Walk history forward over a <start>..<end> range"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \

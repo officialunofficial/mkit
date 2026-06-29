@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -967,6 +967,29 @@ or a bare
 Bounds are 1-based and inclusive; an inverted range is swapped and an
 over-long end is clamped to the last line, matching
 .Xr git 1 Cm blame .
+.Fl Fl reverse Ar start Ns Cm .. Ns Ar end
+walks history forward instead of backward
+.Pq like Xr git 1 Cm blame Fl Fl reverse :
+it blames the
+.Ar start
+version of the file and attributes each line to the last commit in the
+range in which it still existed.
+.Ar start Ns Cm ..
+defaults
+.Ar end
+to
+.Cm HEAD ;
+an explicit
+.Ar start
+is required.
+A line that never survives a step stays on
+.Ar start
+.Pq Xr git 1 prints such lines with a leading Ql ^ ; No mkit's tab format has none .
+.Fl w
+and
+.Fl L
+compose with
+.Fl Fl reverse .
 The default output is
 .Ql <short12>\et<line_num>\et<text>
 per line;
