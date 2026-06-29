@@ -432,12 +432,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "buffa"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f5f4b9af6f6e0cd7ce5d0bc30fd28e64e3582c76e25c374a3d37d21501702a2"
+dependencies = [
+ "bytes",
+ "foldhash 0.1.5",
+ "hashbrown 0.15.5",
+ "once_cell",
+ "rustversion",
+ "serde",
+ "serde_json",
+ "smoothutf8",
+ "thiserror",
+]
+
+[[package]]
 name = "buffa-build"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c26e1e2ec3ddd680a25e60687e0dca72fc2326f01d2ff26acbd8c266a3664693"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "buffa-codegen",
  "tempfile",
 ]
@@ -448,7 +465,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "855364959e603cad456c1656bcf57f431ae6e5b4d4e4f166f7d594df882b6218"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "buffa-descriptor",
  "prettyplease",
  "proc-macro2",
@@ -463,7 +480,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f74c0bf128c53f22b0fc3c1e8e66969cd21375879061293fd4e5298e839099a9"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "serde",
  "serde_json",
 ]
@@ -1189,7 +1206,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1651,7 +1668,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
- "buffa",
+ "buffa 0.7.1",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-parallel",
@@ -1690,7 +1707,7 @@ dependencies = [
 name = "mkit-rpc"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "buffa-build",
  "mkit-core",
  "thiserror",
@@ -1701,7 +1718,7 @@ name = "mkit-sign-ctap"
 version = "0.1.0"
 dependencies = [
  "base64",
- "buffa",
+ "buffa 0.8.0",
  "ctap-hid-fido2",
  "dirs",
  "mkit-attest",
@@ -1718,7 +1735,7 @@ dependencies = [
 name = "mkit-sign-file"
 version = "0.1.0"
 dependencies = [
- "buffa",
+ "buffa 0.8.0",
  "mkit-attest",
  "mkit-core",
  "mkit-rpc",
@@ -1731,7 +1748,7 @@ name = "mkit-sign-tpm"
 version = "0.1.0"
 dependencies = [
  "base64",
- "buffa",
+ "buffa 0.8.0",
  "mkit-rpc",
  "p256",
  "sha2 0.11.0",
@@ -2300,7 +2317,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2442,6 +2459,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2461,6 +2484,15 @@ checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
 dependencies = [
  "borsh",
  "serde",
+]
+
+[[package]]
+name = "smoothutf8"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36358427d32ecdb1624616deed99eccfef0a167fe5bf40ddb51efe6980bc1ec8"
+dependencies = [
+ "simdutf8",
 ]
 
 [[package]]
@@ -2553,7 +2585,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -33,14 +33,14 @@ mkit-core = { path = "../../../rust/crates/mkit-core" }
 # mkit-rpc owns the wire schemas (signer.proto, common.proto) and the
 # length-prefixed framing helpers used by the subprocess protocol.
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.7.1"
+buffa = "0.8.0"
 zeroize = "1"
 
 [dev-dependencies]
 mkit-attest = { path = "../../../rust/crates/mkit-attest", default-features = false, features = ["algo-ed25519", "algo-secp256k1", "algo-p256"] }
 mkit-core = { path = "../../../rust/crates/mkit-core" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.7.1"
+buffa = "0.8.0"
 tempfile = "3"
 
 [features]
