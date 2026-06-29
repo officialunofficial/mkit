@@ -193,7 +193,7 @@ export function RefsPanel({
   return (
     <section className='space-y-2'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-sm font-semibold'>Branches · repo “{room}”</h2>
+        <h2 className='text-sm font-semibold'>Branches</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
       {showSkeleton ? (

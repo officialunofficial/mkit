@@ -128,7 +128,7 @@ export function LockedView({
 }
 
 /**
- * UNLOCKED header: the player identity + a lock control. (The shared repository is titled by {@link RepoSectionHeader}
+ * UNLOCKED header: the player identity + a lock control. (The shared repository is described in the page subcopy
  * above the workspace, not selected here.)
  */
 export function UnlockedHeader({
@@ -169,15 +169,15 @@ export function UnlockedHeader({
         </span>
         <span className='flex items-center gap-1.5'>
           <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
-            {attest.busy ? 'Attesting…' : 'Attest with a passkey'}
+            {attest.busy ? 'Linking…' : 'Link with a passkey'}
           </button>
-          <InfoTip label='About attesting'>
+          <InfoTip label='About linking'>
             <p>
               On its own, your signing key is anonymous. It’s derived from your passkey, but that link is{' '}
               <strong className='text-fg'>private</strong> — no one else can see it or prove it.
             </p>
             <p className='mt-2'>
-              <strong className='text-fg'>Attesting</strong> has a passkey publicly vouch for your signing key, turning
+              <strong className='text-fg'>Linking</strong> has a passkey publicly vouch for your signing key, turning
               that private link into a proof anyone can verify in their browser. In this demo it’s a separate passkey
               you approve just for this — your signing key never leaves your browser.
             </p>
@@ -221,24 +221,5 @@ export function UnlockedHeader({
         </p>
       ) : null}
     </section>
-  )
-}
-
-/**
- * Section header for the two-column repo workspace beneath it. There is ONE fixed shared repository everyone
- * contributes to — no name to pick, no switching — so this reads as a full-width title, not a field. The tooltip
- * carries the "everyone shares one repo" explanation.
- */
-export function RepoSectionHeader() {
-  return (
-    <div className='flex items-center gap-2 border-b border-hairline pb-3'>
-      <h2 className='text-lg font-semibold tracking-tight'>Multiplayer Repository</h2>
-      <InfoTip label='About the repository'>
-        <p>
-          <strong className='text-fg'>Everyone shares this one repository</strong>. Contribute alongside others by
-          pushing commits to a <strong className='text-fg'>branch</strong> (or starting a new one).
-        </p>
-      </InfoTip>
-    </div>
   )
 }

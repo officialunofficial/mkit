@@ -5,7 +5,7 @@ import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/ident
 import { RepoBackendProvider, useRepoEvents, useResolvedRepoBackend } from '../lib/repo-api'
 import { useIdentityActions } from './use-identity-actions'
 import { useMkit } from './use-mkit'
-import { LockedView, RepoSectionHeader, UnlockedHeader } from './multiplayer/identity-panel'
+import { LockedView, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
@@ -85,10 +85,6 @@ function MultiplayerBody({
           />
         )}
       </section>
-
-      {/* Full-width title for the workspace below — one shared repo, no name to
-          pick (the explanation lives in its tooltip). */}
-      <RepoSectionHeader />
 
       {/* Left: the repository's branches. Right: compose, then the selected
           branch's commit log. The log is ALWAYS visible — watch others contribute
