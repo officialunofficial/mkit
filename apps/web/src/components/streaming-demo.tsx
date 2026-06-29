@@ -180,9 +180,9 @@ function FileSidebar({
       </div>
       {rejected ? (
         <p className='text-xs text-amber-700 dark:text-amber-400'>
-          <span className='font-medium'>{rejected.name}</span> is {formatBytes(rejected.size)} — demo cap is{' '}
-          {formatBytes(MAX_FILE_BYTES)} to keep the page snappy. Real mkit handles GBs; the cap only applies to this
-          interactive page.
+          <span className='font-medium'>{rejected.name}</span> is {formatBytes(rejected.size)}. The demo cap is{' '}
+          {formatBytes(MAX_FILE_BYTES)} to keep this page responsive. mkit handles gigabytes; the cap only applies to
+          this interactive page.
         </p>
       ) : null}
 
@@ -225,7 +225,7 @@ function FileSidebar({
         }}
       />
       <p className='text-xs text-muted'>
-        Replace the file to see the delta section come alive — the prior version is captured automatically. Demo cap:{' '}
+        Replace the file and the delta section fills in; the prior version is captured automatically. Demo cap:{' '}
         {formatBytes(MAX_FILE_BYTES)}.
       </p>
 
@@ -243,8 +243,8 @@ function FileSidebar({
         </button>
         <p className='text-xs text-muted'>
           {current.source === 'default'
-            ? 'Drifts one grid cell per tick — watch FastCDC keep most chunks stable while the edited region’s chunk re-hashes.'
-            : 'Flips 1–3 random bytes per tick (skipping any image header) so you can see how the chunker reacts to small edits.'}
+            ? 'Drifts one grid cell per tick. FastCDC keeps most chunks stable while the edited region’s chunk re-hashes.'
+            : 'Flips 1–3 random bytes per tick, skipping any image header, so you can watch the chunker react to small edits.'}
         </p>
       </div>
     </div>

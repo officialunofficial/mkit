@@ -109,8 +109,8 @@ export function PushDemo() {
               style={{ backgroundImage: hashMesh(before.wholeId) }}
             />
             <p className='max-w-prose text-sm text-muted'>
-              A file you want to push — {formatBytes(base.length)}. Today mkit stores it as one object and names it by
-              its hash.
+              A file you want to push, {formatBytes(base.length)}. To start, mkit treats it as one object, named by its
+              hash.
             </p>
           </>
         ) : null}
@@ -120,7 +120,7 @@ export function PushDemo() {
             <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
             <p className='max-w-prose text-sm text-muted'>
               mkit splits it into {before.chunks.length} content-defined chunks (FastCDC) and names each by its BLAKE3
-              hash — so it stores identical chunks, across files or versions, only once.
+              hash. Identical chunks, across files or versions, are stored only once.
             </p>
           </>
         ) : null}
@@ -148,7 +148,7 @@ export function PushDemo() {
               <Stat label='mkit resends' value={formatBytes(changedBytes)} detail={`one chunk · ${savedPct}% less`} />
             </div>
             <p className='max-w-prose text-sm text-muted'>
-              Only the changed chunk ships. The chunks fold into a Merkle root — the file&rsquo;s new id — and mkit
+              Only the changed chunk ships. The chunks fold into a Merkle root, the file&rsquo;s new id, and mkit
               advances the head to it atomically. Read it back: re-deriving the root proves every chunk intact.
             </p>
             <div className='flex items-center gap-2 font-mono text-xs text-muted'>
