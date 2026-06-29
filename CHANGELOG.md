@@ -18,9 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git blame -L`: inclusive bounds, inverted ranges swap, over-long ends
   clamp to EOF, the low bound is validated against EOF, and bad input
   reproduces git's messages (`-L invalid line number: <n>`, `-L invalid
-  empty range`, `file <f> has only N lines`). Attribution remains
-  first-parent only, with no `-w`/`-M`/`-C` yet (tracked in follow-up
-  issues).
+  empty range`, `file <f> has only N lines`).
+- **`mkit blame -w` / `--ignore-whitespace`.** Ignores whitespace when
+  matching lines across revisions (like `git blame -w`, ignoring *all*
+  whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
+  tweak — no longer steals attribution; output still shows the file's
+  current bytes. Attribution remains first-parent only, with no `-M`/`-C`
+  yet (tracked in follow-up issues).
 
 ### Removed
 
@@ -59,8 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#414](https://github.com/officialunofficial/mkit/pull/414)).
 - **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
-  `match_lines` function is now private — callers must use the
-  bounds-checked `match_lines_checked`. Both are pre-1.0 API breaks; no
+  `match_lines` function is now private — line matching is an internal,
+  size-checked detail of `blame_file_with`. Both are pre-1.0 API breaks; no
   in-workspace consumers were affected. (release-plz's `semver_check`
   enforces the matching version bump at release time.)
 

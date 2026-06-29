@@ -1,7 +1,8 @@
-//! `mkit blame [<rev>] [-L <range>] <file>` — line-level attribution.
+//! `mkit blame [-w] [<rev>] [-L <range>] <file>` — line-level attribution.
 //!
 //! Blames `<file>` as of `<rev>` (default `HEAD`), optionally restricted
-//! to a line range with `-L`.
+//! to a line range with `-L`. `-w` ignores whitespace when matching
+//! lines across revisions (git `-w`).
 //!
 //! Output modes:
 //!
@@ -19,7 +20,7 @@
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
-use mkit_core::ops::blame::{BlameResult, blame_file, format_blame_text};
+use mkit_core::ops::blame::{BlameOptions, BlameResult, blame_file_with, format_blame_text};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -46,6 +47,12 @@ struct BlameOpts {
     /// `author`, `timestamp`, `text` keys.
     #[arg(long, value_enum, default_value = "default")]
     format: BlameFormat,
+    /// Ignore whitespace when matching lines across revisions, like
+    /// `git blame -w`, so a whitespace-only edit (reindent, tab↔space,
+    /// spacing tweak) doesn't reattribute the line. Output still shows
+    /// the file's current bytes.
+    #[arg(short = 'w', long = "ignore-whitespace")]
+    ignore_whitespace: bool,
     /// Restrict output to a line range, like `git blame -L`. Accepts
     /// `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>`
     /// (n lines back, ending at start), `<start>,` (start to EOF),
@@ -113,7 +120,10 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    let result = match blame_file(&store, head, file) {
+    let blame_opts = BlameOptions {
+        ignore_whitespace: opts.ignore_whitespace,
+    };
+    let result = match blame_file_with(&store, head, file, &blame_opts) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
     };

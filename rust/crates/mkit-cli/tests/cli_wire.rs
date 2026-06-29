@@ -476,6 +476,39 @@ fn blame_unknown_revision_errors() {
     );
 }
 
+#[test]
+fn blame_w_ignores_whitespace_only_change() {
+    // A whitespace-only edit reattributes the line by default, but `-w`
+    // keeps the original commit while still printing the current bytes.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"foo(a, b)\n", "first");
+    let first = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"foo(a,b)\n", "reformat");
+    let second = head_hash(td.path());
+
+    // Default: the reformat commit owns the line.
+    let plain = run_in(td.path(), &["blame", "f.txt"]);
+    let plain_out = String::from_utf8(plain.stdout).unwrap();
+    assert!(
+        plain_out.starts_with(&second[..12]),
+        "default blame should attribute to the reformat commit: {plain_out:?}"
+    );
+
+    // -w: the original commit owns it, output shows the current bytes.
+    let out = run_in(td.path(), &["blame", "-w", "f.txt"]);
+    assert!(out.status.success(), "blame -w failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.starts_with(&first[..12]),
+        "-w should keep the original commit: {stdout:?}"
+    );
+    assert!(
+        stdout.trim_end().ends_with("\tfoo(a,b)"),
+        "-w output should still show current bytes: {stdout:?}"
+    );
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]

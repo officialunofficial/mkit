@@ -143,6 +143,12 @@ complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c mkit -n "__fish_seen_subcommand_from commit" \
     -l author -d "Override the author identity" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l format -d "Output format (default|json)" -r -a "default json"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s L -l lines -d "Restrict output to a line range" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s w -l ignore-whitespace -d "Ignore whitespace when matching lines"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
