@@ -19,7 +19,7 @@ workspace = true
 # accepts them; this crate publishes (publish defaults to true).
 mkit-core = { version = "0.3", path = "../mkit-core" }
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
-buffa = "0.7.1"
+buffa = "0.8.0"
 thiserror = "2"
 
 # commonware: pinned at workspace root to the 2026.5.x train. All
