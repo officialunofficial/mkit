@@ -105,7 +105,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
     mkit: { mean: 0.008, stddev: 0.0014 },
     git: { mean: 0.0086, stddev: 0.0006 },
     note:
-      'A tie. The index carries a stat cache (mtime, size, inode, ctime — with git’s racy-clean rule), so an ' +
+      'A tie. The index carries a stat cache (mtime, size, inode, ctime, plus git’s racy-clean rule), so an ' +
       'unchanged file is proven clean by one stat call: O(stat), no read, no hash — the same trick git plays.',
   },
 ]
@@ -140,8 +140,8 @@ export const sizeBenchmarks: SizeBenchmark[] = [
     note:
       'The interesting one. mkit stores ~1.1 MiB immediately: the appended megabyte (incompressible — a floor no store ' +
       'can beat), one re-cut boundary chunk, and a fresh chunk manifest. git’s loose store duplicates the whole ' +
-      '~112 MiB blob until you run git gc, which then repacks both versions — the old one as a tiny delta against ' +
-      'the new — netting the growth to ~zero against the loose baseline. mkit’s store is incremental by ' +
+      '~112 MiB blob until you run git gc, which then repacks both versions (the old one as a tiny delta against ' +
+      'the new), netting the growth to ~zero against the loose baseline. mkit’s store is incremental by ' +
       'construction, no maintenance pass required; git’s density arrives only after one.',
   },
 ]

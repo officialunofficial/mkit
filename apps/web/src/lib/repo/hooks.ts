@@ -254,7 +254,7 @@ export function useRepoEvents(room: string, prefix = ''): void {
           kind: 'peer',
           title: `${playerName(author)} advanced branch “${u.name}” — live`,
           lines: [
-            'A peer’s push arrived over the repository’s WebSocket — the Durable Object broadcast it, and your log re-walked to include it.',
+            'A peer pushed, and it arrived live over the repository’s socket. Your log refreshed to include it.',
             `commit ${u.objectIdHex.slice(0, 12)}…  ·  by ${author.slice(0, 12)}…`,
           ],
         })

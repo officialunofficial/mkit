@@ -68,8 +68,8 @@ export function RepoBrowser({
           title: `Forked ${upstreamCommit.slice(0, 10)}… → ${ref}`,
           durationMs: performance.now() - t0,
           lines: [
-            'Built + signed a remix object referencing the upstream commit, then pushed it to a new fork branch under a create-only CAS.',
-            'A remix is a first-class fork object — it took the SAME sign → PutObject → UpdateRef path a commit does.',
+            'Signed a remix that points at the upstream commit, then pushed it to a new fork branch.',
+            'A remix is a first-class object — it took the same sign-and-push path as any commit.',
             `fork branch ${ref}`,
           ],
         })
@@ -81,7 +81,7 @@ export function RepoBrowser({
         e instanceof CasConflictError
           ? 'Your fork branch just moved (a concurrent push) — try forking again.'
           : e instanceof IdentityLockedError
-            ? 'Unlock (create an identity) before forking.'
+            ? 'Unlock or create an identity before forking.'
             : errMsg(e),
       )
     }
@@ -171,7 +171,7 @@ function RefsPanel({
       {showSkeleton ? (
         <SkeletonRows rows={3} />
       ) : entries.length === 0 ? (
-        <p className='text-sm text-muted'>No branches yet — push a commit to create one.</p>
+        <p className='text-sm text-muted'>No branches yet. Push a commit to create one.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
           {entries.map((r) => {
@@ -246,7 +246,7 @@ function LiveLog({
       {showSkeleton ? (
         <SkeletonRows rows={5} />
       ) : entries.length === 0 ? (
-        <p className='text-sm text-muted'>No commits on this branch yet — push one above.</p>
+        <p className='text-sm text-muted'>No commits on this branch yet. Push one above.</p>
       ) : (
         <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
           {entries.map((e) => (

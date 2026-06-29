@@ -102,7 +102,7 @@ export function Compose({
         title: `Signed in your browser → pushed to branch “${targetRef}”`,
         durationMs: performance.now() - t0,
         lines: [
-          'Ed25519-signed the commit in WASM, uploaded it content-addressed (PutObject), then advanced the branch under a compare-and-set.',
+          'Signed the commit with your Ed25519 key, uploaded it by content hash, then advanced the branch under a compare-and-set.',
           <span key='hashes'>
             commit <code className='font-mono'>{commitHash.slice(0, 12)}…</code> · parent{' '}
             {parentHash ? <code className='font-mono'>{parentHash.slice(0, 12)}…</code> : '∅ (first commit)'}
@@ -121,7 +121,7 @@ export function Compose({
     push.error instanceof CasConflictError
       ? 'Someone pushed first — the preview re-parented onto the new head. Push again.'
       : push.error instanceof IdentityLockedError
-        ? 'Identity is locked — unlock (derive) before pushing.'
+        ? 'Identity is locked — unlock to derive your key before pushing.'
         : push.error
           ? errMsg(push.error)
           : null
@@ -208,7 +208,7 @@ export function Compose({
           <Field label='Commit hash'>
             <code className='font-mono text-sm break-all'>{built.commit.hash_hex}</code>
           </Field>
-          <Field label='Signature (Ed25519, in WASM)'>
+          <Field label='Signature (Ed25519, in-browser)'>
             <code className='font-mono text-xs break-all'>{built.commit.signature_hex}</code>
           </Field>
           <Field label={`Parent (head of “${targetRef || 'main'}”)`}>

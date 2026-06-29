@@ -16,12 +16,13 @@ export default function ParityPage() {
         <header className='space-y-3'>
           <h1 className='text-4xl font-semibold tracking-tight'>How much of git is here?</h1>
           <p className='max-w-prose text-base text-fg'>
-            mkit aims for CLI parity with git: the commands and flags you would type behave the way git&rsquo;s do,
-            while mkit keeps its own improvements — BLAKE3 content addressing, a signature on every commit, and guards
-            against silent data loss. What it does not do is share bytes with a{' '}
-            <code className='font-mono text-sm'>.git</code> repo. The two object stores are different, so this is parity
-            of behavior, not wire interoperability. Here is the whole matrix, git&rsquo;s wins and mkit&rsquo;s
-            divergences included.
+            mkit aims for CLI parity with git: the commands and flags you call behave like git&rsquo;s, while mkit keeps
+            its own improvements — BLAKE3 content addressing, a signature on every commit, and guards against silent
+            data loss.
+          </p>
+          <p className='max-w-prose text-base text-fg'>
+            What it won&rsquo;t do is share bytes with a <code className='font-mono text-sm'>.git</code> repo. The two
+            object stores differ, so this is parity of behavior, not wire interoperability.
           </p>
         </header>
         <ParityMatrix />

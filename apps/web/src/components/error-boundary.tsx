@@ -47,8 +47,8 @@ function DefaultFallback({ error, reset }: { error: Error; reset: () => void }) 
     <div role='alert' className='space-y-3 rounded-md border border-hairline p-4'>
       <p className='text-sm font-medium text-fg'>This demo failed to load.</p>
       <p className='max-w-prose text-sm text-muted'>
-        The mkit WebAssembly module couldn&rsquo;t start in your browser. Reloading usually fixes it; if it keeps
-        happening, your browser may be blocking WebAssembly.
+        The mkit WebAssembly module couldn&rsquo;t start in your browser. A reload usually fixes it. If it keeps
+        failing, your browser may be blocking WebAssembly.
       </p>
       {error.message ? <p className='font-mono text-xs break-words text-subtle'>{error.message}</p> : null}
       <button

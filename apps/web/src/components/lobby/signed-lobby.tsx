@@ -30,9 +30,8 @@ import { BTN, PRIMARY_BTN, errMsg } from '../multiplayer/shared'
 const MAX_CHARS = MAX_MESSAGE_CHARS
 
 /**
- * Owns + provides the repo backend for the lobby subtree (mock offline, wasm
- * once loaded). The mock is seeded with offline demo activity at creation
- * (inside the hook), so no seeding/invalidate Effect is needed here.
+ * Owns + provides the repo backend for the lobby subtree (mock offline, wasm once loaded). The mock is seeded with
+ * offline demo activity at creation (inside the hook), so no seeding/invalidate Effect is needed here.
  */
 export function SignedLobby() {
   const api = useMkit()
@@ -65,14 +64,12 @@ function LobbyBody({ room }: { room: string }) {
 }
 
 /**
- * The merged feed, virtualized with TanStack Virtual (headless): the product
- * owns the scroll container + row markup; the virtualizer only computes which
- * rows are visible. Rows are dynamically MEASURED (chat wraps to many lines,
- * commits are one), so `estimateSize` is just a first paint hint and
- * `measureElement` corrects each row's real height. Renders only the visible
- * window + overscan, follows the newest row when pinned to the bottom, and
- * offers a sticky "jump to latest" affordance when scrolled up — all without
- * leaving the design system (empty/loading are plain muted text).
+ * The merged feed, virtualized with TanStack Virtual (headless): the product owns the scroll container + row markup;
+ * the virtualizer only computes which rows are visible. Rows are dynamically MEASURED (chat wraps to many lines,
+ * commits are one), so `estimateSize` is just a first paint hint and `measureElement` corrects each row's real height.
+ * Renders only the visible window + overscan, follows the newest row when pinned to the bottom, and offers a sticky
+ * "jump to latest" affordance when scrolled up — all without leaving the design system (empty/loading are plain muted
+ * text).
  */
 function Feed({ items, isLoading }: { items: FeedItem[]; isLoading: boolean }) {
   const scrollRef = useReactRef<HTMLDivElement>(null)
@@ -131,7 +128,7 @@ function Feed({ items, isLoading }: { items: FeedItem[]; isLoading: boolean }) {
       <div ref={scrollRef} onScroll={onScroll} className='max-h-80 min-h-40 overflow-y-auto bg-muted/5'>
         {empty ? (
           <p className='p-4 text-sm text-muted text-pretty'>
-            {isLoading ? 'Loading the lobby…' : 'No activity yet — say hi or push a commit in multiplayer.'}
+            {isLoading ? 'Loading the lobby…' : 'No activity yet. Say hi, or push a commit in multiplayer.'}
           </p>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
@@ -144,7 +141,13 @@ function Feed({ items, isLoading }: { items: FeedItem[]; isLoading: boolean }) {
                   data-index={vrow.index}
                   ref={virtualizer.measureElement}
                   className='px-4 py-2'
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vrow.start}px)` }}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${vrow.start}px)`,
+                  }}
                 >
                   <Row item={item} />
                 </div>
@@ -223,7 +226,7 @@ function Composer({ room }: { room: string }) {
           {actions.busy ? 'One moment…' : actions.hasPasskey ? 'Unlock to post' : 'Create an identity to post'}
         </button>
         <span className='text-xs text-muted'>
-          {actions.status ?? 'A passkey derives an Ed25519 key in your browser — that key signs every message.'}
+          {actions.status ?? 'A passkey derives an Ed25519 key in your browser. That key signs every message.'}
         </span>
       </div>
     )
@@ -268,7 +271,7 @@ function Composer({ room }: { room: string }) {
         ) : post.isError ? (
           <span className='text-amber-700 dark:text-amber-400'>{errMsg(post.error)}</span>
         ) : post.data?.rateLimited ? (
-          <span className='text-amber-700 dark:text-amber-400'>You’re posting too fast — wait a moment.</span>
+          <span className='text-amber-700 dark:text-amber-400'>You’re posting too fast. Wait a moment.</span>
         ) : (
           <>
             Signed with your Ed25519 key ·{' '}

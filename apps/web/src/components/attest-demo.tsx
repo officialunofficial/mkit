@@ -9,7 +9,7 @@ type Algo = 'ed25519' | 'secp256k1' | 'p256'
 const ALGOS: ReadonlyArray<{ value: Algo; label: string; note: string }> = [
   { value: 'ed25519', label: 'Ed25519', note: 'Fast, the mkit default.' },
   { value: 'secp256k1', label: 'Secp256k1', note: 'What crypto wallets use.' },
-  { value: 'p256', label: 'P-256', note: 'What hardware keys, passkeys, and Secure Enclave use.' },
+  { value: 'p256', label: 'P-256', note: 'What hardware keys, passkeys, and the Secure Enclave use.' },
 ]
 
 // Same seed works for Ed25519 but is out-of-range for secp256k1 / p256, so we keep one default per family and swap

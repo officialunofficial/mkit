@@ -70,7 +70,7 @@ export function useIdentityActions(): IdentityActions {
           ? 'Identity ready — one passkey prompt, Ed25519 derived via PRF.'
           : res.via === 'prf-get'
             ? 'Identity ready — Ed25519 derived from your passkey via PRF.'
-            : 'PRF unavailable — using a random in-memory key (won’t persist across sessions or devices).',
+            : 'No passkey PRF here — using a random in-memory key that won’t persist across sessions or devices.',
       )
       recordActivity({
         kind: 'create',
@@ -79,9 +79,9 @@ export function useIdentityActions(): IdentityActions {
         lines: [
           res.via === 'ephemeral'
             ? 'No passkey PRF here, so this is a random in-memory key — it won’t persist or recover.'
-            : 'Your passkey’s PRF secret was HKDF-expanded into a 32-byte Ed25519 seed, all in one prompt with no key file.',
+            : 'Your passkey derived a 32-byte Ed25519 seed in a single prompt — no key file, nothing stored to disk.',
           `Signer pubkey ${pubkey.slice(0, 12)}… (renders as ${petname}).`,
-          'The seed is held in memory only and is re-derivable from the same passkey — same passkey → same player, on any device.',
+          'The seed stays in memory only, and the same passkey always re-derives it: same passkey, same player, any device.',
         ],
       })
     } catch (e) {
@@ -105,13 +105,13 @@ export function useIdentityActions(): IdentityActions {
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
-      setStatus('Unlocked — recovered your existing player from the passkey via PRF.')
+      setStatus('Unlocked — recovered your player from the passkey.')
       recordActivity({
         kind: 'unlock',
         title: `Recovered ${playerName(pubkey)} — same key, no key file`,
         durationMs: deriveMs,
         lines: [
-          'Re-ran the passkey PRF → same HKDF seed → same Ed25519 key. No new passkey was minted.',
+          'The same passkey re-derived the same seed, so you get the same Ed25519 key — no new passkey created.',
           `Signer pubkey ${pubkey.slice(0, 12)}… — identical to before, because it’s derived, not stored.`,
         ],
       })

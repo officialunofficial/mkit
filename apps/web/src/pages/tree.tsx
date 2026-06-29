@@ -15,9 +15,9 @@ export default function TreePage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Folders, all the way down</h1>
         <p className='max-w-prose text-base text-fg'>
-          A folder lists its entries by their BLAKE3 hashes, and each parent's hash is built from its children's — so
-          the whole repo is one Merkle tree, fingerprinted by a single root hash. Edit any file and watch the change
-          ripple up: file → folder → commit.
+          A folder lists its entries by their BLAKE3 hashes, and each parent's hash is built from its children's. So the
+          whole repo is one Merkle tree, fingerprinted by a single root hash. Edit any file and watch the change ripple
+          up: file → folder → commit.
         </p>
       </header>
       <DemoBoundary>

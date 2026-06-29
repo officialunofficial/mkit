@@ -53,7 +53,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'mv',
         status: 'parity',
-        note: "Renames or moves files and directories — including move-into-directory and multi-source moves — with git's `-f` file-clobber guard (a directory destination is never overwritten). Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).",
+        note: "Renames or moves files and directories (including move-into-directory and multi-source moves) with git's `-f` file-clobber guard (a directory destination is never overwritten). Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).",
       },
       {
         cmd: 'checkout / switch',
@@ -204,7 +204,7 @@ export const categories: ParityCategory[] = [
 export const inherentDivergences: ParityNote[] = [
   {
     label: 'Hash length',
-    body: "mkit object IDs are 64-hex BLAKE3; git's are 40-hex SHA-1. A git SHA pasted into mkit will never resolve. mkit matches the UX shape — short prefixes, abbreviated display — but not the length.",
+    body: "mkit object IDs are 64-hex BLAKE3; git's are 40-hex SHA-1. A git SHA pasted into mkit will never resolve. mkit matches the UX shape (short prefixes, abbreviated display) but not the length.",
   },
   {
     label: 'Repo marker',

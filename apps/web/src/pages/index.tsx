@@ -17,9 +17,11 @@ export default function HomePage() {
       <section className='space-y-5'>
         <h1 className='text-5xl font-semibold tracking-tight'>Version control that signs every commit.</h1>
         <p className='max-w-prose text-lg text-fg'>
-          mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash — change a byte, get a new
-          name. Claims about a commit (reviewed, tested, deployed) travel as signed statements anyone can verify.
-          It&rsquo;s written in Rust, so it runs anywhere — including this browser.
+          mkit signs every commit and names every file, folder, and commit by its BLAKE3 hash. Change a byte, get a new
+          name. Claims about a commit — reviewed, tested, deployed — travel as signed statements anyone can verify.
+        </p>
+        <p className='max-w-prose text-lg text-fg'>
+          It&rsquo;s written in Rust, so it runs anywhere, including this browser.
         </p>
         <div className='max-w-prose space-y-3'>
           <p className='text-sm text-muted'>
@@ -30,7 +32,7 @@ export default function HomePage() {
             >
               where it can be
             </Link>
-            , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
+            , and divergent where it counts: one hash algorithm, a signature on every commit, and attestations as
             first-class objects.
           </p>
           <p className='text-sm text-muted'>
@@ -77,12 +79,12 @@ export default function HomePage() {
         <Demo
           to='/push'
           title='push'
-          body='Store a file whole, or chunk and pack it. Why mkit packs, hashes, and signs every push instead of leaving blobs browsable.'
+          body='Push a file and watch mkit chunk and hash it. Why a small edit on any size file ships only the bytes that changed.'
         />
         <Demo
           to='/demos'
           title='demos'
-          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each a live wasm demo.'
+          body='Hashing, signatures, chunked streaming, and attestations. Four primitives, each a live wasm demo.'
         />
       </ul>
 
@@ -93,14 +95,14 @@ export default function HomePage() {
           emits a fallback and hydrates the wasm-backed client on the client. */}
       <section className='space-y-3'>
         <p className='max-w-prose text-sm text-muted text-pretty'>
-          The same signing key powers a live lobby — chat and commits from{' '}
+          The same key signs your chat and your commits alike. Both land on the feed below — messages and{' '}
           <Link
             to='/multiplayer'
             className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
           >
             multiplayer
           </Link>{' '}
-          on one feed, every entry signed.
+          commits together, every entry signed.
         </p>
         <DemoBoundary>
           <SignedLobby />
