@@ -45,11 +45,39 @@ function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
   return { onAttest, busy, binding, result, err }
 }
 
+/** Fingerprint glyph — signals that the button triggers a biometric passkey prompt. */
+function Fingerprint({ className = '' }: { className?: string }) {
+  return (
+    <svg
+      viewBox='0 0 24 24'
+      width='15'
+      height='15'
+      fill='none'
+      stroke='currentColor'
+      strokeWidth='1.7'
+      strokeLinecap='round'
+      strokeLinejoin='round'
+      aria-hidden
+      className={`shrink-0 ${className}`}
+    >
+      <path d='M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4' />
+      <path d='M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2' />
+      <path d='M17.29 21.02c.12-.6.43-2.3.5-3.02' />
+      <path d='M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4' />
+      <path d='M8.65 22c.21-.66.45-1.32.57-2' />
+      <path d='M14 13.12c0 2.38 0 6.38-1 8.88' />
+      <path d='M2 16h.01' />
+      <path d='M21.8 16c.2-2 .131-5.354 0-6' />
+      <path d='M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2' />
+    </svg>
+  )
+}
+
 /**
- * LOCKED state: two clearly-labelled actions. When a passkey is already known (after a Lock, or a persisted credential
- * on a fresh load) the primary action RECOVERS the same player (Unlock), with "New identity" as the secondary.
- * Otherwise (first-time) the primary mints a passkey (Create) and the secondary recovers a returning user's existing
- * passkey.
+ * LOCKED state: two actions, with the recover/Unlock button kept on the RIGHT — the same spot the Lock button takes
+ * once unlocked, so it doesn't jump across the state change. Unlock carries a fingerprint glyph (it triggers a
+ * biometric passkey prompt). When a passkey is already known: New identity (left) ↔ Unlock (right). First-time: Create
+ * (left, primary) ↔ Unlock existing (right).
  */
 export function LockedView({
   onCreate,
@@ -68,12 +96,13 @@ export function LockedView({
     <section className='space-y-3'>
       {hasPasskey ? (
         <>
-          <div className='flex flex-wrap items-center gap-2'>
-            <button type='button' className={PRIMARY_BTN} onClick={onUnlock} disabled={busy}>
-              {busy ? 'Unlocking…' : 'Unlock'}
-            </button>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
             <button type='button' className={BTN} onClick={onCreate} disabled={busy}>
               New identity
+            </button>
+            <button type='button' className={`${PRIMARY_BTN} gap-1.5`} onClick={onUnlock} disabled={busy}>
+              <Fingerprint />
+              {busy ? 'Unlocking…' : 'Unlock'}
             </button>
           </div>
           <p className='max-w-prose text-sm text-muted'>
@@ -82,11 +111,12 @@ export function LockedView({
         </>
       ) : (
         <>
-          <div className='flex flex-wrap items-center gap-2'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
             <button type='button' className={PRIMARY_BTN} onClick={onCreate} disabled={busy}>
               {busy ? 'Creating…' : 'Create passkey identity'}
             </button>
-            <button type='button' className={BTN} onClick={onUnlock} disabled={busy}>
+            <button type='button' className={`${BTN} gap-1.5`} onClick={onUnlock} disabled={busy}>
+              <Fingerprint />
               Unlock existing passkey
             </button>
           </div>
@@ -139,6 +169,23 @@ export function UnlockedHeader({
           </span>{' '}
           <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
         </span>
+        {/* Attest sits to the LEFT of Lock; Lock stays at the far right — the same
+            spot Unlock occupies while locked. */}
+        <span className='flex items-center gap-1.5'>
+          <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
+            {attest.busy ? 'Attesting…' : 'Attest with a passkey'}
+          </button>
+          <InfoTip label='About attesting'>
+            <p>
+              <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge that vouches this
+              Ed25519 key is yours, tying the two keys together.
+            </p>
+            <p className='mt-2'>
+              It’s optional. The binding is verified in your browser with the passkey’s origin pinned, so a green check
+              is a stronger “same person” signal than the signing key alone.
+            </p>
+          </InfoTip>
+        </span>
         <button
           type='button'
           className={BTN}
@@ -147,19 +194,6 @@ export function UnlockedHeader({
         >
           Lock
         </button>
-        <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
-          {attest.busy ? 'Attesting…' : 'Attest with a passkey'}
-        </button>
-        <InfoTip label='About attesting'>
-          <p>
-            <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge that vouches this
-            Ed25519 key is yours, tying the two keys together.
-          </p>
-          <p className='mt-2'>
-            It’s optional. The binding is verified in your browser with the passkey’s origin pinned, so a green check is
-            a stronger “same person” signal than the signing key alone.
-          </p>
-        </InfoTip>
       </div>
       {attest.result || attest.binding ? (
         <FieldList>

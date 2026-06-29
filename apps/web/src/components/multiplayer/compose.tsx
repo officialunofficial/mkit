@@ -3,6 +3,7 @@
 // Compose surface (build + sign + push a commit) and the fork/remix hook.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
+import * as Collapsible from '@radix-ui/react-collapsible'
 import { useQueryClient } from '@tanstack/react-query'
 import { useId, useMemo, useState } from 'react'
 import { recordActivity } from '../../lib/activity-log'
@@ -207,41 +208,44 @@ export function Compose({
       </button>
 
       {built.ok ? (
-        <details className='group'>
-          <summary className='flex cursor-pointer list-none items-center gap-1 text-sm text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
-            <span className='inline-block transition-transform group-open:rotate-90'>›</span> Signed-commit details
-          </summary>
+        <Collapsible.Root>
+          <Collapsible.Trigger className='group flex w-full cursor-pointer items-center gap-1 text-sm text-muted transition-colors select-none hover:text-fg'>
+            <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span> Signed-commit
+            details
+          </Collapsible.Trigger>
           {/* Fixed-width label column so every row's value lines up; the qualifier
               for each field lives in an info tooltip, not in the label text. */}
-          <dl className='mt-2 grid grid-cols-[5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1.5 text-xs'>
-            <dt className='flex items-center gap-1 text-muted'>
-              Commit
-              <InfoTip label='About the commit hash'>
-                <p>The BLAKE3 content hash that addresses this commit object.</p>
-              </InfoTip>
-            </dt>
-            <dd className='min-w-0 font-mono break-all'>{built.commit.hash_hex}</dd>
+          <Collapsible.Content asChild>
+            <dl className='mt-2 grid grid-cols-[5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1.5 text-xs'>
+              <dt className='flex items-center gap-1 text-muted'>
+                Commit
+                <InfoTip label='About the commit hash'>
+                  <p>The BLAKE3 content hash that addresses this commit object.</p>
+                </InfoTip>
+              </dt>
+              <dd className='min-w-0 font-mono break-all'>{built.commit.hash_hex}</dd>
 
-            <dt className='flex items-center gap-1 text-muted'>
-              Signature
-              <InfoTip label='About the signature'>
-                <p>The Ed25519 signature over the commit, produced in your browser by your passkey-derived key.</p>
-              </InfoTip>
-            </dt>
-            <dd className='min-w-0 font-mono break-all'>{built.commit.signature_hex}</dd>
+              <dt className='flex items-center gap-1 text-muted'>
+                Signature
+                <InfoTip label='About the signature'>
+                  <p>The Ed25519 signature over the commit, produced in your browser by your passkey-derived key.</p>
+                </InfoTip>
+              </dt>
+              <dd className='min-w-0 font-mono break-all'>{built.commit.signature_hex}</dd>
 
-            <dt className='flex items-center gap-1 text-muted'>
-              Parent
-              <InfoTip label='About the parent'>
-                <p>
-                  The current head of “{targetRef || 'main'}” — the commit this one builds on (∅ for the first commit on
-                  a branch).
-                </p>
-              </InfoTip>
-            </dt>
-            <dd className='min-w-0 font-mono break-all'>{parentHash || '∅ (first commit on this branch)'}</dd>
-          </dl>
-        </details>
+              <dt className='flex items-center gap-1 text-muted'>
+                Parent
+                <InfoTip label='About the parent'>
+                  <p>
+                    The current head of “{targetRef || 'main'}” — the commit this one builds on (∅ for the first commit
+                    on a branch).
+                  </p>
+                </InfoTip>
+              </dt>
+              <dd className='min-w-0 font-mono break-all'>{parentHash || '∅ (first commit on this branch)'}</dd>
+            </dl>
+          </Collapsible.Content>
+        </Collapsible.Root>
       ) : (
         <p className='text-red-600 dark:text-red-400'>{built.error}</p>
       )}

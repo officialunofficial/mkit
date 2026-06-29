@@ -1,19 +1,15 @@
 'use client'
 
-// The "what just happened" overlay (bottom-right). Hidden until the user takes
-// an action, then it EXPANDS to narrate it — real values + a green ⚡ speed
-// badge — with a 15s countdown bar clipped to the top edge. Hover (or tap on
-// mobile) pauses the countdown so you can read. When the countdown ends (or you
-// collapse it) it shrinks to a small pill that PERSISTS, with a separate round
-// ✕ button beside it to fully close. The next action re-expands it.
+// The "what just happened" overlay (in the bottom dock). Hidden until the user
+// takes an action, then it EXPANDS to narrate it — real values + a green ⚡ speed
+// badge. It stays open until you collapse it (−, back to an emoji circle) or
+// close it (✕). No timer — the user dismisses it at will. The next action
+// re-expands it.
 
+import * as Collapsible from '@radix-ui/react-collapsible'
 import { useEffect, useRef, useState } from 'react'
 import { type ActivityEvent, type ActivityKind, formatMs, useActivityLog } from '../../lib/activity-log'
 import { useDockExpansion } from '../../lib/dock-expansion'
-
-// The 15s countdown lives in the CSS `wjh-countdown` animation (styles.css +
-// the bar's `[animation:wjh-countdown_15s_…]` class); the bar's `animationend`
-// is what collapses the card.
 
 /** Per-kind accent dot — a quiet visual key, no new vocabulary. */
 const KIND_DOT: Record<ActivityKind, string> = {
@@ -52,7 +48,7 @@ function Caret({ open, className = '' }: { open: boolean; className?: string }) 
   )
 }
 
-/** Small green ⚡ duration badge, reused by the card and the collapsed pill. */
+/** Small green ⚡ duration badge. */
 function SpeedBadge({ ms }: { ms: number }) {
   return (
     <span className='inline-flex items-center gap-0.5 rounded bg-green-100 px-1.5 font-mono text-[10px] font-medium text-green-700 dark:bg-green-950 dark:text-green-300'>
@@ -67,58 +63,38 @@ export function WhatJustHappened() {
   const clear = useActivityLog((s) => s.clear)
   const latest = events[0]
 
-  const [runId, setRunId] = useState(0) // bump to restart the countdown animation
-  // The 15s countdown only runs on a FRESH action. A manual re-expand from the
-  // collapsed pill opens the card "sticky" (no bar, no auto-collapse).
-  const [countdown, setCountdown] = useState(false)
   const [open, setOpen] = useState(true) // detail lines expanded
-  const [hovering, setHovering] = useState(false)
-  const [frozen, setFrozen] = useState(false) // mobile tap-to-pause toggle
-  const paused = hovering || frozen
 
   // Mutual exclusion across the dock: the shared store is the SINGLE source of
-  // truth for whether our card is open, so opening the other panel collapses us
-  // with NO effect race. `dismissed` (local) hides us until the next action.
+  // truth for whether our card is open, so opening the other panel collapses us.
+  // `dismissed` (local) hides us entirely until the next action.
   const expanded = useDockExpansion((s) => s.expanded)
   const openSlot = useDockExpansion((s) => s.open)
   const closeSlot = useDockExpansion((s) => s.close)
   const isOpen = expanded === 'activity'
   const [dismissed, setDismissed] = useState(false)
 
-  // A FRESH event (its id changes) opens the card and starts the countdown. A
-  // clean load stays empty until the first action; closing then re-acting brings
-  // it back.
+  // A FRESH event (its id changes) opens the card. A clean load stays empty until
+  // the first action; closing then re-acting brings it back.
   const lastIdRef = useRef<string | null>(null)
   useEffect(() => {
     if (!latest) return
     if (latest.id === lastIdRef.current) return
     lastIdRef.current = latest.id
     setOpen(true)
-    setFrozen(false)
-    setRunId((n) => n + 1)
-    setCountdown(true)
     setDismissed(false)
     openSlot('activity')
   }, [latest, openSlot])
 
   if (!latest) return null
 
-  // Re-open from the collapsed circle: NO timer this time — stays open until you
-  // collapse or close it.
-  const expand = () => {
-    setFrozen(false)
-    setCountdown(false)
-    openSlot('activity')
-  }
-
   if (!isOpen) {
     if (dismissed) return null
-    // Collapsed = a single emoji circle in the dock row. Click to reopen; the
-    // close (✕) lives inside the expanded card now, not as a separate button.
+    // Collapsed = a single emoji circle in the dock row. Click to reopen.
     return (
       <button
         type='button'
-        onClick={expand}
+        onClick={() => openSlot('activity')}
         title='What just happened'
         aria-label='Reopen the “what just happened” panel'
         className='inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
@@ -133,31 +109,12 @@ export function WhatJustHappened() {
 
   return (
     // role=status + aria-live so the latest narration is announced without
-    // stealing focus. Pause the countdown while the pointer is over it (hover),
-    // and let a tap toggle a sticky freeze on touch devices (no hover there).
+    // stealing focus.
     <div
       role='status'
       aria-live='polite'
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
-      onTouchStart={() => setFrozen((v) => !v)}
       className='w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'
     >
-      {/* Countdown bar, clipped to the top edge — only on a fresh action. `key`
-          restarts the animation each time; `animationend` collapses the card;
-          play-state pauses it on hover/tap. A manual re-expand has no bar. */}
-      {countdown ? (
-        <span
-          key={runId}
-          aria-hidden
-          onAnimationEnd={() => closeSlot('activity')}
-          style={{ animationPlayState: paused ? 'paused' : 'running' }}
-          className={`absolute top-0 left-0 h-[3px] w-full origin-left [animation:wjh-countdown_15s_linear_forwards] ${
-            paused ? 'bg-amber-400' : 'bg-blue-500'
-          }`}
-        />
-      ) : null}
-
       <header className='flex items-center gap-2 border-b border-hairline px-3 py-2'>
         <span aria-hidden>⚡</span>
         <span className='font-semibold'>What just happened</span>
@@ -189,29 +146,32 @@ export function WhatJustHappened() {
       </div>
 
       {older.length > 0 ? (
-        <details className='border-t border-hairline'>
-          <summary className='cursor-pointer list-none px-3 py-2 text-xs text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
+        <Collapsible.Root className='border-t border-hairline'>
+          <Collapsible.Trigger className='group flex w-full cursor-pointer items-center gap-1 px-3 py-2 text-xs text-muted transition-colors select-none hover:text-fg'>
+            <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span>
             Earlier ({older.length})
-          </summary>
-          <ul className='max-h-48 overflow-y-auto px-3 pb-2'>
-            {older.map((e) => (
-              <li key={e.id} className='flex items-center gap-2 py-1 text-xs'>
-                <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[e.kind]}`} />
-                <span className='min-w-0 flex-1 truncate text-muted'>{e.title}</span>
-                {e.durationMs !== undefined ? (
-                  <span className='shrink-0 font-mono text-[10px] text-green-700 dark:text-green-400'>
-                    {formatMs(e.durationMs)}
-                  </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-          <div className='px-3 pb-2'>
-            <button type='button' onClick={clear} className='text-xs text-muted hover:text-fg'>
-              Clear
-            </button>
-          </div>
-        </details>
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <ul className='max-h-48 overflow-y-auto px-3 pb-2'>
+              {older.map((e) => (
+                <li key={e.id} className='flex items-center gap-2 py-1 text-xs'>
+                  <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${KIND_DOT[e.kind]}`} />
+                  <span className='min-w-0 flex-1 truncate text-muted'>{e.title}</span>
+                  {e.durationMs !== undefined ? (
+                    <span className='shrink-0 font-mono text-[10px] text-green-700 dark:text-green-400'>
+                      {formatMs(e.durationMs)}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            <div className='px-3 pb-2'>
+              <button type='button' onClick={clear} className='text-xs text-muted hover:text-fg'>
+                Clear
+              </button>
+            </div>
+          </Collapsible.Content>
+        </Collapsible.Root>
       ) : null}
     </div>
   )

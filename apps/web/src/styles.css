@@ -243,16 +243,3 @@
     -webkit-text-fill-color: transparent;
   }
 }
-
-/* "What just happened" overlay countdown: the top-edge bar shrinks left→right
-   over its lifetime. Driven by a transform (cheap, GPU-friendly) so the bar
-   can be paused mid-flight via `animation-play-state` on hover/tap, and its
-   `animationend` fires the self-dismiss. */
-@keyframes wjh-countdown {
-  from {
-    transform: scaleX(1);
-  }
-  to {
-    transform: scaleX(0);
-  }
-}

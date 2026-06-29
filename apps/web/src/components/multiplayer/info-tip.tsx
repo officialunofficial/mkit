@@ -1,10 +1,12 @@
 'use client'
 
-// A small "ⓘ" affordance next to a field label. Hovering or focusing it (desktop)
-// or tapping it (mobile) reveals a popover with extra explanation. Content is a
-// `ReactNode`, so callers can pass rich markup (code, emphasis, links).
+// A small "ⓘ" affordance next to a field label. Click/tap (or keyboard) opens a
+// popover with extra explanation. Built on Radix Popover so positioning,
+// collision avoidance, focus management, and dismiss (Esc / outside-click) are
+// handled for us. Content is a `ReactNode`, so callers can pass rich markup.
 
-import { type ReactNode, useId, useState } from 'react'
+import * as Popover from '@radix-ui/react-popover'
+import type { ReactNode } from 'react'
 
 export function InfoTip({
   label,
@@ -15,36 +17,28 @@ export function InfoTip({
   /** Popover content. */
   children: ReactNode
 }) {
-  const [open, setOpen] = useState(false)
-  const id = useId()
-
   return (
-    <span className='relative inline-flex align-middle'>
-      <button
-        type='button'
-        aria-label={label}
-        aria-expanded={open}
-        aria-describedby={open ? id : undefined}
-        onClick={() => setOpen((v) => !v)}
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        className='inline-flex h-4 w-4 items-center justify-center rounded-full border border-hairline font-mono text-[10px] leading-none text-muted transition-colors hover:border-fg hover:text-fg'
-      >
-        i
-      </button>
-      {open ? (
-        <span
-          id={id}
-          role='tooltip'
-          // Open below-left of the icon; clamp width so it never overflows a
-          // narrow column / small screen. Pointer-events on so it's tappable.
-          className='absolute top-6 left-0 z-30 w-[min(20rem,80vw)] rounded-lg border border-hairline bg-bg p-3 text-xs leading-relaxed font-normal text-muted shadow-xl'
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type='button'
+          aria-label={label}
+          className='inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-hairline align-middle font-mono text-[10px] leading-none text-muted transition-colors hover:border-fg hover:text-fg data-[state=open]:border-fg data-[state=open]:text-fg'
+        >
+          i
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side='bottom'
+          align='start'
+          sideOffset={6}
+          collisionPadding={8}
+          className='z-[80] w-[min(20rem,calc(100vw-1rem))] rounded-lg border border-hairline bg-bg p-3 text-xs leading-relaxed font-normal text-muted shadow-xl'
         >
           {children}
-        </span>
-      ) : null}
-    </span>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }

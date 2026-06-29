@@ -30,6 +30,8 @@
     "workerd"
   ],
   "dependencies": {
+    "@radix-ui/react-collapsible": "^1.1.14",
+    "@radix-ui/react-popover": "^1.1.17",
     "@tanstack/query-sync-storage-persister": "^5.101.1",
     "@tanstack/react-query": "^5.101.1",
     "@tanstack/react-query-persist-client": "^5.101.1",
