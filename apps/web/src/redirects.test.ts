@@ -4,8 +4,10 @@ import { redirectMiddleware, resolveRedirect } from './redirects'
 describe('resolveRedirect', () => {
   it.each([
     ['/hash', '/demos#hash'],
+    ['/tree', '/demos#tree'],
     ['/sign', '/demos#sign'],
     ['/streaming', '/demos#streaming'],
+    ['/push', '/demos#push'],
     ['/attest', '/demos#attest'],
   ])('maps deleted route %s to %s', (from, to) => {
     expect(resolveRedirect(from)).toBe(to)
@@ -18,7 +20,7 @@ describe('resolveRedirect', () => {
   it('leaves live and unknown routes alone', () => {
     expect(resolveRedirect('/')).toBeNull()
     expect(resolveRedirect('/demos')).toBeNull()
-    expect(resolveRedirect('/push')).toBeNull()
+    expect(resolveRedirect('/multiplayer')).toBeNull()
     expect(resolveRedirect('/hash/extra')).toBeNull()
   })
 })

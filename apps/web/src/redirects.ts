@@ -1,18 +1,20 @@
 // Legacy-route redirects.
 //
-// The hash/sign/streaming/attest demos used to each have their own page; they
-// are now tabs on `/demos` (see components/demos-tabs.tsx, which still keys off
-// `#hash | #sign | #streaming | #attest`). The old pages were deleted, so those
-// paths no longer prerender to a static asset — which means Cloudflare hands the
-// request to the Worker's Hono app, where this middleware can 301 it to the new
-// anchor instead of letting the RSC router 404. Permanent (301) because the old
-// URLs are gone for good: search engines and any existing inbound links should
-// learn the new location.
+// The hash/sign/tree/streaming/push/attest demos used to each have their own
+// page; they are now tabs on `/demos` (see components/demos-tabs.tsx, which
+// keys off `#hash | #tree | #sign | #streaming | #push | #attest`). The old
+// pages were deleted, so those paths no longer prerender to a static asset —
+// which means Cloudflare hands the request to the Worker's Hono app, where this
+// middleware can 301 it to the new anchor instead of letting the RSC router
+// 404. Permanent (301) because the old URLs are gone for good: search engines
+// and any existing inbound links should learn the new location.
 
 const REDIRECTS: Record<string, string> = {
   '/hash': '/demos#hash',
+  '/tree': '/demos#tree',
   '/sign': '/demos#sign',
   '/streaming': '/demos#streaming',
+  '/push': '/demos#push',
   '/attest': '/demos#attest',
 }
 

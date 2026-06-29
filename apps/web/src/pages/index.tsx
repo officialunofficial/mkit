@@ -3,7 +3,6 @@ import { CopyButton } from '../components/copy-button'
 import { DemoBoundary } from '../components/demo-boundary'
 import { SignedLobby } from '../components/lobby/signed-lobby'
 import { Seo } from '../components/seo'
-import { PUSH_MESH } from '../lib/mesh'
 
 export default function HomePage() {
   return (
@@ -36,49 +35,65 @@ export default function HomePage() {
           <p className='max-w-prose text-lg text-fg'>
             Every commit is cryptographically signed, so anyone can contribute and everyone can verify who did what.
           </p>
-          <div className='max-w-prose space-y-3'>
-            <p className='text-sm text-muted'>
-              mkit is git-like{' '}
-              <Link
-                to='/parity'
-                className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-              >
-                where it can be
-              </Link>
-              , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
-              first-class objects.
-            </p>
-            <p className='text-sm text-muted'>
-              open source (alpha):{' '}
-              <a
-                href='https://github.com/officialunofficial/mkit'
-                target='_blank'
-                rel='noreferrer'
-                className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-              >
-                officialunofficial/mkit
-              </a>{' '}
-              on GitHub.
-            </p>
-            <div className='flex flex-col items-start gap-2'>
-              {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
-                curl User-Agent and serves the signed installer (see
-                src/install-route.ts); it detects your platform, verifies the
-                cosign signature, and drops `mkit` into ~/.local/bin. */}
-              <InstallCommand command='curl mkit.sh | sh' />
-              {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
-                / Cursor / etc. via the vercel-labs `skills` CLI. */}
-              <InstallCommand command='npx skills add officialunofficial/mkit' />
-            </div>
-          </div>
+          <p className='max-w-prose text-sm text-muted'>
+            mkit is git-like{' '}
+            <Link
+              to='/parity'
+              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+            >
+              where it can be
+            </Link>
+            , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
+            first-class objects.
+          </p>
         </section>
       </div>
 
+      {/* Full-width "get started" band beneath the split hero: the two install
+          paths side by side, with the open-source note. Pulled out of the hero's
+          right column so the install commands aren't cramped against the lobby. */}
+      <section className='space-y-5'>
+        <h2 className='text-2xl font-semibold tracking-tight'>Get started with mkit</h2>
+        <div className='grid gap-4 sm:grid-cols-2'>
+          <div className='space-y-2'>
+            <p className='text-sm font-medium'>Install the CLI</p>
+            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
+              curl User-Agent and serves the signed installer (see
+              src/install-route.ts); it detects your platform, verifies the
+              cosign signature, and drops `mkit` into ~/.local/bin. */}
+            <InstallCommand command='curl mkit.sh | sh' />
+            <p className='text-sm text-muted'>
+              Detects your platform, verifies the cosign signature, and drops <code className='font-mono'>mkit</code>{' '}
+              into <code className='font-mono'>~/.local/bin</code>.
+            </p>
+          </div>
+          <div className='space-y-2'>
+            <p className='text-sm font-medium'>Add the agent skill</p>
+            {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
+              / Cursor / etc. via the vercel-labs `skills` CLI. */}
+            <InstallCommand command='npx skills add officialunofficial/mkit' />
+            <p className='text-sm text-muted'>Teaches Claude Code, Cursor, and other coding agents to drive mkit.</p>
+          </div>
+        </div>
+        <p className='text-sm text-muted'>
+          open source (alpha):{' '}
+          <a
+            href='https://github.com/officialunofficial/mkit'
+            target='_blank'
+            rel='noreferrer'
+            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          >
+            officialunofficial/mkit
+          </a>{' '}
+          on GitHub.
+        </p>
+      </section>
+
       <ul className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4'>
         <Demo
-          to='/tree'
-          title='tree'
-          body='A Merkle tree of BLAKE3 hashes — edit any file and the hashes ripple up to the commit at the root.'
+          to='/demos'
+          title='demos'
+          body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
         />
         <Demo
           to='/performance'
@@ -91,14 +106,9 @@ export default function HomePage() {
           body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
         />
         <Demo
-          to='/push'
-          title='push'
-          body='Why mkit chunks, packs, hashes, and signs every push instead of leaving blobs browsable.'
-        />
-        <Demo
-          to='/demos'
-          title='demos'
-          body='Four playgrounds in one: hashing, signatures, chunked streaming, and attestations — each one live, right in your browser.'
+          to='/multiplayer'
+          title='multiplayer'
+          body='Set up a passkey, sign a commit in your browser, and push to a shared repo — then watch everyone else’s commits arrive live.'
         />
       </ul>
     </div>
@@ -121,29 +131,27 @@ function InstallCommand({ command }: { command: string }) {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/tree' | '/performance' | '/parity' | '/push' | '/demos'
+type DemoRoute = '/demos' | '/performance' | '/parity' | '/multiplayer'
 
 // Soft per-tile mesh gradients: layered low-alpha radial blooms over the
 // white card so text stays legible while each tile reads distinct.
 const MESH: Record<DemoRoute, string> = {
-  '/tree':
-    'radial-gradient(at 15% 25%, rgba(45,212,191,0.10), transparent 55%), radial-gradient(at 80% 15%, rgba(132,204,22,0.08), transparent 55%)',
+  '/demos':
+    'radial-gradient(at 18% 22%, rgba(99,102,241,0.10), transparent 55%), radial-gradient(at 82% 12%, rgba(56,189,248,0.08), transparent 55%)',
   '/performance':
     'radial-gradient(at 18% 18%, rgba(251,146,60,0.09), transparent 55%), radial-gradient(at 82% 80%, rgba(248,113,113,0.08), transparent 55%)',
   '/parity':
     'radial-gradient(at 16% 20%, rgba(167,139,250,0.09), transparent 55%), radial-gradient(at 84% 80%, rgba(96,165,250,0.08), transparent 55%)',
-  '/push': PUSH_MESH,
-  '/demos':
-    'radial-gradient(at 18% 22%, rgba(99,102,241,0.10), transparent 55%), radial-gradient(at 82% 12%, rgba(56,189,248,0.08), transparent 55%)',
+  '/multiplayer':
+    'radial-gradient(at 20% 20%, rgba(236,72,153,0.10), transparent 55%), radial-gradient(at 80% 78%, rgba(99,102,241,0.08), transparent 55%)',
 }
 
 // Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
 const SHAPE_COLOR: Record<DemoRoute, string> = {
-  '/tree': 'rgb(20,184,166)',
+  '/demos': 'rgb(99,102,241)',
   '/performance': 'rgb(249,115,22)',
   '/parity': 'rgb(139,92,246)',
-  '/push': 'rgb(202,138,4)',
-  '/demos': 'rgb(99,102,241)',
+  '/multiplayer': 'rgb(236,72,153)',
 }
 
 // A small distinct geometric mark per tile, drawn in the tile's accent colour.
@@ -158,8 +166,15 @@ function TileShape({ to }: { to: DemoRoute }) {
   } as const
   const shape = (() => {
     switch (to) {
-      case '/tree':
-        return <circle cx='8' cy='8' r='5' />
+      case '/demos':
+        return (
+          <>
+            <rect x='3' y='3' width='4' height='4' rx='1' />
+            <rect x='9' y='3' width='4' height='4' rx='1' />
+            <rect x='3' y='9' width='4' height='4' rx='1' />
+            <rect x='9' y='9' width='4' height='4' rx='1' />
+          </>
+        )
       case '/performance':
         return <path d='M3 13 V9 M8 13 V4 M13 13 V7' strokeLinecap='round' />
       case '/parity':
@@ -169,21 +184,11 @@ function TileShape({ to }: { to: DemoRoute }) {
             <circle cx='10' cy='8' r='4' />
           </>
         )
-      case '/push':
+      case '/multiplayer':
         return (
           <>
-            <rect x='3' y='3.5' width='10' height='2.5' rx='0.8' />
-            <rect x='3' y='6.75' width='10' height='2.5' rx='0.8' />
-            <rect x='3' y='10' width='10' height='2.5' rx='0.8' />
-          </>
-        )
-      case '/demos':
-        return (
-          <>
-            <rect x='3' y='3' width='4' height='4' rx='1' />
-            <rect x='9' y='3' width='4' height='4' rx='1' />
-            <rect x='3' y='9' width='4' height='4' rx='1' />
-            <rect x='9' y='9' width='4' height='4' rx='1' />
+            <circle cx='6' cy='6.5' r='2.5' />
+            <circle cx='11' cy='10' r='2.5' />
           </>
         )
     }

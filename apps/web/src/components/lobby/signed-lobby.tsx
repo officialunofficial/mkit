@@ -124,15 +124,19 @@ function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (
 
   return (
     <section className='space-y-3'>
-      <div className='flex items-center gap-2'>
-        <span className='relative flex h-2 w-2' aria-hidden>
-          <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500/60' />
-          <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
-        </span>
-        <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
-        <ChannelSwitcher room={room} onSelect={onSelectChannel} />
-      </div>
+      {/* Header, feed, and composer share one bordered card. The header bar is
+          the visual bookend of the composer footer below it — same
+          `border + px-4 py-3` treatment (a `border-b` here mirroring the
+          footer's `border-t`) so the card reads as a real chat panel. */}
       <div className='overflow-hidden rounded-md border border-hairline'>
+        <div className='flex items-center gap-2 border-b border-hairline px-4 py-3'>
+          <span className='relative flex h-2 w-2' aria-hidden>
+            <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500/60' />
+            <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
+          </span>
+          <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
+          <ChannelSwitcher room={room} onSelect={onSelectChannel} />
+        </div>
         <Feed room={room} items={items} isLoading={isLoading} />
         <Composer room={room} />
       </div>
@@ -459,6 +463,7 @@ function Composer({ room }: { room: string }) {
   const [text, setText] = useState('')
 
   if (!unlocked) {
+    const hint = actions.status ?? (actions.hasPasskey ? null : 'Set up a passkey. No email, no passwords.')
     return (
       <div className='flex flex-wrap items-center gap-3 border-t border-hairline px-4 py-3'>
         <button
@@ -498,7 +503,11 @@ function Composer({ room }: { room: string }) {
             </span>
           )}
         </button>
-        <span className='text-xs text-muted'>{actions.status ?? 'Set up a passkey. No email, no passwords.'}</span>
+        {/* The "set up a passkey" prompt only makes sense for a first-time
+            visitor (button reads "Join to chat"). When they already have a
+            passkey (button reads "Unlock to chat"), drop the static copy and
+            show only a live status message, if any. */}
+        {hint ? <span className='text-xs text-muted'>{hint}</span> : null}
       </div>
     )
   }
