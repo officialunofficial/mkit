@@ -241,12 +241,23 @@ impl<'a> Detector<'a> {
         Ok(&self.keys_cache[&blob])
     }
 
-    /// Per-line origins for a source file, by blaming it at `commit` with
-    /// default options so `-C` never recurses (cached; expensive).
+    /// Per-line origins for a source file, by blaming it at `commit`
+    /// (cached; expensive).
+    ///
+    /// The source blame keeps the *active* `-w` and (effective) `-M` so a
+    /// copied block is credited through a prior whitespace-only edit or
+    /// same-file move in the source — matching git. Only `-C` is dropped,
+    /// which both prevents unbounded recursion and matches git (a copy
+    /// source is blamed without further cross-file copy detection).
     fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
         let key = (commit, path.to_string());
         if !self.attrs_cache.contains_key(&key) {
-            let res = blame_file_with(self.store, commit, path, &BlameOptions::default())?;
+            let source_opts = BlameOptions {
+                ignore_whitespace: self.opts.ignore_whitespace,
+                moves: self.opts.effective_move(),
+                copies: CopyDetection::Off,
+            };
+            let res = blame_file_with(self.store, commit, path, &source_opts)?;
             let attrs = res
                 .lines
                 .into_iter()

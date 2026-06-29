@@ -97,7 +97,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: 'Supports -L line ranges and a [<rev>] argument. Attribution is first-parent only, with no -w / -M / -C and no --porcelain. --format=json carries an mkit Identity, not Name <email>.',
+        note: 'Supports -L line ranges, a [<rev>] argument, -w, and -M/-C move/copy detection. Attribution is first-parent only; no --porcelain. --format=json carries an mkit Identity, not Name <email>.',
       },
       {
         cmd: 'bisect',

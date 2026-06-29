@@ -906,6 +906,88 @@ mod tests {
     }
 
     #[test]
+    fn blame_w_c_credits_copy_through_prior_whitespace_edit() {
+        // Review P1: the copy *source* must be blamed with the active `-w`,
+        // so a copied block traces through a prior whitespace-only edit in
+        // the source file. d1 = indented block; d2 dedents it (ws-only); d3
+        // copies it to b.txt. `git blame -w -C` credits d1, not the d2
+        // reformat. (With BlameOptions::default() for the source blame this
+        // wrongly credited d2.) Verified against real git.
+        let (_d, store) = fresh_store();
+        let indented = {
+            let mut v = Vec::new();
+            for b in [BLOCK_A, BLOCK_B] {
+                v.extend_from_slice(b"    ");
+                v.extend_from_slice(b);
+                v.push(b'\n');
+            }
+            v.extend_from_slice(b"zzz\n");
+            v
+        };
+        let d1 = put_multi_file_commit(&store, &[("a.txt", &indented)], vec![], 1, 100);
+        let dedented = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let d2 = put_multi_file_commit(&store, &[("a.txt", &dedented)], vec![d1], 2, 200);
+        let block = [BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let d3 = put_multi_file_commit(
+            &store,
+            &[("a.txt", b"zzz\n"), ("b.txt", &block)],
+            vec![d2],
+            3,
+            300,
+        );
+
+        let opts = BlameOptions {
+            ignore_whitespace: true,
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, d3, "b.txt", &opts).unwrap();
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == d1),
+            "the source blame keeps -w → credits the original, not the reformat"
+        );
+    }
+
+    #[test]
+    fn blame_c_credits_copy_through_prior_same_file_move() {
+        // Review P1: the copy *source* must be blamed with the implied `-M`,
+        // so a copied block traces through a prior same-file move in the
+        // source. d1 = block then X,Y; d2 moves the block below X,Y; d3
+        // copies it to b.txt. `git blame -C` credits d1, not the d2 move.
+        // (With BlameOptions::default() this wrongly credited d2.) Verified
+        // against real git.
+        let (_d, store) = fresh_store();
+        let v1 = [BLOCK_A, BLOCK_B, b"X", b"Y", b""].join(&b'\n');
+        let d1 = put_multi_file_commit(&store, &[("a.txt", &v1)], vec![], 1, 100);
+        let v2 = [b"X" as &[u8], b"Y", BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let d2 = put_multi_file_commit(&store, &[("a.txt", &v2)], vec![d1], 2, 200);
+        let block = [BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let d3 = put_multi_file_commit(
+            &store,
+            &[("a.txt", b"X\nY\n"), ("b.txt", &block)],
+            vec![d2],
+            3,
+            300,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, d3, "b.txt", &opts).unwrap();
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == d1),
+            "the source blame keeps implied -M → credits the original, not the move"
+        );
+    }
+
+    #[test]
     fn blame_single_commit_attributes_all_lines_to_it() {
         let (_d, store) = fresh_store();
         let c = put_file_commit(&store, "f.txt", b"l1\nl2\nl3\n", vec![], 42, 1000);
