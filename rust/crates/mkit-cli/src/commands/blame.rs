@@ -200,7 +200,7 @@ pub fn run(args: &[String]) -> u8 {
     // `--reverse` walks forward over a `<start>..<end>` range; plain blame
     // walks backward from a single `<rev>` (or HEAD).
     let result = if opts.reverse {
-        let (start, end) = match resolve_reverse_range(&store, &mkit_dir, rev_spec) {
+        let (start, end) = match resolve_reverse_range(&store, &mkit_dir, rev_spec, file) {
             Ok(pair) => pair,
             Err((msg, code)) => return emit_err(&msg, code),
         };
@@ -314,7 +314,12 @@ fn collect_ignore_revs(
 
 /// Resolve the `--reverse` `<start>..<end>` range argument into a pair of
 /// commit hashes. `<start>..` defaults `<end>` to HEAD. A missing range, a
-/// bare revision (no `..`), or an empty `<start>` is a usage error.
+/// bare revision (no `..`), an empty `<start>`, a triple-dot/extra-dot
+/// range, or an empty range (`start == end`) is a usage error.
+///
+/// `file` is only used to sharpen the no-range diagnostic: if the single
+/// positional looks like the range itself (`a..b`), the file was likely
+/// forgotten.
 ///
 /// git's diagnostics here (`No commit to dig up from?`, `More than one
 /// commit to dig up from, X and Y?`) are cryptic; mkit names the concrete
@@ -324,8 +329,19 @@ fn resolve_reverse_range(
     store: &ObjectStore,
     mkit_dir: &std::path::Path,
     rev_spec: Option<&String>,
+    file: &str,
 ) -> Result<(Hash, Hash), (String, u8)> {
     let Some(spec) = rev_spec else {
+        // A lone `a..b` positional is parsed as the *file*; the user most
+        // likely supplied the range but omitted the filename.
+        if file.contains("..") {
+            return Err((
+                format!(
+                    "--reverse: missing <file> (got only '{file}', which looks like the range)"
+                ),
+                exit::USAGE,
+            ));
+        }
         return Err((
             "--reverse requires a <start>..<end> revision range".to_string(),
             exit::USAGE,
@@ -337,6 +353,15 @@ fn resolve_reverse_range(
             exit::USAGE,
         ));
     };
+    // Reject git's triple-dot symmetric range and any extra `..`: blame
+    // takes a single two-dot range. (`a...b` splits to end `.b`; `a..b..c`
+    // to end `b..c`.)
+    if end_str.starts_with('.') || end_str.contains("..") {
+        return Err((
+            format!("--reverse requires a single <start>..<end> range, got '{spec}'"),
+            exit::USAGE,
+        ));
+    }
     if start_str.is_empty() {
         return Err((
             "--reverse requires an explicit <start> revision".to_string(),
@@ -356,6 +381,13 @@ fn resolve_reverse_range(
         revspec::resolve_revision(store, mkit_dir, end_str)
             .map_err(|e| (format!("{e}"), exit::NOINPUT))?
     };
+    // An empty range (`start == end`) has nothing to walk; git rejects it.
+    if start == end {
+        return Err((
+            format!("--reverse: empty revision range '{spec}'"),
+            exit::USAGE,
+        ));
+    }
     Ok((start, end))
 }
 

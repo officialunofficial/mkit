@@ -14,8 +14,8 @@
 //! [`format_blame_text`].
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::hash::{self, Hash};
 use crate::object::{EntryMode, Identity, Object};
@@ -510,6 +510,11 @@ fn collect_reverse_chain(
 /// survival via the LCS matcher only, so those detection options do not
 /// apply here (the CLI rejects the combination).
 ///
+/// An empty range (`start_hash == end_hash`) has no step to walk, so every
+/// line is attributed to `start`. git rejects an empty range outright; the
+/// CLI does too (`resolve_reverse_range`), so this only surfaces for direct
+/// core callers.
+///
 /// # Errors
 /// - [`BlameError::ReverseRange`] if `<start>` is not a first-parent
 ///   ancestor of `<end>`.
@@ -538,13 +543,16 @@ pub fn blame_file_reverse(
     // begins at `start` and advances forward as the line survives.
     let mut cur_idx: Vec<Option<usize>> = (0..start_lines.len()).map(Some).collect();
     let mut attributions: Vec<Attribution> = vec![Attribution::from(&chain[0]); start_lines.len()];
+    // Count of still-alive lines, so the dead-everything early-exit is O(1)
+    // per step instead of rescanning `cur_idx`.
+    let mut live = start_lines.len();
 
     let mut prev_blob = start_blob;
     let mut prev_lines = start_lines.clone();
     for entry in &chain[1..] {
         // Every start line is dead and a dead line never resurrects, so
         // there is nothing left to attribute — stop walking the range.
-        if cur_idx.iter().all(Option::is_none) {
+        if live == 0 {
             break;
         }
         let newer_attr = Attribution::from(entry);
@@ -552,6 +560,7 @@ pub fn blame_file_reverse(
             // File absent here: every still-alive line is last seen at the
             // previous commit. Once dead a line never resurrects.
             cur_idx.fill(None);
+            live = 0;
             continue;
         };
         if blob == prev_blob {
@@ -575,15 +584,15 @@ pub fn blame_file_reverse(
         }
         for (j, c) in cur_idx.iter_mut().enumerate() {
             if let Some(p) = *c {
-                match prev_to_new.get(p).copied().flatten() {
+                if let Some(q) = prev_to_new.get(p).copied().flatten() {
                     // Line survives into this commit: advance attribution.
-                    Some(q) => {
-                        *c = Some(q);
-                        attributions[j] = newer_attr.clone();
-                    }
+                    *c = Some(q);
+                    attributions[j] = newer_attr.clone();
+                } else {
                     // Line is gone here: it was last seen at the previous
                     // commit, so its attribution stays put.
-                    None => *c = None,
+                    *c = None;
+                    live -= 1;
                 }
             }
         }
@@ -1823,7 +1832,14 @@ mod tests {
         let mid: &[u8] = b"MIDLINE";
         let x_v0: &[u8] = b"exoldbbbbbbbbbbbbbbb";
         let x_v1: &[u8] = b"exnewbbbbbbbbbbbbbbb";
-        let c0 = put_file_commit(&store, "f.txt", &[dup, mid, x_v0, b""].join(&b'\n'), vec![], 1, 100);
+        let c0 = put_file_commit(
+            &store,
+            "f.txt",
+            &[dup, mid, x_v0, b""].join(&b'\n'),
+            vec![],
+            1,
+            100,
+        );
         // c1 changes the last line (origin → c1); `dup`/`mid` keep origin c0.
         let c1 = put_file_commit(
             &store,
@@ -1855,7 +1871,10 @@ mod tests {
         );
         // Sanity: plain --ignore-rev (no -M) gives the same line-2 origin.
         let plain = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
-        assert_eq!(plain.lines[2].commit_hash, c1, "-M did not change the result");
+        assert_eq!(
+            plain.lines[2].commit_hash, c1,
+            "-M did not change the result"
+        );
     }
 
     #[test]

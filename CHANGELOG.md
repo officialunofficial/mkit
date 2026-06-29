@@ -67,11 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit `<start>` is required, and `-w`/`-L` compose with it. Verified
   field-by-field against real `git blame --reverse` (survivors → end,
   removed/modified lines freeze at their last commit, unchanged commits
-  advance attribution, file-absence kills a line). Two deliberate
-  divergences: mkit reports a clear error for a missing range or open
-  `<start>` where git prints a cryptic "dig up from" message, and a line
-  that never survives a step is shown without git's leading `^` boundary
-  marker (mkit's tab format has no `^`).
+  advance attribution, file-absence kills a line). Deliberate divergences:
+  mkit reports a clear error for a missing / malformed / empty range or open
+  `<start>` where git prints a cryptic "dig up from" message; a line that
+  never survives a step is shown without git's leading `^` boundary marker
+  (mkit's tab format has no `^`); and the range is followed along `<end>`'s
+  **first-parent** chain only (mkit blame is first-parent only — a `<start>`
+  reached solely through a merge's second parent errors rather than
+  resolving; the full-history walk in #458 would lift this).
 
 ### Removed
 

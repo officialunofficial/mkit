@@ -873,6 +873,65 @@ fn blame_reverse_requires_a_range() {
 }
 
 #[test]
+fn blame_reverse_rejects_malformed_and_empty_ranges() {
+    // Review: triple-dot / extra-dot, an omitted file, and an empty range
+    // each get a clear error instead of a cryptic revspec failure or a
+    // silent success.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\n", "c2");
+    let c2 = head_hash(td.path());
+
+    // Triple-dot (git's symmetric range) is not supported.
+    let triple = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("{c1}...{c2}"), "f.txt"],
+    );
+    assert!(!triple.status.success());
+    assert!(
+        String::from_utf8(triple.stderr)
+            .unwrap()
+            .contains("single <start>..<end>"),
+        "expected a clear triple-dot error"
+    );
+    // Extra `..` (a..b..c).
+    let extra = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("{c1}..{c2}..{c1}"), "f.txt"],
+    );
+    assert!(!extra.status.success());
+    assert!(
+        String::from_utf8(extra.stderr)
+            .unwrap()
+            .contains("single <start>..<end>"),
+        "expected a clear extra-dot error"
+    );
+    // File omitted: the lone `a..b` positional is swallowed as the filename.
+    let no_file = run_in(td.path(), &["blame", "--reverse", &format!("{c1}..{c2}")]);
+    assert!(!no_file.status.success());
+    assert!(
+        String::from_utf8(no_file.stderr)
+            .unwrap()
+            .contains("missing <file>"),
+        "expected a missing-file hint, not a bogus range error"
+    );
+    // Empty range (start == end) is rejected, matching git.
+    let empty = run_in(
+        td.path(),
+        &["blame", "--reverse", &format!("{c1}..{c1}"), "f.txt"],
+    );
+    assert!(!empty.status.success());
+    assert!(
+        String::from_utf8(empty.stderr)
+            .unwrap()
+            .contains("empty revision range"),
+        "expected an empty-range error"
+    );
+}
+
+#[test]
 fn blame_reverse_rejects_detection_flags() {
     // `--reverse` resolves survival via the LCS matcher only, so combining
     // it with -M/-C or --ignore-rev is rejected rather than silently
