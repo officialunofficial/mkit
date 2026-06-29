@@ -31,10 +31,16 @@ gen_paths=(
 bash scripts/regen-rpc-proto.sh
 bash scripts/regen-repo-proto.sh
 
-if ! git diff --quiet -- "${gen_paths[@]}"; then
+# `git status --porcelain` (not `git diff`) so the check catches ADDED and
+# DELETED generated files too, not just modifications: the regen scripts
+# `rm -f */*.rs` then re-`cp`, so a brand-new codegen module lands untracked —
+# which `git diff` would silently miss. Fail on any add/delete/modify.
+drift="$(git status --porcelain -- "${gen_paths[@]}")"
+if [ -n "${drift}" ]; then
     echo "::error::Vendored generated code is STALE. Run scripts/regen-rpc-proto.sh and scripts/regen-repo-proto.sh, then commit the result." >&2
     echo >&2
-    git --no-pager diff --stat -- "${gen_paths[@]}" >&2
+    echo "Drift detected in vendored codegen:" >&2
+    echo "${drift}" >&2
     exit 1
 fi
 
