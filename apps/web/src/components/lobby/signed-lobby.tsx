@@ -10,8 +10,10 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
-import { useEffect, useRef as useReactRef, useState } from 'react'
+import { type ReactNode, useEffect, useMemo, useRef as useReactRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
+import { usePresence } from '../../lib/presence-store'
 import {
   type FeedItem,
   MAX_MESSAGE_CHARS,
@@ -20,15 +22,27 @@ import {
   isForkRef,
   useLobbyEvents,
   useLobbyFeed,
+  useObject,
   usePostMessage,
   useReactions,
   useResolvedRepoBackend,
   useToggleReaction,
 } from '../../lib/repo-api'
+import { CopyButton } from '../copy-button'
 import { useIdentityActions } from '../use-identity-actions'
 import { useMkit } from '../use-mkit'
 import { PlayerAvatar, PlayerLabel } from '../multiplayer/player-label'
 import { BTN, FOCUS_RING, HOVER_BORDER, PRIMARY_BTN, errMsg } from '../multiplayer/shared'
+
+/** A live, client-only presence notice spliced into the feed (not a server object). */
+type SystemNoticeItem = { kind: 'system'; sysKind: 'left' | 'viewer'; pubkey: string; ts: number; key: string }
+/** The commit variant of a feed item, narrowed for the notice + drawer. */
+type CommitItem = Extract<FeedItem, { kind: 'commit' }>
+/** Everything the feed renders: real feed items plus ephemeral presence notices. */
+type RenderItem = FeedItem | SystemNoticeItem
+
+/** How long to wait after a member drops before classifying it (lock reconnects as a viewer a beat later). */
+const PRESENCE_DEBOUNCE_MS = 900
 
 /** Message length cap — the SAME shared constant the server enforces. */
 const MAX_CHARS = MAX_MESSAGE_CHARS
@@ -42,16 +56,6 @@ const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅',
 
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
-
-/** The Ed25519 pubkey that authored a feed item (chat author or commit author). */
-function authorOf(item: FeedItem): string {
-  return item.kind === 'chat' ? item.message.authorPubkeyHex : item.entry.authorPubkey
-}
-
-/** The reaction target id for a feed item — its hex id (message id or commit hash). */
-function targetIdOf(item: FeedItem): string {
-  return item.kind === 'chat' ? item.message.messageIdHex : item.entry.hash
-}
 
 /**
  * Channels the lobby can switch between — each is its own room (own feed + live stream), so the header reads as a real
@@ -121,6 +125,16 @@ function ChannelSwitcher({ room, onSelect }: { room: string; onSelect: (channel:
 function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (channel: string) => void }) {
   useLobbyEvents(room)
   const { items, isLoading } = useLobbyFeed(room, 'main')
+  const presenceNotices = usePresenceNotices(room)
+  // The commit whose detail drawer is open (null = closed).
+  const [openCommit, setOpenCommit] = useState<CommitItem | null>(null)
+
+  // Splice the live presence notices into the feed and re-sort by timestamp.
+  // Notices carry a "now" ts, so they land at the bottom as they happen.
+  const rendered = useMemo<RenderItem[]>(
+    () => [...items, ...presenceNotices].sort((a, b) => a.ts - b.ts),
+    [items, presenceNotices],
+  )
 
   return (
     <section className='space-y-3'>
@@ -137,14 +151,97 @@ function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (
           <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
           <ChannelSwitcher room={room} onSelect={onSelectChannel} />
         </div>
-        <Feed room={room} items={items} isLoading={isLoading} />
+        <Feed room={room} items={rendered} isLoading={isLoading} onOpenCommit={setOpenCommit} />
         <Composer room={room} />
       </div>
+      {openCommit ? <CommitDrawer room={room} item={openCommit} onClose={() => setOpenCommit(null)} /> : null}
     </section>
   )
 }
 
-function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isLoading: boolean }) {
+/**
+ * Watches the room roster and emits ephemeral "left the chat" / "is now viewing only" notices for departing members.
+ *
+ * Presence only exposes the current roster (named `members` + an anonymous `viewers` count), so a member dropping is
+ * detected by diffing successive rosters. Distinguishing a true disconnect from a lock (which reconnects a beat later
+ * as a viewer) needs a short debounce: when a member disappears we wait {@link PRESENCE_DEBOUNCE_MS}, then — if they
+ * haven't returned as a member — classify by whether the viewer count went UP (→ became viewer-only) or not (→ left).
+ * It's a heuristic (viewers are anonymous), good enough for a live feed; our own key is never narrated.
+ */
+function usePresenceNotices(room: string): SystemNoticeItem[] {
+  const presence = usePresence(room)
+  const myPubkey = useIdentityStore((s) => s.ed25519PubkeyHex)
+  const [notices, setNotices] = useState<SystemNoticeItem[]>([])
+
+  // Latest roster for the timers to read when they fire.
+  const presenceRef = useReactRef(presence)
+  presenceRef.current = presence
+  const prevMembersRef = useReactRef<Set<string> | null>(null)
+  const timersRef = useReactRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  useEffect(() => {
+    const current = new Set(presence.members.map((m) => m.pubkeyHex))
+    const prev = prevMembersRef.current
+    if (prev) {
+      // Anyone who reappeared as a member cancels their pending classification.
+      for (const pk of current) {
+        const t = timersRef.current.get(pk)
+        if (t) {
+          clearTimeout(t)
+          timersRef.current.delete(pk)
+        }
+      }
+      const viewersAtDeparture = presence.viewers
+      for (const pk of prev) {
+        if (current.has(pk) || pk === myPubkey || timersRef.current.has(pk)) continue
+        const timer = setTimeout(() => {
+          timersRef.current.delete(pk)
+          const snap = presenceRef.current
+          if (snap.members.some((m) => m.pubkeyHex === pk)) return // came back as a member
+          const becameViewer = snap.viewers > viewersAtDeparture
+          const firedAt = Date.now()
+          setNotices((list) =>
+            [
+              ...list,
+              {
+                kind: 'system' as const,
+                sysKind: becameViewer ? ('viewer' as const) : ('left' as const),
+                pubkey: pk,
+                ts: firedAt,
+                key: `sys:${pk}:${firedAt}`,
+              },
+            ].slice(-50),
+          )
+        }, PRESENCE_DEBOUNCE_MS)
+        timersRef.current.set(pk, timer)
+      }
+    }
+    prevMembersRef.current = current
+  }, [presence, myPubkey, presenceRef, prevMembersRef, timersRef])
+
+  // Clear any pending timers on unmount.
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+    }
+  }, [timersRef])
+
+  return notices
+}
+
+function Feed({
+  room,
+  items,
+  isLoading,
+  onOpenCommit,
+}: {
+  room: string
+  items: RenderItem[]
+  isLoading: boolean
+  onOpenCommit: (item: CommitItem) => void
+}) {
   const scrollRef = useReactRef<HTMLDivElement>(null)
   const [atBottom, setAtBottom] = useState(true)
   const atBottomRef = useReactRef(true)
@@ -234,8 +331,6 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
               const item = items[vrow.index]
               if (!item) return null
               const prev = vrow.index > 0 ? items[vrow.index - 1] : undefined
-              const grouped =
-                !!prev && authorOf(prev) === authorOf(item) && item.ts >= prev.ts && item.ts - prev.ts < GROUP_WINDOW_MS
               return (
                 <div
                   key={vrow.key}
@@ -249,15 +344,29 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
                     transform: `translateY(${vrow.start}px)`,
                   }}
                 >
-                  <Row
-                    item={item}
-                    grouped={grouped}
-                    reactions={reactionsFor(targetIdOf(item))}
-                    canReact={unlocked}
-                    onToggle={(emoji) =>
-                      unlocked ? toggle.mutate({ targetId: targetIdOf(item), emoji }) : onNeedIdentity()
-                    }
-                  />
+                  {item.kind === 'system' ? (
+                    <SystemNotice notice={item} />
+                  ) : item.kind === 'commit' ? (
+                    <CommitNotice item={item} onOpen={() => onOpenCommit(item)} />
+                  ) : (
+                    <Row
+                      item={item}
+                      // Group only consecutive chat messages from the same author within the window —
+                      // commits and presence notices break a run.
+                      grouped={
+                        !!prev &&
+                        prev.kind === 'chat' &&
+                        prev.message.authorPubkeyHex === item.message.authorPubkeyHex &&
+                        item.ts >= prev.ts &&
+                        item.ts - prev.ts < GROUP_WINDOW_MS
+                      }
+                      reactions={reactionsFor(item.message.messageIdHex)}
+                      canReact={unlocked}
+                      onToggle={(emoji) =>
+                        unlocked ? toggle.mutate({ targetId: item.message.messageIdHex, emoji }) : onNeedIdentity()
+                      }
+                    />
+                  )}
                 </div>
               )
             })}
@@ -282,7 +391,8 @@ function Feed({ room, items, isLoading }: { room: string; items: FeedItem[]; isL
 /**
  * One chat-style feed row: full header (avatar + name + time) for a run's first message; a tight, indented continuation
  * when `grouped` (timestamp shows on hover). The add-reaction trigger sits inline at the end of the content line
- * (hover-revealed); any existing reaction pills sit on their own line below.
+ * (hover-revealed); any existing reaction pills sit on their own line below. Commits and presence notices render via
+ * their own components ({@link CommitNotice}, {@link SystemNotice}), not here.
  */
 function Row({
   item,
@@ -291,26 +401,14 @@ function Row({
   canReact,
   onToggle,
 }: {
-  item: FeedItem
+  item: Extract<FeedItem, { kind: 'chat' }>
   grouped: boolean
   reactions: ReactionAgg[]
   canReact: boolean
   onToggle: (emoji: string) => void
 }) {
-  const pubkey = authorOf(item)
+  const pubkey = item.message.authorPubkeyHex
   const time = fmtTime(item.ts)
-  const body =
-    item.kind === 'chat' ? (
-      <p className='break-words whitespace-pre-wrap text-fg'>{item.message.text}</p>
-    ) : (
-      // Commit lines read as secondary to chat messages — smaller than the
-      // row's base `text-sm`.
-      <p className='text-[11px] leading-snug text-muted'>
-        pushed <code className='font-mono text-fg'>{item.entry.hash.slice(0, 10)}</code> to{' '}
-        <code className='font-mono text-fg'>{item.entry.ref}</code>
-        {item.entry.message ? <span className='text-muted'> — “{item.entry.message}”</span> : null}
-      </p>
-    )
 
   return (
     <div
@@ -331,21 +429,64 @@ function Row({
             <time title={time.title} className='shrink-0 text-xs text-muted tabular-nums'>
               {time.clock}
             </time>
-            {item.kind === 'commit' ? (
-              <span className='rounded-sm border border-hairline px-1 text-[10px] uppercase tracking-wide text-muted'>
-                {isForkRef(item.entry.ref) ? 'fork' : 'commit'}
-              </span>
-            ) : null}
           </div>
         )}
         <div className={grouped ? '' : 'mt-0.5'}>
           <div className='flex items-start gap-2'>
-            <div className='min-w-0 flex-1'>{body}</div>
+            <div className='min-w-0 flex-1'>
+              <p className='break-words whitespace-pre-wrap text-fg'>{item.message.text}</p>
+            </div>
             <AddReaction onToggle={onToggle} />
           </div>
         </div>
         {reactions.length > 0 ? <ReactionPills reactions={reactions} canReact={canReact} onToggle={onToggle} /> : null}
       </div>
+    </div>
+  )
+}
+
+/**
+ * A commit/fork in the feed, styled like a chat SYSTEM message: centered, small text, a small avatar — visually
+ * distinct from a person's chat message. The whole line is a button that opens the commit-detail drawer.
+ */
+function CommitNotice({ item, onOpen }: { item: CommitItem; onOpen: () => void }) {
+  const e = item.entry
+  const time = fmtTime(item.ts)
+  const fork = isForkRef(e.ref)
+  return (
+    <div className='px-4 py-1.5'>
+      <button
+        type='button'
+        onClick={onOpen}
+        title='View commit details'
+        className='group/sys mx-auto flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-2 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+      >
+        <PlayerAvatar pubkey={e.authorPubkey} size={16} />
+        <PlayerLabel pubkey={e.authorPubkey} className='font-medium text-fg' />
+        <span>{fork ? 'forked' : 'pushed'}</span>
+        <code className='font-mono text-fg'>{e.hash.slice(0, 10)}</code>
+        <span>to</span>
+        <code className='font-mono text-fg'>{e.ref}</code>
+        {e.message ? <span className='truncate'>— “{e.message}”</span> : null}
+        <time className='tabular-nums opacity-70' title={time.title}>
+          {time.clock}
+        </time>
+        <span aria-hidden className='opacity-0 transition-opacity group-hover/sys:opacity-70'>
+          ›
+        </span>
+      </button>
+    </div>
+  )
+}
+
+/** A live presence notice (left / became viewer-only), centered and quiet — the lightest row in the feed. */
+function SystemNotice({ notice }: { notice: SystemNoticeItem }) {
+  return (
+    <div className='px-4 py-1'>
+      <p className='mx-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 text-center text-[11px] text-muted'>
+        <PlayerLabel pubkey={notice.pubkey} className='font-medium' />
+        {notice.sysKind === 'left' ? 'left the chat' : 'is now viewing only'}
+      </p>
     </div>
   )
 }
@@ -567,6 +708,246 @@ function Composer({ room }: { room: string }) {
       </p>
     </div>
   )
+}
+
+/**
+ * Right-sliding drawer with the full commit object: identity, message, branch, hashes, parents, tree, signature, and
+ * (for a remix) its sources — plus reactions. The feed entry carries the basics; the richer fields (parents, tree,
+ * signature, exact time) come from decoding the raw object bytes (`useObject` → `commit_decode`/`remix_decode`).
+ * Rendered through a portal over a backdrop; Escape or a backdrop click closes it.
+ */
+function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem; onClose: () => void }) {
+  const api = useMkit()
+  const e = item.entry
+  const obj = useObject(room, e.hash)
+  const decoded = useMemo(() => decodeCommitDetails(api, obj.data ?? null), [api, obj.data])
+
+  const unlocked = useIdentityStore((s) => s.unlocked)
+  const myPubkey = useIdentityStore((s) => s.ed25519PubkeyHex)
+  const actions = useIdentityActions()
+  const reactionsFor = useReactions(room, myPubkey ?? undefined)
+  const toggle = useToggleReaction(room, myPubkey ?? undefined)
+  const reactions = reactionsFor(e.hash)
+  const onToggle = (emoji: string) =>
+    unlocked
+      ? toggle.mutate({ targetId: e.hash, emoji })
+      : void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())
+
+  // Mount → slide in. Escape closes; lock body scroll while open.
+  const [shown, setShown] = useState(false)
+  useEffect(() => {
+    setShown(true)
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [onClose])
+
+  const fork = isForkRef(e.ref)
+  const timestamp = decoded ? decoded.timestampMs : Date.parse(e.createdAt)
+
+  return createPortal(
+    <div className='fixed inset-0 z-[60]'>
+      <button
+        type='button'
+        aria-label='Close commit details'
+        onClick={onClose}
+        className={`absolute inset-0 bg-black/30 transition-opacity duration-300 ${shown ? 'opacity-100' : 'opacity-0'}`}
+      />
+      <aside
+        role='dialog'
+        aria-modal='true'
+        aria-label='Commit details'
+        className={`absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${shown ? 'translate-x-0' : 'translate-x-full'}`}
+      >
+        <header className='flex items-center justify-between gap-3 border-b border-hairline px-4 py-3'>
+          <h2 className='text-sm font-semibold'>{e.kind === 'remix' ? 'Remix' : 'Commit'} details</h2>
+          <button
+            type='button'
+            onClick={onClose}
+            aria-label='Close'
+            className='-m-1.5 inline-flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+          >
+            <svg
+              width='16'
+              height='16'
+              viewBox='0 0 16 16'
+              fill='none'
+              stroke='currentColor'
+              strokeWidth='1.5'
+              strokeLinecap='round'
+              aria-hidden
+            >
+              <path d='M4 4 L12 12 M12 4 L4 12' />
+            </svg>
+          </button>
+        </header>
+
+        <div className='flex-1 space-y-5 overflow-y-auto px-4 py-4 text-sm'>
+          <div className='flex items-center gap-2'>
+            <PlayerAvatar pubkey={e.authorPubkey} size={28} />
+            <div className='min-w-0'>
+              <PlayerLabel pubkey={e.authorPubkey} className='block font-medium' />
+              <code className='block truncate font-mono text-xs text-muted'>{e.authorPubkey}</code>
+            </div>
+          </div>
+
+          <DrawerField label='Message'>
+            <p className='whitespace-pre-wrap break-words text-fg'>
+              {e.message || <span className='text-muted'>(no message)</span>}
+            </p>
+          </DrawerField>
+
+          <DrawerField label='Branch'>
+            <span className='inline-flex items-center gap-2'>
+              <code className='font-mono text-fg'>{e.ref}</code>
+              <span className='rounded-sm border border-hairline px-1 text-[10px] uppercase tracking-wide text-muted'>
+                {fork ? 'fork' : e.kind === 'remix' ? 'remix' : 'commit'}
+              </span>
+            </span>
+          </DrawerField>
+
+          {Number.isFinite(timestamp) && timestamp > 0 ? (
+            <DrawerField label='When'>
+              <time>{new Date(timestamp).toLocaleString()}</time>
+            </DrawerField>
+          ) : null}
+
+          <DrawerHash label='Commit hash' value={e.hash} />
+          {decoded?.tree ? <DrawerHash label='Tree' value={decoded.tree} /> : null}
+          {decoded && decoded.parents.length > 0 ? (
+            <DrawerField label={decoded.parents.length > 1 ? 'Parents' : 'Parent'}>
+              <div className='space-y-1'>
+                {decoded.parents.map((p) => (
+                  <code key={p} className='block break-all font-mono text-xs text-muted'>
+                    {p}
+                  </code>
+                ))}
+              </div>
+            </DrawerField>
+          ) : null}
+          {e.sources && e.sources.length > 0 ? (
+            <DrawerField label='Remixed from'>
+              <div className='space-y-1'>
+                {e.sources.map((s) => (
+                  <code key={s.commitHashHex} className='block break-all font-mono text-xs text-muted'>
+                    {s.commitHashHex}
+                  </code>
+                ))}
+              </div>
+            </DrawerField>
+          ) : null}
+          {decoded?.signature ? <DrawerHash label='Signature' value={decoded.signature} /> : null}
+
+          <DrawerField label='Reactions'>
+            <div className='flex flex-wrap items-center gap-1.5'>
+              {reactions.length > 0 ? (
+                <ReactionPills reactions={reactions} canReact={unlocked} onToggle={onToggle} />
+              ) : (
+                <span className='text-xs text-muted'>No reactions yet.</span>
+              )}
+              <DrawerAddReaction onToggle={onToggle} />
+            </div>
+          </DrawerField>
+
+          {!decoded && obj.isLoading ? <p className='text-xs text-muted'>Loading commit object…</p> : null}
+        </div>
+      </aside>
+    </div>,
+    document.body,
+  )
+}
+
+/** Label-over-value block used throughout the commit drawer. */
+function DrawerField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className='space-y-1'>
+      <div className='text-xs text-muted'>{label}</div>
+      <div>{children}</div>
+    </div>
+  )
+}
+
+/** A drawer field whose value is a full hex id, with a copy button. */
+function DrawerHash({ label, value }: { label: string; value: string }) {
+  return (
+    <div className='space-y-1'>
+      <div className='text-xs text-muted'>{label}</div>
+      <div className='flex items-start gap-2'>
+        <code className='min-w-0 flex-1 break-all font-mono text-xs text-fg'>{value}</code>
+        <CopyButton text={value} />
+      </div>
+    </div>
+  )
+}
+
+/** Always-visible add-reaction control for the drawer (the feed's hover-only one would be invisible here). */
+function DrawerAddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type='button'
+          className={`inline-flex h-6 items-center gap-1 rounded-full border border-hairline bg-muted/5 px-2 text-xs text-muted ${HOVER_BORDER} hover:text-fg active:scale-[0.96]`}
+        >
+          + React
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side='top'
+          align='start'
+          sideOffset={6}
+          collisionPadding={8}
+          onCloseAutoFocus={(ev) => ev.preventDefault()}
+          // Above the drawer (z-60).
+          className='z-[70] flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
+        >
+          {REACTION_EMOJI.map((em) => (
+            <button
+              key={em}
+              type='button'
+              onClick={() => {
+                onToggle(em)
+                setOpen(false)
+              }}
+              className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+            >
+              {em}
+            </button>
+          ))}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  )
+}
+
+/** Decode the rich commit/remix fields (parents, tree, signature, timestamp) from raw object bytes; null on any error. */
+function decodeCommitDetails(
+  api: ReturnType<typeof useMkit>,
+  bytes: Uint8Array | null,
+): { tree: string; signature: string; parents: string[]; timestampMs: number } | null {
+  if (!bytes) return null
+  try {
+    const kind = api.object_kind(bytes)
+    const info = kind === 'remix' ? api.remix_decode(bytes) : kind === 'commit' ? api.commit_decode(bytes) : null
+    if (!info) return null
+    const parents: string[] = []
+    for (let i = 0; i < info.parent_count; i++) {
+      const p = info.parent(i)
+      if (p) parents.push(p)
+    }
+    return { tree: info.tree_hex, signature: info.signature_hex, parents, timestampMs: Number(info.timestamp) * 1000 }
+  } catch {
+    return null
+  }
 }
 
 /**
