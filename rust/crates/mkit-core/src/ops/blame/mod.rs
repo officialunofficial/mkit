@@ -723,6 +723,40 @@ mod tests {
     }
 
     #[test]
+    fn blame_m_threshold_boundary_is_inclusive() {
+        // Boundary: git's `-M<n>` is a *lower bound* (n-or-more alnum
+        // chars), so a block of exactly the threshold is detected and one
+        // char short is not. `exact` has exactly 20 alnum chars, `short` 19.
+        // They are kept non-adjacent (separated by anchors / a new line) so
+        // each is an independent single-line block, not one merged block.
+        // Verified against real `git blame -M`.
+        let (_d, store) = fresh_store();
+        let exact: &[u8] = b"abcdefghijklmnopqrst"; // 20 alnum
+        let short: &[u8] = b"abcdefghijklmnopqrs"; // 19 alnum
+        let v1 = [exact, b"MID", short, b"B", b"C", b""].join(&b'\n');
+        let v2 = [b"B" as &[u8], b"C", exact, b"NEWX", short, b""].join(&b'\n');
+        let c_a = put_file_commit(&store, "f.txt", &v1, vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", &v2, vec![c_a], 2, 200);
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ..Default::default()
+        };
+        let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        // Child order: B, C, exact, NEWX, short.
+        assert_eq!(m.lines[2].text, exact);
+        assert_eq!(
+            m.lines[2].commit_hash, c_a,
+            "exactly-threshold (20) move is detected (>= is inclusive)"
+        );
+        assert_eq!(m.lines[4].text, short);
+        assert_eq!(
+            m.lines[4].commit_hash, c_b,
+            "one char short of the threshold stays on the editing commit"
+        );
+    }
+
+    #[test]
     fn blame_m_ignores_moves_below_threshold() {
         // A short moved line (1 alnum char) is below the threshold, so even
         // with -M it stays on the editing commit — matching git, which does

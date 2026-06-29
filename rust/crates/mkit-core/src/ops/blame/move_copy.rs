@@ -37,6 +37,7 @@ use super::{
 };
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object};
+use crate::ops::diff::diff_trees;
 use crate::store::ObjectStore;
 
 /// Past this many unmatched lines in one run, only the whole run is tried
@@ -210,8 +211,10 @@ impl<'a> Detector<'a> {
             }
             BlockSource::Copy { path, offset } => {
                 // Blame the winning source file once to get its origins.
-                let attrs = self.candidate_attrs(ctx.source_commit, path)?.to_vec();
-                copy_origins(out, s, e - s, &attrs, *offset);
+                // The cached slice and `out` never alias, so borrow it
+                // directly rather than cloning the whole vector per block.
+                let attrs = self.candidate_attrs(ctx.source_commit, path)?;
+                copy_origins(out, s, e - s, attrs, *offset);
             }
         }
         Ok(())
@@ -344,6 +347,13 @@ fn copy_origins(
 
 /// Longest prefix of `needle` that occurs contiguously in `hay`, using
 /// `index` (key → offsets) to find candidate starts, plus the offset.
+///
+/// Divergence: when an identical block occurs at several offsets in the
+/// same source, the **earliest** offset wins the length tie (`build_index`
+/// records offsets ascending and this keeps the first maximal match). git
+/// tracks line identity through its diff and may land on a different copy;
+/// for block-based detection the earliest deterministic offset is the
+/// documented choice (see the cross-file tie-break note in CHANGELOG).
 fn longest_match(needle: &[Vec<u8>], hay: &[Vec<u8>], index: &KeyIndex) -> Option<(usize, usize)> {
     let first = needle.first()?;
     let offsets = index.get(first)?;
@@ -404,6 +414,12 @@ fn unmatched_runs(mask: &[bool]) -> Vec<Range<usize>> {
 /// files whose blob differs between the parent (`older`) and child
 /// (`newer`) commit (the files "changed in the commit"); level >= 2 =
 /// every file in the parent commit. The blamed path is always excluded.
+///
+/// Built on the canonical [`diff_trees`] differ, so it inherits the shared
+/// `MAX_TREE_DEPTH` guard and the hash-equal-subtree pruning (it does not
+/// re-flatten the whole tree on every ancestor step). Level >= 2 diffs the
+/// parent tree against the empty tree, enumerating every parent blob as a
+/// `Removed` entry that carries its hash.
 fn copy_candidates(
     store: &ObjectStore,
     older: Hash,
@@ -411,19 +427,37 @@ fn copy_candidates(
     target_path: &str,
     level: u8,
 ) -> BlameOutcome<Vec<(String, Hash)>> {
-    let older_blobs = commit_blobs(store, older)?;
-    if level >= 2 {
-        return Ok(older_blobs
-            .into_iter()
-            .filter(|(p, _)| p != target_path)
-            .collect());
-    }
-    let newer_blobs = commit_blobs(store, newer)?;
-    let newer_map: HashMap<&str, Hash> =
-        newer_blobs.iter().map(|(p, h)| (p.as_str(), *h)).collect();
-    Ok(older_blobs
+    let older_tree = commit_tree(store, older)?;
+    let entries = if level >= 2 {
+        diff_trees(store, Some(older_tree), None)?.entries
+    } else {
+        let newer_tree = commit_tree(store, newer)?;
+        diff_trees(store, Some(older_tree), Some(newer_tree))?.entries
+    };
+    Ok(entries
         .into_iter()
-        .filter(|(p, h)| p != target_path && newer_map.get(p.as_str()) != Some(h))
+        .filter_map(|e| {
+            // The copy source is the *parent* version: its content must be
+            // present in `older` and actually differ in the child (so a
+            // mode-only change is not a copy source). `diff_trees` doesn't
+            // emit renames, so `path` is the parent path.
+            let hash = e.old_hash?;
+            if e.new_hash == Some(hash) {
+                return None;
+            }
+            // Only real file content is blamable (skip symlinks/submodules).
+            if !matches!(e.old_mode, Some(EntryMode::Blob | EntryMode::Executable)) {
+                return None;
+            }
+            // A non-UTF-8 name comes back lossy-converted (`�`) and can't
+            // round-trip through `find_blob_in_tree`; such a file is neither
+            // the blamed target nor a usable copy source, so drop it (and
+            // keep self-exclusion exact).
+            if e.path.contains('\u{FFFD}') || e.path == target_path {
+                return None;
+            }
+            Some((e.path, hash))
+        })
         .collect())
 }
 
@@ -435,44 +469,10 @@ pub(super) fn commit_parent(store: &ObjectStore, commit: Hash) -> BlameOutcome<O
     Ok(c.parents.first().copied())
 }
 
-/// Every `(path, blob_hash)` reachable from a commit's tree.
-fn commit_blobs(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<(String, Hash)>> {
+/// The tree a commit points at.
+fn commit_tree(store: &ObjectStore, commit: Hash) -> BlameOutcome<Hash> {
     let Object::Commit(c) = store.read_object(&commit)? else {
         return Err(BlameError::NotACommit);
     };
-    let mut out = Vec::new();
-    collect_tree_blobs(store, c.tree_hash, "", &mut out)?;
-    Ok(out)
-}
-
-/// Recursively collect `(path, blob_hash)` for every blob under a tree.
-/// Symlinks are skipped (not blamable content). Non-UTF-8 names are
-/// skipped too: blame paths are `&str`, so such a file can be neither the
-/// blamed target nor a copy source — lossy-converting it would risk it
-/// failing self-exclusion (matching the blamed file as its own source).
-fn collect_tree_blobs(
-    store: &ObjectStore,
-    tree_hash: Hash,
-    prefix: &str,
-    out: &mut Vec<(String, Hash)>,
-) -> BlameOutcome<()> {
-    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
-        return Ok(());
-    };
-    for entry in tree.entries {
-        let Ok(name) = std::str::from_utf8(&entry.name) else {
-            continue;
-        };
-        match entry.mode {
-            EntryMode::Blob | EntryMode::Executable => {
-                out.push((format!("{prefix}{name}"), entry.object_hash));
-            }
-            EntryMode::Tree => {
-                let child_prefix = format!("{prefix}{name}/");
-                collect_tree_blobs(store, entry.object_hash, &child_prefix, out)?;
-            }
-            EntryMode::Symlink => {}
-        }
-    }
-    Ok(())
+    Ok(c.tree_hash)
 }

@@ -40,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threshold forms aren't exposed on the CLI (the core API takes a custom
   threshold); `-C -C -C` (whole-history search) is approximated as `-C -C`;
   when two source files hold an identical block the earliest by tree-path
-  order wins (git scores candidates); and within a single unmatched run
-  longer than 10,000 lines only the whole run is matched, not sub-blocks (a
-  cost bound; the matcher already caps inputs).
+  order wins, and when one source holds the block at several offsets the
+  earliest offset wins (git scores candidates and tracks line identity
+  through its diff); and within a single unmatched run longer than 10,000
+  lines only the whole run is matched, not sub-blocks (a cost bound; the
+  matcher already caps inputs).
 
 ### Removed
 
