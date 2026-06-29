@@ -688,12 +688,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "buffa"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f5f4b9af6f6e0cd7ce5d0bc30fd28e64e3582c76e25c374a3d37d21501702a2"
+dependencies = [
+ "bytes",
+ "foldhash 0.1.5",
+ "hashbrown 0.15.5",
+ "once_cell",
+ "rustversion",
+ "serde",
+ "serde_json",
+ "smoothutf8",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "buffa-build"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c26e1e2ec3ddd680a25e60687e0dca72fc2326f01d2ff26acbd8c266a3664693"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "buffa-codegen",
  "tempfile",
 ]
@@ -704,7 +721,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "855364959e603cad456c1656bcf57f431ae6e5b4d4e4f166f7d594df882b6218"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "buffa-descriptor",
  "prettyplease",
  "proc-macro2",
@@ -719,18 +736,18 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f74c0bf128c53f22b0fc3c1e8e66969cd21375879061293fd4e5298e839099a9"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "buffa-types"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5103995623b8e213abfa84b89feb98a0df84514607aafd52e6add9ca53c57d2e"
+checksum = "322c36afb2c98a8623ba03058439ac2311f1c8218772f6aa92078f058aeb1ca5"
 dependencies = [
- "buffa",
+ "buffa 0.8.0",
  "bytes",
  "serde",
  "serde_json",
@@ -1301,7 +1318,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "base64",
- "buffa",
+ "buffa 0.7.1",
  "bytes",
  "flate2",
  "futures",
@@ -1327,7 +1344,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5d70e6771939f6cb0943d7672929c9eed2f735cbdce219040cffb09ec5bbf9f"
 dependencies = [
  "anyhow",
- "buffa",
+ "buffa 0.7.1",
  "buffa-codegen",
  "connectrpc-codegen",
  "tempfile",
@@ -1340,7 +1357,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02bca5ca0b62a25e3b41dd8c021e62aa1c8151f51b6258c2aa44f5bd83fded7b"
 dependencies = [
  "anyhow",
- "buffa",
+ "buffa 0.7.1",
  "buffa-codegen",
  "heck",
  "prettyplease",
@@ -2994,7 +3011,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
- "buffa",
+ "buffa 0.7.1",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-parallel",
@@ -3037,7 +3054,7 @@ dependencies = [
 name = "mkit-cli"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -3099,7 +3116,7 @@ name = "mkit-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
- "buffa",
+ "buffa 0.7.1",
  "commonware-invariants",
  "libfuzzer-sys",
  "mkit-core",
@@ -3153,7 +3170,7 @@ name = "mkit-repo-client"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "buffa",
+ "buffa 0.7.1",
  "buffa-types",
  "bytes",
  "connectrpc",
@@ -3177,7 +3194,7 @@ name = "mkit-rpc"
 version = "0.3.0"
 dependencies = [
  "arbitrary",
- "buffa",
+ "buffa 0.7.1",
  "buffa-build",
  "hex",
  "mkit-core",
@@ -3188,7 +3205,7 @@ dependencies = [
 name = "mkit-transport-enc"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
@@ -3251,7 +3268,7 @@ dependencies = [
 name = "mkit-transport-ssh"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "hex",
  "mkit-core",
  "mkit-rpc",
@@ -4717,6 +4734,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4743,6 +4766,15 @@ dependencies = [
  "arbitrary",
  "borsh",
  "serde",
+]
+
+[[package]]
+name = "smoothutf8"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36358427d32ecdb1624616deed99eccfef0a167fe5bf40ddb51efe6980bc1ec8"
+dependencies = [
+ "simdutf8",
 ]
 
 [[package]]

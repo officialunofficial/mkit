@@ -41,7 +41,7 @@ connectrpc = { version = "0.7", default-features = false, features = ["gzip"] }
 
 # Protobuf runtime for the generated message types.
 buffa = "0.7"
-buffa-types = "0.7"
+buffa-types = "0.8"
 
 # Hashing — pure-Rust BLAKE3 over the raw request body (wasm-safe). Must match
 # the server's BLAKE3 of the serialized protobuf request body.
