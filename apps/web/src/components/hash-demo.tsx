@@ -143,7 +143,7 @@ export function HashDemo() {
               <button
                 type='button'
                 onClick={() => fileRef.current?.click()}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-fg active:translate-y-px sm:h-9'
+                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-blue-500/50 active:translate-y-px sm:h-9'
               >
                 Replace image
               </button>
@@ -159,7 +159,7 @@ export function HashDemo() {
             {tooLarge ? (
               <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
                 <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
-                files as data URLs, so it rejects files over {formatBytes(MAX_IMAGE_BYTES)} before reading them. The
+                files as data URLs and rejects anything over {formatBytes(MAX_IMAGE_BYTES)} before reading it. The
                 streaming tab handles larger files.
               </p>
             ) : null}

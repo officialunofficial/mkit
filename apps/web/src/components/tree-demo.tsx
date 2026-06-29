@@ -373,7 +373,9 @@ export function TreeDemo() {
 
       <div>
         {'error' in encoded ? (
-          <p className='mb-4 text-red-600 dark:text-red-400'>wasm encode failed: {encoded.error}</p>
+          <p className='mb-4 text-red-600 dark:text-red-400'>
+            Couldn't build this tree. Check your file contents and try again.
+          </p>
         ) : (
           <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
             {merkle ? (

@@ -19,6 +19,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aead"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
+dependencies = [
+ "crypto-common 0.2.2",
+ "inout 0.2.2",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,7 +684,6 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec95898e2ef31d6266042f21c398fa5ff8334d14d6b2ac5fb38b55448d94f595"
 dependencies = [
- "arbitrary",
  "base64",
  "bytes",
  "compact_str",
@@ -688,13 +697,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "buffa-build"
-version = "0.7.1"
+name = "buffa"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c26e1e2ec3ddd680a25e60687e0dca72fc2326f01d2ff26acbd8c266a3664693"
+checksum = "1f5f4b9af6f6e0cd7ce5d0bc30fd28e64e3582c76e25c374a3d37d21501702a2"
 dependencies = [
- "buffa",
- "buffa-codegen",
+ "arbitrary",
+ "bytes",
+ "foldhash 0.1.5",
+ "hashbrown 0.15.5",
+ "once_cell",
+ "rustversion",
+ "serde",
+ "serde_json",
+ "smoothutf8",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buffa-build"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd40e2a8f692db728974e24de6e536c0529dc537b2130fc63002b91d17df9331"
+dependencies = [
+ "buffa 0.8.0",
+ "buffa-codegen 0.8.0",
  "tempfile",
 ]
 
@@ -704,8 +731,23 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "855364959e603cad456c1656bcf57f431ae6e5b4d4e4f166f7d594df882b6218"
 dependencies = [
- "buffa",
- "buffa-descriptor",
+ "buffa 0.7.1",
+ "buffa-descriptor 0.7.1",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buffa-codegen"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89936eae12df4511c9201033c262ed9cae902d4f7cddbbb329348346603474d8"
+dependencies = [
+ "buffa 0.8.0",
+ "buffa-descriptor 0.8.0",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -719,7 +761,19 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f74c0bf128c53f22b0fc3c1e8e66969cd21375879061293fd4e5298e839099a9"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "buffa-descriptor"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ece5cac7e437c6084948d3fd63e9b911b3d864e3de82725d2790095a95a393"
+dependencies = [
+ "buffa 0.8.0",
+ "rustversion",
  "serde",
  "serde_json",
 ]
@@ -730,7 +784,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5103995623b8e213abfa84b89feb98a0df84514607aafd52e6add9ca53c57d2e"
 dependencies = [
- "buffa",
+ "buffa 0.7.1",
  "bytes",
  "serde",
  "serde_json",
@@ -845,6 +899,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
 dependencies = [
  "cfg-if",
+ "cipher 0.5.2",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
@@ -855,11 +910,23 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
 dependencies = [
- "aead",
+ "aead 0.5.2",
  "chacha20 0.9.1",
  "cipher 0.4.4",
- "poly1305",
+ "poly1305 0.8.0",
  "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead 0.6.1",
+ "chacha20 0.10.0",
+ "cipher 0.5.2",
+ "poly1305 0.9.0",
 ]
 
 [[package]]
@@ -906,6 +973,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
+ "block-buffer 0.12.0",
  "crypto-common 0.2.2",
  "inout 0.2.2",
 ]
@@ -1033,7 +1101,7 @@ dependencies = [
  "blst",
  "bytes",
  "cfg-if",
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "commonware-codec",
  "commonware-formatting",
  "commonware-macros",
@@ -1209,7 +1277,7 @@ version = "2026.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18038fa443164afdfbfe0ab6a38ddc71327f5da18376fd42d6184ebd5d93d8d2"
 dependencies = [
- "chacha20poly1305",
+ "chacha20poly1305 0.10.1",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-formatting",
@@ -1256,7 +1324,6 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
 dependencies = [
- "arbitrary",
  "castaway",
  "cfg-if",
  "itoa",
@@ -1301,7 +1368,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "base64",
- "buffa",
+ "buffa 0.7.1",
  "bytes",
  "flate2",
  "futures",
@@ -1327,8 +1394,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5d70e6771939f6cb0943d7672929c9eed2f735cbdce219040cffb09ec5bbf9f"
 dependencies = [
  "anyhow",
- "buffa",
- "buffa-codegen",
+ "buffa 0.7.1",
+ "buffa-codegen 0.7.1",
  "connectrpc-codegen",
  "tempfile",
 ]
@@ -1340,8 +1407,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02bca5ca0b62a25e3b41dd8c021e62aa1c8151f51b6258c2aa44f5bd83fded7b"
 dependencies = [
  "anyhow",
- "buffa",
- "buffa-codegen",
+ "buffa 0.7.1",
+ "buffa-codegen 0.7.1",
  "heck",
  "prettyplease",
  "proc-macro2",
@@ -1802,13 +1869,13 @@ dependencies = [
 
 [[package]]
 name = "ecdsa"
-version = "0.17.0-rc.20"
+version = "0.17.0-rc.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f7195c1205cec99025b3004e8034e1ddc12746333aa0a3945df7f9b80882ca2"
+checksum = "b7c72d1455753a703ad4b90ed2a759f2bc4562024a303176439cf6e593b5ade4"
 dependencies = [
  "der 0.8.0",
  "digest 0.11.3",
- "elliptic-curve 0.14.0-rc.35",
+ "elliptic-curve 0.14.1",
  "rfc6979 0.6.0-pre.0",
  "signature 3.0.0",
  "spki 0.8.0",
@@ -1912,9 +1979,9 @@ dependencies = [
 
 [[package]]
 name = "elliptic-curve"
-version = "0.14.0-rc.35"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51c58d86e2f3cebbf2dfd94c4bf049585c7def71058ba506bfdafcb57652a34b"
+checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
 dependencies = [
  "base16ct 1.0.0",
  "crypto-bigint 0.7.5",
@@ -2462,9 +2529,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -2507,9 +2574,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
+checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
 dependencies = [
  "subtle",
  "typenum",
@@ -2994,7 +3061,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
- "buffa",
+ "buffa 0.8.0",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-parallel",
@@ -3037,7 +3104,7 @@ dependencies = [
 name = "mkit-cli"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.8.0",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -3099,7 +3166,7 @@ name = "mkit-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
- "buffa",
+ "buffa 0.8.0",
  "commonware-invariants",
  "libfuzzer-sys",
  "mkit-core",
@@ -3124,7 +3191,7 @@ name = "mkit-keystore"
 version = "0.3.0"
 dependencies = [
  "card-backend-pcsc",
- "chacha20poly1305",
+ "chacha20poly1305 0.11.0",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-utils",
@@ -3153,7 +3220,7 @@ name = "mkit-repo-client"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "buffa",
+ "buffa 0.7.1",
  "buffa-types",
  "bytes",
  "connectrpc",
@@ -3177,7 +3244,7 @@ name = "mkit-rpc"
 version = "0.3.0"
 dependencies = [
  "arbitrary",
- "buffa",
+ "buffa 0.8.0",
  "buffa-build",
  "hex",
  "mkit-core",
@@ -3188,7 +3255,7 @@ dependencies = [
 name = "mkit-transport-enc"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.8.0",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
@@ -3251,7 +3318,7 @@ dependencies = [
 name = "mkit-transport-ssh"
 version = "0.3.0"
 dependencies = [
- "buffa",
+ "buffa 0.8.0",
  "hex",
  "mkit-core",
  "mkit-rpc",
@@ -3578,14 +3645,14 @@ dependencies = [
 
 [[package]]
 name = "p256"
-version = "0.14.0-rc.12"
+version = "0.14.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc7d8ed70255af8fecea30f284e523066cb19918cb2b4c17f41f78cda3291d64"
+checksum = "c855a8d2ffd346aa03122626f22e96e3aa75e3bfe64e6bf6cb82f71821ed6ae7"
 dependencies = [
- "ecdsa 0.17.0-rc.20",
- "elliptic-curve 0.14.0-rc.35",
+ "ecdsa 0.17.0-rc.22",
+ "elliptic-curve 0.14.1",
  "primefield",
- "primeorder 0.14.0-rc.12",
+ "primeorder 0.14.0-rc.14",
  "sha2 0.11.0",
 ]
 
@@ -3595,11 +3662,11 @@ version = "0.14.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "563b53b275b129c6f070e538bf0845f8e6abd0b5ffeb3f53f1d6ea5f8dbb3b2c"
 dependencies = [
- "ecdsa 0.17.0-rc.20",
- "elliptic-curve 0.14.0-rc.35",
+ "ecdsa 0.17.0-rc.22",
+ "elliptic-curve 0.14.1",
  "fiat-crypto 0.3.0",
  "primefield",
- "primeorder 0.14.0-rc.12",
+ "primeorder 0.14.0-rc.14",
  "sha2 0.11.0",
 ]
 
@@ -3815,7 +3882,17 @@ checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
 dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
- "universal-hash",
+ "universal-hash 0.5.1",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00baa632505d05512f48a963e16051c54fda9a95cc9acea1a4e3c90991c4a2e"
+dependencies = [
+ "cpufeatures 0.3.0",
+ "universal-hash 0.6.1",
 ]
 
 [[package]]
@@ -3854,9 +3931,9 @@ dependencies = [
 
 [[package]]
 name = "primefield"
-version = "0.14.0-rc.12"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8675564771a62f69a0af716b03e89b917b963c7b173b5855575e84fd4f605ca0"
+checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
  "crypto-bigint 0.7.5",
  "crypto-common 0.2.2",
@@ -3877,11 +3954,11 @@ dependencies = [
 
 [[package]]
 name = "primeorder"
-version = "0.14.0-rc.12"
+version = "0.14.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44545bd63647ac77eaed1589000a031632b0f7175e2c1cc48778787e9783baaf"
+checksum = "4e56e6d67fdf5744e9e245ae571450fe584b91f5af261d0e40163b618e53a1f6"
 dependencies = [
- "elliptic-curve 0.14.0-rc.35",
+ "elliptic-curve 0.14.1",
  "once_cell",
  "primefield",
  "serdect",
@@ -4717,6 +4794,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4740,9 +4823,17 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
 dependencies = [
- "arbitrary",
  "borsh",
  "serde",
+]
+
+[[package]]
+name = "smoothutf8"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36358427d32ecdb1624616deed99eccfef0a167fe5bf40ddb51efe6980bc1ec8"
+dependencies = [
+ "simdutf8",
 ]
 
 [[package]]
@@ -5339,6 +5430,16 @@ checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
 dependencies = [
  "crypto-common 0.1.7",
  "subtle",
+]
+
+[[package]]
+name = "universal-hash"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
+dependencies = [
+ "crypto-common 0.2.2",
+ "ctutils 0.4.2",
 ]
 
 [[package]]
@@ -6124,12 +6225,12 @@ dependencies = [
  "curve25519-dalek 5.0.0-pre.6",
  "der 0.8.0",
  "des",
- "ecdsa 0.17.0-rc.20",
+ "ecdsa 0.17.0-rc.22",
  "ed25519-dalek 3.0.0-pre.7",
- "elliptic-curve 0.14.0-rc.35",
+ "elliptic-curve 0.14.1",
  "log",
  "nom 8.0.0",
- "p256 0.14.0-rc.12",
+ "p256 0.14.0-rc.14",
  "p384",
  "pbkdf2",
  "pcsc",

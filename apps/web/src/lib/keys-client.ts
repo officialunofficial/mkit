@@ -88,7 +88,7 @@ export async function setName(api: MkitApi, seedHex: string, pubkeyHex: string, 
     headers: { 'Content-Type': 'application/json', ...envelopeHeaders(env) },
     body: bodyStr,
   })
-  if (!res.ok) throw new Error(`keys: set name failed (${res.status})`)
+  if (!res.ok) throw new Error("Couldn't save your name. Try again.")
   const rec = (await res.json()) as NameRecord
   return rec.name ?? null
 }

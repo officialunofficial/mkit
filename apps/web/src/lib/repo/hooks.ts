@@ -5,7 +5,7 @@
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import { recordActivity } from '../activity-log'
 import { playerName } from '../identity-name'
@@ -17,13 +17,19 @@ import {
   type ChatMessageEntry,
   type CommitLogEntry,
   type FeedItem,
+  type ReactionAgg,
+  type ReactionEntry,
+  type ReactionUpdate,
   type RefExpectation,
   type RemixSourceEntry,
+  type RoomWatchHandlers,
   MockRepoBackend,
   type RepoBackend,
   WasmRepoBackend,
+  aggregateReactions,
   decodeLogObject,
   mergeFeed,
+  subscribeRoom,
 } from './backend'
 import { useRepoBackend } from './store'
 
@@ -33,6 +39,7 @@ export const repoKeys = {
   object: (room: string, hash: string) => ['repo', room, 'object', hash] as const,
   log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
   messages: (room: string) => ['repo', room, 'messages'] as const,
+  reactions: (room: string) => ['repo', room, 'reactions'] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -66,11 +73,23 @@ export function useObject(room: string, hash: string | null) {
   })
 }
 
-export function useCommitLog(room: string, ref = 'main') {
+export function useCommitLog(room: string, ref = 'main', limit?: number) {
   const backend = useRepoBackend()
+  const qc = useQueryClient()
+  // A capped walk (the lobby) gets its own cache entry so it never collides with
+  // an uncapped reader of the same ref. Invalidation still matches by prefix
+  // (`['repo', room, 'log', ref]`), so a push refreshes both.
+  const key = limit != null ? ([...repoKeys.log(room, ref), limit] as const) : repoKeys.log(room, ref)
   return useQuery({
-    queryKey: repoKeys.log(room, ref),
-    queryFn: () => backend!.commitLog(room, ref),
+    queryKey: key,
+    queryFn: () =>
+      backend!.commitLog(room, ref, {
+        ...(limit != null ? { limit } : {}),
+        // Paint commits as the walk fetches them (one round-trip each) instead of
+        // blocking the feed on the full chain — this clears the "Loading…" gate at
+        // the FIRST commit. The final resolve overwrites with the complete list.
+        onProgress: (partial) => qc.setQueryData(key, partial),
+      }),
     enabled: !!backend,
     // Switching branches keeps the previous ref's list on screen during the
     // fetch (no skeleton/empty flash); replaced once the new ref's log resolves.
@@ -366,34 +385,173 @@ export function usePostMessage(room: string, myPubkeyHex?: string) {
 }
 
 /**
- * Subscribe to the live room stream (ONE WebSocket) and invalidate the right queries: a ref advance refreshes the
- * log/refs (like {@link useRepoEvents}); a chat frame refreshes the messages query. The merged feed re-renders within a
- * frame of either a peer's commit or a peer's message.
+ * Apply a live chat frame to the cached message list (newest appended), deduped by content-addressed id so our own echo
+ * or a replay is idempotent. Also drops our optimistic placeholder for the SAME (author, text) that this server echo
+ * now supersedes, so the poster never sees a transient duplicate.
+ */
+export function applyChatFrame(prev: ChatMessageEntry[] | undefined, m: ChatMessageEntry): ChatMessageEntry[] {
+  const list = prev ?? []
+  if (list.some((x) => x.messageIdHex === m.messageIdHex)) return list
+  const deopt = list.filter(
+    (x) => !(x.messageIdHex.startsWith('optimistic-') && x.authorPubkeyHex === m.authorPubkeyHex && x.text === m.text),
+  )
+  return [...deopt, m]
+}
+
+/**
+ * Apply a live reaction toggle to the cached reaction rows: add the (target, emoji, author) row when active, drop it
+ * when inactive. Idempotent — a repeated add/remove is a no-op.
+ */
+export function applyReactionFrame(prev: ReactionEntry[] | undefined, r: ReactionUpdate): ReactionEntry[] {
+  const list = prev ?? []
+  const matches = (x: ReactionEntry) =>
+    x.targetIdHex === r.targetIdHex && x.emoji === r.emoji && x.authorPubkeyHex === r.authorPubkeyHex
+  if (r.active)
+    return list.some(matches)
+      ? list
+      : [...list, { targetIdHex: r.targetIdHex, emoji: r.emoji, authorPubkeyHex: r.authorPubkeyHex }]
+  return list.filter((x) => !matches(x))
+}
+
+/**
+ * Subscribe to the live room stream (ONE WebSocket) and update the cache. Chat and reaction frames carry their FULL
+ * payload, so they're applied straight to the cache — O(1), no refetch round-trip per event. Ref/commit frames carry
+ * only id+author, so they trigger the (incremental) log re-walk.
+ *
+ * In worker mode the socket is opened off the STATIC backend URL on mount, in PARALLEL with the wasm load — the live
+ * stream needs no wasm, so it's no longer serialized behind backend readiness (which delayed first delivery ~800ms). In
+ * mock/offline mode it drives off the in-memory backend's watcher.
  */
 export function useLobbyEvents(room: string): void {
   const qc = useQueryClient()
   const backend = useRepoBackend()
-  useEffect(() => {
-    if (!backend) return
-    return backend.watchRoom(room, '', {
+  const backendUrl = import.meta.env.VITE_REPO_BACKEND_URL as string | undefined
+
+  const handlers: RoomWatchHandlers = useMemo(
+    () => ({
+      onChat: (m) => qc.setQueryData<ChatMessageEntry[]>(repoKeys.messages(room), (prev) => applyChatFrame(prev, m)),
+      onReaction: (r) =>
+        qc.setQueryData<ReactionEntry[]>(repoKeys.reactions(room), (prev) => applyReactionFrame(prev, r)),
       onRef: (u) => {
         void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
+        // Prefix match covers both the uncapped log key and the lobby's capped one.
         void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
         void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
       },
-      onChat: () => {
-        void qc.invalidateQueries({ queryKey: repoKeys.messages(room) })
-      },
-    })
-  }, [backend, room, qc])
+    }),
+    [qc, room],
+  )
+
+  // Worker mode: open the socket immediately off the static URL (no wasm dep).
+  useEffect(() => {
+    if (!backendUrl) return
+    return subscribeRoom(backendUrl, room, '', handlers)
+  }, [backendUrl, room, handlers])
+
+  // Mock/offline mode: drive updates off the in-memory backend's watcher.
+  useEffect(() => {
+    if (backendUrl || !backend) return
+    return backend.watchRoom(room, '', handlers)
+  }, [backendUrl, backend, room, handlers])
+}
+
+/**
+ * Reactions for the room, aggregated per feed item: a `reactionsFor(targetId)` lookup returning `{ emoji, count, mine
+ * }[]`. Gated on a ready backend.
+ */
+export function useReactions(room: string, myPubkeyHex?: string): (targetId: string) => ReactionAgg[] {
+  const backend = useRepoBackend()
+  const q = useQuery({
+    queryKey: repoKeys.reactions(room),
+    queryFn: () => backend!.listReactions(room),
+    enabled: !!backend,
+  })
+  const byTarget = useMemo(() => aggregateReactions(q.data ?? [], myPubkeyHex), [q.data, myPubkeyHex])
+  // Stable identity: only changes when the aggregation does, so callers using it
+  // as an effect/memo dependency don't re-run on every render. `NO_REACTIONS` is
+  // a shared frozen empty array so the "no reactions" case is referentially
+  // stable too (a fresh `[]` per call would defeat downstream memoization).
+  return useCallback((targetId: string) => byTarget.get(targetId) ?? NO_REACTIONS, [byTarget])
+}
+
+/**
+ * Shared empty result for feed items with no reactions — one stable reference so the "no reactions" case doesn't defeat
+ * memoization. Frozen so a consumer can't mutate the shared singleton (the cast-through-unknown is the compiler's own
+ * escape hatch for assigning `readonly never[]` to the array type).
+ */
+const NO_REACTIONS: ReactionAgg[] = Object.freeze([]) as unknown as ReactionAgg[]
+
+/**
+ * Toggle the signing identity's emoji reaction on a feed item. Optimistically flips the cached reaction list, then
+ * reconciles on settle (the broadcast echo also invalidates). Rejects with `BackendNotReadyError` if no backend is
+ * ready.
+ */
+export function useToggleReaction(room: string, myPubkeyHex?: string) {
+  const qc = useQueryClient()
+  const backend = useRepoBackend()
+  const key = repoKeys.reactions(room)
+  const options = backend
+    ? {
+        mutationFn: ({ targetId, emoji }: { targetId: string; emoji: string }) => backend.react(room, targetId, emoji),
+        onMutate: async ({ targetId, emoji }: { targetId: string; emoji: string }) => {
+          await qc.cancelQueries({ queryKey: key })
+          // Optimistic toggle against my own pubkey row. Remember whether we
+          // added or removed so a failure can be undone SURGICALLY (just my row)
+          // rather than restoring a whole snapshot — restoring a snapshot would
+          // clobber any peer reactions the live stream merged in meanwhile.
+          let added = false
+          if (myPubkeyHex) {
+            qc.setQueryData<ReactionEntry[]>(key, (prev) => {
+              const list = prev ?? []
+              const i = list.findIndex(
+                (r) => r.targetIdHex === targetId && r.emoji === emoji && r.authorPubkeyHex === myPubkeyHex,
+              )
+              if (i >= 0) return list.filter((_, j) => j !== i)
+              added = true
+              return [...list, { targetIdHex: targetId, emoji, authorPubkeyHex: myPubkeyHex }]
+            })
+          }
+          return { targetId, emoji, added }
+        },
+        onError: (_e: unknown, _v: unknown, ctx: { targetId: string; emoji: string; added: boolean } | undefined) => {
+          // Invert ONLY our own optimistic change, leaving peer reactions intact.
+          if (!ctx || !myPubkeyHex) return
+          qc.setQueryData<ReactionEntry[]>(key, (prev) => {
+            const list = prev ?? []
+            const isMine = (r: ReactionEntry) =>
+              r.targetIdHex === ctx.targetId && r.emoji === ctx.emoji && r.authorPubkeyHex === myPubkeyHex
+            if (ctx.added) return list.filter((r) => !isMine(r)) // we added → remove
+            if (list.some(isMine)) return list // already back (echo raced us)
+            return [...list, { targetIdHex: ctx.targetId, emoji: ctx.emoji, authorPubkeyHex: myPubkeyHex }]
+          })
+        },
+        onSettled: () => {
+          void qc.invalidateQueries({ queryKey: key })
+        },
+      }
+    : {
+        mutationFn: (_v: { targetId: string; emoji: string }) =>
+          Promise.reject<{ active: boolean; count: number }>(new BackendNotReadyError()),
+      }
+  return useMutation(options)
 }
 
 /**
  * The merged lobby feed: the `ref` commit log + room chat, interleaved oldest-first by timestamp. Combines
  * {@link useCommitLog} and {@link useLobbyMessages}; the merge itself is the pure {@link mergeFeed}.
  */
-export function useLobbyFeed(room: string, ref = 'main'): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
-  const log = useCommitLog(room, ref)
+/**
+ * How many commits the front-page lobby walks. It shows RECENT activity, not the whole history, so a cold load is
+ * bounded to this many sequential object round-trips instead of up to WALK_CAP (100).
+ */
+const LOBBY_LOG_LIMIT = 30
+
+export function useLobbyFeed(
+  room: string,
+  ref = 'main',
+  limit = LOBBY_LOG_LIMIT,
+): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
+  const log = useCommitLog(room, ref, limit)
   const messages = useLobbyMessages(room)
   const items = useMemo(() => mergeFeed(log.data ?? [], messages.data ?? []), [log.data, messages.data])
   // `isPending` (not `isLoading`) so the gap where the backend is still null —

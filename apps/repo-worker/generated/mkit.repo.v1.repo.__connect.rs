@@ -62,6 +62,30 @@ pub type OwnedListMessagesRequestView = ::buffa::view::OwnedView<
 pub type OwnedListMessagesResponseView = ::buffa::view::OwnedView<
     __buffa::view::ListMessagesResponseView<'static>,
 >;
+///Shorthand for `OwnedView<ReactRequestView<'static>>`.
+pub type OwnedReactRequestView = ::buffa::view::OwnedView<
+    __buffa::view::ReactRequestView<'static>,
+>;
+///Shorthand for `OwnedView<ReactResponseView<'static>>`.
+pub type OwnedReactResponseView = ::buffa::view::OwnedView<
+    __buffa::view::ReactResponseView<'static>,
+>;
+///Shorthand for `OwnedView<ListReactionsRequestView<'static>>`.
+pub type OwnedListReactionsRequestView = ::buffa::view::OwnedView<
+    __buffa::view::ListReactionsRequestView<'static>,
+>;
+///Shorthand for `OwnedView<ListReactionsResponseView<'static>>`.
+pub type OwnedListReactionsResponseView = ::buffa::view::OwnedView<
+    __buffa::view::ListReactionsResponseView<'static>,
+>;
+///Shorthand for `OwnedView<ListCommitsRequestView<'static>>`.
+pub type OwnedListCommitsRequestView = ::buffa::view::OwnedView<
+    __buffa::view::ListCommitsRequestView<'static>,
+>;
+///Shorthand for `OwnedView<ListCommitsResponseView<'static>>`.
+pub type OwnedListCommitsResponseView = ::buffa::view::OwnedView<
+    __buffa::view::ListCommitsResponseView<'static>,
+>;
 impl ::connectrpc::Encodable<PutObjectResponse>
 for __buffa::view::PutObjectResponseView<'_> {
     fn encode(
@@ -204,6 +228,59 @@ for ::buffa::view::OwnedView<__buffa::view::ListMessagesResponseView<'static>> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
 }
+impl ::connectrpc::Encodable<ReactResponse> for __buffa::view::ReactResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<ReactResponse>
+for ::buffa::view::OwnedView<__buffa::view::ReactResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
+impl ::connectrpc::Encodable<ListReactionsResponse>
+for __buffa::view::ListReactionsResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<ListReactionsResponse>
+for ::buffa::view::OwnedView<__buffa::view::ListReactionsResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
+impl ::connectrpc::Encodable<ListCommitsResponse>
+for __buffa::view::ListCommitsResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<ListCommitsResponse>
+for ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
 /// Full service name for this service.
 pub const REPO_SERVICE_SERVICE_NAME: &str = "mkit.repo.v1.RepoService";
 /// Static [`Spec`](::connectrpc::Spec) for the server-side `PutObject` RPC.
@@ -275,6 +352,33 @@ pub const REPO_SERVICE_POST_MESSAGE_SPEC: ::connectrpc::Spec = ::connectrpc::Spe
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const REPO_SERVICE_LIST_MESSAGES_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListMessages",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `React` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_REACT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/React",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListReactions` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_LIST_REACTIONS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/ListReactions",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListCommits` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_LIST_COMMITS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/ListCommits",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -470,6 +574,60 @@ pub trait RepoService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<ListMessagesResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the React RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn react<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, ReactRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<ReactResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the ListReactions RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn list_reactions<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, ListReactionsRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<ListReactionsResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the ListCommits RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn list_commits<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, ListCommitsRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<ListCommitsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -702,6 +860,79 @@ impl<S: RepoService> RepoServiceExt for S {
                 },
             )
             .with_spec(REPO_SERVICE_LIST_MESSAGES_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "React",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::ReactRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                ReactRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.react(ctx, sreq).await?.encode::<ReactResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_REACT_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "ListReactions",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::ListReactionsRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                ListReactionsRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.list_reactions(ctx, sreq)
+                                .await?
+                                .encode::<ListReactionsResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_LIST_REACTIONS_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "ListCommits",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::ListCommitsRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                ListCommitsRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.list_commits(ctx, sreq)
+                                .await?
+                                .encode::<ListCommitsResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC)
     }
 }
 /// Monomorphic dispatcher for `RepoService`.
@@ -793,6 +1024,24 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
                         .with_spec(REPO_SERVICE_LIST_MESSAGES_SPEC),
+                )
+            }
+            "React" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_REACT_SPEC),
+                )
+            }
+            "ListReactions" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_LIST_REACTIONS_SPEC),
+                )
+            }
+            "ListCommits" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC),
                 )
             }
             _ => None,
@@ -917,6 +1166,55 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     svc.list_messages(ctx, req)
                         .await?
                         .encode::<ListMessagesResponse>(format)
+                })
+            }
+            "React" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ReactRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::ReactRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ReactRequest,
+                    >::from_parts(&req, &body);
+                    svc.react(ctx, req).await?.encode::<ReactResponse>(format)
+                })
+            }
+            "ListReactions" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ListReactionsRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::ListReactionsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ListReactionsRequest,
+                    >::from_parts(&req, &body);
+                    svc.list_reactions(ctx, req)
+                        .await?
+                        .encode::<ListReactionsResponse>(format)
+                })
+            }
+            "ListCommits" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ListCommitsRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::ListCommitsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ListCommitsRequest,
+                    >::from_parts(&req, &body);
+                    svc.list_commits(ctx, req)
+                        .await?
+                        .encode::<ListCommitsResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -1359,6 +1657,114 @@ where
                 &self.config,
                 REPO_SERVICE_SERVICE_NAME,
                 "ListMessages",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the React RPC. Sends a request to /mkit.repo.v1.RepoService/React.
+    pub async fn react(
+        &self,
+        request: ReactRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ReactResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.react_with_options(request, ::connectrpc::client::CallOptions::default())
+            .await
+    }
+    /// Call the React RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn react_with_options(
+        &self,
+        request: ReactRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ReactResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "React",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the ListReactions RPC. Sends a request to /mkit.repo.v1.RepoService/ListReactions.
+    pub async fn list_reactions(
+        &self,
+        request: ListReactionsRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListReactionsResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.list_reactions_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the ListReactions RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn list_reactions_with_options(
+        &self,
+        request: ListReactionsRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListReactionsResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "ListReactions",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the ListCommits RPC. Sends a request to /mkit.repo.v1.RepoService/ListCommits.
+    pub async fn list_commits(
+        &self,
+        request: ListCommitsRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.list_commits_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the ListCommits RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn list_commits_with_options(
+        &self,
+        request: ListCommitsRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "ListCommits",
                 request,
                 options,
             )

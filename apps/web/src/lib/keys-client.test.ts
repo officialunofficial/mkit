@@ -102,7 +102,7 @@ describe('keys-client — registry enabled', () => {
 
   it('setName throws on a rejected (non-2xx) write', async () => {
     mockFetch(() => ({ status: 403, body: 'signer is not the named key' }))
-    await expect(setName(fakeApi, SEED, PUBKEY, 'x')).rejects.toThrow(/403/)
+    await expect(setName(fakeApi, SEED, PUBKEY, 'x')).rejects.toThrow(/save your name/i)
   })
 
   it('resolveNames POSTs /resolve and returns the names map', async () => {

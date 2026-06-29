@@ -78,6 +78,36 @@ pub fn is_rate_limited(last_created_at: Option<i64>, now: i64) -> bool {
     }
 }
 
+// --- Reactions --------------------------------------------------------------
+
+/// Minimum gap between two reaction toggles from the SAME author, in ms. Far
+/// smaller than the chat floor (reacting is meant to be snappy) — it exists only
+/// to stop a scripted toggle flood, not to pace a human clicking a few emoji.
+pub const REACT_MIN_INTERVAL_MS: i64 = 150;
+
+/// The closed set of emoji a client may react with — MUST match the web client's
+/// picker (`REACTION_EMOJI` in signed-lobby.tsx). An allowlist (rather than a
+/// length cap) bounds the per-target cardinality and stops an arbitrary string
+/// being persisted + broadcast to every viewer as a "reaction".
+pub const REACTION_EMOJI: &[&str] = &["👍", "❤️", "😂", "🎉", "🚀", "👀", "✅", "🔥"];
+
+/// Whether `emoji` is one of the allowed reaction emoji.
+#[must_use]
+pub fn is_allowed_emoji(emoji: &str) -> bool {
+    REACTION_EMOJI.contains(&emoji)
+}
+
+/// A reaction target must be a 64-char lowercase-hex id (a 32-byte feed-item id:
+/// a chat message id or a commit hash). Rejecting anything else keeps the
+/// reactions table's cardinality bounded to real feed items.
+#[must_use]
+pub fn is_valid_target_id(target: &str) -> bool {
+    target.len() == 64
+        && target
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +163,28 @@ mod tests {
         assert!(!is_rate_limited(Some(10_000), 10_000 + MIN_POST_INTERVAL_MS));
         // well after -> allowed
         assert!(!is_rate_limited(Some(10_000), 60_000));
+    }
+
+    #[test]
+    fn emoji_allowlist() {
+        assert!(is_allowed_emoji("👍"));
+        assert!(is_allowed_emoji("🔥"));
+        // not in the set, arbitrary text, empty, or a long string -> rejected
+        assert!(!is_allowed_emoji("🦀"));
+        assert!(!is_allowed_emoji("aaaa"));
+        assert!(!is_allowed_emoji(""));
+        assert!(!is_allowed_emoji(&"👍".repeat(4)));
+    }
+
+    #[test]
+    fn target_id_must_be_64_lowercase_hex() {
+        assert!(is_valid_target_id(&"a".repeat(64)));
+        assert!(is_valid_target_id(&"0123456789abcdef".repeat(4)));
+        assert!(!is_valid_target_id(&"a".repeat(63))); // too short
+        assert!(!is_valid_target_id(&"a".repeat(65))); // too long
+        assert!(!is_valid_target_id(&"A".repeat(64))); // uppercase
+        assert!(!is_valid_target_id(&"g".repeat(64))); // non-hex
+        assert!(!is_valid_target_id("0")); // a counter, not a real id
+        assert!(!is_valid_target_id(""));
     }
 }

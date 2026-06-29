@@ -9,9 +9,12 @@ import {
   IdentityLockedError,
   MockRepoBackend,
   type FeedItem,
+  type ReactionEntry,
+  aggregateReactions,
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
+  type RepoBackend,
   type RepoWasmClient,
   type SignedEnvelope,
   WasmRepoBackend,
@@ -29,6 +32,29 @@ import {
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
+
+/**
+ * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to make just the method(s) under test do
+ * something. One factory so adding a method to the interface is a single edit here, not a sweep across every test's
+ * hand-rolled literal.
+ */
+function stubBackend(overrides: Partial<RepoBackend> = {}): RepoBackend {
+  return {
+    putObject: async () => {},
+    getObject: async () => null,
+    getRef: async () => null,
+    updateRef: async () => {},
+    listRefs: async () => [],
+    watchRefs: () => () => {},
+    watchRoom: () => () => {},
+    commitLog: async () => [],
+    postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
+    listMessages: async () => [],
+    react: async () => ({ active: true, count: 1 }),
+    listReactions: async () => [],
+    ...overrides,
+  }
+}
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2)
@@ -213,6 +239,11 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const { graph, counters } = opts
     let head = opts.head
     const refs = opts.refs ?? {}
+    // The worker now owns the commit-log walk (ListCommits), so the client just
+    // calls `list_commits` and renders the denormalized metadata. The harness
+    // serves that walk straight from `graph`; `listCommitsCalls` lets the
+    // head-keyed cache tests assert round-trips the way they used to with decode.
+    const listCommitsCalls: string[] = []
 
     const wasm = {
       get_ref: async (_base: string, _room: string, name: string) => {
@@ -224,6 +255,28 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
         counters.getObject++
         // Encode the hash itself as the "bytes" so commit_decode can map back.
         return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_commits: async (_base: string, _room: string, ref: string, startIdHex: string, pageSize: number) => {
+        listCommitsCalls.push(ref)
+        let cur: string | undefined = startIdHex || (ref === 'main' ? head : refs[ref])
+        const commits: Array<Record<string, unknown>> = []
+        const seen = new Set<string>()
+        while (cur && commits.length < pageSize && !seen.has(cur)) {
+          seen.add(cur)
+          const node = graph[cur]
+          if (!node) break // not indexed → stop (the real worker backfills from R2)
+          commits.push({
+            hash: cur,
+            parent: node.parent ?? '',
+            authorPubkeyHex: node.signer,
+            message: node.message,
+            createdAtUnix: 1,
+            kind: 'commit',
+            sourcesJson: '[]',
+          })
+          cur = node.parent
+        }
+        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
       },
       list_refs: async (_base: string, _room: string, prefix: string) => {
         const all = [
@@ -260,7 +313,7 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     } as unknown as MkitApi
 
     const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
-    return { backend, setHead: (h: string | undefined) => (head = h) }
+    return { backend, listCommitsCalls, setHead: (h: string | undefined) => (head = h) }
   }
 
   it('returns [] when the room has no `main` ref', async () => {
@@ -294,16 +347,15 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const h = harness({ head: 'c1', graph, counters })
 
     await h.backend.commitLog('room') // walks c1
-    const afterFirst = counters.decode
-    expect(afterFirst).toBe(1)
+    expect(h.listCommitsCalls.length).toBe(1)
 
-    await h.backend.commitLog('room') // same head → cache hit, no decode
-    expect(counters.decode).toBe(afterFirst)
+    await h.backend.commitLog('room') // same head → cache hit, no round-trip
+    expect(h.listCommitsCalls.length).toBe(1)
 
     h.setHead('c2') // a peer pushed → head advanced → re-walk
     const log = await h.backend.commitLog('room')
     expect(log.map((e) => e.hash)).toEqual(['c2', 'c1'])
-    expect(counters.decode).toBeGreaterThan(afterFirst)
+    expect(h.listCommitsCalls.length).toBe(2)
   })
 
   it('stops the walk on a missing object rather than throwing', async () => {
@@ -339,17 +391,16 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
       m1: { message: 'main', signer: 's' },
       f1: { message: 'feature', signer: 's' },
     }
-    const { backend } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
+    const { backend, listCommitsCalls } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
 
     await backend.commitLog('room', 'main')
     await backend.commitLog('room', 'feature')
-    const afterBoth = counters.decode
-    expect(afterBoth).toBe(2) // each ref walked once
+    expect(listCommitsCalls.length).toBe(2) // each ref walked once
 
-    // Repeat calls hit each ref's own cache — no extra decodes.
+    // Repeat calls hit each ref's own cache — no extra round-trips.
     await backend.commitLog('room', 'main')
     await backend.commitLog('room', 'feature')
-    expect(counters.decode).toBe(afterBoth)
+    expect(listCommitsCalls.length).toBe(2)
   })
 
   it('decodes a single commit by hash for the detail view (tree + signature)', async () => {
@@ -603,6 +654,22 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
     const wasm = {
       get_ref: async (_b: string, _r: string, name: string) => (name === forkRef ? remix.hash_hex : undefined),
       get_object: async (_b: string, _r: string, hash: string) => store[hash],
+      // The worker's ListCommits index serves the remix's denormalized metadata
+      // (kind + sources), so the client renders it with no client-side decode.
+      list_commits: async () => ({
+        commits: [
+          {
+            hash: remix.hash_hex,
+            parent: '',
+            authorPubkeyHex: 'sig',
+            message: 'a fork',
+            createdAtUnix: 2,
+            kind: 'remix',
+            sourcesJson: JSON.stringify([[UPSTREAM_ID, upstream.hash_hex]]),
+          },
+        ],
+        nextCursorHex: '',
+      }),
       list_refs: async (_b: string, _r: string, prefix: string) =>
         [{ name: forkRef, objectIdHex: remix.hash_hex }].filter((r) => r.name.startsWith(prefix)),
     } as unknown as RepoWasmClient
@@ -628,21 +695,12 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
    * can assert the optimistic prepend is visible while the push is still in flight.
    */
   function makeControllableBackend(opts: { failUpdate?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
+    return stubBackend({
       updateRef: async () => {
         if (opts.gate) await opts.gate
         if (opts.failUpdate) throw new CasConflictError(null)
       },
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
-      postMessage: async () => ({ messageIdHex: '', accepted: true, rateLimited: false }),
-      listMessages: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   async function makePushArgs(message: string): Promise<PushArgs> {
@@ -770,11 +828,34 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
   function harness(graph: Record<string, Node>, initialHead: string) {
     let head = initialHead
     const getObjectCalls: string[] = []
+    const listCommitsCalls: string[] = []
     const wasm = {
       get_ref: async () => head,
       get_object: async (_b: string, _r: string, hash: string) => {
         getObjectCalls.push(hash)
         return graph[hash] ? new TextEncoder().encode(hash) : undefined
+      },
+      list_commits: async (_b: string, _r: string, _ref: string, startIdHex: string, pageSize: number) => {
+        listCommitsCalls.push(startIdHex || head)
+        let cur: string | undefined = startIdHex || head
+        const commits: Array<Record<string, unknown>> = []
+        const seen = new Set<string>()
+        while (cur && commits.length < pageSize && !seen.has(cur)) {
+          seen.add(cur)
+          const row: Node | undefined = graph[cur]
+          if (!row) break
+          commits.push({
+            hash: cur,
+            parent: row.parent ?? '',
+            authorPubkeyHex: row.signer,
+            message: row.message,
+            createdAtUnix: 1,
+            kind: 'commit',
+            sourcesJson: '[]',
+          })
+          cur = row.parent
+        }
+        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
       },
       list_refs: async () => [],
     } as unknown as RepoWasmClient
@@ -799,10 +880,10 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
       },
     } as unknown as MkitApi
     const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
-    return { backend, getObjectCalls, setHead: (h: string) => (head = h) }
+    return { backend, getObjectCalls, listCommitsCalls, setHead: (h: string) => (head = h) }
   }
 
-  it('after a cached 3-commit walk, a 4th-commit re-walk fetches only the new object', async () => {
+  it('after a cached 3-commit walk, a 4th-commit re-walk is one round-trip that splices the cached tail', async () => {
     const graph: Record<string, Node> = {
       c3: { message: 'c3', signer: 's', parent: 'c2' },
       c2: { message: 'c2', signer: 's', parent: 'c1' },
@@ -812,17 +893,15 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
 
     const first = await h.backend.commitLog('room')
     expect(first.map((e) => e.hash)).toEqual(['c3', 'c2', 'c1'])
-    const afterCold = h.getObjectCalls.length
-    expect(afterCold).toBe(3) // cold walk fetched all 3
 
     // Push a 4th commit on top → head advances.
     graph.c4 = { message: 'c4', signer: 's', parent: 'c3' }
     h.setHead('c4')
 
-    h.getObjectCalls.length = 0
+    h.listCommitsCalls.length = 0
     const second = await h.backend.commitLog('room')
     expect(second.map((e) => e.hash)).toEqual(['c4', 'c3', 'c2', 'c1']) // newest-first, full chain
-    expect(h.getObjectCalls).toEqual(['c4']) // ONLY the new object, not 4
+    expect(h.listCommitsCalls.length).toBe(1) // one round-trip; the cached tail (c3,c2,c1) is spliced, not re-walked
   })
 })
 
@@ -1046,15 +1125,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
   const ROOM = 'lobby'
 
   function makeControllableBackend(opts: { fail?: boolean; rateLimited?: boolean; gate?: Promise<void> }) {
-    return {
-      putObject: async () => {},
-      getObject: async () => null,
-      getRef: async () => null,
-      updateRef: async () => {},
-      listRefs: async () => [],
-      watchRefs: () => () => {},
-      watchRoom: () => () => {},
-      commitLog: async () => [],
+    return stubBackend({
       postMessage: async () => {
         if (opts.gate) await opts.gate
         if (opts.fail) throw new Error('post failed')
@@ -1062,8 +1133,7 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
         if (opts.rateLimited) return { messageIdHex: '', accepted: false, rateLimited: true }
         return { messageIdHex: 'real', accepted: true, rateLimited: false }
       },
-      listMessages: async () => [],
-    } satisfies import('./repo-api').RepoBackend
+    })
   }
 
   it('appends the message to the cache while the post is still in flight', async () => {
@@ -1107,7 +1177,9 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
     const backend = makeControllableBackend({ rateLimited: true })
     const qc = new QueryClient()
     const key = repoKeys.messages(ROOM)
-    const prior: ChatMessageEntry[] = [{ messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 }]
+    const prior: ChatMessageEntry[] = [
+      { messageIdHex: 'm0', authorPubkeyHex: 'a', text: 'prior', createdAt: 1, seq: 1 },
+    ]
     qc.setQueryData<ChatMessageEntry[]>(key, prior)
 
     const observer = new MutationObserver(qc, postMessageMutationOptions(qc, backend, ROOM, 'mypk'))
@@ -1115,5 +1187,62 @@ describe('postMessageMutationOptions optimistic echo (TanStack Query)', () => {
     // optimistic echo so it doesn't linger until the settle refetch.
     await observer.mutate('too fast')
     expect(qc.getQueryData<ChatMessageEntry[]>(key)).toEqual(prior)
+  })
+})
+
+describe('aggregateReactions tallies per target with mine flag', () => {
+  it('groups by target then emoji, counts reactors, and marks mine', () => {
+    const rows: ReactionEntry[] = [
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'me' },
+      { targetIdHex: 't1', emoji: '👍', authorPubkeyHex: 'other' },
+      { targetIdHex: 't1', emoji: '🚀', authorPubkeyHex: 'other' },
+      { targetIdHex: 't2', emoji: '❤️', authorPubkeyHex: 'other' },
+    ]
+    const agg = aggregateReactions(rows, 'me')
+    expect(agg.get('t1')).toEqual([
+      { emoji: '👍', count: 2, mine: true },
+      { emoji: '🚀', count: 1, mine: false },
+    ])
+    expect(agg.get('t2')).toEqual([{ emoji: '❤️', count: 1, mine: false }])
+    expect(agg.get('nope')).toBeUndefined()
+  })
+
+  it('mine is false when no pubkey is supplied', () => {
+    const agg = aggregateReactions([{ targetIdHex: 't', emoji: '👍', authorPubkeyHex: 'me' }])
+    expect(agg.get('t')?.[0]?.mine).toBe(false)
+  })
+})
+
+describe('MockRepoBackend reactions: toggle / list / watch', () => {
+  async function makeBackend() {
+    const api = await mkit()
+    return new MockRepoBackend(api, () => SEED)
+  }
+
+  it('react toggles on then off, listReactions reflects it, and onReaction fires', async () => {
+    const backend = await makeBackend()
+    const seen: Array<{ emoji: string; active: boolean; count: number }> = []
+    backend.watchRoom('lobby', '', {
+      onReaction: (r) => seen.push({ emoji: r.emoji, active: r.active, count: r.count }),
+    })
+
+    const on = await backend.react('lobby', 'target1', '👍')
+    expect(on).toEqual({ active: true, count: 1 })
+    expect((await backend.listReactions('lobby')).map((r) => r.emoji)).toEqual(['👍'])
+
+    const off = await backend.react('lobby', 'target1', '👍')
+    expect(off).toEqual({ active: false, count: 0 })
+    expect(await backend.listReactions('lobby')).toEqual([])
+
+    expect(seen).toEqual([
+      { emoji: '👍', active: true, count: 1 },
+      { emoji: '👍', active: false, count: 0 },
+    ])
+  })
+
+  it('a locked identity (no seed) cannot react', async () => {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => null)
+    await expect(backend.react('lobby', 't', '👍')).rejects.toBeInstanceOf(IdentityLockedError)
   })
 })

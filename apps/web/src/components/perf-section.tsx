@@ -1,3 +1,4 @@
+import * as Collapsible from '@radix-ui/react-collapsible'
 import { labelColor } from '../lib/hash-color'
 import { methodology, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
 import type { SizeBenchmark, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
@@ -180,12 +181,16 @@ export function PerfSection() {
             <li key={c}>{c}</li>
           ))}
         </ul>
-        <details className='text-xs text-muted'>
-          <summary className='cursor-pointer select-none'>Exact commands</summary>
-          <pre className='mt-2 overflow-x-auto rounded-md border border-hairline p-3 font-mono text-[11px] leading-relaxed'>
-            {methodology.commands.join('\n')}
-          </pre>
-        </details>
+        <Collapsible.Root className='text-xs text-muted'>
+          <Collapsible.Trigger className='select-none transition-colors hover:text-fg'>
+            Exact commands
+          </Collapsible.Trigger>
+          <Collapsible.Content>
+            <pre className='mt-2 overflow-x-auto rounded-md border border-hairline p-3 font-mono text-[11px] leading-relaxed'>
+              {methodology.commands.join('\n')}
+            </pre>
+          </Collapsible.Content>
+        </Collapsible.Root>
       </section>
     </div>
   )

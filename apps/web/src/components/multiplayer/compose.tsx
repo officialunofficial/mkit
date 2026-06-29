@@ -124,7 +124,7 @@ export function Compose({
     push.error instanceof CasConflictError
       ? 'Someone pushed first — the preview re-parented onto the new head. Push again.'
       : push.error instanceof IdentityLockedError
-        ? 'Identity is locked — unlock to derive your key before pushing.'
+        ? 'Your identity is locked. Unlock it before pushing.'
         : push.error
           ? errMsg(push.error)
           : null

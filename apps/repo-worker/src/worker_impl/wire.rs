@@ -33,6 +33,20 @@ pub struct GetResp {
     pub value: Option<String>,
 }
 
+/// Denormalized commit-log metadata recorded into the DO's `commits` index
+/// alongside a ref update — so `ListCommits` can later serve from colocated
+/// SQLite instead of walking R2. The worker decodes the pushed object once
+/// (see `commit_log::extract_commit_meta`) and passes the fields here.
+#[derive(Serialize, Deserialize, Default)]
+pub struct CommitMetaWire {
+    pub parent: String,  // 64-hex first parent, empty if root
+    pub signer: String,  // 64-hex author pubkey
+    pub message: String,
+    pub timestamp: i64,  // unix seconds
+    pub kind: String,    // "commit" | "remix"
+    pub sources: String, // JSON [[upstreamHex, commitHex], …]; "[]" for a commit
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct UpdateReq {
     pub name: String,
@@ -40,6 +54,10 @@ pub struct UpdateReq {
     pub expectation: i32,         // proto wire number
     pub expected: Option<String>, // 64-hex (MATCH only)
     pub author: Option<String>,   // 64-hex Ed25519 pubkey of the writer
+    /// Commit metadata to index on a successful CAS (absent for a
+    /// non-commit/remix target, or from an older worker — `default` = None).
+    #[serde(default)]
+    pub commit: Option<CommitMetaWire>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,4 +126,81 @@ pub struct MsgEntry {
 #[derive(Serialize, Deserialize)]
 pub struct MessagesResp {
     pub messages: Vec<MsgEntry>, // oldest-first
+}
+
+// --- Reactions (worker -> DO) ----------------------------------------------
+//
+//   POST /react     ReactReq  -> ReactResp   (toggle (target, emoji, author))
+//   POST /reactions (no body) -> ReactionsResp
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactReq {
+    pub target: String, // hex id of the feed item
+    pub emoji: String,
+    pub author: String, // 64-hex Ed25519 pubkey of the verified reactor
+    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactResp {
+    pub active: bool, // reaction is now ON for this author
+    pub count: u32,   // reactors for (target, emoji) after the toggle
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactionEntry {
+    pub target: String,
+    pub emoji: String,
+    pub author: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReactionsResp {
+    pub reactions: Vec<ReactionEntry>,
+}
+
+// ---- Commit-log index (denormalized) -------------------------------------
+
+/// Ask the DO to walk its `commits` index from a ref head (or a `start_id`
+/// cursor) by first-parent, returning a bounded page.
+#[derive(Serialize, Deserialize)]
+pub struct ListCommitsReq {
+    pub r#ref: String,
+    pub start_id: String, // empty = walk from the ref head
+    pub page_size: u32,
+}
+
+/// One indexed commit row — the denormalized metadata plus its hash. Shared by
+/// the list response and the backfill request.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct CommitRowWire {
+    pub hash: String,
+    pub parent: String,
+    pub signer: String,
+    pub message: String,
+    pub timestamp: i64,
+    pub kind: String,
+    pub sources: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ListCommitsResp {
+    pub commits: Vec<CommitRowWire>,
+    pub next_cursor: String, // first-parent of the last row; empty when the chain ended
+    /// `false` when the walk hit a hash NOT in the index (pre-index history) —
+    /// the worker then completes + backfills from R2.
+    pub complete: bool,
+}
+
+/// Backfill: record rows the worker decoded from R2 (for history pushed before
+/// the index existed), so subsequent reads are fully local.
+#[derive(Serialize, Deserialize)]
+pub struct RecordCommitsReq {
+    pub r#ref: String,
+    pub commits: Vec<CommitRowWire>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RecordCommitsResp {
+    pub recorded: u32,
 }

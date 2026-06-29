@@ -41,6 +41,7 @@ fn requires_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/PutObject")
         || procedure.ends_with("/UpdateRef")
         || procedure.ends_with("/PostMessage")
+        || procedure.ends_with("/React")
 }
 
 /// Normalize an incoming hex header: strip an optional `0x`, lowercase.

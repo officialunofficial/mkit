@@ -15,8 +15,8 @@ export default function PushPage() {
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Push a file, any file</h1>
         <p className='max-w-prose text-base text-fg'>
-          When you push a file, mkit splits it into chunks and names each by its hash. Change the file, and only the
-          changed chunks get new names — so the push ships just those. Step through it below.
+          When you push a file, mkit splits it into hash-named chunks and ships only the ones that changed — step
+          through it below.
         </p>
       </header>
       <DemoBoundary>
@@ -24,8 +24,8 @@ export default function PushPage() {
       </DemoBoundary>
       <div className='max-w-prose space-y-3 text-sm text-muted'>
         <p>
-          Why address a file by its Merkle root? Because the root <em>is</em> the id. Read the file back, re-derive the
-          root, and you&rsquo;ve proven every chunk intact — integrity lives in the name, not in a separate checksum.
+          The Merkle root <em>is</em> the id, so re-deriving it from the file proves every chunk intact — integrity
+          lives in the name, not a separate checksum.
         </p>
         <p>
           The same root lets a client verify that one chunk belongs to the file without fetching the rest. And a{' '}

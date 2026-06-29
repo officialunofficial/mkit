@@ -49,8 +49,49 @@ export function chatCanonical(room: string, authorHex: string, text: string): Ui
 }
 
 /**
- * Live-stream handlers for a room: ref advances and/or chat messages. Both ride the ONE `/watch/<room>` socket so the
- * lobby renders a merged feed.
+ * One stored reaction — mirrors the proto `Reaction`. `targetIdHex` is the hex id of the feed item (chat message id or
+ * commit hash).
+ */
+export type ReactionEntry = { targetIdHex: string; emoji: string; authorPubkeyHex: string }
+
+/** A live reaction toggle frame (the new on/off state for one reactor). */
+export type ReactionUpdate = {
+  targetIdHex: string
+  emoji: string
+  authorPubkeyHex: string
+  active: boolean
+  count: number
+}
+
+/** Aggregated reactions for one feed item: emoji → count + whether I reacted. */
+export type ReactionAgg = { emoji: string; count: number; mine: boolean }
+
+/**
+ * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested. Emoji order within a target is the
+ * order they first appear (stable).
+ */
+export function aggregateReactions(entries: ReactionEntry[], myPubkeyHex?: string): Map<string, ReactionAgg[]> {
+  const byTarget = new Map<string, ReactionAgg[]>()
+  for (const e of entries) {
+    let list = byTarget.get(e.targetIdHex)
+    if (!list) {
+      list = []
+      byTarget.set(e.targetIdHex, list)
+    }
+    let agg = list.find((a) => a.emoji === e.emoji)
+    if (!agg) {
+      agg = { emoji: e.emoji, count: 0, mine: false }
+      list.push(agg)
+    }
+    agg.count += 1
+    if (myPubkeyHex && e.authorPubkeyHex === myPubkeyHex) agg.mine = true
+  }
+  return byTarget
+}
+
+/**
+ * Live-stream handlers for a room: ref advances, chat messages, and reaction toggles. All ride the ONE `/watch/<room>`
+ * socket so the lobby stays live.
  */
 /** One online participant — an Ed25519 key present in the room right now. */
 export type PresenceMember = { pubkeyHex: string; since: number }
@@ -62,13 +103,15 @@ export type RoomWatchHandlers = {
   onRef?: (u: RefUpdate) => void
   onChat?: (m: ChatMessageEntry) => void
   onPresence?: (p: PresenceState) => void
+  onReaction?: (r: ReactionUpdate) => void
 }
 
-/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, or a `presence` roster. */
+/** A parsed `/watch` frame — a ref advance (`commit`), a `chat` message, a `presence` roster, or a `reaction` toggle. */
 export type ActivityFrame =
   | { kind: 'commit'; ref: RefUpdate }
   | { kind: 'chat'; message: ChatMessageEntry }
   | { kind: 'presence'; presence: PresenceState }
+  | { kind: 'reaction'; reaction: ReactionUpdate }
 
 /**
  * Parse one raw `/watch` WebSocket frame. Accepts the server's snake_case fields and camelCase, dispatches on the
@@ -96,6 +139,20 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
       })
       .filter((m) => m.pubkeyHex)
     return { kind: 'presence', presence: { members, viewers: Number(f.viewers ?? 0) } }
+  }
+  if (kind === 'reaction') {
+    const targetIdHex = (f.targetIdHex ?? f.target_id) as string | undefined
+    if (!targetIdHex) return null
+    return {
+      kind: 'reaction',
+      reaction: {
+        targetIdHex,
+        emoji: (f.emoji ?? '') as string,
+        authorPubkeyHex: (f.authorPubkeyHex ?? f.author_pubkey ?? '') as string,
+        active: f.active === true,
+        count: Number(f.count ?? 0),
+      },
+    }
   }
 
   const messageIdHex = (f.messageIdHex ?? f.message_id) as string | undefined
@@ -138,6 +195,23 @@ export type CommitLogEntry = {
 }
 
 /**
+ * Parse the DO index's `sources_json` (`[[upstreamHex, commitHex], …]`, `"[]"` for a plain commit) back into
+ * {@link RemixSourceEntry}[]. Tolerant of malformed input (returns `[]`).
+ */
+export function parseSourcesJson(json: string): RemixSourceEntry[] {
+  if (!json || json === '[]') return []
+  try {
+    const arr: unknown = JSON.parse(json)
+    if (!Array.isArray(arr)) return []
+    return arr
+      .filter((p): p is [string, string] => Array.isArray(p) && p.length === 2)
+      .map(([upstreamIdHex, commitHashHex]) => ({ upstreamIdHex, commitHashHex }))
+  } catch {
+    return []
+  }
+}
+
+/**
  * Fork ref name for a remix derived from `upstreamCommitHash` by the forker whose Ed25519 pubkey is `forkerPubkeyHex`.
  * Lands under the `forks/` prefix so the Refs panel can mark it as a fork (distinct from `main` / feature branches).
  *
@@ -174,6 +248,17 @@ export function branchRefName(upstreamCommitHash: string, brancherPubkeyHex: str
 // Transport-agnostic backend interface (maps 1:1 to the Connect service)
 // ---------------------------------------------------------------------------
 
+/**
+ * Options for {@link RepoBackend.commitLog}. A cold walk fetches each commit object over its own network round-trip, so:
+ * - `limit` caps how many commits to walk (the front-page lobby only needs recent activity, not the full history); and
+ * - `onProgress` streams the entries gathered so far (newest-first) after each object resolves, so a consumer can paint
+ * commits incrementally instead of waiting for the whole chain.
+ */
+export interface CommitLogOpts {
+  limit?: number
+  onProgress?: (entries: CommitLogEntry[]) => void
+}
+
 export interface RepoBackend {
   /** PutObject — content-addressed, idempotent (re-put of the same id is a no-op). */
   putObject(room: string, objectIdHex: string, bytes: Uint8Array): Promise<void>
@@ -204,9 +289,9 @@ export interface RepoBackend {
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void
   /**
    * Commit log for the demo UI — the chain reachable from `ref` (default `main`), newest-first. The mock derives it; a
-   * server walk sources it.
+   * server walk sources it. `opts` bounds the walk (`limit`) and/or streams partial results (`onProgress`).
    */
-  commitLog(room: string, ref?: string): Promise<CommitLogEntry[]>
+  commitLog(room: string, ref?: string, opts?: CommitLogOpts): Promise<CommitLogEntry[]>
   /**
    * PostMessage — post a signed chat message to the room. The signing identity is the author (server-verified). Throws
    * `IdentityLockedError` when no seed is available; resolves `{ rateLimited: true, accepted: false }` when the author
@@ -215,6 +300,10 @@ export interface RepoBackend {
   postMessage(room: string, text: string): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }>
   /** ListMessages — recent room messages, oldest-first, capped by `limit`. */
   listMessages(room: string, limit?: number): Promise<ChatMessageEntry[]>
+  /** React — toggle the signing identity's emoji reaction on a feed item (`targetIdHex`). */
+  react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }>
+  /** ListReactions — every reaction in the room (client aggregates). */
+  listReactions(room: string): Promise<ReactionEntry[]>
 }
 
 /**
@@ -327,7 +416,7 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
 
 export class CasConflictError extends Error {
   constructor(public current: string | null) {
-    super('ref CAS failed: the ref moved under you — refetch, re-parent, re-sign, retry')
+    super('Someone else changed this first. Refresh and try again.')
     this.name = 'CasConflictError'
   }
 }
@@ -338,7 +427,7 @@ export class CasConflictError extends Error {
  */
 export class IdentityLockedError extends Error {
   constructor() {
-    super('cannot sign write: identity is locked (no seed in memory)')
+    super('Unlock your identity before signing.')
     this.name = 'IdentityLockedError'
   }
 }
@@ -349,7 +438,7 @@ export class IdentityLockedError extends Error {
  */
 export class BackendNotReadyError extends Error {
   constructor() {
-    super('push requires a ready backend — none is available yet')
+    super('Not ready yet. Try again in a moment.')
     this.name = 'BackendNotReadyError'
   }
 }
@@ -366,6 +455,22 @@ const FOREIGN_MESSAGES = ['hello from another tab', 'ship it 🚀', 'spike on a 
 const FOREIGN_REFS = ['main', 'main', 'feature']
 
 /**
+ * Register `handler` in the Set stored at `key` (creating the Set on first use) and return an unsubscribe that removes
+ * it. The one shape behind all three of `watchRoom`'s channels — ref, chat, reaction — so adding a channel is one line.
+ * A missing handler is a no-op (returns an unsubscribe that does nothing).
+ */
+function addWatcher<T>(map: Map<string, Set<T>>, key: string, handler: T | undefined): () => void {
+  if (!handler) return () => {}
+  let set = map.get(key)
+  if (!set) {
+    set = new Set()
+    map.set(key, set)
+  }
+  set.add(handler)
+  return () => set.delete(handler)
+}
+
+/**
  * In-memory backend implementing the Connect service shape. Mirrors server semantics: content-addressed idempotent
  * object writes, in-message CAS via `RefExpectation`, and a synchronous WatchRefs fan-out that drives Query
  * invalidation. Seeded with a couple of "other players'" commits so the live multiplayer log isn't empty.
@@ -380,6 +485,9 @@ export class MockRepoBackend implements RepoBackend {
   private messages = new Map<string, ChatMessageEntry[]>()
   private seqByRoom = new Map<string, number>()
   private chatWatchers = new Map<string, Set<(m: ChatMessageEntry) => void>>()
+  // Reactions: raw rows per room + subscribers (keyed by room).
+  private reactions = new Map<string, ReactionEntry[]>()
+  private reactionWatchers = new Map<string, Set<(r: ReactionUpdate) => void>>()
   /**
    * Rooms already demo-seeded, so `seedDemoOnce` is idempotent across renders and room switches (the instance is
    * reused, never recreated).
@@ -446,28 +554,11 @@ export class MockRepoBackend implements RepoBackend {
   }
 
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
-    const unsubs: Array<() => void> = []
-    if (handlers.onRef) {
-      const key = `${room}::${prefix}`
-      let set = this.watchers.get(key)
-      if (!set) {
-        set = new Set()
-        this.watchers.set(key, set)
-      }
-      const onRef = handlers.onRef
-      set.add(onRef)
-      unsubs.push(() => set?.delete(onRef))
-    }
-    if (handlers.onChat) {
-      let set = this.chatWatchers.get(room)
-      if (!set) {
-        set = new Set()
-        this.chatWatchers.set(room, set)
-      }
-      const onChat = handlers.onChat
-      set.add(onChat)
-      unsubs.push(() => set?.delete(onChat))
-    }
+    const unsubs = [
+      addWatcher(this.watchers, `${room}::${prefix}`, handlers.onRef),
+      addWatcher(this.chatWatchers, room, handlers.onChat),
+      addWatcher(this.reactionWatchers, room, handlers.onReaction),
+    ]
     if (handlers.onPresence) {
       // Offline parity: there are no real peers on the mock, so synthesise a
       // small roster — a couple of seeded "online" keys, plus YOU as a member
@@ -492,13 +583,43 @@ export class MockRepoBackend implements RepoBackend {
     return { members, viewers: pubkeyHex ? 1 : 2 }
   }
 
+  async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
+    const seed = this.seedHex?.() ?? null
+    if (!seed) throw new IdentityLockedError()
+    const authorPubkeyHex = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed)))
+    const list = this.reactions.get(room) ?? []
+    const idx = list.findIndex(
+      (r) => r.targetIdHex === targetIdHex && r.emoji === emoji && r.authorPubkeyHex === authorPubkeyHex,
+    )
+    let active: boolean
+    if (idx >= 0) {
+      list.splice(idx, 1) // toggle off
+      active = false
+    } else {
+      list.push({ targetIdHex, emoji, authorPubkeyHex }) // toggle on
+      active = true
+    }
+    this.reactions.set(room, list)
+    const count = list.filter((r) => r.targetIdHex === targetIdHex && r.emoji === emoji).length
+    this.broadcastReaction(room, { targetIdHex, emoji, authorPubkeyHex, active, count })
+    return { active, count }
+  }
+
+  async listReactions(room: string): Promise<ReactionEntry[]> {
+    return [...(this.reactions.get(room) ?? [])]
+  }
+
+  private broadcastReaction(room: string, u: ReactionUpdate): void {
+    for (const l of this.reactionWatchers.get(room) ?? []) l(u)
+  }
+
   async postMessage(
     room: string,
     text: string,
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }> {
     const trimmed = text.trim()
-    if (!trimmed) throw new Error('message is empty')
-    if ([...trimmed].length > MAX_MESSAGE_CHARS) throw new Error('message exceeds the length cap')
+    if (!trimmed) throw new Error('Add a message before sending.')
+    if ([...trimmed].length > MAX_MESSAGE_CHARS) throw new Error('Your message is too long. Shorten it and try again.')
     const seed = this.seedHex?.() ?? null
     if (!seed) throw new IdentityLockedError()
 
@@ -535,9 +656,11 @@ export class MockRepoBackend implements RepoBackend {
       { seed: FOREIGN_SEEDS[0]!, text: 'gm — every message here is ed25519-signed' },
       { seed: FOREIGN_SEEDS[1]!, text: 'pushed a commit, say hi 👋' },
     ]
+    const ids: string[] = []
     samples.forEach(({ seed, text }, i) => {
       const authorPubkeyHex = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(seed)))
       const messageIdHex = this.api.blake3_hex(chatCanonical(room, authorPubkeyHex, text))
+      ids.push(messageIdHex)
       const seq = (this.seqByRoom.get(room) ?? 0) + 1
       this.seqByRoom.set(room, seq)
       const list = this.messages.get(room) ?? []
@@ -550,10 +673,25 @@ export class MockRepoBackend implements RepoBackend {
       })
       this.messages.set(room, list)
     })
+    // Seed a few reactions so the offline lobby shows the affordance.
+    const a0 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[0]!)))
+    const a1 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[1]!)))
+    const a2 = bytesToHex(this.api.ed25519_pubkey_from_seed(hexToBytes(FOREIGN_SEEDS[2]!)))
+    const seeded: ReactionEntry[] = [
+      { targetIdHex: ids[0]!, emoji: '👋', authorPubkeyHex: a1 },
+      { targetIdHex: ids[0]!, emoji: '👋', authorPubkeyHex: a2 },
+      { targetIdHex: ids[1]!, emoji: '🚀', authorPubkeyHex: a0 },
+    ]
+    this.reactions.set(room, [...(this.reactions.get(room) ?? []), ...seeded])
   }
 
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
-    return (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    const all = (this.log.get(room) ?? []).filter((e) => e.ref === ref).toReversed()
+    const entries = opts?.limit != null ? all.slice(0, opts.limit) : all
+    // Local/in-memory: no round-trips, so just emit the final set once (lets the
+    // shared `onProgress` consumer treat mock and wasm backends identically).
+    opts?.onProgress?.(entries)
+    return entries
   }
 
   private broadcast(room: string, name: string, u: RefUpdate): void {
@@ -614,7 +752,11 @@ export class MockRepoBackend implements RepoBackend {
     let firstCommitHash: string | null = null
     FOREIGN_SEEDS.forEach((seed, i) => {
       const tree = api.tree_encode('[]')
-      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, BigInt(i), seed)
+      // Stamp a REAL recent unix-seconds timestamp into the signed object (not
+      // `BigInt(i)`, which decoded to ~1970 → an absurd "20629d" if any path
+      // reads the object's own timestamp).
+      const tsSecs = BigInt(Math.floor((Date.now() - (FOREIGN_SEEDS.length - i) * 60_000) / 1000))
+      const commit = api.commit_encode_and_sign(tree.hash_hex, '', FOREIGN_MESSAGES[i]!, tsSecs, seed)
       if (i === 0) firstCommitHash = commit.hash_hex
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seed)))
       void this.putObject(room, commit.hash_hex, commit.bytes)
@@ -691,6 +833,36 @@ export interface RepoWasmClient {
     sign: RepoSignFn,
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }>
   list_messages(baseUrl: string, room: string, limit: number): Promise<ChatMessageEntry[]>
+  react(
+    baseUrl: string,
+    room: string,
+    targetIdHex: string,
+    emoji: string,
+    sign: RepoSignFn,
+  ): Promise<{ active: boolean; count: number }>
+  list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
+  /**
+   * ListCommits — server-side first-parent walk; one round-trip returns a page of denormalized commit metadata (already
+   * decoded server-side, no object bytes) plus a continuation cursor. The client renders it directly.
+   */
+  list_commits(
+    baseUrl: string,
+    room: string,
+    ref: string,
+    startIdHex: string,
+    pageSize: number,
+  ): Promise<{
+    commits: Array<{
+      hash: string
+      parent: string
+      authorPubkeyHex: string
+      message: string
+      createdAtUnix: number
+      kind: string
+      sourcesJson: string
+    }>
+    nextCursorHex: string
+  }>
 }
 
 /**
@@ -702,6 +874,74 @@ export interface RepoWasmClient {
  * frame out to `onUpdate` (which drives Query invalidation via `useRepoEvents`). `commitLog` is accumulated in-memory
  * on push (the service has no log RPC).
  */
+/**
+ * Open the live room WebSocket the worker exposes at `GET /watch/<room>` and dispatch parsed frames to `handlers`. PURE
+ * transport — it needs only the backend BASE URL, NO wasm — so a consumer (the lobby) can open it on mount, in PARALLEL
+ * with the wasm load, instead of waiting for the wasm backend to resolve (which serialized ~800ms onto first live
+ * delivery). Reconnects with bounded exponential backoff; returns an unsubscribe that closes the socket.
+ */
+export function subscribeRoom(
+  baseUrl: string,
+  room: string,
+  prefix: string,
+  handlers: RoomWatchHandlers,
+  pubkeyHex?: string | null,
+): () => void {
+  // Attribute this connection's presence to the current key when one is provided
+  // + well-formed; absent → the DO counts it as a signed-out viewer.
+  const pk = pubkeyHex && /^[0-9a-f]{64}$/.test(pubkeyHex) ? `?pubkey=${pubkeyHex}` : ''
+  const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}${pk}`
+  let closed = false
+  let ws: WebSocket | null = null
+  let attempt = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
+
+  const handleMessage = (ev: MessageEvent) => {
+    const frame = parseActivityFrame(ev.data)
+    if (!frame) return
+    if (frame.kind === 'presence') return void handlers.onPresence?.(frame.presence)
+    if (frame.kind === 'chat') return void handlers.onChat?.(frame.message)
+    if (frame.kind === 'reaction') return void handlers.onReaction?.(frame.reaction)
+    const u = frame.ref
+    if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
+    handlers.onRef?.(u)
+  }
+
+  const scheduleReconnect = () => {
+    if (closed || attempt >= MAX_ATTEMPTS) return
+    const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
+    attempt += 1
+    reconnectTimer = setTimeout(connect, delay)
+  }
+
+  function connect() {
+    if (closed) return
+    try {
+      ws = new WebSocket(wsUrl)
+    } catch {
+      ws = null // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
+      return
+    }
+    ws.addEventListener('open', () => {
+      attempt = 0 // reset backoff once a connection is established
+    })
+    ws.addEventListener('message', handleMessage)
+    ws.addEventListener('close', () => {
+      if (!closed) scheduleReconnect()
+    })
+  }
+
+  connect()
+
+  return () => {
+    if (closed) return
+    closed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close()
+  }
+}
+
 export class WasmRepoBackend implements RepoBackend {
   private log = new Map<string, CommitLogEntry[]>()
   /**
@@ -794,6 +1034,15 @@ export class WasmRepoBackend implements RepoBackend {
     return await this.wasm.list_messages(this.baseUrl, room, limit)
   }
 
+  async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.React)
+    return await this.wasm.react(this.baseUrl, room, targetIdHex, emoji, sign)
+  }
+
+  async listReactions(room: string): Promise<ReactionEntry[]> {
+    return await this.wasm.list_reactions(this.baseUrl, room)
+  }
+
   /**
    * Live ref updates over the raw WebSocket the worker exposes at `GET /watch/<room>` (WatchRefs server-streaming isn't
    * surfaceable over the buffered Fetch transport — see apps/repo-worker README §"WatchRefs / streaming"). The RefStore
@@ -812,85 +1061,30 @@ export class WasmRepoBackend implements RepoBackend {
    * that closes the socket.
    */
   watchRoom(room: string, prefix: string, handlers: RoomWatchHandlers, pubkeyHex?: string | null): () => void {
-    // Attribute this connection's presence to the current key when one is
-    // provided + well-formed; absent → the DO counts it as a signed-out viewer.
-    const pk = pubkeyHex && /^[0-9a-f]{64}$/.test(pubkeyHex) ? `?pubkey=${pubkeyHex}` : ''
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/watch/${encodeURIComponent(room)}${pk}`
-    let closed = false
-    let ws: WebSocket | null = null
-    let attempt = 0
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-    const MAX_ATTEMPTS = 6 // ~bounded backoff; give up after this many failures
-
-    const handleMessage = (ev: MessageEvent) => {
-      const frame = parseActivityFrame(ev.data)
-      if (!frame) return
-      if (frame.kind === 'presence') {
-        handlers.onPresence?.(frame.presence)
-        return
-      }
-      if (frame.kind === 'chat') {
-        handlers.onChat?.(frame.message)
-        return
-      }
-      const u = frame.ref
-      if (prefix && !u.name.startsWith(prefix)) return // client-side prefix filter
-      // Surface peers' pushes in the live log so a signed-out viewer sees others
-      // contributing. The ref event carries the commit id + author but not the
-      // message, so peers show a placeholder; our own commits keep their real
-      // message (recorded on push) and are deduped by hash here.
-      this.recordCommit(room, {
-        hash: u.objectIdHex,
-        message: 'pushed by a peer',
-        authorPubkey: u.authorPubkeyHex,
-        ref: u.name,
-        createdAt: new Date().toISOString(),
-      })
-      handlers.onRef?.(u)
-    }
-
-    // Schedule a bounded, exponentially-backed-off reconnect. The socket can
-    // drop (DO hibernation, transient network) without the user closing it.
-    const scheduleReconnect = () => {
-      if (closed || attempt >= MAX_ATTEMPTS) return
-      const delay = Math.min(1000 * 2 ** attempt, 30_000) // 1s,2s,…,capped 30s
-      attempt += 1
-      reconnectTimer = setTimeout(connect, delay)
-    }
-
-    function connect() {
-      if (closed) return
-      try {
-        ws = new WebSocket(wsUrl)
-      } catch {
-        // No WebSocket available (e.g. SSR) — degrade to a no-op subscription.
-        ws = null
-        return
-      }
-      ws.addEventListener('open', () => {
-        attempt = 0 // reset backoff once a connection is established
-      })
-      ws.addEventListener('message', handleMessage)
-      // On error/close, retry with backoff (unless the caller unsubscribed).
-      ws.addEventListener('error', () => {
-        // `error` is followed by `close`; let `close` drive the reconnect.
-      })
-      ws.addEventListener('close', () => {
-        if (!closed) scheduleReconnect()
-      })
-    }
-
-    connect()
-
-    return () => {
-      if (closed) return
-      closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      // CLOSING (2) / CLOSED (3) need no action; otherwise close the socket.
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        ws.close()
-      }
-    }
+    // Delegate to the shared, wasm-free socket (which carries presence + the
+    // `?pubkey=` attribution). Wrap `onRef` to also record the peer's push into
+    // the in-memory log (a placeholder message) so callers that read `this.log`
+    // still see others contributing; the lobby instead drives the socket via
+    // `subscribeRoom` directly (no wasm dependency).
+    return subscribeRoom(
+      this.baseUrl,
+      room,
+      prefix,
+      {
+        ...handlers,
+        onRef: (u) => {
+          this.recordCommit(room, {
+            hash: u.objectIdHex,
+            message: 'pushed by a peer',
+            authorPubkey: u.authorPubkeyHex,
+            ref: u.name,
+            createdAt: new Date().toISOString(),
+          })
+          handlers.onRef?.(u)
+        },
+      },
+      pubkeyHex,
+    )
   }
 
   /**
@@ -903,51 +1097,86 @@ export class WasmRepoBackend implements RepoBackend {
    * repeated calls (and other branches) don't re-walk; a new head (push or WS event) invalidates the cache and
    * re-walks. Stops at no parent, a missing object, or {@link WasmRepoBackend.WALK_CAP}.
    */
-  async commitLog(room: string, ref = 'main'): Promise<CommitLogEntry[]> {
+  async commitLog(room: string, ref = 'main', opts?: CommitLogOpts): Promise<CommitLogEntry[]> {
+    // Never walk past the safety cap; a caller (e.g. the front-page lobby) can
+    // ask for fewer so a cold load isn't N sequential object round-trips deep.
+    const cap = Math.min(opts?.limit ?? WasmRepoBackend.WALK_CAP, WasmRepoBackend.WALK_CAP)
+
     const head = await this.wasm.get_ref(this.baseUrl, room, ref)
     if (!head) return []
 
     const cacheKey = `${room}::${ref}`
     const cached = this.walkCache.get(cacheKey)
-    if (cached && cached.head === head) return cached.entries
+    if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
-    // INCREMENTAL re-walk: when we already have a cached chain for this ref,
-    // walk from the NEW head by first-parent only until we reach a hash that
-    // is already in the cached chain, then splice that cached tail on. The
-    // common case (our push, a peer's single commit) fetches just the new
-    // object(s) instead of re-walking up to WALK_CAP. A cold walk (no cache)
-    // is bounded by WALK_CAP as before.
-    const tailByHash = new Map<string, number>() // hash → index in cached.entries
+    // The worker owns the commit-log walk: ListCommits returns the whole page of
+    // denormalized metadata in ONE round-trip (O(1) round-trips, no per-object
+    // GetObject + decode). The client just renders what it's handed.
+    const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
+    this.walkCache.set(cacheKey, { head, entries })
+    return entries
+  }
+
+  /**
+   * Page through ListCommits, mapping each denormalized entry straight to a log entry, and splice the cached tail when
+   * the walk reaches a hash we already have. No object bytes, no decode — the worker serves the metadata.
+   */
+  private async commitLogViaListCommits(
+    room: string,
+    ref: string,
+    cap: number,
+    cached: { head: string; entries: CommitLogEntry[] } | undefined,
+    opts?: CommitLogOpts,
+  ): Promise<CommitLogEntry[]> {
+    const tailByHash = new Map<string, number>()
     if (cached) cached.entries.forEach((e, i) => tailByHash.set(e.hash, i))
 
     const fresh: CommitLogEntry[] = []
-    const seen = new Set<string>() // guard against a cyclic/self-parent chain
-    let hash: string | undefined = head
+    const seen = new Set<string>()
     let spliced: CommitLogEntry[] | null = null
-    while (hash && fresh.length < WasmRepoBackend.WALK_CAP && !seen.has(hash)) {
-      const tailIdx = tailByHash.get(hash)
-      if (tailIdx !== undefined) {
-        // Reached the cached chain — splice its tail (from this hash down)
-        // instead of re-fetching/decoding the immutable history again.
-        // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
-        spliced = cached!.entries.slice(tailIdx)
-        break
+    let cursor = '' // '' = walk from the ref head
+    let done = false
+
+    while (!done && fresh.length < cap) {
+      const page = await this.wasm.list_commits(this.baseUrl, room, ref, cursor, cap - fresh.length)
+      if (page.commits.length === 0) break
+      for (const c of page.commits) {
+        const tailIdx = tailByHash.get(c.hash)
+        if (tailIdx !== undefined) {
+          // biome-ignore lint/style/noNonNullAssertion: tailIdx came from cached.entries
+          spliced = cached!.entries.slice(tailIdx)
+          done = true
+          break
+        }
+        if (seen.has(c.hash)) {
+          done = true
+          break
+        } // cycle guard
+        seen.add(c.hash)
+        // Metadata from the DO index maps STRAIGHT to a log entry — no object
+        // bytes, no decode.
+        const sources = parseSourcesJson(c.sourcesJson)
+        const entry: CommitLogEntry = {
+          hash: c.hash,
+          message: c.message,
+          authorPubkey: c.authorPubkeyHex,
+          ref,
+          kind: c.kind === 'remix' ? 'remix' : 'commit',
+          createdAt: new Date(c.createdAtUnix * 1000).toISOString(),
+          ...(sources.length > 0 ? { sources } : {}),
+        }
+        fresh.push(entry)
+        opts?.onProgress?.([...fresh])
+        if (fresh.length >= cap) {
+          done = true
+          break
+        }
       }
-      seen.add(hash)
-      const bytes = await this.cachedObject(room, hash)
-      if (!bytes) break // object missing — stop the walk
-      // Route by the object's prologue type: a fork ref's head is a remix,
-      // not a commit. `decodeLogObject` handles both kinds (and stops the
-      // walk on anything else) so a fork chain renders alongside commits.
-      const decoded = decodeLogObject(this.api, bytes, hash, ref)
-      if (!decoded) break // not a commit/remix — stop rather than throw
-      fresh.push(decoded.entry)
-      hash = decoded.firstParent
+      cursor = page.nextCursorHex
+      if (!cursor) break
     }
 
-    const entries = spliced ? [...fresh, ...spliced] : fresh
-    this.walkCache.set(cacheKey, { head, entries })
-    return entries
+    return spliced ? [...fresh, ...spliced] : fresh
   }
 
   /**

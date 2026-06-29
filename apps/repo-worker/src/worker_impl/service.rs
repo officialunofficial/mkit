@@ -21,15 +21,19 @@ use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
 use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
 use crate::proto::mkit::repo::v1::{
-    ChatMessage, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListMessagesRequest, ListMessagesResponse, ListRefsRequest, ListRefsResponse,
-    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, RefEntry,
-    RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
+    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
+    ListCommitsRequest,
+    ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
+    ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
+    PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
+    RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
 };
-use super::refstore::RefEventJson;
+use std::collections::HashSet;
+use super::refstore::WatchFrame;
 use super::wire::{
-    GetReq, GetResp, ListReq, ListResp, MessagesReq, MessagesResp, PostReq, PostResp, UpdateReq,
-    UpdateResp,
+    CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
+    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
+    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -102,6 +106,44 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, con
         .map_err(|e| ce_internal(format!("R2 put: {e}")))?
         .is_some();
     Ok(stored)
+}
+
+/// Read the just-pushed object from R2 and decode its commit metadata into the
+/// DO-index wire shape — so a ref update can dual-write the `commits` index.
+/// `None` on any miss/read error or a non-commit/remix target; the caller then
+/// indexes nothing (the index is backfillable), never failing the update.
+async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<CommitMetaWire> {
+    let bucket = env.bucket(STORAGE_BUCKET).ok()?;
+    let obj = bucket.get(&object_key(room, new_id)).execute().await.ok()??;
+    let bytes = obj.body()?.bytes().await.ok()?;
+    let m = crate::commit_log::extract_commit_meta(&bytes)?;
+    // Compute the borrowing fields before moving the owned `String`s out of `m`.
+    let parent = m.parent.map(hex::encode).unwrap_or_default();
+    let kind = m.kind.as_str().to_string();
+    let sources = m.sources_json();
+    Some(CommitMetaWire {
+        parent,
+        signer: m.signer_hex,
+        message: m.message,
+        timestamp: m.timestamp as i64,
+        kind,
+        sources,
+    })
+}
+
+/// Map a DO commit-index row (hex fields) straight to the proto `CommitEntry`
+/// the client renders — no object bytes, no decode. Field-for-field.
+fn row_to_entry(row: CommitRowWire) -> CommitEntry {
+    CommitEntry {
+        hash: Some(row.hash),
+        parent: Some(row.parent),
+        author_pubkey: Some(row.signer),
+        message: Some(row.message),
+        created_at_unix: Some(row.timestamp),
+        kind: Some(row.kind),
+        sources_json: Some(row.sources),
+        ..Default::default()
+    }
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
@@ -284,6 +326,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
+            // Decode the pushed object once to dual-write the DO commit index.
+            let commit = read_commit_meta_wire(&env, &room, &new_id).await;
             let body = UpdateReq {
                 name,
                 new: hex::encode(&new_id),
@@ -294,6 +338,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     Some(hex::encode(&expected_id))
                 },
                 author,
+                commit,
             };
             let resp: UpdateResp = do_call(&env, &room, "/update", &body).await?;
             let current = hex_to_bytes_opt(&resp.current).unwrap_or_default();
@@ -360,7 +405,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         // WebSocket route, which is fully wired: the RefStore DO broadcasts a
         // JSON RefEvent frame to every `/watch` subscriber on each successful
         // UpdateRef. See README "WatchRefs / streaming".
-        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<RefEventJson>);
+        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<WatchFrame>);
         Err(connectrpc::ConnectError::unimplemented(
             "WatchRefs is served over the WebSocket route GET /watch/<room>, \
              not Connect server-streaming (see README)",
@@ -469,6 +514,224 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .collect();
             Ok(Response::new(ListMessagesResponse {
                 messages,
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn react(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ReactRequest>,
+    ) -> ServiceResult<ReactResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let target = msg.target_id.unwrap_or_default();
+        let emoji = msg.emoji.unwrap_or_default();
+
+        check_room(&room)?;
+        // target_id MUST be a real 64-hex feed-item id (not an arbitrary string),
+        // and emoji MUST be one of the allowed set — together these bound the
+        // reactions table's cardinality and stop arbitrary content being
+        // persisted + broadcast to every viewer.
+        if !crate::chat::is_valid_target_id(&target) {
+            return Err(ce_invalid("target_id must be a 64-char lowercase-hex feed-item id"));
+        }
+        if !crate::chat::is_allowed_emoji(&emoji) {
+            return Err(ce_invalid("emoji is not in the allowed reaction set"));
+        }
+
+        let author = ctx
+            .extensions()
+            .get::<AuthorPubkey>()
+            .map(|a| a.0.clone())
+            .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+        // The request's Idempotency-Key — the DO dedupes a replayed signed React
+        // (a toggle) into its original result rather than flipping state again.
+        let idem = ctx
+            .extensions()
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            let resp: ReactResp =
+                do_call(&env, &room, "/react", &ReactReq { target, emoji, author, idem }).await?;
+            Ok(Response::new(ReactResponse {
+                active: Some(resp.active),
+                count: Some(resp.count),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_reactions(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListReactionsRequest>,
+    ) -> ServiceResult<ListReactionsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // `/reactions` ignores its body; `()` serializes to `null`.
+            let resp: ReactionsResp = do_call(&env, &room, "/reactions", &()).await?;
+            let reactions = resp
+                .reactions
+                .into_iter()
+                .map(|r| Reaction {
+                    target_id: Some(r.target),
+                    emoji: Some(r.emoji),
+                    author_pubkey: Some(hex::decode(&r.author).unwrap_or_default()),
+                    ..Default::default()
+                })
+                .collect();
+            Ok(Response::new(ListReactionsResponse {
+                reactions,
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn list_commits(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, ListCommitsRequest>,
+    ) -> ServiceResult<ListCommitsResponse> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        let mut ref_name = msg.r#ref.unwrap_or_default();
+        if ref_name.is_empty() {
+            ref_name = "main".to_string();
+        }
+        let start_id = msg.start_id.unwrap_or_default();
+        // Bound the page so one request can't walk unbounded history into memory.
+        const DEFAULT_PAGE: usize = 100;
+        const MAX_PAGE: usize = 512;
+        let cap = match msg.page_size.unwrap_or(0) as usize {
+            0 => DEFAULT_PAGE,
+            n => n.min(MAX_PAGE),
+        };
+
+        check_room(&room)?;
+        if !is_valid_ref_name(&ref_name) {
+            return Err(ce_invalid("ref name is invalid (SPEC-REFS §3)"));
+        }
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // 1) Serve METADATA straight from the colocated DO index — ONE SQLite
+            //    query, NO R2, NO object bytes, NO client decode.
+            let idx: ListCommitsResp = do_call(
+                &env,
+                &room,
+                "/list-commits",
+                &ListCommitsReq {
+                    r#ref: ref_name.clone(),
+                    start_id: if start_id.is_empty() { String::new() } else { hex::encode(&start_id) },
+                    page_size: cap as u32,
+                },
+            )
+            .await?;
+
+            if idx.complete {
+                let commits: Vec<CommitEntry> = idx.commits.into_iter().map(row_to_entry).collect();
+                return Ok(Response::new(ListCommitsResponse {
+                    commits,
+                    next_cursor: Some(idx.next_cursor),
+                    ..Default::default()
+                }));
+            }
+
+            // 2) Pre-index history (index incomplete) → the authoritative sequential
+            //    R2 walk to DECODE the metadata, return it, AND backfill the index so
+            //    the next read is fully local.
+            let bucket = env
+                .bucket(STORAGE_BUCKET)
+                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+            let head: Vec<u8> = if !start_id.is_empty() {
+                start_id
+            } else {
+                let resp: GetResp =
+                    do_call(&env, &room, "/get", &GetReq { name: ref_name.clone() }).await?;
+                if !resp.exists {
+                    return Ok(Response::new(ListCommitsResponse::default()));
+                }
+                hex_to_bytes_opt(&resp.value).unwrap_or_default()
+            };
+            if head.len() != 32 {
+                return Ok(Response::new(ListCommitsResponse::default()));
+            }
+
+            let mut rows: Vec<CommitRowWire> = Vec::with_capacity(cap);
+            let mut seen: HashSet<Vec<u8>> = HashSet::new();
+            let mut current = head;
+            let mut next_cursor = String::new();
+            loop {
+                if rows.len() >= cap {
+                    next_cursor = hex::encode(&current);
+                    break;
+                }
+                if !seen.insert(current.clone()) {
+                    break;
+                }
+                let bytes = match bucket.get(&object_key(&room, &current)).execute().await {
+                    Ok(Some(obj)) => obj
+                        .body()
+                        .ok_or_else(|| ce_internal("R2 object had no body"))?
+                        .bytes()
+                        .await
+                        .map_err(|e| ce_internal(format!("R2 read: {e}")))?,
+                    Ok(None) => break,
+                    Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
+                };
+                let Some(m) = crate::commit_log::extract_commit_meta(&bytes) else {
+                    break;
+                };
+                // Compute borrowing fields before moving the owned `String`s out of `m`.
+                let parent_hex = m.parent.map(hex::encode).unwrap_or_default();
+                let kind = m.kind.as_str().to_string();
+                let sources = m.sources_json();
+                let timestamp = m.timestamp as i64;
+                rows.push(CommitRowWire {
+                    hash: hex::encode(&current),
+                    parent: parent_hex.clone(),
+                    signer: m.signer_hex,
+                    message: m.message,
+                    timestamp,
+                    kind,
+                    sources,
+                });
+                if parent_hex.is_empty() {
+                    break;
+                }
+                current = match hex::decode(&parent_hex) {
+                    Ok(b) if b.len() == 32 => b,
+                    _ => break,
+                };
+            }
+
+            // Best-effort backfill (a failure just means a slow next read).
+            if !rows.is_empty() {
+                let _ = do_call::<_, RecordCommitsResp>(
+                    &env,
+                    &room,
+                    "/record-commits",
+                    &RecordCommitsReq { r#ref: ref_name, commits: rows.clone() },
+                )
+                .await;
+            }
+
+            let commits: Vec<CommitEntry> = rows.into_iter().map(row_to_entry).collect();
+            Ok(Response::new(ListCommitsResponse {
+                commits,
+                next_cursor: Some(next_cursor),
                 ..Default::default()
             }))
         })

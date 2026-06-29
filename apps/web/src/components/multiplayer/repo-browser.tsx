@@ -4,6 +4,7 @@
 // column) and the live commit log + commit/remix detail (`RepoLog`, right column
 // under Compose), plus log rows and the loading skeleton.
 
+import * as ScrollArea from '@radix-ui/react-scroll-area'
 import { useMemo, useState } from 'react'
 import { recordActivity } from '../../lib/activity-log'
 import {
@@ -18,6 +19,7 @@ import {
   useRefs,
 } from '../../lib/repo-api'
 import { Field, FieldList, HashChip } from '../result-panel'
+import { Tooltip } from '../tooltip'
 import { useMkit } from '../use-mkit'
 import { useDerive } from './compose'
 import { PlayerLabel } from './player-label'
@@ -189,13 +191,13 @@ export function RefsPanel({
   const showSkeleton = refs.isPending || (refs.isFetching && (refs.data?.length ?? 0) === 0)
 
   return (
-    <section className='space-y-3'>
+    <section className='space-y-2'>
       <div className='flex items-baseline justify-between'>
         <h2 className='text-sm font-semibold'>Branches · repo “{room}”</h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
       {showSkeleton ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows rows={1} />
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No branches yet. Push a commit to create one.</p>
       ) : (
@@ -236,6 +238,10 @@ export function RefsPanel({
   )
 }
 
+/**
+ * A single dropdown over every ref (branches + forks). The trigger shows the active ref, so the panel stays one line
+ * and the commit log gets the room.
+ */
 function LiveLog({
   room,
   selectedRef,
@@ -263,6 +269,7 @@ function LiveLog({
       <div className='flex items-baseline justify-between'>
         <h2 className='text-sm font-semibold'>
           {isForkRef(selectedRef) ? 'Remix log' : 'Commit log'} · “{selectedRef}”
+          {entries.length > 0 ? <span className='ml-1.5 font-normal text-muted'>{entries.length}</span> : null}
         </h2>
         <span className='font-mono text-xs text-muted'>
           {/* Show "head …" while the head is loading/refetching; only show ∅ once
@@ -275,17 +282,30 @@ function LiveLog({
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No commits on this branch yet. Push one above.</p>
       ) : (
-        <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
-          {entries.map((e) => (
-            <LogRow
-              key={e.hash}
-              entry={e}
-              mine={!!myPubkey && e.authorPubkey === myPubkey}
-              onSelect={() => onSelectCommit(e.hash)}
-              derive={derive}
-            />
-          ))}
-        </ul>
+        // Bound the log so a long history scrolls inside the panel instead of
+        // growing the whole page. Radix ScrollArea gives a consistent, themeable
+        // scrollbar across browsers.
+        <ScrollArea.Root type='auto' className='relative max-h-[30rem] overflow-hidden'>
+          <ScrollArea.Viewport className='h-full max-h-[30rem] w-full'>
+            <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
+              {entries.map((e) => (
+                <LogRow
+                  key={e.hash}
+                  entry={e}
+                  mine={!!myPubkey && e.authorPubkey === myPubkey}
+                  onSelect={() => onSelectCommit(e.hash)}
+                  derive={derive}
+                />
+              ))}
+            </ul>
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar
+            orientation='vertical'
+            className='flex w-1.5 touch-none select-none p-px transition-opacity data-[state=hidden]:opacity-0'
+          >
+            <ScrollArea.Thumb className='flex-1 rounded-full bg-muted/40 hover:bg-muted/60' />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
       )}
     </section>
   )
@@ -389,7 +409,7 @@ function CommitDetail({
     // remix_decode and returns the kind + sources, so the detail view
     // never has to guess which decoder to call.
     const res = decodeLogObject(api, obj.data, hash, '')
-    if (!res) return { ok: false as const, error: 'unknown object kind' }
+    if (!res) return { ok: false as const, error: "This commit is in a format we don't recognize." }
     try {
       const info = res.entry.kind === 'remix' ? api.remix_decode(obj.data) : api.commit_decode(obj.data)
       const parents: string[] = []
@@ -458,11 +478,11 @@ function CommitDetail({
       </div>
 
       {obj.isLoading ? (
-        <p className='text-sm text-muted'>Loading object…</p>
+        <p className='text-sm text-muted'>Loading…</p>
       ) : !obj.data ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>Object not found in this repository.</p>
+        <p className='text-sm text-amber-700 dark:text-amber-400'>We couldn't find this commit.</p>
       ) : !decoded?.ok ? (
-        <p className='text-red-600 dark:text-red-400'>Could not decode object: {decoded?.error}</p>
+        <p className='text-red-600 dark:text-red-400'>We couldn't open this commit. Try again.</p>
       ) : (
         <FieldList>
           <Field label='Hash'>
@@ -477,14 +497,15 @@ function CommitDetail({
                   {decoded.sources.map((s) => (
                     <li key={s.commitHashHex} className='flex items-center gap-2'>
                       <HashChip hash={s.commitHashHex} size={12} />
-                      <button
-                        type='button'
-                        onClick={() => onSelectCommit(s.commitHashHex)}
-                        className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
-                        title='Open the upstream commit this fork derives from'
-                      >
-                        {s.commitHashHex}
-                      </button>
+                      <Tooltip content='Open the upstream commit this fork derives from'>
+                        <button
+                          type='button'
+                          onClick={() => onSelectCommit(s.commitHashHex)}
+                          className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
+                        >
+                          {s.commitHashHex}
+                        </button>
+                      </Tooltip>
                     </li>
                   ))}
                 </ul>
@@ -533,7 +554,7 @@ function CommitDetail({
               </ul>
             )}
           </Field>
-          <Field label='Signature (Ed25519)'>
+          <Field label='Signature'>
             <code className='font-mono text-xs break-all'>{decoded.signatureHex}</code>
           </Field>
         </FieldList>

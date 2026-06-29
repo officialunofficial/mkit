@@ -15,6 +15,7 @@ use worker::send::SendFuture;
 use worker::{event, Context, Env, Method, Request, Response, Result};
 
 pub mod auth;
+pub mod commit_index;
 pub mod refstore;
 pub mod service;
 pub mod wire;
@@ -96,24 +97,34 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     serve_connect(req, env).await
 }
 
+/// The Connect `invalid_argument` 400 returned when a request body exceeds the cap.
+fn body_too_large() -> Result<Response> {
+    let payload =
+        format!("{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}");
+    let mut resp = Response::error(payload, 400)?;
+    let _ = resp.headers_mut().set("Content-Type", "application/json");
+    Ok(resp)
+}
+
 /// Drive a ConnectRPC request through the Router-backed tower::Service.
 async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Read raw body + method/uri/headers up front. The envelope auth
     // interceptor needs the raw body, and `Full<Bytes>` is the simplest
     // `http_body::Body<Data = Bytes>` (error = Infallible) that satisfies the
     // ConnectRpcService bound.
+    // H2: cap the request body. Reject by Content-Length BEFORE buffering, so an
+    // oversized POST is refused in O(1) instead of `req.bytes()` materializing the
+    // whole payload in the isolate first (the only large input is PutObject
+    // `bytes`). The post-buffer check below is the backstop for chunked/
+    // unknown-length requests where Content-Length is absent.
+    if let Ok(Some(len)) = req.headers().get("content-length") {
+        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
+            return Ok(with_cors(body_too_large()?));
+        }
+    }
     let body = req.bytes().await.unwrap_or_default();
-
-    // H2: cap the buffered request body. The only large input is the PutObject
-    // `bytes` payload; reject anything oversized with a Connect `invalid_argument`
-    // before doing any further work.
     if body.len() > MAX_BODY_BYTES {
-        let payload = format!(
-            "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
-        );
-        let mut resp = Response::error(payload, 400)?;
-        let _ = resp.headers_mut().set("Content-Type", "application/json");
-        return Ok(with_cors(resp));
+        return Ok(with_cors(body_too_large()?));
     }
 
     let method = match req.method() {
@@ -149,6 +160,10 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Build the service fresh per request — `Env` is Send and cheap to clone;
     // the service holds no cross-request state.
     let router: Router = Arc::new(RepoServer::new(env)).register(Router::new());
+    // Default compression policy (gzip large responses). The wasm client now
+    // re-asserts `content-encoding` from the gzip magic and decompresses, so the
+    // earlier "browser strips the header → client decodes raw gzip" bug is fixed
+    // at the source (see mkit-repo-client transport `is_gzip`).
     let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;

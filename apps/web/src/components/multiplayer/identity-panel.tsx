@@ -216,7 +216,8 @@ export function UnlockedHeader({
       {attest.err ? <p className='text-sm text-amber-700 dark:text-amber-400'>{attest.err}</p> : null}
       {id.ephemeral ? (
         <p className='text-sm text-amber-700 dark:text-amber-400'>
-          No passkey PRF here, so this identity is a random in-memory key that won&rsquo;t persist.
+          This browser can&rsquo;t save your passkey, so this is a temporary identity that won&rsquo;t be here next
+          time.
         </p>
       ) : null}
     </section>

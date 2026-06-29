@@ -120,6 +120,56 @@ pub async fn get_object(
         .then(|| resp.bytes.unwrap_or_default()))
 }
 
+/// `ListCommits` — walk the chain from `ref_name` (empty = "main"), or from a
+/// `start_id_hex` cursor, returning up to `page_size` RAW commit/remix objects in
+/// ONE round-trip (vs O(depth) sequential `GetObject` calls). Returns a JS object
+/// `{ commits: [{ idHex, bytes }], nextCursorHex }`; `nextCursorHex` is empty when
+/// the chain ended. The caller decodes `bytes` with the mkit wasm decoder.
+#[wasm_bindgen]
+pub async fn list_commits(
+    base_url: &str,
+    room: String,
+    ref_name: String,
+    start_id_hex: String,
+    page_size: u32,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let start_id = if start_id_hex.is_empty() {
+        Vec::new()
+    } else {
+        hex_to_bytes(&start_id_hex)?
+    };
+    let resp = client
+        .list_commits(ListCommitsRequest {
+            room: Some(room),
+            r#ref: Some(ref_name),
+            start_id: Some(start_id),
+            page_size: Some(page_size),
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for c in resp.commits {
+        let obj = js_sys::Object::new();
+        // Metadata straight from the DO index — no object bytes, no decode.
+        set(&obj, "hash", c.hash.unwrap_or_default().into())?;
+        set(&obj, "parent", c.parent.unwrap_or_default().into())?;
+        set(&obj, "authorPubkeyHex", c.author_pubkey.unwrap_or_default().into())?;
+        set(&obj, "message", c.message.unwrap_or_default().into())?;
+        set(&obj, "createdAtUnix", (c.created_at_unix.unwrap_or(0) as f64).into())?;
+        set(&obj, "kind", c.kind.unwrap_or_default().into())?;
+        set(&obj, "sourcesJson", c.sources_json.unwrap_or_default().into())?;
+        arr.push(&obj);
+    }
+    let out = js_sys::Object::new();
+    set(&out, "commits", arr.into())?;
+    set(&out, "nextCursorHex", resp.next_cursor.unwrap_or_default().into())?;
+    Ok(out.into())
+}
+
 /// `ListRefs` — refs in the room, optionally filtered by name prefix. Returns a
 /// JS array of `{ name, objectIdHex }` objects.
 #[wasm_bindgen]
@@ -184,6 +234,36 @@ pub async fn list_messages(base_url: &str, room: String, limit: u32) -> Result<J
         // epoch-ms + sequence magnitudes this demo produces.
         set(&obj, "createdAt", (m.created_at.unwrap_or(0) as f64).into())?;
         set(&obj, "seq", (m.seq.unwrap_or(0) as f64).into())?;
+        arr.push(&obj);
+    }
+    Ok(arr.into())
+}
+
+/// `ListReactions` — every reaction in the room. No auth. Returns a JS array of
+/// `{ targetIdHex, emoji, authorPubkeyHex }`; the client aggregates counts +
+/// "did I react".
+#[wasm_bindgen]
+pub async fn list_reactions(base_url: &str, room: String) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
+    let resp = client
+        .list_reactions(ListReactionsRequest {
+            room: Some(room),
+            ..Default::default()
+        })
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let arr = js_sys::Array::new();
+    for r in resp.reactions {
+        let obj = js_sys::Object::new();
+        set(&obj, "targetIdHex", r.target_id.unwrap_or_default().into())?;
+        set(&obj, "emoji", r.emoji.unwrap_or_default().into())?;
+        set(
+            &obj,
+            "authorPubkeyHex",
+            bytes_to_hex(r.author_pubkey.as_deref().unwrap_or_default()).into(),
+        )?;
         arr.push(&obj);
     }
     Ok(arr.into())
@@ -310,6 +390,38 @@ pub async fn post_message(
     )?;
     set(&obj, "accepted", resp.accepted.unwrap_or(false).into())?;
     set(&obj, "rateLimited", resp.rate_limited.unwrap_or(false).into())?;
+    Ok(obj.into())
+}
+
+/// `React` — toggle a signed emoji reaction on a feed item (`target_id_hex`).
+/// Signed via `sign`. Returns `{ active, count }` — `active` is the new on/off
+/// state for the reactor, `count` the total reactors for (target, emoji).
+#[wasm_bindgen]
+pub async fn react(
+    base_url: &str,
+    room: String,
+    target_id_hex: String,
+    emoji: String,
+    sign: js_sys::Function,
+) -> Result<JsValue, JsError> {
+    let client = RepoServiceClient::new(SigningFetchTransport::new(sign), config(base_url)?);
+    let resp = client
+        .react_with_options(
+            ReactRequest {
+                room: Some(room),
+                target_id: Some(target_id_hex),
+                emoji: Some(emoji),
+                ..Default::default()
+            },
+            CallOptions::default(),
+        )
+        .await
+        .map_err(rpc_err)?
+        .into_owned();
+
+    let obj = js_sys::Object::new();
+    set(&obj, "active", resp.active.unwrap_or(false).into())?;
+    set(&obj, "count", (resp.count.unwrap_or(0) as f64).into())?;
     Ok(obj.into())
 }
 

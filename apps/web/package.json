@@ -31,7 +31,11 @@
   ],
   "dependencies": {
     "@radix-ui/react-collapsible": "^1.1.14",
+    "@radix-ui/react-dropdown-menu": "^2.1.18",
     "@radix-ui/react-popover": "^1.1.17",
+    "@radix-ui/react-scroll-area": "^1.2.12",
+    "@radix-ui/react-tabs": "^1.1.15",
+    "@radix-ui/react-tooltip": "^1.2.10",
     "@tanstack/query-sync-storage-persister": "^5.101.1",
     "@tanstack/react-query": "^5.101.1",
     "@tanstack/react-query-persist-client": "^5.101.1",

@@ -22,6 +22,7 @@ pub mod hashing;
 pub mod refs;
 
 /// Generated buffa messages + ConnectRPC RepoService server stubs.
+pub mod commit_log;
 pub mod proto {
     connectrpc::include_generated!();
 }

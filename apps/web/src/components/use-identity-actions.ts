@@ -71,11 +71,9 @@ export function useIdentityActions(): IdentityActions {
         setNameMut.mutate({ pubkeyHex: pubkey, seedHex: res.seedHex, name: petname })
       }
       setStatus(
-        res.via === 'prf-create'
-          ? 'Identity ready — one passkey prompt, Ed25519 derived via PRF.'
-          : res.via === 'prf-get'
-            ? 'Identity ready — Ed25519 derived from your passkey via PRF.'
-            : 'No passkey PRF here — using a random in-memory key that won’t persist across sessions or devices.',
+        res.via === 'ephemeral'
+          ? "Your device can't save this identity, so it'll only last until you close this tab."
+          : 'Your identity is ready.',
       )
       recordActivity({
         kind: 'create',
@@ -110,7 +108,7 @@ export function useIdentityActions(): IdentityActions {
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
-      setStatus('Unlocked — recovered your player from the passkey.')
+      setStatus('Welcome back — your identity is unlocked.')
       recordActivity({
         kind: 'unlock',
         title: `Recovered ${playerName(pubkey)} — same key, no key file`,
@@ -122,7 +120,7 @@ export function useIdentityActions(): IdentityActions {
       })
     } catch (e) {
       if (e instanceof PrfUnsupportedError) {
-        setStatus('This passkey can’t derive a key (no PRF). Create a new identity instead.')
+        setStatus("This passkey can't unlock your signing key. Create a new identity instead.")
       } else {
         setStatus(errMsg(e))
       }

@@ -14,20 +14,13 @@ import { type ReactNode, createContext, useContext } from 'react'
 import type { RepoBackend } from './backend'
 
 /**
- * The active repo backend, or `null` before one is available (worker mode while
- * the wasm client loads). Defaults to `null` so a hook that reads it outside a
- * provider sees "no backend yet" and stays gated, never a stale instance.
+ * The active repo backend, or `null` before one is available (worker mode while the wasm client loads). Defaults to
+ * `null` so a hook that reads it outside a provider sees "no backend yet" and stays gated, never a stale instance.
  */
 const RepoBackendContext = createContext<RepoBackend | null>(null)
 
 /** Provide the backend to the subtree. `backend` is `null` until ready (→ children gate on it). */
-export function RepoBackendProvider({
-  backend,
-  children,
-}: {
-  backend: RepoBackend | null
-  children: ReactNode
-}) {
+export function RepoBackendProvider({ backend, children }: { backend: RepoBackend | null; children: ReactNode }) {
   return <RepoBackendContext.Provider value={backend}>{children}</RepoBackendContext.Provider>
 }
 
