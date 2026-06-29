@@ -1064,11 +1064,12 @@ mod tests {
         // match must not blow up the (previously cubic) search. 3000 new,
         // distinct lines that appear in no source: all stay on the editing
         // commit, and the call returns promptly via the source key-index.
+        use std::fmt::Write as _;
         let (_d, store) = fresh_store();
         let c_a = put_file_commit(&store, "f.txt", b"seed\n", vec![], 1, 100);
         let mut v2 = String::from("seed\n");
         for i in 0..3000 {
-            v2.push_str(&format!("brand_new_distinct_line_number_{i:06}\n"));
+            let _ = writeln!(v2, "brand_new_distinct_line_number_{i:06}");
         }
         let c_b = put_file_commit(&store, "f.txt", v2.as_bytes(), vec![c_a], 2, 200);
 
