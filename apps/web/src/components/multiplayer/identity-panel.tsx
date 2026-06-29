@@ -57,12 +57,12 @@ export function AttestBinding({
         </button>
         <InfoTip label='About attesting'>
           <p>
-            <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge vouching that this
-            Ed25519 signing key is yours — cryptographically linking the two keys.
+            <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge that vouches this
+            Ed25519 key is yours, tying the two keys together.
           </p>
           <p className='mt-2'>
-            It’s optional. The binding is verified in WASM with the RP-ID pinned, so a green check proves the two keys
-            belong together — a stronger “same person” signal than the signing key alone.
+            It’s optional. The binding is verified in your browser with the passkey’s origin pinned, so a green check is
+            a stronger “same person” signal than the signing key alone.
           </p>
         </InfoTip>
       </div>
@@ -73,7 +73,7 @@ export function AttestBinding({
               <span
                 className={result.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}
               >
-                {result.verified ? 'verified ✓ (WebAuthn assertion checked in WASM)' : 'failed ✗'}
+                {result.verified ? 'verified ✓ (WebAuthn assertion checked in your browser)' : 'failed ✗'}
               </span>
             </Field>
           ) : null}
@@ -121,7 +121,7 @@ export function LockedView({
             </button>
           </div>
           <p className='max-w-prose text-sm text-muted'>
-            Unlock recovers your existing player from the passkey; New identity mints a fresh one.
+            Unlock recovers your existing player from the passkey. New identity creates a fresh one.
           </p>
         </>
       ) : (
@@ -135,7 +135,7 @@ export function LockedView({
             </button>
           </div>
           <p className='max-w-prose text-sm text-muted'>
-            One passkey → your Ed25519 player. A single prompt; every push afterwards signs without one.
+            One passkey becomes your Ed25519 player. A single prompt, then every push signs without another.
           </p>
         </>
       )}
@@ -158,8 +158,8 @@ export function UnlockedHeader() {
       kind: 'lock',
       title: 'Signing key wiped from memory',
       lines: [
-        'The in-memory Ed25519 seed is gone — you can still read the repository, but can’t sign a push until you Unlock.',
-        'Your passkey and pubkey stay, so Unlock re-derives the SAME player. No key was ever written to disk.',
+        'Your Ed25519 seed is gone from memory. You can still read the repository, but you can’t sign a push until you unlock.',
+        'Your passkey and public key remain, so unlocking re-derives the same player. Nothing was ever written to disk.',
       ],
     })
     id.lock()
@@ -182,7 +182,7 @@ export function UnlockedHeader() {
       </div>
       {id.ephemeral ? (
         <p className='text-sm text-amber-700 dark:text-amber-400'>
-          Ephemeral key: no passkey PRF available, so this identity is random and won&rsquo;t persist.
+          No passkey PRF here, so this identity is a random in-memory key that won&rsquo;t persist.
         </p>
       ) : null}
     </section>
@@ -205,8 +205,8 @@ export function RoomSelector() {
         </label>
         <InfoTip label='About the repository'>
           <p>
-            <strong className='text-fg'>Everyone here shares one repository.</strong> It’s identified only by its name —
-            anyone with the name can read and write it. No accounts: your anonymous key <em>is</em> your identity.
+            <strong className='text-fg'>Everyone here shares one repository</strong>, identified only by its name.
+            Anyone with the name can read and write it. No accounts: your anonymous key <em>is</em> your identity.
           </p>
           <p className='mt-2'>
             Any number of keys contribute to the same <strong className='text-fg'>shared history</strong>. Because the
