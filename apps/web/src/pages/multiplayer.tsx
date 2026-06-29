@@ -24,29 +24,6 @@ export default function MultiplayerPage() {
       <DemoBoundary>
         <MultiplayerDemo />
       </DemoBoundary>
-      <div className='max-w-prose space-y-3 text-sm text-muted'>
-        <p>
-          The passkey is a P-256 identity anchor synced by your platform; the Ed25519 signing key is re-derived from it
-          each session and held only in memory — there&rsquo;s no key file. Same passkey → same Ed25519 public key → the
-          same anonymous player, across devices.
-        </p>
-        <p>
-          Every push carries a signed request envelope (Ed25519 over a BLAKE3 digest of the canonical request), and the
-          branch advances under a compare-and-set so concurrent pushes serialize cleanly. The wasm ConnectRPC client
-          talks to a Cloudflare Worker (R2 objects + a Durable Object ref store); with no backend configured it falls
-          back to an in-memory mock so the flow still runs offline.
-        </p>
-        <p>
-          Curious about the underlying signature primitive? See the{' '}
-          <a
-            href='/demos#sign'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            sign
-          </a>{' '}
-          demo.
-        </p>
-      </div>
       <Link
         to='/'
         className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'

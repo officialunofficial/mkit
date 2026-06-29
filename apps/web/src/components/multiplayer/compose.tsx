@@ -3,6 +3,7 @@
 // Compose surface (build + sign + push a commit) and the fork/remix hook.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
+import { useQueryClient } from '@tanstack/react-query'
 import { useId, useMemo, useState } from 'react'
 import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
@@ -10,13 +11,14 @@ import {
   CasConflictError,
   IdentityLockedError,
   type RemixSourceEntry,
+  branchRefName,
   forkRefName,
   usePushCommit,
   useRef,
   useRefs,
   useRepoBackend,
 } from '../../lib/repo-api'
-import { Field, FieldList, INPUT_CLASSES } from '../result-panel'
+import { INPUT_CLASSES } from '../result-panel'
 import { bytesToHex, hexToBytes, useMkit } from '../use-mkit'
 import { InfoTip } from './info-tip'
 import { PRIMARY_BTN, errMsg } from './shared'
@@ -164,8 +166,9 @@ export function Compose({
               under a <strong className='text-fg'>compare-and-set</strong>, so concurrent pushes serialize cleanly.
             </p>
             <p className='mt-2'>
-              Pick an existing branch to add onto it, or start a new one. Forks land under{' '}
-              <code className='font-mono'>forks/…</code>.
+              Pick an existing branch to add onto it, or start a new one. Remixing a commit makes its own branch under{' '}
+              <code className='font-mono'>forks/…</code>; branching off a commit makes one under{' '}
+              <code className='font-mono'>b/…</code>.
             </p>
           </InfoTip>
         </div>
@@ -204,17 +207,41 @@ export function Compose({
       </button>
 
       {built.ok ? (
-        <FieldList>
-          <Field label='Commit hash'>
-            <code className='font-mono text-sm break-all'>{built.commit.hash_hex}</code>
-          </Field>
-          <Field label='Signature (Ed25519, in-browser)'>
-            <code className='font-mono text-xs break-all'>{built.commit.signature_hex}</code>
-          </Field>
-          <Field label={`Parent (head of “${targetRef || 'main'}”)`}>
-            <code className='font-mono text-xs break-all'>{parentHash || '∅ (first commit on this branch)'}</code>
-          </Field>
-        </FieldList>
+        <details className='group'>
+          <summary className='flex cursor-pointer list-none items-center gap-1 text-sm text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
+            <span className='inline-block transition-transform group-open:rotate-90'>›</span> Signed-commit details
+          </summary>
+          {/* Fixed-width label column so every row's value lines up; the qualifier
+              for each field lives in an info tooltip, not in the label text. */}
+          <dl className='mt-2 grid grid-cols-[5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1.5 text-xs'>
+            <dt className='flex items-center gap-1 text-muted'>
+              Commit
+              <InfoTip label='About the commit hash'>
+                <p>The BLAKE3 content hash that addresses this commit object.</p>
+              </InfoTip>
+            </dt>
+            <dd className='min-w-0 font-mono break-all'>{built.commit.hash_hex}</dd>
+
+            <dt className='flex items-center gap-1 text-muted'>
+              Signature
+              <InfoTip label='About the signature'>
+                <p>The Ed25519 signature over the commit, produced in your browser by your passkey-derived key.</p>
+              </InfoTip>
+            </dt>
+            <dd className='min-w-0 font-mono break-all'>{built.commit.signature_hex}</dd>
+
+            <dt className='flex items-center gap-1 text-muted'>
+              Parent
+              <InfoTip label='About the parent'>
+                <p>
+                  The current head of “{targetRef || 'main'}” — the commit this one builds on (∅ for the first commit on
+                  a branch).
+                </p>
+              </InfoTip>
+            </dt>
+            <dd className='min-w-0 font-mono break-all'>{parentHash || '∅ (first commit on this branch)'}</dd>
+          </dl>
+        </details>
       ) : (
         <p className='text-red-600 dark:text-red-400'>{built.error}</p>
       )}
@@ -260,45 +287,42 @@ export function ComposeDisabled() {
 }
 
 /**
- * A "Fork / Remix" action: builds + signs a remix referencing a given upstream commit (one source = `{ upstream_id =
- * blake3(room), commit_hash = the clicked commit }`), then pushes it onto a per-forker
- * `forks/<upstreamShort>-<forkerShort>` ref so it appears in the Refs panel as a fork. Reuses the same PutObject + CAS
- * UpdateRef + envelope-signing flow commits use (`usePushCommit`).
+ * The two ways to build on a commit. Both are per-key + per-commit so two people acting on the same commit get distinct
+ * branches.
  *
- * Returns `{ fork, pending, error }`: call `fork(upstreamCommit)` to fork that commit; it resolves to the new fork ref
- * so the caller can select it after a successful push.
+ * • `remix` — signs a first-class REMIX object that records the upstream commit as its `source` (attribution carried IN
+ * the object), pushed onto a `forks/<short>-<short>` branch via the same sign + CAS path commits use. • `branch` —
+ * creates a plain `b/<short>-<short>` branch pointing AT the commit (git `branch <name> <commit>`): NO new object and
+ * NO recorded attribution, just a fresh line of history.
+ *
+ * Each resolves to the new branch ref so the caller can select it.
  */
-export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: string | null) {
+export function useDerive(api: ReturnType<typeof useMkit>, room: string, seedHex: string | null) {
   const push = usePushCommit()
   const backend = useRepoBackend()
+  const qc = useQueryClient()
+  const [branching, setBranching] = useState(false)
 
-  const fork = async (upstreamCommitHash: string): Promise<string | null> => {
+  const forkerPubkey = () => bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seedHex as string)))
+
+  const remix = async (upstreamCommitHash: string): Promise<string | null> => {
     if (!seedHex || !backend) return null
-    // The fork ref is unique per (upstream commit, forker): keying on the
-    // forker's pubkey too means two users forking the SAME commit get distinct
-    // refs (no collision), while the SAME forker re-forking advances ITS ref.
-    const forkerPubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seedHex)))
-    const ref = forkRefName(upstreamCommitHash, forkerPubkey)
-    // Opaque caller-chosen provenance tag — the room id hashed to 32 bytes.
+    const ref = forkRefName(upstreamCommitHash, forkerPubkey())
+    // Opaque provenance tag — the room id hashed to 32 bytes.
     const upstreamId = api.blake3_hex(new TextEncoder().encode(room))
     const sources: RemixSourceEntry[] = [{ upstreamIdHex: upstreamId, commitHashHex: upstreamCommitHash }]
     const sourcesJson = JSON.stringify(
       sources.map((s) => ({ upstream_id_hex: s.upstreamIdHex, commit_hash_hex: s.commitHashHex })),
     )
-    // Read the fork ref's current head FIRST, then embed it as the remix's
-    // FIRST PARENT so the chain is correctly linked: a fresh ref → '' → the
-    // push picks MISSING (create); an existing ref → head → MATCH advances the
-    // SAME ref, chaining onto the prior remix instead of orphaning it (building
-    // with an empty parent while pushing parentHash=head would MATCH-overwrite
-    // and lose the existing fork on the first-parent walk).
+    // Chain onto the remix branch's current head (fresh ref → '' → MISSING create).
     const head = await backend.getRef(room, ref)
-    // Empty tree keeps the demo remix tiny; a real fork snapshots its own tree.
     const tree = api.tree_encode('[]')
-    const remix = api.remix_encode_and_sign(
+    const message = `remix of ${upstreamCommitHash.slice(0, 10)}…`
+    const obj = api.remix_encode_and_sign(
       tree.hash_hex,
-      head ?? '', // chain onto the fork's current head (fresh ref → root remix)
+      head ?? '',
       sourcesJson,
-      `fork of ${upstreamCommitHash.slice(0, 10)}…`,
+      message,
       BigInt(Math.floor(Date.now() / 1000)),
       seedHex,
     )
@@ -307,9 +331,9 @@ export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: 
       seedHex,
       room,
       ref,
-      commitBytes: remix.bytes,
-      commitHash: remix.hash_hex,
-      message: `fork of ${upstreamCommitHash.slice(0, 10)}…`,
+      commitBytes: obj.bytes,
+      commitHash: obj.hash_hex,
+      message,
       parentHash: head ?? '',
       kind: 'remix',
       sources,
@@ -317,7 +341,25 @@ export function useFork(api: ReturnType<typeof useMkit>, room: string, seedHex: 
     return ref
   }
 
-  // `ready` lets the UI disable the Fork action until a backend is present (and
-  // a seed is in memory) — forking needs both to read the head and push.
-  return { fork, pending: push.isPending, error: push.error, ready: !!backend && !!seedHex }
+  const branch = async (upstreamCommitHash: string): Promise<string | null> => {
+    if (!seedHex || !backend) return null
+    setBranching(true)
+    try {
+      const ref = branchRefName(upstreamCommitHash, forkerPubkey())
+      try {
+        // Create-only: a fresh branch pointing AT the commit. No new object, no
+        // attribution — the branch just continues history from here.
+        await backend.updateRef(room, ref, upstreamCommitHash, 'MISSING')
+      } catch (e) {
+        if (!(e instanceof CasConflictError)) throw e // already branched here → reuse it
+      }
+      void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+      return ref
+    } finally {
+      setBranching(false)
+    }
+  }
+
+  // `ready` gates both actions until a backend + a seed are present.
+  return { remix, branch, pending: push.isPending || branching, error: push.error, ready: !!backend && !!seedHex }
 }

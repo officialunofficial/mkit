@@ -1,8 +1,8 @@
 'use client'
 
-// Right column of the multiplayer demo: the refs panel, the live commit log,
-// individual log rows, the commit/remix detail view, and the loading skeleton.
-// Moved verbatim out of `multiplayer-demo.tsx`.
+// Repo views for the multiplayer demo: the branches panel (`RefsPanel`, left
+// column) and the live commit log + commit/remix detail (`RepoLog`, right column
+// under Compose), plus log rows and the loading skeleton.
 
 import { useMemo, useState } from 'react'
 import { recordActivity } from '../../lib/activity-log'
@@ -19,21 +19,42 @@ import {
 } from '../../lib/repo-api'
 import { Field, FieldList, HashChip } from '../result-panel'
 import { useMkit } from '../use-mkit'
-import { useFork } from './compose'
+import { useDerive } from './compose'
 import { PlayerLabel } from './player-label'
 import { BTN, errMsg } from './shared'
 
 /**
- * Navigable repo browser (right column): a refs/branches panel, the selected ref's history, and — when a commit row is
- * clicked — a commit/remix-detail view whose parents (and, for a remix, its upstream sources) are themselves links. All
- * navigation is component state (selectedRef / selectedCommit), no router change.
+ * The two ways to build on a commit, shared down to the rows that trigger them: • Remix — a first-class remix object
+ * that RECORDS the source (attribution carried in the object). • Branch — a plain new branch pointing AT the commit
+ * (git `branch`), NO attribution.
  */
-export function RepoBrowser({
+type DeriveActions = {
+  onRemix: (commit: string) => void
+  onBranch: (commit: string) => void
+  can: boolean
+  pending: boolean
+}
+
+const pad = (n: number, w = 2) => String(n).padStart(w, '0')
+
+/** UTC `HH:MM:SS:mmm` for a commit's ISO `createdAt` (empty if unparseable). */
+function utcTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}:${pad(d.getUTCMilliseconds(), 3)}`
+}
+
+/**
+ * The selected branch's history (right column, under Compose): the live commit log, and — when a commit row is clicked
+ * — a commit/remix-detail view whose parents (and, for a remix, its upstream sources) are themselves links. The
+ * branches panel lives separately in the left column ({@link RefsPanel}). Navigation is component state, no router
+ * change.
+ */
+export function RepoLog({
   api,
   room,
   myPubkey,
   seedHex,
-  useMock,
   selectedRef,
   onSelectRef,
   selectedCommit,
@@ -43,64 +64,71 @@ export function RepoBrowser({
   room: string
   myPubkey: string | null
   seedHex: string | null
-  useMock: boolean
   selectedRef: string
   onSelectRef: (r: string) => void
   selectedCommit: string | null
   onSelectCommit: (h: string | null) => void
 }) {
-  const { fork, pending, error, ready: forkReady } = useFork(api, room, seedHex)
-  const [forkStatus, setForkStatus] = useState<string | null>(null)
+  const { remix, branch, pending, error, ready } = useDerive(api, room, seedHex)
+  const [status, setStatus] = useState<string | null>(null)
 
-  // Build + push a fork of `upstreamCommit`, then select its new fork ref so
-  // the user sees the remix land in the Refs panel + log.
-  const onFork = async (upstreamCommit: string) => {
-    setForkStatus(null)
+  // Run a remix (with attribution) or a branch-off (without) on `upstreamCommit`,
+  // then select the new branch so it lands visibly in the panel + log.
+  const run = async (mode: 'remix' | 'branch', upstreamCommit: string) => {
+    setStatus(null)
     const t0 = performance.now()
     try {
-      const ref = await fork(upstreamCommit)
-      if (ref) {
-        onSelectRef(ref)
-        onSelectCommit(null)
-        setForkStatus(`Forked → ${ref}`)
-        recordActivity({
-          kind: 'fork',
-          title: `Forked ${upstreamCommit.slice(0, 10)}… → ${ref}`,
-          durationMs: performance.now() - t0,
-          lines: [
-            'Signed a remix that points at the upstream commit, then pushed it to a new fork branch.',
-            'A remix is a first-class object — it took the same sign-and-push path as any commit.',
-            `fork branch ${ref}`,
-          ],
-        })
-      }
+      const ref = mode === 'remix' ? await remix(upstreamCommit) : await branch(upstreamCommit)
+      if (!ref) return
+      onSelectRef(ref)
+      onSelectCommit(null)
+      setStatus(mode === 'remix' ? `Remixed → ${ref}` : `Branched off → ${ref}`)
+      recordActivity({
+        kind: 'fork',
+        title:
+          mode === 'remix'
+            ? `Remixed ${upstreamCommit.slice(0, 10)}… → ${ref}`
+            : `Branched off ${upstreamCommit.slice(0, 10)}… → ${ref}`,
+        durationMs: performance.now() - t0,
+        lines:
+          mode === 'remix'
+            ? [
+                'Signed a remix object that RECORDS the upstream commit as its source — attribution is carried along.',
+                `remix branch ${ref}`,
+              ]
+            : [
+                'Created a new branch pointing AT the commit — no new object, no attribution. Just a fresh line of history (git branch).',
+                `branch ${ref}`,
+              ],
+      })
     } catch (e) {
-      setForkStatus(
-        // The fork ref is unique per (commit, you), so a conflict here means a
-        // concurrent re-fork raced your push — your fork chain moved under you.
+      setStatus(
         e instanceof CasConflictError
-          ? 'Your fork branch just moved (a concurrent push) — try forking again.'
+          ? 'That branch just moved (a concurrent push) — try again.'
           : e instanceof IdentityLockedError
-            ? 'Unlock or create an identity before forking.'
+            ? 'Unlock or create an identity first.'
             : errMsg(e),
       )
     }
   }
-  // Fork needs both a seed (to sign) and a backend (to read head + push).
-  const canFork = !!seedHex && forkReady
+
+  // Both need a seed (to sign) and a backend (to read head + push).
+  const derive: DeriveActions = {
+    onRemix: (c) => void run('remix', c),
+    onBranch: (c) => void run('branch', c),
+    can: !!seedHex && ready,
+    pending,
+  }
 
   return (
-    <div className='space-y-6'>
-      <RefsPanel room={room} useMock={useMock} selectedRef={selectedRef} onSelectRef={onSelectRef} />
+    <div className='space-y-3'>
       {selectedCommit ? (
         <CommitDetail
           room={room}
           hash={selectedCommit}
           onSelectCommit={onSelectCommit}
           onClose={() => onSelectCommit(null)}
-          onFork={onFork}
-          canFork={canFork}
-          forkPending={pending}
+          derive={derive}
         />
       ) : (
         <LiveLog
@@ -108,13 +136,11 @@ export function RepoBrowser({
           selectedRef={selectedRef}
           myPubkey={myPubkey}
           onSelectCommit={onSelectCommit}
-          onFork={onFork}
-          canFork={canFork}
-          forkPending={pending}
+          derive={derive}
         />
       )}
-      {forkStatus ? <p className='text-sm text-muted'>{forkStatus}</p> : null}
-      {error && !forkStatus ? <p className='text-sm text-amber-700 dark:text-amber-400'>{errMsg(error)}</p> : null}
+      {status ? <p className='text-sm text-muted'>{status}</p> : null}
+      {error && !status ? <p className='text-sm text-amber-700 dark:text-amber-400'>{errMsg(error)}</p> : null}
     </div>
   )
 }
@@ -139,8 +165,8 @@ function SkeletonRows({ rows = 5 }: { rows?: number }) {
   )
 }
 
-/** All refs in the room. Each row selects the ref the log/detail view follows. */
-function RefsPanel({
+/** All branches in the repo (left column). Each row selects the branch the log/detail view follows. */
+export function RefsPanel({
   room,
   useMock,
   selectedRef,
@@ -191,8 +217,11 @@ function RefsPanel({
                     {r.name}
                   </span>
                   {isForkRef(r.name) ? (
-                    <span className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'>
-                      fork
+                    <span
+                      className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'
+                      title='A remix branch — its head records the commit it derived from (attribution).'
+                    >
+                      remix
                     </span>
                   ) : null}
                   {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
@@ -212,21 +241,19 @@ function LiveLog({
   selectedRef,
   myPubkey,
   onSelectCommit,
-  onFork,
-  canFork,
-  forkPending,
+  derive,
 }: {
   room: string
   selectedRef: string
   myPubkey: string | null
   onSelectCommit: (h: string) => void
-  onFork: (upstreamCommit: string) => void
-  canFork: boolean
-  forkPending: boolean
+  derive: DeriveActions
 }) {
   const log = useCommitLog(room, selectedRef)
   const head = useRef(room, selectedRef)
-  const entries = log.data ?? []
+  // Newest on top, oldest on bottom — sort by the commit timestamp so the order
+  // always matches the timestamps shown on each row.
+  const entries = (log.data ?? []).toSorted((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
   // Same skeleton rule as the refs panel: loading, or refetching with nothing to
   // show yet. Keeps a populated ref from flashing "No commits" before the walk.
   const showSkeleton = log.isPending || (log.isFetching && entries.length === 0)
@@ -235,7 +262,7 @@ function LiveLog({
     <section className='space-y-3'>
       <div className='flex items-baseline justify-between'>
         <h2 className='text-sm font-semibold'>
-          {isForkRef(selectedRef) ? 'Fork log' : 'Commit log'} · “{selectedRef}”
+          {isForkRef(selectedRef) ? 'Remix log' : 'Commit log'} · “{selectedRef}”
         </h2>
         <span className='font-mono text-xs text-muted'>
           {/* Show "head …" while the head is loading/refetching; only show ∅ once
@@ -255,9 +282,7 @@ function LiveLog({
               entry={e}
               mine={!!myPubkey && e.authorPubkey === myPubkey}
               onSelect={() => onSelectCommit(e.hash)}
-              onFork={onFork}
-              canFork={canFork}
-              forkPending={forkPending}
+              derive={derive}
             />
           ))}
         </ul>
@@ -270,24 +295,20 @@ function LogRow({
   entry,
   mine,
   onSelect,
-  onFork,
-  canFork,
-  forkPending,
+  derive,
 }: {
   entry: CommitLogEntry
   mine: boolean
   onSelect: () => void
-  onFork: (upstreamCommit: string) => void
-  canFork: boolean
-  forkPending: boolean
+  derive: DeriveActions
 }) {
   const isRemix = entry.kind === 'remix'
   return (
-    <li className='flex items-center gap-2 py-2.5'>
+    <li className='flex items-start gap-2 py-2.5'>
       <button
         type='button'
         onClick={onSelect}
-        className='flex min-w-0 flex-1 items-center gap-3 text-left transition-colors hover:text-fg'
+        className='flex min-w-0 flex-1 items-start gap-3 text-left transition-colors hover:text-fg'
       >
         <HashChip hash={entry.hash} size={14} />
         <div className='min-w-0 flex-1'>
@@ -304,21 +325,36 @@ function LogRow({
             <PlayerLabel pubkey={entry.authorPubkey} className='font-medium text-fg' />{' '}
             <code className='font-mono break-all'>
               {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 16)}…
-            </code>
+            </code>{' '}
+            ·{' '}
+            <time className='font-mono' dateTime={entry.createdAt}>
+              {utcTime(entry.createdAt)} UTC
+            </time>
           </div>
         </div>
       </button>
-      {/* Fork a COMMIT (not a remix — that would fork a fork; out of scope for the demo). */}
-      {canFork && !isRemix ? (
-        <button
-          type='button'
-          onClick={() => onFork(entry.hash)}
-          disabled={forkPending}
-          className={`${BTN} shrink-0`}
-          title='Build + sign a remix of this commit and push it to a fork ref'
-        >
-          Fork
-        </button>
+      {/* Two ways to build on a COMMIT (not on a remix — out of scope for the demo). */}
+      {derive.can && !isRemix ? (
+        <div className='flex shrink-0 items-center gap-1.5'>
+          <button
+            type='button'
+            onClick={() => derive.onRemix(entry.hash)}
+            disabled={derive.pending}
+            className={BTN}
+            title='Sign a remix object that records this commit as its source (attribution carried along).'
+          >
+            Remix
+          </button>
+          <button
+            type='button'
+            onClick={() => derive.onBranch(entry.hash)}
+            disabled={derive.pending}
+            className={BTN}
+            title='Start a new branch pointing at this commit — no attribution (like git branch).'
+          >
+            Branch
+          </button>
+        </div>
       ) : null}
     </li>
   )
@@ -336,17 +372,13 @@ function CommitDetail({
   hash,
   onSelectCommit,
   onClose,
-  onFork,
-  canFork,
-  forkPending,
+  derive,
 }: {
   room: string
   hash: string
   onSelectCommit: (h: string) => void
   onClose: () => void
-  onFork: (upstreamCommit: string) => void
-  canFork: boolean
-  forkPending: boolean
+  derive: DeriveActions
 }) {
   const api = useMkit()
   const obj = useObject(room, hash)
@@ -391,16 +423,33 @@ function CommitDetail({
           {isRemix ? 'Remix detail' : 'Commit detail'}
           {isRemix ? (
             <span className='rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'>
-              fork
+              remix
             </span>
           ) : null}
         </h2>
         <div className='flex flex-wrap items-center gap-2'>
-          {/* Fork a commit (not a remix) straight from its detail. */}
-          {canFork && decoded?.ok && !isRemix ? (
-            <button type='button' className={BTN} onClick={() => onFork(hash)} disabled={forkPending}>
-              {forkPending ? 'Forking…' : 'Fork / Remix'}
-            </button>
+          {/* Build on a commit (not a remix) straight from its detail. */}
+          {derive.can && decoded?.ok && !isRemix ? (
+            <>
+              <button
+                type='button'
+                className={BTN}
+                onClick={() => derive.onRemix(hash)}
+                disabled={derive.pending}
+                title='Sign a remix object that records this commit as its source (attribution).'
+              >
+                Remix
+              </button>
+              <button
+                type='button'
+                className={BTN}
+                onClick={() => derive.onBranch(hash)}
+                disabled={derive.pending}
+                title='Start a new branch pointing at this commit — no attribution (like git branch).'
+              >
+                Branch
+              </button>
+            </>
           ) : null}
           <button type='button' className={BTN} onClick={onClose}>
             ← Back to log

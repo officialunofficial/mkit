@@ -5,11 +5,11 @@ import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/ident
 import { RepoBackendProvider, useRepoEvents, useResolvedRepoBackend } from '../lib/repo-api'
 import { useIdentityActions } from './use-identity-actions'
 import { useMkit } from './use-mkit'
-import { AttestBinding, LockedView, RoomSelector, UnlockedHeader } from './multiplayer/identity-panel'
+import { LockedView, RoomSelector, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
-import { RepoBrowser } from './multiplayer/repo-browser'
+import { RefsPanel, RepoLog } from './multiplayer/repo-browser'
 import { WhatJustHappened } from './multiplayer/what-just-happened'
 
 /**
@@ -20,7 +20,9 @@ import { WhatJustHappened } from './multiplayer/what-just-happened'
 export function MultiplayerDemo() {
   const api = useMkit()
   const id = useIdentityStore()
-  const room = id.room || DEFAULT_ROOM
+  // ONE fixed shared repository — everyone contributes here (via branches), no
+  // repo switching. See `RoomSelector` (read-only).
+  const room = DEFAULT_ROOM
 
   const { backend, useMock } = useResolvedRepoBackend(api, room)
 
@@ -65,26 +67,6 @@ function MultiplayerBody({
   const [selectedRef, setSelectedRef] = useState('main')
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
 
-  // The repo browser (right column) is rendered the same whether locked or not,
-  // so it's built once here and dropped into the layout below. `myPubkey`/
-  // `seedHex` are null while locked → it renders read-only (browse, no fork).
-  const browser = (
-    <RepoBrowser
-      api={api}
-      room={room}
-      myPubkey={id.unlocked ? id.ed25519PubkeyHex : null}
-      seedHex={id.unlocked ? id.seedHex : null}
-      useMock={useMock}
-      selectedRef={selectedRef}
-      onSelectRef={(r) => {
-        setSelectedRef(r)
-        setSelectedCommit(null) // switching branches closes any open detail
-      }}
-      selectedCommit={selectedCommit}
-      onSelectCommit={setSelectedCommit}
-    />
-  )
-
   return (
     <div className='space-y-8'>
       {/* Identity — its own bordered section spanning both columns. The locked
@@ -92,18 +74,7 @@ function MultiplayerBody({
           so "who am I" reads as one distinct concern above the repo workspace. */}
       <section className='rounded-xl border border-hairline p-4 sm:p-5'>
         {id.unlocked && id.ed25519PubkeyHex ? (
-          <div className='space-y-4'>
-            <UnlockedHeader />
-            <details className='group'>
-              <summary className='flex cursor-pointer list-none items-center gap-1 text-sm text-muted select-none hover:text-fg [&::-webkit-details-marker]:hidden'>
-                <span className='inline-block transition-transform group-open:rotate-90'>›</span> Attest this Ed25519
-                with a passkey (optional)
-              </summary>
-              <div className='mt-3'>
-                <AttestBinding api={api} ed25519PubkeyHex={id.ed25519PubkeyHex} />
-              </div>
-            </details>
-          </div>
+          <UnlockedHeader api={api} ed25519PubkeyHex={id.ed25519PubkeyHex} />
         ) : (
           <LockedView
             onCreate={onCreate}
@@ -115,19 +86,39 @@ function MultiplayerBody({
         )}
       </section>
 
-      {/* Left: the repository you're in + the compose surface. Right: that repo's
-          shared commit log / browser. The log is ALWAYS visible — watch others
-          contribute even before you unlock an identity ("signed out" mode). */}
+      {/* Left: the repository + its branches. Right: compose, then the selected
+          branch's commit log. The log is ALWAYS visible — watch others contribute
+          even before you unlock an identity ("signed out" mode). */}
       <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
         <div className='space-y-6'>
           <RoomSelector />
+          <RefsPanel
+            room={room}
+            useMock={useMock}
+            selectedRef={selectedRef}
+            onSelectRef={(r) => {
+              setSelectedRef(r)
+              setSelectedCommit(null) // switching branches closes any open detail
+            }}
+          />
+        </div>
+        <div className='space-y-6'>
           {id.unlocked && id.seedHex ? (
             <Compose api={api} seedHex={id.seedHex} room={room} targetRef={selectedRef} onTargetRef={setSelectedRef} />
           ) : (
             <ComposeDisabled />
           )}
+          <RepoLog
+            api={api}
+            room={room}
+            myPubkey={id.unlocked ? id.ed25519PubkeyHex : null}
+            seedHex={id.unlocked ? id.seedHex : null}
+            selectedRef={selectedRef}
+            onSelectRef={setSelectedRef}
+            selectedCommit={selectedCommit}
+            onSelectCommit={setSelectedCommit}
+          />
         </div>
-        {browser}
       </div>
     </div>
   )

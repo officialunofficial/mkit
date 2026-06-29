@@ -160,6 +160,16 @@ export function isForkRef(name: string): boolean {
   return name.startsWith(FORKS_PREFIX)
 }
 
+/**
+ * Branch-off (NO attribution) ref name: a plain branch pointing AT a commit (git `branch <name> <commit>`) — no remix
+ * object, no recorded source. A distinct `b/` namespace from remix `forks/` so the two never collide, and unique per
+ * (commit, brancher) so two people branching the same commit get distinct branches.
+ */
+export const BRANCH_PREFIX = 'b/'
+export function branchRefName(upstreamCommitHash: string, brancherPubkeyHex: string): string {
+  return `${BRANCH_PREFIX}${upstreamCommitHash.slice(0, 12)}-${brancherPubkeyHex.slice(0, 12)}`
+}
+
 // ---------------------------------------------------------------------------
 // Transport-agnostic backend interface (maps 1:1 to the Connect service)
 // ---------------------------------------------------------------------------
