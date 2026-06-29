@@ -105,9 +105,7 @@ export function LockedView({
               {busy ? 'Unlocking…' : 'Unlock'}
             </button>
           </div>
-          <p className='max-w-prose text-sm text-muted'>
-            Unlock recovers your existing player from the passkey. New identity creates a fresh one.
-          </p>
+
         </>
       ) : (
         <>
