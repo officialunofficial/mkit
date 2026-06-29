@@ -10,35 +10,73 @@
 //! Detection works over **normalized keys** (whitespace-stripped under
 //! `-w`, raw otherwise), so it agrees with the matcher and so `-w -C`
 //! detects a block copied with a whitespace change. Within a run of
-//! unmatched lines it finds the **longest contiguous sub-block** that
-//! appears verbatim in a source and clears git's alphanumeric-character
-//! threshold, credits it, and recurses on the remainder — so a moved block
+//! unmatched lines it finds, at each start position, the longest
+//! contiguous block that appears verbatim in a source and clears git's
+//! alphanumeric-character threshold, credits the longest such block in the
+//! run, and repeats on the lines before and after it — so a moved block
 //! adjacent to genuinely-new lines is still split out (git parity).
 //!
 //! Attribution is **positional**: a matched block at source offset `oi`
 //! credits child line `s + k` to the source's own per-line origin at
 //! `oi + k`. That keeps `-w` copies correct even when the copied bytes
 //! differ only in whitespace.
+//!
+//! Cost: a per-source index from a line's key to its offsets turns block
+//! search into ~`O(run · matches)` (an unmatched line absent from every
+//! source is an `O(1)` miss — the common "added a new block" case). A run
+//! longer than [`MAX_DETECT_RUN`] is searched only as a single whole block
+//! (a documented bound; the matcher already caps inputs at
+//! [`super::BLAME_MAX_LINES`]).
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use super::{
-    Attribution, BlameOptions, BlameOutcome, CopyDetection, MoveDetection, blame_file_with,
-    line_key, load_blob_lines,
+    Attribution, BlameError, BlameOptions, BlameOutcome, CopyDetection, MoveDetection,
+    blame_file_with, line_key, load_blob_lines,
 };
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object};
 use crate::store::ObjectStore;
 
+/// Past this many unmatched lines in one run, only the whole run is tried
+/// as a single block (no sub-block search). Bounds the worst case; the
+/// matcher already rejects inputs over [`super::BLAME_MAX_LINES`].
+const MAX_DETECT_RUN: usize = 10_000;
+
+/// Line-key → the offsets at which it occurs in a source, for `O(1)`
+/// "where could a block starting with this line be?" lookups.
+type KeyIndex = HashMap<Vec<u8>, Vec<usize>>;
+
+/// Inputs for one [`Detector::reassign`] call. Bundled to keep the entry
+/// point off the positional-argument hazard and to make the "what does
+/// this step see" surface explicit.
+pub(super) struct ReassignRequest<'r> {
+    /// Path being blamed (excluded from its own copy candidates).
+    pub file_path: &'r str,
+    /// Parent revision: supplies `-C` candidate trees and their origins,
+    /// and is the commit the within-file `-M` source is taken from.
+    pub source_commit: Hash,
+    /// Child commit: scopes `-C` level 1 to files changed in it.
+    pub attributed_commit: Hash,
+    /// The child blob's lines (origins are written for these).
+    pub new_lines: &'r [Vec<u8>],
+    /// `unmatched[i]` = the matcher left line `i` "new" (a detection
+    /// candidate). All-`true` at a file's boundary commit.
+    pub unmatched: &'r [bool],
+    /// Parent version of *this* file as a `(lines, origins)` `-M` source —
+    /// `None` at the boundary, where there is no earlier version.
+    pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
+}
+
 /// Stateful move/copy detector. Holds the per-blame caches so a source
-/// blob's keys are stripped at most once and a source file is blamed at
-/// most once, across every step and the boundary.
+/// blob's keys/index are built at most once and a source file is blamed
+/// at most once, across every step and the boundary.
 pub(super) struct Detector<'a> {
     store: &'a ObjectStore,
     opts: BlameOptions,
-    /// Source blob → its normalized line keys (cheap: load + strip).
-    keys_cache: HashMap<Hash, Vec<Vec<u8>>>,
+    /// Source blob → its normalized line keys + key index (cheap).
+    keys_cache: HashMap<Hash, (Vec<Vec<u8>>, KeyIndex)>,
     /// (commit, path) → that file's per-line origins, from blaming it
     /// (expensive; built only once a candidate actually matches a block).
     attrs_cache: HashMap<(Hash, String), Vec<Attribution>>,
@@ -52,18 +90,28 @@ enum BlockSource {
     Copy { path: String, offset: usize },
 }
 
-/// Per-`reassign` context shared down the recursion. Borrows the caller's
-/// child lines and the optional within-file source; owns the candidate
-/// list. Never borrows the [`Detector`] itself.
+/// Per-`reassign` context, computed once. Borrows the caller's child lines
+/// and the within-file source; owns the per-call derived data. Never
+/// borrows the [`Detector`].
 struct Ctx<'c> {
     source_commit: Hash,
-    new_lines: &'c [Vec<u8>],
     new_keys: Vec<Vec<u8>>,
+    /// `alnum_prefix[i]` = alphanumeric byte count over `new_lines[..i]`,
+    /// so a block's count is `alnum_prefix[e] - alnum_prefix[s]` in `O(1)`.
+    alnum_prefix: Vec<usize>,
     within_keys: Option<Vec<Vec<u8>>>,
+    within_index: Option<KeyIndex>,
     within_attrs: Option<&'c [Attribution]>,
-    candidates: Vec<(String, Hash)>,
     move_threshold: Option<usize>,
+    candidates: Vec<(String, Hash)>,
     copy_threshold: Option<usize>,
+}
+
+impl Ctx<'_> {
+    /// Alphanumeric byte count of `new_lines[s..e]`, in `O(1)`.
+    fn alnum(&self, s: usize, e: usize) -> usize {
+        self.alnum_prefix[e] - self.alnum_prefix[s]
+    }
 }
 
 impl<'a> Detector<'a> {
@@ -76,28 +124,17 @@ impl<'a> Detector<'a> {
         }
     }
 
-    /// Reassign moved/copied blocks among the lines of `new_lines` for
-    /// which `is_unmatched` holds, writing origins into `out`.
-    ///
-    /// `source_commit` is the parent revision: its tree supplies `-C`
-    /// candidates and its blame supplies their origins. `attributed_commit`
-    /// is the child commit (used to scope `-C` level 1 to files changed in
-    /// it). `within_file` is the parent version of *this* file as a
-    /// `(lines, origins)` `-M` source — `None` at a file's boundary commit,
-    /// where there is no earlier version.
+    /// Reassign moved/copied blocks among the unmatched lines of the
+    /// request, writing origins into `out`. A no-op when detection is off
+    /// or nothing qualifies.
     pub(super) fn reassign(
         &mut self,
-        file_path: &str,
-        source_commit: Hash,
-        attributed_commit: Hash,
-        new_lines: &[Vec<u8>],
-        is_unmatched: &dyn Fn(usize) -> bool,
-        within_file: Option<(&[Vec<u8>], &[Attribution])>,
+        req: &ReassignRequest,
         out: &mut [Attribution],
     ) -> BlameOutcome<()> {
         let iw = self.opts.ignore_whitespace;
         let move_threshold = match self.opts.effective_move() {
-            MoveDetection::On { threshold } => within_file.map(|_| threshold),
+            MoveDetection::On { threshold } => req.within_file.map(|_| threshold),
             MoveDetection::Off => None,
         };
         let (copy_level, copy_threshold) = match self.opts.copies {
@@ -111,134 +148,159 @@ impl<'a> Detector<'a> {
         let candidates = if copy_level > 0 {
             copy_candidates(
                 self.store,
-                source_commit,
-                attributed_commit,
-                file_path,
+                req.source_commit,
+                req.attributed_commit,
+                req.file_path,
                 copy_level,
             )?
         } else {
             Vec::new()
         };
-
+        let (within_keys, within_index) = match req.within_file {
+            Some((lines, _)) => {
+                let keys: Vec<Vec<u8>> = lines.iter().map(|l| line_key(l, iw)).collect();
+                let index = build_index(&keys);
+                (Some(keys), Some(index))
+            }
+            None => (None, None),
+        };
         let ctx = Ctx {
-            source_commit,
-            new_lines,
-            new_keys: new_lines.iter().map(|l| line_key(l, iw)).collect(),
-            within_keys: within_file
-                .map(|(lines, _)| lines.iter().map(|l| line_key(l, iw)).collect()),
-            within_attrs: within_file.map(|(_, attrs)| attrs),
-            candidates,
+            source_commit: req.source_commit,
+            new_keys: req.new_lines.iter().map(|l| line_key(l, iw)).collect(),
+            alnum_prefix: alnum_prefix(req.new_lines),
+            within_keys,
+            within_index,
+            within_attrs: req.within_file.map(|(_, attrs)| attrs),
             move_threshold,
+            candidates,
             copy_threshold,
         };
 
-        // Walk maximal runs of unmatched lines.
-        let mut ni = 0;
-        while ni < new_lines.len() {
-            if !is_unmatched(ni) {
-                ni += 1;
+        // Process each maximal run of unmatched lines with an explicit
+        // work-stack (no recursion → no stack-overflow on a run of many
+        // independent single-line moves).
+        let mut stack: Vec<Range<usize>> = unmatched_runs(req.unmatched);
+        while let Some(region) = stack.pop() {
+            if region.is_empty() {
                 continue;
             }
-            let start = ni;
-            while ni < new_lines.len() && is_unmatched(ni) {
-                ni += 1;
-            }
-            self.reassign_region(start..ni, &ctx, out)?;
+            let Some((s, e, source)) = self.find_best_block(&region, &ctx)? else {
+                continue;
+            };
+            self.credit(s, e, &source, &ctx, out)?;
+            stack.push(region.start..s);
+            stack.push(e..region.end);
         }
         Ok(())
     }
 
-    /// Greedily credit the longest qualifying sub-block in `region`, then
-    /// recurse on the lines before and after it.
-    fn reassign_region(
+    /// Write the origins for a matched block `[s, e)` into `out`.
+    fn credit(
         &mut self,
-        region: Range<usize>,
+        s: usize,
+        e: usize,
+        source: &BlockSource,
         ctx: &Ctx,
         out: &mut [Attribution],
     ) -> BlameOutcome<()> {
-        if region.is_empty() {
-            return Ok(());
-        }
-        let Some((s, e, source)) = self.find_best_block(&region, ctx)? else {
-            return Ok(());
-        };
         match source {
             BlockSource::WithinFile { offset } => {
                 let attrs = ctx.within_attrs.expect("within-file source present");
-                for k in 0..(e - s) {
-                    if let Some(a) = attrs.get(offset + k) {
-                        out[s + k] = a.clone();
-                    }
-                }
+                copy_origins(out, s, e - s, attrs, *offset);
             }
             BlockSource::Copy { path, offset } => {
-                // Blame the (winning) source file once to get its origins.
-                let attrs = self.candidate_attrs(ctx.source_commit, &path)?.to_vec();
-                for k in 0..(e - s) {
-                    if let Some(a) = attrs.get(offset + k) {
-                        out[s + k] = a.clone();
-                    }
-                }
+                // Blame the winning source file once to get its origins.
+                let attrs = self.candidate_attrs(ctx.source_commit, path)?.to_vec();
+                copy_origins(out, s, e - s, &attrs, *offset);
             }
         }
-        self.reassign_region(region.start..s, ctx, out)?;
-        self.reassign_region(e..region.end, ctx, out)?;
         Ok(())
     }
 
-    /// Find the longest contiguous sub-block of `region` (longest first,
-    /// earliest on ties) that appears verbatim in a source and clears that
-    /// source's threshold. `-M` (within-file) is preferred over `-C`.
+    /// The longest qualifying block in `region` (longest wins; earliest
+    /// start breaks length ties; within-file `-M` beats `-C` at the same
+    /// start and length). Returns `(start, end, source)`.
     fn find_best_block(
         &mut self,
         region: &Range<usize>,
         ctx: &Ctx,
     ) -> BlameOutcome<Option<(usize, usize, BlockSource)>> {
-        for len in (1..=region.len()).rev() {
-            for s in region.start..=(region.end - len) {
-                let e = s + len;
-                let needle = &ctx.new_keys[s..e];
-                let alnum = block_alnum(ctx.new_lines, s..e);
-
-                // -M: same file, parent revision.
-                let moved = ctx
-                    .move_threshold
-                    .filter(|&t| alnum >= t)
-                    .and(ctx.within_keys.as_deref())
-                    .and_then(|keys| find_block(keys, needle));
-                if let Some(offset) = moved {
-                    return Ok(Some((s, e, BlockSource::WithinFile { offset })));
-                }
-
-                // -C: other files at the parent commit.
-                if ctx.copy_threshold.is_some_and(|t| alnum >= t) {
-                    for (path, blob) in &ctx.candidates {
-                        if let Some(offset) = find_block(self.candidate_keys(*blob)?, needle) {
-                            return Ok(Some((
-                                s,
-                                e,
-                                BlockSource::Copy {
-                                    path: path.clone(),
-                                    offset,
-                                },
-                            )));
-                        }
-                    }
+        // Cost bound: only try the whole run as one block past the limit.
+        if region.len() > MAX_DETECT_RUN {
+            return Ok(self
+                .longest_block_at(region.start, region.end, ctx)?
+                .filter(|(len, _)| region.start + len == region.end)
+                .map(|(len, src)| (region.start, region.start + len, src)));
+        }
+        let mut best: Option<(usize, usize, BlockSource)> = None;
+        for s in region.start..region.end {
+            if let Some((len, source)) = self.longest_block_at(s, region.end, ctx)? {
+                let longer = best.as_ref().is_none_or(|(bs, be, _)| be - bs < len);
+                if longer {
+                    best = Some((s, s + len, source));
                 }
             }
         }
-        Ok(None)
+        Ok(best)
     }
 
-    /// Normalized keys for a source blob (cached; cheap).
-    fn candidate_keys(&mut self, blob: Hash) -> BlameOutcome<&[Vec<u8>]> {
+    /// The longest contiguous block starting at `s` (bounded by `end`) that
+    /// appears in a source and clears that source's threshold, with its
+    /// source. `-M` is preferred over an equal-length `-C` match.
+    fn longest_block_at(
+        &mut self,
+        s: usize,
+        end: usize,
+        ctx: &Ctx,
+    ) -> BlameOutcome<Option<(usize, BlockSource)>> {
+        let needle = &ctx.new_keys[s..end];
+        let mut best: Option<(usize, BlockSource)> = None;
+
+        // -M: same file, parent revision.
+        let moved = match (ctx.move_threshold, &ctx.within_keys, &ctx.within_index) {
+            (Some(threshold), Some(keys), Some(index)) => longest_match(needle, keys, index)
+                .filter(|&(len, _)| ctx.alnum(s, s + len) >= threshold),
+            _ => None,
+        };
+        if let Some((len, offset)) = moved {
+            best = Some((len, BlockSource::WithinFile { offset }));
+        }
+
+        // -C: other files at the parent commit. A strictly-longer copy
+        // match wins; an equal-length one does not (keeps `-M` preferred).
+        if let Some(threshold) = ctx.copy_threshold {
+            for ci in 0..ctx.candidates.len() {
+                let blob = ctx.candidates[ci].1;
+                self.ensure_candidate(blob)?;
+                let (keys, index) = &self.keys_cache[&blob];
+                let Some((len, offset)) = longest_match(needle, keys, index) else {
+                    continue;
+                };
+                let wins = best.as_ref().is_none_or(|(bl, _)| len > *bl);
+                if wins && ctx.alnum(s, s + len) >= threshold {
+                    best = Some((
+                        len,
+                        BlockSource::Copy {
+                            path: ctx.candidates[ci].0.clone(),
+                            offset,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(best)
+    }
+
+    /// Ensure a source blob's keys + key index are cached.
+    fn ensure_candidate(&mut self, blob: Hash) -> BlameOutcome<()> {
         if !self.keys_cache.contains_key(&blob) {
             let iw = self.opts.ignore_whitespace;
             let lines = load_blob_lines(self.store, blob)?;
-            let keys = lines.iter().map(|l| line_key(l, iw)).collect();
-            self.keys_cache.insert(blob, keys);
+            let keys: Vec<Vec<u8>> = lines.iter().map(|l| line_key(l, iw)).collect();
+            let index = build_index(&keys);
+            self.keys_cache.insert(blob, (keys, index));
         }
-        Ok(&self.keys_cache[&blob])
+        Ok(())
     }
 
     /// Per-line origins for a source file, by blaming it at `commit`
@@ -258,37 +320,84 @@ impl<'a> Detector<'a> {
                 copies: CopyDetection::Off,
             };
             let res = blame_file_with(self.store, commit, path, &source_opts)?;
-            let attrs = res
-                .lines
-                .into_iter()
-                .map(|l| Attribution {
-                    commit_hash: l.commit_hash,
-                    author: l.author,
-                    timestamp: l.timestamp,
-                })
-                .collect();
+            let attrs = res.lines.into_iter().map(Attribution::from).collect();
             self.attrs_cache.insert(key.clone(), attrs);
         }
         Ok(&self.attrs_cache[&key])
     }
 }
 
-/// First start index in `hay` where `needle` occurs as a contiguous run.
-fn find_block(hay: &[Vec<u8>], needle: &[Vec<u8>]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
+/// Copy `len` source origins starting at `src_off` into `out` at `dst`.
+fn copy_origins(
+    out: &mut [Attribution],
+    dst: usize,
+    len: usize,
+    src: &[Attribution],
+    src_off: usize,
+) {
+    for k in 0..len {
+        if let Some(a) = src.get(src_off + k) {
+            out[dst + k] = a.clone();
+        }
     }
-    (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
 }
 
-/// Count ASCII-alphanumeric bytes across `lines[range]` — git's unit for
-/// the `-M`/`-C` detection threshold.
-fn block_alnum(lines: &[Vec<u8>], range: Range<usize>) -> usize {
-    lines[range]
-        .iter()
-        .flat_map(|l| l.iter())
-        .filter(|b| b.is_ascii_alphanumeric())
-        .count()
+/// Longest prefix of `needle` that occurs contiguously in `hay`, using
+/// `index` (key → offsets) to find candidate starts, plus the offset.
+fn longest_match(needle: &[Vec<u8>], hay: &[Vec<u8>], index: &KeyIndex) -> Option<(usize, usize)> {
+    let first = needle.first()?;
+    let offsets = index.get(first)?;
+    let mut best: Option<(usize, usize)> = None;
+    for &oi in offsets {
+        let len = needle
+            .iter()
+            .zip(&hay[oi..])
+            .take_while(|(a, b)| a == b)
+            .count();
+        if best.is_none_or(|(bl, _)| len > bl) {
+            best = Some((len, oi));
+        }
+    }
+    best
+}
+
+/// Build a line-key → offsets index over `keys`.
+fn build_index(keys: &[Vec<u8>]) -> KeyIndex {
+    let mut index: KeyIndex = HashMap::with_capacity(keys.len());
+    for (i, k) in keys.iter().enumerate() {
+        index.entry(k.clone()).or_default().push(i);
+    }
+    index
+}
+
+/// Alphanumeric-byte prefix sums over `lines` (`len + 1` entries).
+fn alnum_prefix(lines: &[Vec<u8>]) -> Vec<usize> {
+    let mut prefix = Vec::with_capacity(lines.len() + 1);
+    let mut acc = 0;
+    prefix.push(0);
+    for l in lines {
+        acc += l.iter().filter(|b| b.is_ascii_alphanumeric()).count();
+        prefix.push(acc);
+    }
+    prefix
+}
+
+/// Maximal runs of `true` in `mask`, as `[start, end)` ranges.
+fn unmatched_runs(mask: &[bool]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < mask.len() {
+        if !mask[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < mask.len() && mask[i] {
+            i += 1;
+        }
+        runs.push(start..i);
+    }
+    runs
 }
 
 /// Source files to search for copies, per git's `-C` level: level 1 =
@@ -321,7 +430,7 @@ fn copy_candidates(
 /// First-parent of a commit, or `None` for a root commit.
 pub(super) fn commit_parent(store: &ObjectStore, commit: Hash) -> BlameOutcome<Option<Hash>> {
     let Object::Commit(c) = store.read_object(&commit)? else {
-        return Err(super::BlameError::NotACommit);
+        return Err(BlameError::NotACommit);
     };
     Ok(c.parents.first().copied())
 }
@@ -329,7 +438,7 @@ pub(super) fn commit_parent(store: &ObjectStore, commit: Hash) -> BlameOutcome<O
 /// Every `(path, blob_hash)` reachable from a commit's tree.
 fn commit_blobs(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<(String, Hash)>> {
     let Object::Commit(c) = store.read_object(&commit)? else {
-        return Err(super::BlameError::NotACommit);
+        return Err(BlameError::NotACommit);
     };
     let mut out = Vec::new();
     collect_tree_blobs(store, c.tree_hash, "", &mut out)?;
@@ -337,7 +446,10 @@ fn commit_blobs(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<(String, 
 }
 
 /// Recursively collect `(path, blob_hash)` for every blob under a tree.
-/// Symlinks are skipped (not blamable content).
+/// Symlinks are skipped (not blamable content). Non-UTF-8 names are
+/// skipped too: blame paths are `&str`, so such a file can be neither the
+/// blamed target nor a copy source — lossy-converting it would risk it
+/// failing self-exclusion (matching the blamed file as its own source).
 fn collect_tree_blobs(
     store: &ObjectStore,
     tree_hash: Hash,
@@ -348,7 +460,9 @@ fn collect_tree_blobs(
         return Ok(());
     };
     for entry in tree.entries {
-        let name = String::from_utf8_lossy(&entry.name);
+        let Ok(name) = std::str::from_utf8(&entry.name) else {
+            continue;
+        };
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
                 out.push((format!("{prefix}{name}"), entry.object_hash));

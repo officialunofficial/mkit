@@ -597,6 +597,51 @@ fn blame_c_attributes_copy_from_other_file() {
     );
 }
 
+#[test]
+fn blame_c_c_widens_to_unchanged_source_file() {
+    // `-C -C` (level 2) end-to-end: dst.txt copies a block from src.txt,
+    // which is NOT modified in the copying commit. Level 1 misses it;
+    // level 2 searches every parent file and credits the original commit.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    // src.txt unchanged; dst.txt added with the same block.
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "copy"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    // -C (level 1) ignores the unchanged source.
+    let l1 = run_in(td.path(), &["blame", "-C", "dst.txt"]);
+    let l1_out = String::from_utf8(l1.stdout).unwrap();
+    assert!(
+        l1_out.lines().all(|l| l.starts_with(&second[..12])),
+        "-C level 1 misses the unchanged source: {l1_out:?}"
+    );
+
+    // -C -C (level 2) finds it.
+    let l2 = run_in(td.path(), &["blame", "-C", "-C", "dst.txt"]);
+    assert!(l2.status.success(), "blame -C -C failed: {l2:?}");
+    let l2_out = String::from_utf8(l2.stdout).unwrap();
+    assert!(
+        l2_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-C -C credits the copied block to its origin: {l2_out:?}"
+    );
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]

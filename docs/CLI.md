@@ -279,9 +279,12 @@ History / commits:
   alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
   so a moved block next to genuinely-new lines is still split out, and
   combined with `-w` a block copied with a whitespace change is still
-  detected. Divergence: git's inline numeric threshold forms
-  (`-M<num>`/`-C<num>`) are not exposed on the CLI (the core API accepts a
-  custom threshold). `-L` restricts output to a line range —
+  detected. Divergences from git: inline numeric threshold forms
+  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
+  custom threshold); on an identical block in two files the earliest by
+  tree-path order wins (git scores candidates); and a single unmatched run
+  over 10,000 lines is matched only as a whole, not by sub-block. `-L`
+  restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
   start of file), or a bare `<start>` (to EOF); bounds are 1-based and

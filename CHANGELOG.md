@@ -36,8 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whitespace change is still detected. Configured through a typed
   `MoveDetection`/`CopyDetection` API that can't express an invalid
   "enabled but zero-threshold" state. Attribution remains first-parent
-  only; git's inline `-M<num>`/`-C<num>` threshold forms are not exposed on
-  the CLI (the core API takes a custom threshold).
+  only. Documented divergences from git: inline `-M<num>`/`-C<num>`
+  threshold forms aren't exposed on the CLI (the core API takes a custom
+  threshold); `-C -C -C` (whole-history search) is approximated as `-C -C`;
+  when two source files hold an identical block the earliest by tree-path
+  order wins (git scores candidates); and within a single unmatched run
+  longer than 10,000 lines only the whole run is matched, not sub-blocks (a
+  cost bound; the matcher already caps inputs).
 
 ### Removed
 

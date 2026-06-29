@@ -154,6 +154,26 @@ struct Attribution {
     timestamp: u64,
 }
 
+impl From<&HistoryEntry> for Attribution {
+    fn from(h: &HistoryEntry) -> Self {
+        Self {
+            commit_hash: h.commit_hash,
+            author: h.author.clone(),
+            timestamp: h.timestamp,
+        }
+    }
+}
+
+impl From<BlameLine> for Attribution {
+    fn from(l: BlameLine) -> Self {
+        Self {
+            commit_hash: l.commit_hash,
+            author: l.author,
+            timestamp: l.timestamp,
+        }
+    }
+}
+
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
 pub enum BlameError {
@@ -254,39 +274,34 @@ pub fn blame_file_with(
         return Err(BlameError::FileNotFound(file_path.to_string()));
     };
     let oldest_lines = load_blob_lines(store, oldest.blob_hash)?;
-    let mut attributions: Vec<Attribution> = oldest_lines
-        .iter()
-        .map(|_| Attribution {
-            commit_hash: oldest.commit_hash,
-            author: oldest.author.clone(),
-            timestamp: oldest.timestamp,
-        })
-        .collect();
+    let mut attributions: Vec<Attribution> = vec![Attribution::from(&oldest); oldest_lines.len()];
 
     // The move/copy detector owns its own caches and is a no-op when
     // detection is off. The blame pass below stays "boring": it replays the
     // line matcher, then hands the unmatched lines to the detector.
     let mut detector = move_copy::Detector::new(store, *opts);
 
-    // Boundary copy detection (-C): the file first appears at `oldest`, so
-    // every line is credited there by default — but a block may have been
-    // copied from *other* files in `oldest`'s parent (a new file split out
-    // of an existing one). The forward walk can't see this (there is no
-    // earlier version of *this* file), so resolve it against the parent.
-    // There is no within-file `-M` source here.
-    let boundary_parent = if opts.detection_enabled() {
+    // Boundary copy detection: the file first appears at `oldest`, so every
+    // line is credited there by default — but a block may have been *copied*
+    // from other files in `oldest`'s parent (a new file split out of an
+    // existing one). The forward walk can't see this (there is no earlier
+    // version of *this* file). There is no within-file `-M` source here, so
+    // this only matters when `-C` is on.
+    let boundary_parent = if matches!(opts.copies, CopyDetection::On { .. }) {
         move_copy::commit_parent(store, oldest.commit_hash)?
     } else {
         None
     };
     if let Some(parent) = boundary_parent {
         detector.reassign(
-            file_path,
-            parent,
-            oldest.commit_hash,
-            &oldest_lines,
-            &|_| true, // at the boundary every line is "unmatched"
-            None,
+            &move_copy::ReassignRequest {
+                file_path,
+                source_commit: parent,
+                attributed_commit: oldest.commit_hash,
+                new_lines: &oldest_lines,
+                unmatched: &vec![true; oldest_lines.len()],
+                within_file: None,
+            },
             &mut attributions,
         )?;
     }
@@ -313,11 +328,7 @@ pub fn blame_file_with(
             // Provisional attribution: matched lines inherit the parent's
             // origin; unmatched lines are credited to `newer` until move
             // (-M) / copy (-C) detection reassigns them below.
-            let newer_attr = Attribution {
-                commit_hash: newer.commit_hash,
-                author: newer.author.clone(),
-                timestamp: newer.timestamp,
-            };
+            let newer_attr = Attribution::from(newer);
             let mut new_attrs: Vec<Attribution> = (0..new_lines.len())
                 .map(|ni| match mapping[ni] {
                     Some(oi) if oi < attributions.len() => attributions[oi].clone(),
@@ -326,13 +337,16 @@ pub fn blame_file_with(
                 .collect();
 
             if opts.detection_enabled() {
+                let unmatched: Vec<bool> = mapping.iter().map(Option::is_none).collect();
                 detector.reassign(
-                    file_path,
-                    older.commit_hash,
-                    newer.commit_hash,
-                    &new_lines,
-                    &|ni| mapping[ni].is_none(),
-                    Some((&old_lines, attributions.as_slice())),
+                    &move_copy::ReassignRequest {
+                        file_path,
+                        source_commit: older.commit_hash,
+                        attributed_commit: newer.commit_hash,
+                        new_lines: &new_lines,
+                        unmatched: &unmatched,
+                        within_file: Some((&old_lines, attributions.as_slice())),
+                    },
                     &mut new_attrs,
                 )?;
             }
@@ -984,6 +998,90 @@ mod tests {
         assert!(
             r.lines.iter().all(|l| l.commit_hash == d1),
             "the source blame keeps implied -M → credits the original, not the move"
+        );
+    }
+
+    #[test]
+    fn blame_c_alone_implies_within_file_m() {
+        // Review test gap: `-C` with `moves: Off` must still detect a
+        // within-file move (git's `-C` implies `-M`), via effective_move()
+        // returning GIT_DEFAULT. A long block moved within the *blamed*
+        // file is credited to its origin with only copies set.
+        let (_d, store) = fresh_store();
+        let v1 = [LONG_LINE, BLOCK_A, b"B", b"C", b""].join(&b'\n');
+        let v2 = [b"B" as &[u8], b"C", LONG_LINE, BLOCK_A, b""].join(&b'\n');
+        let c_a = put_file_commit(&store, "f.txt", &v1, vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", &v2, vec![c_a], 2, 200);
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
+            ..Default::default() // moves: Off — the implication is under test
+        };
+        let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(m.lines[2].text, LONG_LINE);
+        assert_eq!(
+            m.lines[2].commit_hash, c_a,
+            "-C implies -M, so the within-file move reverts to its origin"
+        );
+    }
+
+    #[test]
+    fn blame_m_many_single_line_moves_no_stack_overflow() {
+        // Review P1 (#2): N independent single-line moves used to recurse N
+        // deep. With the work-stack it must just complete. Reverse 400 long,
+        // distinct lines: each is its own move block, so all revert to c_a.
+        let (_d, store) = fresh_store();
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("let unique_symbol_number_{i:05} = compute({i});"))
+            .collect();
+        let mut v1 = lines.join("\n");
+        v1.push('\n');
+        let mut rev: Vec<&str> = lines.iter().map(String::as_str).collect();
+        rev.reverse();
+        let mut v2 = rev.join("\n");
+        v2.push('\n');
+        let c_a = put_file_commit(&store, "f.txt", v1.as_bytes(), vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", v2.as_bytes(), vec![c_a], 2, 200);
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ..Default::default()
+        };
+        let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(m.lines.len(), 400);
+        assert!(
+            m.lines.iter().all(|l| l.commit_hash == c_a),
+            "every reordered long line is a move → all revert to c_a"
+        );
+    }
+
+    #[test]
+    fn blame_m_large_new_block_terminates() {
+        // Review P1 (#1): a large genuinely-new block with no move/copy
+        // match must not blow up the (previously cubic) search. 3000 new,
+        // distinct lines that appear in no source: all stay on the editing
+        // commit, and the call returns promptly via the source key-index.
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"seed\n", vec![], 1, 100);
+        let mut v2 = String::from("seed\n");
+        for i in 0..3000 {
+            v2.push_str(&format!("brand_new_distinct_line_number_{i:06}\n"));
+        }
+        let c_b = put_file_commit(&store, "f.txt", v2.as_bytes(), vec![c_a], 2, 200);
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ..Default::default()
+        };
+        let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        assert_eq!(m.lines.len(), 3001);
+        assert_eq!(m.lines[0].commit_hash, c_a, "the seed line is unchanged");
+        assert!(
+            m.lines[1..].iter().all(|l| l.commit_hash == c_b),
+            "the large new block stays on the editing commit"
         );
     }
 
