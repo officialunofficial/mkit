@@ -128,8 +128,8 @@ export function LockedView({
 }
 
 /**
- * UNLOCKED header: the player identity + a lock control. (The shared repository is titled by
- * {@link RepoSectionHeader} above the workspace, not selected here.)
+ * UNLOCKED header: the player identity + a lock control. (The shared repository is titled by {@link RepoSectionHeader}
+ * above the workspace, not selected here.)
  */
 export function UnlockedHeader({
   api,
@@ -173,13 +173,15 @@ export function UnlockedHeader({
           </button>
           <InfoTip label='About attesting'>
             <p>
-              <strong className='text-fg'>Attesting</strong> has a P-256 passkey sign a challenge that vouches this
-              Ed25519 key is yours, tying the two keys together.
+              On its own, your signing key is anonymous. It’s derived from your passkey, but that link is{' '}
+              <strong className='text-fg'>private</strong> — no one else can see it or prove it.
             </p>
             <p className='mt-2'>
-              It’s optional. The binding is verified in your browser with the passkey’s origin pinned, so a green check
-              is a stronger “same person” signal than the signing key alone.
+              <strong className='text-fg'>Attesting</strong> has a passkey publicly vouch for your signing key, turning
+              that private link into a proof anyone can verify in their browser. In this demo it’s a separate passkey
+              you approve just for this — your signing key never leaves your browser.
             </p>
+            <p className='mt-2'>It’s optional, and pinned to this site.</p>
           </InfoTip>
         </span>
         <button
@@ -232,12 +234,8 @@ export function RepoSectionHeader() {
       <h2 className='text-lg font-semibold tracking-tight'>Multiplayer Repository</h2>
       <InfoTip label='About the repository'>
         <p>
-          <strong className='text-fg'>Everyone shares this one repository</strong> — there's no switching. You
-          contribute by pushing commits to a <strong className='text-fg'>branch</strong> (or starting a new one).
-        </p>
-        <p className='mt-2'>
-          No accounts: your anonymous key <em>is</em> your identity, and any number of keys write the same shared
-          history. The same passkey brings the same contributor back on any device.
+          <strong className='text-fg'>Everyone shares this one repository</strong>. Contribute alongside others by
+          pushing commits to a <strong className='text-fg'>branch</strong> (or starting a new one).
         </p>
       </InfoTip>
     </div>
