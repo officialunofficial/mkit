@@ -22,7 +22,9 @@
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
-use mkit_core::ops::blame::{BlameOptions, BlameResult, blame_file_with, format_blame_text};
+use mkit_core::ops::blame::{
+    BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_with, format_blame_text,
+};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -74,13 +76,16 @@ struct BlameOpts {
     lines: Option<String>,
     /// Detect lines moved *within* the file, like `git blame -M`: a moved
     /// block of at least 20 alphanumeric characters is credited to its
-    /// origin commit rather than the editing one.
+    /// origin commit rather than the editing one. (git's inline `-M<num>`
+    /// threshold override is not exposed; the core API accepts a custom
+    /// threshold.)
     #[arg(short = 'M', long = "find-moves")]
     find_moves: bool,
     /// Detect lines copied *from other files*, like `git blame -C`
     /// (implies `-M`). Repeat to widen the search: `-C` covers files
     /// changed in the same commit, `-C -C` every file in the parent
     /// commit. A copied block needs at least 40 alphanumeric characters.
+    /// (git's inline `-C<num>` threshold override is not exposed.)
     #[arg(short = 'C', long = "find-copies", action = clap::ArgAction::Count)]
     find_copies: u8,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
@@ -133,13 +138,23 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
+    // `-M` enables move detection at git's default threshold; `-C` (a
+    // repeat count) sets the copy search level. `-C` implies `-M` in the
+    // core, so a bare `-C` still credits within-file moves too.
+    let moves = if opts.find_moves {
+        MoveDetection::GIT_DEFAULT
+    } else {
+        MoveDetection::Off
+    };
+    let copies = if opts.find_copies > 0 {
+        CopyDetection::git_default(opts.find_copies)
+    } else {
+        CopyDetection::Off
+    };
     let blame_opts = BlameOptions {
         ignore_whitespace: opts.ignore_whitespace,
-        detect_moves: opts.find_moves,
-        copy_detection: opts.find_copies,
-        // git's default detection thresholds (alphanumeric chars).
-        move_threshold: 20,
-        copy_threshold: 40,
+        moves,
+        copies,
     };
     let result = match blame_file_with(&store, head, file, &blame_opts) {
         Ok(r) => r,

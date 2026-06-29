@@ -922,11 +922,18 @@ lines copied from other files
 and repeating
 .Fl C
 widens the search from files changed in the commit to every file in the
-parent. A moved/copied block is credited to its origin only above git's
+parent. Detection is block-based: the longest contiguous block above git's
 default thresholds (20 alphanumeric characters for
 .Fl M ,
 40 for
-.Fl C ) .
+.Fl C )
+is credited to its origin, so a moved block beside new lines is still split
+out and, with
+.Fl w ,
+a block copied with a whitespace change is still detected. git's inline
+numeric forms
+.Pq Fl M Ns Ar num , Fl C Ns Ar num
+are not exposed.
 .Fl L
 restricts output to a line range:
 .Ar start , end ,

@@ -13,12 +13,13 @@
 //! where `<short>` is the 12-char prefix of the commit hash. See
 //! [`format_blame_text`].
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::hash::{self, Hash};
 use crate::object::{EntryMode, Identity, Object};
 use crate::store::ObjectStore;
+
+mod move_copy;
 
 /// Hard cap on the per-side line count fed to the LCS matcher. The DP
 /// table is O(m*n) u32 entries: at 100 000 lines × 100 000 lines this
@@ -48,10 +49,66 @@ pub struct BlameResult {
     pub lines: Vec<BlameLine>,
 }
 
+/// Detect lines moved **within a file** (git `-M`). Each `On` state
+/// carries its own threshold, so there is no way to express an invalid
+/// "enabled but zero-threshold" state — [`Default`] is [`Off`].
+///
+/// [`Off`]: MoveDetection::Off
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MoveDetection {
+    /// No within-file move detection.
+    #[default]
+    Off,
+    /// Credit a moved block of at least `threshold` alphanumeric
+    /// characters to its origin.
+    On {
+        /// Minimum alphanumeric characters for a block to qualify.
+        threshold: usize,
+    },
+}
+
+impl MoveDetection {
+    /// git's default `-M` (threshold 20 alphanumeric characters).
+    pub const GIT_DEFAULT: Self = Self::On { threshold: 20 };
+}
+
+/// Detect lines copied **from other files** (git `-C`). `On` carries a
+/// search `level` (1 = files changed in the same commit; 2+ = every file
+/// in the parent commit) and a `threshold`. [`Default`] is [`Off`].
+///
+/// [`Off`]: CopyDetection::Off
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CopyDetection {
+    /// No cross-file copy detection.
+    #[default]
+    Off,
+    /// Credit a copied block of at least `threshold` alphanumeric
+    /// characters to its origin, searching at the given `level`.
+    On {
+        /// Search breadth: 1 = files changed in the commit; 2+ = every
+        /// file in the parent commit.
+        level: u8,
+        /// Minimum alphanumeric characters for a block to qualify.
+        threshold: usize,
+    },
+}
+
+impl CopyDetection {
+    /// git's default `-C` at the given level (threshold 40).
+    #[must_use]
+    pub const fn git_default(level: u8) -> Self {
+        Self::On {
+            level,
+            threshold: 40,
+        }
+    }
+}
+
 /// Knobs controlling how [`blame_file_with`] attributes lines. The
-/// default (all-false / all-zero) reproduces [`blame_file`]'s exact-match
-/// behavior; this struct is the extension point for the blame parity work
-/// (`-w`, `-M`, `-C` today; ignore-revs / `--reverse` to follow).
+/// default (no `-w`, detection off) reproduces [`blame_file`]'s
+/// exact-match behavior; this struct is the extension point for the blame
+/// parity work (`-w`, `-M`, `-C` today; ignore-revs / `--reverse` to
+/// follow).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BlameOptions {
     /// Ignore whitespace when matching a line against its parent
@@ -59,31 +116,32 @@ pub struct BlameOptions {
     /// tweak) does not reattribute the line. Mirrors `git blame -w`,
     /// which ignores *all* whitespace, not just runs of it.
     pub ignore_whitespace: bool,
-    /// Detect lines moved or copied **within the same file** (git `-M`):
-    /// a contiguous block the line-matcher would call "new" but which
-    /// appears verbatim elsewhere in the parent revision inherits that
-    /// block's origin instead of the editing commit.
-    pub detect_moves: bool,
-    /// Detect lines copied **from other files** (git `-C`), as a level:
-    /// `0` off; `1` searches files changed in the same commit; `2`+
-    /// searches every file in the parent commit. Any level `>= 1` also
-    /// enables [`Self::detect_moves`]. A copied block's origin is resolved
-    /// by blaming the source file, matching git's attribution.
-    pub copy_detection: u8,
-    /// Minimum alphanumeric characters a moved block must contain for
-    /// `-M` to credit it to the source (git's default is 20). A block
-    /// below the threshold stays with the editing commit.
-    pub move_threshold: usize,
-    /// Like [`Self::move_threshold`] but for `-C` copies (git's default
-    /// is 40).
-    pub copy_threshold: usize,
+    /// Within-file move detection (git `-M`).
+    pub moves: MoveDetection,
+    /// Cross-file copy detection (git `-C`). `On` implies move detection
+    /// even when [`Self::moves`] is [`MoveDetection::Off`] — git's `-C`
+    /// implies `-M`.
+    pub copies: CopyDetection,
 }
 
 impl BlameOptions {
-    /// Move detection is on explicitly via `-M`, or implicitly because a
-    /// copy level (`-C`) was requested — git's `-C` implies `-M`.
-    fn moves_enabled(self) -> bool {
-        self.detect_moves || self.copy_detection > 0
+    /// The effective `-M` mode: explicit [`Self::moves`] if set, else the
+    /// git default when copy detection is on (git's `-C` implies `-M`),
+    /// else off.
+    fn effective_move(self) -> MoveDetection {
+        match self.moves {
+            MoveDetection::On { .. } => self.moves,
+            MoveDetection::Off if matches!(self.copies, CopyDetection::On { .. }) => {
+                MoveDetection::GIT_DEFAULT
+            }
+            MoveDetection::Off => MoveDetection::Off,
+        }
+    }
+
+    /// Whether any move/copy detection is requested.
+    fn detection_enabled(self) -> bool {
+        matches!(self.effective_move(), MoveDetection::On { .. })
+            || matches!(self.copies, CopyDetection::On { .. })
     }
 }
 
@@ -132,6 +190,43 @@ pub fn blame_file(
     blame_file_with(store, head_hash, file_path, &BlameOptions::default())
 }
 
+/// One step of the file's first-parent ancestry: the commit and the blob
+/// the target path resolved to there.
+#[derive(Clone)]
+struct HistoryEntry {
+    commit_hash: Hash,
+    blob_hash: Hash,
+    author: Identity,
+    timestamp: u64,
+}
+
+/// Walk first-parent ancestry from `head_hash`, collecting one
+/// [`HistoryEntry`] per commit until `file_path` disappears (newest first).
+fn collect_history(
+    store: &ObjectStore,
+    head_hash: Hash,
+    file_path: &str,
+) -> BlameOutcome<Vec<HistoryEntry>> {
+    let mut history: Vec<HistoryEntry> = Vec::new();
+    let mut current = Some(head_hash);
+    while let Some(commit_hash) = current {
+        let Object::Commit(commit) = store.read_object(&commit_hash)? else {
+            return Err(BlameError::NotACommit);
+        };
+        let Some(blob_hash) = find_blob_in_tree(store, commit.tree_hash, file_path)? else {
+            break;
+        };
+        history.push(HistoryEntry {
+            commit_hash,
+            blob_hash,
+            author: commit.author.clone(),
+            timestamp: commit.timestamp,
+        });
+        current = commit.parents.first().copied();
+    }
+    Ok(history)
+}
+
 /// Blame `file_path` at `head_hash`. Walks first-parent ancestry,
 /// stops when the file disappears, and uses LCS to map lines forward.
 /// `opts` tunes matching (see [`BlameOptions`]).
@@ -146,44 +241,13 @@ pub fn blame_file(
 /// Panics only on internal logic violations: it is unreachable for the
 /// "oldest entry" lookup below to fail, since we early-return on an
 /// empty history just above it.
-// History walk + LCS attribution + the -M/-C resolution read most
-// naturally as one linear pass; the pieces are factored into helpers below
-// (`resolve_runs`, `copy_candidates`, …) but the spine stays here.
-#[allow(clippy::too_many_lines)]
 pub fn blame_file_with(
     store: &ObjectStore,
     head_hash: Hash,
     file_path: &str,
     opts: &BlameOptions,
 ) -> BlameOutcome<BlameResult> {
-    #[derive(Clone)]
-    struct HistoryEntry {
-        commit_hash: Hash,
-        blob_hash: Hash,
-        author: Identity,
-        timestamp: u64,
-    }
-
-    let mut history: Vec<HistoryEntry> = Vec::new();
-    let mut current = Some(head_hash);
-    while let Some(commit_hash) = current {
-        let obj = store.read_object(&commit_hash)?;
-        let Object::Commit(commit) = obj else {
-            return Err(BlameError::NotACommit);
-        };
-        let blob_hash = find_blob_in_tree(store, commit.tree_hash, file_path)?;
-        if let Some(bh) = blob_hash {
-            history.push(HistoryEntry {
-                commit_hash,
-                blob_hash: bh,
-                author: commit.author.clone(),
-                timestamp: commit.timestamp,
-            });
-            current = commit.parents.first().copied();
-        } else {
-            break;
-        }
-    }
+    let history = collect_history(store, head_hash, file_path)?;
     // Oldest entry: every line attributed to it. An empty history means the
     // file was never present in any commit along the walk.
     let Some(oldest) = history.last().cloned() else {
@@ -199,46 +263,30 @@ pub fn blame_file_with(
         })
         .collect();
 
-    // Move/copy (-M/-C) caches, shared across the whole blame and built
-    // lazily — untouched when detection is off. `blob_lines`: a source
-    // blob's ordered lines (for contiguous block matching). `origin`: per
-    // (commit, path), a content→origin map produced by blaming the source
-    // file, used to credit a copied block to its true author.
-    let mut blob_lines_cache: HashMap<Hash, Vec<Vec<u8>>> = HashMap::new();
-    let mut origin_cache: HashMap<(Hash, String), HashMap<Vec<u8>, Attribution>> = HashMap::new();
+    // The move/copy detector owns its own caches and is a no-op when
+    // detection is off. The blame pass below stays "boring": it replays the
+    // line matcher, then hands the unmatched lines to the detector.
+    let mut detector = move_copy::Detector::new(store, *opts);
 
     // Boundary copy detection (-C): the file first appears at `oldest`, so
     // every line is credited there by default — but a block may have been
-    // copied from *other* files in `oldest`'s parent (e.g. a new file split
-    // out of an existing one). The forward walk can't see this (there is no
+    // copied from *other* files in `oldest`'s parent (a new file split out
+    // of an existing one). The forward walk can't see this (there is no
     // earlier version of *this* file), so resolve it against the parent.
-    // No within-file `-M` source exists here, so only `-C` applies.
-    let boundary_parent = if opts.copy_detection > 0 {
-        commit_parent(store, oldest.commit_hash)?
+    // There is no within-file `-M` source here.
+    let boundary_parent = if opts.detection_enabled() {
+        move_copy::commit_parent(store, oldest.commit_hash)?
     } else {
         None
     };
     if let Some(parent) = boundary_parent {
-        let cands = copy_candidates(
-            store,
+        detector.reassign(
+            file_path,
             parent,
             oldest.commit_hash,
-            file_path,
-            opts.copy_detection,
-        )?;
-        resolve_runs(
-            store,
             &oldest_lines,
-            opts.ignore_whitespace,
-            |_| true, // at the boundary every line is "unmatched"
+            &|_| true, // at the boundary every line is "unmatched"
             None,
-            opts.move_threshold,
-            opts.copy_detection,
-            opts.copy_threshold,
-            &cands,
-            parent,
-            &mut blob_lines_cache,
-            &mut origin_cache,
             &mut attributions,
         )?;
     }
@@ -277,35 +325,14 @@ pub fn blame_file_with(
                 })
                 .collect();
 
-            if opts.moves_enabled() {
-                let old_keys: Vec<Vec<u8>> = old_lines
-                    .iter()
-                    .map(|l| line_key(l, opts.ignore_whitespace))
-                    .collect();
-                let copy_cands = if opts.copy_detection > 0 {
-                    copy_candidates(
-                        store,
-                        older.commit_hash,
-                        newer.commit_hash,
-                        file_path,
-                        opts.copy_detection,
-                    )?
-                } else {
-                    Vec::new()
-                };
-                resolve_runs(
-                    store,
-                    &new_lines,
-                    opts.ignore_whitespace,
-                    |ni| mapping[ni].is_none(),
-                    Some((&old_keys, attributions.as_slice())),
-                    opts.move_threshold,
-                    opts.copy_detection,
-                    opts.copy_threshold,
-                    &copy_cands,
+            if opts.detection_enabled() {
+                detector.reassign(
+                    file_path,
                     older.commit_hash,
-                    &mut blob_lines_cache,
-                    &mut origin_cache,
+                    newer.commit_hash,
+                    &new_lines,
+                    &|ni| mapping[ni].is_none(),
+                    Some((&old_lines, attributions.as_slice())),
                     &mut new_attrs,
                 )?;
             }
@@ -338,217 +365,6 @@ fn line_key(line: &[u8], ignore_whitespace: bool) -> Vec<u8> {
     } else {
         line.to_vec()
     }
-}
-
-/// Reassign the origin of moved (`-M`) / copied (`-C`) blocks among the
-/// lines the matcher left unmatched, writing into `out`.
-///
-/// Walks maximal runs of consecutive unmatched lines (per `is_unmatched`).
-/// For each run, mirroring git:
-/// 1. **`-M`** — if a within-file source is given and the run appears
-///    verbatim as a contiguous block in it (keyed under `-w`), and the run
-///    holds at least `move_threshold` alphanumeric characters, each line
-///    inherits the matching source line's origin.
-/// 2. **`-C`** — otherwise, if `copy_level > 0` and the run clears
-///    `copy_threshold`, search the candidate files for the block; on a hit
-///    each line is credited via the source file's blame (`origin_cache`).
-///
-/// A run that clears neither stays as `out` had it (the editing commit).
-/// Detection is whole-run and first-match — a partial move inside a larger
-/// insertion isn't split out (a documented simplification vs git's greedy
-/// sub-block matching).
-#[allow(clippy::too_many_arguments)]
-fn resolve_runs(
-    store: &ObjectStore,
-    new_lines: &[Vec<u8>],
-    ignore_whitespace: bool,
-    is_unmatched: impl Fn(usize) -> bool,
-    move_source: Option<(&[Vec<u8>], &[Attribution])>,
-    move_threshold: usize,
-    copy_level: u8,
-    copy_threshold: usize,
-    copy_cands: &[(String, Hash)],
-    source_commit: Hash,
-    blob_lines_cache: &mut HashMap<Hash, Vec<Vec<u8>>>,
-    origin_cache: &mut HashMap<(Hash, String), HashMap<Vec<u8>, Attribution>>,
-    out: &mut [Attribution],
-) -> BlameOutcome<()> {
-    // Keys for within-file matching: stripped under `-w`, raw otherwise.
-    let new_keys: Vec<Vec<u8>> = new_lines
-        .iter()
-        .map(|l| line_key(l, ignore_whitespace))
-        .collect();
-
-    let mut ni = 0;
-    while ni < new_lines.len() {
-        if !is_unmatched(ni) {
-            ni += 1;
-            continue;
-        }
-        let start = ni;
-        while ni < new_lines.len() && is_unmatched(ni) {
-            ni += 1;
-        }
-        let run = start..ni;
-        let alnum = block_alnum(new_lines, run.clone());
-
-        // -M: contiguous block within the parent revision of this file.
-        let moved =
-            move_source
-                .filter(|_| alnum >= move_threshold)
-                .and_then(|(old_keys, old_attrs)| {
-                    find_block(old_keys, &new_keys[run.clone()]).map(|oi| (oi, old_attrs))
-                });
-        if let Some((oi, old_attrs)) = moved {
-            for (k, idx) in run.clone().enumerate() {
-                if oi + k < old_attrs.len() {
-                    out[idx] = old_attrs[oi + k].clone();
-                }
-            }
-            continue;
-        }
-
-        // -C: contiguous block in another file changed in / present at the
-        // parent commit.
-        if copy_level > 0 && alnum >= copy_threshold {
-            let needle = &new_lines[run.clone()];
-            for (path, blob) in copy_cands {
-                if !blob_lines_cache.contains_key(blob) {
-                    let lines = load_blob_lines(store, *blob)?;
-                    blob_lines_cache.insert(*blob, lines);
-                }
-                // Require the run to appear as a contiguous block in the
-                // source (a real move/copy, not scattered coincidences);
-                // attribution itself is per-line via the source's blame.
-                if find_block(&blob_lines_cache[blob], needle).is_none() {
-                    continue;
-                }
-                let key = (source_commit, path.clone());
-                if !origin_cache.contains_key(&key) {
-                    let map = source_origins(store, source_commit, path)?;
-                    origin_cache.insert(key.clone(), map);
-                }
-                for idx in run.clone() {
-                    if let Some(attr) = origin_cache[&key].get(&new_lines[idx]) {
-                        out[idx] = attr.clone();
-                    }
-                }
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// First start index in `hay` where `needle` occurs as a contiguous run,
-/// or `None`. Used to locate a moved/copied block in a source file.
-fn find_block(hay: &[Vec<u8>], needle: &[Vec<u8>]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() {
-        return None;
-    }
-    (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == needle[..])
-}
-
-/// Count ASCII-alphanumeric bytes across `lines[range]` — git's unit for
-/// the `-M`/`-C` detection threshold.
-fn block_alnum(lines: &[Vec<u8>], range: std::ops::Range<usize>) -> usize {
-    lines[range]
-        .iter()
-        .flat_map(|l| l.iter())
-        .filter(|b| b.is_ascii_alphanumeric())
-        .count()
-}
-
-/// Build a content→origin map for `path` at `commit` by blaming it with
-/// default options (so `-C` never recurses). First occurrence of each
-/// line's content wins, mirroring git crediting the earliest source line.
-fn source_origins(
-    store: &ObjectStore,
-    commit: Hash,
-    path: &str,
-) -> BlameOutcome<HashMap<Vec<u8>, Attribution>> {
-    let res = blame_file_with(store, commit, path, &BlameOptions::default())?;
-    let mut map: HashMap<Vec<u8>, Attribution> = HashMap::with_capacity(res.lines.len());
-    for l in res.lines {
-        map.entry(l.text).or_insert(Attribution {
-            commit_hash: l.commit_hash,
-            author: l.author,
-            timestamp: l.timestamp,
-        });
-    }
-    Ok(map)
-}
-
-/// Source files to search for copies, per git's `-C` level: level 1 =
-/// files whose blob differs between the parent (`older`) and child
-/// (`newer`) commit (the files "changed in the commit"); level >= 2 =
-/// every file in the parent commit. The blamed path is always excluded.
-fn copy_candidates(
-    store: &ObjectStore,
-    older: Hash,
-    newer: Hash,
-    target_path: &str,
-    level: u8,
-) -> BlameOutcome<Vec<(String, Hash)>> {
-    let older_blobs = commit_blobs(store, older)?;
-    if level >= 2 {
-        return Ok(older_blobs
-            .into_iter()
-            .filter(|(p, _)| p != target_path)
-            .collect());
-    }
-    let newer_blobs = commit_blobs(store, newer)?;
-    let newer_map: HashMap<&str, Hash> =
-        newer_blobs.iter().map(|(p, h)| (p.as_str(), *h)).collect();
-    Ok(older_blobs
-        .into_iter()
-        .filter(|(p, h)| p != target_path && newer_map.get(p.as_str()) != Some(h))
-        .collect())
-}
-
-/// First-parent of a commit, or `None` for a root commit.
-fn commit_parent(store: &ObjectStore, commit: Hash) -> BlameOutcome<Option<Hash>> {
-    let Object::Commit(c) = store.read_object(&commit)? else {
-        return Err(BlameError::NotACommit);
-    };
-    Ok(c.parents.first().copied())
-}
-
-/// Every `(path, blob_hash)` reachable from a commit's tree.
-fn commit_blobs(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<(String, Hash)>> {
-    let Object::Commit(c) = store.read_object(&commit)? else {
-        return Err(BlameError::NotACommit);
-    };
-    let mut out = Vec::new();
-    collect_tree_blobs(store, c.tree_hash, "", &mut out)?;
-    Ok(out)
-}
-
-/// Recursively collect `(path, blob_hash)` for every blob under a tree.
-/// Symlinks are skipped (not blamable content).
-fn collect_tree_blobs(
-    store: &ObjectStore,
-    tree_hash: Hash,
-    prefix: &str,
-    out: &mut Vec<(String, Hash)>,
-) -> BlameOutcome<()> {
-    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
-        return Ok(());
-    };
-    for entry in tree.entries {
-        let name = String::from_utf8_lossy(&entry.name);
-        match entry.mode {
-            EntryMode::Blob | EntryMode::Executable => {
-                out.push((format!("{prefix}{name}"), entry.object_hash));
-            }
-            EntryMode::Tree => {
-                let child_prefix = format!("{prefix}{name}/");
-                collect_tree_blobs(store, entry.object_hash, &child_prefix, out)?;
-            }
-            EntryMode::Symlink => {}
-        }
-    }
-    Ok(())
 }
 
 /// Walk a `/`-separated tree path and return the leaf blob hash, or
@@ -877,8 +693,7 @@ mod tests {
         );
 
         let opts = BlameOptions {
-            detect_moves: true,
-            move_threshold: 20,
+            moves: MoveDetection::On { threshold: 20 },
             ..Default::default()
         };
         let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
@@ -902,8 +717,7 @@ mod tests {
         let c_a = put_file_commit(&store, "f.txt", b"a\nB\nC\n", vec![], 1, 100);
         let c_b = put_file_commit(&store, "f.txt", b"B\nC\na\n", vec![c_a], 2, 200);
         let opts = BlameOptions {
-            detect_moves: true,
-            move_threshold: 20,
+            moves: MoveDetection::On { threshold: 20 },
             ..Default::default()
         };
         let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
@@ -911,6 +725,99 @@ mod tests {
         assert_eq!(
             m.lines[2].commit_hash, c_b,
             "a sub-threshold move is not detected"
+        );
+    }
+
+    #[test]
+    fn blame_m_detects_sub_block_move_adjacent_to_new_line() {
+        // Review P1: a moved block sitting next to a genuinely-new line.
+        // Parent: LONG1, LONG2, B, C. Child: B, C, NEW, LONG1, LONG2.
+        // git -M credits LONG1/LONG2 to the parent and keeps NEW on the
+        // child; whole-run matching would miss it (the run NEW+LONG1+LONG2
+        // isn't contiguous in the parent). Verified against real git.
+        let (_d, store) = fresh_store();
+        let v1 = [LONG_LINE, BLOCK_A, b"B", b"C", b""].join(&b'\n');
+        let v2 = [b"B" as &[u8], b"C", b"NEWLINE", LONG_LINE, BLOCK_A, b""].join(&b'\n');
+        let c_a = put_file_commit(&store, "f.txt", &v1, vec![], 1, 100);
+        let c_b = put_file_commit(&store, "f.txt", &v2, vec![c_a], 2, 200);
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ..Default::default()
+        };
+        let m = blame_file_with(&store, c_b, "f.txt", &opts).unwrap();
+        // Child order: B, C, NEWLINE, LONG1, BLOCK_A.
+        assert_eq!(m.lines[2].text, b"NEWLINE");
+        assert_eq!(
+            m.lines[2].commit_hash, c_b,
+            "the genuinely-new line stays on c_b"
+        );
+        assert_eq!(m.lines[3].text, LONG_LINE);
+        assert_eq!(
+            m.lines[3].commit_hash, c_a,
+            "the moved block reverts to c_a"
+        );
+        assert_eq!(
+            m.lines[4].commit_hash, c_a,
+            "…including the second moved line"
+        );
+    }
+
+    #[test]
+    fn blame_w_c_detects_copy_with_whitespace_change() {
+        // Review P1: a block copied into a new file *with a reindent*.
+        // Under plain -C the changed whitespace hides the copy; under
+        // -w -C it must still be credited to the origin commit. Verified
+        // against real `git blame -w -C`.
+        let (_d, store) = fresh_store();
+        let a1 = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let c_a = put_multi_file_commit(&store, &[("a.txt", &a1)], vec![], 1, 100);
+        // b.txt copies the block but reindents each line.
+        let reindented = {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"    ");
+            v.extend_from_slice(BLOCK_A);
+            v.push(b'\n');
+            v.extend_from_slice(b"    ");
+            v.extend_from_slice(BLOCK_B);
+            v.push(b'\n');
+            v
+        };
+        let c_b = put_multi_file_commit(
+            &store,
+            &[("a.txt", b"zzz\n"), ("b.txt", &reindented)],
+            vec![c_a],
+            2,
+            200,
+        );
+
+        // Plain -C: the reindent hides the copy; lines stay on c_b.
+        let plain_c = BlameOptions {
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, c_b, "b.txt", &plain_c).unwrap();
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == c_b),
+            "without -w a reindented copy is not detected"
+        );
+
+        // -w -C: normalized keys see through the reindent → credit c_a.
+        let w_c = BlameOptions {
+            ignore_whitespace: true,
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, c_b, "b.txt", &w_c).unwrap();
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == c_a),
+            "-w -C credits a reindented copy to its origin"
         );
     }
 
@@ -939,8 +846,10 @@ mod tests {
         );
 
         let opts = BlameOptions {
-            copy_detection: 1,
-            copy_threshold: 40,
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
             ..Default::default()
         };
         let c = blame_file_with(&store, c_b, "b.txt", &opts).unwrap();
@@ -970,8 +879,10 @@ mod tests {
         );
 
         let l1 = BlameOptions {
-            copy_detection: 1,
-            copy_threshold: 40,
+            copies: CopyDetection::On {
+                level: 1,
+                threshold: 40,
+            },
             ..Default::default()
         };
         let r1 = blame_file_with(&store, c_b, "dst.txt", &l1).unwrap();
@@ -981,8 +892,10 @@ mod tests {
         );
 
         let l2 = BlameOptions {
-            copy_detection: 2,
-            copy_threshold: 40,
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
             ..Default::default()
         };
         let r2 = blame_file_with(&store, c_b, "dst.txt", &l2).unwrap();

@@ -274,9 +274,14 @@ History / commits:
   current bytes. `-M` detects lines moved *within* the file and `-C` lines
   copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
   and repeating it — `-C -C` — widens the search from files changed in the
-  commit to every file in the parent). A moved/copied block is credited to
-  its origin commit only above git's default thresholds (20 alphanumeric
-  characters for `-M`, 40 for `-C`). `-L` restricts output to a line range —
+  commit to every file in the parent). Detection is block-based: the
+  longest contiguous moved/copied block above git's default thresholds (20
+  alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
+  so a moved block next to genuinely-new lines is still split out, and
+  combined with `-w` a block copied with a whitespace change is still
+  detected. Divergence: git's inline numeric threshold forms
+  (`-M<num>`/`-C<num>`) are not exposed on the CLI (the core API accepts a
+  custom threshold). `-L` restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
   start of file), or a bare `<start>` (to EOF); bounds are 1-based and

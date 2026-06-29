@@ -29,10 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--find-copies`, repeatable, implies `-M`) credits a block copied *from
   another file*, resolving the true origin by blaming the source file.
   Repeating `-C` widens the search from files changed in the commit to
-  every file in the parent commit. Detection honors git's default
-  alphanumeric-character thresholds (20 for `-M`, 40 for `-C`), so
-  sub-threshold blocks stay with the editing commit, matching `git blame`.
-  Attribution remains first-parent only.
+  every file in the parent commit. Detection is block-based over normalized
+  keys: the longest contiguous block above git's default thresholds (20 for
+  `-M`, 40 for `-C`) is credited, so a moved block beside genuinely-new
+  lines is split out and — combined with `-w` — a block copied with a
+  whitespace change is still detected. Configured through a typed
+  `MoveDetection`/`CopyDetection` API that can't express an invalid
+  "enabled but zero-threshold" state. Attribution remains first-parent
+  only; git's inline `-M<num>`/`-C<num>` threshold forms are not exposed on
+  the CLI (the core API takes a custom threshold).
 
 ### Removed
 
