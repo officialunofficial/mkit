@@ -292,9 +292,13 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
 /// which collapses `foo(a, b)`, `foo(a,b)`, and `    foo(a,  b)` to the
 /// same key so a whitespace-only edit doesn't reattribute the line.
 fn strip_ws(line: &[u8]) -> Vec<u8> {
+    // Rust's `is_ascii_whitespace` is space/\t/\n/\r/\x0C; git's xdiff
+    // `isspace` also treats vertical tab (\x0B) as whitespace, so strip it
+    // too to keep the parity claim exact. (\n is already stripped by the
+    // line split, but include it for completeness.)
     line.iter()
         .copied()
-        .filter(|b| !b.is_ascii_whitespace())
+        .filter(|b| !(b.is_ascii_whitespace() || *b == 0x0B))
         .collect()
 }
 
@@ -313,11 +317,12 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 /// and child blob lines plus [`BlameOptions`], return for each child line
 /// the matched parent index, or `None` if it is new/changed.
 ///
-/// This is the single place that owns *matching policy* — the
-/// [`BLAME_MAX_LINES`] fast-fail (enforced **before** any normalization
-/// allocation), `-w` whitespace normalization, and the position-stable
-/// LCS tie-breaking — so [`blame_file_with`] only has to replay the
-/// mapping. It is the extension point for future matching modes.
+/// This is the **single, size-checked** matcher and the one place that
+/// owns *matching policy* — the [`BLAME_MAX_LINES`] fast-fail (which is
+/// also the only guard against the O(m·n) DP-table blow-up), `-w`
+/// whitespace normalization, and the position-stable LCS tie-breaking —
+/// so [`blame_file_with`] only has to replay the mapping. It is the
+/// extension point for future matching modes.
 ///
 /// # Errors
 /// - [`BlameError::FileTooLarge`] if either side exceeds [`BLAME_MAX_LINES`].
@@ -326,8 +331,8 @@ fn match_lines_with_options(
     new_lines: &[Vec<u8>],
     opts: BlameOptions,
 ) -> BlameOutcome<Vec<Option<usize>>> {
-    // Fast-fail on oversized input first, before allocating any derived
-    // (e.g. whitespace-stripped) per-line buffers.
+    // Size-check before the DP table (and before any derived per-line
+    // buffers) so an oversized blob fails fast.
     check_line_count(old_lines.len())?;
     check_line_count(new_lines.len())?;
     if opts.ignore_whitespace {
@@ -341,27 +346,9 @@ fn match_lines_with_options(
     }
 }
 
-/// Size-checked LCS line matcher. Returns
-/// [`BlameError::FileTooLarge`] if either side exceeds
-/// [`BLAME_MAX_LINES`] rather than allocating an O(m*n) DP table. This
-/// is the only public entry point; the unbounded inner matcher is
-/// private so external callers cannot trip the O(m*n) allocation.
-///
-/// # Errors
-/// - [`BlameError::FileTooLarge`] if `old_lines.len()` or
-///   `new_lines.len()` exceeds [`BLAME_MAX_LINES`].
-pub fn match_lines_checked<T: AsRef<[u8]>>(
-    old_lines: &[T],
-    new_lines: &[T],
-) -> BlameOutcome<Vec<Option<usize>>> {
-    check_line_count(old_lines.len())?;
-    check_line_count(new_lines.len())?;
-    Ok(match_lines(old_lines, new_lines))
-}
-
 /// Reject a side whose line count would drive the O(m*n) DP table past
-/// [`BLAME_MAX_LINES`]. Pulled out so callers (e.g. the `-w` path) can
-/// fail fast *before* allocating derived per-line buffers.
+/// [`BLAME_MAX_LINES`]. Shared by the matcher (and reused for the size-cap
+/// regression tests).
 fn check_line_count(lines: usize) -> BlameOutcome<()> {
     if lines > BLAME_MAX_LINES {
         return Err(BlameError::FileTooLarge { lines });
@@ -374,7 +361,7 @@ fn check_line_count(lines: usize) -> BlameOutcome<()> {
 ///
 /// NOTE: This function allocates an O(m*n) DP table with no size guard,
 /// so it is kept private; all callers go through the size-checked
-/// [`match_lines_checked`] wrapper.
+/// [`match_lines_with_options`] entry point.
 #[must_use]
 fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
@@ -514,6 +501,9 @@ mod tests {
         assert_eq!(strip_ws(b"  foo(a,  b)\t"), b"foo(a,b)".to_vec());
         assert_eq!(strip_ws(b"abc"), b"abc".to_vec());
         assert_eq!(strip_ws(b" \t "), b"".to_vec());
+        // Vertical tab (\x0B) and form feed (\x0C) are whitespace to git's
+        // xdiff `isspace`; strip both for parity.
+        assert_eq!(strip_ws(b"a\x0Bb\x0Cc"), b"abc".to_vec());
     }
 
     #[test]
@@ -749,17 +739,18 @@ mod tests {
         // gigabytes of heap. Cap both dimensions with BLAME_MAX_LINES
         // and return a FileTooLarge error rather than over-allocating.
         let n = super::BLAME_MAX_LINES + 1;
-        let old: Vec<&[u8]> = vec![b"x"; n];
-        let new: Vec<&[u8]> = vec![b"y"; 1];
-        let err = super::match_lines_checked(&old, &new).unwrap_err();
+        let opts = BlameOptions::default();
+        let old: Vec<Vec<u8>> = vec![b"x".to_vec(); n];
+        let new: Vec<Vec<u8>> = vec![b"y".to_vec(); 1];
+        let err = super::match_lines_with_options(&old, &new, opts).unwrap_err();
         assert!(
             matches!(err, BlameError::FileTooLarge { lines } if lines == n),
             "got {err:?}"
         );
 
-        let old2: Vec<&[u8]> = vec![b"a"; 1];
-        let new2: Vec<&[u8]> = vec![b"b"; n];
-        let err2 = super::match_lines_checked(&old2, &new2).unwrap_err();
+        let old2: Vec<Vec<u8>> = vec![b"a".to_vec(); 1];
+        let new2: Vec<Vec<u8>> = vec![b"b".to_vec(); n];
+        let err2 = super::match_lines_with_options(&old2, &new2, opts).unwrap_err();
         assert!(
             matches!(err2, BlameError::FileTooLarge { lines } if lines == n),
             "got {err2:?}"

@@ -63,8 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#414](https://github.com/officialunofficial/mkit/pull/414)).
 - **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
-  `match_lines` function is now private — callers must use the
-  bounds-checked `match_lines_checked`. Both are pre-1.0 API breaks; no
+  `match_lines` function is now private — line matching is an internal,
+  size-checked detail of `blame_file_with`. Both are pre-1.0 API breaks; no
   in-workspace consumers were affected. (release-plz's `semver_check`
   enforces the matching version bump at release time.)
 
