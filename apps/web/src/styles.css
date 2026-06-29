@@ -231,6 +231,30 @@
     display: none;
   }
 
+  /* Floating-dock pop: panels in the bottom dock swap between a collapsed
+     circle and an expanded card by mounting/unmounting. A short scale+fade
+     entrance keeps that swap from being an instant jump — it plays in BOTH
+     directions because each side (card and circle) is a fresh mount. Honour
+     reduced-motion by skipping it. */
+  @keyframes dock-pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.96) translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+  }
+  .dock-pop-in {
+    animation: dock-pop-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dock-pop-in {
+      animation: none;
+    }
+  }
+
   /* Utility for applying the brand gradient as text fill. Used on the
      landing hero only — kept off secondary headings so the colour still
      reads as an accent rather than a default. */

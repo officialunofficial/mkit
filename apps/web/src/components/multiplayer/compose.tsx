@@ -198,14 +198,16 @@ export function Compose({
           />
         ) : null}
       </div>
-      <button
-        type='button'
-        className={PRIMARY_BTN}
-        onClick={onPush}
-        disabled={!built.ok || push.isPending || !unlocked || !targetRef}
-      >
-        {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign & push'}
-      </button>
+      <div className='flex justify-end'>
+        <button
+          type='button'
+          className={PRIMARY_BTN}
+          onClick={onPush}
+          disabled={!built.ok || push.isPending || !unlocked || !targetRef}
+        >
+          {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign & push'}
+        </button>
+      </div>
 
       {built.ok ? (
         <Collapsible.Root>

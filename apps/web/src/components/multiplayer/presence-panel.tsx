@@ -53,7 +53,7 @@ export function PresencePanel({ room }: { room: string }) {
         onClick={() => openPanel('presence')}
         title={summary}
         aria-label={`Who's online — ${summary}`}
-        className='relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
+        className='dock-pop-in relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
       >
         <span aria-hidden>👥</span>
         {onlineCount > 0 ? (
@@ -66,7 +66,7 @@ export function PresencePanel({ room }: { room: string }) {
   }
 
   return (
-    <div className='w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'>
+    <div className='dock-pop-in w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'>
       <header className='flex items-center gap-2 border-b border-hairline px-3 py-2'>
         <span aria-hidden>👥</span>
         <span className='font-semibold'>Online · repo “{room}”</span>

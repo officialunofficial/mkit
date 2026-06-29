@@ -14,12 +14,6 @@ export default function MultiplayerPage() {
       />
       <header className='space-y-3'>
         <h1 className='text-4xl font-semibold tracking-tight'>Multiplayer mkit</h1>
-        <p className='max-w-prose text-base text-fg'>
-          Create a passkey identity — one prompt derives an Ed25519 signing key from it via the WebAuthn PRF extension —
-          then sign commits in wasm and push them to a shared repository with no further prompts. Anyone can push; the
-          signature proves “the same key made these commits,” not who you are. Watch other players&rsquo; commits arrive
-          live below.
-        </p>
       </header>
       <DemoBoundary>
         <MultiplayerDemo />

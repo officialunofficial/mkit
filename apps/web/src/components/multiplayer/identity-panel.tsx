@@ -7,7 +7,7 @@
 import { useState } from 'react'
 import { type BindingCredential, attestEd25519Binding, enrollBindingPasskey, rpId } from '../../lib/passkey'
 import { recordActivity } from '../../lib/activity-log'
-import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
+import { useIdentityStore } from '../../lib/identity-store'
 import { Field, FieldList } from '../result-panel'
 import { useMkit } from '../use-mkit'
 import { InfoTip } from './info-tip'
@@ -105,7 +105,6 @@ export function LockedView({
               {busy ? 'Unlocking…' : 'Unlock'}
             </button>
           </div>
-
         </>
       ) : (
         <>
@@ -129,8 +128,8 @@ export function LockedView({
 }
 
 /**
- * UNLOCKED header: the player identity + a lock control. (The room selector now lives in the left column — see
- * {@link RoomSelector}.)
+ * UNLOCKED header: the player identity + a lock control. (The shared repository is titled by
+ * {@link RepoSectionHeader} above the workspace, not selected here.)
  */
 export function UnlockedHeader({
   api,
@@ -158,17 +157,16 @@ export function UnlockedHeader({
 
   return (
     <section className='space-y-3'>
-      {/* Player name + key, Lock, and the attest trigger all share one row (the
-          attest results render below). Stacks on mobile, single row on sm+. */}
+      {/* Player name + key and the attest trigger sit together on the LEFT; Lock
+          stays at the far right — the same spot Unlock occupies while locked.
+          Stacks on mobile, single row on sm+. */}
       <div className='flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center'>
-        <span className='min-w-0 sm:flex-1' title={ed25519PubkeyHex}>
+        <span className='min-w-0' title={ed25519PubkeyHex}>
           <span className='text-lg'>
             <OwnPlayerName />
           </span>{' '}
           <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
         </span>
-        {/* Attest sits to the LEFT of Lock; Lock stays at the far right — the same
-            spot Unlock occupies while locked. */}
         <span className='flex items-center gap-1.5'>
           <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
             {attest.busy ? 'Attesting…' : 'Attest with a passkey'}
@@ -186,7 +184,7 @@ export function UnlockedHeader({
         </span>
         <button
           type='button'
-          className={BTN}
+          className={`${BTN} sm:ml-auto`}
           onClick={onLock}
           title='Wipes your signing key from memory; unlock re-derives it from your passkey.'
         >
@@ -224,29 +222,24 @@ export function UnlockedHeader({
 }
 
 /**
- * The repository name. There is ONE fixed shared repository everyone contributes to — you don't switch repos, you push
- * to branches — so this renders read-only rather than as an editable field.
+ * Section header for the two-column repo workspace beneath it. There is ONE fixed shared repository everyone
+ * contributes to — no name to pick, no switching — so this reads as a full-width title, not a field. The tooltip
+ * carries the "everyone shares one repo" explanation.
  */
-export function RoomSelector() {
+export function RepoSectionHeader() {
   return (
-    <div className='space-y-1.5'>
-      <div className='flex items-center gap-1.5'>
-        <span className='text-sm text-muted'>Repository</span>
-        <InfoTip label='About the repository'>
-          <p>
-            <strong className='text-fg'>Everyone shares this one repository</strong> — there's no switching. You
-            contribute by pushing commits to a <strong className='text-fg'>branch</strong> (or starting a new one).
-          </p>
-          <p className='mt-2'>
-            No accounts: your anonymous key <em>is</em> your identity, and any number of keys write the same shared
-            history. The same passkey brings the same contributor back on any device.
-          </p>
-        </InfoTip>
-      </div>
-      <div className='flex items-center justify-between rounded-md border border-hairline bg-fg/[0.03] px-3 py-2 text-sm'>
-        <span className='font-mono'>{DEFAULT_ROOM}</span>
-        <span className='text-xs text-muted'>one shared repo</span>
-      </div>
+    <div className='flex items-center gap-2 border-b border-hairline pb-3'>
+      <h2 className='text-lg font-semibold tracking-tight'>Multiplayer Repository</h2>
+      <InfoTip label='About the repository'>
+        <p>
+          <strong className='text-fg'>Everyone shares this one repository</strong> — there's no switching. You
+          contribute by pushing commits to a <strong className='text-fg'>branch</strong> (or starting a new one).
+        </p>
+        <p className='mt-2'>
+          No accounts: your anonymous key <em>is</em> your identity, and any number of keys write the same shared
+          history. The same passkey brings the same contributor back on any device.
+        </p>
+      </InfoTip>
     </div>
   )
 }

@@ -5,7 +5,7 @@ import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/ident
 import { RepoBackendProvider, useRepoEvents, useResolvedRepoBackend } from '../lib/repo-api'
 import { useIdentityActions } from './use-identity-actions'
 import { useMkit } from './use-mkit'
-import { LockedView, RoomSelector, UnlockedHeader } from './multiplayer/identity-panel'
+import { LockedView, RepoSectionHeader, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
@@ -86,12 +86,15 @@ function MultiplayerBody({
         )}
       </section>
 
-      {/* Left: the repository + its branches. Right: compose, then the selected
+      {/* Full-width title for the workspace below — one shared repo, no name to
+          pick (the explanation lives in its tooltip). */}
+      <RepoSectionHeader />
+
+      {/* Left: the repository's branches. Right: compose, then the selected
           branch's commit log. The log is ALWAYS visible — watch others contribute
           even before you unlock an identity ("signed out" mode). */}
       <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
         <div className='space-y-6'>
-          <RoomSelector />
           <RefsPanel
             room={room}
             useMock={useMock}

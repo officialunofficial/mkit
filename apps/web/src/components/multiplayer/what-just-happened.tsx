@@ -97,7 +97,7 @@ export function WhatJustHappened() {
         onClick={() => openSlot('activity')}
         title='What just happened'
         aria-label='Reopen the “what just happened” panel'
-        className='inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
+        className='dock-pop-in inline-flex h-9 w-9 items-center justify-center rounded-full border border-hairline bg-bg text-base shadow-lg transition-colors hover:border-fg'
       >
         <span aria-hidden>⚡</span>
       </button>
@@ -113,7 +113,7 @@ export function WhatJustHappened() {
     <div
       role='status'
       aria-live='polite'
-      className='w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'
+      className='dock-pop-in w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'
     >
       <header className='flex items-center gap-2 border-b border-hairline px-3 py-2'>
         <span aria-hidden>⚡</span>
