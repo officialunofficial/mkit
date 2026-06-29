@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 use std::io::Write;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::{self, Hash};
@@ -172,7 +173,7 @@ pub fn run(args: &[String]) -> u8 {
     // Build the `--ignore-rev` / `--ignore-revs-file` skip set. Each
     // failure is already git-faithful text paired with an exit code.
     let ignore_revs = match collect_ignore_revs(&store, &mkit_dir, &opts) {
-        Ok(set) => set,
+        Ok(set) => Arc::new(set),
         Err((msg, code)) => return emit_err(&msg, code),
     };
 

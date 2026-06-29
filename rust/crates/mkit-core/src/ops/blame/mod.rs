@@ -14,6 +14,7 @@
 //! [`format_blame_text`].
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::fmt::Write as _;
 
 use crate::hash::{self, Hash};
@@ -111,8 +112,9 @@ impl CopyDetection {
 /// point for the blame parity work (`-w`, `-M`, `-C`, ignore-revs today;
 /// `--reverse` to follow).
 ///
-/// Not `Copy`: [`Self::ignore_revs`] owns a heap [`HashSet`]. It is passed
-/// by reference (`&BlameOptions`) on the hot path.
+/// Not `Copy`: [`Self::ignore_revs`] owns an `Arc`. It is passed by
+/// reference (`&BlameOptions`) on the hot path; the `Arc` lets copy-source
+/// blames share the same set without re-cloning it.
 #[derive(Debug, Clone, Default)]
 pub struct BlameOptions {
     /// Ignore whitespace when matching a line against its parent
@@ -133,7 +135,11 @@ pub struct BlameOptions {
     /// changed the line. A commit whose lines have no counterpart in its
     /// parent (a genuine insertion) stays on the ignored commit, matching
     /// git's default (no `blame.markUnblamableLines` marker).
-    pub ignore_revs: HashSet<Hash>,
+    ///
+    /// Behind an [`Arc`] so a `-C` copy-source blame can share the same set
+    /// (it inherits the active ignore-revs) with an `O(1)` refcount bump
+    /// rather than deep-cloning the whole set per source.
+    pub ignore_revs: Arc<HashSet<Hash>>,
 }
 
 impl BlameOptions {
@@ -372,7 +378,18 @@ pub fn blame_file_with(
                 .collect();
 
             if opts.detection_enabled() {
-                let unmatched: Vec<bool> = mapping.iter().map(Option::is_none).collect();
+                // A detection candidate is LCS-unmatched *and* not already
+                // resolved by ignore-rev fallthrough — otherwise the move/
+                // copy detector would overwrite a fallthrough attribution
+                // (a fallthrough line is `mapping[ni] == None`, so it would
+                // stay flagged unmatched). `--ignore-rev` takes precedence
+                // over `-M`/`-C` on the lines it resolves.
+                let unmatched: Vec<bool> = (0..new_lines.len())
+                    .map(|ni| {
+                        mapping[ni].is_none()
+                            && fallthrough.as_ref().is_none_or(|f| f[ni].is_none())
+                    })
+                    .collect();
                 detector.reassign(
                     &move_copy::ReassignRequest {
                         file_path,
@@ -1469,7 +1486,7 @@ mod tests {
     /// Convenience: a `BlameOptions` that ignores the given commits.
     fn ignoring(revs: &[Hash]) -> BlameOptions {
         BlameOptions {
-            ignore_revs: revs.iter().copied().collect(),
+            ignore_revs: Arc::new(revs.iter().copied().collect()),
             ..Default::default()
         }
     }
@@ -1606,6 +1623,56 @@ mod tests {
             r.lines[1].commit_hash, c1,
             "line falls through both ignored reformats to c1"
         );
+    }
+
+    #[test]
+    fn blame_ignore_rev_fallthrough_not_overwritten_by_move_detection() {
+        // Review: `--ignore-rev` + `-M`. An ignored commit replaces the last
+        // line (`x`) in place with a duplicate of the first line (`dup`,
+        // >= 20 alnum). The trailing hunk is 1-for-1, so ignore-rev
+        // fallthrough pairs the new line with the *replaced* parent line
+        // (`x`, origin c1). But `dup`'s key also appears at line 0 of the
+        // parent, so the move detector *would* credit it to `dup`'s origin
+        // (c0). Fallthrough must win: detection runs only on lines it did
+        // not resolve.
+        let (_d, store) = fresh_store();
+        let dup: &[u8] = b"dupaaaaaaaaaaaaaaaaa"; // 20 alnum
+        let mid: &[u8] = b"MIDLINE";
+        let x_v0: &[u8] = b"exoldbbbbbbbbbbbbbbb";
+        let x_v1: &[u8] = b"exnewbbbbbbbbbbbbbbb";
+        let c0 = put_file_commit(&store, "f.txt", &[dup, mid, x_v0, b""].join(&b'\n'), vec![], 1, 100);
+        // c1 changes the last line (origin → c1); `dup`/`mid` keep origin c0.
+        let c1 = put_file_commit(
+            &store,
+            "f.txt",
+            &[dup, mid, x_v1, b""].join(&b'\n'),
+            vec![c0],
+            2,
+            200,
+        );
+        // c2 (ignored) replaces the last line with a duplicate of `dup`.
+        let c2 = put_file_commit(
+            &store,
+            "f.txt",
+            &[dup, mid, dup, b""].join(&b'\n'),
+            vec![c1],
+            3,
+            300,
+        );
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ignore_revs: Arc::new([c2].into_iter().collect()),
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, c2, "f.txt", &opts).unwrap();
+        assert_eq!(
+            r.lines[2].commit_hash, c1,
+            "fallthrough (replaced parent line → c1) wins; -M does not overwrite it to c0"
+        );
+        // Sanity: plain --ignore-rev (no -M) gives the same line-2 origin.
+        let plain = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        assert_eq!(plain.lines[2].commit_hash, c1, "-M did not change the result");
     }
 
     #[test]
