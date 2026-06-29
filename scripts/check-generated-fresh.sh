@@ -22,20 +22,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-gen_paths=(
-    rust/crates/mkit-rpc/generated
-    rust/crates/mkit-repo-client/generated
-    apps/repo-worker/generated
-)
-
 bash scripts/regen-rpc-proto.sh
 bash scripts/regen-repo-proto.sh
 
-# `git status --porcelain` (not `git diff`) so the check catches ADDED and
-# DELETED generated files too, not just modifications: the regen scripts
-# `rm -f */*.rs` then re-`cp`, so a brand-new codegen module lands untracked —
-# which `git diff` would silently miss. Fail on any add/delete/modify.
-drift="$(git status --porcelain -- "${gen_paths[@]}")"
+# Detect drift in ANY committed codegen tree: every vendored generated dir is
+# named `generated/`, so match on that rather than a hardcoded list that has to
+# be kept in sync with the regen scripts — a new generated tree added to a regen
+# script is then covered automatically. `git status --porcelain` (not `git diff`)
+# so ADDED and DELETED files count too: the regen scripts `rm -f */*.rs` then
+# re-`cp`, so a new module lands untracked, which `git diff` would silently miss.
+# Scoping to `/generated/` keeps cargo build's Cargo.lock / target churn out.
+drift="$(git status --porcelain | grep -E '/generated/' || true)"
 if [ -n "${drift}" ]; then
     echo "::error::Vendored generated code is STALE. Run scripts/regen-rpc-proto.sh and scripts/regen-repo-proto.sh, then commit the result." >&2
     echo >&2
