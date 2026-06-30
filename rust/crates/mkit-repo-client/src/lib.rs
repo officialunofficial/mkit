@@ -80,7 +80,11 @@ fn set(obj: &js_sys::Object, key: &str, val: JsValue) -> Result<(), JsError> {
 
 /// `GetRef` — current object id (hex) a ref points at, or `null` if absent.
 #[wasm_bindgen]
-pub async fn get_ref(base_url: &str, room: String, name: String) -> Result<Option<String>, JsError> {
+pub async fn get_ref(
+    base_url: &str,
+    room: String,
+    name: String,
+) -> Result<Option<String>, JsError> {
     let client = RepoServiceClient::new(FetchTransport, config(base_url)?);
     let resp = client
         .get_ref(GetRefRequest {
@@ -157,16 +161,32 @@ pub async fn list_commits(
         // Metadata straight from the DO index — no object bytes, no decode.
         set(&obj, "hash", c.hash.unwrap_or_default().into())?;
         set(&obj, "parent", c.parent.unwrap_or_default().into())?;
-        set(&obj, "authorPubkeyHex", c.author_pubkey.unwrap_or_default().into())?;
+        set(
+            &obj,
+            "authorPubkeyHex",
+            c.author_pubkey.unwrap_or_default().into(),
+        )?;
         set(&obj, "message", c.message.unwrap_or_default().into())?;
-        set(&obj, "createdAtUnix", (c.created_at_unix.unwrap_or(0) as f64).into())?;
+        set(
+            &obj,
+            "createdAtUnix",
+            (c.created_at_unix.unwrap_or(0) as f64).into(),
+        )?;
         set(&obj, "kind", c.kind.unwrap_or_default().into())?;
-        set(&obj, "sourcesJson", c.sources_json.unwrap_or_default().into())?;
+        set(
+            &obj,
+            "sourcesJson",
+            c.sources_json.unwrap_or_default().into(),
+        )?;
         arr.push(&obj);
     }
     let out = js_sys::Object::new();
     set(&out, "commits", arr.into())?;
-    set(&out, "nextCursorHex", resp.next_cursor.unwrap_or_default().into())?;
+    set(
+        &out,
+        "nextCursorHex",
+        resp.next_cursor.unwrap_or_default().into(),
+    )?;
     Ok(out.into())
 }
 
@@ -389,7 +409,11 @@ pub async fn post_message(
         bytes_to_hex(resp.message_id.as_deref().unwrap_or_default()).into(),
     )?;
     set(&obj, "accepted", resp.accepted.unwrap_or(false).into())?;
-    set(&obj, "rateLimited", resp.rate_limited.unwrap_or(false).into())?;
+    set(
+        &obj,
+        "rateLimited",
+        resp.rate_limited.unwrap_or(false).into(),
+    )?;
     Ok(obj.into())
 }
 

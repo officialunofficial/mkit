@@ -13,8 +13,8 @@ use mkit_core::sign::{
 use zeroize::Zeroizing;
 
 use crate::common::{
-    CommitCore, encode_object, js_err, js_vec_count, js_vec_get, parse_hash_hex, parse_json_triples,
-    parse_parent_list, parse_remix_sources,
+    CommitCore, encode_object, js_err, js_vec_count, js_vec_get, parse_hash_hex,
+    parse_json_triples, parse_parent_list, parse_remix_sources,
 };
 
 /// Serialize a blob object and return `{ bytes, hash_hex }`.
