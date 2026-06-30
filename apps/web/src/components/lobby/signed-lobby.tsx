@@ -262,7 +262,10 @@ function Feed({
   const empty = items.length === 0
   return (
     <div className='relative'>
-      <div ref={scrollRef} onScroll={onScroll} className='max-h-96 min-h-44 overflow-y-auto py-1'>
+      {/* FIXED height (not max-h): the virtualizer needs a definite viewport, and a
+          fixed box means the list scrolls internally instead of growing the page
+          as messages arrive. */}
+      <div ref={scrollRef} onScroll={onScroll} className='h-96 overflow-y-auto py-1'>
         {empty ? (
           <p className='p-4 text-sm text-muted text-pretty'>
             {isLoading ? 'Loading the lobby…' : 'No activity yet — say hi or push a commit in multiplayer.'}
