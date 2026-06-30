@@ -679,16 +679,21 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       ? toggle.mutate({ targetId: e.hash, emoji })
       : void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())
 
-  // Mount → slide in. Escape closes; lock body scroll while open.
-  const [shown, setShown] = useState(false)
+  // `open` drives the slide. Mount → flip to true next tick (slide IN). Closing
+  // flips it false (slide OUT); the panel's transform `transitionend` then calls
+  // onClose to actually unmount — so the exit animates instead of vanishing.
+  const [open, setOpen] = useState(false)
   useEffect(() => {
-    setShown(true)
+    const raf = requestAnimationFrame(() => setOpen(true))
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') onClose()
+      if (ev.key === 'Escape') setOpen(false)
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
 
   const fork = isForkRef(e.ref)
   const timestamp = decoded ? decoded.timestampMs : Date.parse(e.createdAt)
@@ -701,19 +706,24 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       <button
         type='button'
         aria-label='Close commit details'
-        onClick={onClose}
-        className={`absolute inset-0 bg-black/30 transition-opacity duration-300 ${shown ? 'opacity-100' : 'opacity-0'}`}
+        onClick={() => setOpen(false)}
+        className={`absolute inset-0 bg-black/30 transition-opacity duration-300 ${open ? 'opacity-100' : 'opacity-0'}`}
       />
       <aside
         role='dialog'
         aria-label='Commit details'
-        className={`absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${shown ? 'translate-x-0' : 'translate-x-full'}`}
+        // Unmount only after the SLIDE-OUT finishes — the panel's OWN transform
+        // transition ending while closing (ignore bubbled transitions from children).
+        onTransitionEnd={(ev) => {
+          if (ev.target === ev.currentTarget && ev.propertyName === 'transform' && !open) onClose()
+        }}
+        className={`absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col rounded-l-md border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${open ? 'translate-x-0' : 'translate-x-full'}`}
       >
         <header className='flex items-center justify-between gap-3 border-b border-hairline px-4 py-3'>
           <h2 className='text-sm font-semibold'>{e.kind === 'remix' ? 'Remix' : 'Commit'} details</h2>
           <button
             type='button'
-            onClick={onClose}
+            onClick={() => setOpen(false)}
             aria-label='Close'
             className='-m-1.5 inline-flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-muted/10 hover:text-fg'
           >
