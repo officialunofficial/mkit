@@ -132,9 +132,7 @@ export function PushDemo() {
       {/* min-height holds the tallest step (the final comparison) so navigating
           steps doesn't shift the controls below. */}
       <div className='min-h-[11rem]'>
-        {/* Keyed on `step` so it remounts on change, replaying the cross-step fade
-            (see .step-fade-in in styles.css). */}
-        <div key={step} className='step-fade-in space-y-4'>
+        <div className='space-y-4'>
           {step === 0 ? (
             <>
               {/* Neutral gray: the file is still ONE object, not yet chunked. Colour
