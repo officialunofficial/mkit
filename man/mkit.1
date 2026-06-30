@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -934,6 +934,22 @@ a block copied with a whitespace change is still detected. git's inline
 numeric forms
 .Pq Fl M Ns Ar num , Fl C Ns Ar num
 are not exposed.
+.Fl Fl ignore-rev Ar rev
+.Pq repeatable
+and
+.Fl Fl ignore-revs-file Ar file
+skip
+.Dq noise
+commits during attribution
+.Pq like Xr git 1 Cm blame Fl Fl ignore-rev :
+a line that would be credited to an ignored commit falls through to the
+commit that previously changed it, while a line the commit genuinely
+inserted stays put.
+.Fl Fl ignore-rev
+accepts any revision; the file holds one full hex object name per line,
+skipping blank lines and
+.Sq #
+comments.
 .Fl L
 restricts output to a line range:
 .Ar start , end ,

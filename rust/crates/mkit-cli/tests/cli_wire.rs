@@ -550,6 +550,48 @@ fn blame_m_attributes_within_file_move() {
 }
 
 #[test]
+fn blame_ignore_rev_falls_through_to_prior_commit() {
+    // `--ignore-rev <reformat>` skips the noise commit: line 2's blame
+    // falls through to the commit that previously changed it, while the
+    // output still shows the reformatted bytes. Mirrors real
+    // `git blame --ignore-rev`.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbeta\ngamma\n", "first");
+    let first = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\n  beta  \ngamma\n", "reformat");
+    let reformat = head_hash(td.path());
+
+    // Default: the reformat commit owns line 2.
+    let plain = run_in(td.path(), &["blame", "f.txt"]);
+    let plain_out = String::from_utf8(plain.stdout).unwrap();
+    assert!(
+        plain_out
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with(&reformat[..12])
+    );
+
+    let out = run_in(td.path(), &["blame", "--ignore-rev", &reformat, "f.txt"]);
+    assert!(out.status.success(), "blame --ignore-rev failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[1].starts_with(&first[..12]),
+        "ignored reformat falls through to the first commit: {stdout:?}"
+    );
+    assert!(
+        lines[1].ends_with("\t  beta  "),
+        "output still shows the reformatted bytes: {stdout:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with(&reformat[..12])),
+        "no line is credited to the ignored commit: {stdout:?}"
+    );
+}
+
+#[test]
 fn blame_c_attributes_copy_from_other_file() {
     // A block (over the 40-char -C threshold) is moved from a.txt into a
     // new b.txt; both files change in the commit, so -C (level 1) credits
@@ -598,6 +640,34 @@ fn blame_c_attributes_copy_from_other_file() {
 }
 
 #[test]
+fn blame_ignore_revs_file_skips_listed_commits() {
+    // `--ignore-revs-file` reads full hex object names, skipping blank
+    // lines and `#` comments (including inline) — verified against git.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbeta\n", "first");
+    let first = head_hash(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\n  beta  \n", "reformat");
+    let reformat = head_hash(td.path());
+
+    let revs = format!("# noise commits\n\n{reformat}  # the reformat\n");
+    fs::write(td.path().join("revs.txt"), revs).unwrap();
+    let out = run_in(
+        td.path(),
+        &["blame", "--ignore-revs-file", "revs.txt", "f.txt"],
+    );
+    assert!(
+        out.status.success(),
+        "blame --ignore-revs-file failed: {out:?}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().nth(1).unwrap().starts_with(&first[..12]),
+        "listed reformat is skipped; line 2 falls through: {stdout:?}"
+    );
+}
+
+#[test]
 fn blame_c_c_widens_to_unchanged_source_file() {
     // `-C -C` (level 2) end-to-end: dst.txt copies a block from src.txt,
     // which is NOT modified in the copying commit. Level 1 misses it;
@@ -639,6 +709,61 @@ fn blame_c_c_widens_to_unchanged_source_file() {
     assert!(
         l2_out.lines().all(|l| l.starts_with(&first[..12])),
         "-C -C credits the copied block to its origin: {l2_out:?}"
+    );
+}
+
+#[test]
+fn blame_ignore_rev_unknown_errors_like_git() {
+    // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
+    // text (with its own `error:` prefix and sysexits code, not git's 128).
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "first");
+    let out = run_in(
+        td.path(),
+        &["blame", "--ignore-rev", "no-such-rev", "f.txt"],
+    );
+    assert!(
+        !out.status.success(),
+        "expected failure on unknown ignore-rev"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot find revision no-such-rev to ignore"),
+        "expected git-faithful ignore-rev diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn blame_ignore_revs_file_errors_are_git_faithful() {
+    // A missing file and a malformed entry reproduce git's two messages.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "first");
+
+    let missing = run_in(
+        td.path(),
+        &["blame", "--ignore-revs-file", "nope.txt", "f.txt"],
+    );
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8(missing.stderr)
+            .unwrap()
+            .contains("could not open object name list: nope.txt"),
+        "expected git-faithful missing-file diagnostic"
+    );
+
+    fs::write(td.path().join("bad.txt"), "zzznothex\n").unwrap();
+    let bad = run_in(
+        td.path(),
+        &["blame", "--ignore-revs-file", "bad.txt", "f.txt"],
+    );
+    assert!(!bad.status.success());
+    assert!(
+        String::from_utf8(bad.stderr)
+            .unwrap()
+            .contains("invalid object name: zzznothex"),
+        "expected git-faithful invalid-object-name diagnostic"
     );
 }
 

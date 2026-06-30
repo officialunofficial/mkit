@@ -13,6 +13,8 @@
 //! where `<short>` is the 12-char prefix of the commit hash. See
 //! [`format_blame_text`].
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::fmt::Write as _;
 
 use crate::hash::{self, Hash};
@@ -105,11 +107,15 @@ impl CopyDetection {
 }
 
 /// Knobs controlling how [`blame_file_with`] attributes lines. The
-/// default (no `-w`, detection off) reproduces [`blame_file`]'s
-/// exact-match behavior; this struct is the extension point for the blame
-/// parity work (`-w`, `-M`, `-C` today; ignore-revs / `--reverse` to
-/// follow).
-#[derive(Debug, Clone, Copy, Default)]
+/// default (no `-w`, detection off, empty ignore set) reproduces
+/// [`blame_file`]'s exact-match behavior; this struct is the extension
+/// point for the blame parity work (`-w`, `-M`, `-C`, ignore-revs today;
+/// `--reverse` to follow).
+///
+/// Not `Copy`: [`Self::ignore_revs`] owns an `Arc`. It is passed by
+/// reference (`&BlameOptions`) on the hot path; the `Arc` lets copy-source
+/// blames share the same set without re-cloning it.
+#[derive(Debug, Clone, Default)]
 pub struct BlameOptions {
     /// Ignore whitespace when matching a line against its parent
     /// revision, so a whitespace-only edit (reindent, tab↔space, spacing
@@ -122,13 +128,25 @@ pub struct BlameOptions {
     /// even when [`Self::moves`] is [`MoveDetection::Off`] — git's `-C`
     /// implies `-M`.
     pub copies: CopyDetection,
+    /// Commits to skip during attribution, like `git blame --ignore-rev`
+    /// / `--ignore-revs-file`. When a line would be credited to a commit
+    /// in this set (a mass-reformat / license-header / rename "noise"
+    /// commit), blame falls through to the previous commit that actually
+    /// changed the line. A commit whose lines have no counterpart in its
+    /// parent (a genuine insertion) stays on the ignored commit, matching
+    /// git's default (no `blame.markUnblamableLines` marker).
+    ///
+    /// Behind an [`Arc`] so a `-C` copy-source blame can share the same set
+    /// (it inherits the active ignore-revs) with an `O(1)` refcount bump
+    /// rather than deep-cloning the whole set per source.
+    pub ignore_revs: Arc<HashSet<Hash>>,
 }
 
 impl BlameOptions {
     /// The effective `-M` mode: explicit [`Self::moves`] if set, else the
     /// git default when copy detection is on (git's `-C` implies `-M`),
     /// else off.
-    fn effective_move(self) -> MoveDetection {
+    fn effective_move(&self) -> MoveDetection {
         match self.moves {
             MoveDetection::On { .. } => self.moves,
             MoveDetection::Off if matches!(self.copies, CopyDetection::On { .. }) => {
@@ -139,9 +157,15 @@ impl BlameOptions {
     }
 
     /// Whether any move/copy detection is requested.
-    fn detection_enabled(self) -> bool {
+    fn detection_enabled(&self) -> bool {
         matches!(self.effective_move(), MoveDetection::On { .. })
             || matches!(self.copies, CopyDetection::On { .. })
+    }
+
+    /// Whether `commit` is in the [`Self::ignore_revs`] skip set.
+    #[must_use]
+    fn is_ignored(&self, commit: &Hash) -> bool {
+        self.ignore_revs.contains(commit)
     }
 }
 
@@ -279,7 +303,7 @@ pub fn blame_file_with(
     // The move/copy detector owns its own caches and is a no-op when
     // detection is off. The blame pass below stays "boring": it replays the
     // line matcher, then hands the unmatched lines to the detector.
-    let mut detector = move_copy::Detector::new(store, *opts);
+    let mut detector = move_copy::Detector::new(store, opts);
 
     // Boundary copy detection: the file first appears at `oldest`, so every
     // line is credited there by default — but a block may have been *copied*
@@ -323,21 +347,49 @@ pub fn blame_file_with(
             // All matching policy (size guard, `-w` normalization,
             // tie-breaking) lives in the matcher; the replay below only
             // consumes the resulting mapping.
-            let mapping = match_lines_with_options(&old_lines, &new_lines, *opts)?;
+            let mapping = match_lines_with_options(&old_lines, &new_lines, opts)?;
 
-            // Provisional attribution: matched lines inherit the parent's
-            // origin; unmatched lines are credited to `newer` until move
-            // (-M) / copy (-C) detection reassigns them below.
+            // `git blame --ignore-rev`: if `newer` is an ignored commit,
+            // its unmatched lines fall through to the parent line they
+            // correspond to instead of being credited here. `None` when
+            // `newer` is not ignored (the common path), in which case
+            // unmatched lines are credited to `newer` as usual.
+            let fallthrough = if opts.is_ignored(&newer.commit_hash) {
+                Some(ignore_fallthrough(&mapping, old_lines.len()))
+            } else {
+                None
+            };
             let newer_attr = Attribution::from(newer);
+
+            // Provisional attribution: a matched line inherits the parent's
+            // origin. An unmatched line is normally credited to `newer`;
+            // when `newer` is ignored (`--ignore-rev`) it instead inherits
+            // the parent line it pairs with (a genuine insertion has no pair
+            // → stays on `newer`). Move (-M) / copy (-C) detection then
+            // reassigns any unmatched block to its true origin below.
             let mut new_attrs: Vec<Attribution> = (0..new_lines.len())
-                .map(|ni| match mapping[ni] {
-                    Some(oi) if oi < attributions.len() => attributions[oi].clone(),
-                    _ => newer_attr.clone(),
+                .map(|ni| {
+                    let src = mapping[ni].or_else(|| fallthrough.as_ref().and_then(|f| f[ni]));
+                    match src {
+                        Some(oi) if oi < attributions.len() => attributions[oi].clone(),
+                        _ => newer_attr.clone(),
+                    }
                 })
                 .collect();
 
             if opts.detection_enabled() {
-                let unmatched: Vec<bool> = mapping.iter().map(Option::is_none).collect();
+                // A detection candidate is LCS-unmatched *and* not already
+                // resolved by ignore-rev fallthrough — otherwise the move/
+                // copy detector would overwrite a fallthrough attribution
+                // (a fallthrough line is `mapping[ni] == None`, so it would
+                // stay flagged unmatched). `--ignore-rev` takes precedence
+                // over `-M`/`-C` on the lines it resolves.
+                let unmatched: Vec<bool> = (0..new_lines.len())
+                    .map(|ni| {
+                        mapping[ni].is_none()
+                            && fallthrough.as_ref().is_none_or(|f| f[ni].is_none())
+                    })
+                    .collect();
                 detector.reassign(
                     &move_copy::ReassignRequest {
                         file_path,
@@ -494,7 +546,7 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 fn match_lines_with_options(
     old_lines: &[Vec<u8>],
     new_lines: &[Vec<u8>],
-    opts: BlameOptions,
+    opts: &BlameOptions,
 ) -> BlameOutcome<Vec<Option<usize>>> {
     // Size-check before the DP table (and before any derived per-line
     // buffers) so an oversized blob fails fast.
@@ -509,6 +561,60 @@ fn match_lines_with_options(
     } else {
         Ok(match_lines(old_lines, new_lines))
     }
+}
+
+/// For a step whose `newer` commit is *ignored* (`git blame
+/// --ignore-rev`), map each new line to the parent line it should inherit
+/// blame from instead of crediting the ignored commit.
+///
+/// `mapping` is the LCS result (new index → matched old index, or `None`).
+/// The matched anchors split both sides into hunks; within each hunk — a
+/// maximal run of unmatched new lines bounded by anchors — the k-th
+/// unmatched new line is paired positionally with the k-th unmatched old
+/// line in the same hunk. A new line with no counterpart (the hunk added
+/// more lines than it removed) is left `None`, so the caller keeps it on
+/// the ignored commit. This reproduces git's `guess_line_blames` for the
+/// reformat case and its fall-through to unmatched insertions; verified
+/// field-by-field against real `git blame --ignore-rev`.
+fn ignore_fallthrough(mapping: &[Option<usize>], old_len: usize) -> Vec<Option<usize>> {
+    let n = mapping.len();
+    let mut fall: Vec<Option<usize>> = vec![None; n];
+    // `next_old` is the first old index not yet consumed by an anchor; the
+    // unmatched old lines of the current hunk are `[next_old, hunk_end)`,
+    // where `hunk_end` is the old index of the anchor closing the hunk (or
+    // `old_len` for a trailing hunk).
+    let mut next_old = 0usize;
+    let mut ni = 0usize;
+    while ni < n {
+        let Some(anchor_old) = mapping[ni] else {
+            // Start of an unmatched-new run; find where it ends.
+            let hunk_new_start = ni;
+            while ni < n && mapping[ni].is_none() {
+                ni += 1;
+            }
+            // The closing anchor's old index bounds this hunk's unmatched
+            // old lines (`old_len` for a trailing hunk). The loop exits a run
+            // only at a matched anchor, and LCS anchors are increasing, so
+            // this is always `>= next_old`.
+            let hunk_old_end = mapping.get(ni).copied().flatten().unwrap_or(old_len);
+            // Pair the unmatched old lines `[next_old, hunk_old_end)` with
+            // the unmatched new lines positionally; extras stay unpaired.
+            let mut oi = next_old;
+            let mut nj = hunk_new_start;
+            while nj < ni && oi < hunk_old_end {
+                fall[nj] = Some(oi);
+                nj += 1;
+                oi += 1;
+            }
+            next_old = hunk_old_end;
+            continue;
+        };
+        // Anchor: it consumes old index `anchor_old`; the next hunk's
+        // unmatched old lines begin just after it.
+        next_old = anchor_old + 1;
+        ni += 1;
+    }
+    fall
 }
 
 /// Reject a side whose line count would drive the O(m*n) DP table past
@@ -1377,6 +1483,224 @@ mod tests {
         assert_eq!(missing, None);
     }
 
+    /// Convenience: a `BlameOptions` that ignores the given commits.
+    fn ignoring(revs: &[Hash]) -> BlameOptions {
+        BlameOptions {
+            ignore_revs: Arc::new(revs.iter().copied().collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn blame_ignore_rev_falls_through_reformat() {
+        // A reformat commit (changes a line's bytes only) is ignored, so
+        // its line falls through to the commit that owns the parent line —
+        // but the output still shows the reformatted bytes. Mirrors
+        // `git blame --ignore-rev <reformat>` (verified against real git).
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"alpha\nbeta\ngamma\n", vec![], 1, 100);
+        let c_b = put_file_commit(
+            &store,
+            "f.txt",
+            b"alpha\n  beta  \ngamma\n",
+            vec![c_a],
+            2,
+            200,
+        );
+
+        // Without ignore: the reformat steals line 2.
+        let plain = blame_file(&store, c_b, "f.txt").unwrap();
+        assert_eq!(plain.lines[1].commit_hash, c_b);
+
+        let r = blame_file_with(&store, c_b, "f.txt", &ignoring(&[c_b])).unwrap();
+        assert_eq!(
+            r.lines[1].commit_hash, c_a,
+            "ignored reformat falls through to the original commit"
+        );
+        assert_eq!(r.lines[1].text, b"  beta  ", "output keeps current bytes");
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash == c_a),
+            "no line is credited to the ignored commit"
+        );
+    }
+
+    #[test]
+    fn blame_ignore_rev_keeps_genuine_insertion() {
+        // A line genuinely *added* by the ignored commit has no counterpart
+        // in the parent, so git leaves it on the ignored commit (no
+        // `blame.markUnblamableLines` marker by default). Verified against
+        // real `git blame --ignore-rev`.
+        let (_d, store) = fresh_store();
+        let c_a = put_file_commit(&store, "f.txt", b"alpha\nbeta\n", vec![], 1, 100);
+        let c_b = put_file_commit(
+            &store,
+            "f.txt",
+            b"alpha\nbeta\nBRANDNEW\ngamma\n",
+            vec![c_a],
+            2,
+            200,
+        );
+
+        let r = blame_file_with(&store, c_b, "f.txt", &ignoring(&[c_b])).unwrap();
+        assert_eq!(r.lines[0].commit_hash, c_a, "alpha");
+        assert_eq!(r.lines[1].commit_hash, c_a, "beta");
+        assert_eq!(
+            r.lines[2].commit_hash, c_b,
+            "a genuine insertion stays on the ignored commit"
+        );
+        assert_eq!(r.lines[3].commit_hash, c_b, "…and the second insertion");
+    }
+
+    #[test]
+    fn blame_ignore_rev_pairs_changed_lines_to_distinct_origins() {
+        // Two adjacent changed lines in the ignored commit pair positionally
+        // with their two parent lines, which have *different* origins: the
+        // first parent line came from c2, the second from c1. git credits
+        // each fallen-through line to its own parent's origin (verified).
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"L1\nL2\nL3\nL4\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"L1\nL2x\nL3\nL4\n", vec![c1], 2, 200);
+        let c3 = put_file_commit(&store, "f.txt", b"L1\nL2y\nL3y\nL4\n", vec![c2], 3, 300);
+
+        let r = blame_file_with(&store, c3, "f.txt", &ignoring(&[c3])).unwrap();
+        assert_eq!(r.lines[1].commit_hash, c2, "L2y inherits L2x's origin (c2)");
+        assert_eq!(r.lines[2].commit_hash, c1, "L3y inherits L3's origin (c1)");
+        assert!(r.lines.iter().all(|l| l.commit_hash != c3));
+    }
+
+    #[test]
+    fn blame_ignore_rev_unequal_hunk_more_added() {
+        // 1 line removed, 2 added in the ignored commit: the *first* added
+        // line pairs with the removed line (falls through); the extra added
+        // line stays on the ignored commit. Verified against real git.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"L1\nMID\nL3\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"L1\nMIDa\nMIDb\nL3\n", vec![c1], 2, 200);
+
+        let r = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        assert_eq!(r.lines[1].commit_hash, c1, "MIDa falls through to c1");
+        assert_eq!(r.lines[2].commit_hash, c2, "MIDb has no pair → stays on c2");
+    }
+
+    #[test]
+    fn blame_ignore_rev_unequal_hunk_more_removed() {
+        // 2 removed, 1 added: the single added line pairs with the *first*
+        // removed line; the extra removed line simply vanishes. Verified.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"L1\nM1\nM2\nL3\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"L1\nMERGED\nL3\n", vec![c1], 2, 200);
+
+        let r = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        assert_eq!(r.lines[1].commit_hash, c1, "MERGED falls through to c1");
+    }
+
+    #[test]
+    fn blame_ignore_root_commit_keeps_its_lines() {
+        // Ignoring the oldest commit in the walk: its lines have no parent
+        // version of the file to fall through to, so they stay on it —
+        // matching `git blame --ignore-rev <root>`.
+        let (_d, store) = fresh_store();
+        let root = put_file_commit(&store, "f.txt", b"a\nb\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"a\nb\nc\n", vec![root], 2, 200);
+
+        let r = blame_file_with(&store, c2, "f.txt", &ignoring(&[root])).unwrap();
+        assert_eq!(r.lines[0].commit_hash, root, "a stays on the ignored root");
+        assert_eq!(r.lines[1].commit_hash, root, "b stays on the ignored root");
+        assert_eq!(r.lines[2].commit_hash, c2, "c is unaffected");
+    }
+
+    #[test]
+    fn blame_ignore_multiple_revs_chains_through() {
+        // Two stacked reformats, both ignored: line falls through both to
+        // the original author.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"keep\nx\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"keep\n x \n", vec![c1], 2, 200);
+        let c3 = put_file_commit(&store, "f.txt", b"keep\n  x  \n", vec![c2], 3, 300);
+
+        let r = blame_file_with(&store, c3, "f.txt", &ignoring(&[c2, c3])).unwrap();
+        assert_eq!(
+            r.lines[1].commit_hash, c1,
+            "line falls through both ignored reformats to c1"
+        );
+    }
+
+    #[test]
+    fn blame_ignore_rev_fallthrough_not_overwritten_by_move_detection() {
+        // Review: `--ignore-rev` + `-M`. An ignored commit replaces the last
+        // line (`x`) in place with a duplicate of the first line (`dup`,
+        // >= 20 alnum). The trailing hunk is 1-for-1, so ignore-rev
+        // fallthrough pairs the new line with the *replaced* parent line
+        // (`x`, origin c1). But `dup`'s key also appears at line 0 of the
+        // parent, so the move detector *would* credit it to `dup`'s origin
+        // (c0). Fallthrough must win: detection runs only on lines it did
+        // not resolve.
+        let (_d, store) = fresh_store();
+        let dup: &[u8] = b"dupaaaaaaaaaaaaaaaaa"; // 20 alnum
+        let mid: &[u8] = b"MIDLINE";
+        let x_v0: &[u8] = b"exoldbbbbbbbbbbbbbbb";
+        let x_v1: &[u8] = b"exnewbbbbbbbbbbbbbbb";
+        let c0 = put_file_commit(&store, "f.txt", &[dup, mid, x_v0, b""].join(&b'\n'), vec![], 1, 100);
+        // c1 changes the last line (origin → c1); `dup`/`mid` keep origin c0.
+        let c1 = put_file_commit(
+            &store,
+            "f.txt",
+            &[dup, mid, x_v1, b""].join(&b'\n'),
+            vec![c0],
+            2,
+            200,
+        );
+        // c2 (ignored) replaces the last line with a duplicate of `dup`.
+        let c2 = put_file_commit(
+            &store,
+            "f.txt",
+            &[dup, mid, dup, b""].join(&b'\n'),
+            vec![c1],
+            3,
+            300,
+        );
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            ignore_revs: Arc::new([c2].into_iter().collect()),
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, c2, "f.txt", &opts).unwrap();
+        assert_eq!(
+            r.lines[2].commit_hash, c1,
+            "fallthrough (replaced parent line → c1) wins; -M does not overwrite it to c0"
+        );
+        // Sanity: plain --ignore-rev (no -M) gives the same line-2 origin.
+        let plain = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        assert_eq!(plain.lines[2].commit_hash, c1, "-M did not change the result");
+    }
+
+    #[test]
+    fn ignore_fallthrough_pairs_per_hunk() {
+        // Unit-test the pairing helper directly against the verified rules.
+        // mapping: new→old, None = unmatched.
+        // old=[0,1,2,3], new anchors at 0 and 3, two unmatched between →
+        // pair new1↔old1, new2↔old2.
+        let mapping = vec![Some(0), None, None, Some(3)];
+        assert_eq!(
+            super::ignore_fallthrough(&mapping, 4),
+            vec![None, Some(1), Some(2), None]
+        );
+        // More added than removed: old hunk has one line, new hunk two →
+        // first pairs, second unpaired.
+        let mapping = vec![Some(0), None, None, Some(2)];
+        assert_eq!(
+            super::ignore_fallthrough(&mapping, 3),
+            vec![None, Some(1), None, None]
+        );
+        // Trailing insertion with no removed lines → all unpaired.
+        let mapping = vec![Some(0), Some(1), None, None];
+        assert_eq!(
+            super::ignore_fallthrough(&mapping, 2),
+            vec![None, None, None, None]
+        );
+    }
+
     #[test]
     fn match_lines_rejects_oversize_inputs() {
         // G13 regression: the LCS DP table allocation is O(m*n). For
@@ -1387,7 +1711,7 @@ mod tests {
         let opts = BlameOptions::default();
         let old: Vec<Vec<u8>> = vec![b"x".to_vec(); n];
         let new: Vec<Vec<u8>> = vec![b"y".to_vec(); 1];
-        let err = super::match_lines_with_options(&old, &new, opts).unwrap_err();
+        let err = super::match_lines_with_options(&old, &new, &opts).unwrap_err();
         assert!(
             matches!(err, BlameError::FileTooLarge { lines } if lines == n),
             "got {err:?}"
@@ -1395,7 +1719,7 @@ mod tests {
 
         let old2: Vec<Vec<u8>> = vec![b"a".to_vec(); 1];
         let new2: Vec<Vec<u8>> = vec![b"b".to_vec(); n];
-        let err2 = super::match_lines_with_options(&old2, &new2, opts).unwrap_err();
+        let err2 = super::match_lines_with_options(&old2, &new2, &opts).unwrap_err();
         assert!(
             matches!(err2, BlameError::FileTooLarge { lines } if lines == n),
             "got {err2:?}"

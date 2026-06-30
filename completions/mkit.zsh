@@ -262,6 +262,8 @@ _mkit() {
                         '--find-moves[detect lines moved within the file]' \
                         '*-C[detect lines copied from other files (repeatable)]' \
                         '*--find-copies[detect lines copied from other files (repeatable)]' \
+                        '*--ignore-rev[skip a noise commit during attribution]:rev:' \
+                        '*--ignore-revs-file[skip commits listed in a file]:file:_files' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;

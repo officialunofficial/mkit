@@ -75,7 +75,7 @@ pub(super) struct ReassignRequest<'r> {
 /// at most once, across every step and the boundary.
 pub(super) struct Detector<'a> {
     store: &'a ObjectStore,
-    opts: BlameOptions,
+    opts: &'a BlameOptions,
     /// Source blob → its normalized line keys + key index (cheap).
     keys_cache: HashMap<Hash, (Vec<Vec<u8>>, KeyIndex)>,
     /// (commit, path) → that file's per-line origins, from blaming it
@@ -116,7 +116,7 @@ impl Ctx<'_> {
 }
 
 impl<'a> Detector<'a> {
-    pub(super) fn new(store: &'a ObjectStore, opts: BlameOptions) -> Self {
+    pub(super) fn new(store: &'a ObjectStore, opts: &'a BlameOptions) -> Self {
         Self {
             store,
             opts,
@@ -309,11 +309,12 @@ impl<'a> Detector<'a> {
     /// Per-line origins for a source file, by blaming it at `commit`
     /// (cached; expensive).
     ///
-    /// The source blame keeps the *active* `-w` and (effective) `-M` so a
-    /// copied block is credited through a prior whitespace-only edit or
-    /// same-file move in the source — matching git. Only `-C` is dropped,
-    /// which both prevents unbounded recursion and matches git (a copy
-    /// source is blamed without further cross-file copy detection).
+    /// The source blame keeps the *active* `-w`, (effective) `-M`, and
+    /// `--ignore-rev` set so a copied block is credited through a prior
+    /// whitespace-only edit, same-file move, or ignored noise commit in the
+    /// source — matching git. Only `-C` is dropped, which both prevents
+    /// unbounded recursion and matches git (a copy source is blamed without
+    /// further cross-file copy detection).
     fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
         let key = (commit, path.to_string());
         if !self.attrs_cache.contains_key(&key) {
@@ -321,6 +322,7 @@ impl<'a> Detector<'a> {
                 ignore_whitespace: self.opts.ignore_whitespace,
                 moves: self.opts.effective_move(),
                 copies: CopyDetection::Off,
+                ignore_revs: self.opts.ignore_revs.clone(),
             };
             let res = blame_file_with(self.store, commit, path, &source_opts)?;
             let attrs = res.lines.into_iter().map(Attribution::from).collect();

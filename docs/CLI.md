@@ -266,8 +266,9 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-M] [-C] [-L <start>,<end>] [<rev>] <file>`
-  — show line-level commit attribution. `-w` ignores whitespace when
+- `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
+  [--ignore-revs-file <file>] [-L <start>,<end>] [<rev>] <file>` —
+  show line-level commit attribution. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's
@@ -283,7 +284,17 @@ History / commits:
   (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
   custom threshold); on an identical block in two files the earliest by
   tree-path order wins (git scores candidates); and a single unmatched run
-  over 10,000 lines is matched only as a whole, not by sub-block. `-L`
+  over 10,000 lines is matched only as a whole, not by sub-block.
+  `--ignore-rev <rev>` (repeatable) and `--ignore-revs-file <file>` skip
+  "noise" commits — mass reformats, license-header sweeps, renames — during
+  attribution, like `git blame --ignore-rev`: a line that would be credited
+  to an ignored commit falls through to the commit that previously changed
+  it, while a line the ignored commit genuinely inserted stays put.
+  `--ignore-rev` accepts any revision (short hash, ref, `HEAD~2`);
+  `--ignore-revs-file` entries must be full hex object names, one per line,
+  with blank lines and `#` comments (including inline) skipped — both
+  matching git. (mkit does not auto-read a `.git-blame-ignore-revs` file or
+  a `blame.ignoreRevsFile` config key; pass the file explicitly.) `-L`
   restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
