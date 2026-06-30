@@ -173,6 +173,16 @@ pub(super) fn attribute_commit(
     commit: Hash,
 ) -> BlameOutcome<Rc<[Attribution]>> {
     let node = &ctx.nodes[&commit];
+
+    // Fast path: a single parent with the identical blob contributes every
+    // line unchanged (the old `newer.blob == older.blob` skip). Checked
+    // before loading the blob, so a passthrough commit reads nothing and just
+    // refcount-bumps the parent memo — this matters on the merge-aware walk,
+    // which visits every file-touching ancestor, not only first parents.
+    if node.parents.len() == 1 && ctx.nodes[&node.parents[0]].blob_hash == node.blob_hash {
+        return Ok(Rc::clone(&memo[&node.parents[0]]));
+    }
+
     let lines = load_blob_lines(ctx.store, node.blob_hash)?;
     let own = node.own_attribution(commit);
 
@@ -202,27 +212,25 @@ pub(super) fn attribute_commit(
     }
 
     let first_parent = node.parents[0];
-    // Fast path: a single parent with the identical blob contributes every
-    // line unchanged (the old `newer.blob == older.blob` skip). The memo is
-    // `Rc`-shared, so this is an O(1) refcount bump, not a full-vector clone.
-    if node.parents.len() == 1 && ctx.nodes[&first_parent].blob_hash == node.blob_hash {
-        return Ok(Rc::clone(&memo[&first_parent]));
-    }
-
     let mut attrs = vec![own; lines.len()];
     let mut matched = vec![false; lines.len()];
     let first_parent_lines = load_blob_lines(ctx.store, ctx.nodes[&first_parent].blob_hash)?;
     let mut first_parent_mapping: Vec<Option<usize>> = Vec::new();
 
     for (k, &parent) in node.parents.iter().enumerate() {
-        let parent_lines = if k == 0 {
-            first_parent_lines.clone()
+        // Borrow the already-loaded first parent; load the rest. (`k == 0`
+        // previously cloned only to unify the branch types — pure waste on
+        // every changed single-parent commit, the common linear case.)
+        let loaded;
+        let parent_lines: &[Vec<u8>] = if k == 0 {
+            &first_parent_lines
         } else {
-            load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?
+            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
+            &loaded
         };
         // `mapping[ni]` = the parent index that this commit's line `ni` is
         // unchanged from, or `None` if changed/introduced.
-        let mapping = match_lines_with_options(&parent_lines, &lines, ctx.opts)?;
+        let mapping = match_lines_with_options(parent_lines, &lines, ctx.opts)?;
         let parent_attrs = &memo[&parent];
         for (ni, m) in mapping.iter().enumerate() {
             if matched[ni] {
