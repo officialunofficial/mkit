@@ -8,7 +8,6 @@
 // reacting require an unlocked identity (shared with the multiplayer demo).
 
 import { useVirtualizer } from '@tanstack/react-virtual'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
 import { type ReactNode, useEffect, useMemo, useRef as useReactRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -57,72 +56,20 @@ const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅',
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
 
-/**
- * Channels the lobby can switch between — each is its own room (own feed + live stream), so the header reads as a real
- * chat room with channels.
- */
-const CHANNELS = ['lobby', 'general', 'random'] as const
-
 export function SignedLobby() {
   const api = useMkit()
-  const storeRoom = useIdentityStore((s) => s.room) || DEFAULT_ROOM
-  // Channel selection is local to the lobby; switching just re-points the feed +
-  // backend at a different room.
-  const [room, setRoom] = useState(storeRoom)
+  // One shared room — the lobby is a single channel.
+  const room = useIdentityStore((s) => s.room) || DEFAULT_ROOM
   const { backend } = useResolvedRepoBackend(api, room)
 
   return (
     <RepoBackendProvider backend={backend}>
-      <LobbyBody room={room} onSelectChannel={setRoom} />
+      <LobbyBody room={room} />
     </RepoBackendProvider>
   )
 }
 
-/** Header dropdown to switch the active channel. */
-function ChannelSwitcher({ room, onSelect }: { room: string; onSelect: (channel: string) => void }) {
-  return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          type='button'
-          title='Switch channel'
-          className='group inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-sm text-muted transition-colors hover:bg-muted/10 data-[state=open]:text-fg'
-        >
-          #{room}
-          <span aria-hidden className='text-[10px] opacity-70 transition-transform group-data-[state=open]:rotate-180'>
-            ▾
-          </span>
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align='start'
-          sideOffset={4}
-          className='z-50 min-w-[9rem] overflow-hidden rounded-lg border border-hairline bg-bg p-1 shadow-md'
-        >
-          {CHANNELS.map((c) => (
-            <DropdownMenu.Item
-              key={c}
-              onSelect={() => onSelect(c)}
-              className={`flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 font-mono text-sm outline-none transition-colors data-[highlighted]:bg-muted/10 ${
-                c === room ? 'text-fg' : 'text-muted'
-              }`}
-            >
-              #{c}
-              {c === room ? (
-                <span aria-hidden className='ml-auto text-[10px]'>
-                  ✓
-                </span>
-              ) : null}
-            </DropdownMenu.Item>
-          ))}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
-  )
-}
-
-function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (channel: string) => void }) {
+function LobbyBody({ room }: { room: string }) {
   useLobbyEvents(room)
   const { items, isLoading } = useLobbyFeed(room, 'main')
   const presenceNotices = usePresenceNotices(room)
@@ -149,7 +96,6 @@ function LobbyBody({ room, onSelectChannel }: { room: string; onSelectChannel: (
             <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
           </span>
           <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
-          <ChannelSwitcher room={room} onSelect={onSelectChannel} />
         </div>
         <Feed room={room} items={rendered} isLoading={isLoading} onOpenCommit={setOpenCommit} />
         <Composer room={room} />
@@ -280,18 +226,14 @@ function Feed({
     else if (scrolledUp) setBottom(false)
   }
 
-  // Depending on the virtualizer's total size (not just `items.length`) re-runs
-  // this when row heights change without the count changing — a reaction
-  // expanding the last row, or `measureElement` correcting an estimate.
-  const totalSize = virtualizer.getTotalSize()
-
-  // START pinned to the newest row, and STAY pinned. The FIRST time the feed has
-  // rows, jump INSTANTLY — and re-assert across the next few frames, because the
-  // initial jump runs against ESTIMATED row sizes and `measureElement` corrects
-  // them a frame or two later (without the re-assert the feed lands short of the
-  // true bottom — the "it scrolls to the end" effect). After init, follow while
-  // pinned: a genuinely new row gets a gentle smooth nudge; pure height growth (a
-  // reaction, a late measurement) re-pins INSTANTLY so it never animates.
+  // START pinned to the newest row. The FIRST time the feed has rows, jump
+  // INSTANTLY — and re-assert across the next few frames, because the initial
+  // jump runs against ESTIMATED row sizes and `measureElement` corrects them a
+  // frame or two later (without the re-assert the feed lands short of the true
+  // bottom). After init, follow ONLY when a new row actually arrives and you're
+  // already at the bottom — keyed on `items.length`, NOT the virtualizer's total
+  // size, so pure measurement churn (async avatar/name loads, a reaction
+  // resizing a row) can never re-pin and fight a manual scroll-up.
   useEffect(() => {
     if (items.length === 0) return
     const last = items.length - 1
@@ -307,10 +249,10 @@ function Feed({
       })
       return () => cancelAnimationFrame(raf)
     }
-    if (atBottomRef.current) {
-      virtualizer.scrollToIndex(last, { align: 'end', behavior: grew ? 'smooth' : 'auto' })
+    if (grew && atBottomRef.current) {
+      virtualizer.scrollToIndex(last, { align: 'end', behavior: 'smooth' })
     }
-  }, [items.length, totalSize, virtualizer, atBottomRef, didInitRef, prevLenRef])
+  }, [items.length, virtualizer, atBottomRef, didInitRef, prevLenRef])
 
   const jumpToLatest = () => {
     setBottom(true)
