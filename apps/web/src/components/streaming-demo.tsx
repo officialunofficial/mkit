@@ -579,7 +579,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           <select
             value={tamperedIndex ?? ''}
             onChange={(e) => setTamperedIndex(e.target.value === '' ? null : Number(e.target.value))}
-            className='rounded-md border border-hairline bg-transparent px-2 py-1 font-mono text-base sm:text-xs'
+            className='rounded-md border border-hairline bg-transparent py-1 pl-2 pr-7 font-mono text-base sm:text-xs'
           >
             <option value=''>none</option>
             {baoData.chunks.map((_, i) => (

@@ -94,10 +94,8 @@ const TABS: Tab[] = [
     blurb: 'A signed, first-class statement about a commit — reviewed, tested, deployed.',
     body: (
       <>
-        An attestation is a signed statement about a commit — &ldquo;reviewed&rdquo;, &ldquo;tested&rdquo;,
-        &ldquo;deployed&rdquo; — stored as a first-class object. mkit uses standard formats (in-toto + DSSE), so anyone
-        with your public key can verify it, in mkit or cosign. Type a claim, pick an algorithm, and watch the envelope
-        build and verify.
+        An attestation is a signed statement about a commit — reviewed, tested, deployed. Verifying it proves who said
+        what about which commit. Standard formats (in-toto + DSSE), so cosign can verify it too.
       </>
     ),
     Demo: AttestDemo,

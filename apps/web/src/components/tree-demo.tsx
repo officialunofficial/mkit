@@ -385,25 +385,18 @@ export function TreeDemo() {
               <PencilIcon />
               Editing
             </span>
-            {/* Native <select> with the platform arrow suppressed (appearance-none)
-                and our own chevron drawn inside the border on the right. */}
-            <div className='relative inline-flex'>
-              <select
-                aria-label='Choose a file to edit'
-                value={selectedPath}
-                onChange={(e) => setSelectedPath(e.target.value)}
-                className='min-w-0 max-w-full appearance-none truncate rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 font-mono text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
-              >
-                {blobPaths.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <span aria-hidden className='pointer-events-none absolute inset-y-0 right-2 flex items-center text-muted'>
-                <ChevronIcon className='rotate-90' />
-              </span>
-            </div>
+            <select
+              aria-label='Choose a file to edit'
+              value={selectedPath}
+              onChange={(e) => setSelectedPath(e.target.value)}
+              className='min-w-0 max-w-full truncate rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 font-mono text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+            >
+              {blobPaths.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
           </div>
           <textarea
             className={INPUT_CLASSES}

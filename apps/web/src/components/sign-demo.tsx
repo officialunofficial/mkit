@@ -105,22 +105,14 @@ export function SignDemo() {
               </div>
               <label className='inline-flex items-center gap-1.5 text-sm text-muted'>
                 Check against
-                <span className='relative inline-flex'>
-                  <select
-                    value={verifyAs}
-                    onChange={(e) => setVerifyAs(e.target.value as typeof ALICE | typeof MALLORY)}
-                    className='appearance-none rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
-                  >
-                    <option value={ALICE}>{ALICE}’s key</option>
-                    <option value={MALLORY}>{MALLORY}’s key</option>
-                  </select>
-                  <span
-                    aria-hidden
-                    className='pointer-events-none absolute inset-y-0 right-2 flex items-center text-muted'
-                  >
-                    <DownChevron />
-                  </span>
-                </span>
+                <select
+                  value={verifyAs}
+                  onChange={(e) => setVerifyAs(e.target.value as typeof ALICE | typeof MALLORY)}
+                  className='rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+                >
+                  <option value={ALICE}>{ALICE}’s key</option>
+                  <option value={MALLORY}>{MALLORY}’s key</option>
+                </select>
               </label>
             </div>
             <input
@@ -201,24 +193,6 @@ function diffParts(signed: string, received: string) {
     removed: signed.slice(start, endS),
     after: received.slice(endR),
   }
-}
-
-/** Down chevron for the custom-styled <select> (native arrow suppressed via appearance-none). */
-function DownChevron() {
-  return (
-    <svg
-      viewBox='0 0 16 16'
-      fill='none'
-      stroke='currentColor'
-      strokeWidth='1.5'
-      strokeLinecap='round'
-      strokeLinejoin='round'
-      className='size-3'
-      aria-hidden
-    >
-      <path d='M4 6 L8 10 L12 6' />
-    </svg>
-  )
 }
 
 function Button({
