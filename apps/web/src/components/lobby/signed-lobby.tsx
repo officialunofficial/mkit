@@ -633,25 +633,19 @@ function Composer({ room }: { room: string }) {
           {post.isPending ? 'Sending…' : 'Send'}
         </button>
       </div>
-      <p className='text-xs text-muted'>
-        {over ? (
-          <span className='text-amber-700 dark:text-amber-400'>Message is over {MAX_CHARS} characters.</span>
-        ) : post.isError ? (
-          <span className='text-amber-700 dark:text-amber-400'>{errMsg(post.error)}</span>
-        ) : post.data?.rateLimited ? (
-          <span className='text-amber-700 dark:text-amber-400'>You’re posting too fast — wait a moment.</span>
-        ) : (
-          <>
-            Return to send
-            {[...trimmed].length > MAX_CHARS - 40 ? (
-              <span className='tabular-nums'>
-                {' · '}
-                {[...trimmed].length}/{MAX_CHARS}
-              </span>
-            ) : null}
-          </>
-        )}
-      </p>
+      {/* Only surface a line when there's something worth saying — a warning, or
+          the character counter as you near the cap. (No idle "Return to send".) */}
+      {over ? (
+        <p className='text-xs text-amber-700 dark:text-amber-400'>Message is over {MAX_CHARS} characters.</p>
+      ) : post.isError ? (
+        <p className='text-xs text-amber-700 dark:text-amber-400'>{errMsg(post.error)}</p>
+      ) : post.data?.rateLimited ? (
+        <p className='text-xs text-amber-700 dark:text-amber-400'>You’re posting too fast — wait a moment.</p>
+      ) : [...trimmed].length > MAX_CHARS - 40 ? (
+        <p className='text-xs text-muted tabular-nums'>
+          {[...trimmed].length}/{MAX_CHARS}
+        </p>
+      ) : null}
     </div>
   )
 }

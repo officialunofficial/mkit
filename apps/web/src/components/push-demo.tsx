@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useMemo, useState } from 'react'
-import { hashMesh } from '../lib/hash-color'
 import { PUSH_MESH } from '../lib/mesh'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { HashChip } from './result-panel'
@@ -101,62 +100,66 @@ export function PushDemo() {
         </div>
       </div>
 
-      <div className='min-h-[7.5rem] space-y-4'>
-        {step === 0 ? (
-          <>
-            <div
-              className='h-8 w-full rounded-sm border border-hairline'
-              style={{ backgroundImage: hashMesh(before.wholeId) }}
-            />
-            <p className='max-w-prose text-sm text-muted'>
-              A file you want to push, {formatBytes(base.length)}. To start, mkit treats it as one object, named by its
-              hash.
-            </p>
-          </>
-        ) : null}
+      <div className='min-h-[7.5rem]'>
+        {/* Keyed on `step` so it remounts on change, replaying the cross-step fade
+            (see .step-fade-in in styles.css). */}
+        <div key={step} className='step-fade-in space-y-4'>
+          {step === 0 ? (
+            <>
+              {/* Neutral gray: the file is still ONE object, not yet chunked. Colour
+                  only appears once it's split into chunks (each chunk is coloured by
+                  its hash). Same height as the chunk strip so the next step doesn't jump. */}
+              <div className='h-6 w-full rounded-sm border border-hairline bg-muted/25' />
+              <p className='max-w-prose text-sm text-muted'>
+                A file you want to push, {formatBytes(base.length)}. To start, mkit treats it as one object, named by
+                its hash.
+              </p>
+            </>
+          ) : null}
 
-        {step === 1 ? (
-          <>
-            <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
-            <p className='max-w-prose text-sm text-muted'>
-              mkit splits it into {before.chunks.length} content-defined chunks (FastCDC) and names each by its BLAKE3
-              hash. Identical chunks, across files or versions, are stored only once.
-            </p>
-          </>
-        ) : null}
+          {step === 1 ? (
+            <>
+              <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
+              <p className='max-w-prose text-sm text-muted'>
+                mkit splits it into {before.chunks.length} content-defined chunks (FastCDC) and names each by its BLAKE3
+                hash. Identical chunks, across files or versions, are stored only once.
+              </p>
+            </>
+          ) : null}
 
-        {step === 2 ? (
-          <>
-            <ChunkStrip
-              chunks={after.chunks}
-              totalLen={after.bytesLen}
-              ariaLabel='content-defined chunks after an edit'
-              highlightIndex={changedIdx[0]}
-              dimSet={dimSet}
-            />
-            <p className='max-w-prose text-sm text-muted'>
-              You changed a few bytes. Only the chunk covering them gets a new hash (outlined); every other chunk stays
-              byte-identical, so mkit already has it.
-            </p>
-          </>
-        ) : null}
+          {step === 2 ? (
+            <>
+              <ChunkStrip
+                chunks={after.chunks}
+                totalLen={after.bytesLen}
+                ariaLabel='content-defined chunks after an edit'
+                highlightIndex={changedIdx[0]}
+                dimSet={dimSet}
+              />
+              <p className='max-w-prose text-sm text-muted'>
+                You changed a few bytes. Only the chunk covering them gets a new hash (outlined); every other chunk
+                stays byte-identical, so mkit already has it.
+              </p>
+            </>
+          ) : null}
 
-        {step === 3 ? (
-          <>
-            <div className='grid grid-cols-2 gap-3'>
-              <Stat label='git resends' value={formatBytes(edited.length)} detail='the whole file' />
-              <Stat label='mkit resends' value={formatBytes(changedBytes)} detail={`one chunk · ${savedPct}% less`} />
-            </div>
-            <p className='max-w-prose text-sm text-muted'>
-              Only the changed chunk ships. The chunks fold into a Merkle root, the file&rsquo;s new id, and mkit
-              advances the head to it atomically. Read it back: re-deriving the root proves every chunk intact.
-            </p>
-            <div className='flex items-center gap-2 font-mono text-xs text-muted'>
-              <HashChip hash={after.root} />
-              head → {after.root.slice(0, 12)}…
-            </div>
-          </>
-        ) : null}
+          {step === 3 ? (
+            <>
+              <div className='grid grid-cols-2 gap-3'>
+                <Stat label='git resends' value={formatBytes(edited.length)} detail='the whole file' />
+                <Stat label='mkit resends' value={formatBytes(changedBytes)} detail={`one chunk · ${savedPct}% less`} />
+              </div>
+              <p className='max-w-prose text-sm text-muted'>
+                Only the changed chunk ships. The chunks fold into a Merkle root, the file&rsquo;s new id, and mkit
+                advances the head to it atomically. Read it back: re-deriving the root proves every chunk intact.
+              </p>
+              <div className='flex items-center gap-2 font-mono text-xs text-muted'>
+                <HashChip hash={after.root} />
+                head → {after.root.slice(0, 12)}…
+              </div>
+            </>
+          ) : null}
+        </div>
       </div>
 
       <div className='flex items-center justify-between border-t border-hairline pt-4'>

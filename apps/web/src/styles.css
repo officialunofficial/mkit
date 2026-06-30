@@ -255,6 +255,28 @@
     }
   }
 
+  /* Push demo: cross-step transition. Each step's content is keyed on the step
+     index so it remounts on change — this short fade+rise keeps the swap from
+     being an instant jump. Reduced-motion skips it. */
+  @keyframes step-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .step-fade-in {
+    animation: step-fade-in 260ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .step-fade-in {
+      animation: none;
+    }
+  }
+
   /* Utility for applying the brand gradient as text fill. Used on the
      landing hero only — kept off secondary headings so the colour still
      reads as an accent rather than a default. */
