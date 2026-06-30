@@ -10,7 +10,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import * as Popover from '@radix-ui/react-popover'
 import { type ReactNode, useEffect, useMemo, useRef as useReactRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import { usePresence } from '../../lib/presence-store'
 import {
@@ -85,11 +84,13 @@ function LobbyBody({ room }: { room: string }) {
 
   return (
     <section className='space-y-3'>
-      {/* Header, feed, and composer share one bordered card. The header bar is
-          the visual bookend of the composer footer below it — same
-          `border + px-4 py-3` treatment (a `border-b` here mirroring the
-          footer's `border-t`) so the card reads as a real chat panel. */}
-      <div className='overflow-hidden rounded-md border border-hairline'>
+      {/* Header, feed, and composer share one bordered card. `relative` +
+          `overflow-hidden` make this card the positioning + clipping context for
+          the commit drawer, so it slides in OVER the lobby only (not the whole
+          page) and can't change the card's size. The header bar is the visual
+          bookend of the composer footer below it — same `border + px-4 py-3`
+          treatment (a `border-b` here mirroring the footer's `border-t`). */}
+      <div className='relative overflow-hidden rounded-md border border-hairline'>
         <div className='flex items-center gap-2 border-b border-hairline px-4 py-3'>
           <span className='relative flex h-2 w-2' aria-hidden>
             <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500/60' />
@@ -99,8 +100,8 @@ function LobbyBody({ room }: { room: string }) {
         </div>
         <Feed room={room} items={rendered} isLoading={isLoading} onOpenCommit={setOpenCommit} />
         <Composer room={room} />
+        {openCommit ? <CommitDrawer room={room} item={openCommit} onClose={() => setOpenCommit(null)} /> : null}
       </div>
-      {openCommit ? <CommitDrawer room={room} item={openCommit} onClose={() => setOpenCommit(null)} /> : null}
     </section>
   )
 }
@@ -686,19 +687,17 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       if (ev.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)
-    const prevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prevOverflow
-    }
+    return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
   const fork = isForkRef(e.ref)
   const timestamp = decoded ? decoded.timestampMs : Date.parse(e.createdAt)
 
-  return createPortal(
-    <div className='fixed inset-0 z-[60]'>
+  // Rendered INSIDE the lobby card (absolute, not a body portal): the backdrop
+  // and panel are confined to the card, so it overlays the lobby only — never
+  // the page — and being absolutely positioned it can't change the card's size.
+  return (
+    <div className='absolute inset-0 z-20'>
       <button
         type='button'
         aria-label='Close commit details'
@@ -707,9 +706,8 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       />
       <aside
         role='dialog'
-        aria-modal='true'
         aria-label='Commit details'
-        className={`absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${shown ? 'translate-x-0' : 'translate-x-full'}`}
+        className={`absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${shown ? 'translate-x-0' : 'translate-x-full'}`}
       >
         <header className='flex items-center justify-between gap-3 border-b border-hairline px-4 py-3'>
           <h2 className='text-sm font-semibold'>{e.kind === 'remix' ? 'Remix' : 'Commit'} details</h2>
@@ -804,8 +802,7 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
           {!decoded && obj.isLoading ? <p className='text-xs text-muted'>Loading commit object…</p> : null}
         </div>
       </aside>
-    </div>,
-    document.body,
+    </div>
   )
 }
 
