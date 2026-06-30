@@ -2,15 +2,14 @@ import { Link } from 'waku'
 import { GridLogo } from './grid-logo'
 import { ThemeToggle } from './theme-toggle'
 
-// Top-nav order: the three primary pages (tree, performance, parity)
-// first, then the smaller single-primitive demos. Reordering the site nav
-// is editing this list — nothing else.
+// Top-nav order: the combined demos playground first (it now folds in the
+// tree and push walkthroughs as tabs), then performance and parity, then
+// the live multiplayer room. Reordering the site nav is editing this list —
+// nothing else.
 const NAV_LINKS = [
-  { to: '/tree', label: 'tree' },
+  { to: '/demos', label: 'demos' },
   { to: '/performance', label: 'performance' },
   { to: '/parity', label: 'parity' },
-  { to: '/push', label: 'push' },
-  { to: '/demos', label: 'demos' },
   { to: '/multiplayer', label: 'multiplayer' },
 ] as const
 

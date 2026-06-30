@@ -2,9 +2,8 @@
 
 import { useMemo, useRef, useState } from 'react'
 import { mulberry32, renderGridSvg } from '../lib/grid-svg'
-import { MerkleTree, type MerkleNode } from './merkle-tree'
-import { INPUT_CLASSES, ObjectRow, Section } from './result-panel'
-import { DEMO_SEED, TEXT_ENCODER, formatBytes, sanitizeTreeName, useMkit } from './use-mkit'
+import { INPUT_CLASSES, ObjectRow } from './result-panel'
+import { TEXT_ENCODER, formatBytes, useMkit } from './use-mkit'
 
 // Fixed seed so the default grid is identical on every render — no hydration mismatch, reliable baseline hash.
 const DEFAULT_SVG = renderGridSvg(mulberry32(0xc0de_cafe))
@@ -30,7 +29,6 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 export function HashDemo() {
   const api = useMkit()
   const [text, setText] = useState('hello, mkit')
-  const [message, setMessage] = useState('first commit')
   const [image, setImage] = useState<ImageAsset>(DEFAULT_IMAGE)
   const [tooLarge, setTooLarge] = useState<{ name: string; size: number } | null>(null)
   const customised = image !== DEFAULT_IMAGE
@@ -41,53 +39,27 @@ export function HashDemo() {
 
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // Split the pipeline so commit-message keystrokes don't re-run `blob_encode`/`tree_encode` on the image payload.
-  const tree = useMemo(() => {
+  // The whole demo: bytes → BLAKE3. Encode the text and the image as blobs and
+  // read back their content-addressed names — no tree, no commit. Composing
+  // many of these into one signed root is the `tree` demo's job; here a hash is
+  // simply the name of a single object's bytes.
+  const hashes = useMemo(() => {
     try {
-      const textBlob = api.blob_encode(TEXT_ENCODER.encode(text))
+      const textBytes = TEXT_ENCODER.encode(text)
+      const textBlob = api.blob_encode(textBytes)
       const imageBlob = api.blob_encode(image.bytes)
-      const safeImageName = sanitizeTreeName(image.name, 'image')
-      const treeObj = api.tree_encode(
-        `[["README.md","blob","${textBlob.hash_hex}"],["${safeImageName}","blob","${imageBlob.hash_hex}"]]`,
-      )
       return {
         textHash: textBlob.hash_hex,
-        textSize: TEXT_ENCODER.encode(text).byteLength,
+        textSize: textBytes.byteLength,
         imageHash: imageBlob.hash_hex,
         imageSize: image.bytes.byteLength,
-        treeHash: treeObj.hash_hex,
       }
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
     }
   }, [api, text, image])
 
-  const commit = useMemo(() => {
-    if ('error' in tree) return null
-    const c = api.commit_encode_and_sign(tree.treeHash, '', message, 0n, DEMO_SEED)
-    return { hash: c.hash_hex, verified: api.commit_verify(c.bytes) }
-  }, [api, tree, message])
-
-  const merkle = useMemo<MerkleNode | null>(() => {
-    if ('error' in tree || !commit) return null
-    return {
-      hash: commit.hash,
-      label: 'commit',
-      children: [
-        {
-          hash: tree.treeHash,
-          label: '/',
-          children: [
-            { hash: tree.textHash, label: 'README.md' },
-            { hash: tree.imageHash, label: image.name },
-          ],
-        },
-      ],
-    }
-  }, [tree, commit, image.name])
-
-  if ('error' in tree) return <p className='text-red-600 dark:text-red-400'>{tree.error}</p>
-  if (!commit) return null
+  if ('error' in hashes) return <p className='text-red-600 dark:text-red-400'>{hashes.error}</p>
 
   const handleFile = async (file: File) => {
     const name = file.name || 'image'
@@ -110,35 +82,40 @@ export function HashDemo() {
   }
 
   return (
-    // Mobile-first ordering: outputs above controls. `flex-col-reverse` reverses sidebar/main below `lg`, then
-    // `lg:grid` takes over for the desktop two-column where source order doesn't matter.
-    <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
-      <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
-        <label className='block'>
-          <span className='mb-2 block text-sm text-muted'>Commit message</span>
-          <input className={INPUT_CLASSES} value={message} onChange={(e) => setMessage(e.target.value)} />
-        </label>
+    // Full-width, one object per block: the file's content-addressed name on top,
+    // its editor directly beneath, so editing and the name it produces read as one
+    // unit. Edit either and watch the name above it change.
+    <div className='space-y-10'>
+      {/* README.md — a text object. */}
+      <div className='space-y-3'>
+        <ObjectRow hash={hashes.textHash} label='README.md' meta={`${formatBytes(hashes.textSize)} · UTF-8 text`} />
+        <textarea
+          className={INPUT_CLASSES}
+          rows={4}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          aria-label='README.md contents'
+        />
+        <p className='text-xs text-muted'>Edit the text — the name above changes.</p>
+      </div>
 
-        <label className='block'>
-          <span className='mb-2 block text-sm text-muted'>README.md</span>
-          <textarea className={INPUT_CLASSES} rows={3} value={text} onChange={(e) => setText(e.target.value)} />
-        </label>
-
-        <div>
-          <span className='block text-sm text-muted'>Image</span>
-          <p className='mb-3 text-xs text-muted'>
-            {image.name} · {image.mime || 'application/octet-stream'} · {formatBytes(image.bytes.byteLength)} · demo cap{' '}
-            {formatBytes(MAX_IMAGE_BYTES)}
-          </p>
-          <div className='space-y-3'>
-            {/* 1px pure-black inset outline per the image-outline design rule — reads as a consistent edge on any
-                surface colour. */}
-            <div
-              className='size-16 shrink-0 overflow-hidden bg-white'
-              style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
-            >
-              <img src={previewUrl} alt='' className='size-full object-cover' />
-            </div>
+      {/* The image — any bytes get a name, not just text. */}
+      <div className='space-y-3'>
+        <ObjectRow
+          hash={hashes.imageHash}
+          label={image.name}
+          meta={`${formatBytes(hashes.imageSize)} · ${image.mime || 'application/octet-stream'}`}
+        />
+        <div className='flex items-center gap-4'>
+          {/* 1px pure-black inset outline per the image-outline design rule — reads as a consistent edge on any
+              surface colour. */}
+          <div
+            className='size-16 shrink-0 overflow-hidden bg-white'
+            style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
+          >
+            <img src={previewUrl} alt='' className='size-full object-cover' />
+          </div>
+          <div className='space-y-2'>
             <div className='flex items-center gap-2'>
               <button
                 type='button'
@@ -156,53 +133,29 @@ export function HashDemo() {
                 Reset
               </button>
             </div>
-            {tooLarge ? (
-              <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
-                <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
-                files as data URLs and rejects anything over {formatBytes(MAX_IMAGE_BYTES)} before reading it. The
-                streaming tab handles larger files.
-              </p>
-            ) : null}
-            <input
-              ref={fileRef}
-              type='file'
-              accept='image/*'
-              className='hidden'
-              onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void handleFile(f)
-                e.target.value = ''
-              }}
-            />
+            <p className='text-xs text-muted'>
+              Swap the image — the name above changes. Demo cap {formatBytes(MAX_IMAGE_BYTES)}.
+            </p>
           </div>
         </div>
-      </div>
-
-      <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
-        {merkle ? (
-          <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
-            <MerkleTree root={merkle} />
-          </Section>
+        {tooLarge ? (
+          <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
+            <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
+            files as data URLs and rejects anything over {formatBytes(MAX_IMAGE_BYTES)} before reading it. The streaming
+            tab handles larger files.
+          </p>
         ) : null}
-        <Section title='Objects' description='Every hash in this commit. Edit any input and they all change.'>
-          <div className='divide-y divide-hairline'>
-            <ObjectRow
-              hash={commit.hash}
-              label='commit'
-              meta='signed'
-              trailing={
-                <span
-                  className={`text-xs ${commit.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}
-                >
-                  {commit.verified ? 'verified ✓' : 'invalid ✗'}
-                </span>
-              }
-            />
-            <ObjectRow hash={tree.treeHash} label='/' meta='folder' />
-            <ObjectRow hash={tree.textHash} label='README.md' meta={formatBytes(tree.textSize)} />
-            <ObjectRow hash={tree.imageHash} label={image.name} meta={formatBytes(tree.imageSize)} />
-          </div>
-        </Section>
+        <input
+          ref={fileRef}
+          type='file'
+          accept='image/*'
+          className='hidden'
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) void handleFile(f)
+            e.target.value = ''
+          }}
+        />
       </div>
     </div>
   )
