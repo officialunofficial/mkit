@@ -258,6 +258,10 @@ _mkit() {
                         '--lines[restrict to a line range]:range:' \
                         '-w[ignore whitespace when matching]' \
                         '--ignore-whitespace[ignore whitespace when matching]' \
+                        '-M[detect lines moved within the file]' \
+                        '--find-moves[detect lines moved within the file]' \
+                        '*-C[detect lines copied from other files (repeatable)]' \
+                        '*--find-copies[detect lines copied from other files (repeatable)]' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;

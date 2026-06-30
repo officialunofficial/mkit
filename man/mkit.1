@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -914,6 +914,26 @@ ignores whitespace when matching lines across revisions
 .Pq like Xr git 1 Cm blame Fl w , ignoring all whitespace ,
 so a whitespace-only edit does not reattribute the line; output still
 shows the file's current bytes.
+.Fl M
+detects lines moved within the file and
+.Fl C
+lines copied from other files
+.Pq like Xr git 1 Cm blame Fl M Ns / Ns Fl C ; Fl C No implies Fl M ,
+and repeating
+.Fl C
+widens the search from files changed in the commit to every file in the
+parent. Detection is block-based: the longest contiguous block above git's
+default thresholds (20 alphanumeric characters for
+.Fl M ,
+40 for
+.Fl C )
+is credited to its origin, so a moved block beside new lines is still split
+out and, with
+.Fl w ,
+a block copied with a whitespace change is still detected. git's inline
+numeric forms
+.Pq Fl M Ns Ar num , Fl C Ns Ar num
+are not exposed.
 .Fl L
 restricts output to a line range:
 .Ar start , end ,

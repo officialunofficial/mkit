@@ -149,6 +149,10 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s L -l lines -d "Restrict output to a line range" -r
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s w -l ignore-whitespace -d "Ignore whitespace when matching lines"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s M -l find-moves -d "Detect lines moved within the file"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s C -l find-copies -d "Detect lines copied from other files (repeatable)"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \

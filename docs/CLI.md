@@ -266,12 +266,25 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-L <start>,<end>] [<rev>] <file>` —
-  show line-level commit attribution. `-w` ignores whitespace when
+- `mkit blame [--format=json] [-w] [-M] [-C] [-L <start>,<end>] [<rev>] <file>`
+  — show line-level commit attribution. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's
-  current bytes. `-L` restricts output to a line range —
+  current bytes. `-M` detects lines moved *within* the file and `-C` lines
+  copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
+  and repeating it — `-C -C` — widens the search from files changed in the
+  commit to every file in the parent). Detection is block-based: the
+  longest contiguous moved/copied block above git's default thresholds (20
+  alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
+  so a moved block next to genuinely-new lines is still split out, and
+  combined with `-w` a block copied with a whitespace change is still
+  detected. Divergences from git: inline numeric threshold forms
+  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
+  custom threshold); on an identical block in two files the earliest by
+  tree-path order wins (git scores candidates); and a single unmatched run
+  over 10,000 lines is matched only as a whole, not by sub-block. `-L`
+  restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
   start of file), or a bare `<start>` (to EOF); bounds are 1-based and

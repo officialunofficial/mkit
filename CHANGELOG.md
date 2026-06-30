@@ -23,8 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — no longer steals attribution; output still shows the file's
-  current bytes. Attribution remains first-parent only, with no `-M`/`-C`
-  yet (tracked in follow-up issues).
+  current bytes.
+- **`mkit blame -M` / `-C` move & copy detection.** `-M` (`--find-moves`)
+  credits a block moved *within* the file to its origin commit; `-C`
+  (`--find-copies`, repeatable, implies `-M`) credits a block copied *from
+  another file*, resolving the true origin by blaming the source file.
+  Repeating `-C` widens the search from files changed in the commit to
+  every file in the parent commit. Detection is block-based over normalized
+  keys: the longest contiguous block above git's default thresholds (20 for
+  `-M`, 40 for `-C`) is credited, so a moved block beside genuinely-new
+  lines is split out and — combined with `-w` — a block copied with a
+  whitespace change is still detected. Configured through a typed
+  `MoveDetection`/`CopyDetection` API that can't express an invalid
+  "enabled but zero-threshold" state. Attribution remains first-parent
+  only. Documented divergences from git: inline `-M<num>`/`-C<num>`
+  threshold forms aren't exposed on the CLI (the core API takes a custom
+  threshold); `-C -C -C` (whole-history search) is approximated as `-C -C`;
+  when two source files hold an identical block the earliest by tree-path
+  order wins, and when one source holds the block at several offsets the
+  earliest offset wins (git scores candidates and tracks line identity
+  through its diff); and within a single unmatched run longer than 10,000
+  lines only the whole run is matched, not sub-blocks (a cost bound; the
+  matcher already caps inputs).
 
 ### Removed
 
