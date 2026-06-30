@@ -1,16 +1,16 @@
 'use client'
 
 import { useCallback, useMemo, useState } from 'react'
-import { PUSH_MESH } from '../lib/mesh'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { HashChip } from './result-panel'
 import { formatBytes, useMkit } from './use-mkit'
 
-// A demo "file": ~384 KB of varied bytes so FastCDC v1 cuts it into several
-// content-defined chunks (avg 64 KB). Deterministic so the walkthrough reads
-// the same every time; the "edit" XORs one sub-chunk region so exactly the
-// chunk covering it changes.
-const FILE_SIZE = 384 * 1024
+// A demo "file": 2 MiB of varied bytes. mkit only chunks files OVER 1 MiB
+// (CHUNK_THRESHOLD in mkit-core), so this is comfortably above that and FastCDC
+// v1 cuts it into several content-defined chunks (avg 64 KB). Deterministic so
+// the walkthrough reads the same every time; the "edit" flips one byte so
+// exactly the chunk covering it changes.
+const FILE_SIZE = 2 * 1024 * 1024
 const FILE_SEED = 0x6b697421
 
 function makeRng(seed: number): () => number {
@@ -30,15 +30,21 @@ function generateFile(): Uint8Array {
   return out
 }
 
-function editOneRegion(src: Uint8Array): Uint8Array {
+// Flip a SINGLE byte at `at` (XOR 0x5a always changes it). The user drives `at`
+// with the slider in the edit step; only the chunk covering it gets a new hash.
+function flipByte(src: Uint8Array, at: number): Uint8Array {
   const out = src.slice()
-  const start = Math.floor(out.length * 0.45)
-  const end = Math.min(out.length, start + 24 * 1024)
-  for (let i = start; i < end; i++) out[i] = (out[i] ?? 0) ^ 0x5a
+  const i = Math.max(0, Math.min(out.length - 1, at))
+  out[i] = (out[i] ?? 0) ^ 0x5a
   return out
 }
 
-type Encoded = { wholeId: string; root: string; bytesLen: number; chunks: StripChunk[] }
+/** Two-digit uppercase hex for a byte value. */
+function hexByte(b: number): string {
+  return b.toString(16).padStart(2, '0').toUpperCase()
+}
+
+type Encoded = { root: string; bytesLen: number; chunks: StripChunk[] }
 
 const STEPS = [
   { title: 'Your file', next: 'Chunk it' },
@@ -53,8 +59,13 @@ export function PushDemo() {
   const api = useMkit()
   const [step, setStep] = useState(0)
 
+  // The byte the user chooses to flip (drag the slider in the edit step).
+  const [editByte, setEditByte] = useState(Math.floor(FILE_SIZE * 0.45))
+
   const base = useMemo(() => generateFile(), [])
-  const edited = useMemo(() => editOneRegion(base), [base])
+  const edited = useMemo(() => flipByte(base, editByte), [base, editByte])
+  const oldByte = base[editByte] ?? 0
+  const newByte = oldByte ^ 0x5a
 
   const encode = useCallback(
     (b: Uint8Array): Encoded => {
@@ -63,28 +74,46 @@ export function PushDemo() {
         const c = r.chunk(i)!
         return { offset: c.offset, len: c.len, hash_hex: c.hash_hex }
       })
-      return { wholeId: api.blob_encode(b).hash_hex, root: r.root_hash_hex, bytesLen: r.bytes_len, chunks }
+      return { root: r.root_hash_hex, bytesLen: r.bytes_len, chunks }
     },
     [api],
   )
   const before = useMemo(() => encode(base), [encode, base])
   const after = useMemo(() => encode(edited), [encode, edited])
 
-  // The chunks that changed (by hash) — only these ship.
+  // The chunks that changed (by hash). Unchanged chunks dedupe — they never ship.
   const beforeHashes = useMemo(() => new Set(before.chunks.map((c) => c.hash_hex)), [before])
   const changedIdx = after.chunks.flatMap((c, i) => (beforeHashes.has(c.hash_hex) ? [] : [i]))
   const dimSet = new Set(after.chunks.flatMap((c, i) => (beforeHashes.has(c.hash_hex) ? [i] : [])))
-  const changedBytes = changedIdx.reduce((a, i) => a + (after.chunks[i]?.len ?? 0), 0)
-  const savedPct = Math.round((1 - changedBytes / edited.length) * 100)
+
+  // What mkit ACTUALLY puts on the wire for the changed chunk: a delta against
+  // the previous version of that chunk (same boundaries for an in-place flip),
+  // via the same delta encoder the real push path uses (mkit-core delta.rs).
+  // Far smaller than the whole chunk. Falls back to the chunk length if no base.
+  const deltaBytes = useMemo(() => {
+    const beforeSet = new Set(before.chunks.map((c) => c.hash_hex))
+    const ci = after.chunks.findIndex((c) => !beforeSet.has(c.hash_hex))
+    if (ci < 0) return 0
+    const tgt = after.chunks[ci]!
+    const baseC = before.chunks.length === after.chunks.length ? before.chunks[ci] : undefined
+    if (!baseC) return tgt.len
+    try {
+      const summary = api.delta_encode(
+        base.slice(baseC.offset, baseC.offset + baseC.len),
+        edited.slice(tgt.offset, tgt.offset + tgt.len),
+      )
+      return summary.bytes_on_wire
+    } catch {
+      return tgt.len
+    }
+  }, [api, base, edited, before, after])
+  const savedPct = edited.length > 0 ? Math.round((1 - deltaBytes / edited.length) * 100) : 0
 
   const back = () => setStep((s) => Math.max(0, s - 1))
   const next = () => setStep((s) => (s + 1) % STEPS.length)
 
   return (
-    <div
-      className='space-y-5 rounded-md border border-hairline p-5'
-      style={step === 3 ? { backgroundImage: PUSH_MESH } : undefined}
-    >
+    <div className='space-y-5 rounded-md border border-hairline p-5'>
       <div className='flex items-center justify-between gap-3'>
         <div className='font-mono text-xs text-subtle'>
           {STEPS[step]?.title} · step {step + 1} of {STEPS.length}
@@ -100,7 +129,9 @@ export function PushDemo() {
         </div>
       </div>
 
-      <div className='min-h-[7.5rem]'>
+      {/* min-height holds the tallest step (the final comparison) so navigating
+          steps doesn't shift the controls below. */}
+      <div className='min-h-[11rem]'>
         {/* Keyed on `step` so it remounts on change, replaying the cross-step fade
             (see .step-fade-in in styles.css). */}
         <div key={step} className='step-fade-in space-y-4'>
@@ -121,8 +152,9 @@ export function PushDemo() {
             <>
               <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
               <p className='max-w-prose text-sm text-muted'>
-                mkit splits it into {before.chunks.length} content-defined chunks (FastCDC) and names each by its BLAKE3
-                hash. Identical chunks, across files or versions, are stored only once.
+                Because it&rsquo;s over 1 MiB, mkit splits it into {before.chunks.length} content-defined chunks
+                (FastCDC) and names each by its BLAKE3 hash. Identical chunks — across files or versions — are stored
+                only once.
               </p>
             </>
           ) : null}
@@ -135,23 +167,55 @@ export function PushDemo() {
                 ariaLabel='content-defined chunks after an edit'
                 highlightIndex={changedIdx[0]}
                 dimSet={dimSet}
+                markerByte={editByte}
               />
-              <p className='max-w-prose text-sm text-muted'>
-                You changed a few bytes. Only the chunk covering them gets a new hash (outlined); every other chunk
-                stays byte-identical, so mkit already has it.
-              </p>
+              <div className='space-y-1.5'>
+                <input
+                  type='range'
+                  min={0}
+                  max={FILE_SIZE - 1}
+                  step={4096}
+                  value={editByte}
+                  onChange={(e) => setEditByte(Number(e.target.value))}
+                  aria-label='Byte to flip'
+                  className='w-full accent-fg'
+                />
+                <p className='max-w-prose text-sm text-muted'>
+                  Drag to flip any byte. Byte <span className='tabular-nums text-fg'>{editByte.toLocaleString()}</span>:{' '}
+                  <code className='font-mono text-fg'>0x{hexByte(oldByte)}</code> →{' '}
+                  <code className='font-mono text-fg'>0x{hexByte(newByte)}</code>. Only the chunk covering it (outlined)
+                  gets a new hash; every other chunk stays byte-identical, so mkit already has it.
+                </p>
+              </div>
             </>
           ) : null}
 
           {step === 3 ? (
             <>
-              <div className='grid grid-cols-2 gap-3'>
-                <Stat label='git resends' value={formatBytes(edited.length)} detail='the whole file' />
-                <Stat label='mkit resends' value={formatBytes(changedBytes)} detail={`one chunk · ${savedPct}% less`} />
+              {/* Same file, same scale, what each actually puts on the wire. */}
+              <div className='space-y-2'>
+                <CompareBar
+                  name='git'
+                  detail={`${formatBytes(edited.length)} · the whole file`}
+                  chunks={after.chunks}
+                  totalLen={after.bytesLen}
+                  ariaLabel='git resends the whole file'
+                />
+                <CompareBar
+                  name='mkit'
+                  detail={`${formatBytes(deltaBytes)} · delta of 1 chunk · ${savedPct}% less`}
+                  chunks={after.chunks}
+                  totalLen={after.bytesLen}
+                  dimSet={dimSet}
+                  highlightIndex={changedIdx[0]}
+                  ariaLabel='mkit ships only a delta of the changed chunk'
+                />
               </div>
               <p className='max-w-prose text-sm text-muted'>
-                Only the changed chunk ships. The chunks fold into a Merkle root, the file&rsquo;s new id, and mkit
-                advances the head to it atomically. Read it back: re-deriving the root proves every chunk intact.
+                For a large or binary file — above git&rsquo;s 512 MiB delta threshold (
+                <code className='font-mono'>core.bigFileThreshold</code>) or under git-LFS — git resends the whole file.
+                mkit dedupes the unchanged chunks and ships only a <span className='text-fg'>delta</span> of the one
+                that changed, then folds the chunks into a new Merkle root — the file&rsquo;s new id.
               </p>
               <div className='flex items-center gap-2 font-mono text-xs text-muted'>
                 <HashChip hash={after.root} />
@@ -174,13 +238,40 @@ export function PushDemo() {
   )
 }
 
-// A single bytes-on-the-wire figure: label, big value, one-line detail.
-function Stat({ label, value, detail }: { label: string; value: string; detail: string }) {
+// One labelled comparison bar: the file at full scale as a chunk strip, with a
+// name + size detail above it. git fills the whole bar; mkit dims the deduped
+// chunks and highlights only the one that shipped a delta — so the filled area
+// reads as "what went over the wire" in the same visual language as the rest.
+function CompareBar({
+  name,
+  detail,
+  chunks,
+  totalLen,
+  dimSet,
+  highlightIndex,
+  ariaLabel,
+}: {
+  name: string
+  detail: string
+  chunks: StripChunk[]
+  totalLen: number
+  dimSet?: Set<number> | undefined
+  highlightIndex?: number | undefined
+  ariaLabel: string
+}) {
   return (
-    <div className='space-y-0.5 rounded-md border border-hairline bg-bg/40 p-3'>
-      <div className='text-xs text-muted'>{label}</div>
-      <div className='font-mono text-xl font-semibold text-fg'>{value}</div>
-      <div className='text-[11px] text-subtle'>{detail}</div>
+    <div className='space-y-1'>
+      <div className='flex items-baseline justify-between gap-3 text-xs'>
+        <span className='font-medium text-fg'>{name}</span>
+        <span className='text-muted'>{detail}</span>
+      </div>
+      <ChunkStrip
+        chunks={chunks}
+        totalLen={totalLen}
+        ariaLabel={ariaLabel}
+        dimSet={dimSet}
+        highlightIndex={highlightIndex}
+      />
     </div>
   )
 }
