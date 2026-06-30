@@ -84,37 +84,8 @@ const TABS: Tab[] = [
     label: 'push',
     title: 'Push a file, any file',
     blurb: 'Split a file into hash-named chunks on push and send only the ones that changed.',
-    body: (
-      <>
-        When you push a file, mkit splits it into hash-named chunks and ships only the ones that changed — step through
-        it below.
-      </>
-    ),
+    body: <>When you push a file, mkit sends only what changed — not the whole file.</>,
     Demo: PushDemo,
-    footer: (
-      <div className='max-w-prose space-y-3 text-sm text-muted'>
-        <p>
-          The Merkle root <em>is</em> the id, so re-deriving it from the file proves every chunk intact — integrity
-          lives in the name, not a separate checksum.
-        </p>
-        <p>
-          The same root lets a client verify that one chunk belongs to the file without fetching the rest. And a{' '}
-          {/* In-page anchors into sibling tabs — DemosTabs listens for hashchange
-              and switches the active tab, so these open the sign / tree demos. */}
-          <a href='#sign' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
-            signature
-          </a>{' '}
-          on the commit that names the file covers every chunk beneath it.
-        </p>
-        <p>
-          It’s the same Merkle fold the{' '}
-          <a href='#tree' className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'>
-            tree
-          </a>{' '}
-          uses to roll a whole repository up to one signed hash.
-        </p>
-      </div>
-    ),
   },
   {
     id: 'attest',
@@ -138,9 +109,8 @@ export function DemosTabs() {
 
   // Honour a `#hash | #tree | #sign | #streaming | #push | #attest` deep link —
   // on first load (keeps the old per-page URLs meaningful as anchors into the
-  // combined page) and on every later hashchange, so the in-page links between
-  // tabs (e.g. push → sign / tree) switch the active tab instead of doing
-  // nothing.
+  // combined page) and on every later hashchange (so a hash link to a tab
+  // activates it).
   useEffect(() => {
     const apply = () => {
       const id = window.location.hash.slice(1)
