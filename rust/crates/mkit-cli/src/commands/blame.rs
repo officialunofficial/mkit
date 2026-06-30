@@ -1,5 +1,6 @@
 //! `mkit blame [-w] [-M] [-C] [--ignore-rev <rev>] [--ignore-revs-file <file>]
-//! [--reverse] [<rev>] [-L <range>] <file>` — line-level attribution.
+//! [--first-parent] [--reverse] [<rev>] [-L <range>] <file>` — line-level
+//! attribution.
 //!
 //! Blames `<file>` as of `<rev>` (default `HEAD`), optionally restricted
 //! to a line range with `-L`. `-w` ignores whitespace when matching
@@ -7,9 +8,12 @@
 //! the file / copied from other files (git `-M`/`-C`); `--ignore-rev` /
 //! `--ignore-revs-file` skip "noise" commits during attribution (git
 //! `--ignore-rev`), falling through to the commit that previously changed
-//! each line. `--reverse <start>..<end>` instead walks history forward,
-//! attributing each line of the `<start>` version to the last commit in
-//! the range in which it still existed (git `--reverse`).
+//! each line. Blame is merge-aware by default (a line merged from a side
+//! branch is credited to the commit that wrote it); `--first-parent`
+//! restricts the walk to first parents (git `--first-parent`).
+//! `--reverse <start>..<end>` instead walks history forward, attributing
+//! each line of the `<start>` version to the last commit in the range in
+//! which it still existed (git `--reverse`).
 //!
 //! Output modes:
 //!
@@ -54,6 +58,10 @@ enum BlameFormat {
     about = "Show line-level commit attribution.",
     override_usage = "mkit blame [OPTIONS] [<rev>] [--] <file>"
 )]
+// A CLI flag struct: each bool is an independent `git blame` toggle, so the
+// "too many bools" heuristic (which targets state that should be an enum)
+// does not apply.
+#[allow(clippy::struct_excessive_bools)]
 struct BlameOpts {
     /// Output format. Default emits `<short12>\t<line_num>\t<text>`
     /// per line; `json` emits JSONL with `hash`, `line_num`,
@@ -119,6 +127,14 @@ struct BlameOpts {
     /// with `-M`/`-C` or `--ignore-rev`/`--ignore-revs-file`.
     #[arg(long = "reverse")]
     reverse: bool,
+    /// Follow only each commit's first parent, like `git blame
+    /// --first-parent`. By default blame is merge-aware: a line merged in
+    /// from a side branch is credited to the commit that wrote it. With
+    /// `--first-parent` such a line is credited to the merge commit instead.
+    /// Composes with `-w`/`-M`/`-C`/`--ignore-rev`; redundant with
+    /// `--reverse` (reverse blame is already first-parent only).
+    #[arg(long = "first-parent")]
+    first_parent: bool,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
     /// revision to blame it at (a ref, hash, or `HEAD~2`-style spec).
     /// Without a revision the file is blamed against HEAD. A `--`
@@ -195,6 +211,7 @@ pub fn run(args: &[String]) -> u8 {
         moves,
         copies,
         ignore_revs,
+        first_parent: opts.first_parent,
     };
 
     // `--reverse` walks forward over a `<start>..<end>` range; plain blame

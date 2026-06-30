@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -967,6 +967,15 @@ or a bare
 Bounds are 1-based and inclusive; an inverted range is swapped and an
 over-long end is clamped to the last line, matching
 .Xr git 1 Cm blame .
+Blame is merge-aware by default
+.Pq like Xr git 1 Cm blame :
+at a merge a line is credited to whichever parent's side wrote it, so a line
+merged in from a side branch is attributed to its authoring commit rather
+than the merge.
+.Fl Fl first-parent
+.Pq like Xr git 1 Cm blame Fl Fl first-parent
+follows only each commit's first parent, crediting such a line to the merge
+commit instead.
 .Fl Fl reverse Ar start Ns Cm .. Ns Ar end
 walks history forward instead of backward
 .Pq like Xr git 1 Cm blame Fl Fl reverse :

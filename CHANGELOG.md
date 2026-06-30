@@ -93,6 +93,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`mkit blame` is now merge-aware by default (git parity).** Blame walks
+  the file's whole ancestor subgraph instead of only the first-parent chain:
+  at a merge, each line is credited to the first parent that still contains
+  it, so a line merged in from a side branch is attributed to the commit
+  that actually wrote it rather than to the merge commit — matching
+  `git blame`'s default. **This changes output for histories with merges**;
+  the new `--first-parent` flag (like `git blame --first-parent`) restores
+  the previous first-parent-only attribution and composes with
+  `-w`/`-M`/`-C`/`--ignore-rev`. Verified field-by-field against real `git`
+  (distinct side-branch lines, first-parent-wins on a line added identically
+  on both sides, evil-merge lines credited to the merge, octopus merges).
+  This is also the prerequisite for provable blame (#495), which needs
+  correct merge-aware attribution before it can be made verifiable. (mkit
+  still omits git's `^` boundary marker and uses sysexits exit codes, not
+  `128`.)
 - **BREAKING (`mkit-core`):** `Tree` and `ChunkedBlob` are now
   content-addressed by a **domain-bound Binary Merkle Tree (BMT) root**
   (`id = domain_digest(TYPE_DOMAIN, bmt_root)`) instead of `BLAKE3` of

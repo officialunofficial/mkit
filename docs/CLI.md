@@ -267,7 +267,8 @@ History / commits:
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
 - `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
-  [--ignore-revs-file <file>] [--reverse] [-L <start>,<end>] [<rev>] <file>` —
+  [--ignore-revs-file <file>] [--first-parent] [--reverse] [-L <start>,<end>]
+  [<rev>] <file>` —
   show line-level commit attribution. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
@@ -294,7 +295,14 @@ History / commits:
   `--ignore-revs-file` entries must be full hex object names, one per line,
   with blank lines and `#` comments (including inline) skipped — both
   matching git. (mkit does not auto-read a `.git-blame-ignore-revs` file or
-  a `blame.ignoreRevsFile` config key; pass the file explicitly.) `-L`
+  a `blame.ignoreRevsFile` config key; pass the file explicitly.) Blame is
+  **merge-aware by default** (like `git blame`): at a merge, a line is
+  credited to whichever parent's side actually wrote it, so a line merged in
+  from a side branch is attributed to its authoring commit rather than the
+  merge. `--first-parent` (like `git blame --first-parent`) follows only
+  each commit's first parent, so such a line is instead credited to the
+  merge commit — the older linear-history behavior; it composes with
+  `-w`/`-M`/`-C`/`--ignore-rev`. `-L`
   restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from

@@ -959,6 +959,52 @@ fn blame_reverse_rejects_detection_flags() {
     }
 }
 
+#[test]
+fn blame_merge_aware_vs_first_parent() {
+    // base → {main adds a top line, feature appends a line} → merge.
+    // Default blame credits the appended line to the feature commit
+    // (merge-aware); --first-parent credits it to the merge. Verified
+    // against real `git blame` / `git blame --first-parent`.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"base1\nbase2\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(td.path(), "f.txt", b"base1\nbase2\nfeature-line\n", "feat");
+    let feat = ref_hash(td.path(), "feature"); // we are on `feature` here
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    make_commit(td.path(), "f.txt", b"main-line\nbase1\nbase2\n", "main");
+    let merge_out = run_in(td.path(), &["merge", "feature"]);
+    assert!(merge_out.status.success(), "merge failed: {merge_out:?}");
+    let merge = head_hash(td.path());
+
+    // Default (merge-aware): the feature line traces to the feature commit.
+    let def = run_in(td.path(), &["blame", "f.txt"]);
+    assert!(def.status.success(), "blame failed: {def:?}");
+    let dout = String::from_utf8(def.stdout).unwrap();
+    let dlines: Vec<&str> = dout.lines().collect();
+    assert_eq!(dlines.len(), 4, "merged file has 4 lines: {dout:?}");
+    assert!(
+        dlines[3].starts_with(&feat[..12]) && dlines[3].ends_with("\tfeature-line"),
+        "default credits the feature line to the feature commit: {dout:?}"
+    );
+    assert!(
+        dlines.iter().all(|l| !l.starts_with(&merge[..12])),
+        "no line is credited to the merge under merge-aware blame: {dout:?}"
+    );
+
+    // --first-parent: the feature line first appears (to that walk) at the
+    // merge, so it is credited there.
+    let fp = run_in(td.path(), &["blame", "--first-parent", "f.txt"]);
+    assert!(fp.status.success(), "blame --first-parent failed: {fp:?}");
+    let fout = String::from_utf8(fp.stdout).unwrap();
+    let flines: Vec<&str> = fout.lines().collect();
+    assert!(
+        flines[3].starts_with(&merge[..12]),
+        "--first-parent credits the feature line to the merge: {fout:?}"
+    );
+}
+
 // ---------- serve ---------------------------------------------------------
 
 #[test]
