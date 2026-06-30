@@ -1,0 +1,52 @@
+# Baked CI toolchain image for mkit's Cloud Build pipeline.
+#
+# Built + pushed by cloudbuild/builder.yaml; consumed by ci.yaml, codegen.yaml,
+# security.yaml, docs.yaml, geiger.yaml, and coverage.yaml so those configs run
+# `cargo` directly with NO per-build tool install. This is the canonical CI
+# environment:
+#   - one place to install/pin tools (not copy-pasted into every config),
+#   - deterministic versions frozen at image-build time (no per-PR drift, no
+#     cargo-binstall → from-source fallback turning a 10s install into minutes),
+#   - sccache present from the start (no RUSTC_WRAPPER-before-install hazard).
+#
+# Rebuild (re-run cloudbuild/builder.yaml) when this file or rust-toolchain.toml
+# changes. The image tag (:rust-1.95.0) is the version contract — bump it in
+# lockstep with rust/rust-toolchain.toml and the consuming configs' _CI_IMAGE
+# default.
+FROM rust:1.95.0-bookworm
+
+# Native build/link deps the workspace needs under --all-features (signers +
+# keystore). Mirrors rust.yml's "Install native signer deps" step:
+#   libtss2-dev     → mkit-sign-tpm's tpm2 feature (tss-esapi)
+#   libudev-dev     → mkit-sign-ctap (hidapi → libudev)
+#   libpcsclite-dev → mkit-keystore backend-yubikey (PC/SC)
+#   swtpm           → software-TPM integration tests (tpm-mssim feature)
+# unzip/jq support the protoc install below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm unzip jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# protoc — buffa-build / connectrpc-build shell out to it during codegen. The
+# .proto schemas use Edition 2023 (needs protoc >= 27); pin 31.0 to match the
+# version rust.yml installs via arduino/setup-protoc.
+ARG PROTOC_VERSION=31.0
+RUN curl -sSL -o /tmp/protoc.zip \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+    && unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
+    && rm -f /tmp/protoc.zip
+
+# rustfmt + clippy (lints), llvm-tools-preview (coverage.yaml's cargo-llvm-cov),
+# and the wasm32 target (codegen.yaml's repo-worker regen builds for wasm32).
+RUN rustup component add rustfmt clippy llvm-tools-preview \
+    && rustup target add wasm32-unknown-unknown
+
+# Prebuilt tool binaries via cargo-binstall, resolved ONCE here and baked.
+# Every PR then uses this identical image, so versions are reproducible across
+# builds (rebuild this image to update them deliberately). cargo-geiger is
+# pinned to 0.13.0 to match geiger.yml's `cargo install --version`.
+RUN curl -L --proto '=https' --tlsv1.2 -sSf \
+        https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash \
+    && cargo binstall -y \
+        cargo-nextest sccache cargo-deny cargo-audit cargo-llvm-cov cargo-geiger@0.13.0 \
+    && rm -rf "${CARGO_HOME:-/usr/local/cargo}/registry"

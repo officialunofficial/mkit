@@ -1,0 +1,11 @@
+.git/
+target/
+**/target/
+node_modules/
+**/node_modules/
+apps/*/dist/
+apps/*/.wrangler/
+apps/*/.vite/
+apps/*/.waku/
+web/
+.claude/

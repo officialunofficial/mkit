@@ -1,0 +1,120 @@
+# Rust workspace CI on Cloud Build — replaces the Linux leg of the
+# `build-and-test` + `msrv` jobs in .github/workflows/rust.yml. Failure-ordered,
+# single sequential build: fmt → clippy → build → signers → nextest → doctests.
+#
+# NOTE: mkit's Rust workspace lives in `rust/`, and the reference signers are a
+# SEPARATE workspace in `contrib/signers/`. Steps cd into the right tree; this
+# is the main difference from a root-workspace layout.
+#
+# Toolchain (Rust 1.95.0 + protoc + nextest + sccache + native deps) comes from
+# the baked _CI_IMAGE (cloudbuild/Dockerfile.ci), so this config is just cargo.
+#
+# Triggers (see cloudbuild/README.md):
+#   - mkit-ci-main  push to main (paths-ignore apps/web/docs/md)
+#   - mkit-ci-pr    PRs, gated on a maintainer `/gcbrun` comment (the analog of
+#                   rust.yml's approval-gated heavy jobs). Cloud Build checks out
+#                   the PR head, so no SHA juggling is needed here.
+#
+# CACHING: sccache with a GCS backend. On Cloud Build the build runs *as* a
+# service account, so sccache reaches the bucket through the metadata server
+# with no key file and no WIF. The build SA needs roles/storage.objectAdmin on
+# $_CACHE_BUCKET.
+#
+# Cross-platform note: the macOS leg of build-and-test and the keystore-backends
+# matrix (macOS/Windows native keystores) CANNOT run on Cloud Build (Linux
+# containers only) and stay on GitHub Actions.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  # 8 vCPUs keeps clippy+nextest brisk; 100 GB removes the disk pressure that
+  # made rust.yml free the Android/.NET/Haskell trees on GitHub's ~14 GB runners.
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  # _CACHE_BUCKET / _CI_IMAGE embed the built-in ${PROJECT_ID}; resolving a
+  # built-in nested in a substitution value needs dynamic substitutions (auto-on
+  # under triggers, off for a manual `gcloud builds submit` repro).
+  dynamicSubstitutions: true
+
+timeout: 2400s # cold ~15-20 min; warm (sccache hit) far less.
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: check
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0" # required: sccache can't cache incremental builds
+      - "RUST_BACKTRACE=short"
+      # Drop debuginfo in CI (dominant target/ bloat; CI never opens a debugger).
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      # sccache → GCS. RW mode + bucket; ADC comes from the build SA.
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        # ── rust/ workspace: fmt → clippy → build ───────────────────────────
+        ( cd rust
+          cargo fetch --locked
+          cargo fmt --check
+          cargo clippy --all-targets --all-features --workspace -- -D warnings
+          cargo build --locked --workspace
+        )
+
+        # ── contrib/signers (separate workspace) ────────────────────────────
+        # MUST run before the workspace nextest step: mkit-cli's attest_roundtrip
+        # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
+        # back to building it on-the-fly when missing.
+        ( cd contrib/signers
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+        )
+
+        # ── rust/ workspace: tests ──────────────────────────────────────────
+        ( cd rust
+          cargo nextest run --locked --workspace --all-features
+          # nextest doesn't run doctests; gate them separately.
+          cargo test --manifest-path fuzz/Cargo.toml
+          cargo test --locked --doc --workspace
+
+          # Version contract: `mkit version` must print exactly "mkit <X.Y.Z>".
+          cargo build --release --locked -p mkit-cli
+          out=$(./target/release/mkit version)
+          expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          if [ "$out" != "$expected" ]; then
+            echo "mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>'" >&2
+            exit 1
+          fi
+
+          # enc-transport opt-in build + encrypted-transport e2e (issue #156).
+          cargo build --locked -p mkit-cli --features enc-transport
+          cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
+
+          # MSRV gate. The baked image is pinned to the MSRV, so a locked
+          # all-targets check is the rust.yml `msrv` job's equivalent — but
+          # assert the coupling instead of trusting a comment: fail loudly if
+          # the image's rustc ever drifts from the declared rust-version (lower-
+          # case/digit vars below don't match Cloud Build's substitution pattern).
+          msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          rustc_v=$(rustc --version | awk '{print $2}')
+          echo "declared MSRV=$msrv, image rustc=$rustc_v"
+          if [ -n "$msrv" ] && [ "$rustc_v" != "$msrv" ]; then
+            echo "MSRV drift: rust-version=$msrv but CI image rustc=$rustc_v — rebuild Dockerfile.ci or fix rust-version" >&2
+            exit 1
+          fi
+          cargo check --workspace --locked --all-targets
+        )
+
+        sccache --show-stats
