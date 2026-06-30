@@ -223,11 +223,11 @@ commands:
                     (--fork-audit re-derives referenced content) (feature: git-bridge)
   git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
   git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
-  blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>] [-L <start>,<end>] [<rev>] <file>
+  blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>] [--reverse] [-L <start>,<end>] [<rev>] <file>
                     Show line-level commit attribution; -L limits to a line
-                    range, -w ignores whitespace, -M/-C detect lines moved
-                    within / copied from other files,
-                    --ignore-rev/--ignore-revs-file skip noise commits, <rev>
+                    range, -w ignores whitespace, -M/-C detect moved/copied
+                    lines, --ignore-rev/--ignore-revs-file skip noise commits,
+                    --reverse <start>..<end> walks history forward, <rev>
                     blames as of a revision (default HEAD; JSONL with
                     --format=json)
   verify <rev>      Verify the signature on a commit, remix, or signed tag

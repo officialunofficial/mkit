@@ -59,6 +59,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its sysexits-style exit codes rather than git's blanket `128`. mkit does
   not auto-read `.git-blame-ignore-revs` or a `blame.ignoreRevsFile` config
   key — pass the file explicitly.
+- **`mkit blame --reverse <start>..<end>`.** Walks history *forward*
+  instead of backward, like `git blame --reverse`: blames the `<start>`
+  version of the file and attributes each line to the **last** commit in
+  the range in which it still existed (answering "which commit removed or
+  last touched this line"). `<start>..` defaults `<end>` to `HEAD`; an
+  explicit `<start>` is required, and `-w`/`-L` compose with it. Verified
+  field-by-field against real `git blame --reverse` (survivors → end,
+  removed/modified lines freeze at their last commit, unchanged commits
+  advance attribution, file-absence kills a line). Deliberate divergences:
+  mkit reports a clear error for a missing / malformed / empty range or open
+  `<start>` where git prints a cryptic "dig up from" message; a line that
+  never survives a step is shown without git's leading `^` boundary marker
+  (mkit's tab format has no `^`); and the range is followed along `<end>`'s
+  **first-parent** chain only (mkit blame is first-parent only — a `<start>`
+  reached solely through a merge's second parent errors rather than
+  resolving; the full-history walk in #458 would lift this).
 
 ### Removed
 
