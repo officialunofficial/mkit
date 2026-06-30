@@ -47,14 +47,14 @@ layout.
 
 ## Triggers
 
-All on branch `^main$`. PRs require a maintainer **`/gcbrun`** comment to launch
-(`ci` always; the path-gated checks auto-run for org collaborators and need
-`/gcbrun` only for fork PRs). See `scripts/setup-cloud-build.sh` for the exact
+All on branch `^main$`. Every PR trigger auto-runs for org collaborators and
+needs a maintainer **`/gcbrun`** only for external/fork PRs — matching
+polychrome and makechain. See `scripts/setup-cloud-build.sh` for the exact
 `--included-files` / `--ignored-files` filters.
 
 | Trigger | Config | PR gate |
 |---|---|---|
-| `mkit-ci-{pr,main}` | `ci.yaml` | `/gcbrun` always |
+| `mkit-ci-{pr,main}` | `ci.yaml` | collaborators auto, `/gcbrun` for forks |
 | `mkit-codegen-{pr,main}` | `codegen.yaml` | collaborators auto |
 | `mkit-security-{pr,main}` | `security.yaml` | collaborators auto |
 | `mkit-docs-{pr,main}` | `docs.yaml` | collaborators auto |

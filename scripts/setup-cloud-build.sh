@@ -79,12 +79,11 @@ if [ "${SKIP_CODECOV:-0}" != "1" ]; then
 fi
 
 # ── 4. Triggers ─────────────────────────────────────────────────────────────
-# The Rust suite ALWAYS requires `/gcbrun` on PRs — the "run only after a
-# maintainer signs off" gate (the analog of rust.yml's pull_request_review
-# approval). The cheaper path-gated checks auto-run for org collaborators; fork
-# PRs need a maintainer `/gcbrun`.
+# All PR triggers auto-run for org collaborators and require a maintainer
+# `/gcbrun` only for external/fork contributors — matching polychrome and
+# makechain (their *-ci-pr triggers use the same control). This keeps internal
+# PRs flowing on push while still gating untrusted fork code.
 COL="COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY"
-GATED="COMMENTS_ENABLED"
 
 # Idempotent create: skip if a trigger of this name already exists.
 mk() {
@@ -102,9 +101,9 @@ mk_push() { local n="$1"; shift; mk "$n" --branch-pattern='^main$' "$@"; }
 
 echo "== triggers =="
 
-# Rust suite (fmt/clippy/build/test/doctests/msrv): maintainer-gated on PRs,
-# auto on main (skip apps/web/docs-only pushes).
-mk_pr   mkit-ci-pr   --build-config=cloudbuild/ci.yaml --comment-control="$GATED"
+# Rust suite (fmt/clippy/build/test/doctests/msrv): auto on internal PRs,
+# /gcbrun for forks; auto on main (skip apps/web/docs-only pushes).
+mk_pr   mkit-ci-pr   --build-config=cloudbuild/ci.yaml --comment-control="$COL"
 mk_push mkit-ci-main --build-config=cloudbuild/ci.yaml \
         --ignored-files='apps/**','web/**','docs/**','**/*.md'
 
