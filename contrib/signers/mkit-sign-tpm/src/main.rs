@@ -704,12 +704,9 @@ mod tpm {
         ctx.flush_context(ObjectHandle::from(primary.key_handle))
             .map_err(|e| SignerError::Tpm(format!("flush_context: {e}")))?;
 
-        // Flush our own auth session. TPMs (real or simulated) have a small,
-        // fixed number of session slots; leaving this open until process
-        // exit relies on implicit cleanup neither swtpm nor real hardware
-        // reliably perform, and a leaked session here is exactly what made
-        // the next `sign`/`delete` invocation's own session collide with a
-        // stale one ("inconsistent attributes ... session number 1").
+        // Flush our own auth session rather than relying on process exit
+        // (TPM session slots are a small, fixed resource on real hardware
+        // and simulators alike).
         ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
             .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
 
@@ -719,14 +716,21 @@ mod tpm {
     pub fn sign(handle: u32, pae: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SignerError> {
         let mut ctx = new_context()?;
         let sess = start_owner_session(&mut ctx)?;
-        ctx.set_sessions((Some(sess), None, None));
 
-        // Resolve the persistent handle → TPM-session handle.
+        // `tr_from_tpm_public` is backed by the unauthenticated
+        // TPM2_ReadPublic — it takes no session. Attaching one anyway (as
+        // this used to do, before ctx.set_sessions below) is exactly what
+        // produced "inconsistent attributes (associated with session
+        // number 1)": TPM_RC_ATTRIBUTES, the TPM rejecting a session whose
+        // attributes don't fit what the command expects. Only attach the
+        // owner session for the calls that actually need authorization.
         let persistent_handle = persistent(handle)?;
         let object_handle = ctx
             .tr_from_tpm_public(persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("tr_from_tpm_public: {e}")))?;
         let key_handle: KeyHandle = object_handle.into();
+
+        ctx.set_sessions((Some(sess), None, None));
 
         // Read the public half so we can derive the keyid.
         let (public, _name, _qname) = ctx
@@ -827,11 +831,15 @@ mod tpm {
     pub fn delete(handle: u32) -> Result<(), SignerError> {
         let mut ctx = new_context()?;
         let sess = start_owner_session(&mut ctx)?;
-        ctx.set_sessions((Some(sess), None, None));
+
+        // See sign()'s matching comment: tr_from_tpm_public takes no
+        // session (it's backed by the unauthenticated TPM2_ReadPublic).
         let persistent_handle = persistent(handle)?;
         let object_handle = ctx
             .tr_from_tpm_public(persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("tr_from_tpm_public: {e}")))?;
+
+        ctx.set_sessions((Some(sess), None, None));
         ctx.evict_control(Provision::Owner, object_handle, persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("evict_control (delete): {e}")))?;
 
