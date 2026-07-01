@@ -1,7 +1,8 @@
 /**
- * Static mkit-vs-git parity data, distilled from `docs/PARITY.md` (the authoritative scope gate). User-facing notes
- * only — internal phase/issue tracking is dropped. The framing that matters: mkit targets CLI/UX parity, not on-disk or
- * wire interop with real `.git` repositories. A BLAKE3 object store cannot share bytes with git's SHA-1 store.
+ * Static mkit-vs-git parity data — the single source of truth for the per-command parity matrix rendered at `/parity`.
+ * User-facing notes only; the surrounding scope gate, machine-output contract, and internal phase/issue tracking live
+ * in `docs/PARITY.md`. The framing that matters: mkit targets CLI/UX parity, not on-disk or wire interop with real
+ * `.git` repositories. A BLAKE3 object store cannot share bytes with git's SHA-1 store.
  */
 
 export type ParityStatus = 'parity' | 'divergent' | 'non-goal'
