@@ -72,16 +72,22 @@ jobs:
           # push, github.sha is already the right commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Toolchain (rustfmt + clippy) + protoc + lockfile-keyed cargo cache.
+      # Toolchain (rustfmt + clippy) + lockfile-keyed cargo cache. No protoc:
+      # mkit-rpc's build.rs stages pre-committed generated/ sources by default
+      # (protoc is only invoked in codegen mode, via MKIT_RPC_CODEGEN=1, which
+      # only scripts/regen-rpc-proto.sh sets) — the codegen-freshness check
+      # that needs that now lives on Cloud Build (cloudbuild/codegen.yaml),
+      # which gets protoc from its own Docker image, not from here.
       # cache-prefix is partitioned per-workflow + per-runner so a malicious PR
       # cannot poison a key a privileged workflow (release.yml) later reads —
       # see .github/actions/setup-rust and docs/RELEASE.md.
-      - name: Set up Rust, protoc, and cache
+      - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
           cache-prefix: "rust-ci-${{ matrix.os }}"
+          protoc: "false"
 
       # cargo-nextest: faster + structured test runner. Replaces
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
