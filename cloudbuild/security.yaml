@@ -41,4 +41,6 @@ steps:
         ( cd contrib/signers && run_audit )
 
         # cargo-deny reads rust/deny.toml (resolved relative to the manifest).
-        cargo deny --manifest-path rust/Cargo.toml check --all-features
+        # --all-features is a top-level cargo-deny flag, not a `check` subcommand
+        # flag — it must come before `check` or cargo-deny rejects it.
+        cargo deny --manifest-path rust/Cargo.toml --all-features check
