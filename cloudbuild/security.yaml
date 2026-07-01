@@ -27,8 +27,8 @@ steps:
       - |
         set -euo pipefail
         # A shell function (lowercase name, no `$`) keeps the long ignore list
-        # in one place WITHOUT a `$VAR` reference — Cloud Build would otherwise
-        # consume a bare `$AUDIT` as a substitution before bash ever sees it.
+        # in one place WITHOUT a `$$VAR` reference — Cloud Build would otherwise
+        # consume a bare `$$AUDIT` as a substitution before bash ever sees it.
         run_audit() {
           cargo audit --deny warnings \
             --ignore RUSTSEC-2023-0071 \
