@@ -1,28 +1,32 @@
 name: "CI: Rust"
 
+# Scope note: the Linux Rust gates (fmt/clippy/build/nextest/doctests, msrv,
+# codegen-freshness, supply-chain, docs, geiger, coverage) run on Google Cloud
+# Build — see cloudbuild/README.md. This workflow keeps only the legs Cloud
+# Build's Linux containers CAN'T run: the macOS build/test leg and the
+# cross-platform keystore-backends matrix (macOS/Windows native keystores).
+
 on:
   push:
     branches:
       - main
-    # Skip the full matrix on main pushes that can't affect the Rust build
-    # (docs-only, MCP-only, web-only commits). The pull_request_review trigger
-    # below is unaffected — it can't be path-filtered and stays approval-gated.
+    # Skip the matrix on main pushes that can't affect the Rust build
+    # (docs-only, MCP-only, web-only commits).
     paths:
       - '.github/workflows/rust.yml'
       - '.github/actions/setup-rust/**'
       - 'rust/**'
       - 'contrib/signers/**'
-  # Core build/test/clippy/fmt runs on EVERY PR into main so a green PR
-  # rollup actually means the Rust suite ran (and reports pending while it
-  # runs). See the `build-and-test` job's `if:` below — it runs on this
-  # event; the heavier jobs stay approval-gated.
+  # The macOS build/test leg runs on EVERY PR into main so a green PR rollup
+  # reflects a real run on at least one OS (the Linux suite runs on Cloud Build,
+  # gated on a maintainer `/gcbrun`). See the `build-and-test` job's `if:` below.
   pull_request:
     branches:
       - main
-  # Expensive CI (keystore-backends, msrv): on PRs these run only once a
-  # review is approved, to avoid burning multi-OS runner minutes on every
-  # push. The pull_request_review event can't filter by branch/path, so each
-  # job guards on the approval state + base ref below.
+  # Expensive CI (keystore-backends): on PRs these run only once a review is
+  # approved, to avoid burning multi-OS runner minutes on every push. The
+  # pull_request_review event can't filter by branch/path, so the job guards on
+  # the approval state + base ref below.
   pull_request_review:
     types: [submitted]
 
@@ -46,9 +50,10 @@ env:
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})
-    # Core suite: runs on main pushes AND on every pull_request into main
-    # (so the PR rollup reflects a real run). On the pull_request_review
-    # event it still requires an approving review on a main-targeted PR.
+    # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).
+    # Runs on main pushes AND on every pull_request into main (so the PR rollup
+    # reflects a real run). On the pull_request_review event it still requires an
+    # approving review on a main-targeted PR.
     if: >-
       github.event_name != 'pull_request_review' ||
       (github.event.review.state == 'approved' &&
@@ -57,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -66,24 +71,6 @@ jobs:
           # branch — check out the PR head so we test the PR's code. On
           # push, github.sha is already the right commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      # The commonware adoption pulled in tokio + axum + criterion +
-      # reed-solomon, doubling the post-nextest `target/` footprint past
-      # what the ubuntu-latest runner ships with (~14 GiB free of 75 GiB).
-      # Free the Android SDK / .NET / Haskell tree before the build so the
-      # doctest step has room. ~14 GiB recovered; the action is a no-op on
-      # macOS (only runs when `if` matches).
-      - name: Free disk space (Linux only)
-        if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be  # v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
 
       # Toolchain (rustfmt + clippy) + protoc + lockfile-keyed cargo cache.
       # cache-prefix is partitioned per-workflow + per-runner so a malicious PR
@@ -104,17 +91,9 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # Native packages needed by optional signers when --all-features
-      # turns them on across the workspace. macOS gates these deps out
-      # via target_os, so we only install on Linux:
-      #   libtss2-dev   → mkit-sign-tpm's `tpm2` feature (tss-esapi)
-      #   libudev-dev   → mkit-sign-ctap (via hidapi → libudev)
-      #   libpcsclite-dev → mkit-keystore `backend-yubikey` PC/SC support
-      #   swtpm         → integration tests against a software TPM
-      #                   when -F tpm-mssim is enabled
-      - name: Install native signer deps (Linux only)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
+      # macOS gates the native signer deps (libtss2/libudev/pcsclite) out via
+      # target_os, so no apt step is needed here — unlike the Linux leg (now on
+      # Cloud Build), where cloudbuild/Dockerfile.ci bakes them in.
 
       - name: Check formatting
         working-directory: rust
@@ -131,9 +110,7 @@ jobs:
       # The reference external signers are a SEPARATE workspace
       # (contrib/signers/) so they don't break release-plz's crates.io publish
       # (#225). `--workspace` above no longer covers them, so build/test/lint
-      # them here. --all-features turns on tpm2 (tss-esapi, Linux/Windows-gated)
-      # and ctap-hw (ctap-hid-fido2); the native deps installed above cover the
-      # Linux build. This step must run BEFORE the workspace nextest step:
+      # them here. This step must run BEFORE the workspace nextest step:
       # mkit-cli's attest_roundtrip tests drive the mkit-sign-file binary from
       # contrib/signers/target/debug/ and only fall back to building it
       # on-the-fly when it's missing.
@@ -267,151 +244,50 @@ jobs:
         shell: bash
         run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
 
-
-  # Minimum-supported Rust version gate. Reads `rust-version` from
-  # rust/Cargo.toml so the source of truth stays in one place; if a dep
-  # bump pulls in something that requires a newer rustc, this job fails
-  # before users on the pinned MSRV are affected.
-  msrv:
-    name: MSRV check
-    # Heavier gate: stays cost-gated. Runs on main pushes and on an approving
-    # review of a main-targeted PR — NOT on every pull_request.
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          # On approval (pull_request_review) the default ref is the base
-          # branch — check out the PR head so we test the PR's code. On
-          # push, github.sha is already the right commit.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Resolve MSRV from rust/Cargo.toml
-        id: msrv
-        shell: bash
-        run: |
-          # Pulls the first `rust-version = "X.Y"` line from the
-          # workspace package table. Quote-stripped via awk -F'"'.
-          MSRV=$(awk -F'"' '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' rust/Cargo.toml)
-          if [ -z "${MSRV}" ]; then
-            echo "::error::could not read rust-version from rust/Cargo.toml"
-            exit 1
-          fi
-          echo "msrv=${MSRV}" >> "$GITHUB_OUTPUT"
-          echo "MSRV resolved to ${MSRV}"
-
-      - name: Set up Rust, protoc, and cache
-        uses: ./.github/actions/setup-rust
-        with:
-          toolchain: ${{ steps.msrv.outputs.msrv }}
-          cache-prefix: "rust-msrv-${{ steps.msrv.outputs.msrv }}"
-
-      - name: Install native deps
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev
-
-      - name: cargo check (workspace, locked)
-        working-directory: rust
-        env:
-          CARGO_INCREMENTAL: 0
-        run: cargo check --workspace --locked --all-targets
-
-  codegen-fresh:
-    name: Vendored codegen freshness
-    # Same trigger gating as the core suite: runs on main pushes and every PR
-    # into main, and on an approved main-targeted review.
-    if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      # buffa-build / connectrpc-build shell out to protoc (Edition 2023 needs
-      # protoc >= 27); the repo-worker regen builds for wasm32. setup-rust
-      # installs protoc 31.0 by default.
-      - name: Set up Rust, protoc, and cache
-        uses: ./.github/actions/setup-rust
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: wasm32-unknown-unknown
-          cache-prefix: "rust-codegen-fresh"
-
-      # mkit-rpc / repo-client can pull native deps under default features;
-      # mirror the core suite's deps so the regen build links. This job is
-      # ubuntu-only, so (unlike build-and-test's matrix) no runner.os guard is
-      # needed — cf. the single-OS msrv job, which is likewise unguarded.
-      - name: Install native signer deps
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libudev-dev libpcsclite-dev pkg-config swtpm
-
-      # Regenerate the vendored buffa/connectrpc codegen and fail if the
-      # committed copy drifted (stale generated/ vs the protos + *-build crates).
-      - name: Assert vendored codegen is fresh
-        run: ./scripts/check-generated-fresh.sh
-
   # Aggregator gate — the single stable check to mark "required" in branch
-  # protection. It `needs` every critical Rust job and runs with
-  # `if: always()`, so it reports a real success/failure even when an
-  # upstream job fails, is cancelled, or is skipped. The jobs split into two
-  # gating categories:
-  #   - build-and-test / codegen-fresh: MUST be 'success'. They run on every
-  #     pull_request, so a skip means the Rust suite or the codegen-freshness
-  #     guard never ran — which must not pass the gate.
-  #   - keystore-backends / msrv: approval-gated and legitimately skip on
-  #     PR-only events, so 'skipped' is acceptable; only 'failure' /
-  #     'cancelled' fail the gate.
-  # This guarantees a green required check actually exercised the suite,
-  # closing the "green rollup but nothing ran" trust gap.
+  # protection for THIS workflow's legs. It `needs` the macOS build/test leg and
+  # the keystore matrix and runs with `if: always()`, so it reports a real
+  # success/failure even when a job is skipped, cancelled, or fails:
+  #   - build-and-test: MUST be 'success'. It runs on every pull_request, so a
+  #     skip means the macOS suite never ran — which must not pass the gate.
+  #   - keystore-backends: approval-gated and legitimately skips on PR-only
+  #     events, so 'skipped' is acceptable; only 'failure'/'cancelled' fail it.
+  # The Linux Rust gate lives on Cloud Build (cloudbuild/ci.yaml) and posts its
+  # own commit status — mark that "required" alongside this one.
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends, msrv, codegen-fresh]
+    needs: [build-and-test, keystore-backends]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify core suite ran and no critical job failed
+      - name: Verify the macOS suite ran and no critical job failed
         shell: bash
         env:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
-          MSRV: ${{ needs.msrv.result }}
-          CODEGEN_FRESH: ${{ needs.codegen-fresh.result }}
         run: |
           echo "build-and-test:    ${BUILD_AND_TEST}"
-          echo "codegen-fresh:     ${CODEGEN_FRESH}"
           echo "keystore-backends: ${KEYSTORE_BACKENDS}"
-          echo "msrv:              ${MSRV}"
 
           fail=0
 
-          # Must-run jobs share the core suite's trigger gating, so they have to
-          # have actually run and passed — a skip is a gate failure (no silent
+          # Must-run: shares the core suite's trigger gating, so it has to have
+          # actually run and passed — a skip is a gate failure (no silent
           # "green rollup but nothing ran").
-          for job in BUILD_AND_TEST CODEGEN_FRESH; do
-            if [ "${!job}" != "success" ]; then
-              echo "::error::${job} did not succeed (result=${!job}) — required job must run and pass"
-              fail=1
-            fi
-          done
+          if [ "${BUILD_AND_TEST}" != "success" ]; then
+            echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST}) — required job must run and pass"
+            fail=1
+          fi
 
-          # Cost-gated jobs may be skipped on PR-only events, but must not
-          # have failed or been cancelled when they did run.
-          for job in KEYSTORE_BACKENDS MSRV; do
-            case "${!job}" in
-              success|skipped) ;;
-              *)
-                echo "::error::${job} did not succeed (result=${!job})"
-                fail=1
-                ;;
-            esac
-          done
+          # Cost-gated: may be skipped on PR-only events, but must not have
+          # failed or been cancelled when it did run.
+          case "${KEYSTORE_BACKENDS}" in
+            success|skipped) ;;
+            *)
+              echo "::error::keystore-backends did not succeed (result=${KEYSTORE_BACKENDS})"
+              fail=1
+              ;;
+          esac
 
           if [ "${fail}" -ne 0 ]; then
             echo "::error::Rust CI gate failed — see job results above."

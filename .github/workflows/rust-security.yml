@@ -1,22 +1,18 @@
-name: "Security: Rust"
+name: "Security: Rust (scheduled advisory sweep)"
 
-# REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive
-# RSA decrypt timing leak). cargo-deny v0.19 does not yet support a
-# structured `expires` field on advisory ignores; the TODO comment in
-# deny.toml carries the 2026-08-21 re-justification deadline. When
-# that date passes, this workflow run should fail loudly until the
-# ignore is renewed or dropped. See also
+# REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive RSA
+# decrypt timing leak), re-justification deadline 2026-08-21. See also
 # rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs.
+#
+# Scope: this workflow keeps ONLY the time-based advisory sweep. The per-PR /
+# per-push cargo-audit + cargo-deny gate moved to Cloud Build
+# (cloudbuild/security.yaml). A Cloud Build repo trigger has no native cron, so
+# the Monday sweep — which catches newly-published advisories against an
+# UNCHANGED dependency tree (no Cargo.* edit to path-trigger on) — stays here.
 
 on:
   schedule:
     - cron: "0 6 * * 1"   # Every Monday at 06:00 UTC
-  pull_request:
-    branches:
-      - main
-  # No `push: main`: dependencies only change via PRs (audited above on the PR)
-  # and the Monday schedule catches newly-published advisories against the
-  # current tree. Auditing every main push was pure duplication.
   workflow_dispatch:
 
 permissions:
@@ -27,100 +23,28 @@ env:
 
 jobs:
   audit:
-    name: cargo audit
+    name: cargo audit (advisory sweep)
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Detect Cargo.lock
-        id: lock
-        shell: bash
-        run: |
-          if [ -f rust/Cargo.lock ]; then
-            echo "has_lock=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_lock=false" >> "$GITHUB_OUTPUT"
-          fi
-          # The reference external signers (contrib/signers/) are a SEPARATE
-          # Cargo workspace with their own lockfile, audited separately below.
-          if [ -f contrib/signers/Cargo.lock ]; then
-            echo "has_contrib_lock=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_contrib_lock=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Install Rust toolchain
-        if: steps.lock.outputs.has_lock == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           toolchain: "1.95.0"
 
-      - name: Cache cargo artifacts
-        if: steps.lock.outputs.has_lock == 'true'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-        with:
-          workspaces: rust -> rust/target
-          prefix-key: "rust-security-audit"
-          cache-on-failure: false
-          cache-bin: false
-
-      # rustsec/audit-check@v1 does not accept a working-directory input
-      # (silently dropped; the action then `cargo generate-lockfile`s at the
-      # repo root, which has no Cargo.toml, and fails with exit 101). Install
-      # cargo-audit ourselves and point it at rust/Cargo.lock directly.
       - name: Install cargo-audit
-        if: steps.lock.outputs.has_lock == 'true'
         run: cargo install --locked cargo-audit
 
-      - name: cargo audit
-        if: steps.lock.outputs.has_lock == 'true'
+      # The reference external signers (contrib/signers/) are a SEPARATE Cargo
+      # workspace with their own lockfile — audit both. Keep the --ignore list
+      # in lockstep with rust/deny.toml [advisories.ignore] and
+      # cloudbuild/security.yaml.
+      - name: cargo audit (rust workspace)
         working-directory: rust
-        # Keep this list in lockstep with rust/deny.toml [advisories.ignore].
-        # RUSTSEC-2023-0071: transitive via yubikey 0.9.0-pre.0 cert parsing;
-        # mkit never calls the affected RSA decrypt path.
-        # RUSTSEC-2024-0436: `paste` unmaintained; macro-only, no runtime
-        # exposure, pulled by commonware-* feature-gated deps.
-        # RUSTSEC-2025-0055: tracing-subscriber 0.2 ANSI-escape log
-        # injection; transitive via commonware-runtime 2026.5.x ->
-        # arkworks (ark-r1cs-std), arkworks-internal logging only, no
-        # reachable fix until arkworks moves to >=0.3.20.
         run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055
 
-      # The contrib/signers workspace is NOT covered by the rust/ audit above
-      # (separate lockfile). Since the commonware 2026.5.x bump it carries the
-      # same tracing-subscriber 0.2 chain (commonware-cryptography -> arkworks
-      # -> ark-r1cs-std), so a signer-only advisory would otherwise bypass CI.
-      # Audit it with the IDENTICAL ignore set — keep these flags in lockstep
-      # with the rust/ audit above and rust/deny.toml [advisories.ignore].
-      - name: cargo audit (contrib signers)
-        if: steps.lock.outputs.has_contrib_lock == 'true'
+      - name: cargo audit (contrib/signers workspace)
         working-directory: contrib/signers
         run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0055
-
-  deny:
-    name: cargo deny
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - name: Detect workspace members
-        id: workspace
-        shell: bash
-        run: |
-          if ls rust/crates/*/Cargo.toml >/dev/null 2>&1; then
-            echo "has_members=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_members=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: cargo deny check
-        if: steps.workspace.outputs.has_members == 'true'
-        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2
-        with:
-          manifest-path: rust/Cargo.toml
-          command: check
-          arguments: --all-features
