@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Deterministic mkit↔git bridge translation core.
 //!
 //! Implements [`SPEC-GIT-BRIDGE`](../../../docs/SPEC-GIT-BRIDGE.md):

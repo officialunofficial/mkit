@@ -3,7 +3,7 @@ name = "mkit-cli"
 description = "The mkit command-line tool: a content-addressed VCS with native attestation support"
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
-readme = "../../README.md"
+readme = "README.md"
 # Published to crates.io so `cargo install mkit-cli` works (it installs the
 # `mkit` binary). It ALSO ships as a signed binary via the GitHub Release
 # archives and `cargo install --git` (see docs/INSTALL.md). NOTE: this crate's
@@ -198,3 +198,7 @@ pack-shards = [
 # `mkit-core::history::CommitHistory::open_at` wired into commit /
 # branch / merge / rebase / cherry-pick ref advances.
 history-mmr = ["mkit-core/history-mmr"]
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

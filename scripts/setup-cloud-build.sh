@@ -3,7 +3,7 @@
 #
 # The hard part is already done: the `officialunofficial/mkit` repo is linked to
 # the existing 2nd-gen Cloud Build GitHub connection (`github`, in us-east4) —
-# the same connection polychrome/makechain/uno-infra use. So there is NO GitHub
+# the same connection other org repos already use. So there is NO GitHub
 # App to install. This script provisions the rest:
 #   1. sccache GCS bucket    (+ grant the build SA access)
 #   2. CI toolchain image    (cloudbuild/Dockerfile.ci → GAR; consumed by every
@@ -12,7 +12,7 @@
 #   4. Build triggers        (the /gcbrun-gated Rust suite + path-gated gates)
 #
 # SCOPE: CI only. mkit ships a CLI binary + Cloudflare Workers, so there is no
-# image-publish / GKE-deploy half (unlike polychrome). Release/crates.io/npm/
+# image-publish / GKE-deploy half. Release/crates.io/npm/
 # cosign stay on GitHub Actions; the macOS + keystore-backends legs (which Cloud
 # Build's Linux containers can't run) also stay on GitHub Actions.
 #
@@ -80,9 +80,9 @@ fi
 
 # ── 4. Triggers ─────────────────────────────────────────────────────────────
 # All PR triggers auto-run for org collaborators and require a maintainer
-# `/gcbrun` only for external/fork contributors — matching polychrome and
-# makechain (their *-ci-pr triggers use the same control). This keeps internal
-# PRs flowing on push while still gating untrusted fork code.
+# `/gcbrun` only for external/fork contributors — matching the same control
+# other org repos' *-ci-pr triggers use. This keeps internal PRs flowing on
+# push while still gating untrusted fork code.
 COL="COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY"
 
 # Idempotent create: skip if a trigger of this name already exists.

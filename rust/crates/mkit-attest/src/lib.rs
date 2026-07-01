@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit-attest — JCS + in-toto v1 Statement + DSSE envelope + signers.
 //!
 //! The wire format and on-disk layout this crate produces are defined,

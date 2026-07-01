@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit SSH transport.
 //!
 //! Implements [`mkit_core::protocol::Transport`] over a long-lived

@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit-core — BLAKE3 hashing and canonical v1 object byte format.
 //!
 //! The byte layout implemented here is defined, normatively, in

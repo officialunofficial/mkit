@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Versioned wire protocols for mkit cross-system speech.
 //!
 //! mkit-rpc owns the schemas mkit uses to talk to processes outside

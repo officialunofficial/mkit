@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! `mkit` CLI crate, exposed as a library so integration tests can
 //! drive commands in-process.
 //!
