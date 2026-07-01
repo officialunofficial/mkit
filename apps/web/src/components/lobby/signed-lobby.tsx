@@ -9,7 +9,7 @@
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import * as Popover from '@radix-ui/react-popover'
-import { type ReactNode, useEffect, useMemo, useRef as useReactRef, useState } from 'react'
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef as useReactRef, useState } from 'react'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import { usePresence } from '../../lib/presence-store'
 import {
@@ -54,6 +54,13 @@ const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅',
 
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
+
+/**
+ * `useLayoutEffect` on the client, `useEffect` (a no-op-during-SSR-safe stand-in) on the server — avoids React's
+ * "useLayoutEffect does nothing on the server" warning. Used for the initial bottom-pin below, which MUST run
+ * synchronously before the browser's first paint (see {@link Feed}).
+ */
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
 export function SignedLobby() {
   const api = useMkit()
@@ -227,15 +234,18 @@ function Feed({
     else if (scrolledUp) setBottom(false)
   }
 
-  // START pinned to the newest row. The FIRST time the feed has rows, jump
-  // INSTANTLY — and re-assert across the next few frames, because the initial
-  // jump runs against ESTIMATED row sizes and `measureElement` corrects them a
-  // frame or two later (without the re-assert the feed lands short of the true
-  // bottom). After init, follow ONLY when a new row actually arrives and you're
-  // already at the bottom — keyed on `items.length`, NOT the virtualizer's total
-  // size, so pure measurement churn (async avatar/name loads, a reaction
-  // resizing a row) can never re-pin and fight a manual scroll-up.
-  useEffect(() => {
+  // START pinned to the newest row. The FIRST time the feed has rows, pin
+  // SYNCHRONOUSLY in a layout effect — before the browser paints — so the very
+  // first frame the user sees already sits at the bottom; nothing renders top-
+  // first and then visibly scrolls down. Re-assert across the next few frames
+  // too, because that initial jump runs against ESTIMATED row sizes and
+  // `measureElement` corrects them a frame or two later (without the
+  // re-assert the feed lands short of the true bottom). After init, follow
+  // ONLY when a new row actually arrives and you're already at the bottom —
+  // keyed on `items.length`, NOT the virtualizer's total size, so pure
+  // measurement churn (async avatar/name loads, a reaction resizing a row)
+  // can never re-pin and fight a manual scroll-up.
+  useIsomorphicLayoutEffect(() => {
     if (items.length === 0) return
     const last = items.length - 1
     const grew = items.length > prevLenRef.current
@@ -243,6 +253,7 @@ function Feed({
 
     if (!didInitRef.current) {
       didInitRef.current = true
+      virtualizer.scrollToIndex(last, { align: 'end' })
       let n = 0
       let raf = requestAnimationFrame(function pin() {
         virtualizer.scrollToIndex(last, { align: 'end' })
@@ -706,10 +717,15 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       <aside
         role='dialog'
         aria-label='Commit details'
-        // Unmount only after the SLIDE-OUT finishes — the panel's OWN transform
-        // transition ending while closing (ignore bubbled transitions from children).
+        // Unmount only after the SLIDE-OUT finishes — the panel's OWN translate
+        // transition ending while closing (ignore bubbled transitions from
+        // children). Tailwind's `translate-x-*` utilities animate the CSS
+        // `translate` property, NOT `transform` — matching on `'transform'`
+        // here meant this NEVER fired, so the drawer (and its full-card
+        // backdrop) never unmounted on close, leaving it stuck over the feed
+        // blocking scroll and any further clicks.
         onTransitionEnd={(ev) => {
-          if (ev.target === ev.currentTarget && ev.propertyName === 'transform' && !open) onClose()
+          if (ev.target === ev.currentTarget && ev.propertyName === 'translate' && !open) onClose()
         }}
         className={`absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col rounded-l-md border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${open ? 'translate-x-0' : 'translate-x-full'}`}
       >
