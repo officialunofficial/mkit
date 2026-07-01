@@ -251,6 +251,13 @@ commands:
                     replaces attest.external_signer_args from config)
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
+  self update [--version <tag>] [--check] [--allow-downgrade] [--format human|json]
+                    Update this binary in place from a signed GitHub
+                    Release, verifying the mkit-native release
+                    attestation against keys embedded at build time.
+                    Only for installer-managed binaries (curl mkit.sh |
+                    sh); refuses with guidance under brew/cargo.
+                    --check only reports; `latest` never downgrades
   version           Print version. Also available as the top-level
                     `--version` / `-V` flags; all emit `mkit <X.Y.Z>`.
 
@@ -317,6 +324,7 @@ mod tests {
             "rebase",
             "bisect",
             "sparse-checkout",
+            "self",
             "serve",
             "mcp",
             "pack-shard",

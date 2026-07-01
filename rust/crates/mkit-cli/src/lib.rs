@@ -130,6 +130,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "blame" => commands::blame::run(&rest),
+        "self" => commands::self_update::run(&rest),
         "serve" => commands::serve::run(&rest),
         #[cfg(feature = "git-bridge")]
         "git" => commands::git::run(&rest),
