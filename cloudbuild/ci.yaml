@@ -73,6 +73,35 @@ steps:
         # MUST run before the workspace nextest step: mkit-cli's attest_roundtrip
         # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
         # back to building it on-the-fly when missing.
+        #
+        # mkit-sign-tpm's integration test needs a real or simulated TPM 2.0
+        # device. Cloud Build's VM exposes a real vTPM at /dev/tpm0 (Shielded
+        # VM), which the binary's `tcti()` falls back to whenever `TCTI` /
+        # `TPM2TOOLS_TCTI` are unset — but that device is the VM's own
+        # Secure-Boot/measured-boot TPM, not a scratch TPM for tests, so
+        # writing arbitrary persistent objects to it is unsupported and
+        # produces "inconsistent attributes" errors. Run an ephemeral swtpm
+        # simulator instead (README's documented dev recipe) so the test
+        # gets a clean, disposable TPM state every build, matching local dev.
+        # Lowercase bash variable names here, not upper-snake-case — Cloud
+        # Build's dynamicSubstitutions scanner treats a bare dollar-prefixed
+        # upper-snake-case token as an attempted substitution reference and
+        # fails the build if it isn't a declared one (see the escaping note
+        # in cloudbuild/security.yaml).
+        swtpm_state_dir=$(mktemp -d)
+        swtpm socket --tpmstate dir="$swtpm_state_dir" --tpm2 \
+          --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
+          --flags not-need-init &
+        swtpm_pid=$!
+        trap 'kill "$swtpm_pid" 2>/dev/null || true' EXIT
+        export TCTI="swtpm:host=localhost,port=2321"
+        # Wait for swtpm's control port to accept connections before the TPM
+        # tests dial it — the daemon above starts asynchronously.
+        for _ in $(seq 1 50); do
+          (exec 3<>/dev/tcp/localhost/2322) 2>/dev/null && break
+          sleep 0.2
+        done
+
         ( cd contrib/signers
           cargo fmt --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
