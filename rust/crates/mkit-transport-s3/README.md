@@ -1,10 +1,10 @@
 # mkit-transport-s3
 
-S3-compatible transport for mkit, with SigV4 signing over rustls, tuned for
+S3-compatible transport for mkit, with `SigV4` signing over rustls, tuned for
 Cloudflare R2.
 
 Implements the 7-verb `Transport` trait (`docs/SPEC-TRANSPORT.md`) on top of
-a `reqwest` blocking client with an in-crate SigV4 signer (`sigv4`). Designed
+a `reqwest` blocking client with an in-crate `SigV4` signer (`sigv4`). Designed
 for Cloudflare R2 — plain AWS S3 also works, but CAS semantics only match
 R2's behaviour of returning the body MD5 as the `ETag` on `PUT`.
 

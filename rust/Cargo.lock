@@ -3658,9 +3658,9 @@ dependencies = [
 
 [[package]]
 name = "p384"
-version = "0.14.0-rc.12"
+version = "0.14.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "563b53b275b129c6f070e538bf0845f8e6abd0b5ffeb3f53f1d6ea5f8dbb3b2c"
+checksum = "62941b68907ddf996ac20f0debf700c236ccc3d874637731a93c631129ca042f"
 dependencies = [
  "ecdsa 0.17.0-rc.22",
  "elliptic-curve 0.14.1",
@@ -4960,7 +4960,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

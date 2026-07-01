@@ -1,7 +1,7 @@
 # mkit-transport-enc
 
 Encrypted-stream transport for mkit, layering `mkit-rpc`'s `SshFrame` on top
-of `commonware-stream::encrypted` (ChaCha20-Poly1305, X25519 + Ed25519
+of `commonware-stream::encrypted` (`ChaCha20-Poly1305`, `X25519` + `Ed25519`
 handshake). Full picture in `docs/SPEC-TRANSPORT-ENC.md`.
 
 Implements the `Transport` trait by carrying the existing mkit-rpc
@@ -28,10 +28,10 @@ remote dispatch and `mkit serve --listen-enc`.
 ```
 
 The encrypted layer guarantees mutual authentication (the client knows the
-server's static Ed25519 public key out-of-band; the server decides whether
-to accept the client's key), forward secrecy via ephemeral X25519, and
-per-direction nonce-derived AEAD keys. It reuses the same length-prefixed
+server's static `Ed25519` public key out-of-band; the server decides whether
+to accept the client's key), forward secrecy via ephemeral `X25519`, and
+per-direction nonce-derived `AEAD` keys. It reuses the same length-prefixed
 `SshFrame` wire as `mkit-transport-ssh`, keeping one source of truth for verb
 framing across the encrypted and SSH-tunnelled paths. This is the
-no-OpenSSH encrypted transport (`mkit+enc://`) — see the top-level README's
+no-`OpenSSH` encrypted transport (`mkit+enc://`) — see the top-level README's
 transport table for how it fits alongside `ssh`/`http`/`s3`.

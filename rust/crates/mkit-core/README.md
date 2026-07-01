@@ -21,7 +21,7 @@ must update the spec in the same PR. The crate depends only on `std`: no
 - `protocol` — the `Transport` trait (`list_refs`, `read_ref`, `write_ref`,
   `pack_exists`, `download_pack`, `upload_pack`) every `mkit-transport-*`
   crate implements.
-- `chunker` / `delta` — FastCDC content-defined chunking and delta encoding
+- `chunker` / `delta` — `FastCDC` content-defined chunking and delta encoding
   for large blobs.
 - `ops` — the higher-level repository operations (`commit`, `merge`,
   `rebase`, `cherry-pick`, …) `mkit-cli` drives.
