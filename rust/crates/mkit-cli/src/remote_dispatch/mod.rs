@@ -191,7 +191,7 @@ fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
 ///
 /// Low-level scheme dispatch only — it neither enforces the credential
 /// gate nor threads `ssh.*` config. Any caller that has a [`Config`]
-/// must use [`open_with_config`] (directly, or via [`open_trusted`]) so
+/// must use `open_with_config` (directly, or via `open_trusted`) so
 /// the trust-pinning keys reach the spawned `ssh(1)`; `open` stays
 /// public only for file/memory integration tests that have no ambient
 /// config to resolve.

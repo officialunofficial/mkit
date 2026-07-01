@@ -26,8 +26,8 @@
 # Cargo.toml (mkit-wasm, the contrib signers, fuzz, benches). release-plz skips
 # those automatically; the remaining library and CLI crates (including mkit-cli
 # and mkit-transport-enc) publish. We deliberately do NOT set a workspace-wide
-# `publish = false` (unlike
-# the polychrome repo, which never goes to crates.io).
+# `publish = false` (unlike some other org repos, which never go to
+# crates.io).
 
 [workspace]
 # Tagging/release/changelog happen on ONE anchor package — mkit-core, below — so

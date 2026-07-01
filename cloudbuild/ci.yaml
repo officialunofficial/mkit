@@ -73,6 +73,53 @@ steps:
         # MUST run before the workspace nextest step: mkit-cli's attest_roundtrip
         # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
         # back to building it on-the-fly when missing.
+        #
+        # mkit-sign-tpm's integration test needs a real or simulated TPM 2.0
+        # device. Cloud Build's VM exposes a real vTPM at /dev/tpm0 (Shielded
+        # VM), which the binary's `tcti()` falls back to whenever `TCTI` /
+        # `TPM2TOOLS_TCTI` are unset — but that device is the VM's own
+        # Secure-Boot/measured-boot TPM, not a scratch TPM for tests, so
+        # writing arbitrary persistent objects to it is unsupported and
+        # produces "inconsistent attributes" errors. Run an ephemeral swtpm
+        # simulator instead (README's documented dev recipe) so the test
+        # gets a clean, disposable TPM state every build, matching local dev.
+        # Lowercase bash variable names here, not upper-snake-case — Cloud
+        # Build's dynamicSubstitutions scanner treats a bare dollar-prefixed
+        # upper-snake-case token as an attempted substitution reference and
+        # fails the build if it isn't a declared one (see the escaping note
+        # in cloudbuild/security.yaml).
+        swtpm_state_dir=$(mktemp -d)
+        swtpm socket --tpmstate dir="$swtpm_state_dir" --tpm2 \
+          --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
+          --flags not-need-init &
+        swtpm_pid=$!
+        trap 'kill "$swtpm_pid" 2>/dev/null || true' EXIT
+        export TCTI="swtpm:host=localhost,port=2321"
+        # Wait for both swtpm ports to accept connections before poking them —
+        # the daemon above starts asynchronously.
+        for _ in $(seq 1 50); do
+          (exec 3<>/dev/tcp/localhost/2321) 2>/dev/null && (exec 3<>/dev/tcp/localhost/2322) 2>/dev/null && break
+          sleep 0.2
+        done
+
+        # A fresh swtpm instance is powered-on but not started — every TPM2
+        # command fails with TPM_RC_INITIALIZE until TPM2_Startup(CLEAR) runs
+        # once. No CLI tool for this is baked into the image (tpm2-tools isn't
+        # installed, only libtss2-dev), so send the fixed 12-byte command
+        # (TPM2 Part 3 §9.3, no session, no auth — deterministic wire bytes)
+        # directly to the command port and check for TPM_RC_SUCCESS:
+        #   tag=TPM_ST_NO_SESSIONS(0x8001) size=12 code=TPM2_Startup(0x144)
+        #   body=TPM_SU_CLEAR(0x0000)
+        exec 4<>/dev/tcp/localhost/2321
+        printf '\x80\x01\x00\x00\x00\x0c\x00\x00\x01\x44\x00\x00' >&4
+        startup_resp=$(head -c 10 <&4 | od -An -tx1 | tr -d ' \n')
+        exec 4<&- 4>&-
+        echo "TPM2_Startup response bytes: $startup_resp"
+        if [ "${startup_resp: -8}" != "00000000" ]; then
+          echo "TPM2_Startup did not return TPM_RC_SUCCESS" >&2
+          exit 1
+        fi
+
         ( cd contrib/signers
           cargo fmt --check
           cargo clippy --locked --all-targets --all-features -- -D warnings

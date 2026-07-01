@@ -72,16 +72,22 @@ jobs:
           # push, github.sha is already the right commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Toolchain (rustfmt + clippy) + protoc + lockfile-keyed cargo cache.
+      # Toolchain (rustfmt + clippy) + lockfile-keyed cargo cache. No protoc:
+      # mkit-rpc's build.rs stages pre-committed generated/ sources by default
+      # (protoc is only invoked in codegen mode, via MKIT_RPC_CODEGEN=1, which
+      # only scripts/regen-rpc-proto.sh sets) — the codegen-freshness check
+      # that needs that now lives on Cloud Build (cloudbuild/codegen.yaml),
+      # which gets protoc from its own Docker image, not from here.
       # cache-prefix is partitioned per-workflow + per-runner so a malicious PR
       # cannot poison a key a privileged workflow (release.yml) later reads —
       # see .github/actions/setup-rust and docs/RELEASE.md.
-      - name: Set up Rust, protoc, and cache
+      - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
           cache-prefix: "rust-ci-${{ matrix.os }}"
+          protoc: "false"
 
       # cargo-nextest: faster + structured test runner. Replaces
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
@@ -169,11 +175,15 @@ jobs:
     name: Keystore backends (${{ matrix.name }})
     # Heavier (3-OS matrix): stays cost-gated. Runs on main pushes and on an
     # approving review of a main-targeted PR — NOT on every pull_request.
-    if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
+    #
+    # The gate lives on each STEP below (via env.SHOULD_RUN), not on the job
+    # itself. A job-level `if: false` short-circuits before the matrix is ever
+    # expanded, so GitHub shows one synthetic entry named literally
+    # "Keystore backends (${{ matrix.name }})" (unexpanded) instead of the
+    # real per-leg names — confusing in the PR checks list even though
+    # nothing is actually misconfigured. Gating per-step still expands the
+    # matrix normally (real names, real "skipped" steps) at effectively the
+    # same cost: the trivial steps below.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -188,8 +198,15 @@ jobs:
           - name: linux-secret-systemd-yubikey
             os: ubuntu-latest
             features: backend-linux-secret-service backend-systemd-creds backend-yubikey
+    env:
+      SHOULD_RUN: >-
+        ${{ github.event_name == 'push' ||
+            (github.event_name == 'pull_request_review' &&
+             github.event.review.state == 'approved' &&
+             github.event.pull_request.base.ref == 'main') }}
     steps:
       - name: Checkout
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           # On approval (pull_request_review) the default ref is the base
@@ -199,6 +216,7 @@ jobs:
 
       # Keystore backends never compile mkit-rpc, so protoc is skipped here.
       - name: Set up Rust and cache
+        if: env.SHOULD_RUN == 'true'
         uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -207,10 +225,11 @@ jobs:
           protoc: "false"
 
       - name: Install Linux keystore native deps
-        if: runner.os == 'Linux'
+        if: env.SHOULD_RUN == 'true' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libpcsclite-dev pkg-config
 
       - name: Test keystore backend feature set
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         shell: bash
         env:
@@ -240,6 +259,7 @@ jobs:
           fi
 
       - name: Clippy keystore backend feature set
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         shell: bash
         run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
@@ -250,8 +270,12 @@ jobs:
   # success/failure even when a job is skipped, cancelled, or fails:
   #   - build-and-test: MUST be 'success'. It runs on every pull_request, so a
   #     skip means the macOS suite never ran — which must not pass the gate.
-  #   - keystore-backends: approval-gated and legitimately skips on PR-only
-  #     events, so 'skipped' is acceptable; only 'failure'/'cancelled' fail it.
+  #   - keystore-backends: approval-gated via each step's env.SHOULD_RUN (not
+  #     a job-level `if:`, so the matrix still expands to real per-leg names
+  #     instead of one unexpanded synthetic entry — see the job's comment).
+  #     On PR-only events every step no-ops, so the job reports 'success'
+  #     trivially; 'skipped' remains accepted too in case that ever changes.
+  #     Only 'failure'/'cancelled' fail it.
   # The Linux Rust gate lives on Cloud Build (cloudbuild/ci.yaml) and posts its
   # own commit status — mark that "required" alongside this one.
   ci-gate:

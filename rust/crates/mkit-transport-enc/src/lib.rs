@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit encrypted-stream transport.
 //!
 //! Implements [`mkit_core::protocol::Transport`] by layering the
