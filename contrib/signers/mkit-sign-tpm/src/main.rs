@@ -542,7 +542,7 @@ mod tpm {
         Context, TctiNameConf,
         attributes::ObjectAttributesBuilder,
         constants::SessionType,
-        handles::{KeyHandle, ObjectHandle, PersistentTpmHandle},
+        handles::{KeyHandle, ObjectHandle, PersistentTpmHandle, SessionHandle},
         interface_types::{
             algorithm::{HashingAlgorithm, PublicAlgorithm, SignatureSchemeAlgorithm},
             ecc::EccCurve,
@@ -704,6 +704,15 @@ mod tpm {
         ctx.flush_context(ObjectHandle::from(primary.key_handle))
             .map_err(|e| SignerError::Tpm(format!("flush_context: {e}")))?;
 
+        // Flush our own auth session. TPMs (real or simulated) have a small,
+        // fixed number of session slots; leaving this open until process
+        // exit relies on implicit cleanup neither swtpm nor real hardware
+        // reliably perform, and a leaked session here is exactly what made
+        // the next `sign`/`delete` invocation's own session collide with a
+        // stale one ("inconsistent attributes ... session number 1").
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
+
         Ok(pub_compressed)
     }
 
@@ -768,6 +777,10 @@ mod tpm {
         let mut compact = der_ecdsa_to_compact(&der).map_err(SignerError::from)?;
         normalize_low_s(&mut compact);
 
+        // See keygen()'s matching flush for why this matters.
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
+
         Ok((pub_compressed, compact.to_vec()))
     }
 
@@ -821,6 +834,11 @@ mod tpm {
             .map_err(|e| SignerError::Tpm(format!("tr_from_tpm_public: {e}")))?;
         ctx.evict_control(Provision::Owner, object_handle, persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("evict_control (delete): {e}")))?;
+
+        // See keygen()'s matching flush for why this matters.
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
+
         Ok(())
     }
 
