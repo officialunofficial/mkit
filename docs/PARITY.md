@@ -1,9 +1,12 @@
 # mkit ↔ Git parity matrix
 
 > **Authoritative scope gate for git-parity (umbrella #246, scope-definition milestone #247).**
-> This file defines *exactly* what "usable like git" means for mkit v1. A row
-> is in scope only if it appears here. If schedule pressure appears, the lever
-> is **renegotiating this matrix — never the safety principles.**
+> This file defines *exactly* what "usable like git" means for mkit v1 — the
+> **scope statement, non-goals, machine-output contract, and tracked
+> divergences**. The live, per-command status matrix now lives on the web
+> **`/parity`** page (see the pointer below). A command is in scope only if it
+> is covered by this scope gate. If schedule pressure appears, the lever is
+> **renegotiating scope here — never the safety principles.**
 
 ## Scope statement
 
@@ -55,86 +58,20 @@ creeping; revisit post-v1 if demand warrants.
   (mkit `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
   linear/DAG case is an optional post-v1 follow-up, not a v1 blocker.
 
-## Status legend
-
-| Status | Meaning |
-|--------|---------|
-| ✅ shipped | Behaves like Git's in-matrix subset today |
-| ⚠️ shipped, divergent | Works, but with a known divergence to reconcile (noted + tracked) |
-| 📝 docs-only gap | Implemented; docs/tests need alignment (no code) |
-| 🔨 to implement | In scope, not yet built — owned by the listed phase/issue |
-| 🚫 non-goal | Explicitly out of scope for v1 |
-
 ---
 
-## Porcelain commands
+## Per-command status matrix
 
-| Command | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
-|---------|----------------------------------|--------------------|--------|-------|-------|-------|
-| `init` | create repo | `.mkit/` repo | ✅ | — | — | marker differs (`.mkit/`) |
-| `add` | pathspecs, `-A`, `-u` | same | ✅ | — | — | `-p` interactive hunk staging shipped (#258, row below) |
-| `rm` | `--cached`, `-r`, `-f` + dirty guard | same | ✅ | — | — | guard is an mkit safety divergence |
-| `mv` | rename file or directory, `-f`, into-dir | same | ✅ | 2 | #250 | guarded: refuses to clobber w/o `-f` (incl. dangling symlink); rejects missing/untracked source; keeps writes inside the repo. Exact rename detection (identical content id) → `status`/`diff` show `R` like git; `--no-renames` falls back to delete+add. **Directory moves** (`mv dir newdir`, or `mv dir existing-dir/` → `existing-dir/dir`) are supported: one filesystem rename moves the whole subtree (untracked files included, like git), each tracked file beneath is restaged at its new path. A directory move refuses a pre-existing destination **even with `-f`** (recursively deleting it would strand tracked files in the index and destroy untracked ones), refuses overlapping sources up front (`mv dir dir/file …`), and refuses moving a directory into itself. |
-| `status` | `--porcelain[=v1]`, `-s`, `-z`, C-style path quoting | same | ✅ | 1 | #249 | tracked changes combine into one `XY` record per path (e.g. `MM`); untracked stays its own `??` record, so a staged-delete-plus-untracked path emits both `D ` and `??` like git; quoting matches git `core.quotePath`; `-z` = raw NUL-terminated |
-| `status` | `--porcelain=v2` | same | ✅ | 1 | #249 | `1 <XY> N... <mH> <mI> <mW> <hH> <hI> <path>` (octal modes; full 64-hex BLAKE3 ids modulo length) + `? <path>` for untracked; exact renames emit a `2` `R100` record; `--branch` header lines not emitted. A tracked path shadowed on disk by a directory is suppressed like git — only the tracked-side deletion is reported (#288) |
-| `diff` | HEAD/worktree, `--staged`, pathspecs | same | ✅ | — | — | |
-| `diff` | `<rev>`, `<a>..<b>` ranges | implemented (`split_range`/`rev_to_tree`) | ✅ | 0 | #248 | docs reconciled (stale CLI.md divergence removed) |
-| `diff` | `--name-only`, `--name-status`, `-z` | same | ✅ | 1 | #249 | `A`/`D`/`M` (`T` = mkit mode change); special-byte paths C-quoted, `-z` = raw NUL (status letter + path each NUL-terminated); `-z` only with name-only/-status |
-| `diff` | `--stat` | same | ✅ | 1 | #249 | byte-exact diffstat: padded name column, `+`/`-` graph scaled to width via git's `scale_linear` (honors `COLUMNS`, default 80), summary line with git pluralization; binary → `Bin … bytes` |
-| `diff` | byte-exact hunks (Myers) | same | ✅ | 4 | #257 | Myers diff + git change-compaction; full `diff --git` header (`new file`/`deleted file`/`index`/`--- a/p`/`+++ b/p`, `/dev/null`); byte-matches `git diff` modulo the abbreviated `index` ids (BLAKE3 vs SHA-1). git's optional indent heuristic not applied |
-| `commit` | `-m`, `-F`/`--file`, `-a`, `--amend`, `--author` | same | ✅ | — | — | signed; `-F <file>` reads the message (`-` = stdin, mutually exclusive with `-m`); amend leaves unreachable obj until gc; when a merge is in progress (`MERGE_HEAD` present, conflicts resolved) `commit` records a **two-parent merge commit** and clears the merge state, like `git commit` after a merge |
-| `log` | history, `-n`, `--format=json`, `--oneline`, `--abbrev-commit`, `--abbrev[=N]` | same | ✅ | 0 | #248 | `--oneline`/`--abbrev-commit` abbreviate (default 7); abbreviated id is a BLAKE3 prefix |
-| `log` | `<rev>`, `<a>..<b>`, `<a>...<b>` ranges | same | ✅ | 1 | #249, #252 | `<rev>` start (annotated tags peeled), `A..B`/`A..`/`..B` ranges, `A...B` symmetric difference (excludes the merge base's ancestors); reverse-chrono + topological order = git `--date-order` (matches git default for linear/monotonic-timestamp history) |
-| `diff` | `<a>...<b>` symmetric range | same | ✅ | 4 | #252 | diffs `merge-base(a,b)` against `b` (git semantics); single merge base (criss-cross multi-base is a documented edge) |
-| `diff` | `--merge-base [<a> [<b>]]` | same | ✅ | — | — | flag spelling of `<a>...<b>`: one revision = `merge-base(<a>, HEAD)` vs the worktree; two revisions = `merge-base(<a>, <b>)` vs `<b>`; trailing args are pathspecs; rejected with `--staged` |
-| `log` | `--graph` | `--graph` is a no-op | 🚫 | 1 | #249 | **v1 non-goal** — flag accepted as a no-op; full graph parity unachievable (mkit's default `log` body diverges); optional `--oneline --graph` renderer is a post-v1 follow-up |
-| `branch` | create, list, `-v`, `-d`/`-D`/`-m`, `--list [<pattern>]`, `--contains`/`--no-contains`, `--merged`/`--no-merged` | same | ✅ | 1 | #249 | default list is `<marker> <name>` (no id, like git); `-v` adds abbreviated id + subject; `-D <missing>` errors like git (no silent no-op). Listing filters: `--list <pattern>...` keeps branches whose name matches any shell glob (`*`/`?`/`[…]`, `*` spans `/`; git `wildmatch` non-pathname semantics — enabled by `--list` or any filter); `--contains [<c>]`/`--no-contains [<c>]` keep (or exclude) branches whose tip has `<c>`; `--merged [<c>]`/`--no-merged [<c>]` keep (or exclude) branches merged into `<c>`; all four commit args default to HEAD when omitted (like git); filters and patterns combine (AND). Prior divergences from the core-porcelain milestone reconciled. |
-| `checkout` | switch branch, restore files; `-b`/`-B <new> [<start>]` | same | ✅ | — | — | guarded against clobber; untracked files preserved on switch (refuses only target-tree collisions); `-b` creates (refuses to clobber), `-B` create-or-resets, then switches — output `Switched to a new branch '<n>'`. `checkout -`/`@{-1}` (previous branch) not yet supported |
-| `switch` | `switch <branch>`, `switch -c`/`-C <new> [<start>]` | same | ✅ | — | — | git's modern switch UX; thin front-end over `checkout` (same clobber guard + `Switched to …` output). `switch -` not yet supported |
-| `tag` | lightweight/`-a`/`-s`/`-m`/`-d` | same | ✅ | — | — | |
-| `merge` / `cherry-pick` / `rebase` | merge, pick, replay + conflict workflow; `merge`/`cherry-pick` `--no-commit` + `-m` | same | ✅ | — | — | `rebase -i` row below (#259); rebase target accepts any revspec (`HEAD~n`, hashes, tags). `merge --no-commit` stages the merge and records `MERGE_HEAD` (finish with `mkit commit` → two-parent merge, or `mkit merge --continue`); `cherry-pick -n` stages a clean pick without committing (next `mkit commit` is an ordinary single-parent commit); a `-n` pick that **conflicts** is refused before anything is written (mkit can't represent a staged-but-unresolved conflict, and a later `mkit commit` only guards merges — so re-run without `-n` to use the resumable `--continue` flow). `merge -m` overrides the merge message; **`cherry-pick -m`/`--mainline <parent-number>` selects the mainline parent** when replaying a merge commit (git semantics — required for a merge, rejected for a non-merge; mkit refuses to silently guess the mainline). Fast-forward merges create no commit, so `--no-commit` does not affect them (like git) |
-| `rebase -i` | interactive todo list | same | ✅ | 4 | #259, #291 | reorder / `drop` / `reword` / `squash` / `fixup` via `$EDITOR` (squash combines messages, fixup keeps the prior; a leading squash/fixup is rejected); conflict pause/resume + `--continue`/`--skip`/`--abort` carry over. `edit` (stop-to-amend) not yet supported |
-| `restore` / `reset` | `--staged`/`--worktree`/`--soft`/`--mixed` | same | ✅ | — | — | |
-| `reset --hard` | reset worktree | same | ✅ | 2 | #250 | resets HEAD+index+worktree to target; removes dropped tracked files, keeps untracked (like git) except a target-colliding untracked path; refuses to discard dirty/staged or overwrite a colliding untracked path without `-f` (mkit divergence — git discards silently); guard re-checks each dropped path directly, so it also covers a tracked file matching an ignore rule (`.gitignore`/`.mkitignore`) |
-| `revert` | inverse-commit, `--no-commit`, conflict-aware | same; merge `-m` not yet supported | ✅ | 2 | #255 | forward commit (not gated on gc); reuses the conflict workflow; reverting a merge is refused pending mainline selection |
-| `clean` | `-n`/`-f`/`-d`/`-x`/`-X`, pathspecs | same | ✅ | 2 | #250 | refuses unless `-f` (git `clean.requireForce`); `-n` previews `Would remove …`; `-d` removes untracked dirs but keeps ignored files + protects nested repos (no `-ff`); `-x`/`-X` mutually exclusive, use the shared path-aware ignore matcher (#256); pathspecs select top-level entries / whole dirs (`.` = all under cwd; naming a file inside a removable untracked dir is a known limitation) |
-| `stash` | save/list/pop/apply/drop/clear/show; `stash@{N}` refs; `pop`/`apply` `--index` | same | ✅ | — | — | `pop`/`apply`/`drop`/`show` accept either a bare index or the `stash@{N}` spelling that `stash list` prints. `save` records the staged index as the stash commit's **second parent** (git-style `[HEAD, I]`, gc-reachable via the closure), so `pop`/`apply` `--index` restore the staged state in addition to the worktree. No on-disk manifest change (the index snapshot lives in the object graph). The snapshot is the **serialized index** (stored as a blob in the second parent's wrapper tree, alongside a content subtree that keeps staged blobs gc-reachable), so `--index` restores the index exactly — **including staged deletions** (`mkit rm`-staged), which a tree could not represent. Pre-feature single-parent entries carry no index snapshot, so `--index` is a documented no-op for them |
-| `gc` | prune unreachable objects | mark-and-sweep, recovery-aware | ✅ | — | #233 | `-n`/`--grace-secs`; fail-closed; see SPEC-GC.md |
-| `add -p` | interactive hunk staging | same | ✅ | 4 | #258 | per-hunk `y/n/q/a/d`; regular text files only (binary skipped with a message, symlink/dir refused); explicit paths required; ignored paths need `-f`; symlinked-parent escapes refused; `s` (split) / `e` (manual edit) are follow-ups |
-| `git export` | *(no git analogue — mirror-to-git bridge)* | deterministic one-way export to a git mirror per [`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md) | ✅ | — | #330 | **experimental**, feature-gated (`git-bridge`, default-off); per-ref refuse-loudly for remixes / unmappable ref names / non-canonical chunking; bidirectional sync remains 🚫 |
-| `git import` | *(no git analogue — git-to-mkit bridge)* | importer-signed import per [`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md) | ✅ | — | #330 | `import`/`fetch`/`pull`, passthrough fork export, `verify`/`status`/`format-patch`; feature-gated (`git-bridge`) |
+The live, per-command git-parity matrix — every porcelain, plumbing, remote,
+and config-convention row with its shipped / divergent / non-goal status — is
+rendered on the web **[`/parity`](../apps/web/src/pages/parity.tsx)** page from
+[`apps/web/src/lib/parity-data.ts`](../apps/web/src/lib/parity-data.ts). That
+page is the single source of truth for *which commands and flags* behave like
+git today; keep it current when a command's behavior changes.
 
-## Plumbing commands (read-only first, mutating later)
-
-| Command | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
-|---------|----------------------------------|--------------------|--------|-------|-------|-------|
-| `rev-parse` | `--verify`, `--short`, `--abbrev-ref`, `--show-toplevel` | same | ✅ | 3 | #251 | id is 64-hex BLAKE3 (vs 40-hex SHA-1); `--short` = BLAKE3 prefix; `--verify` is accepted for git-script compatibility but is a no-op — mkit always errors on an unresolvable revision |
-| `cat-file` | `-t`, `-s`, `-p`, `--batch` | same | ✅ | 3 | #251 | `-s`/`-p` byte-exact for blobs; tree `-p` is `<mode> <type> <hash>\t<name>` (modulo hash); commit/tag `-p` and `remix` type are mkit-shaped. `--batch` header is `<hash> <type> <size>`; `<size>` matches the emitted content (byte-exact for blobs, mkit-shaped otherwise); unknown → `<name> missing` |
-| `ls-files` | `-s`, `-z`, `--others`, `--ignored`, `--exclude-standard` | same | ✅ | 3 | #251 | `-s` is `<mode> <hash> 0\t<path>` (modulo hash; stage always 0 — no merge stages); tracked/others paths sorted; `-z` raw NUL |
-| `ls-tree` | `-r`, `-z` | same | ✅ | 3 | #251 | `<mode> <type> <hash>\t<name>` modulo hash length; `-r` omits tree lines like git; `-z` raw NUL |
-| `show-ref` | `--heads`, `--tags` | same | ✅ | 3 | #251 | `<hash> <refname>` sorted, modulo hash length |
-| `for-each-ref` | `--format` | same | ✅ | 3 | #251 | default `<objectname> <objecttype>\t<refname>`; `%(atom)` subset: refname[:short], objectname[:short], objecttype (modulo hash length) |
-| `show` | object/commit display, `--stat` | same | ✅ | 3 | #251 | commit/remix = header + first-parent diff (diff body byte-matches `git show`); `--stat` renders the diffstat instead of the patch (reuses `diff --stat`); tag peels to target; tree listing; blob contents; defaults to HEAD. Commit/tag *header* diverges (mkit `Identity` + 64-hex), same as `log` |
-| `symbolic-ref` | read | same (HEAD) | ✅ | 3 | #251 | reads HEAD only; full target or `--short`; detached → error |
-| `symbolic-ref` | write (HEAD → refs/heads/<b>) | same | ✅ | 4 | #254 | repoints HEAD without touching the worktree; target need not exist yet |
-| `update-ref` | `[-d] <ref> [<new> [<old>]]` | same | ✅ | 4 | #254 | refs/heads/* + refs/tags/* only; CAS via `<old>` (all-zero = must be absent, update mode only; `-d`'s `<old>` must be concrete); branch moves go through the history-MMR ref-write path; `-d` refuses the current branch (mkit safety divergence) |
-| `merge-base` | `<a> <b>`, `--is-ancestor` | same | ✅ | — | — | reuses the merge engine's `find_merge_base`/`is_ancestor`; prints the base id (64-hex BLAKE3), exit 1 + no output when none; `--is-ancestor` exits 0/1 with no output |
-| `rev-list` | `[--count] <rev>` | same | ✅ | — | — | reuses `log`'s ordered (reverse-chrono/topological) walk; lists 64-hex ids, or `--count` prints the number. Range/filter forms are a follow-up |
-
-## Config & format conventions
-
-| Convention | Git-compatible subset (in scope) | mkit current state | Status | Phase | Issue | Notes |
-|------------|----------------------------------|--------------------|--------|-------|-------|-------|
-| `config user.name` / `user.email` | accept + round-trip, case-insensitive key | same | ✅ | 2 | #250 | **non-authoritative**: stored/round-tripped but never feed the signed `Identity` (that stays `user.identity`, still in `REPO_FORBIDDEN_KEYS`). Repo-safe precisely because inert — proven by a no-spoof test. Config section + variable names are matched case-insensitively like git (`User.Name` == `user.name`), in both the `config` command and the config-file parser; normalization happens **before** the `REPO_FORBIDDEN_KEYS` check so a case-variant (`User.Identity`) cannot bypass the spoof guard. **Subsection** names (`remote.<name>`, `branch.<branch>`) stay case-sensitive (git semantics), so a named remote `Origin` survives a reload uncorrupted |
-| `config core.*` | accept inert subset, reject dangerous | same | ✅ | 2 | #254 | inert allowlist (autocrlf/bare/filemode/ignorecase/quotepath/symlinks) stored & round-tripped but **not honored**; dangerous keys (sshCommand/pager/editor/hooksPath/fsmonitor) **rejected**; case-insensitive, lowercased like git |
-| `.gitignore` | `**`, anchored `/`, dir-relative, negation, char classes | path-relative; reads `.gitignore` + `.mkitignore` (root) | ✅ | 3 | #256 | v1 subset: path-relative matching, anchored leading `/`, multi-segment patterns, `**` (leading/middle/trailing), `[...]` classes, `\` escapes, negation (last-match-wins), trailing-space trim. Reads both files at the repo **root**; `.mkitignore` applied last (wins). **Deferred:** nested per-directory ignore files, `core.excludesFile` global excludes, escaped trailing spaces |
-| abbreviated hashes | short prefix resolution + display | resolve + `log --abbrev[=N]`/`--oneline` | ✅ | 0 | #248 | display side shipped; `rev-parse --short` lands with the plumbing-commands milestone (#251) |
-| `--version` / `-V` | top-level flag | `mkit --version`/`-V` alias `version` | ✅ | 0 | #248 | emits `mkit <X.Y.Z>` (not git's `git version …`) |
-| global `-C <path>` | run as if started in `<path>` | same | ✅ | — | — | parsed before the subcommand (so it applies to repo discovery); repeatable, relative-resolving, like git |
-| global `-c <key>=<val>` | one-shot config override | same | ✅ | — | — | applied to the effective config on **both** read paths (`read_or_default` + `read_layered`), so every command honors it; to the in-memory view only (never persisted). Flows through the SAME enforcement as a per-repo file — `REPO_FORBIDDEN_KEYS` refused, dangerous `core.*` dropped, control-char values rejected — so `-c` cannot spoof the signed author or redirect trust |
-| global `--no-pager`/`-P`/`--paginate` | pager control | accepted no-op | ✅ | — | — | mkit never paginates (better for agents; intentional); flags accepted so defensive scripts don't error |
-| global `--git-dir`/`--work-tree`/`--exec-path` | — | — | 🚫 | — | — | non-goal (mkit uses `.mkit/`; no split work-tree/exec-path model) |
-| `.git/` repo detection | — | — | 🚫 | — | #254 | non-goal in core; opt-in alias shim only |
+This document keeps the surrounding **contract** that the web page distills out
+(it carries user-facing notes only): the scope gate above, and the
+machine-output / safety / divergence sections below.
 
 ---
 

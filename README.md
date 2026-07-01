@@ -339,7 +339,7 @@ they describe are pinned by the test vectors under
 | [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users — migrate from git, track a git upstream, push work back |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
-| [`docs/PARITY.md`](docs/PARITY.md) | Contributors — mkit ↔ git parity matrix and v1 scope gate |
+| [`docs/PARITY.md`](docs/PARITY.md) | Contributors — v1 scope gate, machine-output contract, and tracked divergences (the per-command matrix is the web `/parity` page) |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
 | [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
 | [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers — object on-disk format |

@@ -550,6 +550,104 @@ fn blame_m_attributes_within_file_move() {
 }
 
 #[test]
+fn blame_m_merge_credits_move_from_second_parent() {
+    // A long line lives only on the SECOND merge parent (feature); the merge
+    // resolution moves it to the file's end, so neither parent's matcher
+    // explains it in place. `git blame -M` credits the moved line to the
+    // feature commit, NOT the merge — the detector must run against the
+    // second parent. (Pinned against real `git blame -M`, git 2.50.1.)
+    let long = "let quick_brown_fox_total = 1;";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"HEAD\nX\nY\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    // First parent (main): a conflicting edit to line 1, no long line.
+    make_commit(td.path(), "f.txt", b"MAIN\nX\nY\n", "p1edit");
+
+    // Second parent (feature): writes the long line at the top.
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(
+        td.path(),
+        "f.txt",
+        format!("{long}\nX\nY\n").as_bytes(),
+        "feature writes long",
+    );
+    let feature = ref_hash(td.path(), "feature");
+
+    // Merge conflicts on line 1; resolve by moving the long line to the end.
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    let merge = run_in(td.path(), &["merge", "feature"]);
+    assert!(!merge.status.success(), "merge should conflict: {merge:?}");
+    fs::write(td.path().join("f.txt"), format!("X\nY\n{long}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "f.txt"]).status.success());
+    let cont = run_in(td.path(), &["merge", "--continue"]);
+    assert!(cont.status.success(), "merge --continue failed: {cont:?}");
+
+    let out = run_in(td.path(), &["blame", "-M", "f.txt"]);
+    assert!(out.status.success(), "blame -M failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let line = stdout.lines().find(|l| l.ends_with(long)).unwrap();
+    assert!(
+        line.starts_with(&feature[..12]),
+        "-M credits the move to the 2nd-parent (feature) origin, not the merge: {stdout:?}"
+    );
+}
+
+#[test]
+fn blame_ignore_rev_merge_falls_through_to_second_parent() {
+    // An ignored merge resolves a modify/delete conflict by keeping a noise
+    // version of the feature line. The first parent (main) DELETED that line,
+    // so the fall-through must cross to the SECOND parent (feature) that wrote
+    // the content. `blame --ignore-rev <merge>` credits feature, not the
+    // merge. (Pinned against real `git blame --ignore-rev`, git 2.50.1.)
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"TOP\nMID\nBOT\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    // First parent (main): deletes MID.
+    make_commit(td.path(), "f.txt", b"TOP\nBOT\n", "p1 deletes mid");
+
+    // Second parent (feature): rewrites MID to real content.
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    make_commit(
+        td.path(),
+        "f.txt",
+        b"TOP\nREAL_CONTENT_OF_B_LINE\nBOT\n",
+        "feature rewrites mid",
+    );
+    let feature = ref_hash(td.path(), "feature");
+
+    // Merge conflicts (modify/delete); resolve to a noise version of the line.
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    let merge = run_in(td.path(), &["merge", "feature"]);
+    assert!(!merge.status.success(), "merge should conflict: {merge:?}");
+    fs::write(
+        td.path().join("f.txt"),
+        b"TOP\n  REAL_CONTENT_OF_B_LINE  X\nBOT\n",
+    )
+    .unwrap();
+    assert!(run_in(td.path(), &["add", "f.txt"]).status.success());
+    let cont = run_in(td.path(), &["merge", "--continue"]);
+    assert!(cont.status.success(), "merge --continue failed: {cont:?}");
+    let merge_hash = head_hash(td.path());
+
+    let out = run_in(td.path(), &["blame", "--ignore-rev", &merge_hash, "f.txt"]);
+    assert!(out.status.success(), "blame --ignore-rev failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[1].starts_with(&feature[..12]),
+        "ignored merge falls through across to the 2nd parent (feature): {stdout:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with(&merge_hash[..12])),
+        "no line is credited to the ignored merge: {stdout:?}"
+    );
+}
+
+#[test]
 fn blame_ignore_rev_falls_through_to_prior_commit() {
     // `--ignore-rev <reformat>` skips the noise commit: line 2's blame
     // falls through to the commit that previously changed it, while the

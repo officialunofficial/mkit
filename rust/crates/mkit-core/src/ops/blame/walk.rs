@@ -3,6 +3,7 @@
 //! attributions from its parents' already-resolved ones. `super::blame_file_with`
 //! drives this; the single-parent path reproduces the old linear replay.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -148,12 +149,46 @@ pub(super) fn topo_order(nodes: &HashMap<Hash, DagNode>, head: Hash) -> Vec<Hash
     order
 }
 
+/// A relevant parent's loaded lines and its line mapping (`mapping[ni]` = the
+/// parent line child line `ni` is unchanged from, or `None`). Loaded once in
+/// [`attribute_commit`] and reused by the fall-through / detector passes.
+type ParentData<'a> = (Cow<'a, [Vec<u8>]>, Vec<Option<usize>>);
+
 /// Read-mostly context threaded into [`attribute_commit`].
 pub(super) struct WalkCtx<'a> {
     pub(super) store: &'a ObjectStore,
     pub(super) opts: &'a BlameOptions,
     pub(super) nodes: &'a HashMap<Hash, DagNode>,
     pub(super) file_path: &'a str,
+}
+
+/// The per-commit working set shared by the merge passes: the commit and its
+/// node, the commit's own lines, and the first parent's lines (loaded once and
+/// reused). Bundling these keeps the fall-through and detector helpers to a
+/// handful of arguments instead of a positional pile-up.
+struct CommitPass<'a> {
+    node: &'a DagNode,
+    commit: Hash,
+    lines: &'a [Vec<u8>],
+    first_parent_lines: &'a [Vec<u8>],
+}
+
+impl<'a> CommitPass<'a> {
+    /// The `k`th parent's lines: the first parent is already loaded and simply
+    /// borrowed; the rest (only reached at a merge) are loaded on demand. The
+    /// `Cow` lets both cases share one binding without the borrow-or-own dance.
+    fn parent_lines(
+        &self,
+        ctx: &WalkCtx,
+        k: usize,
+        parent: Hash,
+    ) -> BlameOutcome<Cow<'a, [Vec<u8>]>> {
+        Ok(if k == 0 {
+            Cow::Borrowed(self.first_parent_lines)
+        } else {
+            Cow::Owned(load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?)
+        })
+    }
 }
 
 /// Resolve the attribution of every line of `commit`'s blob from its parents'
@@ -165,7 +200,7 @@ pub(super) struct WalkCtx<'a> {
 /// the first parent — in parent order — that still contains it (so a line on
 /// both sides is credited to the first parent, matching git); lines no parent
 /// explains are introduced here, then offered to ignore-rev fall-through and
-/// the detector against the first parent.
+/// the `-M`/`-C` detector against every relevant parent (first-parent-wins).
 pub(super) fn attribute_commit(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
@@ -206,6 +241,7 @@ pub(super) fn attribute_commit(
                     within_file: None,
                 },
                 &mut attrs,
+                &mut vec![false; lines.len()],
             )?;
         }
         return Ok(attrs.into());
@@ -215,22 +251,25 @@ pub(super) fn attribute_commit(
     let mut attrs = vec![own; lines.len()];
     let mut matched = vec![false; lines.len()];
     let first_parent_lines = load_blob_lines(ctx.store, ctx.nodes[&first_parent].blob_hash)?;
-    let mut first_parent_mapping: Vec<Option<usize>> = Vec::new();
+    let pass = CommitPass {
+        node,
+        commit,
+        lines: &lines,
+        first_parent_lines: &first_parent_lines,
+    };
 
+    // Load each relevant parent's lines and its line mapping exactly once,
+    // here, and reuse them in the fall-through / detector passes below —
+    // otherwise a merge under `--ignore-rev` (or `-M`/`-C`) would reload the
+    // blob and rerun the diff per parent. `parents_data[k]` corresponds to
+    // `node.parents[k]`; `mapping[ni]` = the parent line this commit's line
+    // `ni` is unchanged from, or `None` if changed/introduced.
+    let mut parents_data: Vec<ParentData> = Vec::with_capacity(node.parents.len());
     for (k, &parent) in node.parents.iter().enumerate() {
-        // Borrow the already-loaded first parent; load the rest. (`k == 0`
-        // previously cloned only to unify the branch types — pure waste on
-        // every changed single-parent commit, the common linear case.)
-        let loaded;
-        let parent_lines: &[Vec<u8>] = if k == 0 {
-            &first_parent_lines
-        } else {
-            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
-            &loaded
-        };
-        // `mapping[ni]` = the parent index that this commit's line `ni` is
-        // unchanged from, or `None` if changed/introduced.
-        let mapping = match_lines_with_options(parent_lines, &lines, ctx.opts)?;
+        let parent_lines = pass.parent_lines(ctx, k, parent)?;
+        let mapping = match_lines_with_options(&parent_lines, &lines, ctx.opts)?;
+        // Each line is explained by the first parent — in parent order — that
+        // still contains it (a line on both sides sticks to the first parent).
         let parent_attrs = &memo[&parent];
         for (ni, m) in mapping.iter().enumerate() {
             if matched[ni] {
@@ -242,18 +281,51 @@ pub(super) fn attribute_commit(
                 matched[ni] = true;
             }
         }
-        if k == 0 {
-            first_parent_mapping = mapping;
-        }
+        parents_data.push((parent_lines, mapping));
     }
 
-    // `--ignore-rev`: a line this (ignored) commit would keep falls through to
-    // the first parent's corresponding line. A line the fall-through resolves
-    // is marked `matched` so the detector below does not overwrite it —
-    // `--ignore-rev` takes precedence over `-M`/`-C` on the lines it resolves.
     if ctx.opts.is_ignored(&commit) {
-        let fall = ignore_fallthrough(&first_parent_mapping, first_parent_lines.len());
-        let parent_attrs = &memo[&first_parent];
+        apply_ignore_fallthrough(memo, &pass, &parents_data, &mut attrs, &mut matched);
+    }
+
+    if ctx.opts.detection_enabled() {
+        apply_detection(
+            ctx,
+            memo,
+            detector,
+            &pass,
+            &parents_data,
+            &mut attrs,
+            &mut matched,
+        )?;
+    }
+
+    Ok(attrs.into())
+}
+
+/// `--ignore-rev` fall-through across `node`'s parents (first-parent-wins).
+///
+/// A line this (ignored) commit would keep falls through to a parent's
+/// corresponding line. At a merge the fall-through is offered to each parent
+/// in turn: a line the first parent has a positional counterpart for is
+/// credited there, but a line the first parent dropped (no counterpart in its
+/// conflicted hunk) falls through across to the next parent that does pair it
+/// — matching `git blame --ignore-rev` at a merge. A resolved line is marked
+/// `matched` so the detector does not overwrite it (`--ignore-rev` takes
+/// precedence over `-M`/`-C`). With one parent this is exactly the old
+/// single-parent fall-through.
+fn apply_ignore_fallthrough(
+    memo: &HashMap<Hash, Rc<[Attribution]>>,
+    pass: &CommitPass,
+    parents_data: &[ParentData],
+    attrs: &mut [Attribution],
+    matched: &mut [bool],
+) {
+    for (k, &parent) in pass.node.parents.iter().enumerate() {
+        // Reuse the lines + mapping loaded once in `attribute_commit`.
+        let (parent_lines, mapping) = &parents_data[k];
+        let fall = ignore_fallthrough(mapping, parent_lines.len());
+        let parent_attrs = &memo[&parent];
         for (ni, &paired) in fall.iter().enumerate() {
             if matched[ni] {
                 continue;
@@ -265,23 +337,45 @@ pub(super) fn attribute_commit(
             }
         }
     }
+}
 
-    // `-M`/`-C`: reassign blocks no parent explained, against the first parent
-    // (its lines and resolved origins are the move/copy source).
-    if ctx.opts.detection_enabled() {
+/// `-M`/`-C` reassignment across `node`'s parents (first-parent-wins).
+///
+/// At a merge the unexplained lines are offered to each relevant parent in
+/// turn, each searching that parent's own tree, so a block moved (`-M`) or
+/// copied (`-C -C`) in from a non-first-parent side is credited to that side's
+/// origin — matching `git blame -M`/`-C`, which credits the merge parent whose
+/// tree holds the source. A block both sides could equally explain sticks to
+/// the first parent (git's `-C` copy tie is last-parent-wins — a documented
+/// residual; see the `move_copy` module note). `matched` doubles as the
+/// "already explained" mask threaded into `reassign`, so a line an earlier
+/// parent claimed is excluded from the next parent's candidates and never
+/// reassigned twice; it is not read after this pass. With one parent this is
+/// exactly the old single pass, so the linear path is unchanged.
+fn apply_detection(
+    ctx: &WalkCtx,
+    memo: &HashMap<Hash, Rc<[Attribution]>>,
+    detector: &mut move_copy::Detector,
+    pass: &CommitPass,
+    parents_data: &[ParentData],
+    attrs: &mut [Attribution],
+    matched: &mut [bool],
+) -> BlameOutcome<()> {
+    for (k, &parent) in pass.node.parents.iter().enumerate() {
+        let parent_lines = &parents_data[k].0;
         let unmatched: Vec<bool> = matched.iter().map(|&m| !m).collect();
         detector.reassign(
             &move_copy::ReassignRequest {
                 file_path: ctx.file_path,
-                source_commit: first_parent,
-                attributed_commit: commit,
-                new_lines: &lines,
+                source_commit: parent,
+                attributed_commit: pass.commit,
+                new_lines: pass.lines,
                 unmatched: &unmatched,
-                within_file: Some((&first_parent_lines, &memo[&first_parent])),
+                within_file: Some((parent_lines, &memo[&parent])),
             },
-            &mut attrs,
+            attrs,
+            matched,
         )?;
     }
-
-    Ok(attrs.into())
+    Ok(())
 }

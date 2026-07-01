@@ -27,6 +27,30 @@
 //! longer than [`MAX_DETECT_RUN`] is searched only as a single whole block
 //! (a documented bound; the matcher already caps inputs at
 //! [`super::BLAME_MAX_LINES`]).
+//!
+//! **Merges.** At a merge both the within-file `-M` move source and the
+//! cross-file `-C` copy source are offered to **every relevant parent** (see
+//! [`super::walk::attribute_commit`]), each search enumerating that parent's
+//! own tree. So a block moved or copied in from a non-first-parent side is
+//! credited to that side — matching `git blame -M`/`-C -C`, which credits the
+//! merge parent whose tree holds the source (verified against git 2.50.1). A
+//! block whose source lives only in the merge's *own* tree (introduced by the
+//! merge) stays on the merge, as in git.
+//!
+//! Two narrow `-C` residuals remain (issue #499 follow-up); `-M` and
+//! `--ignore-rev` are fully merge-aware:
+//!
+//! 1. **Multi-parent copy tie.** When the *same* block is newly added on two
+//!    or more merge sides, mkit's first-parent-wins `claimed` mask credits the
+//!    first such parent, whereas git credits the last (its copy-source scoring
+//!    is effectively last-parent-wins across the parent queue). Only a block
+//!    duplicated across sides is affected.
+//! 2. **Boundary / newly-added file.** When the blamed file is *added by the
+//!    merge* (no parent contains it) and its sole copy source lives on a
+//!    non-first parent, the root search walks the first parent's tree only
+//!    ([`commit_parent`] returns a single parent, and [`super::walk::build_file_dag`]
+//!    drops parents that lack the file), so mkit credits the merge where git
+//!    would credit that parent.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -126,12 +150,19 @@ impl<'a> Detector<'a> {
     }
 
     /// Reassign moved/copied blocks among the unmatched lines of the
-    /// request, writing origins into `out`. A no-op when detection is off
-    /// or nothing qualifies.
+    /// request, writing origins into `out` and marking each reassigned line
+    /// `true` in `claimed`. A no-op when detection is off or nothing
+    /// qualifies.
+    ///
+    /// `claimed` lets a merge run the detector against each parent in turn
+    /// (first-parent-wins): a line a higher-priority parent already explained
+    /// is excluded from the next parent's `unmatched` mask, so it is never
+    /// reassigned twice. The single-parent path passes a throwaway buffer.
     pub(super) fn reassign(
         &mut self,
         req: &ReassignRequest,
         out: &mut [Attribution],
+        claimed: &mut [bool],
     ) -> BlameOutcome<()> {
         let iw = self.opts.ignore_whitespace;
         let move_threshold = match self.opts.effective_move() {
@@ -189,6 +220,7 @@ impl<'a> Detector<'a> {
                 continue;
             };
             self.credit(s, e, &source, &ctx, out)?;
+            claimed[s..e].fill(true);
             stack.push(region.start..s);
             stack.push(e..region.end);
         }

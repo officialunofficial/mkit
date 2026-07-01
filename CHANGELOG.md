@@ -35,22 +35,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lines is split out and — combined with `-w` — a block copied with a
   whitespace change is still detected. Configured through a typed
   `MoveDetection`/`CopyDetection` API that can't express an invalid
-  "enabled but zero-threshold" state. Attribution remains first-parent
-  only. Documented divergences from git: inline `-M<num>`/`-C<num>`
-  threshold forms aren't exposed on the CLI (the core API takes a custom
-  threshold); `-C -C -C` (whole-history search) is approximated as `-C -C`;
-  when two source files hold an identical block the earliest by tree-path
-  order wins, and when one source holds the block at several offsets the
-  earliest offset wins (git scores candidates and tracks line identity
-  through its diff); and within a single unmatched run longer than 10,000
-  lines only the whole run is matched, not sub-blocks (a cost bound; the
-  matcher already caps inputs).
+  "enabled but zero-threshold" state. Detection is **merge-aware** (#499):
+  at a merge both `-M` moves and `-C -C` copies are traced against **every
+  relevant parent's tree**, so a block moved or copied in from a
+  non-first-parent side is credited to that side's origin — matching
+  `git blame -M`/`-C`, which credits the merge parent whose tree holds the
+  source (a block whose source is only in the merge's own tree stays on the
+  merge, as in git). Documented divergences from git: inline
+  `-M<num>`/`-C<num>` threshold forms aren't exposed on the CLI (the core API
+  takes a custom threshold); `-C -C -C` (whole-history search) is approximated
+  as `-C -C`; when one source holds the block at several offsets the earliest
+  offset wins (git scores candidates and tracks line identity through its
+  diff); within a single unmatched run longer than 10,000 lines only the whole
+  run is matched, not sub-blocks (a cost bound; the matcher already caps
+  inputs); and two narrow residual `-C` cases at a merge — (1) when the *same*
+  block is newly added on two or more sides, mkit credits the first such parent
+  where git credits the last (its copy-source scoring is last-parent-wins), and
+  (2) when the blamed file is *newly added by the merge* and its sole copy
+  source lives only on a non-first parent, `git blame -C -C` traces it across
+  to that parent while mkit's boundary search (first parent's tree only)
+  credits the merge.
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited
   to an ignored commit falls through to the commit that previously changed
   it; a line the ignored commit genuinely inserted stays put (git's default,
-  no marker). `--ignore-rev` is repeatable and accepts any revision (short
+  no marker). The fall-through is **merge-aware** (#499): at an ignored merge
+  a line the first parent can't pair (it dropped that line) falls through
+  across to the next parent that does — first-parent-wins, matching `git blame
+  --ignore-rev` at a merge. `--ignore-rev` is repeatable and accepts any revision (short
   hash, ref, `HEAD~2`); `--ignore-revs-file` reads full hex object names one
   per line, skipping blank lines and `#` comments (including inline) — both
   verified against real `git`. Unknown or malformed inputs reproduce git's
