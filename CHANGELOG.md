@@ -41,20 +41,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-first-parent side is credited to that side's origin — matching
   `git blame -M`/`-C`, which credits the merge parent whose tree holds the
   source (a block whose source is only in the merge's own tree stays on the
-  merge, as in git). Documented divergences from git: inline
-  `-M<num>`/`-C<num>` threshold forms aren't exposed on the CLI (the core API
-  takes a custom threshold); `-C -C -C` (whole-history search) is approximated
-  as `-C -C`; when one source holds the block at several offsets the earliest
-  offset wins (git scores candidates and tracks line identity through its
-  diff); within a single unmatched run longer than 10,000 lines only the whole
-  run is matched, not sub-blocks (a cost bound; the matcher already caps
-  inputs); and two narrow residual `-C` cases at a merge — (1) when the *same*
-  block is newly added on two or more sides, mkit credits the first such parent
-  where git credits the last (its copy-source scoring is last-parent-wins), and
-  (2) when the blamed file is *newly added by the merge* and its sole copy
-  source lives only on a non-first parent, `git blame -C -C` traces it across
-  to that parent while mkit's boundary search (first parent's tree only)
-  credits the merge.
+  merge, as in git). The two remaining `-C`-at-a-merge gaps from the initial
+  #499 landing are now also closed, matching two distinct git rules pinned
+  against git 2.50.1: **(1) interior copy ties** — when the *same* block is
+  newly added on two or more merge sides for a file that already exists in
+  every parent, git's cross-file `-C` search never considers the FIRST
+  parent's tree at all; it credits the first parent (in order) *after* the
+  first that holds the block, so a 2-way tie goes to the second parent and a
+  3-way octopus tie goes to the earliest of the non-first parents that has
+  it — not literally "the last parent". A block whose *only* candidate is on
+  the first parent still stays on the merge, uncontested or not. `-M`
+  (within-file move) is unaffected by this carve-out and keeps offering every
+  parent, first included, so a same-length `-M` move on the first parent
+  still beats a `-C` copy on a later parent. **(2) Boundary copy ties** — when
+  the blamed file is *newly added by the merge* (no parent contains it), the
+  rule is the opposite: every real parent is searched, INCLUDING the first,
+  in order, first-found-wins — so the first parent CAN win a boundary tie,
+  and a sole candidate on a non-first (or third+, octopus) parent is traced
+  there instead of staying on the merge. Documented divergences from git
+  remain: inline `-M<num>`/`-C<num>` threshold forms aren't exposed on the
+  CLI (the core API takes a custom threshold); `-C -C -C` (whole-history
+  search) is approximated as `-C -C`; when one source holds the block at
+  several offsets the earliest offset wins (git scores candidates and tracks
+  line identity through its diff); and within a single unmatched run longer
+  than 10,000 lines only the whole run is matched, not sub-blocks (a cost
+  bound; the matcher already caps inputs).
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited

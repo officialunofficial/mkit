@@ -221,28 +221,40 @@ pub(super) fn attribute_commit(
     let lines = load_blob_lines(ctx.store, node.blob_hash)?;
     let own = node.own_attribution(commit);
 
-    // Root: the file first appears here, so every line is introduced — but a
-    // block may have been copied from other files in the real parent (`-C`).
+    // Root/boundary: the file first appears here (no *relevant* parent still
+    // has it), so every line is introduced — but a block may have been
+    // copied from another file in a real parent (`-C`). Unlike the interior
+    // merge case in `apply_detection`, git's boundary `-C` search covers
+    // EVERY real parent of this commit, INCLUDING the first, in order,
+    // first-found-wins (pinned against git 2.50.1 — see the
+    // `blame_c_merge_boundary_*` tests in `mod.rs`). `node.parents` cannot be
+    // used here: it is filtered to parents that still contain the file, which
+    // is exactly empty in this branch, so the real parent list is read
+    // straight from the commit object via `commit_parents`.
     if node.parents.is_empty() {
         let mut attrs = vec![own; lines.len()];
-        let boundary_parent = if matches!(ctx.opts.copies, CopyDetection::On { .. }) {
-            move_copy::commit_parent(ctx.store, commit)?
-        } else {
-            None
-        };
-        if let Some(parent) = boundary_parent {
-            detector.reassign(
-                &move_copy::ReassignRequest {
-                    file_path: ctx.file_path,
-                    source_commit: parent,
-                    attributed_commit: commit,
-                    new_lines: &lines,
-                    unmatched: &vec![true; lines.len()],
-                    within_file: None,
-                },
-                &mut attrs,
-                &mut vec![false; lines.len()],
-            )?;
+        if matches!(ctx.opts.copies, CopyDetection::On { .. }) {
+            let mut boundary_parents = move_copy::commit_parents(ctx.store, commit)?;
+            if ctx.opts.first_parent {
+                boundary_parents.truncate(1);
+            }
+            let mut claimed = vec![false; lines.len()];
+            for parent in boundary_parents {
+                let unmatched: Vec<bool> = claimed.iter().map(|&c| !c).collect();
+                detector.reassign(
+                    &move_copy::ReassignRequest {
+                        file_path: ctx.file_path,
+                        source_commit: parent,
+                        attributed_commit: commit,
+                        new_lines: &lines,
+                        unmatched: &unmatched,
+                        within_file: None,
+                        allow_copy: true,
+                    },
+                    &mut attrs,
+                    &mut claimed,
+                )?;
+            }
         }
         return Ok(attrs.into());
     }
@@ -339,19 +351,32 @@ fn apply_ignore_fallthrough(
     }
 }
 
-/// `-M`/`-C` reassignment across `node`'s parents (first-parent-wins).
+/// `-M`/`-C` reassignment across `node`'s parents (first-parent-wins, with one
+/// `-C`-specific carve-out below).
 ///
 /// At a merge the unexplained lines are offered to each relevant parent in
 /// turn, each searching that parent's own tree, so a block moved (`-M`) or
 /// copied (`-C -C`) in from a non-first-parent side is credited to that side's
 /// origin — matching `git blame -M`/`-C`, which credits the merge parent whose
-/// tree holds the source. A block both sides could equally explain sticks to
-/// the first parent (git's `-C` copy tie is last-parent-wins — a documented
-/// residual; see the `move_copy` module note). `matched` doubles as the
-/// "already explained" mask threaded into `reassign`, so a line an earlier
-/// parent claimed is excluded from the next parent's candidates and never
-/// reassigned twice; it is not read after this pass. With one parent this is
-/// exactly the old single pass, so the linear path is unchanged.
+/// tree holds the source. `matched` doubles as the "already explained" mask
+/// threaded into `reassign`, so a line an earlier parent claimed is excluded
+/// from the next parent's candidates and never reassigned twice; it is not
+/// read after this pass. With one parent this is exactly the old single pass,
+/// so the linear path is unchanged.
+///
+/// **`-C`'s first-parent carve-out.** At a true (multi-parent) merge, real
+/// git's cross-file `-C` search never considers the FIRST parent's own tree —
+/// only parents `[1..]`, in order, first-found-wins with no override on a
+/// length tie. A block that is a duplicate ONLY on the first parent therefore
+/// stays on the merge, even though the first parent has a perfectly valid,
+/// uncontested candidate (pinned against git 2.50.1: see
+/// `blame_c_merge_copy_tie_prefers_last_parent` and
+/// `blame_c_merge_copy_tie_octopus_prefers_first_non_first_parent` in
+/// `mod.rs`). `-M` (within-file move) is NOT subject to this carve-out — it
+/// stays offered to every parent including the first, so a same-length `-M`
+/// candidate on the first parent still wins over any parent's `-C` (both
+/// mechanisms share one `reassign` call per parent, and the first parent's
+/// call, processed first, can still claim the block via `-M`).
 fn apply_detection(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
@@ -361,6 +386,7 @@ fn apply_detection(
     attrs: &mut [Attribution],
     matched: &mut [bool],
 ) -> BlameOutcome<()> {
+    let is_merge = pass.node.parents.len() > 1;
     for (k, &parent) in pass.node.parents.iter().enumerate() {
         let parent_lines = &parents_data[k].0;
         let unmatched: Vec<bool> = matched.iter().map(|&m| !m).collect();
@@ -372,6 +398,7 @@ fn apply_detection(
                 new_lines: pass.lines,
                 unmatched: &unmatched,
                 within_file: Some((parent_lines, &memo[&parent])),
+                allow_copy: !(is_merge && k == 0),
             },
             attrs,
             matched,

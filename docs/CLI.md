@@ -287,12 +287,15 @@ History / commits:
   only as a whole, not by sub-block. Move/copy detection is merge-aware: at
   a merge both `-M` and `-C -C` search every relevant parent's tree, so a
   block moved or copied in from a non-first-parent side is credited to that
-  side (matching `git blame -M`/`-C`). Two narrow `-C` residuals at a merge —
-  (1) when the *same* block is newly added on two or more sides, mkit credits
-  the first such parent where git credits the last; (2) when the blamed file
-  is *newly added by the merge* and its sole copy source lives only on a
-  non-first parent, `git blame -C -C` traces it across while mkit credits the
-  merge. `-M` and `--ignore-rev` are otherwise fully merge-aware.
+  side (matching `git blame -M`/`-C`). `-C` copy ties across parents follow
+  two distinct git rules (pinned against git 2.50.1): for a file that already
+  exists on every parent, a tie is resolved by skipping the first parent
+  entirely and crediting the first parent after it (in order) that holds the
+  block — a sole candidate on only the first parent is left on the merge; for
+  a file *newly added by the merge* (no parent has it), the opposite rule
+  applies — every real parent is searched including the first, first-found
+  wins, so the first parent can win that tie. `-M`, `--ignore-rev`, and
+  `--first-parent` are fully merge-aware throughout.
   `--ignore-rev <rev>` (repeatable) and `--ignore-revs-file <file>` skip
   "noise" commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`: a line that would be credited

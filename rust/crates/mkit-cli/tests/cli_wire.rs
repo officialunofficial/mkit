@@ -595,6 +595,81 @@ fn blame_m_merge_credits_move_from_second_parent() {
 }
 
 #[test]
+fn blame_c_merge_copy_tie_credits_second_parent_not_first() {
+    // End-to-end `-C` merge residual closure: the SAME copyable block is
+    // added as a new file on BOTH merge sides (main's s1.txt, feature's
+    // s2.txt) while f.txt itself conflicts and is resolved by appending the
+    // block. Real `git blame -C -C` credits the SECOND parent (feature),
+    // never the first (main), even though main's candidate is otherwise
+    // identical — this is the exact tie mkit-core's
+    // `blame_c_merge_copy_tie_prefers_last_parent` pins at the API level;
+    // this test proves the fix end-to-end through `mkit merge --continue`
+    // and the real CLI `blame -C -C` path. (Pinned against real git 2.50.1.)
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"TOP\n", "base");
+    assert!(run_in(td.path(), &["branch", "feature"]).status.success());
+
+    // First parent (main): conflicting edit to f.txt, plus its OWN copy of
+    // the block in s1.txt.
+    fs::write(td.path().join("f.txt"), b"MAIN\n").unwrap();
+    fs::write(td.path().join("s1.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "f.txt", "s1.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main edit + s1"])
+            .status
+            .success()
+    );
+
+    // Second parent (feature): a different conflicting edit to f.txt, plus
+    // the SAME block duplicated in s2.txt (the tie).
+    assert!(run_in(td.path(), &["checkout", "feature"]).status.success());
+    fs::write(td.path().join("f.txt"), b"FEAT\n").unwrap();
+    fs::write(td.path().join("s2.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "f.txt", "s2.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature edit + s2"])
+            .status
+            .success()
+    );
+    let feature = ref_hash(td.path(), "feature");
+
+    // Merge conflicts on f.txt; resolve by keeping main's line and
+    // appending the block (present verbatim on both sides' new files).
+    assert!(run_in(td.path(), &["checkout", "main"]).status.success());
+    let merge = run_in(td.path(), &["merge", "feature"]);
+    assert!(!merge.status.success(), "merge should conflict: {merge:?}");
+    fs::write(td.path().join("f.txt"), format!("MAIN\n{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "f.txt"]).status.success());
+    let cont = run_in(td.path(), &["merge", "--continue"]);
+    assert!(cont.status.success(), "merge --continue failed: {cont:?}");
+    let merge_hash = head_hash(td.path());
+
+    let out = run_in(td.path(), &["blame", "-C", "-C", "f.txt"]);
+    assert!(out.status.success(), "blame -C -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[1].starts_with(&feature[..12]) && lines[2].starts_with(&feature[..12]),
+        "-C -C credits the copy tie to the second parent (feature): {stdout:?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.starts_with(&merge_hash[..12])),
+        "the tied block is not left on the merge: {stdout:?}"
+    );
+}
+
+#[test]
 fn blame_ignore_rev_merge_falls_through_to_second_parent() {
     // An ignored merge resolves a modify/delete conflict by keeping a noise
     // version of the feature line. The first parent (main) DELETED that line,

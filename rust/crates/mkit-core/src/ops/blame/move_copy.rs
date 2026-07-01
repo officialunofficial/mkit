@@ -35,22 +35,34 @@
 //! credited to that side — matching `git blame -M`/`-C -C`, which credits the
 //! merge parent whose tree holds the source (verified against git 2.50.1). A
 //! block whose source lives only in the merge's *own* tree (introduced by the
-//! merge) stays on the merge, as in git.
+//! merge) stays on the merge, as in git. `-M` and `--ignore-rev` treat every
+//! parent uniformly (first-parent-wins on a tie); `-C` does not — its
+//! cross-parent tie-break is two distinct, git-verified rules depending on
+//! whether the blamed path is interior or a merge boundary:
 //!
-//! Two narrow `-C` residuals remain (issue #499 follow-up); `-M` and
-//! `--ignore-rev` are fully merge-aware:
+//! 1. **Interior copy tie** (the path already exists on every relevant
+//!    parent). Real git's cross-file `-C` search never considers the FIRST
+//!    parent's own tree at a true (multi-parent) merge — only parents
+//!    `[1..]`, in order, first-found-wins with no override on a length tie.
+//!    A block whose *only* candidate is on the first parent therefore stays
+//!    on the merge, even uncontested. See [`super::walk::apply_detection`]
+//!    and its `allow_copy` carve-out, and the `blame_c_merge_copy_tie_*` /
+//!    `blame_c_merge_copy_source_only_on_first_parent_stays_on_merge` tests
+//!    in `mod.rs` (each carries its git 2.50.1 recipe).
+//! 2. **Boundary copy tie** (the blamed file is newly added by the merge; no
+//!    parent contains it). Here the rule is the *opposite*: every real
+//!    parent is searched, INCLUDING the first, in order, first-found-wins —
+//!    so the first parent CAN win this tie, and a sole candidate on any
+//!    later (including octopus) parent is traced there. [`commit_parents`]
+//!    reads the commit's actual parent list (not [`super::walk::DagNode::parents`],
+//!    which is filtered to file-containing parents and is empty exactly in
+//!    this case) so every real parent — not just the first — can be tried.
+//!    See the `blame_c_merge_boundary_*` tests in `mod.rs`.
 //!
-//! 1. **Multi-parent copy tie.** When the *same* block is newly added on two
-//!    or more merge sides, mkit's first-parent-wins `claimed` mask credits the
-//!    first such parent, whereas git credits the last (its copy-source scoring
-//!    is effectively last-parent-wins across the parent queue). Only a block
-//!    duplicated across sides is affected.
-//! 2. **Boundary / newly-added file.** When the blamed file is *added by the
-//!    merge* (no parent contains it) and its sole copy source lives on a
-//!    non-first parent, the root search walks the first parent's tree only
-//!    ([`commit_parent`] returns a single parent, and [`super::walk::build_file_dag`]
-//!    drops parents that lack the file), so mkit credits the merge where git
-//!    would credit that parent.
+//! `-M` is unaffected by carve-out 1 and stays offered to every parent,
+//! first included — so a same-length `-M` move on the first parent still
+//! beats a `-C` copy candidate on a later parent (both mechanisms share one
+//! `reassign` call per parent, processed in parent order).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -92,6 +104,16 @@ pub(super) struct ReassignRequest<'r> {
     /// Parent version of *this* file as a `(lines, origins)` `-M` source —
     /// `None` at the boundary, where there is no earlier version.
     pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
+    /// Whether `-C` cross-file candidates from `source_commit` may be
+    /// considered at all. `true` everywhere except one narrow case: at an
+    /// **interior** merge (the blamed path already exists on every relevant
+    /// parent), real git's cross-file `-C` search never considers the FIRST
+    /// parent's tree — only parents `[1..]` — so a block that is only a
+    /// duplicate on the first parent stays on the merge rather than being
+    /// traced there (pinned against git 2.50.1; see
+    /// [`super::walk::apply_detection`]). `-M` (within-file) is unaffected
+    /// and stays offered to every parent, first included.
+    pub allow_copy: bool,
 }
 
 /// Stateful move/copy detector. Holds the per-blame caches so a source
@@ -169,9 +191,13 @@ impl<'a> Detector<'a> {
             MoveDetection::On { threshold } => req.within_file.map(|_| threshold),
             MoveDetection::Off => None,
         };
-        let (copy_level, copy_threshold) = match self.opts.copies {
-            CopyDetection::On { level, threshold } => (level, Some(threshold)),
-            CopyDetection::Off => (0, None),
+        let (copy_level, copy_threshold) = if req.allow_copy {
+            match self.opts.copies {
+                CopyDetection::On { level, threshold } => (level, Some(threshold)),
+                CopyDetection::Off => (0, None),
+            }
+        } else {
+            (0, None)
         };
         if move_threshold.is_none() && copy_threshold.is_none() {
             return Ok(());
@@ -496,12 +522,16 @@ fn copy_candidates(
         .collect())
 }
 
-/// First-parent of a commit, or `None` for a root commit.
-pub(super) fn commit_parent(store: &ObjectStore, commit: Hash) -> BlameOutcome<Option<Hash>> {
+/// All real parents of a commit, in commit order (empty for a root commit).
+/// Unlike [`super::walk::DagNode::parents`], this is not filtered to parents
+/// that still contain the blamed file — the boundary/root case (the file is
+/// absent from every relevant parent, so the DAG node has none) needs the
+/// *actual* parent list to search each one's tree for a `-C` source.
+pub(super) fn commit_parents(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<Hash>> {
     let Object::Commit(c) = store.read_object(&commit)? else {
         return Err(BlameError::NotACommit);
     };
-    Ok(c.parents.first().copied())
+    Ok(c.parents.clone())
 }
 
 /// The tree a commit points at.
