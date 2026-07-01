@@ -717,26 +717,27 @@ mod tpm {
         let mut ctx = new_context()?;
         let sess = start_owner_session(&mut ctx)?;
 
-        // `tr_from_tpm_public` is backed by the unauthenticated
-        // TPM2_ReadPublic — it takes no session. Attaching one anyway (as
-        // this used to do, before ctx.set_sessions below) is exactly what
-        // produced "inconsistent attributes (associated with session
-        // number 1)": TPM_RC_ATTRIBUTES, the TPM rejecting a session whose
-        // attributes don't fit what the command expects. Only attach the
-        // owner session for the calls that actually need authorization.
+        // `tr_from_tpm_public` and `read_public` are backed by the
+        // unauthenticated TPM2_ReadPublic — neither takes a session.
+        // Attaching one anyway (as this used to do, before ctx.set_sessions
+        // below) is exactly what produced "inconsistent attributes
+        // (associated with session number 1)": TPM_RC_ATTRIBUTES, the TPM
+        // rejecting a session whose attributes don't fit what the command
+        // expects. Only attach the owner session for the call that
+        // actually needs authorization (Sign).
         let persistent_handle = persistent(handle)?;
         let object_handle = ctx
             .tr_from_tpm_public(persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("tr_from_tpm_public: {e}")))?;
         let key_handle: KeyHandle = object_handle.into();
 
-        ctx.set_sessions((Some(sess), None, None));
-
         // Read the public half so we can derive the keyid.
         let (public, _name, _qname) = ctx
             .read_public(key_handle)
             .map_err(|e| SignerError::Tpm(format!("read_public: {e}")))?;
         let pub_compressed = compress_from_public(&public)?;
+
+        ctx.set_sessions((Some(sess), None, None));
 
         // Sign SHA256(pae). P-256 over SHA-256, ECDSA scheme.
         let digest_bytes = Sha256::digest(pae);
