@@ -136,7 +136,8 @@ pub fn commit_verify(commit_bytes: &[u8]) -> bool {
 /// Deserializes via the same path [`commit_verify`] uses
 /// (`mkit_core::deserialize` → [`Object::Commit`]) and exposes the
 /// fields the multiplayer log needs to walk + render the room's `main`
-/// chain: the [`CommitInfoJs::message`], the [`CommitInfoJs::parents`]
+/// chain: the [`CommitInfoJs::message`], the parents via
+/// [`CommitInfoJs::parent_count`] / [`CommitInfoJs::parent`]
 /// (64-hex object ids, parent 0 first), the
 /// [`CommitInfoJs::signer_hex`] (the 64-hex Ed25519 signer/author
 /// pubkey), the [`CommitInfoJs::timestamp`] (unix seconds), the
@@ -261,7 +262,7 @@ pub fn remix_encode_and_sign(
 /// `mkit_core::deserialize` → [`Object::Remix`] and exposes the same
 /// commit-shaped fields (`message`, `signer_hex`, `timestamp`,
 /// `tree_hex`, `signature_hex`, `parents`) plus the remix-only
-/// [`RemixInfoJs::sources`] — each a `{ upstream_id_hex, commit_hash_hex }`
+/// `sources` — each a `{ upstream_id_hex, commit_hash_hex }`
 /// read by `source_count` + the `source(i)` indexed getter. The web
 /// browser uses the sources to render the "fork of …" badge whose
 /// `commit_hash` links to the upstream commit's detail.
@@ -305,7 +306,7 @@ pub fn remix_decode(bytes: &[u8]) -> Result<RemixInfoJs, JsValue> {
 /// Lets the browser route a fetched object to the right decoder
 /// (`commit_decode` vs `remix_decode`) without guessing or trial-decoding.
 /// Goes through `mkit_core::deserialize` so the answer reflects a fully
-/// well-formed object, then reports [`ObjectType::name`].
+/// well-formed object, then reports `ObjectType::name`.
 ///
 /// # Errors
 /// `bytes` is not a valid serialized object (bad prologue / truncated /
