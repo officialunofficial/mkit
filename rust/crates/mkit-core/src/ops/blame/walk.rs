@@ -204,8 +204,10 @@ pub(super) fn attribute_commit(
                     new_lines: &lines,
                     unmatched: &vec![true; lines.len()],
                     within_file: None,
+                    cross_file: true,
                 },
                 &mut attrs,
+                &mut vec![false; lines.len()],
             )?;
         }
         return Ok(attrs.into());
@@ -247,13 +249,77 @@ pub(super) fn attribute_commit(
         }
     }
 
-    // `--ignore-rev`: a line this (ignored) commit would keep falls through to
-    // the first parent's corresponding line. A line the fall-through resolves
-    // is marked `matched` so the detector below does not overwrite it —
-    // `--ignore-rev` takes precedence over `-M`/`-C` on the lines it resolves.
     if ctx.opts.is_ignored(&commit) {
-        let fall = ignore_fallthrough(&first_parent_mapping, first_parent_lines.len());
-        let parent_attrs = &memo[&first_parent];
+        apply_ignore_fallthrough(
+            ctx,
+            memo,
+            node,
+            &lines,
+            &first_parent_lines,
+            &first_parent_mapping,
+            &mut attrs,
+            &mut matched,
+        )?;
+    }
+
+    if ctx.opts.detection_enabled() {
+        apply_detection(
+            ctx,
+            memo,
+            detector,
+            node,
+            commit,
+            &lines,
+            &first_parent_lines,
+            &matched,
+            &mut attrs,
+        )?;
+    }
+
+    Ok(attrs.into())
+}
+
+/// `--ignore-rev` fall-through across `node`'s parents (first-parent-wins).
+///
+/// A line this (ignored) commit would keep falls through to a parent's
+/// corresponding line. At a merge the fall-through is offered to each parent
+/// in turn: a line the first parent has a positional counterpart for is
+/// credited there, but a line the first parent dropped (no counterpart in its
+/// conflicted hunk) falls through across to the next parent that does pair it
+/// — matching `git blame --ignore-rev` at a merge. A resolved line is marked
+/// `matched` so the detector does not overwrite it (`--ignore-rev` takes
+/// precedence over `-M`/`-C`). With one parent this is exactly the old
+/// single-parent fall-through.
+#[allow(clippy::too_many_arguments)]
+fn apply_ignore_fallthrough(
+    ctx: &WalkCtx,
+    memo: &HashMap<Hash, Rc<[Attribution]>>,
+    node: &DagNode,
+    lines: &[Vec<u8>],
+    first_parent_lines: &[Vec<u8>],
+    first_parent_mapping: &[Option<usize>],
+    attrs: &mut [Attribution],
+    matched: &mut [bool],
+) -> BlameOutcome<()> {
+    for (k, &parent) in node.parents.iter().enumerate() {
+        // Reuse the first parent's already-loaded lines and mapping;
+        // recompute for the rest (only reached for an ignored merge).
+        let loaded;
+        let parent_lines: &[Vec<u8>] = if k == 0 {
+            first_parent_lines
+        } else {
+            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
+            &loaded
+        };
+        let recomputed;
+        let mapping: &[Option<usize>] = if k == 0 {
+            first_parent_mapping
+        } else {
+            recomputed = match_lines_with_options(parent_lines, lines, ctx.opts)?;
+            &recomputed
+        };
+        let fall = ignore_fallthrough(mapping, parent_lines.len());
+        let parent_attrs = &memo[&parent];
         for (ni, &paired) in fall.iter().enumerate() {
             if matched[ni] {
                 continue;
@@ -265,23 +331,60 @@ pub(super) fn attribute_commit(
             }
         }
     }
+    Ok(())
+}
 
-    // `-M`/`-C`: reassign blocks no parent explained, against the first parent
-    // (its lines and resolved origins are the move/copy source).
-    if ctx.opts.detection_enabled() {
-        let unmatched: Vec<bool> = matched.iter().map(|&m| !m).collect();
+/// `-M`/`-C` reassignment across `node`'s parents (first-parent-wins).
+///
+/// At a merge the unexplained lines are offered to each relevant parent in
+/// turn, so a block moved in (`-M`) from a non-first-parent side is credited
+/// to that side's origin (matching `git blame -M`), while a block both sides
+/// could explain stays on the first parent. `claimed` carries each parent's
+/// reassignments forward so a lower-priority parent cannot overwrite them.
+/// Cross-file `-C` is restricted to the first parent (`cross_file: k == 0`):
+/// git does not trace a copy in a *modified* file across to a non-first
+/// parent's tree, so widening it to every parent would over-detect (the
+/// boundary `-C -C` cross-parent copy is a documented residual; see the
+/// `move_copy` module note). With one parent this is exactly the old single
+/// pass (claimed starts all-false, so the linear path is unchanged).
+#[allow(clippy::too_many_arguments)]
+fn apply_detection(
+    ctx: &WalkCtx,
+    memo: &HashMap<Hash, Rc<[Attribution]>>,
+    detector: &mut move_copy::Detector,
+    node: &DagNode,
+    commit: Hash,
+    lines: &[Vec<u8>],
+    first_parent_lines: &[Vec<u8>],
+    matched: &[bool],
+    attrs: &mut [Attribution],
+) -> BlameOutcome<()> {
+    let mut claimed = vec![false; lines.len()];
+    for (k, &parent) in node.parents.iter().enumerate() {
+        // Reuse the already-loaded first parent; load the rest.
+        let loaded;
+        let parent_lines: &[Vec<u8>] = if k == 0 {
+            first_parent_lines
+        } else {
+            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
+            &loaded
+        };
+        let unmatched: Vec<bool> = (0..lines.len())
+            .map(|i| !matched[i] && !claimed[i])
+            .collect();
         detector.reassign(
             &move_copy::ReassignRequest {
                 file_path: ctx.file_path,
-                source_commit: first_parent,
+                source_commit: parent,
                 attributed_commit: commit,
-                new_lines: &lines,
+                new_lines: lines,
                 unmatched: &unmatched,
-                within_file: Some((&first_parent_lines, &memo[&first_parent])),
+                within_file: Some((parent_lines, &memo[&parent])),
+                cross_file: k == 0,
             },
-            &mut attrs,
+            attrs,
+            &mut claimed,
         )?;
     }
-
-    Ok(attrs.into())
+    Ok(())
 }

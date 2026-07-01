@@ -284,8 +284,13 @@ History / commits:
   detected. Divergences from git: inline numeric threshold forms
   (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
   custom threshold); on an identical block in two files the earliest by
-  tree-path order wins (git scores candidates); and a single unmatched run
-  over 10,000 lines is matched only as a whole, not by sub-block.
+  tree-path order wins (git scores candidates); a single unmatched run
+  over 10,000 lines is matched only as a whole, not by sub-block; and one
+  `-C` case at a merge — when the blamed file is *newly added by the merge*
+  and its sole copy source lives only on a non-first parent, `git blame -C
+  -C` traces it across to that parent while mkit credits the merge (`-M` and
+  `--ignore-rev` are fully merge-aware; cross-file `-C` in a *modified* file
+  is first-parent only, matching git).
   `--ignore-rev <rev>` (repeatable) and `--ignore-revs-file <file>` skip
   "noise" commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`: a line that would be credited

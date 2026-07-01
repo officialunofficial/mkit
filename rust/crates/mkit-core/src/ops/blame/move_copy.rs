@@ -27,6 +27,20 @@
 //! longer than [`MAX_DETECT_RUN`] is searched only as a single whole block
 //! (a documented bound; the matcher already caps inputs at
 //! [`super::BLAME_MAX_LINES`]).
+//!
+//! **Merges.** At a merge the within-file `-M` move source is offered to
+//! every relevant parent in first-parent-wins order (see
+//! [`super::walk::attribute_commit`]), so a block moved in from a
+//! non-first-parent side is credited to that side — matching `git blame -M`.
+//! Cross-file `-C`, however, is searched against the **first parent only**
+//! (`ReassignRequest::cross_file`): git does not trace a copy in a *modified*
+//! file across to a non-first parent's tree, and matching that is what the
+//! restriction preserves. The one residual (issue #499): when the blamed
+//! file is *newly added by the merge* and its sole copy source lives only on
+//! a non-first parent, `git blame -C -C` enumerates that parent's tree and
+//! credits it, whereas mkit's boundary search walks the first parent's tree
+//! only and credits the merge. `-M` and `--ignore-rev` are fully merge-aware;
+//! this boundary `-C` cross-parent case is the documented follow-up.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -68,6 +82,13 @@ pub(super) struct ReassignRequest<'r> {
     /// Parent version of *this* file as a `(lines, origins)` `-M` source —
     /// `None` at the boundary, where there is no earlier version.
     pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
+    /// Whether cross-file `-C` copy detection is allowed for this pass. The
+    /// first parent of a merge (and every linear commit) sets this `true`;
+    /// the *additional* parents of a merge set it `false`, because git does
+    /// not trace a copy in a modified file across to a non-first-parent's
+    /// tree — only the within-file `-M` move is offered to those parents.
+    /// (The first-parent pass keeps `-C` exactly as the linear path had it.)
+    pub cross_file: bool,
 }
 
 /// Stateful move/copy detector. Holds the per-blame caches so a source
@@ -126,12 +147,19 @@ impl<'a> Detector<'a> {
     }
 
     /// Reassign moved/copied blocks among the unmatched lines of the
-    /// request, writing origins into `out`. A no-op when detection is off
-    /// or nothing qualifies.
+    /// request, writing origins into `out` and marking each reassigned line
+    /// `true` in `claimed`. A no-op when detection is off or nothing
+    /// qualifies.
+    ///
+    /// `claimed` lets a merge run the detector against each parent in turn
+    /// (first-parent-wins): a line a higher-priority parent already explained
+    /// is excluded from the next parent's `unmatched` mask, so it is never
+    /// reassigned twice. The single-parent path passes a throwaway buffer.
     pub(super) fn reassign(
         &mut self,
         req: &ReassignRequest,
         out: &mut [Attribution],
+        claimed: &mut [bool],
     ) -> BlameOutcome<()> {
         let iw = self.opts.ignore_whitespace;
         let move_threshold = match self.opts.effective_move() {
@@ -146,7 +174,7 @@ impl<'a> Detector<'a> {
             return Ok(());
         }
 
-        let candidates = if copy_level > 0 {
+        let candidates = if copy_level > 0 && req.cross_file {
             copy_candidates(
                 self.store,
                 req.source_commit,
@@ -189,6 +217,7 @@ impl<'a> Detector<'a> {
                 continue;
             };
             self.credit(s, e, &source, &ctx, out)?;
+            claimed[s..e].fill(true);
             stack.push(region.start..s);
             stack.push(e..region.end);
         }
