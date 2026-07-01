@@ -2200,15 +2200,15 @@ mod tests {
     }
 
     #[test]
-    fn blame_c_merge_modified_file_not_copied_across_parents() {
-        // `-C` parity guard: when the blamed file already EXISTS in the
-        // parents and a merge appends a block that happens to also live in a
-        // file on the SECOND parent, `git blame -C -C` does NOT trace the copy
-        // across to that non-first parent — it credits the merge. (git's copy
-        // detection only crosses parents for a *newly added* file, not a
-        // modified one; pinned against real git 2.50.1.) The merge-aware
-        // detector must therefore restrict cross-file `-C` to the first parent
-        // so it does not over-detect here.
+    fn blame_c_merge_credits_copy_from_second_parent() {
+        // `-C` merge parity: the blamed file already EXISTS in the parents and
+        // a merge appends a block that lives in `src.txt` on the SECOND parent.
+        // `git blame -C -C <merge> -- b.txt` credits the SECOND parent (`c2`),
+        // enumerating that parent's tree to find the copy source — it does NOT
+        // credit the merge. Pinned against real git 2.50.1:
+        //   base: b.txt="hello"; p1 adds m.txt; c2 adds src.txt with the block;
+        //   merge(p1,c2) appends the block to b.txt
+        //   => `git blame -C -C` credits c2/src.txt for the appended lines.
         let (_d, store) = fresh_store();
         let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
         let p1 = put_multi_file_commit(
@@ -2250,12 +2250,177 @@ mod tests {
         // Child order: hello, BLOCK_A, BLOCK_B.
         assert_eq!(r.lines[1].text, BLOCK_A);
         assert_eq!(
-            r.lines[1].commit_hash, merge,
-            "a modified file's appended block is not copied across merge parents (git credits the merge)"
+            r.lines[1].commit_hash, c2,
+            "a modified file's appended block is copied across to the second parent's tree (git credits c2)"
         );
-        assert!(
-            r.lines.iter().all(|l| l.commit_hash != c2),
-            "the second parent's source file is not a cross-parent copy source for a modified file"
+        assert_eq!(
+            r.lines[2].commit_hash, c2,
+            "the whole copied block is credited to c2"
+        );
+        // The unchanged first line stays on its own origin, not the merge.
+        assert_ne!(r.lines[1].commit_hash, merge);
+    }
+
+    #[test]
+    fn blame_c_merge_credits_copy_from_third_octopus_parent() {
+        // `-C -C` searches EVERY relevant merge parent's tree, not just the
+        // first two. Octopus merge(p1, p2, p3): the copy source lives only in
+        // `src.txt` on the THIRD parent; real git credits p3 for the appended
+        // block (pinned against git 2.50.1). Guards against a first-/second-
+        // parent-only search.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("x.txt", b"x only\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let p2 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("y.txt", b"y only\n")],
+            vec![base],
+            3,
+            300,
+        );
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p3 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("src.txt", &src)],
+            vec![base],
+            4,
+            400,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", &bmerge),
+                ("x.txt", b"x only\n"),
+                ("y.txt", b"y only\n"),
+                ("src.txt", &src),
+            ],
+            vec![p1, p2, p3],
+            5,
+            500,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, p3,
+            "the copied block is traced to the third octopus parent's tree"
+        );
+    }
+
+    #[test]
+    fn blame_c_merge_source_only_in_merge_tree_credits_merge() {
+        // Counterpart guard: when the copy source (`src.txt`) is introduced by
+        // the MERGE itself and no parent's tree holds the block, real git
+        // credits the merge — the cross-parent search must not manufacture a
+        // parent credit. Pinned against git 2.50.1.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("m.txt", b"main only\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let c2 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("o.txt", b"other\n")],
+            vec![base],
+            3,
+            300,
+        );
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        // src.txt exists only in the merge's own tree (no parent has it).
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", &bmerge),
+                ("m.txt", b"main only\n"),
+                ("o.txt", b"other\n"),
+                ("src.txt", &src),
+            ],
+            vec![p1, c2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, merge,
+            "no parent holds the source, so the appended block stays on the merge (git parity)"
+        );
+    }
+
+    #[test]
+    fn blame_c_merge_copy_tie_prefers_first_parent_is_residual() {
+        // Documented `-C` residual #1 (issue #499 follow-up): when the SAME
+        // block is newly added on two merge sides (p1's s1.txt and c2's
+        // s2.txt), real `git blame -C -C` credits the LAST such parent (c2 —
+        // git's copy-source scoring is effectively last-parent-wins). mkit's
+        // first-parent-wins `claimed` mask credits p1 instead. Only a block
+        // duplicated across sides is affected. This pins mkit's current
+        // behavior; if the `-C` tie is aligned to git, update this test.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s1.txt", &src)],
+            vec![base],
+            2,
+            200,
+        );
+        let c2 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s2.txt", &src)],
+            vec![base],
+            3,
+            300,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[("b.txt", &bmerge), ("s1.txt", &src), ("s2.txt", &src)],
+            vec![p1, c2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, p1,
+            "residual: a copy tie across parents resolves to the first parent (git credits the last, c2)"
         );
     }
 

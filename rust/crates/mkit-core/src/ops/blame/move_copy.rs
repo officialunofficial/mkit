@@ -28,19 +28,29 @@
 //! (a documented bound; the matcher already caps inputs at
 //! [`super::BLAME_MAX_LINES`]).
 //!
-//! **Merges.** At a merge the within-file `-M` move source is offered to
-//! every relevant parent in first-parent-wins order (see
-//! [`super::walk::attribute_commit`]), so a block moved in from a
-//! non-first-parent side is credited to that side — matching `git blame -M`.
-//! Cross-file `-C`, however, is searched against the **first parent only**
-//! (`ReassignRequest::cross_file`): git does not trace a copy in a *modified*
-//! file across to a non-first parent's tree, and matching that is what the
-//! restriction preserves. The one residual (issue #499): when the blamed
-//! file is *newly added by the merge* and its sole copy source lives only on
-//! a non-first parent, `git blame -C -C` enumerates that parent's tree and
-//! credits it, whereas mkit's boundary search walks the first parent's tree
-//! only and credits the merge. `-M` and `--ignore-rev` are fully merge-aware;
-//! this boundary `-C` cross-parent case is the documented follow-up.
+//! **Merges.** At a merge both the within-file `-M` move source and the
+//! cross-file `-C` copy source are offered to **every relevant parent** (see
+//! [`super::walk::attribute_commit`]), each search enumerating that parent's
+//! own tree. So a block moved or copied in from a non-first-parent side is
+//! credited to that side — matching `git blame -M`/`-C -C`, which credits the
+//! merge parent whose tree holds the source (verified against git 2.50.1). A
+//! block whose source lives only in the merge's *own* tree (introduced by the
+//! merge) stays on the merge, as in git.
+//!
+//! Two narrow `-C` residuals remain (issue #499 follow-up); `-M` and
+//! `--ignore-rev` are fully merge-aware:
+//!
+//! 1. **Multi-parent copy tie.** When the *same* block is newly added on two
+//!    or more merge sides, mkit's first-parent-wins `claimed` mask credits the
+//!    first such parent, whereas git credits the last (its copy-source scoring
+//!    is effectively last-parent-wins across the parent queue). Only a block
+//!    duplicated across sides is affected.
+//! 2. **Boundary / newly-added file.** When the blamed file is *added by the
+//!    merge* (no parent contains it) and its sole copy source lives on a
+//!    non-first parent, the root search walks the first parent's tree only
+//!    ([`commit_parent`] returns a single parent, and [`super::walk::build_file_dag`]
+//!    drops parents that lack the file), so mkit credits the merge where git
+//!    would credit that parent.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -82,13 +92,6 @@ pub(super) struct ReassignRequest<'r> {
     /// Parent version of *this* file as a `(lines, origins)` `-M` source —
     /// `None` at the boundary, where there is no earlier version.
     pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
-    /// Whether cross-file `-C` copy detection is allowed for this pass. The
-    /// first parent of a merge (and every linear commit) sets this `true`;
-    /// the *additional* parents of a merge set it `false`, because git does
-    /// not trace a copy in a modified file across to a non-first-parent's
-    /// tree — only the within-file `-M` move is offered to those parents.
-    /// (The first-parent pass keeps `-C` exactly as the linear path had it.)
-    pub cross_file: bool,
 }
 
 /// Stateful move/copy detector. Holds the per-blame caches so a source
@@ -174,7 +177,7 @@ impl<'a> Detector<'a> {
             return Ok(());
         }
 
-        let candidates = if copy_level > 0 && req.cross_file {
+        let candidates = if copy_level > 0 {
             copy_candidates(
                 self.store,
                 req.source_commit,

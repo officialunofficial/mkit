@@ -98,7 +98,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: 'Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move and --ignore-rev attribution is merge-aware, traced to the true origin across every merge parent; one -C edge — a copy into a file first added by a merge — stays first-parent. No --porcelain; --format=json carries an mkit Identity, not Name <email>.',
+        note: 'Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware, traced to the true origin across every merge parent; two narrow -C tie-breaks at a merge still differ from git. No --porcelain; --format=json carries an mkit Identity, not Name <email>.',
       },
       {
         cmd: 'bisect',
