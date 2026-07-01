@@ -3,6 +3,7 @@
 //! attributions from its parents' already-resolved ones. `super::blame_file_with`
 //! drives this; the single-parent path reproduces the old linear replay.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -156,6 +157,35 @@ pub(super) struct WalkCtx<'a> {
     pub(super) file_path: &'a str,
 }
 
+/// The per-commit working set shared by the merge passes: the commit and its
+/// node, the commit's own lines, and the first parent's lines (loaded once and
+/// reused). Bundling these keeps the fall-through and detector helpers to a
+/// handful of arguments instead of a positional pile-up.
+struct CommitPass<'a> {
+    node: &'a DagNode,
+    commit: Hash,
+    lines: &'a [Vec<u8>],
+    first_parent_lines: &'a [Vec<u8>],
+}
+
+impl<'a> CommitPass<'a> {
+    /// The `k`th parent's lines: the first parent is already loaded and simply
+    /// borrowed; the rest (only reached at a merge) are loaded on demand. The
+    /// `Cow` lets both cases share one binding without the borrow-or-own dance.
+    fn parent_lines(
+        &self,
+        ctx: &WalkCtx,
+        k: usize,
+        parent: Hash,
+    ) -> BlameOutcome<Cow<'a, [Vec<u8>]>> {
+        Ok(if k == 0 {
+            Cow::Borrowed(self.first_parent_lines)
+        } else {
+            Cow::Owned(load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?)
+        })
+    }
+}
+
 /// Resolve the attribution of every line of `commit`'s blob from its parents'
 /// already-resolved attributions in `memo`.
 ///
@@ -217,22 +247,19 @@ pub(super) fn attribute_commit(
     let mut attrs = vec![own; lines.len()];
     let mut matched = vec![false; lines.len()];
     let first_parent_lines = load_blob_lines(ctx.store, ctx.nodes[&first_parent].blob_hash)?;
+    let pass = CommitPass {
+        node,
+        commit,
+        lines: &lines,
+        first_parent_lines: &first_parent_lines,
+    };
     let mut first_parent_mapping: Vec<Option<usize>> = Vec::new();
 
     for (k, &parent) in node.parents.iter().enumerate() {
-        // Borrow the already-loaded first parent; load the rest. (`k == 0`
-        // previously cloned only to unify the branch types — pure waste on
-        // every changed single-parent commit, the common linear case.)
-        let loaded;
-        let parent_lines: &[Vec<u8>] = if k == 0 {
-            &first_parent_lines
-        } else {
-            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
-            &loaded
-        };
+        let parent_lines = pass.parent_lines(ctx, k, parent)?;
         // `mapping[ni]` = the parent index that this commit's line `ni` is
         // unchanged from, or `None` if changed/introduced.
-        let mapping = match_lines_with_options(parent_lines, &lines, ctx.opts)?;
+        let mapping = match_lines_with_options(&parent_lines, &lines, ctx.opts)?;
         let parent_attrs = &memo[&parent];
         for (ni, m) in mapping.iter().enumerate() {
             if matched[ni] {
@@ -253,9 +280,7 @@ pub(super) fn attribute_commit(
         apply_ignore_fallthrough(
             ctx,
             memo,
-            node,
-            &lines,
-            &first_parent_lines,
+            &pass,
             &first_parent_mapping,
             &mut attrs,
             &mut matched,
@@ -263,17 +288,7 @@ pub(super) fn attribute_commit(
     }
 
     if ctx.opts.detection_enabled() {
-        apply_detection(
-            ctx,
-            memo,
-            detector,
-            node,
-            commit,
-            &lines,
-            &first_parent_lines,
-            &matched,
-            &mut attrs,
-        )?;
+        apply_detection(ctx, memo, detector, &pass, &matched, &mut attrs)?;
     }
 
     Ok(attrs.into())
@@ -290,32 +305,23 @@ pub(super) fn attribute_commit(
 /// `matched` so the detector does not overwrite it (`--ignore-rev` takes
 /// precedence over `-M`/`-C`). With one parent this is exactly the old
 /// single-parent fall-through.
-#[allow(clippy::too_many_arguments)]
 fn apply_ignore_fallthrough(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
-    node: &DagNode,
-    lines: &[Vec<u8>],
-    first_parent_lines: &[Vec<u8>],
+    pass: &CommitPass,
     first_parent_mapping: &[Option<usize>],
     attrs: &mut [Attribution],
     matched: &mut [bool],
 ) -> BlameOutcome<()> {
-    for (k, &parent) in node.parents.iter().enumerate() {
+    for (k, &parent) in pass.node.parents.iter().enumerate() {
         // Reuse the first parent's already-loaded lines and mapping;
         // recompute for the rest (only reached for an ignored merge).
-        let loaded;
-        let parent_lines: &[Vec<u8>] = if k == 0 {
-            first_parent_lines
-        } else {
-            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
-            &loaded
-        };
+        let parent_lines = pass.parent_lines(ctx, k, parent)?;
         let recomputed;
         let mapping: &[Option<usize>] = if k == 0 {
             first_parent_mapping
         } else {
-            recomputed = match_lines_with_options(parent_lines, lines, ctx.opts)?;
+            recomputed = match_lines_with_options(&parent_lines, pass.lines, ctx.opts)?;
             &recomputed
         };
         let fall = ignore_fallthrough(mapping, parent_lines.len());
@@ -347,39 +353,28 @@ fn apply_ignore_fallthrough(
 /// boundary `-C -C` cross-parent copy is a documented residual; see the
 /// `move_copy` module note). With one parent this is exactly the old single
 /// pass (claimed starts all-false, so the linear path is unchanged).
-#[allow(clippy::too_many_arguments)]
 fn apply_detection(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
     detector: &mut move_copy::Detector,
-    node: &DagNode,
-    commit: Hash,
-    lines: &[Vec<u8>],
-    first_parent_lines: &[Vec<u8>],
+    pass: &CommitPass,
     matched: &[bool],
     attrs: &mut [Attribution],
 ) -> BlameOutcome<()> {
-    let mut claimed = vec![false; lines.len()];
-    for (k, &parent) in node.parents.iter().enumerate() {
-        // Reuse the already-loaded first parent; load the rest.
-        let loaded;
-        let parent_lines: &[Vec<u8>] = if k == 0 {
-            first_parent_lines
-        } else {
-            loaded = load_blob_lines(ctx.store, ctx.nodes[&parent].blob_hash)?;
-            &loaded
-        };
-        let unmatched: Vec<bool> = (0..lines.len())
+    let mut claimed = vec![false; pass.lines.len()];
+    for (k, &parent) in pass.node.parents.iter().enumerate() {
+        let parent_lines = pass.parent_lines(ctx, k, parent)?;
+        let unmatched: Vec<bool> = (0..pass.lines.len())
             .map(|i| !matched[i] && !claimed[i])
             .collect();
         detector.reassign(
             &move_copy::ReassignRequest {
                 file_path: ctx.file_path,
                 source_commit: parent,
-                attributed_commit: commit,
-                new_lines: lines,
+                attributed_commit: pass.commit,
+                new_lines: pass.lines,
                 unmatched: &unmatched,
-                within_file: Some((parent_lines, &memo[&parent])),
+                within_file: Some((&*parent_lines, &memo[&parent])),
                 cross_file: k == 0,
             },
             attrs,
