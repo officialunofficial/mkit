@@ -277,13 +277,31 @@ fn reconstruct_rejects_gitlink_mode() {
 
 // ─── differential vs real git ───────────────────────────────────────
 
-fn git_available() -> bool {
-    Command::new("git")
+/// True if `name` can be spawned as a subprocess (i.e. it resolves on
+/// `PATH`). We only care whether the OS could exec it, not its exit code.
+fn tool_available(name: &str) -> bool {
+    Command::new(name)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok()
+}
+
+/// Loud skip (#505 PR 2/5): if `name` is missing, panic under
+/// `MKIT_TEST_STRICT` (a CI job that expects this tool must not silently
+/// skip the test it's here for) — otherwise print a loud `SKIP:` line and
+/// return `false`.
+fn require_tool(name: &str) -> bool {
+    if tool_available(name) {
+        return true;
+    }
+    assert!(
+        std::env::var_os("MKIT_TEST_STRICT").is_none(),
+        "{name} required (MKIT_TEST_STRICT set) but not found"
+    );
+    eprintln!("SKIP: {name} not available");
+    false
 }
 
 /// Every translated object's id must equal what `git hash-object`
@@ -291,8 +309,7 @@ fn git_available() -> bool {
 /// objects must pass `git fsck`.
 #[test]
 fn differential_ids_and_fsck_against_real_git() {
-    if !git_available() {
-        eprintln!("skipping: no git on PATH");
+    if !require_tool("git") {
         return;
     }
     let (_d, store) = store();

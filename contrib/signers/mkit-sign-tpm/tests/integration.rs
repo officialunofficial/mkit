@@ -148,8 +148,18 @@ fn tpm_keygen_sign_delete_roundtrip() {
     if !keygen_out.status.success() {
         let stderr = String::from_utf8_lossy(&keygen_out.stderr);
         if stderr.contains("built without the `tpm2` feature") {
+            // Loud skip (#505 PR 2/5): this binary was built without the
+            // `tpm2` cargo feature, so the real keygen/sign/delete
+            // round-trip can't run. Under `MKIT_TEST_STRICT`, a CI job
+            // that provisions a TPM (real or swtpm) for this test must
+            // also build with `--features tpm2` — silently reporting
+            // green here would be a config bug, not a routine skip.
+            assert!(
+                std::env::var_os("MKIT_TEST_STRICT").is_none(),
+                "tpm2 feature required (MKIT_TEST_STRICT set) but binary lacks it: {stderr}"
+            );
             eprintln!(
-                "skipping TPM test: binary lacks tpm2 feature — run `cargo test -p mkit-sign-tpm --features tpm2 -- --ignored`"
+                "SKIP: tpm2 feature not enabled — run `cargo test -p mkit-sign-tpm --features tpm2 -- --ignored`"
             );
             return;
         }
