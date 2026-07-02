@@ -266,19 +266,79 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-L <start>,<end>] [<rev>] <file>` —
+- `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
+  [--ignore-revs-file <file>] [--first-parent] [--reverse] [-L <start>,<end>]
+  [<rev>] <file>` —
   show line-level commit attribution. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's
-  current bytes. `-L` restricts output to a line range —
+  current bytes. `-M` detects lines moved *within* the file and `-C` lines
+  copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
+  and repeating it — `-C -C` — widens the search from files changed in the
+  commit to every file in the parent). Detection is block-based: the
+  longest contiguous moved/copied block above git's default thresholds (20
+  alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
+  so a moved block next to genuinely-new lines is still split out, and
+  combined with `-w` a block copied with a whitespace change is still
+  detected. Divergences from git: inline numeric threshold forms
+  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
+  custom threshold); a single unmatched run over 10,000 lines is matched
+  only as a whole, not by sub-block. Move/copy detection is merge-aware and
+  implements git's per-parent mechanism (pinned against git 2.50.1): at a
+  merge, every **real** parent is offered the unexplained lines in commit
+  order, first-found-wins. A parent that contains the blamed file (and
+  whose copy of it isn't byte-identical to an earlier parent's) supplies
+  the within-file `-M` source, and its `-C` copy candidates are the files
+  *modified between that parent and the merge*; a parent without that —
+  because it deleted the file, holds a duplicate of an earlier parent's
+  copy, or the file is newly added by the merge — has no `-M` source, and
+  with `-C -C` its **entire tree** is searched instead. Everyday
+  consequences (each pinned by a test with its git recipe): a block copied
+  in from a side branch is credited to that side; an *unchanged* source
+  file on the first parent is invisible (the block stays on the merge)
+  while the same source *modified* in the merge does credit the first
+  parent; a parent that deleted the blamed file can still supply the copy
+  source; and for a file newly added by the merge every real parent is
+  searched, first included. `-M` and `--ignore-rev` treat every relevant
+  parent uniformly (first-parent-wins); under `--first-parent` all of the
+  above runs against the first parent only.
+  `--ignore-rev <rev>` (repeatable) and `--ignore-revs-file <file>` skip
+  "noise" commits — mass reformats, license-header sweeps, renames — during
+  attribution, like `git blame --ignore-rev`: a line that would be credited
+  to an ignored commit falls through to the commit that previously changed
+  it, while a line the ignored commit genuinely inserted stays put.
+  `--ignore-rev` accepts any revision (short hash, ref, `HEAD~2`);
+  `--ignore-revs-file` entries must be full hex object names, one per line,
+  with blank lines and `#` comments (including inline) skipped — both
+  matching git. (mkit does not auto-read a `.git-blame-ignore-revs` file or
+  a `blame.ignoreRevsFile` config key; pass the file explicitly.) Blame is
+  **merge-aware by default** (like `git blame`): at a merge, a line is
+  credited to whichever parent's side actually wrote it, so a line merged in
+  from a side branch is attributed to its authoring commit rather than the
+  merge. `--first-parent` (like `git blame --first-parent`) follows only
+  each commit's first parent, so such a line is instead credited to the
+  merge commit — the older linear-history behavior; it composes with
+  `-w`/`-M`/`-C`/`--ignore-rev`. `-L`
+  restricts output to a line range —
   `<start>,<end>`, `<start>,+<n>` (n lines forward), `<start>,-<n>` (n
   lines back, ending at `<start>`), `<start>,` (to EOF), `,<end>` (from
   start of file), or a bare `<start>` (to EOF); bounds are 1-based and
   inclusive, an inverted range is swapped, and an over-long end is
   clamped to EOF, matching `git blame -L`. An optional
   `<rev>` (a ref, hash, or `HEAD~2`-style spec) blames the file as of
-  that revision instead of `HEAD`. Default emits
+  that revision instead of `HEAD`. `--reverse <start>..<end>` walks
+  history *forward* instead of backward (like `git blame --reverse`):
+  it blames the `<start>` version of the file and attributes each line to
+  the **last** commit in the range in which it still existed — useful for
+  "which commit removed or last touched this line." `<start>..` defaults
+  `<end>` to `HEAD`; an explicit `<start>` is required (mkit reports a
+  clear error for a missing range or open start, where `git` prints a
+  cryptic "dig up from" message — a deliberate divergence, like the `-L`
+  diagnostics). A line that never survives a step stays on `<start>`
+  (git marks such lines with a leading `^`; mkit's tab format carries no
+  `^`, consistent with its existing boundary-marker omission). `-w` and
+  `-L` compose with `--reverse`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `mkit verify <rev>` — verify the signature on a commit, remix, or
@@ -968,6 +1028,39 @@ Config / keys / version:
     runs (`core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`,
     `core.fsmonitor`) are **rejected** rather than stored. Names match
     case-insensitively and canonicalize to lowercase, like git.
+- `mkit self update [--version <tag>] [--check] [--allow-downgrade]
+  [--format human|json]` — update this binary in place from a signed
+  GitHub Release. The downloaded archive is verified against the
+  **mkit-native release attestation** (`mkit-<ver>.release.dsse`, a
+  DSSE/in-toto envelope over the archives' BLAKE3 digests — see
+  `docs/RELEASE.md`) using release-attestation public keys embedded in
+  the binary at build time; no `cosign` and no GitHub attestation API
+  are involved. The sha256 sidecar is additionally checked as
+  defense-in-depth. Only **installer-managed** binaries are updated:
+  the `.mkit-installed-tag` receipt written by `install.sh` must sit
+  next to the (canonicalized) executable, and the global
+  `$MKIT_STATE_DIR/installed-tag` (default `~/.local/state/mkit`) must
+  agree with it when present. Homebrew/cargo installs are refused with
+  channel-specific guidance (`brew upgrade mkit`,
+  `cargo install --locked mkit-cli`). Both receipts are rewritten
+  after a successful swap, in the installer's exact format, so
+  installer and updater stay interchangeable.
+  - `--check` — only report whether an update is available (works for
+    any install method; compares against the running binary's own
+    version); exits 0 either way, and `--format json` carries the
+    machine-readable bit (`status: up-to-date | update-available`).
+  - Downgrade policy mirrors `install.sh`: resolving `latest` never
+    downgrades; an explicit `--version` pin may downgrade only with
+    `--allow-downgrade`, loudly.
+  - The staged binary must pass a pre-swap self-check (`version` must
+    emit exactly `mkit <X.Y.Z>`); the swap is a same-directory atomic
+    rename. Group-/world-writable install dirs are refused (installer
+    parity).
+  - Environment: `GH_TOKEN`/`GITHUB_TOKEN` (API bearer; needed while
+    the repo is private), `MKIT_STATE_DIR`,
+    `MKIT_SELF_UPDATE_API_BASE` (test/mirror override).
+  - There is **no background update check** — the command only ever
+    acts when invoked. Not yet supported on Windows.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
   The top-level `mkit --version` / `mkit -V` flags are aliases of this
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,

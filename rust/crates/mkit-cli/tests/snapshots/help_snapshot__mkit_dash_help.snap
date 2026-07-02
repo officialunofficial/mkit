@@ -223,10 +223,13 @@ commands:
                     (--fork-audit re-derives referenced content) (feature: git-bridge)
   git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
   git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
-  blame [--format=json] [-w] [-L <start>,<end>] [<rev>] <file>
-                    Show line-level commit attribution; -L limits output to a
-                    line range, -w ignores whitespace when matching, <rev>
-                    blames as of a revision (default HEAD; JSONL with
+  blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
+                    Show line-level commit attribution; -L limits to a line
+                    range, -w ignores whitespace, -M/-C detect moved/copied
+                    lines, --ignore-rev/--ignore-revs-file skip noise commits,
+                    --first-parent limits the merge-aware walk to first
+                    parents, --reverse <start>..<end> walks history forward,
+                    <rev> blames as of a revision (default HEAD; JSONL with
                     --format=json)
   verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
@@ -236,6 +239,13 @@ commands:
                     replaces attest.external_signer_args from config)
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
+  self update [--version <tag>] [--check] [--allow-downgrade] [--format human|json]
+                    Update this binary in place from a signed GitHub
+                    Release, verifying the mkit-native release
+                    attestation against keys embedded at build time.
+                    Only for installer-managed binaries (curl mkit.sh |
+                    sh); refuses with guidance under brew/cargo.
+                    --check only reports; `latest` never downgrades
   version           Print version. Also available as the top-level
                     `--version` / `-V` flags; all emit `mkit <X.Y.Z>`.
 

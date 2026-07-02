@@ -1,8 +1,19 @@
-//! `mkit blame [-w] [<rev>] [-L <range>] <file>` — line-level attribution.
+//! `mkit blame [-w] [-M] [-C] [--ignore-rev <rev>] [--ignore-revs-file <file>]
+//! [--first-parent] [--reverse] [<rev>] [-L <range>] <file>` — line-level
+//! attribution.
 //!
 //! Blames `<file>` as of `<rev>` (default `HEAD`), optionally restricted
 //! to a line range with `-L`. `-w` ignores whitespace when matching
-//! lines across revisions (git `-w`).
+//! lines across revisions (git `-w`); `-M`/`-C` detect lines moved within
+//! the file / copied from other files (git `-M`/`-C`); `--ignore-rev` /
+//! `--ignore-revs-file` skip "noise" commits during attribution (git
+//! `--ignore-rev`), falling through to the commit that previously changed
+//! each line. Blame is merge-aware by default (a line merged from a side
+//! branch is credited to the commit that wrote it); `--first-parent`
+//! restricts the walk to first parents (git `--first-parent`).
+//! `--reverse <start>..<end>` instead walks history forward, attributing
+//! each line of the `<start>` version to the last commit in the range in
+//! which it still existed (git `--reverse`).
 //!
 //! Output modes:
 //!
@@ -17,10 +28,16 @@
 //! Line numbers in the output are always the file's own 1-based numbers,
 //! so a `-L 40,60` slice still prints `40..=60`, matching `git blame -L`.
 
+use std::collections::HashSet;
 use std::io::Write;
+use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
-use mkit_core::ops::blame::{BlameOptions, BlameResult, blame_file_with, format_blame_text};
+use mkit_core::hash::{self, Hash};
+use mkit_core::ops::blame::{
+    BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
+    format_blame_text,
+};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -41,6 +58,10 @@ enum BlameFormat {
     about = "Show line-level commit attribution.",
     override_usage = "mkit blame [OPTIONS] [<rev>] [--] <file>"
 )]
+// A CLI flag struct: each bool is an independent `git blame` toggle, so the
+// "too many bools" heuristic (which targets state that should be an enum)
+// does not apply.
+#[allow(clippy::struct_excessive_bools)]
 struct BlameOpts {
     /// Output format. Default emits `<short12>\t<line_num>\t<text>`
     /// per line; `json` emits JSONL with `hash`, `line_num`,
@@ -70,6 +91,50 @@ struct BlameOpts {
         allow_hyphen_values = true
     )]
     lines: Option<String>,
+    /// Detect lines moved *within* the file, like `git blame -M`: a moved
+    /// block of at least 20 alphanumeric characters is credited to its
+    /// origin commit rather than the editing one. (git's inline `-M<num>`
+    /// threshold override is not exposed; the core API accepts a custom
+    /// threshold.)
+    #[arg(short = 'M', long = "find-moves")]
+    find_moves: bool,
+    /// Detect lines copied *from other files*, like `git blame -C`
+    /// (implies `-M`). Repeat to widen the search: `-C` covers files
+    /// changed in the same commit, `-C -C` every file in the parent
+    /// commit. A copied block needs at least 40 alphanumeric characters.
+    /// (git's inline `-C<num>` threshold override is not exposed.)
+    #[arg(short = 'C', long = "find-copies", action = clap::ArgAction::Count)]
+    find_copies: u8,
+    /// Ignore a "noise" commit (mass reformat, license header, rename)
+    /// when attributing lines, like `git blame --ignore-rev`. A line that
+    /// would be credited to an ignored commit falls through to the commit
+    /// that previously changed it; a genuine insertion stays put. Accepts
+    /// any revision (short hash, ref, `HEAD~2`) and may be repeated.
+    #[arg(long = "ignore-rev", value_name = "REV")]
+    ignore_rev: Vec<String>,
+    /// Ignore every commit listed in `<file>`, like
+    /// `git blame --ignore-revs-file`. One full hex object name per line;
+    /// blank lines and `#` comments (including inline) are skipped. May be
+    /// repeated.
+    #[arg(long = "ignore-revs-file", value_name = "FILE")]
+    ignore_revs_file: Vec<String>,
+    /// Walk history *forward* instead of backward, like
+    /// `git blame --reverse`. Blames the `<start>` version of the file and
+    /// attributes each line to the last commit in the range in which it
+    /// still existed. Requires the `<rev>` argument to be a
+    /// `<start>..<end>` range (`<start>..` defaults `<end>` to HEAD); a
+    /// bare revision or a missing `<start>` is rejected. Cannot be combined
+    /// with `-M`/`-C` or `--ignore-rev`/`--ignore-revs-file`.
+    #[arg(long = "reverse")]
+    reverse: bool,
+    /// Follow only each commit's first parent, like `git blame
+    /// --first-parent`. By default blame is merge-aware: a line merged in
+    /// from a side branch is credited to the commit that wrote it. With
+    /// `--first-parent` such a line is credited to the merge commit instead.
+    /// Composes with `-w`/`-M`/`-C`/`--ignore-rev`; redundant with
+    /// `--reverse` (reverse blame is already first-parent only).
+    #[arg(long = "first-parent")]
+    first_parent: bool,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
     /// revision to blame it at (a ref, hash, or `HEAD~2`-style spec).
     /// Without a revision the file is blamed against HEAD. A `--`
@@ -105,27 +170,80 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    // Resolve the commit to blame against: an explicit <rev> via the
-    // shared revspec grammar, otherwise HEAD.
-    let head = if let Some(spec) = rev_spec {
-        match revspec::resolve_revision(&store, &mkit_dir, spec) {
-            Ok(h) => h,
-            Err(e) => return emit_err(&format!("{e}"), exit::NOINPUT),
-        }
+    // `--reverse` is a distinct walk that resolves line survival via the
+    // LCS matcher only — it runs neither move/copy nor ignore-rev
+    // detection, so reject the combination rather than silently ignoring
+    // those flags.
+    if opts.reverse
+        && (opts.find_moves
+            || opts.find_copies > 0
+            || !opts.ignore_rev.is_empty()
+            || !opts.ignore_revs_file.is_empty())
+    {
+        return emit_err(
+            "--reverse cannot be combined with -M/-C or --ignore-rev/--ignore-revs-file",
+            exit::USAGE,
+        );
+    }
+
+    // `-M` enables move detection at git's default threshold; `-C` (a
+    // repeat count) sets the copy search level. `-C` implies `-M` in the
+    // core, so a bare `-C` still credits within-file moves too.
+    let moves = if opts.find_moves {
+        MoveDetection::GIT_DEFAULT
     } else {
-        match refs::resolve_head(&mkit_dir) {
-            Ok(Some(h)) => h,
-            Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
-            Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
-        }
+        MoveDetection::Off
+    };
+    let copies = if opts.find_copies > 0 {
+        CopyDetection::git_default(opts.find_copies)
+    } else {
+        CopyDetection::Off
+    };
+    // Build the `--ignore-rev` / `--ignore-revs-file` skip set. Each
+    // failure is already git-faithful text paired with an exit code.
+    let ignore_revs = match collect_ignore_revs(&store, &mkit_dir, &opts) {
+        Ok(set) => Arc::new(set),
+        Err((msg, code)) => return emit_err(&msg, code),
     };
 
     let blame_opts = BlameOptions {
         ignore_whitespace: opts.ignore_whitespace,
+        moves,
+        copies,
+        ignore_revs,
+        first_parent: opts.first_parent,
     };
-    let result = match blame_file_with(&store, head, file, &blame_opts) {
-        Ok(r) => r,
-        Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
+
+    // `--reverse` walks forward over a `<start>..<end>` range; plain blame
+    // walks backward from a single `<rev>` (or HEAD).
+    let result = if opts.reverse {
+        let (start, end) = match resolve_reverse_range(&store, &mkit_dir, rev_spec, file) {
+            Ok(pair) => pair,
+            Err((msg, code)) => return emit_err(&msg, code),
+        };
+        match blame_file_reverse(&store, start, end, file, &blame_opts) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
+        }
+    } else {
+        // Resolve the commit to blame against: an explicit <rev> via the
+        // shared revspec grammar, otherwise HEAD.
+        let head = if let Some(spec) = rev_spec {
+            match revspec::resolve_revision(&store, &mkit_dir, spec) {
+                Ok(h) => h,
+                Err(e) => return emit_err(&format!("{e}"), exit::NOINPUT),
+            }
+        } else {
+            match refs::resolve_head(&mkit_dir) {
+                Ok(Some(h)) => h,
+                Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
+                Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
+            }
+        };
+        match blame_file_with(&store, head, file, &blame_opts) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&format!("blame: {e}"), exit::NOINPUT),
+        }
     };
 
     // `-L` slices the per-line attributions to the requested range,
@@ -150,6 +268,144 @@ pub fn run(args: &[String]) -> u8 {
         let _ = stdout.write_all(text.as_bytes());
         exit::OK
     }
+}
+
+/// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits
+/// to skip during attribution.
+///
+/// `--ignore-rev` takes any revision (short hash, ref, `HEAD~2`) via the
+/// shared revspec grammar — git resolves these the same way — so an
+/// unknown one errors `cannot find revision <rev> to ignore`.
+/// `--ignore-revs-file` entries must be **full** hex object names (git
+/// rejects short hashes in the file): each line is truncated at the first
+/// `#` (inline comments), trimmed, and skipped if empty; a malformed
+/// entry errors `invalid object name: <token>`, and an unreadable file
+/// `could not open object name list: <path>`. All three messages and the
+/// full-hash-only rule were verified against real git.
+///
+/// On error returns `(message, exit_code)`; mkit uses its sysexits-style
+/// codes rather than git's blanket `128`.
+fn collect_ignore_revs(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    opts: &BlameOpts,
+) -> Result<HashSet<Hash>, (String, u8)> {
+    let mut set = HashSet::new();
+
+    for spec in &opts.ignore_rev {
+        match revspec::resolve_revision(store, mkit_dir, spec) {
+            Ok(h) => {
+                set.insert(h);
+            }
+            Err(_) => {
+                return Err((
+                    format!("cannot find revision {spec} to ignore"),
+                    exit::DATAERR,
+                ));
+            }
+        }
+    }
+
+    for path in &opts.ignore_revs_file {
+        let contents = std::fs::read_to_string(path).map_err(|_| {
+            (
+                format!("could not open object name list: {path}"),
+                exit::NOINPUT,
+            )
+        })?;
+        for raw in contents.lines() {
+            // Strip an inline `#` comment, then surrounding whitespace
+            // (covers trailing `\r` on CRLF files), matching git.
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let h = hash::from_hex(line)
+                .map_err(|_| (format!("invalid object name: {line}"), exit::DATAERR))?;
+            set.insert(h);
+        }
+    }
+
+    Ok(set)
+}
+
+/// Resolve the `--reverse` `<start>..<end>` range argument into a pair of
+/// commit hashes. `<start>..` defaults `<end>` to HEAD. A missing range, a
+/// bare revision (no `..`), an empty `<start>`, a triple-dot/extra-dot
+/// range, or an empty range (`start == end`) is a usage error.
+///
+/// `file` is only used to sharpen the no-range diagnostic: if the single
+/// positional looks like the range itself (`a..b`), the file was likely
+/// forgotten.
+///
+/// git's diagnostics here (`No commit to dig up from?`, `More than one
+/// commit to dig up from, X and Y?`) are cryptic; mkit names the concrete
+/// problem instead — a documented bucket-1 divergence, like the clearer
+/// `-L` messages. On error returns `(message, exit_code)`.
+fn resolve_reverse_range(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    rev_spec: Option<&String>,
+    file: &str,
+) -> Result<(Hash, Hash), (String, u8)> {
+    let Some(spec) = rev_spec else {
+        // A lone `a..b` positional is parsed as the *file*; the user most
+        // likely supplied the range but omitted the filename.
+        if file.contains("..") {
+            return Err((
+                format!(
+                    "--reverse: missing <file> (got only '{file}', which looks like the range)"
+                ),
+                exit::USAGE,
+            ));
+        }
+        return Err((
+            "--reverse requires a <start>..<end> revision range".to_string(),
+            exit::USAGE,
+        ));
+    };
+    let Some((start_str, end_str)) = spec.split_once("..") else {
+        return Err((
+            format!("--reverse requires a <start>..<end> range, got '{spec}'"),
+            exit::USAGE,
+        ));
+    };
+    // Reject git's triple-dot symmetric range and any extra `..`: blame
+    // takes a single two-dot range. (`a...b` splits to end `.b`; `a..b..c`
+    // to end `b..c`.)
+    if end_str.starts_with('.') || end_str.contains("..") {
+        return Err((
+            format!("--reverse requires a single <start>..<end> range, got '{spec}'"),
+            exit::USAGE,
+        ));
+    }
+    if start_str.is_empty() {
+        return Err((
+            "--reverse requires an explicit <start> revision".to_string(),
+            exit::USAGE,
+        ));
+    }
+    let start = revspec::resolve_revision(store, mkit_dir, start_str)
+        .map_err(|e| (format!("{e}"), exit::NOINPUT))?;
+    // `<start>..` (empty end) defaults to HEAD, matching git.
+    let end = if end_str.is_empty() {
+        match refs::resolve_head(mkit_dir) {
+            Ok(Some(h)) => h,
+            Ok(None) => return Err(("no commits yet".to_string(), exit::GENERAL_ERROR)),
+            Err(e) => return Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
+        }
+    } else {
+        revspec::resolve_revision(store, mkit_dir, end_str)
+            .map_err(|e| (format!("{e}"), exit::NOINPUT))?
+    };
+    // An empty range (`start == end`) has nothing to walk; git rejects it.
+    if start == end {
+        return Err((
+            format!("--reverse: empty revision range '{spec}'"),
+            exit::USAGE,
+        ));
+    }
+    Ok((start, end))
 }
 
 /// Parse a `git blame -L` style range spec into an inclusive, 1-based

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit self update`.** The binary can now update itself in place from a
+  signed GitHub Release — but only when installer-managed (the
+  `.mkit-installed-tag` receipt written by `install.sh` sits next to the
+  executable); Homebrew/cargo installs are refused with channel-specific
+  guidance. The downloaded archive is verified against the **mkit-native
+  release attestation** (below) using release-attestation public keys
+  embedded in the binary at build time — no `cosign`, no GitHub
+  attestation API — plus the sha256 sidecar as defense-in-depth, and the
+  staged binary must pass a `version` self-check before an atomic
+  same-directory swap. Downgrade policy mirrors the installer (`latest`
+  never downgrades; explicit `--version` pins need `--allow-downgrade`),
+  receipts are rewritten in the installer's exact format, and
+  `--check`/`--format json` report without changing anything. There is no
+  background update check, ever. Not yet supported on Windows.
+- **mkit-native release attestation.** Every release now ships
+  `mkit-<ver>.release.dsse`: a DSSE/in-toto v1 envelope over the BLAKE3
+  digests of all release tarballs, predicate
+  `.../spec/predicate/release/v1` `{"tag": "vX.Y.Z"}`, signed with a
+  dedicated Ed25519 release key (public rotation set checked in at
+  `docs/keys/release-attest.pub`; custody + rotation runbook in
+  `docs/RELEASE.md`). `release.yml` self-verifies the envelope against the
+  checked-in public key before publishing, and the envelope is covered by
+  the cosign-signed `SHA256SUMS`. Produced by the new internal
+  `mkit-release-attest` tool crate (publish = false).
 - **`mkit blame` line ranges and revision argument.** `blame` now accepts
   `-L`/`--lines` to restrict output to a line range — `<start>,<end>`,
   `<start>,+<n>` (n lines forward), `<start>,-<n>` (n lines back, ending at
@@ -23,8 +47,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — no longer steals attribution; output still shows the file's
-  current bytes. Attribution remains first-parent only, with no `-M`/`-C`
-  yet (tracked in follow-up issues).
+  current bytes.
+- **`mkit blame -M` / `-C` move & copy detection.** `-M` (`--find-moves`)
+  credits a block moved *within* the file to its origin commit; `-C`
+  (`--find-copies`, repeatable, implies `-M`) credits a block copied *from
+  another file*, resolving the true origin by blaming the source file.
+  Repeating `-C` widens the search from files changed in the commit to
+  every file in the parent commit. Detection is block-based over normalized
+  keys: the longest contiguous block above git's default thresholds (20 for
+  `-M`, 40 for `-C`) is credited, so a moved block beside genuinely-new
+  lines is split out and — combined with `-w` — a block copied with a
+  whitespace change is still detected. Configured through a typed
+  `MoveDetection`/`CopyDetection` API that can't express an invalid
+  "enabled but zero-threshold" state. Detection is **merge-aware** (#499):
+  at a merge both `-M` moves and `-C -C` copies are traced against **every
+  relevant parent's tree**, so a block moved or copied in from a
+  non-first-parent side is credited to that side's origin — matching
+  `git blame -M`/`-C`, which credits the merge parent whose tree holds the
+  source (a block whose source is only in the merge's own tree stays on the
+  merge, as in git). The `-C`-at-a-merge gaps from the initial #499 landing
+  are now closed by implementing git's actual per-parent candidate
+  mechanism (from git 2.50.1's `blame.c`, each shape pinned by a test with
+  its git recipe): the `-M`/`-C` pass runs against **every real parent** in
+  commit order, first-found-wins. A parent that contains the blamed file —
+  and whose copy of it is not byte-identical to an earlier parent's (git
+  dedups those) — keeps its *porigin*: it supplies the within-file `-M`
+  source, and its `-C` candidates are the files *modified between that
+  parent and the merge*. A porigin-less parent (deleted the file, holds a
+  duplicate blob, or the file is newly added by the merge) has no `-M`
+  source and, with `-C -C`, gets its **entire tree** searched. The rules
+  previously described as "interior vs boundary tie-breaks" fall out of
+  this mechanism, plus the shapes they missed: an unchanged source on the
+  first parent is invisible (block stays on the merge) even when another
+  parent deleted the file; the same source *modified* at the merge credits
+  the first parent — at plain `-C` level 1 too; a parent that deleted the
+  blamed file can still supply the `-C -C` copy source from its tree; and
+  a file newly added by the merge searches every real parent, first
+  included (under `--first-parent`, only the first). Documented divergences from git
+  remain: inline `-M<num>`/`-C<num>` threshold forms aren't exposed on the
+  CLI (the core API takes a custom threshold); `-C -C -C` (whole-history
+  search) is approximated as `-C -C`; when one source holds the block at
+  several offsets the earliest offset wins (git scores candidates and tracks
+  line identity through its diff); and within a single unmatched run longer
+  than 10,000 lines only the whole run is matched, not sub-blocks (a cost
+  bound; the matcher already caps inputs).
+- **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
+  commits — mass reformats, license-header sweeps, renames — during
+  attribution, like `git blame --ignore-rev`. A line that would be credited
+  to an ignored commit falls through to the commit that previously changed
+  it; a line the ignored commit genuinely inserted stays put (git's default,
+  no marker). The fall-through is **merge-aware** (#499): at an ignored merge
+  a line the first parent can't pair (it dropped that line) falls through
+  across to the next parent that does — first-parent-wins, matching `git blame
+  --ignore-rev` at a merge. `--ignore-rev` is repeatable and accepts any revision (short
+  hash, ref, `HEAD~2`); `--ignore-revs-file` reads full hex object names one
+  per line, skipping blank lines and `#` comments (including inline) — both
+  verified against real `git`. Unknown or malformed inputs reproduce git's
+  messages (`cannot find revision <rev> to ignore`, `invalid object name:
+  <token>`, `could not open object name list: <path>`), though mkit returns
+  its sysexits-style exit codes rather than git's blanket `128`. mkit does
+  not auto-read `.git-blame-ignore-revs` or a `blame.ignoreRevsFile` config
+  key — pass the file explicitly.
+- **`mkit blame --reverse <start>..<end>`.** Walks history *forward*
+  instead of backward, like `git blame --reverse`: blames the `<start>`
+  version of the file and attributes each line to the **last** commit in
+  the range in which it still existed (answering "which commit removed or
+  last touched this line"). `<start>..` defaults `<end>` to `HEAD`; an
+  explicit `<start>` is required, and `-w`/`-L` compose with it. Verified
+  field-by-field against real `git blame --reverse` (survivors → end,
+  removed/modified lines freeze at their last commit, unchanged commits
+  advance attribution, file-absence kills a line). Deliberate divergences:
+  mkit reports a clear error for a missing / malformed / empty range or open
+  `<start>` where git prints a cryptic "dig up from" message; a line that
+  never survives a step is shown without git's leading `^` boundary marker
+  (mkit's tab format has no `^`); and the range is followed along `<end>`'s
+  **first-parent** chain only (mkit blame is first-parent only — a `<start>`
+  reached solely through a merge's second parent errors rather than
+  resolving; the full-history walk in #458 would lift this).
 
 ### Removed
 
@@ -43,6 +142,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **buffa 0.8.1 + connectrpc 0.8.0 everywhere.** The main workspace and
+  `contrib/signers` move buffa 0.8.0 → 0.8.1 (runtime-only patch; vendored
+  codegen verified byte-identical). The ConnectRPC pair
+  (`mkit-repo-client` + `apps/repo-worker`) finally leaves its 0.7 pin:
+  connectrpc 0.8 ships on buffa ^0.8.1, so both crates now match the rest
+  of the repo on a single buffa version (the workspace lockfile drops the
+  entire duplicate 0.7 dependency tree). Vendored ConnectRPC codegen was
+  regenerated with the 0.8 toolchain — ~4,300 lines smaller thanks to
+  buffa 0.8's `impl_default_instance!` runtime macros, fused
+  `put_*_field` writers, and shared `check_wire_type`/`map_codec` helpers
+  (wire output is byte-identical). Handler traits now return
+  `impl Encodable<Resp>`, letting future handlers return zero-copy views.
+  connectrpc's now-optional `json` feature is enabled explicitly so
+  generated serde derives and JSON error/end-of-stream frames keep
+  working on wasm.
+- **`mkit blame` is now merge-aware by default (git parity).** Blame walks
+  the file's whole ancestor subgraph instead of only the first-parent chain:
+  at a merge, each line is credited to the first parent that still contains
+  it, so a line merged in from a side branch is attributed to the commit
+  that actually wrote it rather than to the merge commit — matching
+  `git blame`'s default. **This changes output for histories with merges**;
+  the new `--first-parent` flag (like `git blame --first-parent`) restores
+  the previous first-parent-only attribution and composes with
+  `-w`/`-M`/`-C`/`--ignore-rev`. Verified field-by-field against real `git`
+  (distinct side-branch lines, first-parent-wins on a line added identically
+  on both sides, evil-merge lines credited to the merge, octopus merges).
+  This is also the prerequisite for provable blame (#495), which needs
+  correct merge-aware attribution before it can be made verifiable. (mkit
+  still omits git's `^` boundary marker and uses sysexits exit codes, not
+  `128`.)
 - **BREAKING (`mkit-core`):** `Tree` and `ChunkedBlob` are now
   content-addressed by a **domain-bound Binary Merkle Tree (BMT) root**
   (`id = domain_digest(TYPE_DOMAIN, bmt_root)`) instead of `BLAKE3` of

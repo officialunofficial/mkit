@@ -79,6 +79,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "key",
     "keygen",
     "config",
+    "self",
     "version",
 ];
 

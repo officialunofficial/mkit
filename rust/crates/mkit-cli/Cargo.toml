@@ -3,7 +3,7 @@ name = "mkit-cli"
 description = "The mkit command-line tool: a content-addressed VCS with native attestation support"
 keywords = ["mkit", "vcs", "cli", "attestation", "content-addressed"]
 categories = ["command-line-utilities", "cryptography"]
-readme = "../../README.md"
+readme = "README.md"
 # Published to crates.io so `cargo install mkit-cli` works (it installs the
 # `mkit` binary). It ALSO ships as a signed binary via the GitHub Release
 # archives and `cargo install --git` (see docs/INSTALL.md). NOTE: this crate's
@@ -76,7 +76,7 @@ mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 # remote_dispatch can build a key from raw bytes without touching
 # `mkit-transport-enc`'s internals.
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-buffa = "0.8.0"
+buffa = "0.8.1"
 
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
@@ -91,6 +91,14 @@ thiserror = "2"
 # chain: serde_json is already in this binary's normal dependency graph
 # via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
 serde_json = "1"
+# `mkit self update` (commands/self_update.rs): release download over
+# rustls (same feature set + version as mkit-transport-http — zero new
+# TLS supply chain), sha256 sidecar check, and single-member tar.gz
+# extraction of the new binary.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519
 # algorithms (secp256k1 / p256). Same version mkit-core already pulls in.
 getrandom = "0.4"
@@ -198,3 +206,7 @@ pack-shards = [
 # `mkit-core::history::CommitHistory::open_at` wired into commit /
 # branch / merge / rebase / cherry-pick ref advances.
 history-mmr = ["mkit-core/history-mmr"]
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true

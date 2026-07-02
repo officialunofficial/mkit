@@ -461,12 +461,72 @@ jobs:
           find artifacts -type f -exec cp {} dist/ \;
           ls -la dist/
 
+      # ---- mkit-native release attestation -------------------------------
+      # A DSSE/in-toto envelope over the BLAKE3 digests of every CLI
+      # tarball, signed with the mkit release-attestation Ed25519 key
+      # (secret MKIT_RELEASE_ATTEST_KEY; public half checked in at
+      # docs/keys/release-attest.pub). This is the trust root
+      # `mkit self update` verifies against — independent of both
+      # cosign/Sigstore and GitHub infrastructure. Produced BEFORE the
+      # top-level SHA256SUMS so the envelope is also covered by the
+      # cosign-signed checksum file. See docs/RELEASE.md.
+      - name: Install Rust ${{ env.RUST_VERSION }} (release-attest tool)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo artifacts (release-attest tool)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: rust -> rust/target
+          # Partitioned away from PR-event caches — see header note.
+          prefix-key: "rust-release-attest"
+          key: release-attest
+          cache-on-failure: false
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign mkit-native release attestation
+        shell: bash
+        working-directory: rust
+        env:
+          MKIT_RELEASE_ATTEST_KEY: ${{ secrets.MKIT_RELEASE_ATTEST_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MKIT_RELEASE_ATTEST_KEY}" ]; then
+            echo "::error::MKIT_RELEASE_ATTEST_KEY secret is not configured. Releases must ship the mkit-native attestation — see docs/RELEASE.md (Release attestation key) for provisioning." >&2
+            exit 1
+          fi
+          cargo build --release --locked -p mkit-release-attest
+          ./target/release/mkit-release-attest sign \
+            --tag "${{ steps.meta.outputs.tag }}" \
+            --key-env MKIT_RELEASE_ATTEST_KEY \
+            --out "../dist/mkit-${{ steps.meta.outputs.version }}.release.dsse" \
+            ../dist/*.tar.gz
+
+      # Post-sign sanity check against the CHECKED-IN public key: a
+      # rotated-but-not-committed (or corrupted) secret fails the
+      # release here, not at first `mkit self update` in the field.
+      - name: Verify release attestation against checked-in public key
+        shell: bash
+        working-directory: rust
+        run: |
+          ./target/release/mkit-release-attest verify \
+            --pubkeys ../docs/keys/release-attest.pub \
+            --dsse "../dist/mkit-${{ steps.meta.outputs.version }}.release.dsse" \
+            --tag "${{ steps.meta.outputs.tag }}" \
+            ../dist/*.tar.gz
+
       - name: Compute top-level SHA256SUMS
         shell: bash
         working-directory: dist
         run: |
-          sha256sum *.tar.gz sbom.cdx.json > SHA256SUMS || \
-            shasum -a 256 *.tar.gz sbom.cdx.json > SHA256SUMS
+          sha256sum *.tar.gz *.release.dsse sbom.cdx.json > SHA256SUMS || \
+            shasum -a 256 *.tar.gz *.release.dsse sbom.cdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -501,6 +561,7 @@ jobs:
             dist/*.tar.gz.sig
             dist/*.tar.gz.crt
             dist/*.tar.gz.cosign.bundle
+            dist/*.release.dsse
             dist/sbom.cdx.json
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
@@ -529,6 +590,15 @@ jobs:
               --bundle <archive>.cosign.bundle \
               <archive>
             ```
+
+            ### mkit-native attestation
+
+            `mkit-${{ steps.meta.outputs.version }}.release.dsse` is a
+            DSSE/in-toto attestation over the BLAKE3 digests of every
+            archive, signed with the mkit release-attestation Ed25519
+            key (public half: `docs/keys/release-attest.pub` in the
+            repo). `mkit self update` verifies it automatically; manual
+            verification steps are in `docs/RELEASE.md`.
 
             ### Platform notes
 

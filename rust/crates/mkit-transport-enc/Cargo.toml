@@ -3,7 +3,7 @@ name = "mkit-transport-enc"
 description = "Encrypted-stream transport for mkit, layering mkit-rpc SshFrame on top of commonware-stream::encrypted (ChaCha20-Poly1305, X25519+ed25519 handshake)"
 keywords = ["mkit", "vcs", "transport", "encryption", "commonware"]
 categories = ["network-programming", "cryptography"]
-readme = "../../README.md"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,7 @@ workspace = true
 # accepts them; this crate publishes (publish defaults to true).
 mkit-core = { version = "0.3", path = "../mkit-core" }
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
-buffa = "0.8.0"
+buffa = "0.8.1"
 thiserror = "2"
 
 # commonware: pinned at workspace root to the 2026.5.x train. All

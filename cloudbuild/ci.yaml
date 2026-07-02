@@ -1,0 +1,167 @@
+# Rust workspace CI on Cloud Build — replaces the Linux leg of the
+# `build-and-test` + `msrv` jobs in .github/workflows/rust.yml. Failure-ordered,
+# single sequential build: fmt → clippy → build → signers → nextest → doctests.
+#
+# NOTE: mkit's Rust workspace lives in `rust/`, and the reference signers are a
+# SEPARATE workspace in `contrib/signers/`. Steps cd into the right tree; this
+# is the main difference from a root-workspace layout.
+#
+# Toolchain (Rust 1.95.0 + protoc + nextest + sccache + native deps) comes from
+# the baked _CI_IMAGE (cloudbuild/Dockerfile.ci), so this config is just cargo.
+#
+# Triggers (see cloudbuild/README.md):
+#   - mkit-ci-main  push to main (paths-ignore apps/web/docs/md)
+#   - mkit-ci-pr    PRs, gated on a maintainer `/gcbrun` comment (the analog of
+#                   rust.yml's approval-gated heavy jobs). Cloud Build checks out
+#                   the PR head, so no SHA juggling is needed here.
+#
+# CACHING: sccache with a GCS backend. On Cloud Build the build runs *as* a
+# service account, so sccache reaches the bucket through the metadata server
+# with no key file and no WIF. The build SA needs roles/storage.objectAdmin on
+# $_CACHE_BUCKET.
+#
+# Cross-platform note: the macOS leg of build-and-test and the keystore-backends
+# matrix (macOS/Windows native keystores) CANNOT run on Cloud Build (Linux
+# containers only) and stay on GitHub Actions.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  # 8 vCPUs keeps clippy+nextest brisk; 100 GB removes the disk pressure that
+  # made rust.yml free the Android/.NET/Haskell trees on GitHub's ~14 GB runners.
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  # _CACHE_BUCKET / _CI_IMAGE embed the built-in ${PROJECT_ID}; resolving a
+  # built-in nested in a substitution value needs dynamic substitutions (auto-on
+  # under triggers, off for a manual `gcloud builds submit` repro).
+  dynamicSubstitutions: true
+
+timeout: 2400s # cold ~15-20 min; warm (sccache hit) far less.
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: check
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0" # required: sccache can't cache incremental builds
+      - "RUST_BACKTRACE=short"
+      # Drop debuginfo in CI (dominant target/ bloat; CI never opens a debugger).
+      - "CARGO_PROFILE_DEV_DEBUG=0"
+      - "CARGO_PROFILE_TEST_DEBUG=0"
+      # sccache → GCS. RW mode + bucket; ADC comes from the build SA.
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        # ── rust/ workspace: fmt → clippy → build ───────────────────────────
+        ( cd rust
+          cargo fetch --locked
+          cargo fmt --check
+          cargo clippy --all-targets --all-features --workspace -- -D warnings
+          cargo build --locked --workspace
+        )
+
+        # ── contrib/signers (separate workspace) ────────────────────────────
+        # MUST run before the workspace nextest step: mkit-cli's attest_roundtrip
+        # tests drive contrib/signers/target/debug/mkit-sign-file and only fall
+        # back to building it on-the-fly when missing.
+        #
+        # mkit-sign-tpm's integration test needs a real or simulated TPM 2.0
+        # device. Cloud Build's VM exposes a real vTPM at /dev/tpm0 (Shielded
+        # VM), which the binary's `tcti()` falls back to whenever `TCTI` /
+        # `TPM2TOOLS_TCTI` are unset — but that device is the VM's own
+        # Secure-Boot/measured-boot TPM, not a scratch TPM for tests, so
+        # writing arbitrary persistent objects to it is unsupported and
+        # produces "inconsistent attributes" errors. Run an ephemeral swtpm
+        # simulator instead (README's documented dev recipe) so the test
+        # gets a clean, disposable TPM state every build, matching local dev.
+        # Lowercase bash variable names here, not upper-snake-case — Cloud
+        # Build's dynamicSubstitutions scanner treats a bare dollar-prefixed
+        # upper-snake-case token as an attempted substitution reference and
+        # fails the build if it isn't a declared one (see the escaping note
+        # in cloudbuild/security.yaml).
+        swtpm_state_dir=$(mktemp -d)
+        swtpm socket --tpmstate dir="$swtpm_state_dir" --tpm2 \
+          --server type=tcp,port=2321 --ctrl type=tcp,port=2322 \
+          --flags not-need-init &
+        swtpm_pid=$!
+        trap 'kill "$swtpm_pid" 2>/dev/null || true' EXIT
+        export TCTI="swtpm:host=localhost,port=2321"
+        # Wait for both swtpm ports to accept connections before poking them —
+        # the daemon above starts asynchronously.
+        for _ in $(seq 1 50); do
+          (exec 3<>/dev/tcp/localhost/2321) 2>/dev/null && (exec 3<>/dev/tcp/localhost/2322) 2>/dev/null && break
+          sleep 0.2
+        done
+
+        # A fresh swtpm instance is powered-on but not started — every TPM2
+        # command fails with TPM_RC_INITIALIZE until TPM2_Startup(CLEAR) runs
+        # once. No CLI tool for this is baked into the image (tpm2-tools isn't
+        # installed, only libtss2-dev), so send the fixed 12-byte command
+        # (TPM2 Part 3 §9.3, no session, no auth — deterministic wire bytes)
+        # directly to the command port and check for TPM_RC_SUCCESS:
+        #   tag=TPM_ST_NO_SESSIONS(0x8001) size=12 code=TPM2_Startup(0x144)
+        #   body=TPM_SU_CLEAR(0x0000)
+        exec 4<>/dev/tcp/localhost/2321
+        printf '\x80\x01\x00\x00\x00\x0c\x00\x00\x01\x44\x00\x00' >&4
+        startup_resp=$(head -c 10 <&4 | od -An -tx1 | tr -d ' \n')
+        exec 4<&- 4>&-
+        echo "TPM2_Startup response bytes: $startup_resp"
+        if [ "${startup_resp: -8}" != "00000000" ]; then
+          echo "TPM2_Startup did not return TPM_RC_SUCCESS" >&2
+          exit 1
+        fi
+
+        ( cd contrib/signers
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo build --locked --all-features
+          cargo nextest run --locked --all-features
+        )
+
+        # ── rust/ workspace: tests ──────────────────────────────────────────
+        ( cd rust
+          cargo nextest run --locked --workspace --all-features
+          # nextest doesn't run doctests; gate them separately.
+          cargo test --manifest-path fuzz/Cargo.toml
+          cargo test --locked --doc --workspace
+
+          # Version contract: `mkit version` must print exactly "mkit <X.Y.Z>".
+          cargo build --release --locked -p mkit-cli
+          out=$(./target/release/mkit version)
+          expected="mkit $(awk -F\" '/^version/ {print $2; exit}' Cargo.toml)"
+          echo "stdout:   [$out]"
+          echo "expected: [$expected]"
+          if [ "$out" != "$expected" ]; then
+            echo "mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>'" >&2
+            exit 1
+          fi
+
+          # enc-transport opt-in build + encrypted-transport e2e (issue #156).
+          cargo build --locked -p mkit-cli --features enc-transport
+          cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
+
+          # MSRV gate. The baked image is pinned to the MSRV, so a locked
+          # all-targets check is the rust.yml `msrv` job's equivalent — but
+          # assert the coupling instead of trusting a comment: fail loudly if
+          # the image's rustc ever drifts from the declared rust-version (lower-
+          # case/digit vars below don't match Cloud Build's substitution pattern).
+          msrv=$(awk -F\" '/^[[:space:]]*rust-version[[:space:]]*=/ {print $2; exit}' Cargo.toml)
+          rustc_v=$(rustc --version | awk '{print $2}')
+          echo "declared MSRV=$msrv, image rustc=$rustc_v"
+          if [ -n "$msrv" ] && [ "$rustc_v" != "$msrv" ]; then
+            echo "MSRV drift: rust-version=$msrv but CI image rustc=$rustc_v — rebuild Dockerfile.ci or fix rust-version" >&2
+            exit 1
+          fi
+          cargo check --workspace --locked --all-targets
+        )
+
+        sccache --show-stats

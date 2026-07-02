@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MerkleTree, type MerkleNode } from './merkle-tree'
-import { HashChip, INPUT_CLASSES, ObjectRow, Section } from './result-panel'
+import { HashChip, INPUT_CLASSES, Section } from './result-panel'
 import { DEMO_SEED, previewBytes, sanitizeTreeName, TEXT_ENCODER, useMkit } from './use-mkit'
 
 type BlobNode = { kind: 'blob'; name: string; content: string }
@@ -160,6 +160,21 @@ export function TreeDemo() {
 
   const rows = useMemo(() => flattenForNav(tree, expanded), [tree, expanded])
 
+  // Every editable file in the tree (regardless of which folders are expanded),
+  // sorted by path — the options for the editor's file-switcher dropdown.
+  const blobPaths = useMemo(() => {
+    const paths: string[] = []
+    const walk = (node: TreeNode2, path: string) => {
+      if (node.kind === 'blob') {
+        paths.push(path)
+        return
+      }
+      for (const child of node.children) walk(child, path === '' ? child.name : `${path}/${child.name}`)
+    }
+    walk(tree, '')
+    return paths.toSorted((a, b) => (a < b ? -1 : 1))
+  }, [tree])
+
   // path → hash lookup for the nav chips. Root folder lives at '' so empty
   // paths stay coherent if anything ever needs it.
   const hashByPath = useMemo(() => {
@@ -298,7 +313,7 @@ export function TreeDemo() {
             ref={treeRef}
             role='tree'
             aria-label='File tree'
-            className='select-none border-y border-dashed border-hairline py-2 outline-none'
+            className='select-none border-t border-dashed border-hairline py-2 outline-none'
             onKeyDown={onTreeKeyDown}
           >
             {rows.map((row) => {
@@ -357,59 +372,53 @@ export function TreeDemo() {
             })}
           </ul>
         </div>
-
-        {selectedBlob ? (
-          <label className='block'>
-            <span className='mb-2 block text-sm text-muted'>Editing {selectedPath}</span>
-            <textarea
-              className={INPUT_CLASSES}
-              rows={6}
-              value={selectedBlob.content}
-              onChange={(e) => onContentChange(e.target.value)}
-            />
-          </label>
-        ) : null}
       </div>
 
-      <div>
+      <div className='space-y-8'>
+        {/* Editor CTA — the primary action lives here, above the visualisation:
+            edit a file and watch the hashes and Merkle tree below change. The
+            filename is a dropdown so you can jump to any file without hunting
+            through the tree on the left. */}
+        <div className='space-y-3'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <span className='inline-flex items-center gap-1.5 text-sm font-medium'>
+              <PencilIcon />
+              Editing
+            </span>
+            <select
+              aria-label='Choose a file to edit'
+              value={selectedPath}
+              onChange={(e) => setSelectedPath(e.target.value)}
+              className='min-w-0 max-w-full truncate rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 font-mono text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+            >
+              {blobPaths.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+          <textarea
+            className={INPUT_CLASSES}
+            rows={6}
+            value={selectedBlob?.content ?? ''}
+            onChange={(e) => onContentChange(e.target.value)}
+            aria-label={`Contents of ${selectedPath}`}
+          />
+          <p className='text-xs text-muted'>Edit the contents — every hash and the Merkle tree below update live.</p>
+        </div>
+
         {'error' in encoded ? (
-          <p className='mb-4 text-red-600 dark:text-red-400'>
+          <p className='text-red-600 dark:text-red-400'>
             Couldn't build this tree. Check your file contents and try again.
           </p>
-        ) : (
-          <div className='divide-y-2 divide-hairline border-y-2 border-hairline'>
-            {merkle ? (
-              <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
-                <MerkleTree root={merkle} />
-              </Section>
-            ) : null}
-            <Section title='Objects' description='Every commit, folder, and file under this commit.'>
-              <div className='divide-y divide-hairline'>
-                {commit ? (
-                  <ObjectRow
-                    hash={commit.hash}
-                    label='commit'
-                    meta='signed'
-                    trailing={
-                      <span
-                        className={`text-xs ${commit.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}
-                      >
-                        {commit.verified ? 'verified ✓' : 'invalid ✗'}
-                      </span>
-                    }
-                  />
-                ) : null}
-                <ObjectRow hash={encoded.root.hash} label='/' meta='root folder' />
-                {encoded.subtrees.map((t) => (
-                  <ObjectRow key={t.path} hash={t.hash} label={`${t.path}/`} meta='folder' />
-                ))}
-                {encoded.blobs.map((b) => (
-                  <ObjectRow key={b.path} hash={b.hash} label={b.path} meta={`${b.byteCount} B`} />
-                ))}
-              </div>
+        ) : merkle ? (
+          <div className='border-t-2 border-hairline'>
+            <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
+              <MerkleTree root={merkle} />
             </Section>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   )
@@ -465,6 +474,24 @@ function updateBlobAt(tree: TreeNode, path: string, newContent: string): TreeNod
   }
   const result = walk(tree, 0)
   return result.kind === 'tree' ? result : tree
+}
+
+/** Pencil glyph marking the editor as the thing to act on (the edit CTA). Inherits the foreground colour per theme. */
+function PencilIcon() {
+  return (
+    <svg
+      viewBox='0 0 16 16'
+      fill='none'
+      stroke='currentColor'
+      strokeWidth='1.3'
+      strokeLinecap='round'
+      strokeLinejoin='round'
+      className='size-4 text-fg'
+      aria-hidden
+    >
+      <path d='M11.5 2.5 L13.5 4.5 L6 12 L3.5 12.5 L4 10 Z' />
+    </svg>
+  )
 }
 
 /**

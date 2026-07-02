@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -84,7 +84,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet -S --gpg-sign --no-verify --no-edit --help" -- "$cur") )
             ;;
         blame)
-            COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
@@ -121,6 +121,13 @@ _mkit_complete() {
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )
+            ;;
+        self)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "update" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "--version --check --allow-downgrade --format --help" -- "$cur") )
+            fi
             ;;
         gc)
             COMPREPLY=( $(compgen -W "-n --dry-run --grace-secs --help" -- "$cur") )

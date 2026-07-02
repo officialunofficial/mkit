@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Local-filesystem [`Transport`] implementation.
 //!
 //! This is a real local/served transport, not a test-only fixture: it is

@@ -68,8 +68,8 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
 
   async init() {
     // Thin wrapper preserving zod-schema -> handler-arg typing while casting
-    // around the agents/SDK McpServer overload skew (same approach as the
-    // makechain MCP). Every callback is wrapped in `guardTool` so a D1 outage,
+    // around the agents/SDK McpServer overload skew (same approach used
+    // elsewhere in the org). Every callback is wrapped in `guardTool` so a D1 outage,
     // an empty corpus, or any other throw becomes a graceful MCP error result
     // (logged for observability) instead of an unhandled exception to the client.
     const tool = <TShape extends Record<string, z.ZodTypeAny>>(

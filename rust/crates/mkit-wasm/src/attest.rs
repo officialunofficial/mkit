@@ -364,7 +364,13 @@ pub fn verify_webauthn_wrapping(
         authenticator_data: authenticator_data.to_vec(),
         client_data_json: client_data_json.to_vec(),
     };
-    attest_verify_webauthn(pae, &wrapping, &pubkey, signature, &WebAuthnPolicy::permissive())
+    attest_verify_webauthn(
+        pae,
+        &wrapping,
+        &pubkey,
+        signature,
+        &WebAuthnPolicy::permissive(),
+    )
 }
 
 /// Policy-aware counterpart of [`verify_webauthn_wrapping`].
@@ -446,10 +452,16 @@ fn parse_webauthn_policy(policy_json: &str) -> Result<WebAuthnPolicy, JsValue> {
         .ok_or_else(|| js_err("policy_json must be a JSON object"))?;
 
     let mut policy = WebAuthnPolicy::permissive();
-    if let Some(rp) = obj.get("expected_rp_id").and_then(serde_json::Value::as_str) {
+    if let Some(rp) = obj
+        .get("expected_rp_id")
+        .and_then(serde_json::Value::as_str)
+    {
         policy.expected_rp_id = Some(rp.to_string());
     }
-    if let Some(arr) = obj.get("allowed_origins").and_then(serde_json::Value::as_array) {
+    if let Some(arr) = obj
+        .get("allowed_origins")
+        .and_then(serde_json::Value::as_array)
+    {
         let origins = arr
             .iter()
             .map(|o| {
@@ -460,7 +472,10 @@ fn parse_webauthn_policy(policy_json: &str) -> Result<WebAuthnPolicy, JsValue> {
             .collect::<Result<Vec<_>, _>>()?;
         policy.allowed_origins = Some(origins);
     }
-    if let Some(b) = obj.get("require_user_presence").and_then(serde_json::Value::as_bool) {
+    if let Some(b) = obj
+        .get("require_user_presence")
+        .and_then(serde_json::Value::as_bool)
+    {
         policy.require_user_presence = b;
     }
     if let Some(b) = obj
@@ -469,10 +484,16 @@ fn parse_webauthn_policy(policy_json: &str) -> Result<WebAuthnPolicy, JsValue> {
     {
         policy.require_user_verification = b;
     }
-    if let Some(b) = obj.get("allow_cross_origin").and_then(serde_json::Value::as_bool) {
+    if let Some(b) = obj
+        .get("allow_cross_origin")
+        .and_then(serde_json::Value::as_bool)
+    {
         policy.allow_cross_origin = b;
     }
-    if let Some(n) = obj.get("previous_sign_count").and_then(serde_json::Value::as_u64) {
+    if let Some(n) = obj
+        .get("previous_sign_count")
+        .and_then(serde_json::Value::as_u64)
+    {
         policy.previous_sign_count = Some(u32::try_from(n).unwrap_or(u32::MAX));
     }
     Ok(policy)

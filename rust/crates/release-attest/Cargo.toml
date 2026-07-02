@@ -1,0 +1,32 @@
+# Internal release tooling — NOT published and NOT shipped in release
+# archives. Builds the `mkit-release-attest` binary that release.yml
+# uses to sign (and self-verify) the mkit-native release attestation:
+# a DSSE/in-toto v1 envelope whose subjects are the BLAKE3 digests of
+# the release tarballs, signed with the mkit release-attestation
+# Ed25519 key (secret `MKIT_RELEASE_ATTEST_KEY`; public half checked in
+# at docs/keys/release-attest.pub). `mkit self update` verifies this
+# envelope against the public keys embedded in the CLI binary — see
+# docs/RELEASE.md §"Release attestation key".
+[package]
+name = "mkit-release-attest"
+description = "Internal release tool: sign and verify the mkit release DSSE attestation"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mkit-release-attest"
+path = "src/main.rs"
+
+[dependencies]
+mkit-core = { path = "../mkit-core" }
+mkit-attest = { path = "../mkit-attest" }
+serde_json = "1"
+zeroize = "1"

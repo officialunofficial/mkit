@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit S3 / Cloudflare R2 transport.
 //!
 //! Implements the 7-verb [`Transport`] trait on top of a reqwest

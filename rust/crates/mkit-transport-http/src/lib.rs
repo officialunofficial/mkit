@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! mkit HTTP/HTTPS transport.
 //!
 //! Speaks a simple JSON REST dialect against a mkit VCS Worker (e.g.

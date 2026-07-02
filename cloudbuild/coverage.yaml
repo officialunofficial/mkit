@@ -1,0 +1,90 @@
+# Coverage on Cloud Build — replaces .github/workflows/coverage.yml.
+# Runs the workspace under cargo-llvm-cov (nextest), emits an lcov report, and
+# uploads it to Codecov (non-fatal, like the GitHub job). cargo-llvm-cov +
+# llvm-tools-preview are baked into _CI_IMAGE (cloudbuild/Dockerfile.ci).
+#
+# Doctests are deliberately excluded (llvm-cov doctest coverage needs nightly),
+# matching coverage.yml.
+#
+# Trigger: mkit-coverage-main — push to main only (coverage is informational, so
+# it doesn't gate PRs).
+#
+# Codecov: the CODECOV_TOKEN secret is optional. If it's absent the upload step
+# is skipped; the report is still produced and logged.
+
+substitutions:
+  _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/CODECOV_TOKEN/versions/latest
+      env: CODECOV_TOKEN
+
+options:
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  dynamicSubstitutions: true
+timeout: 2400s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: coverage
+    entrypoint: bash
+    secretEnv: ["CODECOV_TOKEN"]
+    env:
+      - "CARGO_TERM_COLOR=always"
+      - "CARGO_INCREMENTAL=0"
+      - "RUSTC_WRAPPER=sccache"
+      - "SCCACHE_GCS_BUCKET=${_CACHE_BUCKET}"
+      - "SCCACHE_GCS_RW_MODE=READ_WRITE"
+      - "SCCACHE_GCS_KEY_PREFIX=ci"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        # Prebuild the mkit-sign-file fixture the attest tests drive (see ci.yaml).
+        ( cd contrib/signers && cargo build --locked -p mkit-sign-file )
+
+        ( cd rust
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report nextest --locked --workspace --all-features
+          cargo llvm-cov report --lcov --output-path /workspace/coverage.lcov
+          cargo llvm-cov report --summary-only | tee /workspace/coverage-summary.txt
+        )
+        sccache --show-stats
+
+        # Upload to Codecov (non-fatal). Skipped when no token is configured.
+        #
+        # CODECOV_TOKEN is a secretEnv (injected into the process env). Under
+        # `dynamicSubstitutions: true` Cloud Build runs bash-style parameter
+        # expansion over this whole script string AT CONFIG TIME (it has no notion
+        # of `#` comments), and a brace-wrapped reference to CODECOV_TOKEN — even
+        # dollar-dollar-brace-escaped, even with a ":-" default — is taken as a
+        # substitution reference to an undeclared key, rejecting the build
+        # pre-start with "key in the template CODECOV_TOKEN is not a valid
+        # built-in substitution". (A bare dollar-dollar word WITHOUT braces
+        # survives — that's how security.yaml gets away with its AUDIT/VAR
+        # comment tokens — but don't rely on that here.) So the secret's name must
+        # never appear brace-wrapped after a dollar in this string, in code OR
+        # comment. Read the injected value with `printenv` (bare name, no dollar)
+        # into a lowercase bash var — lowercase keys never match the substitution
+        # pattern, so a `${codecov_token}` brace expansion is safe (same
+        # convention as ci.yaml).
+        # COMMIT_SHA / BRANCH_NAME ARE valid Cloud Build built-ins, so `${...}`
+        # is correct for them (populated by the mkit-coverage-main trigger).
+        codecov_token=$(printenv CODECOV_TOKEN 2>/dev/null || true)
+        if [ -z "${codecov_token:-}" ]; then
+          echo "CODECOV_TOKEN not set — skipping upload (report at /workspace/coverage.lcov)."
+          exit 0
+        fi
+        curl -fLso codecov https://cli.codecov.io/latest/linux/codecov \
+          && chmod +x codecov \
+          && ./codecov upload-process \
+               --fail-on-error \
+               --file /workspace/coverage.lcov \
+               --token "$codecov_token" \
+               --sha "${COMMIT_SHA}" \
+               --branch "${BRANCH_NAME}" \
+          || echo "Codecov upload failed (non-fatal)."

@@ -23,7 +23,7 @@ Responses are `image/png` with a one-year immutable cache header.
 ## Develop
 
 ```sh
-cd og
+cd apps/og
 npm install
 npm run dev        # wrangler dev — open http://localhost:8787/
 npm run typecheck  # wrangler types && tsc --noEmit

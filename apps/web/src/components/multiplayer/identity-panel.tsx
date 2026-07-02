@@ -128,8 +128,8 @@ export function LockedView({
 }
 
 /**
- * UNLOCKED header: the player identity + a lock control. (The shared repository is described in the page subcopy
- * above the workspace, not selected here.)
+ * UNLOCKED header: the player identity + a lock control. (The shared repository is described in the page subcopy above
+ * the workspace, not selected here.)
  */
 export function UnlockedHeader({
   api,

@@ -18,7 +18,7 @@ set -l __mkit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify \
-    attest verify-attest version help
+    attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
@@ -149,6 +149,18 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s L -l lines -d "Restrict output to a line range" -r
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -s w -l ignore-whitespace -d "Ignore whitespace when matching lines"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s M -l find-moves -d "Detect lines moved within the file"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s C -l find-copies -d "Detect lines copied from other files (repeatable)"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l ignore-rev -d "Skip a noise commit during attribution" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l ignore-revs-file -d "Skip commits listed in a file" -r -F
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l first-parent -d "Follow only first parents (disable merge-aware blame)"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l reverse -d "Walk history forward over a <start>..<end> range"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
@@ -259,6 +271,21 @@ complete -c mkit -n "__fish_seen_subcommand_from remote; \
 complete -c mkit -n "__fish_seen_subcommand_from key; \
     and not __fish_seen_subcommand_from generate list import export delete" \
     -a "generate list import export delete"
+complete -c mkit -n "__fish_seen_subcommand_from self; \
+    and not __fish_seen_subcommand_from update" \
+    -a "update"
+complete -c mkit -n "__fish_seen_subcommand_from self; \
+    and __fish_seen_subcommand_from update" \
+    -l version -d "Pin to a release tag"
+complete -c mkit -n "__fish_seen_subcommand_from self; \
+    and __fish_seen_subcommand_from update" \
+    -l check -d "Only report whether an update is available"
+complete -c mkit -n "__fish_seen_subcommand_from self; \
+    and __fish_seen_subcommand_from update" \
+    -l allow-downgrade -d "Allow an explicit --version pin to downgrade"
+complete -c mkit -n "__fish_seen_subcommand_from self; \
+    and __fish_seen_subcommand_from update" \
+    -l format -d "Output format" -a "human json"
 
 # attest / verify-attest flags.
 complete -c mkit -n "__fish_seen_subcommand_from attest" \

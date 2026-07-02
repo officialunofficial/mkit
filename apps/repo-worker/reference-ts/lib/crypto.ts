@@ -3,8 +3,8 @@
 // this standalone worker's build. The reference vcs worker uses mkit-wasm
 // strict verify for byte-exact parity with the Rust node. mkit-wasm@0.2.1 is
 // published to npm and resolvable, but its wasm-bindgen `--target bundler`
-// build needs a Workers-specific re-instantiation shim (see makechain
-// apps/vcs/src/mkit-wasm-bootstrap.ts). @noble/curves implements the SAME
+// build needs a Workers-specific re-instantiation shim (see the reference
+// vcs worker's mkit-wasm bootstrap shim). @noble/curves implements the SAME
 // algorithm with the SAME strict semantics (RFC 8032 / ZIP-215-off), so the
 // envelope contract is byte-for-byte identical; only the implementation
 // differs. See README "Crypto parity" for details.

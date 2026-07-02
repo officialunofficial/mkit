@@ -64,7 +64,13 @@ fn forge_assertion() -> (Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>) {
     let signature = signer.sign_dsse(&webauthn_input).unwrap();
     let pubkey_hex = hex::encode(signer.public_key_sec1());
 
-    (pae, authenticator_data, client_data_json, pubkey_hex, signature)
+    (
+        pae,
+        authenticator_data,
+        client_data_json,
+        pubkey_hex,
+        signature,
+    )
 }
 
 #[test]

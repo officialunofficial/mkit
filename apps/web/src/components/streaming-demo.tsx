@@ -12,7 +12,7 @@ type FileAsset = { name: string; bytes: Uint8Array; source: 'default' | 'upload'
 
 const DEFAULT_NAME = 'grid.ppm'
 const DEFAULT_SEED = 0xc0de_cafe
-// Demo-only hard cap. At 64 KB avg FastCDC chunks, 128 MiB → ~2,048 chunks — the strip stays readable (each chip is
+// Demo-only hard cap. At 64 KiB avg FastCDC chunks, 128 MiB → ~2,048 chunks — the strip stays readable (each chip is
 // still visible at typical viewport widths) and the wasm passes finish in a few seconds on a modest laptop. Above this
 // we'd risk OOM in wasm32 (the linear memory ceiling is 4 GiB and our passes hold multiple copies — input, chunker
 // state, Bao outboard) and start freezing the tab while building tens of thousands of DOM nodes. Real mkit has no
@@ -57,7 +57,7 @@ export function StreamingDemo() {
     setBaoFile(asset)
   }, [])
 
-  // Reject oversized files *before* reading the ArrayBuffer — saves the browser from allocating hundreds of MB just
+  // Reject oversized files *before* reading the ArrayBuffer — saves the browser from allocating hundreds of MiB just
   // to throw it away. Real mkit has no cap; this is purely to keep the demo page responsive.
   const tryReplaceFile = async (file: File) => {
     const name = file.name || 'file'
@@ -579,7 +579,7 @@ function StreamingBaoVerify({ file }: { file: FileAsset }) {
           <select
             value={tamperedIndex ?? ''}
             onChange={(e) => setTamperedIndex(e.target.value === '' ? null : Number(e.target.value))}
-            className='rounded-md border border-hairline bg-transparent px-2 py-1 font-mono text-base sm:text-xs'
+            className='rounded-md border border-hairline bg-transparent py-1 pl-2 pr-7 font-mono text-base sm:text-xs'
           >
             <option value=''>none</option>
             {baoData.chunks.map((_, i) => (

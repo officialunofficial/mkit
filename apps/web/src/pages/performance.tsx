@@ -17,7 +17,7 @@ export default function PerformancePage() {
           <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
           <p className='max-w-prose text-base text-fg'>
             The numbers below are real <code className='font-mono text-sm'>hyperfine</code> runs of both CLIs on one
-            machine, git&rsquo;s wins included.
+            machine.
           </p>
         </header>
         <PerfSection />

@@ -175,7 +175,7 @@ export function Compose({
         </div>
         <select
           id={refId}
-          className={INPUT_CLASSES}
+          className={`${INPUT_CLASSES} pr-9`}
           value={selectValue}
           onChange={(e) => onTargetRef(e.target.value === NEW_REF ? '' : e.target.value)}
         >
@@ -277,7 +277,7 @@ export function ComposeDisabled() {
       </div>
       <div className='space-y-1.5'>
         <span className='block text-sm text-muted'>Branch</span>
-        <select className={INPUT_CLASSES} disabled value='main'>
+        <select className={`${INPUT_CLASSES} pr-9`} disabled value='main'>
           <option value='main'>main</option>
         </select>
       </div>

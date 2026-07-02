@@ -1,5 +1,5 @@
 // Cloudflare Worker config for the mkit anonymous-multiplayer repo server.
-// JSONC to match the org convention (makechain/apps/vcs) + Cloudflare's default.
+// JSONC to match the org's Worker config convention + Cloudflare's default.
 // Build with worker-build (the workers-rs cross-platform build command), which
 // compiles the cdylib to wasm32 and emits the ES-module shim into ./build.
 {

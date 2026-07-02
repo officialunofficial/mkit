@@ -1,6 +1,6 @@
 # mkit-wasm
 
-WebAssembly bindings for [mkit](https://github.com/officialunofficial/mkit) — a content-addressed VCS for creative work. The package exposes the pure byte-format and crypto paths from `mkit-core` and `mkit-attest` so they can run anywhere a modern JS runtime can: browsers, Cloudflare Workers, Bun, Deno, Node.
+WebAssembly bindings for mkit — a content-addressed VCS for creative work. The package exposes the pure byte-format and crypto paths from `mkit-core` and `mkit-attest` so they can run anywhere a modern JS runtime can: browsers, Cloudflare Workers, Bun, Deno, Node.
 
 No filesystem or network access is performed inside the wasm module. It is a stateless library of object encoders, hashers, signers, verifiers, FastCDC chunkers, delta encoders, and Bao streaming primitives.
 
@@ -87,11 +87,9 @@ TypeScript declarations shipped in the package for full signatures.
 
 ## Versioning
 
-This package is generated from the `mkit-wasm` crate inside the
-[mkit Rust workspace](https://github.com/officialunofficial/mkit/tree/main/rust/crates/mkit-wasm).
-Each npm release is built from a tagged commit of the upstream repo;
-the npm version matches the upstream `vX.Y.Z` tag, so `@makechain/mkit-wasm@0.3.0`
-on npm corresponds to `v0.3.0` on GitHub.
+This package is generated from the `mkit-wasm` crate inside the mkit Rust
+workspace (`rust/crates/mkit-wasm`). Each npm release is built from a tagged
+commit, so `@makechain/mkit-wasm@0.3.0` on npm corresponds to tag `v0.3.0`.
 
 The wasm bundle wraps the same Rust crates the native `mkit` CLI uses,
 so on-disk objects produced here are byte-identical to those produced
@@ -103,10 +101,6 @@ Releases are published from GitHub Actions with
 [`npm publish --provenance`](https://docs.npmjs.com/generating-provenance-statements),
 producing a Sigstore-backed attestation tied to the workflow run.
 Verify on the npm package page or with `npm audit signatures`.
-
-## Repository
-
-[github.com/officialunofficial/mkit](https://github.com/officialunofficial/mkit)
 
 ## License
 

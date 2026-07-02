@@ -9,10 +9,11 @@ Commits are **anonymous**: a signature proves "the same key made these
 commits," not *who*. No accounts, no authorization, no billing.
 
 The happy news: **almost none of this is new.** mkit already specs an
-HTTP-transport-to-R2 backend, and `../makechain` already ships the exact
-anonymous-contributor Worker — verifying signatures with the same
-`@makechain/mkit-wasm` package this branch extends. The demo is a *minimal
-re-cut* of makechain's anonymous path plus the passkey→Ed25519 client flow.
+HTTP-transport-to-R2 backend, and an existing internal reference Worker
+already ships the exact anonymous-contributor pattern — verifying signatures
+with the same `@makechain/mkit-wasm` package this branch extends. The demo
+is a *minimal re-cut* of that reference Worker's anonymous path plus the
+passkey→Ed25519 client flow.
 
 ---
 
@@ -65,9 +66,9 @@ plain `fetch`.
 
 ---
 
-## 3. Server: a minimal Cloudflare Worker (mirror of makechain's anonymous path)
+## 3. Server: a minimal Cloudflare Worker (mirror of an existing internal reference Worker's anonymous path)
 
-makechain's storage split, adopted verbatim:
+The reference Worker's storage split, adopted verbatim:
 
 | Store | Holds | Key shape | Notes |
 |---|---|---|---|
@@ -75,13 +76,14 @@ makechain's storage split, adopted verbatim:
 | **Durable Object + SQLite** | Refs (the only mutable state) | table `refs(path PRIMARY KEY, value)` | One DO per repo = serialization gate; CAS in its serial queue |
 | **KV** (optional) | Player presence / "seen pubkeys" for the multiplayer UI | `player:<pubkey_hex>` | Not needed for correctness — the commit's pubkey *is* the identity |
 
-> makechain puts refs in a DO-hosted SQLite (the "D1-like" store) rather than
-> raw D1, precisely because a DO gives single-writer linearization for free.
-> KV's identity index there maps pubkey→UUID for accounts; **we don't need it** —
-> anonymous means the pubkey is the whole identity.
+> The reference Worker puts refs in a DO-hosted SQLite (the "D1-like" store)
+> rather than raw D1, precisely because a DO gives single-writer
+> linearization for free. KV's identity index there maps pubkey→UUID for
+> accounts; **we don't need it** — anonymous means the pubkey is the whole
+> identity.
 
 **REST contract** — converges with both mkit's `SPEC-TRANSPORT` §5 HTTP transport
-*and* makechain's VCS API. Loose-object variant (no packfile needed, since
+*and* that reference Worker's VCS API. Loose-object variant (no packfile needed, since
 pack-creation isn't WASM-exposed yet):
 
 ```
@@ -93,11 +95,11 @@ GET  /v1/repos/{repo}/refs?prefix=                                    → [{name
 GET  /v1/repos/{repo}/events            (WebSocket; live ref updates — §5)
 ```
 
-**Auth = demo mode (open write, verify-only).** Mirror makechain's signed
-envelope but with `isDemoMode`-style "accept any key":
+**Auth = demo mode (open write, verify-only).** Mirror the reference Worker's
+signed envelope but with `isDemoMode`-style "accept any key":
 
 - Request headers: `X-Public-Key`, `X-Signature`, `X-Digest`, `X-Created-At` (±5 min freshness), `Idempotency-Key`.
-- Canonical string `["mkit-write:v1", method, path, repo, bodyDigest, createdAt, idempotencyKey, ifMatch, ifNoneMatch].join("\n")` → BLAKE3 → **`ed25519_verify`** (mkit-wasm, in the Worker — makechain proves this runs).
+- Canonical string `["mkit-write:v1", method, path, repo, bodyDigest, createdAt, idempotencyKey, ifMatch, ifNoneMatch].join("\n")` → BLAKE3 → **`ed25519_verify`** (mkit-wasm, in the Worker — already proven in production elsewhere).
 - **No allow-list, no ownership check.** The signature only proves request integrity + "same author." Any valid Ed25519 key may write any ref.
 - **Object validity:** on `PUT .../objects/{hash}`, the Worker runs `commit_verify` (mkit-wasm) for commit objects and checks `BLAKE3(bytes)==hash`, so the shared repo holds only well-formed, self-consistently-signed commits. Cheap, and it demos mkit verification server-side.
 
@@ -107,8 +109,9 @@ envelope but with `isDemoMode`-style "accept any key":
 
 - **Ref CAS in the DO.** `PUT /refs/main` carries `If-Match: "<parent>"`. The
   per-repo RefStore DO reads the current value in its serial queue and writes
-  only on match, else `412`. This is exactly makechain's `RefStore.writeRef`
-  (`INSERT ... ON CONFLICT DO UPDATE` guarded by the read). Linearizable
+  only on match, else `412`. This is exactly the reference Worker's
+  `RefStore.writeRef` (`INSERT ... ON CONFLICT DO UPDATE` guarded by the
+  read). Linearizable
   without distributed locks.
 - **Object writes are commutative.** Content-addressed + idempotent R2 PUT;
   two players uploading the same object is a no-op, different objects don't
@@ -133,7 +136,7 @@ the "multiplayer" feel: one shared repo, live updates, anonymous authors.
 
 ## 6. Frontend state stack
 
-Confirmed fit (makechain's workbench uses the same shape: Vite + React +
+Confirmed fit (an existing internal workbench uses the same shape: Vite + React +
 TanStack Router + TanStack Query, Ed25519 in the browser):
 
 - **TanStack Query — server state.** All Worker reads/writes: ref values,
@@ -153,10 +156,10 @@ TanStack Router + TanStack Query, Ed25519 in the browser):
 | Piece | Status |
 |---|---|
 | Ed25519 commit build+sign in WASM (`commit_encode_and_sign`, `ed25519_pubkey_from_seed`) | ✅ exists |
-| `ed25519_verify` / `commit_verify` in WASM (server-side, runs in Workers) | ✅ exists (makechain uses it) |
+| `ed25519_verify` / `commit_verify` in WASM (server-side, runs in Workers) | ✅ exists (proven in production elsewhere) |
 | P-256 passkey attestation + verify (`verify_webauthn_wrapping[_with_policy]`, `attest_pae`) | ✅ added on this branch |
 | mkit HTTP transport REST contract + CAS semantics | ✅ specced (`SPEC-TRANSPORT` §5) |
-| Reference Worker: R2 objects + DO refs + signed envelope + demo-mode open write | ✅ exists in `../makechain` (anonymous path) — to be re-cut minimally |
+| Reference Worker: R2 objects + DO refs + signed envelope + demo-mode open write | ✅ exists in an existing internal reference Worker (anonymous path) — to be re-cut minimally |
 | PRF → HKDF → Ed25519 seed (browser) | 🔨 new (small; raw WebAuthn API + WebCrypto HKDF) |
 | Passkey ceremony in the demo UI (enroll/derive/sign/push/watch) | 🔨 new (the demo work) |
 | WS multiplayer events from the RefStore DO | 🔨 new (small; DO WebSocket fan-out) |
@@ -166,8 +169,8 @@ TanStack Router + TanStack Query, Ed25519 in the browser):
 
 ## 8. Open decisions
 
-1. **Reuse makechain's Worker in demo mode, or ship a standalone minimal Worker for mkit.sh?** Standalone is cleaner for a public demo (no makechain coupling, no billing tables) and is ~a few hundred lines given the reference. Recommended.
+1. **Reuse the existing internal reference Worker in demo mode, or ship a standalone minimal Worker for mkit.sh?** Standalone is cleaner for a public demo (no cross-repo coupling, no billing tables) and is ~a few hundred lines given the reference. Recommended.
 2. **Loose objects vs packfiles.** Loose (recommended for the demo) needs no WASM pack support and keeps the Worker trivial; packs would be more faithful to `mkit push` but require exposing pack-creation in WASM.
 3. **Attestation binding on/off.** Optional flourish — show the P-256 passkey vouching for the Ed25519. Nice for the "full lifecycle" story; not required for contribution.
 4. **Repo scope.** One shared global repo (max multiplayer chaos) vs. per-room repos (`/repos/{room}`). Per-room is friendlier for demos and trivial (DO id = room).
-5. **Anti-abuse on an open-write public endpoint.** Even anonymous, a public CAS endpoint invites spam. Minimum: per-IP rate limit + object size cap + the `commit_verify` gate. (makechain leans on billing reservations; the demo can't.)
+5. **Anti-abuse on an open-write public endpoint.** Even anonymous, a public CAS endpoint invites spam. Minimum: per-IP rate limit + object size cap + the `commit_verify` gate. (The reference Worker leans on billing reservations; the demo can't.)

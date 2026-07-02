@@ -1,0 +1,46 @@
+# Supply-chain gate on Cloud Build — replaces .github/workflows/rust-security.yml.
+# Runs cargo-audit (RUSTSEC advisories) over both workspaces and cargo-deny
+# (advisories, licenses, bans, sources) per rust/deny.toml. Both tools are baked
+# into _CI_IMAGE (cloudbuild/Dockerfile.ci); neither compiles the tree, so no
+# sccache/large disk is needed.
+#
+# Trigger: mkit-security-{pr,main} — path-filtered to **/Cargo.toml,
+# **/Cargo.lock, rust/deny.toml. Keep the --ignore list in sync with
+# rust-security.yml.
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+options:
+  machineType: E2_HIGHCPU_8
+  dynamicSubstitutions: true
+timeout: 600s
+
+steps:
+  - name: ${_CI_IMAGE}
+    id: security
+    entrypoint: bash
+    env:
+      - "CARGO_TERM_COLOR=always"
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # A shell function (lowercase name, no `$`) keeps the long ignore list
+        # in one place WITHOUT a `$$VAR` reference — Cloud Build would otherwise
+        # consume a bare `$$AUDIT` as a substitution before bash ever sees it.
+        run_audit() {
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2025-0055
+        }
+
+        # cargo-audit operates on a Cargo.lock; run it once per workspace.
+        ( cd rust && run_audit )
+        ( cd contrib/signers && run_audit )
+
+        # cargo-deny reads rust/deny.toml (resolved relative to the manifest).
+        # --all-features is a top-level cargo-deny flag, not a `check` subcommand
+        # flag — it must come before `check` or cargo-deny rejects it.
+        cargo deny --manifest-path rust/Cargo.toml --all-features check

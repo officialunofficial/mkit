@@ -426,6 +426,11 @@ export function useLobbyEvents(room: string): void {
   const qc = useQueryClient()
   const backend = useRepoBackend()
   const backendUrl = import.meta.env.VITE_REPO_BACKEND_URL as string | undefined
+  // Attribute this connection to the current key (a member when unlocked, else a
+  // signed-out viewer). Changing it reconnects the socket with/without `?pubkey`,
+  // so lock/unlock moves the user between "online" and "viewer" in the roster.
+  const myPubkey = useIdentityStore((s) => (s.unlocked ? s.ed25519PubkeyHex : null))
+  const setPresence = usePresenceStore((s) => s.set)
 
   const handlers: RoomWatchHandlers = useMemo(
     () => ({
@@ -438,21 +443,24 @@ export function useLobbyEvents(room: string): void {
         void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
         void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
       },
+      // Live "who's online" roster → the presence store, so the lobby can narrate
+      // joins/leaves and show viewer-vs-participant state.
+      onPresence: (p) => setPresence(room, p),
     }),
-    [qc, room],
+    [qc, room, setPresence],
   )
 
   // Worker mode: open the socket immediately off the static URL (no wasm dep).
   useEffect(() => {
     if (!backendUrl) return
-    return subscribeRoom(backendUrl, room, '', handlers)
-  }, [backendUrl, room, handlers])
+    return subscribeRoom(backendUrl, room, '', handlers, myPubkey)
+  }, [backendUrl, room, handlers, myPubkey])
 
   // Mock/offline mode: drive updates off the in-memory backend's watcher.
   useEffect(() => {
     if (backendUrl || !backend) return
-    return backend.watchRoom(room, '', handlers)
-  }, [backendUrl, backend, room, handlers])
+    return backend.watchRoom(room, '', handlers, myPubkey)
+  }, [backendUrl, backend, room, handlers, myPubkey])
 }
 
 /**

@@ -1,0 +1,24 @@
+# Build + push the baked CI toolchain image (cloudbuild/Dockerfile.ci) to GAR.
+# Run once during setup, and again whenever Dockerfile.ci or rust-toolchain.toml
+# changes. The ci/codegen/security/docs/geiger/coverage configs consume it via
+# their _CI_IMAGE substitution (keep the default in lockstep with _CI_IMAGE here
+# and the :rust-1.95.0 tag).
+
+substitutions:
+  _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "cloudbuild/Dockerfile.ci", "-t", "${_CI_IMAGE}", "cloudbuild"]
+
+images: ["${_CI_IMAGE}"]
+
+options:
+  machineType: E2_HIGHCPU_8
+  # `_CI_IMAGE` embeds the built-in ${PROJECT_ID}; resolving a built-in nested in
+  # a substitution value requires dynamic substitutions. Triggers enable this
+  # automatically, but this config is run by hand (`gcloud builds submit
+  # --config=cloudbuild/builder.yaml`), so set it explicitly — otherwise the
+  # literal `${PROJECT_ID}` ships in the image ref and the build fails.
+  dynamicSubstitutions: true
+timeout: 1800s

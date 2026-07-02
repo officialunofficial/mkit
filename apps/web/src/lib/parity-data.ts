@@ -1,7 +1,8 @@
 /**
- * Static mkit-vs-git parity data, distilled from `docs/PARITY.md` (the authoritative scope gate). User-facing notes
- * only — internal phase/issue tracking is dropped. The framing that matters: mkit targets CLI/UX parity, not on-disk or
- * wire interop with real `.git` repositories. A BLAKE3 object store cannot share bytes with git's SHA-1 store.
+ * Static mkit-vs-git parity data — the single source of truth for the per-command parity matrix rendered at `/parity`.
+ * User-facing notes only; the surrounding scope gate, machine-output contract, and internal phase/issue tracking live
+ * in `docs/PARITY.md`. The framing that matters: mkit targets CLI/UX parity, not on-disk or wire interop with real
+ * `.git` repositories. A BLAKE3 object store cannot share bytes with git's SHA-1 store.
  */
 
 export type ParityStatus = 'parity' | 'divergent' | 'non-goal'
@@ -97,7 +98,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: 'Supports -L line ranges and a [<rev>] argument. Attribution is first-parent only, with no -w / -M / -C and no --porcelain. --format=json carries an mkit Identity, not Name <email>.',
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed), pinned against git 2.50.1. No --porcelain; --format=json carries an mkit Identity, not Name <email>.",
       },
       {
         cmd: 'bisect',

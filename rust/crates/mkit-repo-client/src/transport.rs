@@ -23,8 +23,8 @@ use futures::future::BoxFuture;
 use http::{Request, Response};
 use http_body_util::BodyExt;
 use send_wrapper::SendWrapper;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 /// JS-side signer. Given the lowercase-hex BLAKE3 digest of the raw request
@@ -254,8 +254,7 @@ async fn fetch(
     let js_req = web_sys::Request::new_with_str_and_init(&parts.uri.to_string(), &init)?;
 
     let global = js_sys::global();
-    let fetch_fn: js_sys::Function =
-        js_sys::Reflect::get(&global, &"fetch".into())?.dyn_into()?;
+    let fetch_fn: js_sys::Function = js_sys::Reflect::get(&global, &"fetch".into())?.dyn_into()?;
     let js_resp: web_sys::Response = JsFuture::from(
         fetch_fn
             .call1(&wasm_bindgen::JsValue::undefined(), &js_req)?
@@ -269,8 +268,7 @@ async fn fetch(
     if let Some(iter) = js_sys::try_iter(&js_resp.headers())? {
         for entry in iter {
             let pair: js_sys::Array = entry?.into();
-            let (Some(key), Some(val)) = (pair.get(0).as_string(), pair.get(1).as_string())
-            else {
+            let (Some(key), Some(val)) = (pair.get(0).as_string(), pair.get(1).as_string()) else {
                 continue;
             };
             builder = builder.header(key, val);

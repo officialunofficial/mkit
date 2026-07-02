@@ -66,6 +66,7 @@ _mkit() {
         'verify:Verify the signature on a commit'
         'attest:Produce a signed DSSE attestation for a commit'
         'verify-attest:Verify every attestation attached to a commit'
+        'self:Self-management (self update)'
         'version:Print version'
         'help:Show help text'
     )
@@ -258,6 +259,14 @@ _mkit() {
                         '--lines[restrict to a line range]:range:' \
                         '-w[ignore whitespace when matching]' \
                         '--ignore-whitespace[ignore whitespace when matching]' \
+                        '-M[detect lines moved within the file]' \
+                        '--find-moves[detect lines moved within the file]' \
+                        '*-C[detect lines copied from other files (repeatable)]' \
+                        '*--find-copies[detect lines copied from other files (repeatable)]' \
+                        '*--ignore-rev[skip a noise commit during attribution]:rev:' \
+                        '*--ignore-revs-file[skip commits listed in a file]:file:_files' \
+                        '--first-parent[follow only first parents (disable merge-aware blame)]' \
+                        '--reverse[walk history forward over a <start>..<end> range]' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;
@@ -371,6 +380,19 @@ _mkit() {
                         'good[mark a commit as good]' \
                         'bad[mark a commit as bad]' \
                         'reset[end bisect and restore HEAD]'
+                    ;;
+                self)
+                    if (( CURRENT == 2 )); then
+                        _values 'self subcommand' \
+                            'update[update this binary from a signed release]'
+                    else
+                        _arguments \
+                            '--version[pin to a release tag]:tag:' \
+                            '--check[only report whether an update is available]' \
+                            '--allow-downgrade[allow an explicit --version pin to downgrade]' \
+                            '--format[output format]:format:(human json)' \
+                            '--help[show help]'
+                    fi
                     ;;
                 gc)
                     _arguments \

@@ -189,6 +189,12 @@ fn hex_to_bytes_opt(s: &Option<String>) -> Option<Vec<u8>> {
 
 // --- the RepoService trait impl --------------------------------------------
 
+// connectrpc 0.8's generated trait methods return
+// `impl Encodable<Resp> + Send + use<'a, Self>` so handlers MAY return
+// zero-copy views; these handlers return the concrete owned response
+// types, which is a (harmless, crate-internal) refinement of that
+// signature.
+#[allow(refining_impl_trait)]
 impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
     async fn put_object(
         &self,
