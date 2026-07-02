@@ -199,8 +199,10 @@ impl<'a> CommitPass<'a> {
 /// then the `-M`/`-C` detector). At a **merge**, each line is explained by
 /// the first parent — in parent order — that still contains it (so a line on
 /// both sides is credited to the first parent, matching git); lines no parent
-/// explains are introduced here, then offered to ignore-rev fall-through and
-/// the `-M`/`-C` detector against every relevant parent (first-parent-wins).
+/// explains are introduced here, then offered to ignore-rev fall-through
+/// (against every relevant parent, first-parent-wins) and the `-M`/`-C`
+/// detector against every REAL parent under porigin rules — see
+/// [`apply_detection`].
 pub(super) fn attribute_commit(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
@@ -223,38 +225,22 @@ pub(super) fn attribute_commit(
 
     // Root/boundary: the file first appears here (no *relevant* parent still
     // has it), so every line is introduced — but a block may have been
-    // copied from another file in a real parent (`-C`). Unlike the interior
-    // merge case in `apply_detection`, git's boundary `-C` search covers
-    // EVERY real parent of this commit, INCLUDING the first, in order,
-    // first-found-wins (pinned against git 2.50.1 — see the
-    // `blame_c_merge_boundary_*` tests in `mod.rs`). `node.parents` cannot be
-    // used here: it is filtered to parents that still contain the file, which
-    // is exactly empty in this branch, so the real parent list is read
-    // straight from the commit object via `commit_parents`.
+    // copied from another file in a real parent (`-C`). The same
+    // real-parent detection pass as the interior case applies; with no
+    // porigin anywhere, `-C -C` searches every real parent's whole tree,
+    // first included, in order, first-found-wins (pinned against git
+    // 2.50.1 — see the `blame_c_merge_boundary_*` tests in `mod.rs`).
     if node.parents.is_empty() {
         let mut attrs = vec![own; lines.len()];
         if matches!(ctx.opts.copies, CopyDetection::On { .. }) {
-            let mut boundary_parents = move_copy::commit_parents(ctx.store, commit)?;
-            if ctx.opts.first_parent {
-                boundary_parents.truncate(1);
-            }
+            let pass = CommitPass {
+                node,
+                commit,
+                lines: &lines,
+                first_parent_lines: &[],
+            };
             let mut claimed = vec![false; lines.len()];
-            for parent in boundary_parents {
-                let unmatched: Vec<bool> = claimed.iter().map(|&c| !c).collect();
-                detector.reassign(
-                    &move_copy::ReassignRequest {
-                        file_path: ctx.file_path,
-                        source_commit: parent,
-                        attributed_commit: commit,
-                        new_lines: &lines,
-                        unmatched: &unmatched,
-                        within_file: None,
-                        allow_copy: true,
-                    },
-                    &mut attrs,
-                    &mut claimed,
-                )?;
-            }
+            apply_detection(ctx, memo, detector, &pass, &[], &mut attrs, &mut claimed)?;
         }
         return Ok(attrs.into());
     }
@@ -351,32 +337,33 @@ fn apply_ignore_fallthrough(
     }
 }
 
-/// `-M`/`-C` reassignment across `node`'s parents (first-parent-wins, with one
-/// `-C`-specific carve-out below).
+/// `-M`/`-C` reassignment across the commit's **real** parents, in commit
+/// order, first-found-wins — mirroring git 2.50.1's `pass_blame` move/copy
+/// passes (`blame.c`).
 ///
-/// At a merge the unexplained lines are offered to each relevant parent in
-/// turn, each searching that parent's own tree, so a block moved (`-M`) or
-/// copied (`-C -C`) in from a non-first-parent side is credited to that side's
-/// origin — matching `git blame -M`/`-C`, which credits the merge parent whose
-/// tree holds the source. `matched` doubles as the "already explained" mask
-/// threaded into `reassign`, so a line an earlier parent claimed is excluded
-/// from the next parent's candidates and never reassigned twice; it is not
-/// read after this pass. With one parent this is exactly the old single pass,
-/// so the linear path is unchanged.
+/// Each real parent gets one `reassign` call. What that call may search is
+/// keyed on the parent's **porigin** (its version of the blamed file):
 ///
-/// **`-C`'s first-parent carve-out.** At a true (multi-parent) merge, real
-/// git's cross-file `-C` search never considers the FIRST parent's own tree —
-/// only parents `[1..]`, in order, first-found-wins with no override on a
-/// length tie. A block that is a duplicate ONLY on the first parent therefore
-/// stays on the merge, even though the first parent has a perfectly valid,
-/// uncontested candidate (pinned against git 2.50.1: see
-/// `blame_c_merge_copy_tie_prefers_last_parent` and
-/// `blame_c_merge_copy_tie_octopus_prefers_first_non_first_parent` in
-/// `mod.rs`). `-M` (within-file move) is NOT subject to this carve-out — it
-/// stays offered to every parent including the first, so a same-length `-M`
-/// candidate on the first parent still wins over any parent's `-C` (both
-/// mechanisms share one `reassign` call per parent, and the first parent's
-/// call, processed first, can still claim the block via `-M`).
+/// * The parent has a porigin when it contains the file (it appears in the
+///   filtered `node.parents`) AND no earlier real parent brought the
+///   identical file blob — git dedups same-blob porigins, and the deduped
+///   parent is treated as porigin-less from then on.
+/// * With a porigin, `-M` searches the parent's file and `-C` candidates
+///   are limited to files modified between that parent and this commit.
+/// * Without one (parent lacks the file / deduped / boundary), `-M` is off
+///   and `-C -C` widens to the parent's whole tree — so a parent that
+///   deleted the file still surfaces its copy sources, and at a boundary
+///   every real parent (first included) is searched.
+///
+/// Everything previously modeled as a first-parent carve-out or an
+/// interior-vs-boundary tie-break falls out of these rules; the
+/// `blame_c_merge_*` tests in `mod.rs` pin each shape against a real git
+/// 2.50.1 run. `--first-parent` truncates the real parent list to one,
+/// exactly like git's `first_scapegoat`. `matched` doubles as the
+/// "already explained" mask threaded through `reassign`, so a line an
+/// earlier parent claimed is never reassigned twice. With one real parent
+/// that has the file this is exactly the old single pass, so the linear
+/// path is unchanged.
 fn apply_detection(
     ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
@@ -386,19 +373,43 @@ fn apply_detection(
     attrs: &mut [Attribution],
     matched: &mut [bool],
 ) -> BlameOutcome<()> {
-    let is_merge = pass.node.parents.len() > 1;
-    for (k, &parent) in pass.node.parents.iter().enumerate() {
-        let parent_lines = &parents_data[k].0;
-        let unmatched: Vec<bool> = matched.iter().map(|&m| !m).collect();
+    let mut real_parents = move_copy::commit_parents(ctx.store, pass.commit)?;
+    if ctx.opts.first_parent {
+        real_parents.truncate(1);
+    }
+    let copies_on = matches!(ctx.opts.copies, CopyDetection::On { .. });
+    // File blobs already offered as a porigin; a later parent with an
+    // identical blob is deduped to porigin-less (git parity).
+    let mut seen_blobs: HashSet<Hash> = HashSet::new();
+    for &parent in &real_parents {
+        if matched.iter().all(|&m| m) {
+            break; // every line explained — later parents have no work
+        }
+        // The parent's porigin: its index in the file-bearing (filtered)
+        // parent list, unless its file blob was already offered by an
+        // earlier parent (dedup).
+        let porigin = match pass.node.parents.iter().position(|&p| p == parent) {
+            Some(k) if seen_blobs.insert(ctx.nodes[&parent].blob_hash) => Some(k),
+            _ => None,
+        };
+        // A porigin-less parent contributes nothing without `-C` (there is
+        // no within-file `-M` source), and `reassign` would silently
+        // no-op — skip the call outright.
+        if porigin.is_none() && !copies_on {
+            continue;
+        }
         detector.reassign(
             &move_copy::ReassignRequest {
                 file_path: ctx.file_path,
                 source_commit: parent,
                 attributed_commit: pass.commit,
                 new_lines: pass.lines,
-                unmatched: &unmatched,
-                within_file: Some((parent_lines, &memo[&parent])),
-                allow_copy: !(is_merge && k == 0),
+                within_file: porigin.map(|k| {
+                    (
+                        &*parents_data[k].0,
+                        &*memo[&pass.node.parents[k]] as &[Attribution],
+                    )
+                }),
             },
             attrs,
             matched,

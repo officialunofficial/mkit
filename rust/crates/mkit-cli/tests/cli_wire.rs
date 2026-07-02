@@ -595,16 +595,21 @@ fn blame_m_merge_credits_move_from_second_parent() {
 }
 
 #[test]
-fn blame_c_merge_copy_tie_credits_second_parent_not_first() {
-    // End-to-end `-C` merge residual closure: the SAME copyable block is
+fn blame_c_merge_conflict_edit_keeps_copy_tie_on_merge() {
+    // End-to-end `-C` at a conflicted merge: the SAME copyable block is
     // added as a new file on BOTH merge sides (main's s1.txt, feature's
-    // s2.txt) while f.txt itself conflicts and is resolved by appending the
-    // block. Real `git blame -C -C` credits the SECOND parent (feature),
-    // never the first (main), even though main's candidate is otherwise
-    // identical — this is the exact tie mkit-core's
-    // `blame_c_merge_copy_tie_prefers_last_parent` pins at the API level;
-    // this test proves the fix end-to-end through `mkit merge --continue`
-    // and the real CLI `blame -C -C` path. (Pinned against real git 2.50.1.)
+    // s2.txt) while f.txt itself CONFLICTS (edited on both sides) and is
+    // resolved by appending the block. Because f.txt differs on the two
+    // parents, BOTH keep their porigins — neither is deduped into the
+    // whole-tree search — and s1.txt/s2.txt are unchanged at the merge, so
+    // they are invisible to the modified-files channel: the block stays on
+    // the MERGE, and the resolved "MAIN" line is credited to main's edit.
+    // Pinned against real git 2.50.1 (contrast with mkit-core's
+    // `blame_c_merge_copy_tie_prefers_deduped_second_parent`, where the
+    // blamed file is UNCHANGED on both sides, the second parent's porigin
+    // is deduped, and its whole tree — including the source — is
+    // searched). This proves the porigin mechanism end-to-end through
+    // `mkit merge --continue` and the real CLI `blame -C -C` path.
     let b1 = "fn handler_alpha() { compute(); }";
     let b2 = "fn handler_bravo() { compute(); }";
     let td = tempfile::tempdir().unwrap();
@@ -660,12 +665,14 @@ fn blame_c_merge_copy_tie_credits_second_parent_not_first() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(
-        lines[1].starts_with(&feature[..12]) && lines[2].starts_with(&feature[..12]),
-        "-C -C credits the copy tie to the second parent (feature): {stdout:?}"
+        lines[1].starts_with(&merge_hash[..12]) && lines[2].starts_with(&merge_hash[..12]),
+        "both parents keep their porigins (f.txt conflicted), so the \
+         unchanged sources are invisible and the block stays on the merge \
+         (git parity): {stdout:?}"
     );
     assert!(
-        lines.iter().all(|l| !l.starts_with(&merge_hash[..12])),
-        "the tied block is not left on the merge: {stdout:?}"
+        lines.iter().all(|l| !l.starts_with(&feature[..12])),
+        "the second parent's unchanged s2.txt must not be credited: {stdout:?}"
     );
 }
 

@@ -28,41 +28,35 @@
 //! (a documented bound; the matcher already caps inputs at
 //! [`super::BLAME_MAX_LINES`]).
 //!
-//! **Merges.** At a merge both the within-file `-M` move source and the
-//! cross-file `-C` copy source are offered to **every relevant parent** (see
-//! [`super::walk::attribute_commit`]), each search enumerating that parent's
-//! own tree. So a block moved or copied in from a non-first-parent side is
-//! credited to that side — matching `git blame -M`/`-C -C`, which credits the
-//! merge parent whose tree holds the source (verified against git 2.50.1). A
-//! block whose source lives only in the merge's *own* tree (introduced by the
-//! merge) stays on the merge, as in git. `-M` and `--ignore-rev` treat every
-//! parent uniformly (first-parent-wins on a tie); `-C` does not — its
-//! cross-parent tie-break is two distinct, git-verified rules depending on
-//! whether the blamed path is interior or a merge boundary:
+//! **Merges.** At a merge the detector runs against **every real parent**,
+//! in commit order, first-found-wins (see [`super::walk::apply_detection`]).
+//! What each parent's `-C` search covers mirrors git's actual mechanism
+//! (`find_copy_in_parent` + `pass_blame` in git 2.50.1's `blame.c`),
+//! keyed on the parent's **porigin** — its version of the blamed path:
 //!
-//! 1. **Interior copy tie** (the path already exists on every relevant
-//!    parent). Real git's cross-file `-C` search never considers the FIRST
-//!    parent's own tree at a true (multi-parent) merge — only parents
-//!    `[1..]`, in order, first-found-wins with no override on a length tie.
-//!    A block whose *only* candidate is on the first parent therefore stays
-//!    on the merge, even uncontested. See [`super::walk::apply_detection`]
-//!    and its `allow_copy` carve-out, and the `blame_c_merge_copy_tie_*` /
-//!    `blame_c_merge_copy_source_only_on_first_parent_stays_on_merge` tests
-//!    in `mod.rs` (each carries its git 2.50.1 recipe).
-//! 2. **Boundary copy tie** (the blamed file is newly added by the merge; no
-//!    parent contains it). Here the rule is the *opposite*: every real
-//!    parent is searched, INCLUDING the first, in order, first-found-wins —
-//!    so the first parent CAN win this tie, and a sole candidate on any
-//!    later (including octopus) parent is traced there. [`commit_parents`]
-//!    reads the commit's actual parent list (not [`super::walk::DagNode::parents`],
-//!    which is filtered to file-containing parents and is empty exactly in
-//!    this case) so every real parent — not just the first — can be tried.
-//!    See the `blame_c_merge_boundary_*` tests in `mod.rs`.
+//! * A parent HAS a porigin when it contains the blamed file AND no
+//!   earlier real parent brought the identical file blob (git dedups
+//!   same-blob porigins; the duplicate parent is treated as porigin-less).
+//! * **With a porigin** (`within_file` is `Some`): `-M` searches the
+//!   parent's version of the file, and `-C` candidates are the files whose
+//!   blobs *differ between that parent and the child* (the "modified in
+//!   the commit" channel, any `-C` level), excluding the blamed path.
+//! * **Without a porigin** (`within_file` is `None` — the parent lacks the
+//!   file, its blob was deduped, or the blamed file is newly added by this
+//!   commit): `-M` has no source, and at `-C` level >= 2 the copy search
+//!   widens to the parent's **entire tree** (git's `find_copies_harder`,
+//!   set exactly when porigin is NULL). At level 1 the modified-files
+//!   channel still applies, with no path excluded.
 //!
-//! `-M` is unaffected by carve-out 1 and stays offered to every parent,
-//! first included — so a same-length `-M` move on the first parent still
-//! beats a `-C` copy candidate on a later parent (both mechanisms share one
-//! `reassign` call per parent, processed in parent order).
+//! Everything previously described as a "first-parent carve-out" or an
+//! "interior vs boundary tie-break" falls out of these rules: at a typical
+//! merge the first parent keeps its porigin (so only its *modified* files
+//! are copy candidates — an unchanged source file on the first parent is
+//! invisible), while a later parent with the identical file blob is
+//! deduped and gets the whole-tree search. A file newly added by the merge
+//! leaves every parent porigin-less, so all real parents get whole-tree
+//! searches, first included. Pinned against git 2.50.1 by the
+//! `blame_c_merge_*` tests in `mod.rs`, each carrying its git recipe.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -89,31 +83,27 @@ type KeyIndex = HashMap<Vec<u8>, Vec<usize>>;
 /// point off the positional-argument hazard and to make the "what does
 /// this step see" surface explicit.
 pub(super) struct ReassignRequest<'r> {
-    /// Path being blamed (excluded from its own copy candidates).
+    /// Path being blamed (excluded from its own copy candidates when this
+    /// parent has a porigin — see `within_file`).
     pub file_path: &'r str,
     /// Parent revision: supplies `-C` candidate trees and their origins,
     /// and is the commit the within-file `-M` source is taken from.
     pub source_commit: Hash,
-    /// Child commit: scopes `-C` level 1 to files changed in it.
+    /// Child commit: the modified-files `-C` channel diffs `source_commit`
+    /// against it.
     pub attributed_commit: Hash,
     /// The child blob's lines (origins are written for these).
     pub new_lines: &'r [Vec<u8>],
-    /// `unmatched[i]` = the matcher left line `i` "new" (a detection
-    /// candidate). All-`true` at a file's boundary commit.
-    pub unmatched: &'r [bool],
-    /// Parent version of *this* file as a `(lines, origins)` `-M` source —
-    /// `None` at the boundary, where there is no earlier version.
+    /// This parent's **porigin**: its version of the blamed file as a
+    /// `(lines, origins)` `-M` source. `None` when the parent lacks the
+    /// file, when its file blob was deduped against an earlier parent's,
+    /// or at a boundary commit (git's porigin-NULL cases). Besides gating
+    /// `-M`, this selects the `-C` channel: `Some` limits candidates to
+    /// files modified between parent and child (blamed path excluded);
+    /// `None` widens level >= 2 to the parent's entire tree, blamed path
+    /// included (git parity: `find_copies_harder` is set exactly when
+    /// porigin is NULL, and the same-path exclusion is porigin-based).
     pub within_file: Option<(&'r [Vec<u8>], &'r [Attribution])>,
-    /// Whether `-C` cross-file candidates from `source_commit` may be
-    /// considered at all. `true` everywhere except one narrow case: at an
-    /// **interior** merge (the blamed path already exists on every relevant
-    /// parent), real git's cross-file `-C` search never considers the FIRST
-    /// parent's tree — only parents `[1..]` — so a block that is only a
-    /// duplicate on the first parent stays on the merge rather than being
-    /// traced there (pinned against git 2.50.1; see
-    /// [`super::walk::apply_detection`]). `-M` (within-file) is unaffected
-    /// and stays offered to every parent, first included.
-    pub allow_copy: bool,
 }
 
 /// Stateful move/copy detector. Holds the per-blame caches so a source
@@ -171,15 +161,18 @@ impl<'a> Detector<'a> {
         }
     }
 
-    /// Reassign moved/copied blocks among the unmatched lines of the
-    /// request, writing origins into `out` and marking each reassigned line
-    /// `true` in `claimed`. A no-op when detection is off or nothing
-    /// qualifies.
+    /// Reassign moved/copied blocks among the still-unclaimed lines,
+    /// writing origins into `out` and marking each reassigned line `true`
+    /// in `claimed`. A no-op when detection is off or nothing qualifies —
+    /// note the porigin-less + copies-off combination is a *silent* no-op
+    /// (`-M` has no source without `within_file`), so callers skip the
+    /// call instead of relying on it.
     ///
-    /// `claimed` lets a merge run the detector against each parent in turn
-    /// (first-parent-wins): a line a higher-priority parent already explained
-    /// is excluded from the next parent's `unmatched` mask, so it is never
-    /// reassigned twice. The single-parent path passes a throwaway buffer.
+    /// `claimed` is both input and output: lines already `true` (matched
+    /// positionally, or claimed by an earlier parent's detector pass —
+    /// first-parent-wins at a merge) are excluded from this pass's
+    /// candidate runs, and every line this pass reassigns is set `true`
+    /// so a later parent never reassigns it again.
     pub(super) fn reassign(
         &mut self,
         req: &ReassignRequest,
@@ -191,15 +184,21 @@ impl<'a> Detector<'a> {
             MoveDetection::On { threshold } => req.within_file.map(|_| threshold),
             MoveDetection::Off => None,
         };
-        let (copy_level, copy_threshold) = if req.allow_copy {
-            match self.opts.copies {
-                CopyDetection::On { level, threshold } => (level, Some(threshold)),
-                CopyDetection::Off => (0, None),
-            }
-        } else {
-            (0, None)
+        let (copy_level, copy_threshold) = match self.opts.copies {
+            CopyDetection::On { level, threshold } => (level, Some(threshold)),
+            CopyDetection::Off => (0, None),
         };
         if move_threshold.is_none() && copy_threshold.is_none() {
+            return Ok(());
+        }
+
+        // Candidate runs first: when everything is already claimed there
+        // is nothing to detect, and the expensive setup below (candidate
+        // enumeration, per-line keying) must not run at all — at a merge
+        // this fires for every parent after the one that explained the
+        // last line.
+        let mut stack: Vec<Range<usize>> = unclaimed_runs(claimed);
+        if stack.is_empty() {
             return Ok(());
         }
 
@@ -210,6 +209,7 @@ impl<'a> Detector<'a> {
                 req.attributed_commit,
                 req.file_path,
                 copy_level,
+                req.within_file.is_some(),
             )?
         } else {
             Vec::new()
@@ -234,10 +234,9 @@ impl<'a> Detector<'a> {
             copy_threshold,
         };
 
-        // Process each maximal run of unmatched lines with an explicit
+        // Process each maximal run of unclaimed lines with an explicit
         // work-stack (no recursion → no stack-overflow on a run of many
         // independent single-line moves).
-        let mut stack: Vec<Range<usize>> = unmatched_runs(req.unmatched);
         while let Some(region) = stack.pop() {
             if region.is_empty() {
                 continue;
@@ -453,17 +452,19 @@ fn alnum_prefix(lines: &[Vec<u8>]) -> Vec<usize> {
     prefix
 }
 
-/// Maximal runs of `true` in `mask`, as `[start, end)` ranges.
-fn unmatched_runs(mask: &[bool]) -> Vec<Range<usize>> {
+/// Maximal runs of `false` in `claimed`, as `[start, end)` ranges — the
+/// regions still open for detection. Derived directly from the claimed
+/// mask so callers never maintain a separate (complementary) mask.
+fn unclaimed_runs(claimed: &[bool]) -> Vec<Range<usize>> {
     let mut runs = Vec::new();
     let mut i = 0;
-    while i < mask.len() {
-        if !mask[i] {
+    while i < claimed.len() {
+        if claimed[i] {
             i += 1;
             continue;
         }
         let start = i;
-        while i < mask.len() && mask[i] {
+        while i < claimed.len() && !claimed[i] {
             i += 1;
         }
         runs.push(start..i);
@@ -471,25 +472,35 @@ fn unmatched_runs(mask: &[bool]) -> Vec<Range<usize>> {
     runs
 }
 
-/// Source files to search for copies, per git's `-C` level: level 1 =
-/// files whose blob differs between the parent (`older`) and child
-/// (`newer`) commit (the files "changed in the commit"); level >= 2 =
-/// every file in the parent commit. The blamed path is always excluded.
+/// Source files to search for copies from one parent, mirroring git's
+/// `find_copy_in_parent` channel selection:
+///
+/// * **Modified-files channel** (any `-C` level): files whose blob differs
+///   between the parent (`older`) and child (`newer`) — git's "files
+///   modified in the same commit". When the parent has a porigin
+///   (`has_porigin`), the blamed path itself is excluded (`-M` owns it).
+/// * **Whole-tree channel** (level >= 2, porigin-less parent only): every
+///   file in the parent's tree, blamed path included — git sets
+///   `find_copies_harder` exactly when porigin is NULL, i.e. the parent
+///   lacks the file, its file blob was deduped against an earlier
+///   parent's, or the child newly adds the file.
 ///
 /// Built on the canonical [`diff_trees`] differ, so it inherits the shared
 /// `MAX_TREE_DEPTH` guard and the hash-equal-subtree pruning (it does not
-/// re-flatten the whole tree on every ancestor step). Level >= 2 diffs the
-/// parent tree against the empty tree, enumerating every parent blob as a
-/// `Removed` entry that carries its hash.
+/// re-flatten the whole tree on every ancestor step). The whole-tree arm
+/// diffs the parent tree against the empty tree, enumerating every parent
+/// blob as a `Removed` entry that carries its hash.
 fn copy_candidates(
     store: &ObjectStore,
     older: Hash,
     newer: Hash,
     target_path: &str,
     level: u8,
+    has_porigin: bool,
 ) -> BlameOutcome<Vec<(String, Hash)>> {
     let older_tree = commit_tree(store, older)?;
-    let entries = if level >= 2 {
+    let whole_tree = level >= 2 && !has_porigin;
+    let entries = if whole_tree {
         diff_trees(store, Some(older_tree), None)?.entries
     } else {
         let newer_tree = commit_tree(store, newer)?;
@@ -499,11 +510,12 @@ fn copy_candidates(
         .into_iter()
         .filter_map(|e| {
             // The copy source is the *parent* version: its content must be
-            // present in `older` and actually differ in the child (so a
-            // mode-only change is not a copy source). `diff_trees` doesn't
-            // emit renames, so `path` is the parent path.
+            // present in `older`, and on the modified-files channel it must
+            // actually differ in the child (a mode-only change is not a
+            // copy source). `diff_trees` doesn't emit renames, so `path`
+            // is the parent path.
             let hash = e.old_hash?;
-            if e.new_hash == Some(hash) {
+            if !whole_tree && e.new_hash == Some(hash) {
                 return None;
             }
             // Only real file content is blamable (skip symlinks/submodules).
@@ -511,10 +523,11 @@ fn copy_candidates(
                 return None;
             }
             // A non-UTF-8 name comes back lossy-converted (`�`) and can't
-            // round-trip through `find_blob_in_tree`; such a file is neither
-            // the blamed target nor a usable copy source, so drop it (and
-            // keep self-exclusion exact).
-            if e.path.contains('\u{FFFD}') || e.path == target_path {
+            // round-trip through `find_blob_in_tree`, so drop it. The blamed
+            // path is excluded only when this parent has a porigin (git
+            // parity: `-M` owns the porigin path; a porigin-less parent's
+            // own copy of the path IS a valid `-C` source).
+            if e.path.contains('\u{FFFD}') || (has_porigin && e.path == target_path) {
                 return None;
             }
             Some((e.path, hash))
@@ -524,9 +537,10 @@ fn copy_candidates(
 
 /// All real parents of a commit, in commit order (empty for a root commit).
 /// Unlike [`super::walk::DagNode::parents`], this is not filtered to parents
-/// that still contain the blamed file — the boundary/root case (the file is
-/// absent from every relevant parent, so the DAG node has none) needs the
-/// *actual* parent list to search each one's tree for a `-C` source.
+/// that still contain the blamed file — the `-M`/`-C` detection pass runs
+/// against every REAL parent (git parity: a parent that deleted or never
+/// had the file still gets a whole-tree `-C -C` search), so it needs the
+/// actual parent list straight from the commit object.
 pub(super) fn commit_parents(store: &ObjectStore, commit: Hash) -> BlameOutcome<Vec<Hash>> {
     let Object::Commit(c) = store.read_object(&commit)? else {
         return Err(BlameError::NotACommit);
