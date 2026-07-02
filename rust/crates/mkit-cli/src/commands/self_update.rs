@@ -178,7 +178,7 @@ fn run_update_cli(args: &[String]) -> u8 {
 /// Everything `run_update` touches outside pure computation, so the
 /// integration tests can point the whole flow at a mock server, a
 /// temp install dir, and a test trust root. Production wiring is
-/// [`UpdateEnv::production`].
+/// `UpdateEnv::production` (private).
 #[derive(Debug)]
 pub struct UpdateEnv {
     /// Release-API base, no trailing slash.
