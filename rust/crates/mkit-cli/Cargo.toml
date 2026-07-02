@@ -76,7 +76,7 @@ mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 # remote_dispatch can build a key from raw bytes without touching
 # `mkit-transport-enc`'s internals.
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-buffa = "0.8.0"
+buffa = "0.8.1"
 
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the

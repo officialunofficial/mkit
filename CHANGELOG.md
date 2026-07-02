@@ -130,6 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **buffa 0.8.1 + connectrpc 0.8.0 everywhere.** The main workspace and
+  `contrib/signers` move buffa 0.8.0 → 0.8.1 (runtime-only patch; vendored
+  codegen verified byte-identical). The ConnectRPC pair
+  (`mkit-repo-client` + `apps/repo-worker`) finally leaves its 0.7 pin:
+  connectrpc 0.8 ships on buffa ^0.8.1, so both crates now match the rest
+  of the repo on a single buffa version (the workspace lockfile drops the
+  entire duplicate 0.7 dependency tree). Vendored ConnectRPC codegen was
+  regenerated with the 0.8 toolchain — ~4,300 lines smaller thanks to
+  buffa 0.8's `impl_default_instance!` runtime macros, fused
+  `put_*_field` writers, and shared `check_wire_type`/`map_codec` helpers
+  (wire output is byte-identical). Handler traits now return
+  `impl Encodable<Resp>`, letting future handlers return zero-copy views.
+  connectrpc's now-optional `json` feature is enabled explicitly so
+  generated serde derives and JSON error/end-of-stream frames keep
+  working on wasm.
 - **`mkit blame` is now merge-aware by default (git parity).** Blame walks
   the file's whole ancestor subgraph instead of only the first-parent chain:
   at a merge, each line is credited to the first parent that still contains

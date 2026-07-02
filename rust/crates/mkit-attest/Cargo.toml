@@ -47,7 +47,7 @@ bls-threshold = [
 mkit-core = { version = "0.3", path = "../mkit-core" }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
-buffa = "0.8.0"
+buffa = "0.8.1"
 blake3 = "1"
 base64 = "0.22"
 thiserror = "2"
