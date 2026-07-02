@@ -103,39 +103,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "borsh"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3f6da4992df95bbcd9af42a6c7dcb994498fc9048230405f3b36ff7cd3f145"
-dependencies = [
- "bytes",
- "cfg_aliases",
-]
-
-[[package]]
 name = "buffa"
-version = "0.7.1"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec95898e2ef31d6266042f21c398fa5ff8334d14d6b2ac5fb38b55448d94f595"
+checksum = "33f29a40702df4b86ccd84211bfde8cee0bce6d0811450ade4a86a7d0958a23a"
 dependencies = [
  "base64",
- "bytes",
- "compact_str",
- "ecow",
- "hashbrown 0.15.5",
- "once_cell",
- "serde",
- "serde_json",
- "smol_str",
- "thiserror",
-]
-
-[[package]]
-name = "buffa"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f5f4b9af6f6e0cd7ce5d0bc30fd28e64e3582c76e25c374a3d37d21501702a2"
-dependencies = [
  "bytes",
  "foldhash",
  "hashbrown 0.15.5",
@@ -149,38 +122,23 @@ dependencies = [
 
 [[package]]
 name = "buffa-build"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd40e2a8f692db728974e24de6e536c0529dc537b2130fc63002b91d17df9331"
+checksum = "ef33217cabddfad99c0a54d42ddb7ca5b73fa492f7b16ddb621132ef51107556"
 dependencies = [
- "buffa 0.8.0",
- "buffa-codegen 0.8.0",
+ "buffa",
+ "buffa-codegen",
  "tempfile",
 ]
 
 [[package]]
 name = "buffa-codegen"
-version = "0.7.1"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "855364959e603cad456c1656bcf57f431ae6e5b4d4e4f166f7d594df882b6218"
+checksum = "c6681b562b18ea719622d0d12684e88ecbdca600d517557dc7bcef7704631e28"
 dependencies = [
- "buffa 0.7.1",
- "buffa-descriptor 0.7.1",
- "prettyplease",
- "proc-macro2",
- "quote",
- "syn",
- "thiserror",
-]
-
-[[package]]
-name = "buffa-codegen"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89936eae12df4511c9201033c262ed9cae902d4f7cddbbb329348346603474d8"
-dependencies = [
- "buffa 0.8.0",
- "buffa-descriptor 0.8.0",
+ "buffa",
+ "buffa-descriptor",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -190,22 +148,11 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.7.1"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f74c0bf128c53f22b0fc3c1e8e66969cd21375879061293fd4e5298e839099a9"
+checksum = "57ed423c4ecec86d1500879ce42e7e5f6def01bc632985ac756c1fd723fa21fc"
 dependencies = [
- "buffa 0.7.1",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "buffa-descriptor"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ece5cac7e437c6084948d3fd63e9b911b3d864e3de82725d2790095a95a393"
-dependencies = [
- "buffa 0.8.0",
+ "buffa",
  "rustversion",
  "serde",
  "serde_json",
@@ -227,15 +174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "castaway"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "cc"
 version = "1.2.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,12 +188,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
@@ -304,21 +236,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "compact_str"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "rustversion",
- "ryu",
- "serde",
- "static_assertions",
-]
-
-[[package]]
 name = "compression-codecs"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -337,14 +254,14 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "connectrpc"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "003fac88ace432fd8e6adbe13da8b20e90613b89e70c72186c505ad1bea307b2"
+checksum = "e269f3f40beac0c161e048847c0106f81eed9afb70ce35911f8ef9287cc209a1"
 dependencies = [
  "async-compression",
  "async-trait",
  "base64",
- "buffa 0.7.1",
+ "buffa",
  "bytes",
  "flate2",
  "futures",
@@ -365,26 +282,26 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-build"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5d70e6771939f6cb0943d7672929c9eed2f735cbdce219040cffb09ec5bbf9f"
+checksum = "f8cdec2dacacd00437898dad38f98105c82d51086a78baa62cee6dc66c031070"
 dependencies = [
  "anyhow",
- "buffa 0.7.1",
- "buffa-codegen 0.7.1",
+ "buffa",
+ "buffa-codegen",
  "connectrpc-codegen",
  "tempfile",
 ]
 
 [[package]]
 name = "connectrpc-codegen"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02bca5ca0b62a25e3b41dd8c021e62aa1c8151f51b6258c2aa44f5bd83fded7b"
+checksum = "36c6e3bb62a4a77f41d5cd3d290a488bf529dc7e26b444cda67a3e5544c97542"
 dependencies = [
  "anyhow",
- "buffa 0.7.1",
- "buffa-codegen 0.7.1",
+ "buffa",
+ "buffa-codegen",
  "heck",
  "prettyplease",
  "proc-macro2",
@@ -525,15 +442,6 @@ dependencies = [
  "rfc6979",
  "signature",
  "spki",
-]
-
-[[package]]
-name = "ecow"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78e4f79b296fbaab6ce2e22d52cb4c7f010fe0ebe7a32e34fa25885fd797bd02"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -1045,7 +953,7 @@ version = "0.3.0"
 dependencies = [
  "base64",
  "blake3",
- "buffa 0.8.0",
+ "buffa",
  "ed25519-dalek",
  "k256",
  "mkit-core",
@@ -1079,7 +987,7 @@ dependencies = [
 name = "mkit-repo-worker"
 version = "0.1.0"
 dependencies = [
- "buffa 0.7.1",
+ "buffa",
  "bytes",
  "connectrpc",
  "connectrpc-build",
@@ -1103,7 +1011,7 @@ dependencies = [
 name = "mkit-rpc"
 version = "0.3.0"
 dependencies = [
- "buffa 0.8.0",
+ "buffa",
  "buffa-build",
  "mkit-core",
  "thiserror",
@@ -1445,16 +1353,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
-name = "smol_str"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
-dependencies = [
- "borsh",
- "serde",
-]
-
-[[package]]
 name = "smoothutf8"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1478,12 +1376,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strum"
