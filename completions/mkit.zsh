@@ -66,6 +66,7 @@ _mkit() {
         'verify:Verify the signature on a commit'
         'attest:Produce a signed DSSE attestation for a commit'
         'verify-attest:Verify every attestation attached to a commit'
+        'self:Self-management (self update)'
         'version:Print version'
         'help:Show help text'
     )
@@ -379,6 +380,19 @@ _mkit() {
                         'good[mark a commit as good]' \
                         'bad[mark a commit as bad]' \
                         'reset[end bisect and restore HEAD]'
+                    ;;
+                self)
+                    if (( CURRENT == 2 )); then
+                        _values 'self subcommand' \
+                            'update[update this binary from a signed release]'
+                    else
+                        _arguments \
+                            '--version[pin to a release tag]:tag:' \
+                            '--check[only report whether an update is available]' \
+                            '--allow-downgrade[allow an explicit --version pin to downgrade]' \
+                            '--format[output format]:format:(human json)' \
+                            '--help[show help]'
+                    fi
                     ;;
                 gc)
                     _arguments \

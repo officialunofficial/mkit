@@ -11,6 +11,12 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    // Target triple for `mkit self update`: release archives are named
+    // `mkit-<version>-<triple>.tar.gz`, and TARGET is only visible to
+    // build scripts, so re-export it to the crate.
+    let target = std::env::var("TARGET").expect("TARGET set by cargo");
+    println!("cargo:rustc-env=MKIT_TARGET_TRIPLE={target}");
+
     let cli_path = Path::new("src").join("cli.rs");
     println!("cargo:rerun-if-changed={}", cli_path.display());
     println!("cargo:rerun-if-changed=Cargo.toml");
