@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! In-memory [`Transport`] implementation for tests and fuzz harnesses.
 //!
 //! A `HashMap`-backed store that holds pack bytes and refs entirely in

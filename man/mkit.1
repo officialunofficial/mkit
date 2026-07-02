@@ -1200,6 +1200,33 @@ Render native commits in
 as
 .Cm git am Ns
 -able mbox patches, oldest first; merge commits are skipped.
+.It Cm self Cm update Oo Fl Fl version Ar tag Oc Oo Fl Fl check Oc Oo Fl Fl allow-downgrade Oc Oo Fl Fl format Ar human|json Oc
+Update this binary in place from a signed GitHub Release. The
+downloaded archive is verified against the mkit-native release
+attestation (a DSSE/in-toto envelope over the archives' BLAKE3
+digests) using release-attestation public keys embedded in the binary
+at build time \(em no
+.Cm cosign
+or GitHub attestation API required. Only installer-managed binaries
+(installed via
+.Ql curl mkit.sh | sh ,
+which writes the
+.Pa .mkit-installed-tag
+receipt) are updated; Homebrew and cargo installs are refused with
+channel-specific guidance instead.
+.Fl Fl check
+only reports whether an update is available and changes nothing.
+Resolving
+.Ql latest
+never downgrades; an explicit
+.Fl Fl version
+pin may only downgrade together with
+.Fl Fl allow-downgrade .
+Receipts
+.Pq Pa .mkit-installed-tag , MKIT_STATE_DIR/installed-tag
+are rewritten after a successful swap, in the installer's format.
+There is no background update check; the command only ever acts when
+invoked. Not yet supported on Windows.
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .
@@ -1251,6 +1278,23 @@ Standard OpenSSH agent socket; used when pushing or cloning via
 Locations of user-level config, keystore, cache, and state
 respectively. See
 .Sx FILES .
+.It Ev GH_TOKEN , Ev GITHUB_TOKEN
+Bearer token
+.Cm mkit self update
+sends to the GitHub API, tried in that order. Optional for public
+releases; required while the repository is private.
+.It Ev MKIT_STATE_DIR
+Receipt state dir consulted by
+.Cm mkit self update
+(default
+.Pa ~/.local/state/mkit ) ,
+matching the installer's variable of the same name.
+.It Ev MKIT_SELF_UPDATE_API_BASE
+Override the release-API base URL used by
+.Cm mkit self update
+(default
+.Lk https://api.github.com/repos/officialunofficial/mkit ) .
+For tests and mirrors.
 .El
 .Sh FILES
 .Bl -tag -width "~/.local/state/mkit/"

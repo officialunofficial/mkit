@@ -24,7 +24,7 @@
 #  - RELEASE_PLZ_APP_ID + RELEASE_PLZ_APP_PRIVATE_KEY — a GitHub App installation
 #    token, minted per-run. release-plz creates no tag, so the App token is here
 #    so the Release PR it opens can trigger CI (a `GITHUB_TOKEN`-authored PR does
-#    not). Same App the polychrome repo uses — reuse it if installed on this repo.
+#    not). Same App already used elsewhere in the org — reuse it if installed on this repo.
 
 name: "Release: release-plz (manual)"
 

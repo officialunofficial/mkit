@@ -231,10 +231,17 @@ signing identity is the GitHub Actions workflow itself
 every signature is recorded in the
 [Rekor transparency log](https://docs.sigstore.dev/logging/overview/).
 
-No artifact-signing private keys are held by any human or stored in GitHub
-Secrets. Artifact signatures are keyless and bound to the artifact hash, so a
-stolen release signature cannot be reused on any other artifact. The installer
+Cosign signatures are keyless and bound to the artifact hash, so a stolen
+release signature cannot be reused on any other artifact. The installer
 (`install.sh`) enforces this same trust boundary by default.
+
+One long-lived private key exists alongside the keyless flow: the
+**release-attestation key** (GitHub Actions secret `MKIT_RELEASE_ATTEST_KEY`),
+which signs the mkit-native DSSE attestation that `mkit self update` verifies
+offline against public keys embedded in the CLI binary. Its custody and
+rotation runbook is in [Release attestation key](#release-attestation-key)
+below. It is deliberately GitHub- and Sigstore-independent: an updater in the
+field needs neither `cosign` nor GitHub's attestation API to verify a release.
 
 ### Artifacts attached to every release
 
@@ -256,9 +263,10 @@ Plus one top-level set for the aggregate:
 
 | File | Purpose |
 | --- | --- |
-| `SHA256SUMS` | Hashes of every archive + SBOM. |
+| `SHA256SUMS` | Hashes of every archive + attestation + SBOM. |
 | `SHA256SUMS.{sig,crt,cosign.bundle}` | Cosign signature of `SHA256SUMS`. |
 | `sbom.cdx.json` | CycloneDX SBOM of the release. |
+| `mkit-X.Y.Z.release.dsse` | mkit-native DSSE/in-toto attestation over the BLAKE3 digests of every archive. Verified by `mkit self update`. |
 
 ### Verify a downloaded archive
 
@@ -310,6 +318,67 @@ cosign verify-blob \
 grep ' sbom.cdx.json$' SHA256SUMS > sbom.cdx.json.sha256
 sha256sum -c sbom.cdx.json.sha256 || shasum -a 256 -c sbom.cdx.json.sha256
 ```
+
+### Verify the mkit-native release attestation
+
+`mkit-X.Y.Z.release.dsse` is a DSSE envelope over an in-toto v1 Statement whose
+subjects are the **BLAKE3** digests of every release archive (subject name =
+archive filename), with predicate `{"tag": "vX.Y.Z"}` and predicate type
+`https://github.com/officialunofficial/mkit/spec/predicate/release/v1`. It is
+signed by the release-attestation Ed25519 key; the public half is checked in at
+[`docs/keys/release-attest.pub`](keys/release-attest.pub).
+
+`mkit self update` performs this verification automatically. To verify by hand
+from a source checkout:
+
+```sh
+VERSION=0.4.0
+cargo run -p mkit-release-attest -- verify \
+  --pubkeys docs/keys/release-attest.pub \
+  --dsse "mkit-${VERSION}.release.dsse" \
+  --tag "v${VERSION}" \
+  mkit-${VERSION}-*.tar.gz
+```
+
+The check requires: a signature by one of the listed keys, the expected
+predicate tag, and the subject set to exactly equal the given archives
+(basename + BLAKE3). The envelope itself is also listed in the cosign-signed
+`SHA256SUMS`, chaining it into the Sigstore trust path as well.
+
+### Release attestation key
+
+Custody: the Ed25519 secret seed lives **only** in the GitHub Actions secret
+`MKIT_RELEASE_ATTEST_KEY` (64 hex chars). The public half is committed at
+`docs/keys/release-attest.pub` and embedded (as a rotation set) in the
+`mkit-cli` binary, which is what lets `mkit self update` verify releases
+offline. `release.yml` fails the release if the secret is missing, and
+self-verifies every attestation against the checked-in public key so a
+secret/pubkey mismatch can never ship.
+
+Provisioning or rotating:
+
+```sh
+# 1. Generate a new keypair. The secret goes STRAIGHT into the GitHub
+#    secret — it never touches disk. The public key is APPENDED to the
+#    checked-in rotation set (do not delete the old line yet).
+cargo run -p mkit-release-attest -- keygen --out-pub /tmp/new.pub
+#    (pipe form, recommended:)
+cargo run -q -p mkit-release-attest -- keygen --out-pub /tmp/new.pub \
+  | gh secret set MKIT_RELEASE_ATTEST_KEY --repo officialunofficial/mkit
+cat /tmp/new.pub   # copy the ed25519: line into docs/keys/release-attest.pub
+
+# 2. Ship at least one release with BOTH keys listed (old binaries in the
+#    field only trust the keys embedded at their build time — removing the
+#    old key immediately would strand them one release too early).
+# 3. After the overlap release is out, delete the retired ed25519: line
+#    from docs/keys/release-attest.pub in a follow-up PR.
+```
+
+Compromise response: rotate as above but *replace* the compromised line
+instead of appending alongside it, and note the affected tag range here.
+Binaries whose embedded set contains only the compromised key cannot securely
+self-update; users on those versions must reinstall via `install.sh` (cosign
+path) and the release notes must say so.
 
 ### macOS Gatekeeper
 

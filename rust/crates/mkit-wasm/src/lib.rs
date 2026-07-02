@@ -9,15 +9,15 @@
 //! exported items so the generated JS surface (function names, struct
 //! names, getter names) is identical to the single-file layout:
 //!
-//! * [`objects`] — blob / tree / commit / remix encode + decode and the
+//! * `objects` — blob / tree / commit / remix encode + decode and the
 //!   object-kind probe, plus their view structs.
-//! * [`crypto`] — Ed25519 keygen + sign / verify (commit-domain and raw)
+//! * `crypto` — Ed25519 keygen + sign / verify (commit-domain and raw)
 //!   and `blake3_hex`.
-//! * [`attest`] — in-toto / DSSE attestations and the `WebAuthn` passkey
+//! * `attest` — in-toto / DSSE attestations and the `WebAuthn` passkey
 //!   signing lifecycle.
-//! * [`chunking`] — `FastCDC` chunker, chunked-blob manifest, delta, and
+//! * `chunking` — `FastCDC` chunker, chunked-blob manifest, delta, and
 //!   Bao verified streaming.
-//! * [`common`] — shared private helpers (hex / JSON parsing, count /
+//! * `common` — shared private helpers (hex / JSON parsing, count /
 //!   index policy, object encoding) and the internal `CommitCore`.
 
 #![forbid(unsafe_code)]

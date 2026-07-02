@@ -542,7 +542,7 @@ mod tpm {
         Context, TctiNameConf,
         attributes::ObjectAttributesBuilder,
         constants::SessionType,
-        handles::{KeyHandle, ObjectHandle, PersistentTpmHandle},
+        handles::{KeyHandle, ObjectHandle, PersistentTpmHandle, SessionHandle},
         interface_types::{
             algorithm::{HashingAlgorithm, PublicAlgorithm, SignatureSchemeAlgorithm},
             ecc::EccCurve,
@@ -704,15 +704,27 @@ mod tpm {
         ctx.flush_context(ObjectHandle::from(primary.key_handle))
             .map_err(|e| SignerError::Tpm(format!("flush_context: {e}")))?;
 
+        // Flush our own auth session rather than relying on process exit
+        // (TPM session slots are a small, fixed resource on real hardware
+        // and simulators alike).
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
+
         Ok(pub_compressed)
     }
 
     pub fn sign(handle: u32, pae: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SignerError> {
         let mut ctx = new_context()?;
         let sess = start_owner_session(&mut ctx)?;
-        ctx.set_sessions((Some(sess), None, None));
 
-        // Resolve the persistent handle → TPM-session handle.
+        // `tr_from_tpm_public` and `read_public` are backed by the
+        // unauthenticated TPM2_ReadPublic — neither takes a session.
+        // Attaching one anyway (as this used to do, before ctx.set_sessions
+        // below) is exactly what produced "inconsistent attributes
+        // (associated with session number 1)": TPM_RC_ATTRIBUTES, the TPM
+        // rejecting a session whose attributes don't fit what the command
+        // expects. Only attach the owner session for the call that
+        // actually needs authorization (Sign).
         let persistent_handle = persistent(handle)?;
         let object_handle = ctx
             .tr_from_tpm_public(persistent_handle.into())
@@ -724,6 +736,8 @@ mod tpm {
             .read_public(key_handle)
             .map_err(|e| SignerError::Tpm(format!("read_public: {e}")))?;
         let pub_compressed = compress_from_public(&public)?;
+
+        ctx.set_sessions((Some(sess), None, None));
 
         // Sign SHA256(pae). P-256 over SHA-256, ECDSA scheme.
         let digest_bytes = Sha256::digest(pae);
@@ -767,6 +781,10 @@ mod tpm {
         let der = encode_der_ecdsa(&r_bytes, &s_bytes);
         let mut compact = der_ecdsa_to_compact(&der).map_err(SignerError::from)?;
         normalize_low_s(&mut compact);
+
+        // See keygen()'s matching flush for why this matters.
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
 
         Ok((pub_compressed, compact.to_vec()))
     }
@@ -814,13 +832,22 @@ mod tpm {
     pub fn delete(handle: u32) -> Result<(), SignerError> {
         let mut ctx = new_context()?;
         let sess = start_owner_session(&mut ctx)?;
-        ctx.set_sessions((Some(sess), None, None));
+
+        // See sign()'s matching comment: tr_from_tpm_public takes no
+        // session (it's backed by the unauthenticated TPM2_ReadPublic).
         let persistent_handle = persistent(handle)?;
         let object_handle = ctx
             .tr_from_tpm_public(persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("tr_from_tpm_public: {e}")))?;
+
+        ctx.set_sessions((Some(sess), None, None));
         ctx.evict_control(Provision::Owner, object_handle, persistent_handle.into())
             .map_err(|e| SignerError::Tpm(format!("evict_control (delete): {e}")))?;
+
+        // See keygen()'s matching flush for why this matters.
+        ctx.flush_context(ObjectHandle::from(SessionHandle::from(sess)))
+            .map_err(|e| SignerError::Tpm(format!("flush_context (session): {e}")))?;
+
         Ok(())
     }
 

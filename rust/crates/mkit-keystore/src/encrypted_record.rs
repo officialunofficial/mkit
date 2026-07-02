@@ -71,7 +71,7 @@ impl EncryptedKeyRecord {
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: secret.expose_secret(),
                     aad: &aad,
@@ -112,7 +112,7 @@ impl EncryptedKeyRecord {
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let mut plaintext = cipher
             .decrypt(
-                XNonce::from_slice(&self.nonce),
+                &XNonce::from(self.nonce),
                 Payload {
                     msg: &self.ciphertext,
                     aad: &aad,
@@ -156,7 +156,7 @@ impl EncryptedKeyRecord {
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: secret.expose_secret(),
                     aad: &aad,
@@ -440,7 +440,7 @@ impl BlsShareRecord {
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: share_bytes,
                     aad: &aad,
@@ -488,7 +488,7 @@ impl BlsShareRecord {
             .map_err(|_| Error::Internal("invalid encryption key length".into()))?;
         let plaintext = cipher
             .decrypt(
-                XNonce::from_slice(&self.nonce),
+                &XNonce::from(self.nonce),
                 Payload {
                     msg: &self.ciphertext,
                     aad: &aad,

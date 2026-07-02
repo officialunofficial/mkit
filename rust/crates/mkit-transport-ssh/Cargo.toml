@@ -3,7 +3,7 @@ name = "mkit-transport-ssh"
 description = "SSH transport for mkit using a forced-command server pattern over a system ssh(1) child process"
 keywords = ["mkit", "vcs", "ssh", "transport"]
 categories = ["network-programming", "data-structures"]
-readme = "../../README.md"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,7 +20,7 @@ workspace = true
 # path so `cargo publish` accepts it.
 mkit-core = { version = "0.3", path = "../mkit-core" }
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
-buffa = "0.8.0"
+buffa = "0.8.1"
 thiserror = "2"
 
 [dev-dependencies]

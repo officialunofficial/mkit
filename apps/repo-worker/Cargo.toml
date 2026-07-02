@@ -25,18 +25,21 @@ crate-type = ["cdylib", "rlib"]
 worker = { version = "0.8", features = ["http"] }
 
 # ConnectRPC core — the tower::Service is `ConnectRpcService` and the Router
-# both live in the default/core path (no feature needed). We pin the crates.io
-# 0.7.0 (identical to what the sibling `rust/crates/mkit-repo-client` resolved,
-# so the workspace stays on a single version) with `default-features = false`
-# to drop the `streaming` default (it pulls tokio-based `async-compression`,
-# which won't build on wasm32) plus `server`/`client`/`axum`/`tls` (hyper +
-# tokio/net). `gzip` matches the client and is wasm-clean. serde/serde_json are
-# unconditional connectrpc deps (Connect error + end-of-stream frames are always
-# JSON) and the buffa-generated message types need `::serde` in direct scope.
-# The Router runs without a tokio runtime — its wasm32 internal spawn is
-# wasm_bindgen_futures::spawn_local.
-connectrpc = { version = "0.7", default-features = false, features = ["gzip"] }
-buffa = "0.7"
+# both live in the default/core path (no feature needed). We pin the same
+# crates.io version the sibling `rust/crates/mkit-repo-client` resolves, so
+# the pair stays on a single version, with `default-features = false` to drop
+# the `streaming` default (it pulls tokio-based `async-compression`, which
+# won't build on wasm32) plus `server`/`client`/`axum`/`tls` (hyper +
+# tokio/net). `gzip` matches the client and is wasm-clean. As of 0.8 `json`
+# is a default-on FEATURE that default-features = false would drop; we
+# re-enable it explicitly so the buffa-generated message types keep their
+# serde derives and JSON error / end-of-stream frames keep working
+# (serde_json is wasm-safe). The Router runs without a tokio runtime — its
+# wasm32 internal spawn is wasm_bindgen_futures::spawn_local. connectrpc 0.8
+# requires buffa >= 0.8.1 (view→owned overflow accounting), matching the
+# main workspace's pin.
+connectrpc = { version = "0.8", default-features = false, features = ["gzip", "json"] }
+buffa = "0.8.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -72,7 +75,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [build-dependencies]
-connectrpc-build = "0.7"
+connectrpc-build = "0.8"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }

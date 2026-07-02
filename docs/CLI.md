@@ -1028,6 +1028,39 @@ Config / keys / version:
     runs (`core.sshCommand`, `core.pager`, `core.editor`, `core.hooksPath`,
     `core.fsmonitor`) are **rejected** rather than stored. Names match
     case-insensitively and canonicalize to lowercase, like git.
+- `mkit self update [--version <tag>] [--check] [--allow-downgrade]
+  [--format human|json]` — update this binary in place from a signed
+  GitHub Release. The downloaded archive is verified against the
+  **mkit-native release attestation** (`mkit-<ver>.release.dsse`, a
+  DSSE/in-toto envelope over the archives' BLAKE3 digests — see
+  `docs/RELEASE.md`) using release-attestation public keys embedded in
+  the binary at build time; no `cosign` and no GitHub attestation API
+  are involved. The sha256 sidecar is additionally checked as
+  defense-in-depth. Only **installer-managed** binaries are updated:
+  the `.mkit-installed-tag` receipt written by `install.sh` must sit
+  next to the (canonicalized) executable, and the global
+  `$MKIT_STATE_DIR/installed-tag` (default `~/.local/state/mkit`) must
+  agree with it when present. Homebrew/cargo installs are refused with
+  channel-specific guidance (`brew upgrade mkit`,
+  `cargo install --locked mkit-cli`). Both receipts are rewritten
+  after a successful swap, in the installer's exact format, so
+  installer and updater stay interchangeable.
+  - `--check` — only report whether an update is available (works for
+    any install method; compares against the running binary's own
+    version); exits 0 either way, and `--format json` carries the
+    machine-readable bit (`status: up-to-date | update-available`).
+  - Downgrade policy mirrors `install.sh`: resolving `latest` never
+    downgrades; an explicit `--version` pin may downgrade only with
+    `--allow-downgrade`, loudly.
+  - The staged binary must pass a pre-swap self-check (`version` must
+    emit exactly `mkit <X.Y.Z>`); the swap is a same-directory atomic
+    rename. Group-/world-writable install dirs are refused (installer
+    parity).
+  - Environment: `GH_TOKEN`/`GITHUB_TOKEN` (API bearer; needed while
+    the repo is private), `MKIT_STATE_DIR`,
+    `MKIT_SELF_UPDATE_API_BASE` (test/mirror override).
+  - There is **no background update check** — the command only ever
+    acts when invoked. Not yet supported on Windows.
 - `mkit version` — print the version. Emits exactly `mkit <X.Y.Z>\n`.
   The top-level `mkit --version` / `mkit -V` flags are aliases of this
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,

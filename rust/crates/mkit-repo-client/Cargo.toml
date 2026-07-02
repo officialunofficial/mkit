@@ -36,12 +36,16 @@ wasm-opt = false
 
 [dependencies]
 # ConnectRPC client only. NO server, NO tls; gzip is pure-Rust (flate2) and
-# wasm-safe. zstd is NOT wasm-safe, keep it off.
-connectrpc = { version = "0.7", default-features = false, features = ["gzip"] }
+# wasm-safe. zstd is NOT wasm-safe, keep it off. As of 0.8 `json` is a
+# default-on FEATURE that default-features = false would drop; re-enabled
+# explicitly so the generated message types keep their serde derives
+# (serde_json is wasm-safe).
+connectrpc = { version = "0.8", default-features = false, features = ["gzip", "json"] }
 
-# Protobuf runtime for the generated message types.
-buffa = "0.7"
-buffa-types = "0.7"
+# Protobuf runtime for the generated message types. connectrpc 0.8 requires
+# buffa >= 0.8.1 (view→owned overflow accounting).
+buffa = "0.8.1"
+buffa-types = "0.8"
 
 # Hashing — pure-Rust BLAKE3 over the raw request body (wasm-safe). Must match
 # the server's BLAKE3 of the serialized protobuf request body.
@@ -79,4 +83,4 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 wasm-bindgen-test = "0.3"
 
 [build-dependencies]
-connectrpc-build = "0.7"
+connectrpc-build = "0.8"

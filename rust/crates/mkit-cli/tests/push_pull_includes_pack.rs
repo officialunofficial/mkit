@@ -311,6 +311,19 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
 fn pull_all_ref_update_failure_does_not_restore_worktree() {
     use std::os::unix::fs::PermissionsExt;
 
+    // This test simulates a ref-write failure via a read-only directory
+    // mode (0o555). root bypasses discretionary file permission checks
+    // entirely, so the write would still succeed and the test's premise
+    // wouldn't hold — skip rather than fail on root-run CI images (e.g.
+    // Docker containers with no USER directive default to root).
+    if mkit_core::sign::effective_uid() == 0 {
+        eprintln!(
+            "skipping pull_all_ref_update_failure_does_not_restore_worktree: running as root, \
+             which bypasses the read-only directory this test relies on"
+        );
+        return;
+    }
+
     let alice = tempfile::tempdir().unwrap();
     let bob = tempfile::tempdir().unwrap();
 

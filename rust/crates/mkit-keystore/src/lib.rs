@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+//!
 //! Signing-key keystore abstraction for mkit.
 //!
 //! This crate owns keystore backends and signer handles. `mkit-core` remains

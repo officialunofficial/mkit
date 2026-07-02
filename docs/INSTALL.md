@@ -13,6 +13,7 @@ verify the result.
 4. [WASM / npm](#wasm--npm)
 5. [Hardware signers](#hardware-signers)
 6. [Verify your install](#verify-your-install)
+7. [Updating](#updating)
 
 ## Pick your channel
 
@@ -302,3 +303,34 @@ on your `PATH` is not a release build of this repo.
 Run `mkit --help` to enumerate subcommands, then jump into the
 [CLI reference](CLI.md) or the
 [attestation spec](SPEC-ATTESTATIONS.md).
+
+## Updating
+
+If you installed via the install script (`curl mkit.sh | sh`), the
+binary can update itself:
+
+```sh
+mkit self update            # update to the latest release
+mkit self update --check    # just report whether an update exists
+mkit self update --version v0.4.0   # pin a specific release
+```
+
+`self update` downloads the release archive for your platform and
+verifies the **mkit-native release attestation** — a DSSE/in-toto
+envelope over the archives' BLAKE3 digests, signed by the release key
+whose public half is embedded in your binary — entirely in-process
+(no `cosign` needed, unlike the install script). It refuses silent
+downgrades, swaps the binary atomically, and rewrites the same
+receipts `install.sh` writes, so the two stay interchangeable.
+
+Installs it does **not** manage are refused with pointers to the right
+channel instead:
+
+- Homebrew: `brew upgrade mkit`
+- cargo: `cargo install --locked mkit-cli` (or `cargo binstall mkit-cli`)
+
+mkit never checks for updates in the background; `self update` acts
+only when you run it. Full details (receipts, downgrade policy,
+environment variables) are in [CLI.md](CLI.md); the attestation's
+trust model and the key-rotation runbook are in
+[RELEASE.md](RELEASE.md).

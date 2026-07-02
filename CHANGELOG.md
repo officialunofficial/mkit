@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit self update`.** The binary can now update itself in place from a
+  signed GitHub Release — but only when installer-managed (the
+  `.mkit-installed-tag` receipt written by `install.sh` sits next to the
+  executable); Homebrew/cargo installs are refused with channel-specific
+  guidance. The downloaded archive is verified against the **mkit-native
+  release attestation** (below) using release-attestation public keys
+  embedded in the binary at build time — no `cosign`, no GitHub
+  attestation API — plus the sha256 sidecar as defense-in-depth, and the
+  staged binary must pass a `version` self-check before an atomic
+  same-directory swap. Downgrade policy mirrors the installer (`latest`
+  never downgrades; explicit `--version` pins need `--allow-downgrade`),
+  receipts are rewritten in the installer's exact format, and
+  `--check`/`--format json` report without changing anything. There is no
+  background update check, ever. Not yet supported on Windows.
+- **mkit-native release attestation.** Every release now ships
+  `mkit-<ver>.release.dsse`: a DSSE/in-toto v1 envelope over the BLAKE3
+  digests of all release tarballs, predicate
+  `.../spec/predicate/release/v1` `{"tag": "vX.Y.Z"}`, signed with a
+  dedicated Ed25519 release key (public rotation set checked in at
+  `docs/keys/release-attest.pub`; custody + rotation runbook in
+  `docs/RELEASE.md`). `release.yml` self-verifies the envelope against the
+  checked-in public key before publishing, and the envelope is covered by
+  the cosign-signed `SHA256SUMS`. Produced by the new internal
+  `mkit-release-attest` tool crate (publish = false).
 - **`mkit blame` line ranges and revision argument.** `blame` now accepts
   `-L`/`--lines` to restrict output to a line range — `<start>,<end>`,
   `<start>,+<n>` (n lines forward), `<start>,-<n>` (n lines back, ending at
@@ -118,6 +142,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **buffa 0.8.1 + connectrpc 0.8.0 everywhere.** The main workspace and
+  `contrib/signers` move buffa 0.8.0 → 0.8.1 (runtime-only patch; vendored
+  codegen verified byte-identical). The ConnectRPC pair
+  (`mkit-repo-client` + `apps/repo-worker`) finally leaves its 0.7 pin:
+  connectrpc 0.8 ships on buffa ^0.8.1, so both crates now match the rest
+  of the repo on a single buffa version (the workspace lockfile drops the
+  entire duplicate 0.7 dependency tree). Vendored ConnectRPC codegen was
+  regenerated with the 0.8 toolchain — ~4,300 lines smaller thanks to
+  buffa 0.8's `impl_default_instance!` runtime macros, fused
+  `put_*_field` writers, and shared `check_wire_type`/`map_codec` helpers
+  (wire output is byte-identical). Handler traits now return
+  `impl Encodable<Resp>`, letting future handlers return zero-copy views.
+  connectrpc's now-optional `json` feature is enabled explicitly so
+  generated serde derives and JSON error/end-of-stream frames keep
+  working on wasm.
 - **`mkit blame` is now merge-aware by default (git parity).** Blame walks
   the file's whole ancestor subgraph instead of only the first-parent chain:
   at a merge, each line is credited to the first parent that still contains

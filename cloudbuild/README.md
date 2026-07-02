@@ -1,8 +1,8 @@
 # Cloud Build CI for mkit
 
-mkit's Rust CI runs on **Google Cloud Build** (modeled on `polychrome/cloudbuild`).
-This directory holds the build configs; `scripts/setup-cloud-build.sh` provisions
-the GCP side and creates the triggers.
+mkit's Rust CI runs on **Google Cloud Build**. This directory holds the build
+configs; `scripts/setup-cloud-build.sh` provisions the GCP side and creates
+the triggers.
 
 ## Why Cloud Build
 
@@ -18,7 +18,7 @@ the GCP side and creates the triggers.
 ## Scope: CI only
 
 mkit ships a CLI binary + Cloudflare Workers, so there is **no image-publish /
-GKE-deploy half** (unlike polychrome). These stay on GitHub Actions:
+GKE-deploy half**. These stay on GitHub Actions:
 
 - **Release / publish:** `release.yml`, `crates-publish.yml`, `mcp-release.yml`,
   `release-plz.yml` (CLI binaries, cosign, crates.io, npm).
@@ -48,9 +48,9 @@ layout.
 ## Triggers
 
 All on branch `^main$`. Every PR trigger auto-runs for org collaborators and
-needs a maintainer **`/gcbrun`** only for external/fork PRs — matching
-polychrome and makechain. See `scripts/setup-cloud-build.sh` for the exact
-`--included-files` / `--ignored-files` filters.
+needs a maintainer **`/gcbrun`** only for external/fork PRs. See
+`scripts/setup-cloud-build.sh` for the exact `--included-files` /
+`--ignored-files` filters.
 
 | Trigger | Config | PR gate |
 |---|---|---|
@@ -64,7 +64,7 @@ polychrome and makechain. See `scripts/setup-cloud-build.sh` for the exact
 ## One-time setup
 
 ```bash
-gcloud config set project <polychrome-project-id>   # shared GCP project
+gcloud config set project <gcp-project-id>   # shared GCP project
 ./scripts/setup-cloud-build.sh
 ```
 
