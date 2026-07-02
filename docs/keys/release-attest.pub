@@ -1,0 +1,8 @@
+# mkit release-attestation public key(s) — Ed25519.
+# One `ed25519:<64-hex>` per non-comment line; multiple lines form
+# the rotation set (a release attestation verifies if ANY listed
+# key signed it). The secret half lives ONLY in the GitHub Actions
+# secret MKIT_RELEASE_ATTEST_KEY — see docs/RELEASE.md for the
+# custody and rotation runbook.
+# keyid: blake3:01c06f94dd9e953109a42e0a7be84fb2ad84747d7ba7d7d286d47a2abee079b0
+ed25519:32ffb05e3bd7bafaf3d24279fa0b5219f7540872d4bc2cb6afe35646ed0d7a00

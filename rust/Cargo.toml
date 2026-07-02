@@ -19,6 +19,10 @@ members = [
     "crates/mkit-transport-enc",
     "crates/mkit-cli",
     "crates/mkit-rpc",
+    # Internal release tooling (publish = false): signs/verifies the
+    # mkit-native release attestation in release.yml. See the crate's
+    # Cargo.toml header and docs/RELEASE.md.
+    "crates/release-attest",
     "crates/mkit-wasm",
     "crates/mkit-repo-client",
     "benches",
