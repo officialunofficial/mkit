@@ -395,23 +395,39 @@ fn merge_symlink_conflict_no_markers() {
     repo.add("link");
     repo.commit("ours symlink");
 
-    let out = run(repo.path(), repo.xdg(), &["merge", "feature"]);
-    // A symlink/symlink target divergence must produce resolvable
-    // conflict state (recorded in the sidecar) and never crash. The
-    // conflict struct carries only blob hashes, so the symlink target
-    // text routes through the text path; the important #177 guarantee
-    // is that state is recorded and resolvable.
-    if !out.status.success() {
-        assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
-        assert!(repo.mkit_dir().join("mkit-conflicts").exists());
-        let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
-        assert!(sidecar.contains("link"), "sidecar: {sidecar}");
-        // Resolve the path to a concrete regular file and continue.
-        repo.write("link", b"resolved-link-target\n");
-        repo.add("link");
-        ok(repo.path(), repo.xdg(), &["merge", "--continue"]);
-        assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
-    }
+    // A symlink/symlink target divergence is an add/add conflict: the
+    // merge MUST stop (non-zero exit) and record resolvable conflict
+    // state in the sidecar (#177).
+    fail(repo.path(), repo.xdg(), &["merge", "feature"]);
+    assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
+    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    assert!(sidecar.contains("link"), "sidecar: {sidecar}");
+    // "No markers": the conflicted path must NOT have text conflict
+    // markers injected. It stays a symlink (ours preserved), so check
+    // the link target itself; a regular file would get the byte check.
+    let link_path = repo.path().join("link");
+    let meta = fs::symlink_metadata(&link_path).unwrap();
+    let on_disk: Vec<u8> = if meta.file_type().is_symlink() {
+        fs::read_link(&link_path)
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .to_vec()
+    } else {
+        fs::read(&link_path).unwrap()
+    };
+    assert!(
+        !on_disk.windows(7).any(|w| w == b"<<<<<<<"),
+        "conflict markers must not be injected into a symlink path"
+    );
+    // Resolve the path to a concrete regular file and continue.
+    fs::remove_file(&link_path).unwrap();
+    repo.write("link", b"resolved-link-target\n");
+    repo.add("link");
+    ok(repo.path(), repo.xdg(), &["merge", "--continue"]);
+    assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
+    assert_eq!(repo.head_tree_blob("link"), b"resolved-link-target\n");
 }
 
 #[test]
@@ -426,17 +442,21 @@ fn merge_file_vs_dir_conflict() {
     ok(repo.path(), repo.xdg(), &["checkout", "main"]);
     repo.commit_file("x", b"ours-file\n", "ours file");
 
-    // This should conflict (add/add on `x` with different shapes) — at
-    // minimum it must not crash and must produce resolvable state or a
-    // clean merge.
-    let out = run(repo.path(), repo.xdg(), &["merge", "feature"]);
-    // Either it conflicts (state present) or merges cleanly; either way
-    // the repo stays consistent. If it conflicted, we can abort cleanly.
-    if !out.status.success() {
-        assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
-        ok(repo.path(), repo.xdg(), &["merge", "--abort"]);
-        assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
-    }
+    // An add/add on `x` with different shapes (file vs directory) is a
+    // conflict: the merge MUST stop, record resolvable state naming the
+    // conflicted path, and abort cleanly.
+    fail(repo.path(), repo.xdg(), &["merge", "feature"]);
+    assert!(repo.mkit_dir().join("MERGE_HEAD").exists());
+    assert!(repo.mkit_dir().join("mkit-conflicts").exists());
+    let sidecar = fs::read_to_string(repo.mkit_dir().join("mkit-conflicts")).unwrap();
+    assert!(
+        sidecar.lines().any(|l| l.ends_with("\tx")),
+        "sidecar must record path 'x': {sidecar}"
+    );
+    ok(repo.path(), repo.xdg(), &["merge", "--abort"]);
+    assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
+    // The abort restored ours: `x` is the regular file again.
+    assert_eq!(fs::read(repo.path().join("x")).unwrap(), b"ours-file\n");
 }
 
 #[test]

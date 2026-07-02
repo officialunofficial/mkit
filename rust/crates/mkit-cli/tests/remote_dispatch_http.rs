@@ -79,12 +79,9 @@ fn open_rejects_malformed_mkit_http_url() {
     );
 }
 
-#[test]
-fn push_roundtrip_against_mockito_http_server() {
-    // Build a small repo with one commit on `main`, point a mockito
-    // server at the HTTP wire dialect, and run `push_all` through
-    // `remote_dispatch`. Assert every expected route landed.
-
+/// Stand up a source repo with a single commit on `main`. Returns the
+/// tempdir and the tip hash hex.
+fn source_repo_with_one_commit() -> (tempfile::TempDir, String) {
     let td = tempfile::tempdir().unwrap();
     assert!(run_in(td.path(), &["init"]).status.success());
     assert!(run_in(td.path(), &["keygen"]).status.success());
@@ -92,91 +89,170 @@ fn push_roundtrip_against_mockito_http_server() {
     assert!(run_in(td.path(), &["add", "hello.txt"]).status.success());
     let out = run_in(td.path(), &["commit", "-m", "init"]);
     assert!(out.status.success(), "commit failed: {out:?}");
+    let tip_hex = std::fs::read_to_string(td.path().join(".mkit/refs/heads/main"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    (td, tip_hex)
+}
 
-    let mut server = Server::new();
-
-    // All pack HEADs: reply 404 so the push path uploads every object.
-    let _pack_head = server
-        .mock(
-            "HEAD",
-            Matcher::Regex(r"^/myproj/packs/[0-9a-f]{64}$".to_string()),
-        )
+/// Mock the push side of the wire dialect on `server`: 404 every ref
+/// probe (fresh remote), echo the BLAKE3 of every uploaded body as the
+/// `{"key": …}` confirmation (so the client's integrity cross-check
+/// passes), and commit the atomic head+packmap advance. Captured
+/// upload bodies land in `uploads`.
+fn mock_fresh_remote_push(
+    server: &mut Server,
+    uploads: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+) -> (mockito::Mock, mockito::Mock, mockito::Mock) {
+    let ref_gets = server
+        .mock("GET", Matcher::Regex(r"^/myproj/refs/refs/".to_string()))
         .with_status(404)
-        .expect_at_least(1)
+        // Branch-tip probe + packmap probe.
+        .expect(2)
         .create();
-
-    // All pack POSTs: echo back the key so upload_pack's integrity
-    // check passes. We extract the hex from the matching URL by
-    // regex-matching the body path; the client uses a collection URL
-    // (/myproj/packs) and includes the digest it expects in Content.
-    // Simpler: respond with a canned success using a wildcard matcher
-    // that accepts any body and returns the *same* key the client sent.
-    //
-    // mockito lacks capture groups on bodies, so we replicate what the
-    // HttpTransport's `upload_pack_server_key_mismatch` unit test does:
-    // configure each POST to return the exact same body-hash-hex we
-    // expect. Since we can't precompute the digests cheaply here, we
-    // instead mock the upload verb with a dynamic response that echoes
-    // the MD5 of the body via mockito's `with_body_from_request`.
-    let _pack_post = server
+    let pack_posts = server
         .mock("POST", "/myproj/packs")
         .with_status(201)
         .with_header("content-type", "application/json")
-        .with_body_from_request(|req| {
-            // Client sends `{"key":"<sha256-hex>"}` back; but we don't
-            // actually have the digest. We cheat: echo a placeholder key
-            // that we know won't match; test will then assert the push
-            // surfaces an `InvalidResponse` — which still proves the
-            // dispatch is wired and the client reached the server.
-            let _ = req;
-            br#"{"key":"0000000000000000000000000000000000000000000000000000000000000000"}"#
-                .to_vec()
+        .with_body_from_request(move |req| {
+            let body = req.body().expect("upload body").clone();
+            let hex = mkit_core::hash::to_hex(&mkit_core::hash::hash(&body));
+            uploads.lock().unwrap().push(body);
+            format!(r#"{{"key":"{hex}"}}"#).into_bytes()
         })
-        .expect_at_least(1)
+        // One pack + one packlist-node blob.
+        .expect(2)
         .create();
+    let advance = server
+        .mock("POST", "/myproj/refs/advance")
+        .with_status(200)
+        .expect(1)
+        .create();
+    (ref_gets, pack_posts, advance)
+}
+
+#[test]
+fn push_roundtrip_against_mockito_http_server() {
+    // Build a small repo with one commit on `main`, point a mockito
+    // server at the HTTP wire dialect, and run `push_all` through
+    // `remote_dispatch`. The server echoes the BLAKE3 of each uploaded
+    // body, so the client's integrity cross-check passes and the push
+    // must SUCCEED end-to-end: one branch pushed, the pack + packlist
+    // node uploaded, and the head+packmap advance committed.
+    let (td, _tip_hex) = source_repo_with_one_commit();
+
+    let mut server = Server::new();
+    let uploads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (ref_gets, pack_posts, advance) = mock_fresh_remote_push(&mut server, uploads.clone());
 
     let url = format!("{}/myproj", server.url());
     let dispatch_url = format!("mkit+{url}");
     let tx = remote_dispatch::open(&dispatch_url).expect("open mkit+http");
 
-    // Expect the mismatch to surface as a dispatch error — the key the
-    // server echoed doesn't match what the client asked to upload. The
-    // important outcome for this test is that the HTTP dispatch path
-    // actually reached the mock server for both the HEAD and the POST;
-    // mockito's `expect_at_least(1)` on both mocks will panic on drop
-    // if they weren't hit.
-    let res = remote_dispatch::push_all(td.path(), tx.as_ref());
-    assert!(
-        res.is_err(),
-        "expected InvalidResponse from mismatched key, got {res:?}"
+    let n = remote_dispatch::push_all(td.path(), tx.as_ref()).expect("push must succeed");
+    assert_eq!(n, 1, "exactly one branch (main) must be pushed");
+    // Every leg of the roundtrip landed, the expected number of times.
+    ref_gets.assert();
+    pack_posts.assert();
+    advance.assert();
+    // Exactly one pack and one packlist node (MKPL magic) were sent.
+    let uploads = uploads.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    assert_eq!(
+        uploads.iter().filter(|b| b.starts_with(b"MKPL")).count(),
+        1,
+        "push must advertise exactly one packlist node"
     );
 }
 
 #[test]
 fn pull_roundtrip_against_mockito_http_server() {
-    // Pull path: `list_refs` → `download_pack` per reachable object.
-    // We only assert the refs GET lands; the download path hinges on
-    // real commit/tree/blob bytes which would duplicate existing
-    // transport-level coverage.
+    // Full pull roundtrip: `list_refs` → packmap ref → packlist-node
+    // blob → pack download → unpack → branch ref + worktree
+    // materialise in a fresh local repo.
+    //
+    // To serve REAL pack/node bytes without duplicating the wire
+    // format in the test, phase 1 drives an actual `push_all` from a
+    // source repo into a mock server, capturing the uploaded bodies;
+    // phase 2 serves those bodies back to a fresh repo's `pull_all`.
+    let (src, tip_hex) = source_repo_with_one_commit();
 
-    let td = tempfile::tempdir().unwrap();
-    assert!(run_in(td.path(), &["init"]).status.success());
-
+    // --- phase 1: capture the push's pack + packlist node ---
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut server = Server::new();
-    // Empty ref list — `fetch_all` should succeed with n=0 and not
-    // make any `download_pack` calls.
-    let _refs_get = server
+    let _mocks = mock_fresh_remote_push(&mut server, captured.clone());
+    let dispatch_url = format!("mkit+{}/myproj", server.url());
+    let tx = remote_dispatch::open(&dispatch_url).expect("open mkit+http");
+    assert_eq!(
+        remote_dispatch::push_all(src.path(), tx.as_ref()).expect("seed push"),
+        1
+    );
+    drop(tx);
+    drop(server);
+
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2, "seed push uploads pack + node");
+    let (nodes, packs): (Vec<Vec<u8>>, Vec<Vec<u8>>) =
+        captured.into_iter().partition(|b| b.starts_with(b"MKPL"));
+    let (node, pack) = (&nodes[0], &packs[0]);
+    let node_hex = mkit_core::hash::to_hex(&mkit_core::hash::hash(node));
+    let pack_hex = mkit_core::hash::to_hex(&mkit_core::hash::hash(pack));
+
+    // --- phase 2: serve the captured remote to a fresh repo ---
+    let mut server = Server::new();
+    let refs_list = server
         .mock("GET", Matcher::Regex(r"^/myproj/refs\?prefix=".to_string()))
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(r#"{"refs":[]}"#)
+        .with_body(format!(
+            r#"{{"refs":[{{"name":"main","hash":"{tip_hex}"}}]}}"#
+        ))
+        .expect_at_least(1)
+        .create();
+    let packmap_get = server
+        .mock("GET", "/myproj/refs/refs/mkit/packmap/main")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(r#"{{"hash":"{node_hex}"}}"#))
+        .expect_at_least(1)
+        .create();
+    let node_get = server
+        .mock("GET", format!("/myproj/packs/{node_hex}").as_str())
+        .with_status(200)
+        .with_body(node.clone())
+        .expect_at_least(1)
+        .create();
+    let pack_get = server
+        .mock("GET", format!("/myproj/packs/{pack_hex}").as_str())
+        .with_status(200)
+        .with_body(pack.clone())
         .expect_at_least(1)
         .create();
 
-    let url = format!("{}/myproj", server.url());
-    let dispatch_url = format!("mkit+{url}");
+    let dst = tempfile::tempdir().unwrap();
+    assert!(run_in(dst.path(), &["init"]).status.success());
+    let dispatch_url = format!("mkit+{}/myproj", server.url());
     let tx = remote_dispatch::open(&dispatch_url).expect("open mkit+http");
 
-    let n = remote_dispatch::pull_all(td.path(), tx.as_ref(), "default").expect("pull");
-    assert_eq!(n, 0, "empty remote must yield zero pulled refs");
+    let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default").expect("pull");
+    assert_eq!(n, 1, "one remote branch must be fetched");
+    // Every leg of the pull actually landed.
+    refs_list.assert();
+    packmap_get.assert();
+    node_get.assert();
+    pack_get.assert();
+    // The remote's single ref materialised: branch ref on the remote
+    // tip and the committed file restored into the worktree.
+    let local_tip = std::fs::read_to_string(dst.path().join(".mkit/refs/heads/main")).unwrap();
+    assert_eq!(
+        local_tip.trim(),
+        tip_hex,
+        "pulled branch must land on the remote tip"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("hello.txt")).unwrap(),
+        b"hello\n",
+        "pull must materialise the committed file"
+    );
 }

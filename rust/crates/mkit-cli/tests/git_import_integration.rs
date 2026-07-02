@@ -1130,15 +1130,29 @@ fn duplicate_import_state_for_same_upstream_refuses() {
 
 #[test]
 fn dash_prefixed_url_refuses() {
-    if !git_available() {
-        return;
-    }
-    let f = Fixture::new();
-    let out = f.mkit(
-        f.root.path(),
-        &["git", "import", "--upload-pack=/bin/echo", "fork"],
+    // The argument-injection guard: an option-shaped URL must be
+    // refused by mkit's OWN validate_url (USAGE, with its diagnostic)
+    // before any git argv is built. `--` forces the dash-prefixed
+    // value through clap so the failure can only come from mkit's
+    // guard, not clap's unknown-flag error. No git or fixture needed —
+    // the guard fires before anything touches a repository.
+    let cwd = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let out = mkit_in(
+        cwd.path(),
+        xdg.path(),
+        &["git", "import", "--", "--upload-pack=/bin/echo", "fork"],
     );
-    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "dash-prefixed URL must exit USAGE (64): {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is not a valid git URL or path"),
+        "expected mkit's URL guard diagnostic, got: {stderr}"
+    );
 }
 
 #[test]

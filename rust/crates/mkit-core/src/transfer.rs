@@ -733,13 +733,32 @@ mod tests {
 
     #[test]
     fn packlist_decode_rejects_over_cap_pack_list() {
-        // A body whose Vec length prefix exceeds the cap is rejected by the
-        // codec RangeCfg as Malformed, not silently allocated.
-        let mut node = encode_packlist(None, &[[1u8; 32]]).unwrap();
-        // Corrupt the magic-free body is fragile; instead assert the
-        // round-trip cap holds for a legitimately large (but in-cap) list.
-        node.truncate(PACKLIST_HEADER_LEN); // header only → empty body → Malformed
+        // A REAL over-cap body: `encode_packlist` refuses to build one,
+        // so assemble the node by hand with the same codec — the guard
+        // header followed by `Option<Hash>` + a `Vec<Hash>` holding
+        // PACKLIST_MAX_ENTRIES + 1 entries (~32 MiB). The decode-side
+        // RangeCfg must reject it as Malformed, not allocate it.
+        use commonware_codec::Write as _;
+        let over_cap = PACKLIST_MAX_ENTRIES as usize + 1;
+        let mut node = Vec::with_capacity(PACKLIST_HEADER_LEN + 8 + 32 * over_cap);
+        node.extend_from_slice(PACKLIST_MAGIC);
+        node.push(PACKLIST_VERSION);
+        let prev: Option<Hash> = None;
+        prev.write(&mut node);
+        vec![[1u8; 32]; over_cap].write(&mut node);
         assert_eq!(decode_packlist(&node), Err(PackListError::Malformed));
+
+        // Sanity: the identical construction at exactly the cap is
+        // accepted, so the failure above is the cap check itself, not
+        // an artifact of the hand-rolled encoding.
+        let mut at_cap = Vec::with_capacity(PACKLIST_HEADER_LEN + 8 + 32 * (over_cap - 1));
+        at_cap.extend_from_slice(PACKLIST_MAGIC);
+        at_cap.push(PACKLIST_VERSION);
+        let prev: Option<Hash> = None;
+        prev.write(&mut at_cap);
+        vec![[1u8; 32]; over_cap - 1].write(&mut at_cap);
+        let decoded = decode_packlist(&at_cap).expect("at-cap list must decode");
+        assert_eq!(decoded.packs.len(), PACKLIST_MAX_ENTRIES as usize);
     }
 
     #[test]

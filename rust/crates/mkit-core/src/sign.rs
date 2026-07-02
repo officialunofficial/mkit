@@ -160,8 +160,13 @@ impl KeyPair {
     /// [`KeyPair::generate`] and [`load_key`] already use the
     /// `Zeroizing` path internally; no production call site passes a
     /// bare `[u8; 32]` here. The contract above is pinned by the
-    /// `from_seed_scrubs_owned_param` and
-    /// `from_seed_zeroizing_matches_from_seed` regression tests.
+    /// `from_seed_zeroizing_matches_from_seed`,
+    /// `secret_seed_zeroize_clears_bytes` and
+    /// `keypair_drop_runs_zeroize_on_secret` regression tests. (The
+    /// owned-argument scrub two lines below is unobservable from
+    /// outside the function and is therefore covered by review, not by
+    /// a test — a previous test only ever scrubbed its own local
+    /// copy.)
     #[must_use]
     pub fn from_seed(mut seed: [u8; SECRET_KEY_LENGTH]) -> Self {
         let signing = SigningKey::from_bytes(&seed);
@@ -1364,29 +1369,6 @@ mod tests {
         assert_eq!(s.0, [0u8; SECRET_KEY_LENGTH]);
     }
 
-    /// `Zeroizing<[u8; 32]>` is the wire-format wrapper used across
-    /// load + key-construction paths. Pin its drop-time scrub so a
-    /// downstream crate swap (e.g. zeroize 2.x with different semantics)
-    /// would surface here, not as a subtle leak in production paths.
-    #[test]
-    fn zeroizing_seed_scrubs_on_drop() {
-        // Build a `Zeroizing<[u8; 32]>`, smuggle its address out via a
-        // raw pointer, drop it, and read back through the pointer.
-        //
-        // SAFETY caveats: post-drop reads are UB in the strict sense.
-        // We work around that by recreating the same stack slot via a
-        // fresh `Zeroizing::new([0u8; 32])` and checking THAT one is
-        // zero — i.e. we lean on `Zeroizing`'s drop contract directly
-        // rather than peeking at freed memory. The test stays
-        // soundness-clean while still asserting the property we care
-        // about.
-        use zeroize::Zeroize;
-        let mut s: Zeroizing<[u8; SECRET_KEY_LENGTH]> = Zeroizing::new([0xCDu8; SECRET_KEY_LENGTH]);
-        // Pre-drop manual zeroize: same code path the `Drop` impl uses.
-        s.zeroize();
-        assert_eq!(*s, [0u8; SECRET_KEY_LENGTH]);
-    }
-
     /// Round-trip the new `from_seed_zeroizing` constructor: it must
     /// produce the same `(public, secret)` pair as `from_seed`. The
     /// public-key check is the easy half; the secret-bytes check is
@@ -1406,85 +1388,26 @@ mod tests {
         verify(&b.public, COMMIT_DOMAIN, b"x", &sig).expect("verify");
     }
 
-    /// Pin the `from_seed` self-scrubbing contract (#99): the `[u8; 32]`
-    /// argument that `from_seed` owns MUST be zeroed before the function
-    /// returns. We can't observe the moved-in argument from outside, so
-    /// we re-derive the exact body the constructor runs and assert the
-    /// scrub step lands. If a future refactor drops the `seed.zeroize()`
-    /// line (or moves it after a point where the bytes already escaped),
-    /// this test fails. NOTE: this is the *owned-argument* contract; it
-    /// does NOT (and cannot) cover a `Copy` the caller left on their own
-    /// frame — that is what `from_seed_zeroizing` is for, see the
-    /// constructor docs.
-    #[test]
-    fn from_seed_scrubs_owned_param() {
-        // Mirror `from_seed`'s body so a divergence in the production
-        // scrub step is caught here.
-        let mut seed = [0x5Au8; SECRET_KEY_LENGTH];
-        let kp = KeyPair::from_seed(seed);
-        // The returned keypair still holds the (zeroized-on-drop) secret.
-        assert_ne!(kp.public.0, [0u8; 32], "public key derived");
-
-        // Re-run the documented scrub locally and confirm it clears the
-        // buffer — the same `Zeroize` pass `from_seed` applies to its
-        // owned argument.
-        seed.zeroize();
-        assert_eq!(seed, [0u8; SECRET_KEY_LENGTH], "owned seed scrubs to zero");
-    }
-
-    /// Drop-tracking regression for `KeyPair::secret`: when the
-    /// `KeyPair` goes out of scope, the `SecretSeed`'s `ZeroizeOnDrop`
-    /// must run. We can't reliably inspect post-drop memory (Rust's
-    /// drop semantics + LLVM stack reuse make it brittle), so instead
-    /// we instrument with a test-only newtype that asserts via an
-    /// `Arc<AtomicBool>` side-channel.
+    /// Structural pin on the REAL type's drop-time scrub wiring:
+    /// `SecretSeed` (the only owner of `KeyPair`'s secret bytes) must
+    /// keep implementing `ZeroizeOnDrop`. If a refactor removed the
+    /// derive (turning drop into a plain memory release), this stops
+    /// compiling — the value-level half (a `zeroize()` pass actually
+    /// clearing the bytes) is pinned by
+    /// `secret_seed_zeroize_clears_bytes` above. Together they cover
+    /// what the old sentinel-struct test only pretended to: the real
+    /// `SecretSeed`, not a test-local stand-in.
     #[test]
     fn keypair_drop_runs_zeroize_on_secret() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<SecretSeed>();
 
-        // A SecretSeed-shaped sentinel whose `Drop` flips a flag — used
-        // here to mirror what `SecretSeed`'s real `ZeroizeOnDrop` does:
-        // run a `Zeroize` pass and then drop. The two share the same
-        // stack-frame lifetime when held by `KeyPair`-shaped containers,
-        // so a regression in drop-glue ordering would surface here.
-        struct DropFlag {
-            flag: Arc<AtomicBool>,
-            bytes: [u8; 32],
-        }
-        impl Zeroize for DropFlag {
-            fn zeroize(&mut self) {
-                self.bytes.zeroize();
-            }
-        }
-        impl Drop for DropFlag {
-            fn drop(&mut self) {
-                self.zeroize();
-                self.flag.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let flag = Arc::new(AtomicBool::new(false));
-        {
-            let _df = DropFlag {
-                flag: Arc::clone(&flag),
-                bytes: [0xEFu8; 32],
-            };
-            assert!(!flag.load(Ordering::SeqCst));
-        }
-        assert!(
-            flag.load(Ordering::SeqCst),
-            "Drop impl on a SecretSeed-shaped type must run at scope exit"
-        );
-
-        // And for the real `SecretSeed`: build a `KeyPair`, observe its
-        // pre-drop bytes (so the optimiser cannot fold the construction
-        // away), then let it drop. The fact that this compiles and runs
-        // without UB is the contract: `SecretSeed: ZeroizeOnDrop` must
-        // be wired up, which the derive macro enforces structurally.
+        // And the field wiring: the secret a `KeyPair` holds IS a
+        // `SecretSeed` (not a raw array that would drop without a
+        // scrub), carrying the caller's seed bytes.
         let kp = KeyPair::from_seed([0xDEu8; 32]);
-        let preview = kp.secret.0[0];
-        assert_eq!(preview, 0xDE);
+        let seed_ref: &SecretSeed = &kp.secret;
+        assert_eq!(seed_ref.0, [0xDEu8; 32]);
         drop(kp);
     }
 

@@ -208,12 +208,19 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
     );
     let head_before = fs::read_to_string(td.path().join(".mkit/HEAD")).expect("HEAD before");
     let resolved_head_before = resolve_head(td.path());
-    let index_before = fs::read(td.path().join(".mkit/index")).expect("index before");
+
+    // Capture the original feature-tip authorship before the replay so
+    // we can prove the malformed user.identity did not re-attribute it.
+    let mkit_dir = td.path().join(".mkit");
+    let store = ObjectStore::open(td.path()).unwrap();
+    let orig_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let Object::Commit(orig) = store.read_object(&orig_tip).unwrap() else {
+        panic!("original tip is not a commit");
+    };
 
     // Replays never consult user.identity, so a malformed value cannot
     // block (or alter) the rebase — authorship comes from the original
     // commits.
-    let _ = (head_before, resolved_head_before, index_before);
     let out = run_in_with_xdg(td.path(), xdg.path(), &["rebase", "main"]);
     assert!(
         out.status.success(),
@@ -226,5 +233,29 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
     assert!(
         td.path().join("feature.txt").exists() && td.path().join("main.txt").exists(),
         "rebased worktree must contain both branches' files"
+    );
+    // HEAD still points at the feature branch (rebase never detaches
+    // it), and the branch actually moved to a new replayed commit.
+    let head_after = fs::read_to_string(td.path().join(".mkit/HEAD")).expect("HEAD after");
+    assert_eq!(head_after, head_before, "rebase must not re-point HEAD");
+    assert_ne!(
+        resolve_head(td.path()),
+        resolved_head_before,
+        "rebase must advance the branch to a replayed commit"
+    );
+    // The replayed tip keeps the ORIGINAL author + timestamp — the
+    // malformed user.identity was ignored, not applied and not fatal.
+    let new_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    assert_ne!(new_tip, orig_tip, "rebase must rewrite the feature tip");
+    let Object::Commit(replayed) = store.read_object(&new_tip).unwrap() else {
+        panic!("replayed tip is not a commit");
+    };
+    assert_eq!(
+        replayed.author, orig.author,
+        "replay must preserve the original author despite the bad identity"
+    );
+    assert_eq!(
+        replayed.timestamp, orig.timestamp,
+        "replay must preserve the original timestamp"
     );
 }
