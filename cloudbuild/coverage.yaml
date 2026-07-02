@@ -56,13 +56,26 @@ steps:
         sccache --show-stats
 
         # Upload to Codecov (non-fatal). Skipped when no token is configured.
-        # CODECOV_TOKEN is a secretEnv: reference it as `$$CODECOV_TOKEN` so
-        # Cloud Build's substitution pass leaves it for bash (a bare
-        # `${CODECOV_TOKEN}` would be consumed as an undefined substitution and
-        # resolve to empty). COMMIT_SHA / BRANCH_NAME below ARE Cloud Build
-        # built-in substitutions and are correct as `${...}` (populated in the
-        # mkit-coverage-main trigger).
-        if [ -z "$${CODECOV_TOKEN:-}" ]; then
+        #
+        # CODECOV_TOKEN is a secretEnv (injected into the process env). Under
+        # `dynamicSubstitutions: true` Cloud Build runs bash-style parameter
+        # expansion over this whole script string AT CONFIG TIME (it has no notion
+        # of `#` comments), and a brace-wrapped reference to CODECOV_TOKEN — even
+        # dollar-dollar-brace-escaped, even with a ":-" default — is taken as a
+        # substitution reference to an undeclared key, rejecting the build
+        # pre-start with "key in the template CODECOV_TOKEN is not a valid
+        # built-in substitution". (A bare dollar-dollar word WITHOUT braces
+        # survives — that's how security.yaml gets away with its AUDIT/VAR
+        # comment tokens — but don't rely on that here.) So the secret's name must
+        # never appear brace-wrapped after a dollar in this string, in code OR
+        # comment. Read the injected value with `printenv` (bare name, no dollar)
+        # into a lowercase bash var — lowercase keys never match the substitution
+        # pattern, so a `${codecov_token}` brace expansion is safe (same
+        # convention as ci.yaml).
+        # COMMIT_SHA / BRANCH_NAME ARE valid Cloud Build built-ins, so `${...}`
+        # is correct for them (populated by the mkit-coverage-main trigger).
+        codecov_token=$(printenv CODECOV_TOKEN 2>/dev/null || true)
+        if [ -z "${codecov_token:-}" ]; then
           echo "CODECOV_TOKEN not set — skipping upload (report at /workspace/coverage.lcov)."
           exit 0
         fi
@@ -71,7 +84,7 @@ steps:
           && ./codecov upload-process \
                --fail-on-error \
                --file /workspace/coverage.lcov \
-               --token "$$CODECOV_TOKEN" \
+               --token "$codecov_token" \
                --sha "${COMMIT_SHA}" \
                --branch "${BRANCH_NAME}" \
           || echo "Codecov upload failed (non-fatal)."
