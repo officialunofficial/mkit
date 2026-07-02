@@ -2375,14 +2375,20 @@ mod tests {
     }
 
     #[test]
-    fn blame_c_merge_copy_tie_prefers_first_parent_is_residual() {
-        // Documented `-C` residual #1 (issue #499 follow-up): when the SAME
-        // block is newly added on two merge sides (p1's s1.txt and c2's
-        // s2.txt), real `git blame -C -C` credits the LAST such parent (c2 —
-        // git's copy-source scoring is effectively last-parent-wins). mkit's
-        // first-parent-wins `claimed` mask credits p1 instead. Only a block
-        // duplicated across sides is affected. This pins mkit's current
-        // behavior; if the `-C` tie is aligned to git, update this test.
+    fn blame_c_merge_copy_tie_prefers_deduped_second_parent() {
+        // Real `git blame -C -C` recipe (git 2.50.1):
+        //   base: b.txt="hello"
+        //   p1  = base + s1.txt(BLOCK_A,BLOCK_B,"zzz")
+        //   c2  = base + s2.txt(BLOCK_A,BLOCK_B,"zzz")   (same block, 2nd parent)
+        //   merge(p1,c2): b.txt="hello"+BLOCK_A+BLOCK_B  (both s1.txt,s2.txt kept)
+        //   $ git blame -C -C -l b.txt
+        //   -> lines 2-3 credited to c2/s2.txt, NOT p1 (confirmed independent of
+        //      file name: "aaa.txt" on c2 still beats "zzz.txt" on p1).
+        // Mechanism (see move_copy's module note): p1 keeps its porigin, so
+        // its -C candidates are only files MODIFIED between p1 and the merge
+        // — s1.txt is unchanged, hence invisible. c2's b.txt blob is
+        // identical to p1's, so c2's porigin is deduped and c2 gets the
+        // whole-tree search, which finds s2.txt.
         let (_d, store) = fresh_store();
         let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
         let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
@@ -2419,21 +2425,575 @@ mod tests {
         let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
         assert_eq!(r.lines[1].text, BLOCK_A);
         assert_eq!(
-            r.lines[1].commit_hash, p1,
-            "residual: a copy tie across parents resolves to the first parent (git credits the last, c2)"
+            r.lines[1].commit_hash, c2,
+            "a copy tie across parents resolves to the non-first parent (git parity)"
+        );
+        assert_eq!(r.lines[2].commit_hash, c2);
+        assert!(
+            r.lines.iter().all(|l| l.commit_hash != p1),
+            "the first parent never wins an interior -C tie"
         );
     }
 
     #[test]
-    fn blame_c_merge_boundary_copy_from_second_parent_is_residual() {
-        // Documented `-C` residual (issue #499): when the blamed file is
-        // ADDED by the merge and its only copy source lives on a NON-first
-        // parent, real `git blame -C -C` traces it across to that parent (it
-        // enumerates every parent's tree at level 2). mkit's boundary copy
-        // search only walks the FIRST parent's tree, so it credits the merge
-        // instead. This pins mkit's *current* behavior; `-M` and
-        // `--ignore-rev` ARE fully merge-aware (the cases above). If the
-        // boundary search is widened to all parents, update this test.
+    fn blame_c_merge_copy_tie_octopus_prefers_first_non_first_parent() {
+        // Real git recipe (git 2.50.1) — a 3-way octopus tie where the FIRST
+        // parent has NO candidate at all and parents 2 and 3 both do:
+        //   base: b.txt="hello"
+        //   p1  = base + pm.txt("p1 only")            (no candidate)
+        //   c2  = base + s2.txt(BLOCK_A,BLOCK_B,"zzz") (candidate)
+        //   c3  = base + s3.txt(BLOCK_A,BLOCK_B,"zzz") (same candidate)
+        //   merge(p1,c2,c3): b.txt="hello"+BLOCK_A+BLOCK_B
+        //   $ git blame -C -C -l b.txt  -> credited to c2 (the SECOND parent,
+        //   i.e. the FIRST of the two tied non-first parents), NOT c3 (the
+        //   literal last parent). This disproves plain "last-parent-wins".
+        //   Mechanism: p1 keeps its porigin (modified-files channel only —
+        //   pm.txt has no block); c2's and c3's identical b.txt blobs are
+        //   deduped to porigin-less, so both get whole-tree searches in
+        //   parent order and c2, searched first, claims the block.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("pm.txt", b"p1 only\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let c2 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s2.txt", &src)],
+            vec![base],
+            3,
+            300,
+        );
+        let c3 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s3.txt", &src)],
+            vec![base],
+            4,
+            400,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[("b.txt", &bmerge), ("s2.txt", &src), ("s3.txt", &src)],
+            vec![p1, c2, c3],
+            5,
+            500,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, c2,
+            "the first NON-first parent (in order) wins the octopus tie, not the literal last parent"
+        );
+        assert_eq!(r.lines[2].commit_hash, c2);
+    }
+
+    #[test]
+    fn blame_c_merge_copy_source_only_on_first_parent_stays_on_merge() {
+        // Counterpart guard, no tie involved: the block's ONLY candidate
+        // source lives on the FIRST parent (p1's s1.txt); the second parent
+        // has an unrelated file and no candidate at all. Real git recipe
+        // (git 2.50.1):
+        //   base: b.txt="hello"
+        //   p1  = base + s1.txt(BLOCK_A,BLOCK_B,"zzz")
+        //   c2  = base + m.txt("other unrelated content")
+        //   merge(p1,c2): b.txt="hello"+BLOCK_A+BLOCK_B
+        //   $ git blame -C -C -l b.txt -> credited to the MERGE commit
+        //   itself, NOT p1, even though p1's candidate is uncontested.
+        //   Mechanism: p1 keeps its porigin, so its -C candidates are only
+        //   files MODIFIED between p1 and the merge — s1.txt is unchanged,
+        //   hence invisible. c2 is deduped (same b.txt blob) and gets the
+        //   whole-tree search, but c2's tree has no block. See
+        //   blame_c_level1_merge_modified_source_credits_first_parent for
+        //   the converse: a first-parent source that IS modified gets
+        //   credited.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("b.txt", b"hello\n")], vec![], 1, 100);
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s1.txt", &src)],
+            vec![base],
+            2,
+            200,
+        );
+        let c2 = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", b"hello\n"),
+                ("m.txt", b"other unrelated content\n"),
+            ],
+            vec![base],
+            3,
+            300,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", &bmerge),
+                ("s1.txt", &src),
+                ("m.txt", b"other unrelated content\n"),
+            ],
+            vec![p1, c2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, merge,
+            "an uncontested -C source on the first parent is never traced (git parity)"
+        );
+        assert_eq!(r.lines[2].commit_hash, merge);
+    }
+
+    #[test]
+    fn blame_c_merge_unmodified_first_parent_source_with_fileless_second_stays_on_merge() {
+        // Modify/delete merge where the SECOND parent deleted the blamed
+        // file: the filtered DAG sees a single relevant parent, but the
+        // commit is still a true two-parent merge and p1's unchanged
+        // s1.txt must stay invisible (modified-files channel). Guards the
+        // old bug where `is_merge` was keyed on the FILTERED parent list,
+        // making this shape look linear and tracing the block to p1.
+        // Real git recipe (git 2.50.1):
+        //   base: b.txt="hello", sbase.txt
+        //   p1  = base + s1.txt(BLOCK_A,BLOCK_B,"zzz")   (keeps b.txt)
+        //   p2  = base - b.txt                            (deleted)
+        //   merge(p1,p2): b.txt="hello"+BLOCK_A+BLOCK_B; s1.txt unchanged
+        //   $ git blame -C -C b.txt -> block stays on the MERGE.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", b"hello\n"),
+                ("sbase.txt", b"source header line\n"),
+            ],
+            vec![],
+            1,
+            100,
+        );
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", b"hello\n"),
+                ("sbase.txt", b"source header line\n"),
+                ("s1.txt", &src),
+            ],
+            vec![base],
+            2,
+            200,
+        );
+        let p2 = put_multi_file_commit(
+            &store,
+            &[("sbase.txt", b"source header line\n")],
+            vec![base],
+            3,
+            300,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", &bmerge),
+                ("sbase.txt", b"source header line\n"),
+                ("s1.txt", &src),
+            ],
+            vec![p1, p2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, merge,
+            "a fileless second parent does not make the merge linear: p1's \
+             unchanged source stays invisible and the block stays on the merge (git parity)"
+        );
+        assert_eq!(r.lines[2].commit_hash, merge);
+    }
+
+    #[test]
+    fn blame_c_merge_file_deleting_parent_supplies_copy_source() {
+        // A parent that DELETED the blamed file is still `-C -C` searched —
+        // porigin-less parents get the whole-tree channel. Guards the old
+        // bug where detection iterated only the file-bearing (filtered)
+        // parents and p2's tree was never offered.
+        // Real git recipe (git 2.50.1):
+        //   base: f.txt="hello", s.txt="source header line"
+        //   p1  = base                                    (unchanged)
+        //   p2  = base - f.txt; s.txt gains BLOCK_A+BLOCK_B
+        //   merge(p1,p2): f.txt="hello"+BLOCK_A+BLOCK_B; s.txt = p2's
+        //   $ git blame -C -C f.txt -> block credited to p2 (via s.txt).
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(
+            &store,
+            &[("f.txt", b"hello\n"), ("s.txt", b"source header line\n")],
+            vec![],
+            1,
+            100,
+        );
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("f.txt", b"hello\n"), ("s.txt", b"source header line\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let src = [
+            b"source header line" as &[u8],
+            BLOCK_A,
+            BLOCK_B,
+            b"zzz",
+            b"",
+        ]
+        .join(&b'\n');
+        let p2 = put_multi_file_commit(&store, &[("s.txt", &src)], vec![base], 3, 300);
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[("f.txt", &bmerge), ("s.txt", &src)],
+            vec![p1, p2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "f.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, p2,
+            "the parent that deleted the blamed file is whole-tree searched \
+             and its source claims the block (git parity)"
+        );
+        assert_eq!(r.lines[2].commit_hash, p2);
+    }
+
+    #[test]
+    fn blame_c_merge_fileless_first_parent_unmodified_second_source_stays_on_merge() {
+        // Octopus where the FIRST parent deleted the blamed file and the
+        // second parent's tree holds the block in a source UNCHANGED at
+        // the merge. p1 is porigin-less (whole tree — no block there); p2
+        // is the first file-bearing parent so it KEEPS its porigin and only
+        // its modified files are candidates — s2.txt is unchanged, hence
+        // invisible; p3's b.txt blob dedups against p2's (whole tree — no
+        // block). Guards the old bug where the filtered index made p2 look
+        // like "the first parent" for the wrong reason (and, on the fixed
+        // real-parent model, would have wrongly whole-tree-searched p2).
+        // Real git recipe (git 2.50.1):
+        //   base: b.txt="hello", s2.txt="source header line"
+        //   p1  = base - b.txt
+        //   p2  = base with s2.txt = BLOCK_A+BLOCK_B+... (gains the block)
+        //   p3  = base + o.txt
+        //   merge(p1,p2,p3): b.txt="hello"+BLOCK; s2.txt = p2's; o.txt kept
+        //   $ git blame -C -C b.txt -> block stays on the MERGE.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s2.txt", b"source header line\n")],
+            vec![],
+            1,
+            100,
+        );
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("s2.txt", b"source header line\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let src = [
+            b"source header line" as &[u8],
+            BLOCK_A,
+            BLOCK_B,
+            b"zzz",
+            b"",
+        ]
+        .join(&b'\n');
+        let p2 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s2.txt", &src)],
+            vec![base],
+            3,
+            300,
+        );
+        let p3 = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", b"hello\n"),
+                ("s2.txt", b"source header line\n"),
+                ("o.txt", b"other\n"),
+            ],
+            vec![base],
+            4,
+            400,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[("b.txt", &bmerge), ("s2.txt", &src), ("o.txt", b"other\n")],
+            vec![p1, p2, p3],
+            5,
+            500,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[1].text, BLOCK_A);
+        assert_eq!(
+            r.lines[1].commit_hash, merge,
+            "the first file-bearing parent keeps its porigin even when the real \
+             first parent is fileless; its unchanged source stays invisible (git parity)"
+        );
+        assert_eq!(r.lines[2].commit_hash, merge);
+    }
+
+    #[test]
+    fn blame_c_level1_merge_modified_source_credits_first_parent() {
+        // Plain `-C` (level 1) at a true merge: the source file IS modified
+        // between the first parent and the merge (the block moved out of
+        // s1.txt into b.txt), so it is a modified-files-channel candidate
+        // and the FIRST parent gets the credit — there is no first-parent
+        // carve-out in git, at any level. Guards the old bug where the
+        // carve-out unconditionally zeroed the first parent's copy search.
+        // Real git recipe (git 2.50.1), same result with -C and -C -C:
+        //   base: b.txt="hello", s1.txt="source header line"
+        //   p1  = base with s1.txt gaining BLOCK_A+BLOCK_B
+        //   p2  = base + o.txt
+        //   merge(p1,p2): b.txt="hello"+BLOCK; s1.txt back to base's (block
+        //   moved out); o.txt kept
+        //   $ git blame -C b.txt -> block credited to P1 (via s1.txt).
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s1.txt", b"source header line\n")],
+            vec![],
+            1,
+            100,
+        );
+        let src = [
+            b"source header line" as &[u8],
+            BLOCK_A,
+            BLOCK_B,
+            b"zzz",
+            b"",
+        ]
+        .join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("b.txt", b"hello\n"), ("s1.txt", &src)],
+            vec![base],
+            2,
+            200,
+        );
+        let p2 = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", b"hello\n"),
+                ("s1.txt", b"source header line\n"),
+                ("o.txt", b"other\n"),
+            ],
+            vec![base],
+            3,
+            300,
+        );
+        let bmerge = [b"hello" as &[u8], BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("b.txt", &bmerge),
+                ("s1.txt", b"source header line\n"),
+                ("o.txt", b"other\n"),
+            ],
+            vec![p1, p2],
+            4,
+            400,
+        );
+
+        for level in [1u8, 2] {
+            let opts = BlameOptions {
+                copies: CopyDetection::On {
+                    level,
+                    threshold: 40,
+                },
+                ..Default::default()
+            };
+            let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+            assert_eq!(r.lines[1].text, BLOCK_A);
+            assert_eq!(
+                r.lines[1].commit_hash, p1,
+                "a source modified between the first parent and the merge is a \
+                 level-{level} candidate and credits the first parent (git parity)"
+            );
+        }
+    }
+
+    #[test]
+    fn blame_c_boundary_first_parent_mode_still_searches_first_parent() {
+        // `--first-parent -C -C` at a merge boundary: the real parent list
+        // is truncated to the first parent (git's first_scapegoat does the
+        // same), which is porigin-less for a newly-added file and therefore
+        // whole-tree searched — the source on p1 is credited exactly as in
+        // the merge-aware walk. Real git recipe (git 2.50.1):
+        //   base: x.txt
+        //   p1  = base + s1.txt(BLOCK_A,BLOCK_B,"zzz")
+        //   p2  = base + o.txt
+        //   merge(p1,p2): + n.txt = BLOCK_A+BLOCK_B   (new file)
+        //   $ git blame --first-parent -C -C n.txt -> credited to P1.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("x.txt", b"x\n")], vec![], 1, 100);
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("x.txt", b"x\n"), ("s1.txt", &src)],
+            vec![base],
+            2,
+            200,
+        );
+        let p2 = put_multi_file_commit(
+            &store,
+            &[("x.txt", b"x\n"), ("o.txt", b"other\n")],
+            vec![base],
+            3,
+            300,
+        );
+        let newf = [BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("x.txt", b"x\n"),
+                ("s1.txt", &src),
+                ("o.txt", b"other\n"),
+                ("n.txt", &newf),
+            ],
+            vec![p1, p2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            first_parent: true,
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "n.txt", &opts).unwrap();
+        assert_eq!(r.lines[0].text, BLOCK_A);
+        assert_eq!(
+            r.lines[0].commit_hash, p1,
+            "--first-parent truncates the boundary search to the real first \
+             parent, which is still whole-tree searched (git parity)"
+        );
+        assert_eq!(r.lines[1].commit_hash, p1);
+    }
+
+    #[test]
+    fn blame_c_merge_mixed_within_file_move_beats_copy_on_tie() {
+        // Real git recipe (git 2.50.1), `-M -C -C`: a length-1 tie between an
+        // within-file `-M` move source on the FIRST parent and a cross-file
+        // `-C` copy source on the second parent for the SAME moved line:
+        //   base: f.txt="X\nY\n"
+        //   p1  = f.txt=LONG_LINE+"X\nY\n"           (own prior version: -M source)
+        //   c2  = base f.txt (unchanged) + other.txt=LONG_LINE+"other stuff\n" (-C source)
+        //   merge(p1,c2): f.txt="X\nY\n"+LONG_LINE   (moved to the end)
+        //   $ git blame -M -C -C -l f.txt -> LONG_LINE credited to p1 (the
+        //   `-M` move), not c2's `-C` copy. `-M` is unaffected by `-C`'s
+        //   first-parent carve-out and keeps its own first-parent-wins tie.
+        let (_d, store) = fresh_store();
+        let base = put_file_commit(&store, "f.txt", b"X\nY\n", vec![], 1, 100);
+        let v1 = [LONG_LINE, b"X", b"Y", b""].join(&b'\n');
+        let p1 = put_file_commit(&store, "f.txt", &v1, vec![base], 2, 200);
+        let c2 = put_multi_file_commit(
+            &store,
+            &[
+                ("f.txt", b"X\nY\n"),
+                ("other.txt", &[LONG_LINE, b"other stuff", b""].join(&b'\n')),
+            ],
+            vec![base],
+            3,
+            300,
+        );
+        let vm = [b"X" as &[u8], b"Y", LONG_LINE, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("f.txt", &vm),
+                ("other.txt", &[LONG_LINE, b"other stuff", b""].join(&b'\n')),
+            ],
+            vec![p1, c2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            moves: MoveDetection::On { threshold: 20 },
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "f.txt", &opts).unwrap();
+        assert_eq!(r.lines[2].text, LONG_LINE);
+        assert_eq!(
+            r.lines[2].commit_hash, p1,
+            "-M's within-file move on the first parent still wins the tie over -C's copy on the second"
+        );
+    }
+
+    #[test]
+    fn blame_c_merge_boundary_copy_from_second_parent() {
+        // -C merge residual #2, closed. Real git recipe (git 2.50.1): the
+        // blamed file (`b.txt`) is ADDED by the merge — no parent contains
+        // it at all — and its sole copy source lives on the SECOND parent:
+        //   base: base.txt="base"
+        //   p1  = base + m.txt("main only")            (no candidate)
+        //   c2  = base + src.txt(BLOCK_A,BLOCK_B,"zzz") (candidate)
+        //   merge(p1,c2): adds b.txt=BLOCK_A+BLOCK_B (new path, no parent has it)
+        //   $ git blame -C -C -l b.txt -> credited to c2/src.txt.
         let (_d, store) = fresh_store();
         let base = put_multi_file_commit(&store, &[("base.txt", b"base\n")], vec![], 1, 100);
         let p1 = put_multi_file_commit(
@@ -2473,11 +3033,136 @@ mod tests {
             ..Default::default()
         };
         let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
-        // RESIDUAL: git credits c2 here; mkit currently credits the merge
-        // because the boundary copy search only walks the first parent.
+        assert_eq!(r.lines[0].text, BLOCK_A);
         assert_eq!(
-            r.lines[0].commit_hash, merge,
-            "documented residual: boundary -C across merge parents not yet traced (git would credit c2)"
+            r.lines[0].commit_hash, c2,
+            "a boundary -C source on a non-first parent is traced (git parity)"
+        );
+        assert_eq!(r.lines[1].commit_hash, c2);
+    }
+
+    #[test]
+    fn blame_c_merge_boundary_copy_octopus_third_parent() {
+        // Real git recipe (git 2.50.1): boundary case (file wholly new),
+        // 3-way octopus merge, source only on the THIRD parent:
+        //   base: base.txt="base"
+        //   p1 = base + pm.txt("p1 only")   (no candidate)
+        //   c2 = base + cm.txt("c2 only")   (no candidate)
+        //   c3 = base + s3.txt(BLOCK_A,BLOCK_B,"zzz")  (candidate)
+        //   merge(p1,c2,c3): adds b.txt=BLOCK_A+BLOCK_B (new path)
+        //   $ git blame -C -C -l b.txt -> credited to c3. Guards the
+        //   boundary search against stopping after the first two parents.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("base.txt", b"base\n")], vec![], 1, 100);
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("base.txt", b"base\n"), ("pm.txt", b"p1 only\n")],
+            vec![base],
+            2,
+            200,
+        );
+        let c2 = put_multi_file_commit(
+            &store,
+            &[("base.txt", b"base\n"), ("cm.txt", b"c2 only\n")],
+            vec![base],
+            3,
+            300,
+        );
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let c3 = put_multi_file_commit(
+            &store,
+            &[("base.txt", b"base\n"), ("s3.txt", &src)],
+            vec![base],
+            4,
+            400,
+        );
+        let bnew = [BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("base.txt", b"base\n"),
+                ("pm.txt", b"p1 only\n"),
+                ("cm.txt", b"c2 only\n"),
+                ("s3.txt", &src),
+                ("b.txt", &bnew),
+            ],
+            vec![p1, c2, c3],
+            5,
+            500,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[0].text, BLOCK_A);
+        assert_eq!(
+            r.lines[0].commit_hash, c3,
+            "the boundary search walks every real parent, not just the first two"
+        );
+        assert_eq!(r.lines[1].commit_hash, c3);
+    }
+
+    #[test]
+    fn blame_c_merge_boundary_copy_tie_prefers_first_parent() {
+        // The boundary case's tie-break is the OPPOSITE of the interior
+        // case's: real git recipe (git 2.50.1), both parents have the SAME
+        // candidate for a wholly-new file:
+        //   base: base.txt="base"
+        //   p1 = base + s1.txt(BLOCK_A,BLOCK_B,"zzz")
+        //   c2 = base + s2.txt(BLOCK_A,BLOCK_B,"zzz")  (same block)
+        //   merge(p1,c2): adds b.txt=BLOCK_A+BLOCK_B (new path)
+        //   $ git blame -C -C -l b.txt -> credited to p1 (the FIRST parent),
+        //   unlike the interior tie (which excludes the first parent
+        //   entirely). The boundary search includes every real parent,
+        //   first-found-wins in natural order, so the first parent CAN win.
+        let (_d, store) = fresh_store();
+        let base = put_multi_file_commit(&store, &[("base.txt", b"base\n")], vec![], 1, 100);
+        let src = [BLOCK_A, BLOCK_B, b"zzz", b""].join(&b'\n');
+        let p1 = put_multi_file_commit(
+            &store,
+            &[("base.txt", b"base\n"), ("s1.txt", &src)],
+            vec![base],
+            2,
+            200,
+        );
+        let c2 = put_multi_file_commit(
+            &store,
+            &[("base.txt", b"base\n"), ("s2.txt", &src)],
+            vec![base],
+            3,
+            300,
+        );
+        let bnew = [BLOCK_A, BLOCK_B, b""].join(&b'\n');
+        let merge = put_multi_file_commit(
+            &store,
+            &[
+                ("base.txt", b"base\n"),
+                ("s1.txt", &src),
+                ("s2.txt", &src),
+                ("b.txt", &bnew),
+            ],
+            vec![p1, c2],
+            4,
+            400,
+        );
+
+        let opts = BlameOptions {
+            copies: CopyDetection::On {
+                level: 2,
+                threshold: 40,
+            },
+            ..Default::default()
+        };
+        let r = blame_file_with(&store, merge, "b.txt", &opts).unwrap();
+        assert_eq!(r.lines[0].text, BLOCK_A);
+        assert_eq!(
+            r.lines[0].commit_hash, p1,
+            "the boundary copy tie prefers the first parent (git parity) — unlike the interior tie"
         );
     }
 

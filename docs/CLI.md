@@ -284,15 +284,25 @@ History / commits:
   detected. Divergences from git: inline numeric threshold forms
   (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
   custom threshold); a single unmatched run over 10,000 lines is matched
-  only as a whole, not by sub-block. Move/copy detection is merge-aware: at
-  a merge both `-M` and `-C -C` search every relevant parent's tree, so a
-  block moved or copied in from a non-first-parent side is credited to that
-  side (matching `git blame -M`/`-C`). Two narrow `-C` residuals at a merge —
-  (1) when the *same* block is newly added on two or more sides, mkit credits
-  the first such parent where git credits the last; (2) when the blamed file
-  is *newly added by the merge* and its sole copy source lives only on a
-  non-first parent, `git blame -C -C` traces it across while mkit credits the
-  merge. `-M` and `--ignore-rev` are otherwise fully merge-aware.
+  only as a whole, not by sub-block. Move/copy detection is merge-aware and
+  implements git's per-parent mechanism (pinned against git 2.50.1): at a
+  merge, every **real** parent is offered the unexplained lines in commit
+  order, first-found-wins. A parent that contains the blamed file (and
+  whose copy of it isn't byte-identical to an earlier parent's) supplies
+  the within-file `-M` source, and its `-C` copy candidates are the files
+  *modified between that parent and the merge*; a parent without that —
+  because it deleted the file, holds a duplicate of an earlier parent's
+  copy, or the file is newly added by the merge — has no `-M` source, and
+  with `-C -C` its **entire tree** is searched instead. Everyday
+  consequences (each pinned by a test with its git recipe): a block copied
+  in from a side branch is credited to that side; an *unchanged* source
+  file on the first parent is invisible (the block stays on the merge)
+  while the same source *modified* in the merge does credit the first
+  parent; a parent that deleted the blamed file can still supply the copy
+  source; and for a file newly added by the merge every real parent is
+  searched, first included. `-M` and `--ignore-rev` treat every relevant
+  parent uniformly (first-parent-wins); under `--first-parent` all of the
+  above runs against the first parent only.
   `--ignore-rev <rev>` (repeatable) and `--ignore-revs-file <file>` skip
   "noise" commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`: a line that would be credited

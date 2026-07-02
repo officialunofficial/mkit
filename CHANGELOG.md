@@ -65,20 +65,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-first-parent side is credited to that side's origin — matching
   `git blame -M`/`-C`, which credits the merge parent whose tree holds the
   source (a block whose source is only in the merge's own tree stays on the
-  merge, as in git). Documented divergences from git: inline
-  `-M<num>`/`-C<num>` threshold forms aren't exposed on the CLI (the core API
-  takes a custom threshold); `-C -C -C` (whole-history search) is approximated
-  as `-C -C`; when one source holds the block at several offsets the earliest
-  offset wins (git scores candidates and tracks line identity through its
-  diff); within a single unmatched run longer than 10,000 lines only the whole
-  run is matched, not sub-blocks (a cost bound; the matcher already caps
-  inputs); and two narrow residual `-C` cases at a merge — (1) when the *same*
-  block is newly added on two or more sides, mkit credits the first such parent
-  where git credits the last (its copy-source scoring is last-parent-wins), and
-  (2) when the blamed file is *newly added by the merge* and its sole copy
-  source lives only on a non-first parent, `git blame -C -C` traces it across
-  to that parent while mkit's boundary search (first parent's tree only)
-  credits the merge.
+  merge, as in git). The `-C`-at-a-merge gaps from the initial #499 landing
+  are now closed by implementing git's actual per-parent candidate
+  mechanism (from git 2.50.1's `blame.c`, each shape pinned by a test with
+  its git recipe): the `-M`/`-C` pass runs against **every real parent** in
+  commit order, first-found-wins. A parent that contains the blamed file —
+  and whose copy of it is not byte-identical to an earlier parent's (git
+  dedups those) — keeps its *porigin*: it supplies the within-file `-M`
+  source, and its `-C` candidates are the files *modified between that
+  parent and the merge*. A porigin-less parent (deleted the file, holds a
+  duplicate blob, or the file is newly added by the merge) has no `-M`
+  source and, with `-C -C`, gets its **entire tree** searched. The rules
+  previously described as "interior vs boundary tie-breaks" fall out of
+  this mechanism, plus the shapes they missed: an unchanged source on the
+  first parent is invisible (block stays on the merge) even when another
+  parent deleted the file; the same source *modified* at the merge credits
+  the first parent — at plain `-C` level 1 too; a parent that deleted the
+  blamed file can still supply the `-C -C` copy source from its tree; and
+  a file newly added by the merge searches every real parent, first
+  included (under `--first-parent`, only the first). Documented divergences from git
+  remain: inline `-M<num>`/`-C<num>` threshold forms aren't exposed on the
+  CLI (the core API takes a custom threshold); `-C -C -C` (whole-history
+  search) is approximated as `-C -C`; when one source holds the block at
+  several offsets the earliest offset wins (git scores candidates and tracks
+  line identity through its diff); and within a single unmatched run longer
+  than 10,000 lines only the whole run is matched, not sub-blocks (a cost
+  bound; the matcher already caps inputs).
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited
