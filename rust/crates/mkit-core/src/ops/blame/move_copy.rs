@@ -68,6 +68,7 @@ use super::{
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object};
 use crate::ops::diff::diff_trees;
+use crate::ops::is_ancestor;
 use crate::store::ObjectStore;
 
 /// Past this many unmatched lines in one run, only the whole run is tried
@@ -327,17 +328,47 @@ impl<'a> Detector<'a> {
         }
 
         // -C: other files at the parent commit. A strictly-longer copy
-        // match wins; an equal-length one does not (keeps `-M` preferred).
+        // match wins outright. An equal-length copy tie is broken git's way
+        // — prefer the source that traces to the older (ancestor) commit —
+        // rather than by candidate order; an equal-length `-M` still wins
+        // (within-file move stays preferred).
         if let Some(threshold) = ctx.copy_threshold {
             for ci in 0..ctx.candidates.len() {
                 let blob = ctx.candidates[ci].1;
                 self.ensure_candidate(blob)?;
-                let (keys, index) = &self.keys_cache[&blob];
-                let Some((len, offset)) = longest_match(needle, keys, index) else {
+                // Scope the `keys_cache` borrow so the ancestry tie-break
+                // below can take `&mut self` (it blames candidate sources).
+                let matched = {
+                    let (keys, index) = &self.keys_cache[&blob];
+                    longest_match(needle, keys, index)
+                };
+                let Some((len, offset)) = matched else {
                     continue;
                 };
-                let wins = best.as_ref().is_none_or(|(bl, _)| len > *bl);
-                if wins && ctx.alnum(s, s + len) >= threshold {
+                if ctx.alnum(s, s + len) < threshold {
+                    continue;
+                }
+                let take = match &best {
+                    None => true,
+                    Some((bl, _)) if len > *bl => true,
+                    Some((bl, _)) if len < *bl => false,
+                    // Equal length: keep `-M`, else prefer the older source.
+                    Some((_, BlockSource::WithinFile { .. })) => false,
+                    Some((
+                        _,
+                        BlockSource::Copy {
+                            path: cur_path,
+                            offset: cur_off,
+                        },
+                    )) => self.copy_source_is_older(
+                        ctx.source_commit,
+                        &ctx.candidates[ci].0,
+                        offset,
+                        cur_path,
+                        *cur_off,
+                    )?,
+                };
+                if take {
                     best = Some((
                         len,
                         BlockSource::Copy {
@@ -349,6 +380,56 @@ impl<'a> Detector<'a> {
             }
         }
         Ok(best)
+    }
+
+    /// Whether the copy source `(new_path, new_off)` traces to an older
+    /// (ancestor) commit than the incumbent `(cur_path, cur_off)`, both
+    /// blamed at `source_commit`. This is git's equal-length copy tie-break:
+    /// among equally-similar sources it credits the one that pushes blame
+    /// furthest back.
+    ///
+    /// Ordering is topological (mkit commits can share a whole-second
+    /// timestamp, so ancestry — not time — is authoritative): the new source
+    /// wins iff its origin commit is a strict ancestor of the incumbent's.
+    /// Ties on the same commit keep the incumbent (deterministic, candidate
+    /// order); genuinely incomparable origins (parallel branches) fall back
+    /// to the older timestamp, then to keeping the incumbent.
+    fn copy_source_is_older(
+        &mut self,
+        source_commit: Hash,
+        new_path: &str,
+        new_off: usize,
+        cur_path: &str,
+        cur_off: usize,
+    ) -> BlameOutcome<bool> {
+        let Some(new_origin) = self.copy_origin(source_commit, new_path, new_off)? else {
+            return Ok(false);
+        };
+        let Some(cur_origin) = self.copy_origin(source_commit, cur_path, cur_off)? else {
+            return Ok(false);
+        };
+        if new_origin.commit_hash == cur_origin.commit_hash {
+            return Ok(false);
+        }
+        if is_ancestor(self.store, new_origin.commit_hash, cur_origin.commit_hash)? {
+            return Ok(true);
+        }
+        if is_ancestor(self.store, cur_origin.commit_hash, new_origin.commit_hash)? {
+            return Ok(false);
+        }
+        Ok(new_origin.timestamp < cur_origin.timestamp)
+    }
+
+    /// The origin [`Attribution`] of a copy source's line at `offset` —
+    /// which commit authored it — by blaming `path` at `commit`.
+    fn copy_origin(
+        &mut self,
+        commit: Hash,
+        path: &str,
+        offset: usize,
+    ) -> BlameOutcome<Option<Attribution>> {
+        let attrs = self.candidate_attrs(commit, path)?;
+        Ok(attrs.get(offset).cloned())
     }
 
     /// Ensure a source blob's keys + key index are cached.
@@ -409,11 +490,14 @@ fn copy_origins(
 /// `index` (key → offsets) to find candidate starts, plus the offset.
 ///
 /// Divergence: when an identical block occurs at several offsets in the
-/// same source, the **earliest** offset wins the length tie (`build_index`
-/// records offsets ascending and this keeps the first maximal match). git
-/// tracks line identity through its diff and may land on a different copy;
-/// for block-based detection the earliest deterministic offset is the
-/// documented choice (see the cross-file tie-break note in CHANGELOG).
+/// **same** source file, the **earliest** offset wins the length tie
+/// (`build_index` records offsets ascending and this keeps the first
+/// maximal match). git tracks line identity through its diff and may land
+/// on a different offset within the file; for block-based detection the
+/// earliest deterministic offset is the documented choice. (Ties *across*
+/// candidate source files are resolved git's way — by ancestry — in
+/// [`Detector::copy_source_is_older`]; this note is only the
+/// within-one-file residue.)
 fn longest_match(needle: &[Vec<u8>], hay: &[Vec<u8>], index: &KeyIndex) -> Option<(usize, usize)> {
     let first = needle.first()?;
     let offsets = index.get(first)?;

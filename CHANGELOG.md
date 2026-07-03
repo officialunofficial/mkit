@@ -91,6 +91,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line identity through its diff); and within a single unmatched run longer
   than 10,000 lines only the whole run is matched, not sub-blocks (a cost
   bound; the matcher already caps inputs).
+- **`mkit blame -C` copy tie-break now matches git.** When two
+  equally-similar copy sources exist, blame credits the source that traces
+  to the older (ancestor) commit — git's push-blame-furthest-back bias —
+  instead of the first candidate in path order. The ordering is topological
+  (mkit commits can share a whole-second timestamp, so ancestry, not time,
+  is authoritative), pinned against git 2.50.1.
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited
