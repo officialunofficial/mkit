@@ -1,9 +1,11 @@
-//! `mkit bisect start|good|bad|reset|skip` — binary-search a history
+//! `mkit bisect start|good|bad|reset|skip|run` — binary-search a history
 //! for the commit that introduced a regression. Backing state + search
 //! logic live in `mkit_core::ops::bisect`.
 
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::path::Path;
+use std::process::Command;
 
 use mkit_core::hash::Hash;
 use mkit_core::ops::bisect::{
@@ -41,6 +43,14 @@ enum BisectCmd {
     Skip,
     /// End the session and restore the original HEAD.
     Reset,
+    /// Automatically bisect: run `<cmd> [args…]` at each candidate,
+    /// classifying by exit status (0=good, 125=skip, 1–127 else=bad,
+    /// ≥128=abort) until the first bad commit is found.
+    Run {
+        /// The command to run, followed by its arguments.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
 }
 
 #[must_use]
@@ -65,6 +75,7 @@ pub fn run(args: &[String]) -> u8 {
         BisectCmd::Bad { commit } => mark(&store, &mkit_dir, commit.as_deref(), false),
         BisectCmd::Skip => skip(&store, &mkit_dir),
         BisectCmd::Reset => reset(&mkit_dir),
+        BisectCmd::Run { argv } => run_automated(&store, &cwd, &mkit_dir, &argv),
     }
 }
 
@@ -185,6 +196,179 @@ fn reset(mkit_dir: &std::path::Path) -> u8 {
     exit::OK
 }
 
+/// How a `bisect run` command's exit status classifies the candidate.
+enum Verdict {
+    Good,
+    Bad,
+    Skip,
+    Abort,
+}
+
+/// Map a child exit code to a verdict, following git's `bisect run`
+/// contract: `0` good, `125` skip, `1`–`127` (except `125`) bad, `>=128`
+/// or signal-killed (`code() == None`) abort.
+fn classify(code: Option<i32>) -> Verdict {
+    match code {
+        Some(0) => Verdict::Good,
+        Some(125) => Verdict::Skip,
+        Some(c) if (1..=127).contains(&c) => Verdict::Bad,
+        _ => Verdict::Abort,
+    }
+}
+
+/// Drive the bisection automatically (git's `bisect run`): check out each
+/// candidate, run `<program> [cmd_args…]`, classify by exit status, and
+/// converge on the first bad commit.
+///
+/// mkit's bisect is otherwise print-candidate (no auto-checkout); `run`
+/// checks out each candidate transiently so the command tests real code,
+/// then restores the original HEAD once it converges — it *prints* the
+/// first bad commit rather than parking the worktree there (the intentional
+/// divergence that keeps bisect's overall model print-candidate). The
+/// candidate is also exported as `MKIT_BISECT_COMMIT` for commands that
+/// prefer it over the worktree.
+fn run_automated(store: &ObjectStore, cwd: &Path, mkit_dir: &Path, argv: &[String]) -> u8 {
+    if !is_bisect_in_progress(mkit_dir) {
+        return emit_err("no bisect in progress", exit::GENERAL_ERROR);
+    }
+    // clap's `required = true` guarantees at least the program name.
+    let Some((program, cmd_args)) = argv.split_first() else {
+        return emit_err("bisect run: missing command", exit::USAGE);
+    };
+    let mut state = match read_state(mkit_dir) {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
+    };
+
+    // Each iteration records an endpoint (good/bad) or a skip, all of which
+    // strictly shrink the candidate set, so the loop terminates; the guard
+    // is a backstop against a misbehaving `next_step`.
+    let mut guard = 0u32;
+    loop {
+        guard += 1;
+        if guard > 1_000_000 {
+            let _ = restore_head(cwd, &state);
+            return emit_err("bisect run: did not converge", exit::GENERAL_ERROR);
+        }
+
+        let hash = match next_step(store, &state) {
+            Ok(BisectStep::Testing { hash, remaining }) => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(
+                    stderr,
+                    "bisect run: testing {} ({remaining} candidates remaining)",
+                    format::short_hash(&hash, 12)
+                );
+                hash
+            }
+            Ok(BisectStep::Found(h)) => {
+                // Converged: restore the original HEAD, then report. The
+                // hash goes to stdout (data), the prose to stderr.
+                if let Err(code) = restore_head(cwd, &state) {
+                    return code;
+                }
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "bisect found first bad commit:");
+                drop(stderr);
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{}", format::short_hash(&h, 12));
+                return exit::OK;
+            }
+            Ok(BisectStep::NeedMore) => {
+                return emit_err(
+                    "bisect run: need at least one good and one bad commit first",
+                    exit::USAGE,
+                );
+            }
+            Err(e) => return emit_err(&format!("bisect run: {e}"), exit::GENERAL_ERROR),
+        };
+
+        // Check out the candidate so the command tests its actual tree.
+        if let Err(code) = checkout(cwd, &format::hex_hash(&hash)) {
+            let _ = restore_head(cwd, &state);
+            return code;
+        }
+
+        let status = Command::new(program)
+            .args(cmd_args)
+            .current_dir(cwd)
+            .env("MKIT_BISECT_COMMIT", format::hex_hash(&hash))
+            .status();
+        let code = match status {
+            Ok(s) => s.code(),
+            Err(e) => {
+                let _ = restore_head(cwd, &state);
+                return emit_err(
+                    &format!("bisect run: failed to run `{program}`: {e}"),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        };
+
+        match classify(code) {
+            Verdict::Good => state.good_hashes.push(hash),
+            Verdict::Bad => state.bad_hash = Some(hash),
+            Verdict::Skip => {
+                state.skipped.insert(hash);
+            }
+            Verdict::Abort => {
+                let _ = restore_head(cwd, &state);
+                let shown = code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+                return emit_err(
+                    &format!("bisect run: command aborted (exit {shown})"),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        }
+        if let Err(e) = write_state(mkit_dir, &state) {
+            let _ = restore_head(cwd, &state);
+            return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
+        }
+    }
+}
+
+/// Restore the worktree + HEAD to where bisect started, re-exec'ing
+/// `mkit checkout` on the original branch (or detached original HEAD).
+fn restore_head(cwd: &Path, state: &BisectState) -> Result<(), u8> {
+    let target = match state.orig_branch.as_deref() {
+        Some(branch) => branch.to_string(),
+        None => format::hex_hash(&state.orig_head),
+    };
+    checkout(cwd, &target)
+}
+
+/// Re-exec this same binary as `mkit checkout <target>` to materialize a
+/// commit into the worktree, reusing checkout's full safety/index/sparse
+/// handling. On failure prints the child's diagnostics and returns a code.
+fn checkout(cwd: &Path, target: &str) -> Result<(), u8> {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(emit_err(
+                &format!("cannot locate mkit binary: {e}"),
+                exit::GENERAL_ERROR,
+            ));
+        }
+    };
+    let out = Command::new(exe)
+        .args(["checkout", target])
+        .current_dir(cwd)
+        .env("NO_COLOR", "1")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(&o.stderr);
+            Err(exit::GENERAL_ERROR)
+        }
+        Err(e) => Err(emit_err(
+            &format!("checkout {target}: {e}"),
+            exit::GENERAL_ERROR,
+        )),
+    }
+}
+
 fn report_step(store: &ObjectStore, state: &BisectState) -> u8 {
     match next_step(store, state) {
         Ok(BisectStep::NeedMore) => {
@@ -220,3 +404,24 @@ fn report_step(store: &ObjectStore, state: &BisectState) -> u8 {
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod tests {
+    use super::{Verdict, classify};
+
+    #[test]
+    fn classify_matches_git_bisect_run_contract() {
+        // git's contract: 0=good, 125=skip, 1-127 (except 125)=bad,
+        // >=128 or signal-killed (None) = abort.
+        assert!(matches!(classify(Some(0)), Verdict::Good));
+        assert!(matches!(classify(Some(125)), Verdict::Skip));
+        assert!(matches!(classify(Some(1)), Verdict::Bad));
+        assert!(matches!(classify(Some(124)), Verdict::Bad));
+        assert!(matches!(classify(Some(126)), Verdict::Bad));
+        assert!(matches!(classify(Some(127)), Verdict::Bad));
+        assert!(matches!(classify(Some(128)), Verdict::Abort));
+        assert!(matches!(classify(Some(255)), Verdict::Abort));
+        // Signal-killed children report no code.
+        assert!(matches!(classify(None), Verdict::Abort));
+    }
+}

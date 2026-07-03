@@ -272,6 +272,75 @@ fn bisect_start_creates_state_file() {
     assert!(run_in(td.path(), &["bisect", "reset"]).status.success());
 }
 
+#[test]
+fn bisect_run_converges_to_first_bad_commit() {
+    // #528: `bisect run <cmd>` drives the loop automatically — it checks
+    // out each candidate, runs the command, and maps the exit code (0=good,
+    // 1-127≠125=bad) until it prints the first bad commit. Bug is introduced
+    // at c3 (marker flips to BAD); the run must converge to c3.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c2");
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c3");
+    let c3 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c4");
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c5");
+    let c5 = head_hash(td.path());
+
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c5]).status.success());
+
+    // `! grep -q BAD marker.txt` exits 0 (good) when marker is "ok",
+    // 1 (bad) when it is "BAD".
+    let out = run_in(
+        td.path(),
+        &["bisect", "run", "sh", "-c", "! grep -q BAD marker.txt"],
+    );
+    assert!(out.status.success(), "bisect run failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        &c3[..12],
+        "bisect run must converge to the first bad commit c3: {stdout:?}"
+    );
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
+#[test]
+fn bisect_run_skips_untestable_candidate_and_still_converges() {
+    // #528: exit 125 marks a candidate untestable (skip). c2 is untestable
+    // and c3 introduces the bug; the run must skip c2 and still converge
+    // to c3.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"SKIP\n", "c2");
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c3");
+    let c3 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c4");
+    let c4 = head_hash(td.path());
+
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c4]).status.success());
+
+    // 125 (skip) when marker is SKIP; 1 (bad) when BAD; 0 (good) otherwise.
+    let script = "grep -q SKIP marker.txt && exit 125; grep -q BAD marker.txt && exit 1; exit 0";
+    let out = run_in(td.path(), &["bisect", "run", "sh", "-c", script]);
+    assert!(out.status.success(), "bisect run failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        &c3[..12],
+        "bisect run must skip c2 and converge to c3: {stdout:?}"
+    );
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
 // ---------- stash ---------------------------------------------------------
 
 #[test]

@@ -198,6 +198,8 @@ commands:
   bisect start       Begin binary search for a bug
   bisect good [hash] Mark a commit as good
   bisect bad [hash]  Mark a commit as bad
+  bisect run <cmd>...  Auto-bisect: run <cmd> per candidate, classify by
+                     exit status (0=good/125=skip/1-127=bad), print first bad
   bisect reset       End bisect and restore original state
   gc [-n] [--grace-secs SECS]
                     Reclaim unreachable objects older than the grace

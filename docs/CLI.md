@@ -661,7 +661,15 @@ Branches / refs:
   mutation. Removing every line resets the branch to the base. A
   `reword`/`squash` whose replay hits a conflict still reopens the editor
   on `--continue`. `edit` (stop-to-amend) is not yet supported.
-- `mkit bisect start | good | bad | reset` — binary search for a bug.
+- `mkit bisect start | good | bad | skip | reset | run <cmd> [args…]` —
+  binary search for a bug. `run` drives the loop automatically: it checks
+  out each candidate, runs `<cmd>`, and classifies from the exit status
+  (git's contract: `0`=good, `125`=skip, `1`–`127` else=bad, `≥128`=abort),
+  then restores the original HEAD and prints the first bad commit. The
+  candidate hash is also exported as `MKIT_BISECT_COMMIT`. (mkit's bisect is
+  otherwise print-candidate — `start`/`good`/`bad`/`skip` print the next
+  candidate rather than checking it out — so `run` checks out transiently
+  for the test and parks nothing at the end.)
 - `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,
