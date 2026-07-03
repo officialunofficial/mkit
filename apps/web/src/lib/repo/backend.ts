@@ -35,16 +35,17 @@ export type ChatMessageEntry = {
 export const MAX_MESSAGE_CHARS = 280
 
 /**
- * Domain prefix for a chat message's canonical bytes — MUST byte-match the server's `CHAT_CANONICAL_PREFIX` so a mock
- * and the worker content-address an identical (room, author, text) to the SAME id.
+ * Domain prefix for a chat message's canonical bytes — matches the server's `CHAT_CANONICAL_PREFIX` so the mock
+ * content-addresses chat with the SAME scheme as the worker. Ids aren't equal across the two: each folds in a unique
+ * per-post nonce, so the same (room, author, text) yields a distinct id per send.
  */
 const CHAT_CANONICAL_PREFIX = 'mkit-chat:v1'
 
 /**
  * Canonical bytes a chat message is content-addressed by (mirrors `chat::canonical_message`):
- * `mkit-chat:v1\n{room}\n{authorHex}\n{nonce}\n{text}`. `nonce` is the send's unique per-post idempotency key, folded in
- * so two identical (room, author, text) posts get DISTINCT ids — the message becomes a unique signed object and reactions
- * key on the plain id. `text` is last so a newline in it can't desync the earlier fields.
+ * `mkit-chat:v1\n{room}\n{authorHex}\n{nonce}\n{text}`. `nonce` is the send's unique per-post idempotency key, folded
+ * in so two identical (room, author, text) posts get DISTINCT ids — the message becomes a unique signed object and
+ * reactions key on the plain id. `text` is last so a newline in it can't desync the earlier fields.
  */
 export function chatCanonical(room: string, authorHex: string, text: string, nonce: string): Uint8Array {
   return TEXT_ENCODER.encode(`${CHAT_CANONICAL_PREFIX}\n${room}\n${authorHex}\n${nonce}\n${text}`)
