@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::{
     Attribution, BlameError, BlameOptions, BlameOutcome, CopyDetection, find_blob_in_tree,
-    ignore_fallthrough, load_blob_lines, match_lines_with_options, move_copy,
+    ignore_fallthrough, line_key, load_blob_lines, match_lines_with_options, move_copy,
 };
 use crate::hash::Hash;
 use crate::object::{Identity, Object};
@@ -283,7 +283,7 @@ pub(super) fn attribute_commit(
     }
 
     if ctx.opts.is_ignored(&commit) {
-        apply_ignore_fallthrough(memo, &pass, &parents_data, &mut attrs, &mut matched);
+        apply_ignore_fallthrough(ctx, memo, &pass, &parents_data, &mut attrs, &mut matched);
     }
 
     if ctx.opts.detection_enabled() {
@@ -312,7 +312,14 @@ pub(super) fn attribute_commit(
 /// `matched` so the detector does not overwrite it (`--ignore-rev` takes
 /// precedence over `-M`/`-C`). With one parent this is exactly the old
 /// single-parent fall-through.
+///
+/// When [`BlameOptions::ignore_rev_precise`] is set, [`precise_overrides`]
+/// refines each parent's positional `fall` result with content matching
+/// before it is applied here — the credit loop below, the first-parent-wins
+/// per-parent ordering, and the `matched` marking are all unchanged either
+/// way.
 fn apply_ignore_fallthrough(
+    ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
     pass: &CommitPass,
     parents_data: &[ParentData],
@@ -323,6 +330,17 @@ fn apply_ignore_fallthrough(
         // Reuse the lines + mapping loaded once in `attribute_commit`.
         let (parent_lines, mapping) = &parents_data[k];
         let fall = ignore_fallthrough(mapping, parent_lines.len());
+        let fall = if ctx.opts.ignore_rev_precise {
+            precise_overrides(
+                mapping,
+                &fall,
+                pass.lines,
+                parent_lines,
+                ctx.opts.ignore_whitespace,
+            )
+        } else {
+            fall
+        };
         let parent_attrs = &memo[&parent];
         for (ni, &paired) in fall.iter().enumerate() {
             if matched[ni] {
@@ -416,4 +434,185 @@ fn apply_detection(
         )?;
     }
     Ok(())
+}
+
+/// `--ignore-rev-precise` (#496): refine one parent's positional
+/// [`ignore_fallthrough`] result (`fall`) with content matching, so a line
+/// a reformat/reorder moved can be attributed to its true surviving origin
+/// instead of whatever line happens to sit at the same offset in the hunk.
+///
+/// git's positional guess is the base; this only *overrides* a slot when
+/// content evidence contradicts it:
+///
+/// * `fall[ni] == Some(j)` and `line_key(parent[j]) == line_key(new[ni])`:
+///   content agrees with the guess — kept as-is.
+/// * Otherwise: `new[ni]`'s key is looked up across the parent's **whole
+///   file** (not just the enclosing hunk — the point is finding lines a
+///   reformat moved across hunk boundaries), restricted to old lines the
+///   LCS pass didn't already anchor. Exactly one candidate reattributes the
+///   line; multiple candidates are ranked by the longest forward-matching
+///   run of keys, tie-broken by proximity to the positional guess (if any)
+///   then by lowest old index; zero candidates keeps `fall[ni]` untouched
+///   (`Some(j)` or `None`, matching git).
+/// * A key shorter than 3 bytes (blank lines, `}`-only lines, …) is never
+///   content-reattributed, so trivial lines don't "teleport".
+///
+/// The override map is kept injective (one old line credits at most one new
+/// line) in two passes. Pass 1 decides, for every unmatched new line
+/// independently of processing order, whether *it itself* will keep its
+/// positional pairing (content agrees, or a trivial key) — those old
+/// indices are reserved up front, since an override elsewhere must never
+/// steal a line its own positional owner is keeping. Pass 2 then resolves
+/// overrides in index order, growing the reserved set with each override
+/// chosen, so two lines can never be reattributed to the same old line.
+/// Deciding "keeps its own pairing" per line first (rather than reserving
+/// *every* positional target up front) is what lets a genuine swap — where
+/// neither side's content agrees with its positional guess — resolve to
+/// both true origins, rather than every candidate being pre-blocked by its
+/// own soon-to-be-overridden positional pairing.
+///
+/// Does not touch `ignore_fallthrough` itself or its shape: callers see the
+/// same `Vec<Option<usize>>` domain (only unmatched new lines are ever
+/// `Some`/reattributed), so the credit loop in [`apply_ignore_fallthrough`]
+/// is unchanged either way.
+///
+/// `pub(super)`: exercised directly by a `blame::tests` unit test (mirroring
+/// how `ignore_fallthrough_pairs_per_hunk` unit-tests `ignore_fallthrough`),
+/// alongside the full `blame_file_with` integration tests.
+pub(super) fn precise_overrides(
+    mapping: &[Option<usize>],
+    fall: &[Option<usize>],
+    new_lines: &[Vec<u8>],
+    parent_lines: &[Vec<u8>],
+    ignore_whitespace: bool,
+) -> Vec<Option<usize>> {
+    // `fall` is only ever defined over the LCS-unmatched new lines (the
+    // domain `ignore_fallthrough` pairs); restrict content matching to the
+    // same domain.
+    let unmatched_new: Vec<usize> = (0..mapping.len())
+        .filter(|&ni| mapping[ni].is_none())
+        .collect();
+    if unmatched_new.is_empty() {
+        return fall.to_vec();
+    }
+
+    // The parent's unmatched-old lines, across the WHOLE file — a reformat
+    // can move a line across hunk boundaries, which per-hunk pairing alone
+    // can never see.
+    let matched_old: HashSet<usize> = mapping.iter().filter_map(|&m| m).collect();
+    let unmatched_old: Vec<usize> = (0..parent_lines.len())
+        .filter(|oi| !matched_old.contains(oi))
+        .collect();
+    if unmatched_old.is_empty() {
+        return fall.to_vec();
+    }
+
+    let old_keys: Vec<Vec<u8>> = unmatched_old
+        .iter()
+        .map(|&oi| line_key(&parent_lines[oi], ignore_whitespace))
+        .collect();
+    let old_index = move_copy::build_index(&old_keys);
+    let new_keys: Vec<Vec<u8>> = unmatched_new
+        .iter()
+        .map(|&ni| line_key(&new_lines[ni], ignore_whitespace))
+        .collect();
+
+    // Pass 1: decide, per line and independent of processing order, whether
+    // it keeps its own positional pairing (trivial key, or content already
+    // agrees) — and if so, reserve that old index so no override elsewhere
+    // can steal it.
+    let mut keeps: HashSet<usize> = HashSet::new(); // ni values that keep `fall[ni]` as-is
+    let mut claimed: HashSet<usize> = HashSet::new(); // old indices reserved / taken
+    for (pos, &ni) in unmatched_new.iter().enumerate() {
+        let Some(j) = fall[ni] else { continue };
+        let key = &new_keys[pos];
+        if key.len() < 3 || *line_key(&parent_lines[j], ignore_whitespace) == *key {
+            keeps.insert(ni);
+            claimed.insert(j);
+        }
+    }
+
+    // Pass 2: resolve overrides for everything not kept above.
+    let mut out = fall.to_vec();
+    for (pos, &ni) in unmatched_new.iter().enumerate() {
+        let key = &new_keys[pos];
+        if keeps.contains(&ni) || key.len() < 3 {
+            continue; // kept as-is, or a trivial key that never teleports
+        }
+        let Some(offsets) = old_index.get(key) else {
+            continue; // no content candidate anywhere in the parent
+        };
+        let candidates: Vec<usize> = offsets
+            .iter()
+            .copied()
+            .filter(|&d| !claimed.contains(&unmatched_old[d]))
+            .collect();
+        if candidates.is_empty() {
+            continue; // every candidate already claimed (reserved, or taken by an earlier override)
+        }
+        let chosen = if candidates.len() == 1 {
+            candidates[0]
+        } else {
+            best_content_candidate(
+                &candidates,
+                pos,
+                &new_keys,
+                &old_keys,
+                &unmatched_old,
+                fall[ni],
+            )
+        };
+        let real_old = unmatched_old[chosen];
+        claimed.insert(real_old);
+        out[ni] = Some(real_old);
+    }
+    out
+}
+
+/// Break a tie among several content candidates for the same key (dense
+/// offsets into `old_keys`/`unmatched_old`): the longest forward-matching
+/// run of keys starting at `pos` (new side) / the candidate (old side)
+/// wins — the same forward-extension idea `move_copy::longest_match` uses
+/// for `-M`/`-C` block search, but restricted to this call's
+/// already-filtered (unclaimed) candidate set, which the generic
+/// unfiltered helper has no way to express. A length tie is broken by
+/// proximity to git's positional guess (`positional`), if any, then by the
+/// lowest old-line index.
+fn best_content_candidate(
+    candidates: &[usize],
+    pos: usize,
+    new_keys: &[Vec<u8>],
+    old_keys: &[Vec<u8>],
+    unmatched_old: &[usize],
+    positional: Option<usize>,
+) -> usize {
+    let run_len = |d: usize| -> usize {
+        new_keys[pos..]
+            .iter()
+            .zip(&old_keys[d..])
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    let mut best = candidates[0];
+    let mut best_len = run_len(best);
+    for &d in &candidates[1..] {
+        let len = run_len(d);
+        let better = match len.cmp(&best_len) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => match positional {
+                Some(expected) => {
+                    let cur = unmatched_old[d].abs_diff(expected);
+                    let prev = unmatched_old[best].abs_diff(expected);
+                    cur < prev || (cur == prev && unmatched_old[d] < unmatched_old[best])
+                }
+                None => unmatched_old[d] < unmatched_old[best],
+            },
+        };
+        if better {
+            best = d;
+            best_len = len;
+        }
+    }
+    best
 }
