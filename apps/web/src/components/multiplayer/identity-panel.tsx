@@ -21,8 +21,8 @@ import { BTN, PRIMARY_BTN, errMsg } from './shared'
  */
 function useAttest(
   api: ReturnType<typeof useMkit>,
-  credentialId: string,
-  p256PubkeyHex: string,
+  credentialId: string | null,
+  p256PubkeyHex: string | null,
   ed25519PubkeyHex: string,
 ) {
   const [result, setResult] = useState<{ verified: boolean } | null>(null)
@@ -30,6 +30,11 @@ function useAttest(
   const [err, setErr] = useState<string | null>(null)
 
   const onAttest = async () => {
+    // No credential/pubkey to vouch with (legacy identity or an authenticator
+    // that didn't expose getPublicKey()) — the caller already gates the
+    // trigger on this via `canAttest`; this guard just makes null
+    // unrepresentable downstream instead of relying on that alone.
+    if (credentialId == null || p256PubkeyHex == null) return
     setErr(null)
     setBusy(true)
     try {
@@ -141,7 +146,7 @@ export function UnlockedHeader({
   ed25519PubkeyHex: string
 }) {
   const id = useIdentityStore()
-  const attest = useAttest(api, id.credentialId ?? '', id.p256PubkeyHex ?? '', ed25519PubkeyHex)
+  const attest = useAttest(api, id.credentialId, id.p256PubkeyHex, ed25519PubkeyHex)
   // A legacy identity (created before #494) or an authenticator that didn't
   // expose getPublicKey() at creation time has no captured pubkey — the
   // attest ceremony has no key to hand the verifier, so disable rather than
