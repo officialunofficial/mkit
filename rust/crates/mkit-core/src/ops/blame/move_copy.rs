@@ -118,6 +118,10 @@ pub(super) struct Detector<'a> {
     /// (commit, path) → that file's per-line origins, from blaming it
     /// (expensive; built only once a candidate actually matches a block).
     attrs_cache: HashMap<(Hash, String), Vec<Attribution>>,
+    /// (ancestor, descendant) → ancestry result, memoizing the copy
+    /// tie-break's `is_ancestor` DAG walks so a duplicated block that ties
+    /// at many start positions doesn't re-walk history each time.
+    ancestry_cache: HashMap<(Hash, Hash), bool>,
 }
 
 /// Where a matched block came from.
@@ -159,7 +163,20 @@ impl<'a> Detector<'a> {
             opts,
             keys_cache: HashMap::new(),
             attrs_cache: HashMap::new(),
+            ancestry_cache: HashMap::new(),
         }
+    }
+
+    /// Memoized [`is_ancestor`] for the copy tie-break. An incomparable pair
+    /// (parallel branches) walks the whole reachable DAG to return `false`,
+    /// so caching matters when a duplicated block ties repeatedly.
+    fn is_ancestor_cached(&mut self, ancestor: Hash, descendant: Hash) -> BlameOutcome<bool> {
+        if let Some(&v) = self.ancestry_cache.get(&(ancestor, descendant)) {
+            return Ok(v);
+        }
+        let v = is_ancestor(self.store, ancestor, descendant)?;
+        self.ancestry_cache.insert((ancestor, descendant), v);
+        Ok(v)
     }
 
     /// Reassign moved/copied blocks among the still-unclaimed lines,
@@ -411,10 +428,10 @@ impl<'a> Detector<'a> {
         if new_origin.commit_hash == cur_origin.commit_hash {
             return Ok(false);
         }
-        if is_ancestor(self.store, new_origin.commit_hash, cur_origin.commit_hash)? {
+        if self.is_ancestor_cached(new_origin.commit_hash, cur_origin.commit_hash)? {
             return Ok(true);
         }
-        if is_ancestor(self.store, cur_origin.commit_hash, new_origin.commit_hash)? {
+        if self.is_ancestor_cached(cur_origin.commit_hash, new_origin.commit_hash)? {
             return Ok(false);
         }
         Ok(new_origin.timestamp < cur_origin.timestamp)
