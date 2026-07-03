@@ -18,6 +18,7 @@
 //!   checking, known-hosts path, identity file) are wired through via
 //!   `SshTransport::connect_with_options` when config is loaded.
 
+mod applied_packs;
 mod packmap;
 
 use std::path::Path;
@@ -131,6 +132,13 @@ pub enum DispatchError {
     /// is incomplete, so fetch aborts before publishing the ref.
     #[error("remote is missing object {0} needed to reconstruct the ref")]
     RemoteMissingObject(String),
+    /// A remote name passed to the applied-packs record (#409) contained
+    /// `/`, `\`, or `..`. Remote names are already restricted to a safe
+    /// charset wherever they are configured; this is defence-in-depth
+    /// against the name being used as a raw path component under
+    /// `.mkit/applied-packs/`.
+    #[error("invalid remote name for applied-packs record: '{0}'")]
+    InvalidRemoteName(String),
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -667,16 +675,25 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 /// flow is exactly
 ///
 /// 1. read the branch's packmap ref (`refs/mkit/packmap/<branch>`),
-/// 2. walk its chain oldest-first and unpack each pack
+/// 2. walk its chain oldest-first, skip any pack the local applied-pack
+///    record already has, and unpack the rest
 ///    ([`packmap::fetch_pack_chain`]), then
 /// 3. assert the tip's closure is fully present
 ///    ([`verify_closure_present`]) — a pure integrity check that downloads
 ///    nothing.
 ///
+/// Steps 2 and 3 are both performed *inside* [`packmap::fetch_pack_chain`]
+/// (rather than sequenced here) so a closure-completeness failure counts
+/// toward that function's applied-pack self-heal retry (#409): if the
+/// local record wrongly claims every pack in the chain is already applied
+/// (e.g. `.mkit/objects` was wiped out-of-band while `applied-packs/`
+/// survived), the very first symptom is exactly this closure check
+/// failing, not a download/unpack error — the retry has to cover both.
+///
 /// Both ends fail loudly: an absent packmap is [`DispatchError::PackmapMissing`]
-/// and a present-but-incomplete packmap is [`DispatchError::RemoteMissingObject`].
-/// We never publish a remote-tracking ref to a closure we couldn't fully
-/// materialise locally.
+/// and a present-but-incomplete packmap (even after the self-heal retry) is
+/// [`DispatchError::RemoteMissingObject`]. We never publish a
+/// remote-tracking ref to a closure we couldn't fully materialise locally.
 fn fetch_objects(
     store: &ObjectStore,
     mkit_dir: &Path,
@@ -698,11 +715,7 @@ fn fetch_objects(
         let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
             return Err(DispatchError::PackmapMissing(r.name.clone()));
         };
-        fetch_pack_chain(store, tx, &r.name, chain_head)?;
-        // Integrity assertion only — NO downloads. The chain above is the
-        // sole delivery mechanism; if it didn't deliver the whole closure the
-        // remote's packmap is incomplete and we refuse to publish the ref.
-        verify_closure_present(store, &h)?;
+        fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, chain_head, h)?;
         refs::write_remote_ref(mkit_dir, remote, &r.name, &h)?;
         n += 1;
     }
@@ -717,7 +730,11 @@ fn fetch_objects(
 /// surfaces as [`StoreError::ObjectNotFound`], which we re-tag as
 /// [`DispatchError::RemoteMissingObject`] so the fetch aborts loudly rather
 /// than publishing a ref to a closure we can't reconstruct.
-fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), DispatchError> {
+///
+/// Called from [`packmap::fetch_pack_chain`] (not sequenced after it) so its
+/// result participates in that function's applied-pack self-heal retry —
+/// see [`fetch_objects`]'s doc comment.
+pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), DispatchError> {
     match mkit_core::ops::reachable_objects(store, tip) {
         Ok(_) => Ok(()),
         Err(StoreError::ObjectNotFound(hex)) => Err(DispatchError::RemoteMissingObject(hex)),

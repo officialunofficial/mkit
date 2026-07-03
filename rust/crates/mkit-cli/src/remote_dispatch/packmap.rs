@@ -20,6 +20,8 @@
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
 //! them.
 
+use std::path::Path;
+
 use mkit_core::hash::Hash;
 use mkit_core::pack::{self, PackReader};
 use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
@@ -28,6 +30,7 @@ use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
 
 use super::DispatchError;
+use super::applied_packs::AppliedPacks;
 
 /// Ref under which a branch's transfer packlist key is advertised. The
 /// value is the BLAKE3 of the packlist chain head — an auxiliary
@@ -245,17 +248,106 @@ pub(crate) fn commit_head(
 /// earlier pack (the push planner only deltas against bases the remote — and
 /// therefore the chain — already holds), so unpacking oldest-first is
 /// sufficient: there is no per-object base prefetch.
+///
+/// Packs already recorded in the local applied-pack record for `remote`
+/// (`.mkit/applied-packs/<remote>`, see [`applied_packs`]) are skipped —
+/// neither downloaded nor unpacked — so a steady-state fetch only pays for
+/// packs new since the last fetch (#409). The chain itself is still
+/// resolved in full every time: node downloads are small blobs and remain
+/// the source of truth for chain shape, independent of what's locally
+/// applied.
+///
+/// # Self-heal
+///
+/// A run's result is "downloading/unpacking every non-skipped pack, then
+/// asserting `tip`'s closure is fully present" (the latter via
+/// [`super::verify_closure_present`], folded in here rather than sequenced
+/// by the caller — see that function's doc comment for why). If EITHER
+/// half fails in a run that skipped at least one recorded pack, the local
+/// applied-pack record is treated as possibly stale relative to the object
+/// store (e.g. `.mkit/objects` was wiped out-of-band while
+/// `applied-packs/` survived) rather than a hard failure: the record is
+/// cleared and the whole chain is retried once with no skips. Only if that
+/// retry also fails is the error propagated. A [`DispatchError::Interrupted`]
+/// (user-requested shutdown) is never treated as a self-heal trigger — it
+/// propagates immediately regardless of how many packs were skipped.
 pub(crate) fn fetch_pack_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
+    mkit_dir: &Path,
+    remote: &str,
     branch: &str,
     head_key: Hash,
+    tip: Hash,
 ) -> Result<(), DispatchError> {
-    for pk in resolve_pack_chain(tx, branch, head_key)? {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
+    // Chain shape is always resolved fresh and in full — see the doc
+    // comment above. Only the per-pack download+unpack loop below
+    // consults / mutates the applied-pack record.
+    let chain = resolve_pack_chain(tx, branch, head_key)?;
+    let mut applied = AppliedPacks::load(mkit_dir, remote)?;
+
+    let (skipped, result) = attempt_pack_chain(store, tx, branch, &chain, tip, &mut applied);
+    match result {
+        Ok(()) => {
+            applied.persist()?;
+            Ok(())
         }
-        let pack = match tx.download_pack(&PackKey::from_hash(pk)) {
+        Err(DispatchError::Interrupted) => Err(DispatchError::Interrupted),
+        Err(e) if skipped > 0 => {
+            eprintln!(
+                "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({e}); clearing it and re-fetching the full pack chain"
+            );
+            applied.clear_and_persist()?;
+            let (_, retry_result) =
+                attempt_pack_chain(store, tx, branch, &chain, tip, &mut applied);
+            retry_result?;
+            applied.persist()?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Run [`apply_pack_chain`] and, if it succeeds, follow up with
+/// [`super::verify_closure_present`] on `tip`. Returns the number of packs
+/// [`apply_pack_chain`] skipped alongside the combined result — the caller
+/// uses the skip count to decide whether a failure (from either half) is
+/// eligible for the self-heal retry in [`fetch_pack_chain`].
+fn attempt_pack_chain(
+    store: &ObjectStore,
+    tx: &dyn Transport,
+    branch: &str,
+    chain: &[Hash],
+    tip: Hash,
+    applied: &mut AppliedPacks,
+) -> (usize, Result<(), DispatchError>) {
+    let (skipped, result) = apply_pack_chain(store, tx, branch, chain, applied);
+    let result = result.and_then(|()| super::verify_closure_present(store, &tip));
+    (skipped, result)
+}
+
+/// Download + unpack every key in `chain` not already recorded in
+/// `applied`, inserting each newly-applied digest into `applied` as soon as
+/// its pack is successfully read. Returns the number of packs skipped
+/// (already recorded as applied) alongside the loop's result.
+fn apply_pack_chain(
+    store: &ObjectStore,
+    tx: &dyn Transport,
+    branch: &str,
+    chain: &[Hash],
+    applied: &mut AppliedPacks,
+) -> (usize, Result<(), DispatchError>) {
+    let mut skipped = 0usize;
+    for &pk in chain {
+        if crate::signal::is_shutdown() {
+            return (skipped, Err(DispatchError::Interrupted));
+        }
+        let key = PackKey::from_hash(pk);
+        if applied.contains(&key) {
+            skipped += 1;
+            continue;
+        }
+        let pack = match tx.download_pack(&key) {
             Ok(b) => b,
             // The packmap PROMISED this pack. Its objects are delta/raw
             // entries inside the pack, not stored under their own digests, so
@@ -263,14 +355,20 @@ pub(crate) fn fetch_pack_chain(
             // pack means a corrupt/incomplete remote — fail loudly rather
             // than publish a ref to a history we can't reconstruct.
             Err(TransportError::PackNotFound) => {
-                return Err(DispatchError::AdvertisedPackMissing {
-                    branch: branch.to_owned(),
-                    pack: mkit_core::hash::to_hex(&pk),
-                });
+                return (
+                    skipped,
+                    Err(DispatchError::AdvertisedPackMissing {
+                        branch: branch.to_owned(),
+                        pack: mkit_core::hash::to_hex(&pk),
+                    }),
+                );
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return (skipped, Err(e.into())),
         };
-        PackReader::read(&pack, store)?;
+        if let Err(e) = PackReader::read(&pack, store) {
+            return (skipped, Err(e.into()));
+        }
+        applied.insert(&key);
     }
-    Ok(())
+    (skipped, Ok(()))
 }
