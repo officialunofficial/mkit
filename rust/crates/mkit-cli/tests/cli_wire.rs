@@ -905,6 +905,119 @@ fn blame_c_c_widens_to_unchanged_source_file() {
 }
 
 #[test]
+fn blame_c_inline_threshold_flips_copy_attribution() {
+    // #525: inline `-C<num>` sets the similarity threshold (an alphanumeric
+    // char count). The copied block is EXACTLY 40 alnum chars, so a
+    // threshold at or below 40 detects the copy (credit the origin) while
+    // 41 misses it (the block reads as new) — the boundary flip git's
+    // `-C<num>` produces. The `%` form parses and, since mkit has no
+    // similarity-ratio model, is treated as the same char count.
+    let block = "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"; // 40 alnum chars
+    assert_eq!(block.chars().filter(|c| c.is_alphanumeric()).count(), 40);
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "a.txt",
+        format!("{block}\nkeeper\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    // Second commit: remove the block from a.txt, add it verbatim in b.txt.
+    fs::write(td.path().join("a.txt"), b"keeper\n").unwrap();
+    fs::write(td.path().join("b.txt"), format!("{block}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "a.txt", "b.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "split"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    // Threshold above the block size: copy is NOT detected.
+    let above = run_in(td.path(), &["blame", "-C41", "b.txt"]);
+    assert!(above.status.success(), "blame -C41 failed: {above:?}");
+    let above_out = String::from_utf8(above.stdout).unwrap();
+    assert!(
+        above_out.lines().all(|l| l.starts_with(&second[..12])),
+        "-C41 (> 40-char block) misses the copy: {above_out:?}"
+    );
+
+    // Threshold at the block size: copy IS detected (git uses `>=`).
+    let at = run_in(td.path(), &["blame", "-C40", "b.txt"]);
+    assert!(at.status.success(), "blame -C40 failed: {at:?}");
+    let at_out = String::from_utf8(at.stdout).unwrap();
+    assert!(
+        at_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-C40 (== block) credits the origin commit: {at_out:?}"
+    );
+
+    // The percent form parses and behaves like the bare number.
+    let pct = run_in(td.path(), &["blame", "-C40%", "b.txt"]);
+    assert!(pct.status.success(), "blame -C40% failed: {pct:?}");
+    let pct_out = String::from_utf8(pct.stdout).unwrap();
+    assert_eq!(
+        pct_out, at_out,
+        "-C40% is treated as the same char-count threshold as -C40"
+    );
+
+    // A non-numeric inline value is a clean value error, not a silent no-op.
+    let bad = run_in(td.path(), &["blame", "-Cxyz", "b.txt"]);
+    assert!(!bad.status.success(), "-Cxyz must be rejected");
+}
+
+#[test]
+fn blame_c_inline_threshold_composes_with_repeat() {
+    // #525: a numeric `-C<num>` still counts toward the copy *level*, so
+    // `-C<num> -C` reaches level 2 (whole-parent search) with the given
+    // threshold. The source file is UNCHANGED in the copying commit, so
+    // only level 2 can find it — proving the repeat composed — and the
+    // threshold from the numeric form still governs the match.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "copy"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    // A single numeric `-C20` is only level 1 → misses the unchanged source.
+    let l1 = run_in(td.path(), &["blame", "-C20", "dst.txt"]);
+    let l1_out = String::from_utf8(l1.stdout).unwrap();
+    assert!(
+        l1_out.lines().all(|l| l.starts_with(&second[..12])),
+        "-C20 (level 1) misses the unchanged source: {l1_out:?}"
+    );
+
+    // `-C20 -C` → level 2 with threshold 20 → finds the unchanged source.
+    let l2 = run_in(td.path(), &["blame", "-C20", "-C", "dst.txt"]);
+    assert!(l2.status.success(), "blame -C20 -C failed: {l2:?}");
+    let l2_out = String::from_utf8(l2.stdout).unwrap();
+    assert!(
+        l2_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-C20 -C reaches level 2 and credits the origin: {l2_out:?}"
+    );
+}
+
+#[test]
 fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
     // #526: git's third -C ("copies from other files in any commit")
     // whole-tree-searches at EVERY walk step, not just the file-creating
@@ -951,6 +1064,53 @@ fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
         "-C -C -C credits the unmodified source's origin c1 ({}), not c2 ({}): {l3_out:?}",
         &c1[..12],
         &c2[..12]
+    );
+}
+
+#[test]
+fn blame_stacked_short_flags_reach_clap() {
+    // Review #2: the inline-threshold pre-scan must only consume a *numeric*
+    // glued value; stacked short clusters where `-M`/`-C` leads (`-CC` =
+    // `-C -C`, `-Mw` = `-M -w`) must still reach clap, not be misread as a
+    // threshold. `-CC` on an unchanged source is level 2 and credits the
+    // origin; a genuinely bad flag (`-Cxyz`) is a clap USAGE error, not a
+    // silent no-op or a DATAERR.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "c1",
+    );
+    let first = head_hash(td.path());
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
+
+    // `-CC` == `-C -C` (level 2) → finds the unchanged source.
+    let cc = run_in(td.path(), &["blame", "-CC", "dst.txt"]);
+    assert!(cc.status.success(), "blame -CC failed: {cc:?}");
+    let cc_out = String::from_utf8(cc.stdout).unwrap();
+    assert!(
+        cc_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-CC is level 2 and credits the origin: {cc_out:?}"
+    );
+    // `-Mw` == `-M -w` → succeeds (move detection + ignore-whitespace).
+    assert!(
+        run_in(td.path(), &["blame", "-Mw", "dst.txt"])
+            .status
+            .success(),
+        "-Mw (= -M -w) must be accepted"
+    );
+    // A non-numeric glued value that isn't a valid cluster is a clap error.
+    let bad = run_in(td.path(), &["blame", "-Cxyz", "dst.txt"]);
+    assert_eq!(
+        bad.status.code(),
+        Some(64),
+        "a bad -C value is a clap USAGE error (64), not DATAERR: {bad:?}"
     );
 }
 
