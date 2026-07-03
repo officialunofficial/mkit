@@ -1029,15 +1029,16 @@ fn blame_stacked_short_flags_reach_clap() {
     let b2 = "fn handler_bravo() { compute(); }";
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
-    make_commit(td.path(), "src.txt", format!("{b1}\n{b2}\n").as_bytes(), "c1");
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "c1",
+    );
     let first = head_hash(td.path());
     fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
     assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
-    assert!(
-        run_in(td.path(), &["commit", "-m", "c2"])
-            .status
-            .success()
-    );
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
 
     // `-CC` == `-C -C` (level 2) → finds the unchanged source.
     let cc = run_in(td.path(), &["blame", "-CC", "dst.txt"]);
