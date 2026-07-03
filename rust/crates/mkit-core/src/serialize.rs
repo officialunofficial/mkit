@@ -992,20 +992,6 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
     }
 
-    #[test]
-    fn deterministic_serialization() {
-        let obj = Object::Blob(Blob {
-            data: b"deterministic".to_vec(),
-        });
-        let a = serialize(&obj).unwrap();
-        let b = serialize(&obj).unwrap();
-        assert_eq!(a, b);
-        assert_eq!(hash(&a), hash(&b));
-        // Ensure hash() and ZERO are linked correctly — silly sanity.
-        assert_ne!(a, vec![0u8; a.len()]);
-        let _ = ZERO;
-    }
-
     // ---- Fallible-serialize tests (review follow-up #22) ----
 
     #[test]

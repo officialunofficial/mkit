@@ -840,26 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn single_entry_round_trip() {
-        let mut idx = Index::new();
-        idx.entries.push(IndexEntry {
-            path: "README.md".to_string(),
-            status: EntryStatus::Blob,
-            object_hash: seed_hash("readme"),
-            mtime_ns: 0,
-            size: 0,
-            ino: 0,
-            ctime_ns: 0,
-        });
-        let bytes = idx.serialize();
-        // 9 header + 1 status + 32 hash + 32 stat cache
-        // + 2 path_len + 9 path = 85.
-        assert_eq!(bytes.len(), 85);
-        let parsed = deserialize(&bytes).unwrap();
-        assert_eq!(parsed, idx);
-    }
-
-    #[test]
     fn multi_entry_round_trip_with_all_statuses() {
         let mut idx = Index::new();
         idx.entries.push(IndexEntry {

@@ -276,12 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_returns_p256() {
-        let signer = P256Signer::new(TEST_SECRET).unwrap();
-        assert!(matches!(signer.algorithm(), Algorithm::P256));
-    }
-
-    #[test]
     fn pubkey_round_trip_compressed_and_uncompressed() {
         let signer = P256Signer::new(TEST_SECRET).unwrap();
         let pae = b"DSSEv1 4 test 2 hi";

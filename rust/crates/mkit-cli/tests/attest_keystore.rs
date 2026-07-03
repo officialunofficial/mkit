@@ -83,18 +83,7 @@ fn init_repo_with_commit(root: &Path) {
 fn attest_with_keystore_ed25519_roundtrip() {
     let td = tempfile::tempdir().expect("tempdir");
     let repo = td.path().join("repo");
-    fs::create_dir(&repo).expect("repo dir");
-
-    assert!(run(td.path(), &["init"]).status.success());
-    assert!(run(td.path(), &["keygen"]).status.success());
-    fs::write(repo.join("README.md"), b"hello\n").expect("write README");
-    assert!(run(td.path(), &["add", "README.md"]).status.success());
-    let commit = run(td.path(), &["commit", "-m", "init"]);
-    assert!(
-        commit.status.success(),
-        "commit stderr: {}",
-        String::from_utf8_lossy(&commit.stderr)
-    );
+    init_repo_with_commit(td.path());
 
     let secret = [0x55; 32];
     let secret_hex = hex_lower(&secret);

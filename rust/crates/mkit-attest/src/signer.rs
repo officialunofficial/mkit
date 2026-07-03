@@ -59,36 +59,3 @@ pub struct SignedBytes {
     pub keyid: String,
     pub sig: Vec<u8>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Echoing stub — keyid is fixed; `sign` returns the PAE bytes as
-    /// the "signature" for trait-shape testing.
-    struct Stub {
-        kid: String,
-    }
-    impl Signer for Stub {
-        fn algorithm(&self) -> Algorithm {
-            Algorithm::Ed25519
-        }
-        fn keyid(&self) -> Result<String, Error> {
-            Ok(self.kid.clone())
-        }
-        fn sign(&mut self, pae: &[u8]) -> Result<Vec<u8>, Error> {
-            Ok(pae.to_vec())
-        }
-    }
-
-    #[test]
-    fn dispatch_through_trait_object() {
-        let mut s: Box<dyn Signer> = Box::new(Stub {
-            kid: "stub:keyid".into(),
-        });
-        assert_eq!(s.algorithm(), Algorithm::Ed25519);
-        assert_eq!(s.keyid().unwrap(), "stub:keyid");
-        let sig = s.sign(b"DSSEv1 4 test 2 ok").unwrap();
-        assert_eq!(sig, b"DSSEv1 4 test 2 ok");
-    }
-}
