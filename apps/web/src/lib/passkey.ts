@@ -11,12 +11,50 @@
 //     → HKDF-SHA256(ikm=prf, info="mkit-ed25519-signing-v1")     // 32-byte seed
 //
 // SimpleWebAuthn deliberately won't wrap PRF, so we call the raw `navigator`
-// API directly. `ox`'s WebAuthnP256 is used only for the optional attestation
-// ceremony (see `attestEd25519Binding`).
+// API directly. The SAME identity passkey also produces the optional
+// attestation binding (see `attestIdentityBinding`): one `get()` carries both
+// the PRF eval and the WebAuthn assertion signature, so a single passkey and
+// a single prompt vouch for both the seed AND the Ed25519 pubkey it derived.
 
-import { Hex, PublicKey, Signature, WebAuthnP256 } from 'ox'
+import { Signature } from 'ox'
 import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
+
+/**
+ * NIST P-256 (secp256r1) group order — needed to normalize a raw ECDSA signature to low-S ourselves: `ox`'s `Signature`
+ * module is bound to secp256k1 (it under/over-validates r/s against the WRONG curve's order and never normalizes S), so
+ * DER decoding is safe to borrow from it (r/s are just big-endian integers) but canonicalization is not — mkit's Rust
+ * verifier (`signer_p256::verify_p256`) rejects any high-S signature outright.
+ */
+const P256_ORDER = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
+
+/** Fixed 26-byte DER prefix for a P-256 (secp256r1) SPKI public key, per RFC 5480. */
+const P256_SPKI_PREFIX_HEX = '3059301306072a8648ce3d020106082a8648ce3d030107034200'
+
+/**
+ * Convert a P-256 SPKI-encoded public key (as returned by `AuthenticatorAttestationResponse.getPublicKey()`) to the
+ * SEC1 uncompressed hex format mkit's WASM verifier expects (`verify_webauthn_wrapping`'s `pubkey_hex`).
+ *
+ * A P-256 SPKI key is always exactly 91 bytes: a fixed 26-byte DER header (algorithm OID etc.) followed by the 65-byte
+ * SEC1 uncompressed point (`0x04 || x(32) || y(32)`). We validate the header matches exactly (not just the length) and
+ * throw a descriptive error otherwise — a mismatched prefix means the key isn't the P-256 curve we asked for, which
+ * should never happen but must not silently produce a bogus pubkey.
+ */
+export function spkiToSec1Hex(spki: ArrayBuffer): string {
+  const bytes = new Uint8Array(spki)
+  if (bytes.length !== 91) {
+    throw new Error(`Expected a 91-byte P-256 SPKI public key, got ${bytes.length} bytes.`)
+  }
+  const prefixHex = bytesToHex(bytes.subarray(0, 26))
+  if (prefixHex !== P256_SPKI_PREFIX_HEX) {
+    throw new Error(`SPKI public key is not P-256 (unexpected DER prefix ${prefixHex}).`)
+  }
+  const point = bytes.subarray(26)
+  if (point[0] !== 0x04) {
+    throw new Error(`Expected an uncompressed SEC1 point (0x04 prefix), got 0x${point[0]?.toString(16)}.`)
+  }
+  return bytesToHex(point)
+}
 
 /** Per-host PRF salt label. The salt itself is SHA-256 of this string (32 bytes). */
 function saltInfo(host: string): string {
@@ -45,13 +83,6 @@ function randomChallenge(): Uint8Array<ArrayBuffer> {
   return crypto.getRandomValues(new Uint8Array(32))
 }
 
-export type EnrollResult = {
-  /** Base64url credential id, used to scope subsequent `get()` assertions. */
-  credentialId: string
-  /** Whether the authenticator reported PRF support at creation time. */
-  prfEnabled: boolean
-}
-
 export class PrfUnsupportedError extends Error {
   constructor(message = 'This passkey/authenticator does not support the PRF extension') {
     super(message)
@@ -67,37 +98,6 @@ export function webauthnAvailable(): boolean {
     typeof PublicKeyCredential !== 'undefined' &&
     !!navigator.credentials
   )
-}
-
-/**
- * Enroll an identity passkey (§2 step 1). Creates a P-256 (`alg: -7`) discoverable credential with the PRF extension
- * requested, then reports whether the authenticator confirmed PRF support. A `null` return means PRF is unsupported.
- */
-export async function enroll(displayName = 'mkit player'): Promise<EnrollResult> {
-  if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
-
-  const userId = crypto.getRandomValues(new Uint8Array(16))
-  const cred = (await navigator.credentials.create({
-    publicKey: {
-      challenge: randomChallenge(),
-      rp: { id: rpId(), name: 'mkit multiplayer' },
-      user: { id: userId, name: `${displayName}@${rpId()}`, displayName },
-      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
-      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
-      timeout: 60_000,
-      extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
-    },
-  })) as PublicKeyCredential | null
-
-  if (!cred) throw new Error('Passkey setup was canceled. Try again.')
-
-  const ext = cred.getClientExtensionResults() as { prf?: { enabled?: boolean } }
-  return {
-    credentialId: b64url(new Uint8Array(cred.rawId)),
-    // Some platforms only reveal PRF support on the first `get()`, so an absent
-    // `enabled` flag here is not authoritative — `deriveEd25519Seed` is the real test.
-    prfEnabled: ext.prf?.enabled === true,
-  }
 }
 
 /** Decode a base64url (no-pad) string back to bytes. */
@@ -186,6 +186,31 @@ export type IdentityResult = DeriveResult & {
   credentialId: string
   /** How the seed was obtained — `prf-create` is the one-prompt path. */
   via: 'prf-create' | 'prf-get' | 'ephemeral'
+  /**
+   * SEC1 uncompressed hex of the identity credential's own P-256 public key, captured via
+   * `AuthenticatorAttestationResponse.getPublicKey()` at creation time — the WASM verify input for
+   * `attestIdentityBinding`. `null` when there's no credential at all (the ephemeral, no-WebAuthn fallback) or when the
+   * authenticator didn't expose `getPublicKey()` (exotic/legacy authenticators): a `null` here just means the "Link
+   * with a passkey" attestation button stays disabled for this identity — it never fails identity creation.
+   */
+  p256PubkeyHex: string | null
+}
+
+/**
+ * Best-effort capture of the just-created credential's P-256 public key. Never throws: any failure (missing
+ * `getPublicKey`, a null return, or an unexpected key shape) degrades to `null` rather than failing identity creation —
+ * capturing the attestation pubkey is a bonus, not a requirement for having a usable signing identity.
+ */
+function capturePubkeyHex(response: AuthenticatorResponse): string | null {
+  try {
+    const attestation = response as AuthenticatorAttestationResponse
+    if (typeof attestation.getPublicKey !== 'function') return null
+    const spki = attestation.getPublicKey()
+    if (!spki) return null
+    return spkiToSec1Hex(spki)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -211,7 +236,7 @@ export function toPrfBytes(first: BufferSource): Uint8Array {
  */
 export async function createIdentity(displayName = 'mkit player'): Promise<IdentityResult> {
   if (!webauthnAvailable()) {
-    return { ...randomSeed(), credentialId: '', via: 'ephemeral' }
+    return { ...randomSeed(), credentialId: '', via: 'ephemeral', p256PubkeyHex: null }
   }
 
   const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
@@ -231,6 +256,10 @@ export async function createIdentity(displayName = 'mkit player'): Promise<Ident
   if (!cred) throw new Error('Passkey setup was canceled. Try again.')
 
   const credentialId = b64url(new Uint8Array(cred.rawId))
+  // Capture the credential's own P-256 pubkey now — the browser default
+  // attestation ("none") still exposes it via getPublicKey(). Best-effort:
+  // never throws, so a capture failure can't fail identity creation.
+  const p256PubkeyHex = capturePubkeyHex(cred.response)
   const ext = cred.getClientExtensionResults() as {
     prf?: { enabled?: boolean; results?: { first?: BufferSource } }
   }
@@ -239,19 +268,19 @@ export async function createIdentity(displayName = 'mkit player'): Promise<Ident
   if (first) {
     const prf = toPrfBytes(first)
     const seed = await hkdfSha256(prf, HKDF_INFO)
-    return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf), credentialId, via: 'prf-create' }
+    return { seedHex: bytesToHex(seed), prfHex: bytesToHex(prf), credentialId, via: 'prf-create', p256PubkeyHex }
   }
 
   // No PRF on create. If the authenticator explicitly lacks PRF, go ephemeral;
   // otherwise pull it with a single follow-up assertion.
   if (ext.prf?.enabled === false) {
-    return { ...randomSeed(), credentialId, via: 'ephemeral' }
+    return { ...randomSeed(), credentialId, via: 'ephemeral', p256PubkeyHex }
   }
   try {
     const d = await deriveEd25519Seed(credentialId)
-    return { ...d, credentialId, via: 'prf-get' }
+    return { ...d, credentialId, via: 'prf-get', p256PubkeyHex }
   } catch (e) {
-    if (e instanceof PrfUnsupportedError) return { ...randomSeed(), credentialId, via: 'ephemeral' }
+    if (e instanceof PrfUnsupportedError) return { ...randomSeed(), credentialId, via: 'ephemeral', p256PubkeyHex }
     throw e
   }
 }
@@ -266,58 +295,75 @@ export function randomSeed(): DeriveResult {
 }
 
 // ---------------------------------------------------------------------------
-// Optional: P-256 passkey attests the Ed25519 binding (design note §2 step 4)
+// Optional: the identity passkey attests the Ed25519 binding (design note §2
+// step 4, unified per #494) — the SAME P-256 credential the Ed25519 seed is
+// derived from also vouches for the derived pubkey, in ONE navigator.get().
 // ---------------------------------------------------------------------------
 
-export type BindingCredential = {
-  /** Ox credential id (base64url), reused for the assertion. */
-  id: string
-  /** SEC1 uncompressed P-256 public key as hex (no 0x), the WASM verify input. */
-  pubkeyHex: string
-}
+const TEXT_DECODER = new TextDecoder()
 
 /**
- * Enroll a _separate_ P-256 passkey used only to vouch for an Ed25519 pubkey. Uses `ox`'s WebAuthnP256 (COSE→SEC1 key
- * extraction handled for us). This is the optional "binding" flourish — it shows the full passkey lifecycle, not
- * required for contribution.
- */
-export async function enrollBindingPasskey(name = 'mkit binding'): Promise<BindingCredential> {
-  const cred = await WebAuthnP256.createCredential({ name })
-  // ox returns the public key as {x,y} bigints; serialize to SEC1 uncompressed hex.
-  const sec1 = PublicKey.toHex(cred.publicKey, { includePrefix: true })
-  return { id: cred.id, pubkeyHex: sec1.replace(/^0x/, '') }
-}
-
-/**
- * Sign a DSSE-PAE challenge with the binding passkey and verify the assertion through the WASM WebAuthn verifier
- * (`verify_webauthn_wrapping[_with_policy]`), proving the P-256 passkey vouched for the Ed25519 pubkey. The WebAuthn
- * challenge is the PAE itself (design note §4, option A: keep payloads small).
+ * Sign a DSSE-PAE challenge with the IDENTITY passkey (the same credential `deriveEd25519Seed` uses) and verify the
+ * assertion through the WASM WebAuthn verifier (`verify_webauthn_wrapping[_with_policy]`), proving the passkey that
+ * derives the Ed25519 signing key ALSO vouches for its pubkey. A single `get()` carries both the PRF eval (same salt as
+ * `deriveEd25519Seed`) and the WebAuthn assertion signature over the PAE challenge — one prompt, two proofs — but the
+ * PRF result is intentionally discarded here (no seed-refresh wiring; that's a bonus, not required by #494).
  *
  * Returns the live `authenticatorData` / `clientDataJSON` so the ceremony is legible in the UI, and a verdict. Throws
  * on a verifier rejection.
  */
-export async function attestEd25519Binding(
+export async function attestIdentityBinding(
   api: MkitApi,
-  binding: BindingCredential,
+  credentialId: string,
+  p256PubkeyHex: string,
   ed25519PubkeyHex: string,
   opts: { policyJson?: string } = {},
 ): Promise<{ verified: boolean; authenticatorDataHex: string; clientDataJSON: string; paeHex: string }> {
+  if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
+
   // A tiny in-toto-style predicate binding the Ed25519 key; commit hash is a
   // placeholder "subject" (the binding is over the predicate, not a real commit).
   const predicate = TEXT_ENCODER.encode(JSON.stringify({ ed25519_pubkey: ed25519PubkeyHex }))
   const commitHash = ed25519PubkeyHex.padEnd(64, '0').slice(0, 64)
   const pae = api.attest_pae(commitHash, 'https://mkit.sh/EdBinding/v1', predicate)
 
-  // The WebAuthn challenge is the raw PAE bytes (the verifier checks
-  // clientDataJSON.challenge == base64url-nopad(PAE)).
-  const { metadata, signature } = await WebAuthnP256.sign({
-    credentialId: binding.id,
-    challenge: Hex.fromBytes(pae),
-  })
+  // Same salt `deriveEd25519Seed` uses — carried purely so this ceremony is
+  // indistinguishable from an unlock prompt; the PRF result itself is unused.
+  const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
 
-  const authenticatorData = hexToBytes(metadata.authenticatorData)
-  const clientDataJSONBytes = TEXT_ENCODER.encode(metadata.clientDataJSON)
-  const sigCompact = hexToBytes(Signature.toHex(signature)) // r||s, low-S normalized by ox
+  // ONE get(): the WebAuthn challenge is the raw PAE bytes (the verifier
+  // checks clientDataJSON.challenge == base64url-nopad(PAE)), scoped to the
+  // identity credential via allowCredentials, with UV required — this is a
+  // deliberate, user-verified attestation, not a passive unlock.
+  const assertion = (await navigator.credentials.get({
+    publicKey: {
+      // Copy into a fresh ArrayBuffer-backed view: `pae` comes back from wasm-bindgen typed as
+      // `Uint8Array<ArrayBufferLike>`, which `PublicKeyCredentialRequestOptions.challenge` (a strict `BufferSource`)
+      // doesn't structurally accept.
+      challenge: new Uint8Array(pae),
+      rpId: rpId(),
+      allowCredentials: [{ type: 'public-key', id: fromB64url(credentialId) }],
+      userVerification: 'required',
+      timeout: 60_000,
+      extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
+    },
+  })) as PublicKeyCredential | null
+  if (!assertion) throw new Error('Passkey attestation was canceled. Try again.')
+
+  const response = assertion.response as AuthenticatorAssertionResponse
+  const authenticatorData = new Uint8Array(response.authenticatorData)
+  const clientDataJSONBytes = new Uint8Array(response.clientDataJSON)
+  const clientDataJSON = TEXT_DECODER.decode(clientDataJSONBytes)
+
+  // DER → 64-byte low-S compact hex. `ox`'s DER decode (`fromDerBytes`) is
+  // curve-agnostic ASN.1 integer extraction, so it's safe to reuse for r/s —
+  // but `ox`'s `Signature` module is bound to secp256k1 and never
+  // normalizes S, so the low-S canonicalization mkit's verifier enforces
+  // (`signer_p256::verify_p256` rejects any high-S signature) is done here
+  // against the actual P-256 group order.
+  const { r, s } = Signature.fromDerBytes(new Uint8Array(response.signature))
+  const sLow = s > P256_ORDER >> 1n ? P256_ORDER - s : s
+  const sigCompact = hexToBytes(Signature.toHex({ r, s: sLow }))
 
   // Throws a typed reason on failure; resolves on success.
   if (opts.policyJson !== undefined) {
@@ -325,18 +371,18 @@ export async function attestEd25519Binding(
       pae,
       authenticatorData,
       clientDataJSONBytes,
-      binding.pubkeyHex,
+      p256PubkeyHex,
       sigCompact,
       opts.policyJson,
     )
   } else {
-    api.verify_webauthn_wrapping(pae, authenticatorData, clientDataJSONBytes, binding.pubkeyHex, sigCompact)
+    api.verify_webauthn_wrapping(pae, authenticatorData, clientDataJSONBytes, p256PubkeyHex, sigCompact)
   }
 
   return {
     verified: true,
-    authenticatorDataHex: metadata.authenticatorData.replace(/^0x/, ''),
-    clientDataJSON: metadata.clientDataJSON,
+    authenticatorDataHex: bytesToHex(authenticatorData),
+    clientDataJSON,
     paeHex: bytesToHex(pae),
   }
 }

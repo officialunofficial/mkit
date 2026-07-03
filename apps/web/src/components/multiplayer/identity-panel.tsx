@@ -5,7 +5,7 @@
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
 import { useState } from 'react'
-import { type BindingCredential, attestEd25519Binding, enrollBindingPasskey, rpId } from '../../lib/passkey'
+import { attestIdentityBinding, rpId } from '../../lib/passkey'
 import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
 import { Field, FieldList } from '../result-panel'
@@ -15,12 +15,16 @@ import { OwnPlayerName } from './player-label'
 import { BTN, PRIMARY_BTN, errMsg } from './shared'
 
 /**
- * Optional flourish: a P-256 _passkey_ vouches that the derived Ed25519 key is the same person's, by signing a DSSE-PAE
- * binding challenge, verified in-browser (RP-ID pinned). A hook so the trigger can sit inline in the unlocked header
- * row while the results render below it.
+ * Optional flourish: the IDENTITY passkey (the same one the Ed25519 key is derived from) vouches for the derived
+ * pubkey, by signing a DSSE-PAE binding challenge, verified in-browser (RP-ID pinned). A hook so the trigger can sit
+ * inline in the unlocked header row while the results render below it.
  */
-function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
-  const [binding, setBinding] = useState<BindingCredential | null>(null)
+function useAttest(
+  api: ReturnType<typeof useMkit>,
+  credentialId: string,
+  p256PubkeyHex: string,
+  ed25519PubkeyHex: string,
+) {
   const [result, setResult] = useState<{ verified: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -29,9 +33,7 @@ function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
     setErr(null)
     setBusy(true)
     try {
-      const b = binding ?? (await enrollBindingPasskey())
-      setBinding(b)
-      const res = await attestEd25519Binding(api, b, ed25519PubkeyHex, {
+      const res = await attestIdentityBinding(api, credentialId, p256PubkeyHex, ed25519PubkeyHex, {
         policyJson: JSON.stringify({ expected_rp_id: rpId() }),
       })
       setResult({ verified: res.verified })
@@ -42,7 +44,7 @@ function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
     }
   }
 
-  return { onAttest, busy, binding, result, err }
+  return { onAttest, busy, result, err }
 }
 
 /** Fingerprint glyph — signals that the button triggers a biometric passkey prompt. */
@@ -139,7 +141,12 @@ export function UnlockedHeader({
   ed25519PubkeyHex: string
 }) {
   const id = useIdentityStore()
-  const attest = useAttest(api, ed25519PubkeyHex)
+  const attest = useAttest(api, id.credentialId ?? '', id.p256PubkeyHex ?? '', ed25519PubkeyHex)
+  // A legacy identity (created before #494) or an authenticator that didn't
+  // expose getPublicKey() at creation time has no captured pubkey — the
+  // attest ceremony has no key to hand the verifier, so disable rather than
+  // fail on click.
+  const canAttest = id.p256PubkeyHex != null
 
   // Narrate the lock so the "I can wipe my key and re-derive it" property is
   // legible.
@@ -168,7 +175,13 @@ export function UnlockedHeader({
           <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
         </span>
         <span className='flex items-center gap-1.5'>
-          <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
+          <button
+            type='button'
+            className={BTN}
+            onClick={attest.onAttest}
+            disabled={attest.busy || !canAttest}
+            title={canAttest ? undefined : 'Re-create your identity to enable passkey attestation.'}
+          >
             {attest.busy ? 'Linking…' : 'Link with a passkey'}
           </button>
           <InfoTip label='About linking'>
@@ -177,9 +190,10 @@ export function UnlockedHeader({
               <strong className='text-fg'>private</strong> — no one else can see it or prove it.
             </p>
             <p className='mt-2'>
-              <strong className='text-fg'>Linking</strong> has a passkey publicly vouch for your signing key, turning
-              that private link into a proof anyone can verify in their browser. In this demo it’s a separate passkey
-              you approve just for this — your signing key never leaves your browser.
+              <strong className='text-fg'>Linking</strong> has your passkey publicly vouch for your signing key, turning
+              that private link into a proof anyone can verify in their browser. It’s the same passkey your signing key
+              is derived from — your passkey vouches for your signing key — and your signing key never leaves your
+              browser.
             </p>
             <p className='mt-2'>It’s optional, and pinned to this site.</p>
           </InfoTip>
@@ -193,22 +207,20 @@ export function UnlockedHeader({
           Lock
         </button>
       </div>
-      {attest.result || attest.binding ? (
+      {attest.result ? (
         <FieldList>
-          {attest.result ? (
-            <Field label='Binding attestation' compact>
-              <span
-                className={
-                  attest.result.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-                }
-              >
-                {attest.result.verified ? 'verified ✓ (checked in your browser)' : 'failed ✗'}
-              </span>
-            </Field>
-          ) : null}
-          {attest.binding ? (
-            <Field label='Binding passkey (P-256) public key' compact>
-              <code className='font-mono break-all'>{attest.binding.pubkeyHex}</code>
+          <Field label='Binding attestation' compact>
+            <span
+              className={
+                attest.result.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+              }
+            >
+              {attest.result.verified ? 'verified ✓ (checked in your browser)' : 'failed ✗'}
+            </span>
+          </Field>
+          {id.p256PubkeyHex ? (
+            <Field label='Identity passkey (P-256) public key' compact>
+              <code className='font-mono break-all'>{id.p256PubkeyHex}</code>
             </Field>
           ) : null}
         </FieldList>
