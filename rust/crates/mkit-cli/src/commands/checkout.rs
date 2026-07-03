@@ -50,6 +50,13 @@ struct CheckoutOpts {
     /// (`git checkout -B <new>`).
     #[arg(short = 'B', value_name = "NEW")]
     create_force: Option<String>,
+    /// Discard local changes that would block the switch, like
+    /// `git checkout -f`: skip the dirty-tracked/staged safety gate and
+    /// overwrite locally-modified tracked paths with the target's version.
+    /// Untracked files are still preserved. Used by `bisect run` to
+    /// materialize each candidate over the test command's scribbles.
+    #[arg(short = 'f', long = "force")]
+    force: bool,
     /// Branch name, tag, or 64-char commit hash. With `-b`/`-B` this is
     /// the optional start-point (defaults to HEAD).
     target: Option<String>,
@@ -202,14 +209,18 @@ pub fn run(args: &[String]) -> u8 {
     // the target tree would be clobbered. Untracked files that do NOT
     // collide with the target are preserved (git branch-switch
     // semantics), so they no longer block the checkout.
-    if let Err(e) = super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts) {
+    // `--force` (git checkout -f) skips the gate, discarding local edits.
+    if !opts.force
+        && let Err(e) =
+            super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts)
+    {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
-    // first if any of them carries local edits.
-    let dropped = match dropped_paths_guarded(&cwd, &store, tree_hash, &sparse_opts) {
+    // first if any of them carries local edits (unless `--force`).
+    let dropped = match dropped_paths_guarded(&cwd, &store, tree_hash, &sparse_opts, opts.force) {
         Ok(d) => d,
         Err(code) => return code,
     };
@@ -307,6 +318,7 @@ fn dropped_paths_guarded(
     store: &ObjectStore,
     tree_hash: Hash,
     opts: &RestoreOptions,
+    force: bool,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, u8> {
     let dropped: Vec<(String, EntryStatus, Hash)> =
         match super::dropped_tracked_paths(cwd, store, tree_hash) {
@@ -316,6 +328,10 @@ fn dropped_paths_guarded(
                 .collect(),
             Err(e) => return Err(emit_err(&e, exit::GENERAL_ERROR)),
         };
+    // `--force` overwrites/removes dropped paths regardless of local edits.
+    if force {
+        return Ok(dropped);
+    }
     match super::locally_modified_dropped_path(cwd, store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(

@@ -20,6 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Identity (empty `*-mail`, `+0000` tz, single UTC author = committer);
   `filename` is the `-C` copy source on a cross-file copy; git's `previous`
   line is out of scope and not emitted.
+- **`mkit bisect run <cmd> [args…]`.** Drives the bisection loop
+  automatically: it checks out each candidate, runs the command, and
+  classifies from the exit status using git's contract (`0`=good, `125`=skip,
+  `1`–`127` else=bad, `≥128` or signal=abort), converging on the first bad
+  commit. The candidate is also exported as `MKIT_BISECT_COMMIT`. mkit's
+  bisect stays print-candidate by design, so `run` checks out each candidate
+  transiently for the test, then restores the original HEAD and *prints* the
+  first bad commit rather than parking there. Each candidate is checked out
+  with `--force`, so a test command that dirties a tracked file doesn't block
+  the next iteration; and when only skipped candidates remain, `run` reports
+  the result as ambiguous (like git) and exits non-zero instead of guessing.
+- **`mkit checkout --force` / `-f`.** Discard local changes that would block
+  the switch (git `checkout -f`): skip the dirty-tracked/staged safety gate
+  and overwrite locally-modified tracked paths with the target's version;
+  untracked files are still preserved. Used by `bisect run`.
 - **`mkit self update`.** The binary can now update itself in place from a
   signed GitHub Release — but only when installer-managed (the
   `.mkit-installed-tag` receipt written by `install.sh` sits next to the
