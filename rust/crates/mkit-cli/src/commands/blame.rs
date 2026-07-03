@@ -34,7 +34,6 @@ use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::{self, Hash};
-use mkit_core::object::Object;
 use mkit_core::ops::blame::{
     BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
     format_blame_text,
@@ -606,7 +605,7 @@ fn render_porcelain(
                 let ident = format::full_identity(&line.author);
                 let summary = summaries
                     .entry(line.commit_hash)
-                    .or_insert_with(|| commit_summary(store, &line.commit_hash));
+                    .or_insert_with(|| super::commit_subject(store, &line.commit_hash));
                 let _ = writeln!(stdout, "author {ident}");
                 let _ = writeln!(stdout, "author-mail <>");
                 let _ = writeln!(stdout, "author-time {}", line.timestamp);
@@ -631,19 +630,6 @@ fn render_porcelain(
         i += group_len;
     }
     exit::OK
-}
-
-/// First line of a commit's message (empty on any read failure), for the
-/// porcelain `summary` field.
-fn commit_summary(store: &ObjectStore, commit: &Hash) -> String {
-    match store.read_object(commit) {
-        Ok(Object::Commit(c)) => String::from_utf8_lossy(&c.message)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned(),
-        _ => String::new(),
-    }
 }
 
 use super::error as emit_err;

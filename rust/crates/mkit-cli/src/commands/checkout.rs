@@ -284,25 +284,12 @@ pub fn run(args: &[String]) -> u8 {
             stderr,
             "HEAD is now at {} {}",
             format::short_hash(&commit_hash, format::SUMMARY_ABBREV),
-            commit_subject(&store, &commit_hash),
+            super::commit_subject(&store, &commit_hash),
         );
     }
     exit::OK
 }
 
-/// First line of a commit/remix message, for the detached-HEAD report
-/// (empty string on any read failure).
-fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
-    let msg = match store.read_object(commit) {
-        Ok(Object::Commit(c)) => c.message,
-        _ => return String::new(),
-    };
-    String::from_utf8_lossy(&msg)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_owned()
-}
 
 use super::error as emit_err;
 
