@@ -45,8 +45,15 @@
 //!   file, its blob was deduped, or the blamed file is newly added by this
 //!   commit): `-M` has no source, and at `-C` level >= 2 the copy search
 //!   widens to the parent's **entire tree** (git's `find_copies_harder`,
-//!   set exactly when porigin is NULL). At level 1 the modified-files
-//!   channel still applies, with no path excluded.
+//!   set when porigin is NULL — the commit that *creates* the file, git's
+//!   second `-C`). At level 1 the modified-files channel still applies,
+//!   with no path excluded.
+//!
+//! At **`-C` level >= 3** (git's third `-C`, "copies from other files in
+//! any commit") the whole-tree search fires at *every* step regardless of
+//! porigin, so a block copied into a persisting file from an unmodified
+//! source is still found; the blamed path stays excluded where the parent
+//! has a porigin.
 //!
 //! Everything previously described as a "first-parent carve-out" or an
 //! "interior vs boundary tie-break" falls out of these rules: at a typical
@@ -600,7 +607,14 @@ fn copy_candidates(
     has_porigin: bool,
 ) -> BlameOutcome<Vec<(String, Hash)>> {
     let older_tree = commit_tree(store, older)?;
-    let whole_tree = level >= 2 && !has_porigin;
+    // Whole-tree copy search (git's `find_copies_harder`) fires in two
+    // cases, matching git's `-C` levels: at level >= 2 when this parent is
+    // porigin-less — the commit that *creates* the blamed file (git's second
+    // `-C`); and at level >= 3 unconditionally — copies from other files in
+    // *any* commit, so every walk step whole-tree-searches its parent even
+    // for a persisting file (git's third `-C`). Otherwise only files
+    // modified between parent and child are copy candidates.
+    let whole_tree = (level >= 2 && !has_porigin) || level >= 3;
     let entries = if whole_tree {
         diff_trees(store, Some(older_tree), None)?.entries
     } else {
