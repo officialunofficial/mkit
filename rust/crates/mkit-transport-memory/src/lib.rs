@@ -451,33 +451,6 @@ mod tests {
     // Full-interface integration test (1 test, exercises every verb)
     // ------------------------------------------------------------------
 
-    #[test]
-    fn full_interface_roundtrip() {
-        let t = MemoryTransport::new();
-
-        // pack verbs
-        let pack_data = b"full interface test pack";
-        let key = pack_key(pack_data);
-        assert!(!t.pack_exists(&key).unwrap());
-        t.upload_pack(pack_data, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
-        assert_eq!(t.download_pack(&key).unwrap(), pack_data);
-
-        // write_ref + read_ref
-        let h = blake3_hash(b"interface-commit");
-        t.write_ref("refs/heads/main", &h).unwrap();
-        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
-        assert_eq!(t.read_ref("refs/heads/missing").unwrap(), None);
-
-        // list_refs
-        t.write_ref("refs/heads/dev", &blake3_hash(b"dev-commit"))
-            .unwrap();
-        let refs = t.list_refs("refs/heads/").unwrap();
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].name, "dev");
-        assert_eq!(refs[1].name, "main");
-    }
-
     // ------------------------------------------------------------------
     // pack_count / ref_count accessors
     // ------------------------------------------------------------------

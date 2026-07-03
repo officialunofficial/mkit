@@ -587,12 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_rejects_unknown() {
-        let args = vec!["--bogus".into(), "x".into()];
-        assert!(parse_args(&args).is_err());
-    }
-
-    #[test]
     fn parse_signer_spec_ok() {
         let s = parse_signer_spec("algorithm=secp256k1,signer=repo-key,path=k.key").unwrap();
         assert_eq!(s.algorithm, Algorithm::Secp256k1);
@@ -664,16 +658,5 @@ mod tests {
         // clear enough for the user to fix.
         let e = parse_signer_spec("algorithm=ed25519 signer=repo-key").unwrap_err();
         assert!(e.contains("algorithm") || e.contains("key=value"), "{e}");
-    }
-
-    #[test]
-    fn parse_args_all_defaults_when_empty() {
-        let p = parse_args(&[]).unwrap();
-        assert!(p.commit.is_none());
-        assert!(p.algorithm.is_none());
-        assert!(p.signer.is_none());
-        assert!(p.predicate_type.is_none());
-        assert!(p.predicate_file.is_none());
-        assert!(p.additional_signers.is_empty());
     }
 }

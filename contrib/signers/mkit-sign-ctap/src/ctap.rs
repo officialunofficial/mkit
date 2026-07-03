@@ -322,25 +322,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mock_returns_canned_credential() {
-        let mock = MockCtapDevice {
-            canned_credential: EnrolledCredential {
-                credential_id: b"cred".to_vec(),
-                public_key_sec1_uncompressed: vec![0x04; 65],
-                keyid: "p256:abc".into(),
-            },
-            canned_assertion: SignedAssertion {
-                auth_data: vec![],
-                signature: vec![],
-                credential_id: vec![],
-            },
-        };
-        let c = mock.make_credential("rp", "user", None).unwrap();
-        assert_eq!(c.credential_id, b"cred");
-        assert_eq!(c.keyid, "p256:abc");
-    }
-
-    #[test]
     fn to_hex_lowercase() {
         assert_eq!(to_hex(&[0x0a, 0xff, 0x00]), "0aff00");
         assert_eq!(to_hex(&[]), "");

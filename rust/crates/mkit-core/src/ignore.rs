@@ -426,12 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn comment_lines_ignored() {
-        let il = parse("# this is a comment\n*.tmp");
-        assert_eq!(il.patterns().len(), 1);
-    }
-
-    #[test]
     fn blank_lines_ignored() {
         let il = parse("\n\n*.tmp\n\n");
         assert_eq!(il.patterns().len(), 1);

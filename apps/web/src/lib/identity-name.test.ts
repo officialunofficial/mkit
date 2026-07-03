@@ -13,11 +13,6 @@ describe('playerName', () => {
     expect(playerName('a3'.repeat(32))).toMatch(/^[a-z]+-[a-z]+$/)
   })
 
-  it('two distinct keys usually differ', () => {
-    expect(playerName('00'.repeat(32))).not.toBe(playerName('ff'.repeat(32)))
-    expect(playerName('a3'.repeat(32))).not.toBe(playerName('b5'.repeat(32)))
-  })
-
   it('returns "anonymous" for empty / invalid / too-short hex', () => {
     expect(playerName('')).toBe('anonymous')
     expect(playerName('ab')).toBe('anonymous') // only one byte

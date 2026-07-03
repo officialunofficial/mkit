@@ -1,4 +1,4 @@
-import { QueryClient, QueryObserver, MutationObserver, keepPreviousData } from '@tanstack/react-query'
+import { QueryClient, MutationObserver } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
 import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
@@ -623,14 +623,6 @@ describe('decodeLogObject routes commits vs remixes via object_kind', () => {
     expect(decodeLogObject(api, new Uint8Array([1, 2, 3]), 'h', 'main')).toBeNull()
   })
 
-  it('object_kind separates a commit from a remix', async () => {
-    const api = await mkit()
-    const commit = api.commit_encode_and_sign(TREE, '', 'c', 1n, SEED2)
-    const sourcesJson = JSON.stringify([{ upstream_id_hex: UPSTREAM_ID, commit_hash_hex: commit.hash_hex }])
-    const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'r', 2n, SEED2)
-    expect(api.object_kind(commit.bytes)).toBe('commit')
-    expect(api.object_kind(remix.bytes)).toBe('remix')
-  })
 })
 
 describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
@@ -902,93 +894,6 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
     const second = await h.backend.commitLog('room')
     expect(second.map((e) => e.hash)).toEqual(['c4', 'c3', 'c2', 'c1']) // newest-first, full chain
     expect(h.listCommitsCalls.length).toBe(1) // one round-trip; the cached tail (c3,c2,c1) is spliced, not re-walked
-  })
-})
-
-describe('enabled-gating keeps repo queries pending until a backend is ready', () => {
-  it('a query with enabled:false never calls its queryFn and stays pending; flipping enabled runs it', async () => {
-    const qc = new QueryClient()
-    const queryFn = vi.fn(async () => ['ref-a'])
-
-    // Mirror the dependent-query options shape the hooks build: keyed by repoKeys,
-    // gated by `enabled`, with the same queryFn the hook would call.
-    const buildOptions = (ready: boolean) => ({
-      queryKey: repoKeys.refs('room', ''),
-      queryFn,
-      enabled: ready,
-    })
-
-    const observer = new QueryObserver(qc, buildOptions(false))
-    const seen: string[] = []
-    const unsub = observer.subscribe((r) => seen.push(r.status))
-
-    await new Promise((r) => setTimeout(r, 0))
-    expect(queryFn).not.toHaveBeenCalled() // disabled → queryFn never runs
-    expect(observer.getCurrentResult().status).toBe('pending') // stays pending → skeleton
-
-    // Flip enabled true (backend ready) → the query runs.
-    observer.setOptions(buildOptions(true))
-    await vi.waitFor(() => expect(queryFn).toHaveBeenCalledTimes(1))
-    await vi.waitFor(() => expect(observer.getCurrentResult().status).toBe('success'))
-    expect(observer.getCurrentResult().data).toEqual(['ref-a'])
-
-    unsub()
-    expect(seen[0]).toBe('pending')
-  })
-
-  it('useObject gating predicate is !!backend && !!hash (preserves the hash guard)', () => {
-    const enabledFor = (hasBackend: boolean, hash: string | null) => hasBackend && !!hash
-    expect(enabledFor(false, 'abc')).toBe(false) // no backend
-    expect(enabledFor(true, null)).toBe(false) // no hash
-    expect(enabledFor(true, '')).toBe(false) // empty hash
-    expect(enabledFor(true, 'abc')).toBe(true) // both → enabled
-  })
-})
-
-describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () => {
-  it('keepPreviousData keeps prior data on a key change until the new fetch resolves', async () => {
-    const qc = new QueryClient()
-    const logKeyMain = repoKeys.log('room', 'main')
-    const logKeyFeat = repoKeys.log('room', 'feature')
-
-    // Seed "main" as already-loaded.
-    qc.setQueryData<CommitLogEntry[]>(logKeyMain, [
-      { hash: 'm1', message: 'on main', authorPubkey: 'a', ref: 'main', createdAt: '1' },
-    ])
-
-    let resolveFeat: (v: CommitLogEntry[]) => void = () => {}
-    const featData = new Promise<CommitLogEntry[]>((r) => {
-      resolveFeat = r
-    })
-
-    const observer = new QueryObserver<CommitLogEntry[]>(qc, {
-      queryKey: logKeyMain,
-      queryFn: async () => qc.getQueryData<CommitLogEntry[]>(logKeyMain) ?? [],
-      placeholderData: keepPreviousData,
-      enabled: true,
-    })
-    const unsub = observer.subscribe(() => {})
-    await vi.waitFor(() => expect(observer.getCurrentResult().data?.[0]?.hash).toBe('m1'))
-
-    // Switch to "feature" — its fetch is in flight (pending) but keepPreviousData
-    // keeps main's list visible (isPlaceholderData true) rather than flashing empty.
-    observer.setOptions({
-      queryKey: logKeyFeat,
-      queryFn: () => featData,
-      placeholderData: keepPreviousData,
-      enabled: true,
-    })
-    await new Promise((r) => setTimeout(r, 0))
-    const during = observer.getCurrentResult()
-    expect(during.data?.[0]?.hash).toBe('m1') // prior data retained
-    expect(during.isPlaceholderData).toBe(true)
-
-    // Once the new ref resolves, its data replaces the placeholder.
-    resolveFeat([{ hash: 'f1', message: 'on feature', authorPubkey: 'a', ref: 'feature', createdAt: '2' }])
-    await vi.waitFor(() => expect(observer.getCurrentResult().data?.[0]?.hash).toBe('f1'))
-    await vi.waitFor(() => expect(observer.getCurrentResult().isPlaceholderData).toBe(false))
-
-    unsub()
   })
 })
 

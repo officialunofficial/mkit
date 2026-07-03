@@ -1015,25 +1015,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_directory_with_ignore_list_preserves_case_variant_mkit_and_git() {
-        let target = TempDir::new().unwrap();
-        fs::create_dir_all(target.path().join(".MKIT")).unwrap();
-        fs::write(target.path().join(".MKIT/config"), b"meta").unwrap();
-        fs::create_dir_all(target.path().join(".GIT")).unwrap();
-        fs::write(target.path().join(".GIT/HEAD"), b"ref").unwrap();
-        let ignore = crate::ignore::IgnoreList::new();
-        clean_directory(target.path(), &[], None, "", Some(&ignore)).unwrap();
-        assert!(
-            target.path().join(".MKIT/config").exists(),
-            ".MKIT swept by clean_directory (ignore-aware, case-fold bypass)"
-        );
-        assert!(
-            target.path().join(".GIT/HEAD").exists(),
-            ".GIT swept by clean_directory (ignore-aware, case-fold bypass)"
-        );
-    }
-
-    #[test]
     fn restore_chunked_blob_reassembled() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();

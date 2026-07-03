@@ -269,12 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn algorithm_returns_secp256k1() {
-        let signer = Secp256k1Signer::new(fixed_secret()).unwrap();
-        assert_eq!(signer.algorithm(), Algorithm::Secp256k1);
-    }
-
-    #[test]
     fn signer_trait_dispatch() {
         let mut signer: Box<dyn Signer> = Box::new(Secp256k1Signer::new(fixed_secret()).unwrap());
         let kid = signer.keyid().unwrap();

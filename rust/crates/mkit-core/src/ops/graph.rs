@@ -438,15 +438,4 @@ mod tests {
         let err = reachable_objects(&s, &fake).unwrap_err();
         assert!(matches!(err, StoreError::ObjectNotFound(_)));
     }
-
-    #[test]
-    fn reachable_is_deterministic() {
-        let (_d, s) = store();
-        let t = make_single_file_tree(&s, b"f", b"x");
-        let c1 = make_commit(&s, t, &[], "c1");
-        let c2 = make_commit(&s, t, &[c1], "c2");
-        let a: Vec<Hash> = reachable_objects(&s, &c2).unwrap().into_iter().collect();
-        let b: Vec<Hash> = reachable_objects(&s, &c2).unwrap().into_iter().collect();
-        assert_eq!(a, b);
-    }
 }

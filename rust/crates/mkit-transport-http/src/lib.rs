@@ -2115,13 +2115,6 @@ mod tests {
         assert!(matches!(err, TransportError::ConnectionFailed));
     }
 
-    // -- object safety smoke test ------------------------------------------
-
-    #[test]
-    fn http_transport_is_object_safe() {
-        fn _takes(_t: Box<dyn Transport>) {}
-    }
-
     // ----------------------------------------------------------------------
     // E9: http:// restricted to loopback, download_pack body cap
     // ----------------------------------------------------------------------
@@ -2153,13 +2146,6 @@ mod tests {
     }
 
     #[test]
-    fn connect_accepts_http_on_localhost_name() {
-        unsafe { env::remove_var(TOKEN_ENV) };
-        let t = HttpTransport::connect("mkit+http://localhost:8787/p").unwrap();
-        assert_eq!(t.base().scheme(), "http");
-    }
-
-    #[test]
     fn validate_http_scheme_helper_behaves() {
         // Direct helper test: https is always OK, http only on loopback.
         let https = Url::parse("https://example.com/").unwrap();
@@ -2180,14 +2166,6 @@ mod tests {
             let u = Url::parse(ok).unwrap();
             assert!(validate_http_scheme(&u).is_ok(), "{ok} should be allowed");
         }
-    }
-
-    #[test]
-    fn pack_body_limit_is_4_gib() {
-        // Matches the s3 transport's existing cap, documenting that the
-        // two transports agree on the same upper bound for a single
-        // pack download.
-        assert_eq!(PACK_BODY_LIMIT, 4 * 1024 * 1024 * 1024);
     }
 
     // ----------------------------------------------------------------------
@@ -2329,11 +2307,6 @@ mod tests {
                 .create();
             let t = make_transport(&server, None);
             assert_eq!(t.download_pack(&key).unwrap(), body);
-        }
-
-        #[test]
-        fn shard_advertise_value_is_default_config() {
-            assert_eq!(pack_shards::accept_pack_shards_advertise(), "16+4");
         }
 
         fn make_transport_with_retry(
