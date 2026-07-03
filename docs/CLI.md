@@ -281,10 +281,16 @@ History / commits:
   alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
   so a moved block next to genuinely-new lines is still split out, and
   combined with `-w` a block copied with a whitespace change is still
-  detected. Divergences from git: inline numeric threshold forms
-  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
-  custom threshold); a single unmatched run over 10,000 lines is matched
-  only as a whole, not by sub-block. Move/copy detection is merge-aware and
+  detected. The inline numeric forms override the default threshold, like
+  git: `-M<num>`/`-C<num>` (glued, no space) set the minimum alphanumeric
+  character count, and a numeric `-C<num>` still counts toward the `-C`
+  level (so `-C40 -C` is level 2 with threshold 40). The percent form
+  `-M<num>%`/`-C<num>%` is accepted for git-surface compatibility, but
+  because mkit's block detector has no similarity-ratio model the number is
+  treated as the same char-count threshold — a deliberate, `log`-consistent
+  divergence. Remaining divergence from git: a single unmatched run over
+  10,000 lines is matched only as a whole, not by sub-block. Move/copy
+  detection is merge-aware and
   implements git's per-parent mechanism (pinned against git 2.50.1): at a
   merge, every **real** parent is offered the unexplained lines in commit
   order, first-found-wins. A parent that contains the blamed file (and
