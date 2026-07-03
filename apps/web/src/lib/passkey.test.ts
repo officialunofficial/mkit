@@ -315,7 +315,8 @@ describe('attestIdentityBinding — unified on the identity passkey (#494)', () 
     expect(get).toHaveBeenCalledTimes(1) // exactly one prompt
     const call = get.mock.calls[0]?.[0] as { publicKey: PublicKeyCredentialRequestOptions }
     expect(new Uint8Array(call.publicKey.challenge as ArrayBuffer)).toEqual(pae) // the PAE IS the challenge
-    expect(call.publicKey.userVerification).toBe('required')
+    // 'preferred' matches create/unlock — 'required' would fail on a UV-incapable authenticator.
+    expect(call.publicKey.userVerification).toBe('preferred')
     expect(call.publicKey.allowCredentials).toHaveLength(1)
     expect(new Uint8Array(call.publicKey.allowCredentials?.[0]?.id as ArrayBuffer)).toEqual(
       new Uint8Array([1, 2, 3, 4]),
@@ -338,7 +339,8 @@ describe('attestIdentityBinding — unified on the identity passkey (#494)', () 
       policyJson: '{}',
     })
 
-    expect(res.verified).toBe(true)
+    // No `verified` field: resolving IS the success verdict (the verifier throws on rejection).
+    expect(res.paeHex).toBeTruthy()
     expect(verifyWithPolicy).toHaveBeenCalledTimes(1)
     const [paeArg, authDataArg, clientDataArg, pubkeyArg, sigArg, policyArg] = verifyWithPolicy.mock.calls[0] ?? []
     expect(paeArg).toBe(pae)

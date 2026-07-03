@@ -16,17 +16,9 @@
 // the PRF eval and the WebAuthn assertion signature, so a single passkey and
 // a single prompt vouch for both the seed AND the Ed25519 pubkey it derived.
 
-import { Signature } from 'ox'
-import { bytesToHex, hexToBytes } from '../components/use-mkit'
+import { p256 } from '@noble/curves/p256'
+import { bytesToHex } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
-
-/**
- * NIST P-256 (secp256r1) group order — needed to normalize a raw ECDSA signature to low-S ourselves: `ox`'s `Signature`
- * module is bound to secp256k1 (it under/over-validates r/s against the WRONG curve's order and never normalizes S), so
- * DER decoding is safe to borrow from it (r/s are just big-endian integers) but canonicalization is not — mkit's Rust
- * verifier (`signer_p256::verify_p256`) rejects any high-S signature outright.
- */
-const P256_ORDER = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n
 
 /** Fixed 26-byte DER prefix for a P-256 (secp256r1) SPKI public key, per RFC 5480. */
 const P256_SPKI_PREFIX_HEX = '3059301306072a8648ce3d020106082a8648ce3d030107034200'
@@ -59,6 +51,16 @@ export function spkiToSec1Hex(spki: ArrayBuffer): string {
 /** Per-host PRF salt label. The salt itself is SHA-256 of this string (32 bytes). */
 function saltInfo(host: string): string {
   return `${host}/ed25519-identity/v1`
+}
+
+/**
+ * The 32-byte PRF salt, SHA-256("<host>/ed25519-identity/v1"). This salt is the linchpin tying attestation to seed
+ * derivation: every ceremony — create, unlock, and attest — MUST evaluate the PRF under the SAME salt or they'd derive
+ * different seeds. A single helper so a future change to the salt scheme (e.g. a label bump) can't silently desync one
+ * call site.
+ */
+async function prfSalt(): Promise<Uint8Array<ArrayBuffer>> {
+  return sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
 }
 
 /** HKDF info string — domain-separates the PRF output into the signing seed. */
@@ -153,7 +155,7 @@ export type DeriveResult = {
 export async function deriveEd25519Seed(credentialId?: string): Promise<DeriveResult> {
   if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
 
-  const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
+  const salt = await prfSalt()
   const assertion = (await navigator.credentials.get({
     publicKey: {
       challenge: randomChallenge(),
@@ -208,7 +210,12 @@ function capturePubkeyHex(response: AuthenticatorResponse): string | null {
     const spki = attestation.getPublicKey()
     if (!spki) return null
     return spkiToSec1Hex(spki)
-  } catch {
+  } catch (err) {
+    // Preserve the never-throw/null contract, but don't swallow the descriptive
+    // diagnostics `spkiToSec1Hex` throws ("SPKI public key is not P-256 …"):
+    // without this, an authenticator that can't attest just yields a
+    // permanently disabled button with zero signal in production.
+    console.warn('capturePubkeyHex: could not capture P-256 attestation pubkey', err)
     return null
   }
 }
@@ -239,7 +246,7 @@ export async function createIdentity(displayName = 'mkit player'): Promise<Ident
     return { ...randomSeed(), credentialId: '', via: 'ephemeral', p256PubkeyHex: null }
   }
 
-  const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
+  const salt = await prfSalt()
   const userId = crypto.getRandomValues(new Uint8Array(16))
   const cred = (await navigator.credentials.create({
     publicKey: {
@@ -309,8 +316,9 @@ const TEXT_DECODER = new TextDecoder()
  * `deriveEd25519Seed`) and the WebAuthn assertion signature over the PAE challenge — one prompt, two proofs — but the
  * PRF result is intentionally discarded here (no seed-refresh wiring; that's a bonus, not required by #494).
  *
- * Returns the live `authenticatorData` / `clientDataJSON` so the ceremony is legible in the UI, and a verdict. Throws
- * on a verifier rejection.
+ * Returns the live `authenticatorData` / `clientDataJSON` / `pae` so the ceremony is legible in the UI. There is no
+ * `verified` field: the WASM verifier THROWS a typed reason on any rejection, so a normal return IS the success verdict
+ * — a `verified: false` would be unreachable.
  */
 export async function attestIdentityBinding(
   api: MkitApi,
@@ -318,7 +326,7 @@ export async function attestIdentityBinding(
   p256PubkeyHex: string,
   ed25519PubkeyHex: string,
   opts: { policyJson?: string } = {},
-): Promise<{ verified: boolean; authenticatorDataHex: string; clientDataJSON: string; paeHex: string }> {
+): Promise<{ authenticatorDataHex: string; clientDataJSON: string; paeHex: string }> {
   if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
 
   // A tiny in-toto-style predicate binding the Ed25519 key; commit hash is a
@@ -329,12 +337,16 @@ export async function attestIdentityBinding(
 
   // Same salt `deriveEd25519Seed` uses — carried purely so this ceremony is
   // indistinguishable from an unlock prompt; the PRF result itself is unused.
-  const salt = await sha256(TEXT_ENCODER.encode(saltInfo(rpId())))
+  const salt = await prfSalt()
 
   // ONE get(): the WebAuthn challenge is the raw PAE bytes (the verifier
   // checks clientDataJSON.challenge == base64url-nopad(PAE)), scoped to the
-  // identity credential via allowCredentials, with UV required — this is a
-  // deliberate, user-verified attestation, not a passive unlock.
+  // identity credential via allowCredentials. UV is 'preferred' to MATCH the
+  // create/unlock ceremonies (`createIdentity`, `deriveEd25519Seed`): the
+  // credential was enrolled under 'preferred', so nothing guarantees it's
+  // UV-capable — requiring UV here would make every attest fail with
+  // NotAllowedError on a UV-incapable authenticator (e.g. a PIN-less security
+  // key). The authenticatorData UV flag still records whether UV happened.
   const assertion = (await navigator.credentials.get({
     publicKey: {
       // Copy into a fresh ArrayBuffer-backed view: `pae` comes back from wasm-bindgen typed as
@@ -343,7 +355,7 @@ export async function attestIdentityBinding(
       challenge: new Uint8Array(pae),
       rpId: rpId(),
       allowCredentials: [{ type: 'public-key', id: fromB64url(credentialId) }],
-      userVerification: 'required',
+      userVerification: 'preferred',
       timeout: 60_000,
       extensions: { prf: { eval: { first: salt } } } as AuthenticationExtensionsClientInputs,
     },
@@ -355,15 +367,13 @@ export async function attestIdentityBinding(
   const clientDataJSONBytes = new Uint8Array(response.clientDataJSON)
   const clientDataJSON = TEXT_DECODER.decode(clientDataJSONBytes)
 
-  // DER → 64-byte low-S compact hex. `ox`'s DER decode (`fromDerBytes`) is
-  // curve-agnostic ASN.1 integer extraction, so it's safe to reuse for r/s —
-  // but `ox`'s `Signature` module is bound to secp256k1 and never
-  // normalizes S, so the low-S canonicalization mkit's verifier enforces
-  // (`signer_p256::verify_p256` rejects any high-S signature) is done here
-  // against the actual P-256 group order.
-  const { r, s } = Signature.fromDerBytes(new Uint8Array(response.signature))
-  const sLow = s > P256_ORDER >> 1n ? P256_ORDER - s : s
-  const sigCompact = hexToBytes(Signature.toHex({ r, s: sLow }))
+  // DER → 64-byte low-S compact. Parsed with `@noble/curves`'s P-256 curve
+  // (not `ox`'s `Signature`, which is bound to secp256k1: it validates r/s
+  // against the WRONG group order and never normalizes S, working on P-256 only
+  // by the accident that n_p256 < n_secp256k1). `normalizeS()` applies the
+  // low-S canonicalization mkit's Rust verifier enforces (`signer_p256::verify_p256`
+  // rejects any high-S signature), against the actual P-256 group order.
+  const sigCompact = p256.Signature.fromDER(new Uint8Array(response.signature)).normalizeS().toCompactRawBytes()
 
   // Throws a typed reason on failure; resolves on success.
   if (opts.policyJson !== undefined) {
@@ -380,7 +390,6 @@ export async function attestIdentityBinding(
   }
 
   return {
-    verified: true,
     authenticatorDataHex: bytesToHex(authenticatorData),
     clientDataJSON,
     paeHex: bytesToHex(pae),
