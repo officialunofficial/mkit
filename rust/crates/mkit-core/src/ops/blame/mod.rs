@@ -161,6 +161,16 @@ pub struct BlameOptions {
     /// a positional guess when content evidence contradicts it (or fills a
     /// `None` surplus slot with a genuine content match); when no such
     /// evidence exists the result is identical to the positional default.
+    /// The override selection is not strictly injective: no override
+    /// collides with a content-agreeing or trivial-key keeper, nor with an
+    /// earlier override, but a line that keeps its positional fall-through
+    /// target purely for lack of any content candidate does not reserve
+    /// that target, so a single old line can end up credited by both such a
+    /// positional-fallback line and one content-exact override. This never
+    /// attributes any line worse than git's positional `--ignore-rev`
+    /// result — every override is an exact content match and every
+    /// non-overridden line retains git's positional target — so the
+    /// refinement is monotonically ≥ positional, not strictly injective.
     /// The default (`false`) keeps `--ignore-rev` byte-identical to git —
     /// this is a documented divergence, not a change to the default.
     pub ignore_rev_precise: bool,
@@ -1976,6 +1986,48 @@ mod tests {
             Some(0),
             "non-trivial key 'REALZZZ' is reattributed to its true content match \
              (old index 0), since its positional guess (old index 1) disagreed"
+        );
+    }
+
+    #[test]
+    fn precise_overrides_double_credit_never_worse_than_positional() {
+        // Pins the documented non-injective-but-never-worse case (see the
+        // `precise_overrides` doc in `walk.rs` and the `ignore_rev_precise`
+        // field doc above): Pass 1 only reserves an old index for a new line
+        // that KEEPS its positional guess because content agrees (or the key
+        // is trivial). A line that keeps its positional guess merely because
+        // Pass 2 finds no content candidate for it never reserves that old
+        // index — so a later, unrelated override can still land on the same
+        // old line, leaving two `out` slots pointing at one old index.
+        //
+        // single hunk, mapping=[None, None], old=[old0="PPP", old1="QQQ"]
+        // fall = [Some(0), Some(1)] (positional pairing).
+        //
+        //   new0 key "ZZZ": disagrees with old0's "PPP" -> not kept, not
+        //     reserved in Pass 1. Pass 2: no old line has key "ZZZ" -> no
+        //     candidate -> out[0] keeps fall[0] = Some(0) (old0), UNRESERVED.
+        //   new1 key "PPP": disagrees with old1's "QQQ" -> not kept, not
+        //     reserved in Pass 1. Pass 2: old_index["PPP"] = old0, unclaimed
+        //     -> out[1] = Some(0) (old0), an exact-content override.
+        //
+        // Result: out = [Some(0), Some(0)] — both new lines credit old0.
+        // This is intentional and benign: new0 stays exactly at git's
+        // positional target (no worse than plain `--ignore-rev`), and new1
+        // is a genuine content-exact improvement over its own (wrong)
+        // positional guess. No line is ever attributed *worse* than
+        // positional; the only anomaly is the redundant credit to old0.
+        let mapping = vec![None, None];
+        let fall = vec![Some(0), Some(1)];
+        let new_lines = vec![b"ZZZ".to_vec(), b"PPP".to_vec()];
+        let parent_lines = vec![b"PPP".to_vec(), b"QQQ".to_vec()];
+
+        let out = super::walk::precise_overrides(&mapping, &fall, &new_lines, &parent_lines, false);
+        assert_eq!(
+            out,
+            vec![Some(0), Some(0)],
+            "new0 keeps its unreserved positional target (old0) and new1's exact-content \
+             override independently lands on the same old0 — a benign double credit, \
+             never worse than the positional result"
         );
     }
 

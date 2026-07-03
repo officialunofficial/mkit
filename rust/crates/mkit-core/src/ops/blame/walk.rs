@@ -457,14 +457,32 @@ fn apply_detection(
 /// * A key shorter than 3 bytes (blank lines, `}`-only lines, …) is never
 ///   content-reattributed, so trivial lines don't "teleport".
 ///
-/// The override map is kept injective (one old line credits at most one new
-/// line) in two passes. Pass 1 decides, for every unmatched new line
+/// The overrides are resolved in two passes, but the result is NOT strictly
+/// injective — no override collides with a content-agreeing or trivial-key
+/// keeper, nor with an earlier override, but it may still coincide with a
+/// line that keeps its positional fall-through target for lack of any
+/// content candidate. Pass 1 decides, for every unmatched new line
 /// independently of processing order, whether *it itself* will keep its
 /// positional pairing (content agrees, or a trivial key) — those old
 /// indices are reserved up front, since an override elsewhere must never
 /// steal a line its own positional owner is keeping. Pass 2 then resolves
 /// overrides in index order, growing the reserved set with each override
-/// chosen, so two lines can never be reattributed to the same old line.
+/// chosen, so two overrides can never be reattributed to the same old line,
+/// and no override ever steals a Pass-1 keeper's target.
+///
+/// What Pass 1 does *not* reserve is a line that keeps `fall[ni]` only
+/// because Pass 2 later finds no content candidate for it (content
+/// disagrees with the positional guess, but nothing else matches either):
+/// that old index is never claimed, so a separate, unrelated override can
+/// still land on it too. A single old line can therefore end up credited by
+/// one such positional-fallback line *and* one content-exact override. This
+/// is benign: every override is an exact content match, and every
+/// non-overridden line keeps exactly git's positional target, so no line is
+/// ever attributed *worse* than plain positional `--ignore-rev` — the
+/// refinement is monotonically ≥ positional, not a strict one-to-one
+/// mapping. See `precise_overrides_double_credit_never_worse_than_positional`
+/// in `mod.rs` for the concrete reachable case.
+///
 /// Deciding "keeps its own pairing" per line first (rather than reserving
 /// *every* positional target up front) is what lets a genuine swap — where
 /// neither side's content agrees with its positional guess — resolve to
