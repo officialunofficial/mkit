@@ -28,7 +28,7 @@
 //! Line numbers in the output are always the file's own 1-based numbers,
 //! so a `-L 40,60` slice still prints `40..=60`, matching `git blame -L`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -68,6 +68,16 @@ struct BlameOpts {
     /// `author`, `timestamp`, `text` keys.
     #[arg(long, value_enum, default_value = "default")]
     format: BlameFormat,
+    /// Emit git's grouped porcelain: a per-line header block (commit id,
+    /// original + final line numbers, author/committer, summary, `boundary`,
+    /// `filename`) with each content line tab-prefixed; the metadata block
+    /// is emitted once per commit. See [`render_porcelain`] for mkit's
+    /// documented field mapping (identity, UTC tz, `filename` on `-C`).
+    #[arg(long = "porcelain", conflicts_with = "format")]
+    porcelain: bool,
+    /// Like `--porcelain`, but repeat the full header block for every line.
+    #[arg(long = "line-porcelain", conflicts_with = "format")]
+    line_porcelain: bool,
     /// Ignore whitespace when matching lines across revisions, like
     /// `git blame -w`, so a whitespace-only edit (reindent, tab↔space,
     /// spacing tweak) doesn't reattribute the line. Output still shows
@@ -93,16 +103,20 @@ struct BlameOpts {
     lines: Option<String>,
     /// Detect lines moved *within* the file, like `git blame -M`: a moved
     /// block of at least 20 alphanumeric characters is credited to its
-    /// origin commit rather than the editing one. (git's inline `-M<num>`
-    /// threshold override is not exposed; the core API accepts a custom
-    /// threshold.)
+    /// origin commit rather than the editing one. The inline
+    /// `-M<num>`/`-M<num>%` form overrides the threshold and is pulled out
+    /// of argv by [`extract_inline_thresholds`] before clap runs; this
+    /// bool captures the bare `-M`/`--find-moves` flag.
     #[arg(short = 'M', long = "find-moves")]
     find_moves: bool,
     /// Detect lines copied *from other files*, like `git blame -C`
     /// (implies `-M`). Repeat to widen the search: `-C` covers files
     /// changed in the same commit, `-C -C` every file in the parent
     /// commit. A copied block needs at least 40 alphanumeric characters.
-    /// (git's inline `-C<num>` threshold override is not exposed.)
+    /// The inline `-C<num>`/`-C<num>%` form overrides the threshold and
+    /// still counts toward the level; [`extract_inline_thresholds`] pulls
+    /// those out of argv before clap runs, so this count captures only the
+    /// bare `-C`/`--find-copies` occurrences.
     #[arg(short = 'C', long = "find-copies", action = clap::ArgAction::Count)]
     find_copies: u8,
     /// Ignore a "noise" commit (mass reformat, license header, rename)
@@ -144,12 +158,24 @@ struct BlameOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear flow: parse + resolve + blame + slice + render
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", args) {
+    // git's inline `-M<num>`/`-C<num>` forms can't be expressed with clap
+    // derive (a short flag that both repeats *and* takes an optional glued
+    // value), so pull them out of argv first; bare `-M`/`-C` and stacked
+    // short clusters (`-CC`, `-Mw`) fall through to clap below.
+    let (clap_args, inline) = extract_inline_thresholds(args);
+    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", &clap_args) {
         Ok(o) => o,
         Err(code) => return code,
     };
     let json = matches!(opts.format, BlameFormat::Json);
+
+    // Merge the inline-form results with clap's bare-flag results: a
+    // `-M<num>` counts as `-M`, and each `-C<num>` still adds to the copy
+    // level like a bare `-C`.
+    let find_moves = opts.find_moves || inline.moves;
+    let find_copies = opts.find_copies.saturating_add(inline.copies);
 
     // `rev_and_file` is clamped to 1..=2 by clap: one value is the file
     // (blame against HEAD); two values are `<rev> <file>`.
@@ -175,8 +201,8 @@ pub fn run(args: &[String]) -> u8 {
     // detection, so reject the combination rather than silently ignoring
     // those flags.
     if opts.reverse
-        && (opts.find_moves
-            || opts.find_copies > 0
+        && (find_moves
+            || find_copies > 0
             || !opts.ignore_rev.is_empty()
             || !opts.ignore_revs_file.is_empty())
     {
@@ -186,16 +212,27 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
 
-    // `-M` enables move detection at git's default threshold; `-C` (a
-    // repeat count) sets the copy search level. `-C` implies `-M` in the
-    // core, so a bare `-C` still credits within-file moves too.
-    let moves = if opts.find_moves {
-        MoveDetection::GIT_DEFAULT
+    // `-M` enables move detection; `-C` (a repeat count) sets the copy
+    // search level. An inline `-M<num>`/`-C<num>` overrides the default
+    // threshold, otherwise git's defaults (20 for `-M`, 40 for `-C`) apply.
+    // `-C` implies `-M` in the core, so a bare `-C` still credits
+    // within-file moves too.
+    let moves = if find_moves {
+        match inline.move_threshold {
+            Some(threshold) => MoveDetection::On { threshold },
+            None => MoveDetection::GIT_DEFAULT,
+        }
     } else {
         MoveDetection::Off
     };
-    let copies = if opts.find_copies > 0 {
-        CopyDetection::git_default(opts.find_copies)
+    let copies = if find_copies > 0 {
+        match inline.copy_threshold {
+            Some(threshold) => CopyDetection::On {
+                level: find_copies,
+                threshold,
+            },
+            None => CopyDetection::git_default(find_copies),
+        }
     } else {
         CopyDetection::Off
     };
@@ -260,7 +297,9 @@ pub fn run(args: &[String]) -> u8 {
         None => result,
     };
 
-    if json {
+    if opts.porcelain || opts.line_porcelain {
+        render_porcelain(&store, &result, file, opts.line_porcelain)
+    } else if json {
         render_json(&result)
     } else {
         let text = format_blame_text(&result);
@@ -268,6 +307,90 @@ pub fn run(args: &[String]) -> u8 {
         let _ = stdout.write_all(text.as_bytes());
         exit::OK
     }
+}
+
+/// Inline `-M<num>`/`-C<num>` threshold state pulled from argv before clap
+/// parsing. Bare `-M`/`-C` are left for clap (which owns the help text and
+/// the `-C` repeat count); only the glued-value forms — which clap-derive
+/// can't model — are handled here.
+#[derive(Default)]
+struct InlineThresholds {
+    /// A `-M<num>` was seen (implies move detection, like a bare `-M`).
+    moves: bool,
+    /// Threshold from the last `-M<num>` seen, if any.
+    move_threshold: Option<usize>,
+    /// Count of `-C<num>` occurrences; each still adds to the copy level.
+    copies: u8,
+    /// Threshold from the last `-C<num>` seen, if any.
+    copy_threshold: Option<usize>,
+}
+
+/// Pull git's inline `-M<num>`/`-C<num>`/`-M<num>%` forms out of `args`,
+/// returning the remaining args (for clap) and the parsed thresholds.
+///
+/// clap-derive can't model a short flag that both repeats (`-C` sets the
+/// copy level) and takes an optional glued value (`-C40` sets the
+/// threshold), so the valued forms are handled here and the bare `-M`/`-C`
+/// flags fall through to clap unchanged. Only glued values are consumed:
+/// bare `-M`/`-C`, the `-L` range value (even a `-3,5`), and every
+/// positional pass through untouched, and nothing after a `--` end-of-
+/// options marker is inspected (so a file literally named `-C9` survives).
+///
+/// A glued value is consumed as a threshold **only when it is numeric**
+/// (`-M20`, `-C40%`). Everything else — bare `-M`/`-C`, stacked short
+/// clusters (`-CC` = copy level 2, `-Mw` = `-M -w`), the `-L` range value
+/// (even a `-3,5`), and positionals — passes through untouched to clap, and
+/// nothing after a `--` end-of-options marker is inspected (so a file
+/// literally named `-C9` survives). Passing non-numeric `-M`/`-C` tokens on
+/// to clap keeps git's/clap's short-flag stacking working and lets clap own
+/// the diagnostic for a genuinely bad flag.
+///
+/// The number is a minimum alphanumeric-character count — git's non-`%`
+/// `-M<n>` unit, which maps 1:1 onto mkit's core threshold. A trailing `%`
+/// is accepted for git-surface compatibility but the number is still used
+/// as a char count: mkit's block detector has no similarity-ratio model, a
+/// deliberate, `log`-consistent divergence (documented in `docs/CLI.md`).
+fn extract_inline_thresholds(args: &[String]) -> (Vec<String>, InlineThresholds) {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut out = InlineThresholds::default();
+    let mut opts_ended = false;
+    for arg in args {
+        if opts_ended {
+            rest.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            opts_ended = true;
+            rest.push(arg.clone());
+            continue;
+        }
+        if let Some(t) = arg.strip_prefix("-M").and_then(parse_threshold) {
+            out.move_threshold = Some(t);
+            out.moves = true;
+        } else if let Some(t) = arg.strip_prefix("-C").and_then(parse_threshold) {
+            out.copy_threshold = Some(t);
+            out.copies = out.copies.saturating_add(1);
+        } else {
+            // Bare `-M`/`-C`, a stacked cluster, or a non-`-M`/`-C` token:
+            // clap handles it.
+            rest.push(arg.clone());
+        }
+    }
+    (rest, out)
+}
+
+/// Parse the value glued to `-M`/`-C` into a threshold, or `None` when it
+/// is not a bare number — an empty suffix (bare `-M`), a stacked cluster
+/// (`-CC` → `"C"`), or otherwise non-numeric. A single trailing `%` is
+/// stripped first (git-surface compatibility; the number is still a char
+/// count). An all-digit value that overflows `usize` clamps to `MAX` — an
+/// unreachable threshold — rather than being mis-read as a stacked cluster.
+fn parse_threshold(val: &str) -> Option<usize> {
+    let num = val.strip_suffix('%').unwrap_or(val);
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(num.parse::<usize>().unwrap_or(usize::MAX))
 }
 
 /// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits
@@ -531,6 +654,91 @@ fn render_json(result: &BlameResult) -> u8 {
         let text = String::from_utf8_lossy(&line.text);
         let _ = write!(stdout, ",\"text\":\"{}\"", format::json_escape(&text));
         let _ = stdout.write_all(b"}\n");
+    }
+    exit::OK
+}
+
+/// Grouped / line porcelain output (`--porcelain` / `--line-porcelain`),
+/// matching git 2.50.1's field ordering and grouping for the in-scope
+/// fields.
+///
+/// Each line emits a header `<64-hex-sha> <orig> <final>` — plus the group
+/// length on the first line of a run of one commit — then a metadata block
+/// (once per commit for `--porcelain`, for **every** line under
+/// `--line-porcelain`), then the tab-prefixed content bytes.
+///
+/// mkit field mapping — deliberate, `log`-consistent divergences from git,
+/// same spirit as `blame --format=json`:
+/// - `author`/`committer` carry mkit's Identity string (e.g. `ed25519:…`),
+///   not a `Name`; `author-mail`/`committer-mail` are empty (`<>`) — mkit
+///   has no email.
+/// - mkit commits hold a single author + timestamp, so `committer*` mirror
+///   `author*` and both `*-tz` are `+0000` (mkit timestamps are UTC).
+/// - `filename` is the blamed path, or the `-C` copy source for a
+///   cross-file copy. git's `previous` line is outside the in-scope field
+///   set (#524) and is not emitted.
+fn render_porcelain(
+    store: &ObjectStore,
+    result: &BlameResult,
+    file: &str,
+    line_porcelain: bool,
+) -> u8 {
+    let mut summaries: HashMap<Hash, String> = HashMap::new();
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let lines = &result.lines;
+    let mut stdout = std::io::stdout().lock();
+
+    let mut i = 0;
+    while i < lines.len() {
+        // A group is a maximal run of consecutive lines from one commit; its
+        // length is printed on the group's first header (git's 4th field).
+        let commit = lines[i].commit_hash;
+        let mut group_len = 1;
+        while i + group_len < lines.len() && lines[i + group_len].commit_hash == commit {
+            group_len += 1;
+        }
+        for g in 0..group_len {
+            let line = &lines[i + g];
+            let hex = format::hex_hash(&line.commit_hash);
+            if g == 0 {
+                let _ = writeln!(
+                    stdout,
+                    "{hex} {} {} {group_len}",
+                    line.orig_line_num, line.line_num
+                );
+            } else {
+                let _ = writeln!(stdout, "{hex} {} {}", line.orig_line_num, line.line_num);
+            }
+            // Grouped porcelain emits the metadata once per commit;
+            // line-porcelain repeats it for every line.
+            let emit_meta = line_porcelain || seen.insert(line.commit_hash);
+            if emit_meta {
+                let ident = format::full_identity(&line.author);
+                let summary = summaries
+                    .entry(line.commit_hash)
+                    .or_insert_with(|| super::commit_subject(store, &line.commit_hash));
+                let _ = writeln!(stdout, "author {ident}");
+                let _ = writeln!(stdout, "author-mail <>");
+                let _ = writeln!(stdout, "author-time {}", line.timestamp);
+                let _ = writeln!(stdout, "author-tz +0000");
+                let _ = writeln!(stdout, "committer {ident}");
+                let _ = writeln!(stdout, "committer-mail <>");
+                let _ = writeln!(stdout, "committer-time {}", line.timestamp);
+                let _ = writeln!(stdout, "committer-tz +0000");
+                let _ = writeln!(stdout, "summary {summary}");
+                if line.boundary {
+                    let _ = writeln!(stdout, "boundary");
+                }
+                let filename = line.source_path.as_deref().unwrap_or(file);
+                let _ = writeln!(stdout, "filename {filename}");
+            }
+            // Content line: tab prefix + raw bytes + newline (git puts each
+            // line's exact bytes after the tab).
+            let _ = stdout.write_all(b"\t");
+            let _ = stdout.write_all(&line.text);
+            let _ = stdout.write_all(b"\n");
+        }
+        i += group_len;
     }
     exit::OK
 }

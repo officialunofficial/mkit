@@ -266,25 +266,45 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
-  [--ignore-revs-file <file>] [--first-parent] [--reverse] [-L <start>,<end>]
-  [<rev>] <file>` —
-  show line-level commit attribution. `-w` ignores whitespace when
+- `mkit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
+  [--ignore-rev <rev>] [--ignore-revs-file <file>] [--first-parent] [--reverse]
+  [-L <start>,<end>] [<rev>] <file>` —
+  show line-level commit attribution. `--porcelain` emits git's grouped
+  machine format — a per-line header (`<id> <orig> <final> [<group-len>]`)
+  followed by a metadata block (author/committer, `author-time`/`-tz`,
+  `summary`, a `boundary` marker on a file-history root, and `filename`) once
+  per commit, with each content line tab-prefixed; `--line-porcelain` repeats
+  the full block for every line. mkit's documented divergences (consistent
+  with `--format=json` and the `log` precedent): object ids are 64-hex;
+  `author`/`committer` carry mkit's Identity string, not `Name <email>`
+  (`author-mail`/`committer-mail` are empty and both `*-tz` are `+0000`,
+  since mkit commits store a single UTC author + timestamp); `filename` is
+  the `-C` copy source on a cross-file copy; git's out-of-scope `previous`
+  line is not emitted. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's
   current bytes. `-M` detects lines moved *within* the file and `-C` lines
   copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
-  and repeating it — `-C -C` — widens the search from files changed in the
-  commit to every file in the parent). Detection is block-based: the
+  and repeating it widens the search: `-C` covers files changed in the
+  commit, `-C -C` every file in the commit that creates the blamed file,
+  and `-C -C -C` every file in any commit — a whole-tree search at each
+  walk step, so a block copied from an unmodified source is still found).
+  Detection is block-based: the
   longest contiguous moved/copied block above git's default thresholds (20
   alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
   so a moved block next to genuinely-new lines is still split out, and
   combined with `-w` a block copied with a whitespace change is still
-  detected. Divergences from git: inline numeric threshold forms
-  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
-  custom threshold); a single unmatched run over 10,000 lines is matched
-  only as a whole, not by sub-block. Move/copy detection is merge-aware and
+  detected. The inline numeric forms override the default threshold, like
+  git: `-M<num>`/`-C<num>` (glued, no space) set the minimum alphanumeric
+  character count, and a numeric `-C<num>` still counts toward the `-C`
+  level (so `-C40 -C` is level 2 with threshold 40). The percent form
+  `-M<num>%`/`-C<num>%` is accepted for git-surface compatibility, but
+  because mkit's block detector has no similarity-ratio model the number is
+  treated as the same char-count threshold — a deliberate, `log`-consistent
+  divergence. Remaining divergence from git: a single unmatched run over
+  10,000 lines is matched only as a whole, not by sub-block. Move/copy
+  detection is merge-aware and
   implements git's per-parent mechanism (pinned against git 2.50.1): at a
   merge, every **real** parent is offered the unexplained lines in commit
   order, first-found-wins. A parent that contains the blamed file (and

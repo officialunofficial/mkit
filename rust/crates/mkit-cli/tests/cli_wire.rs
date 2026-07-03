@@ -1042,6 +1042,390 @@ fn blame_c_c_widens_to_unchanged_source_file() {
 }
 
 #[test]
+fn blame_c_inline_threshold_flips_copy_attribution() {
+    // #525: inline `-C<num>` sets the similarity threshold (an alphanumeric
+    // char count). The copied block is EXACTLY 40 alnum chars, so a
+    // threshold at or below 40 detects the copy (credit the origin) while
+    // 41 misses it (the block reads as new) — the boundary flip git's
+    // `-C<num>` produces. The `%` form parses and, since mkit has no
+    // similarity-ratio model, is treated as the same char count.
+    let block = "abcdefghijklmnopqrstuvwxyzabcdefghijklmn"; // 40 alnum chars
+    assert_eq!(block.chars().filter(|c| c.is_alphanumeric()).count(), 40);
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "a.txt",
+        format!("{block}\nkeeper\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    // Second commit: remove the block from a.txt, add it verbatim in b.txt.
+    fs::write(td.path().join("a.txt"), b"keeper\n").unwrap();
+    fs::write(td.path().join("b.txt"), format!("{block}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "a.txt", "b.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "split"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    // Threshold above the block size: copy is NOT detected.
+    let above = run_in(td.path(), &["blame", "-C41", "b.txt"]);
+    assert!(above.status.success(), "blame -C41 failed: {above:?}");
+    let above_out = String::from_utf8(above.stdout).unwrap();
+    assert!(
+        above_out.lines().all(|l| l.starts_with(&second[..12])),
+        "-C41 (> 40-char block) misses the copy: {above_out:?}"
+    );
+
+    // Threshold at the block size: copy IS detected (git uses `>=`).
+    let at = run_in(td.path(), &["blame", "-C40", "b.txt"]);
+    assert!(at.status.success(), "blame -C40 failed: {at:?}");
+    let at_out = String::from_utf8(at.stdout).unwrap();
+    assert!(
+        at_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-C40 (== block) credits the origin commit: {at_out:?}"
+    );
+
+    // The percent form parses and behaves like the bare number.
+    let pct = run_in(td.path(), &["blame", "-C40%", "b.txt"]);
+    assert!(pct.status.success(), "blame -C40% failed: {pct:?}");
+    let pct_out = String::from_utf8(pct.stdout).unwrap();
+    assert_eq!(
+        pct_out, at_out,
+        "-C40% is treated as the same char-count threshold as -C40"
+    );
+
+    // A non-numeric inline value is a clean value error, not a silent no-op.
+    let bad = run_in(td.path(), &["blame", "-Cxyz", "b.txt"]);
+    assert!(!bad.status.success(), "-Cxyz must be rejected");
+}
+
+#[test]
+fn blame_c_inline_threshold_composes_with_repeat() {
+    // #525: a numeric `-C<num>` still counts toward the copy *level*, so
+    // `-C<num> -C` reaches level 2 (whole-parent search) with the given
+    // threshold. The source file is UNCHANGED in the copying commit, so
+    // only level 2 can find it — proving the repeat composed — and the
+    // threshold from the numeric form still governs the match.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "first",
+    );
+    let first = head_hash(td.path());
+
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "copy"])
+            .status
+            .success()
+    );
+    let second = head_hash(td.path());
+
+    // A single numeric `-C20` is only level 1 → misses the unchanged source.
+    let l1 = run_in(td.path(), &["blame", "-C20", "dst.txt"]);
+    let l1_out = String::from_utf8(l1.stdout).unwrap();
+    assert!(
+        l1_out.lines().all(|l| l.starts_with(&second[..12])),
+        "-C20 (level 1) misses the unchanged source: {l1_out:?}"
+    );
+
+    // `-C20 -C` → level 2 with threshold 20 → finds the unchanged source.
+    let l2 = run_in(td.path(), &["blame", "-C20", "-C", "dst.txt"]);
+    assert!(l2.status.success(), "blame -C20 -C failed: {l2:?}");
+    let l2_out = String::from_utf8(l2.stdout).unwrap();
+    assert!(
+        l2_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-C20 -C reaches level 2 and credits the origin: {l2_out:?}"
+    );
+}
+
+#[test]
+fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
+    // #526: git's third -C ("copies from other files in any commit")
+    // whole-tree-searches at EVERY walk step, not just the file-creating
+    // commit. Here a block is appended to a PERSISTING file (main.txt, which
+    // has a porigin) and copied from an UNMODIFIED src.txt. -C -C only
+    // searches files modified in the commit → misses (block stays on the
+    // append commit c2); -C -C -C searches the whole parent tree → credits
+    // the source's origin c1. Pinned against git 2.50.1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    // c1: a persisting file + the (never-again-modified) copy source.
+    fs::write(td.path().join("main.txt"), b"header line one here\n").unwrap();
+    fs::write(td.path().join("src.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "-A"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c1"]).status.success());
+    let c1 = head_hash(td.path());
+    // c2: append the block to main.txt; src.txt untouched.
+    fs::write(
+        td.path().join("main.txt"),
+        format!("header line one here\n{b1}\n{b2}\n"),
+    )
+    .unwrap();
+    assert!(run_in(td.path(), &["add", "main.txt"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
+    let c2 = head_hash(td.path());
+
+    // Level 2 misses the unmodified source: appended block stays on c2.
+    let l2 = run_in(td.path(), &["blame", "-C", "-C", "main.txt"]);
+    assert!(l2.status.success(), "blame -C -C failed: {l2:?}");
+    let l2_out = String::from_utf8(l2.stdout).unwrap();
+    assert!(
+        l2_out.lines().nth(1).unwrap().starts_with(&c2[..12]),
+        "-C -C leaves the appended block on the append commit c2: {l2_out:?}"
+    );
+
+    // Level 3 whole-tree-searches the parent: block credited to c1/src.txt.
+    let l3 = run_in(td.path(), &["blame", "-C", "-C", "-C", "main.txt"]);
+    assert!(l3.status.success(), "blame -C -C -C failed: {l3:?}");
+    let l3_out = String::from_utf8(l3.stdout).unwrap();
+    assert!(
+        l3_out.lines().nth(1).unwrap().starts_with(&c1[..12]),
+        "-C -C -C credits the unmodified source's origin c1 ({}), not c2 ({}): {l3_out:?}",
+        &c1[..12],
+        &c2[..12]
+    );
+}
+
+#[test]
+fn blame_stacked_short_flags_reach_clap() {
+    // Review #2: the inline-threshold pre-scan must only consume a *numeric*
+    // glued value; stacked short clusters where `-M`/`-C` leads (`-CC` =
+    // `-C -C`, `-Mw` = `-M -w`) must still reach clap, not be misread as a
+    // threshold. `-CC` on an unchanged source is level 2 and credits the
+    // origin; a genuinely bad flag (`-Cxyz`) is a clap USAGE error, not a
+    // silent no-op or a DATAERR.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(
+        td.path(),
+        "src.txt",
+        format!("{b1}\n{b2}\n").as_bytes(),
+        "c1",
+    );
+    let first = head_hash(td.path());
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
+
+    // `-CC` == `-C -C` (level 2) → finds the unchanged source.
+    let cc = run_in(td.path(), &["blame", "-CC", "dst.txt"]);
+    assert!(cc.status.success(), "blame -CC failed: {cc:?}");
+    let cc_out = String::from_utf8(cc.stdout).unwrap();
+    assert!(
+        cc_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-CC is level 2 and credits the origin: {cc_out:?}"
+    );
+    // `-Mw` == `-M -w` → succeeds (move detection + ignore-whitespace).
+    assert!(
+        run_in(td.path(), &["blame", "-Mw", "dst.txt"])
+            .status
+            .success(),
+        "-Mw (= -M -w) must be accepted"
+    );
+    // A non-numeric glued value that isn't a valid cluster is a clap error.
+    let bad = run_in(td.path(), &["blame", "-Cxyz", "dst.txt"]);
+    assert_eq!(
+        bad.status.code(),
+        Some(64),
+        "a bad -C value is a clap USAGE error (64), not DATAERR: {bad:?}"
+    );
+}
+
+#[test]
+fn blame_c_copy_tiebreak_prefers_older_ancestor_source() {
+    // #527: two equally-similar copy sources. git credits the source that
+    // traces to the OLDER (ancestor) commit — blame's push-back bias — not
+    // the first candidate in path order. Here the older source (committed
+    // first) is alphabetically LAST (src_z), so a path-order pick would
+    // wrongly credit the newer src_a. Pinned against git 2.50.1:
+    // `git blame -C -C dst.txt` credits c1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let block = format!("{b1}\n{b2}\n");
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    // c1 introduces src_z.txt (older; alphabetically last).
+    make_commit(td.path(), "src_z.txt", block.as_bytes(), "c1");
+    let c1 = head_hash(td.path());
+    // c2 introduces an identical src_a.txt (newer; alphabetically first).
+    make_commit(td.path(), "src_a.txt", block.as_bytes(), "c2");
+    let c2 = head_hash(td.path());
+    // c3 adds dst.txt copying the block; both sources are unchanged in c3,
+    // so only -C -C (level 2, whole-tree) sees them as candidates.
+    make_commit(td.path(), "dst.txt", block.as_bytes(), "c3");
+
+    let out = run_in(td.path(), &["blame", "-C", "-C", "dst.txt"]);
+    assert!(out.status.success(), "blame -C -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().all(|l| l.starts_with(&c1[..12])),
+        "tie-break must credit the older ancestor source (c1/src_z), not \
+         the newer src_a ({}): {stdout:?}",
+        &c2[..12]
+    );
+}
+
+#[test]
+fn blame_c_copy_tiebreak_older_source_wins_regardless_of_path_order() {
+    // #527 guard: the mirror of the tracer — the older source is now
+    // alphabetically FIRST (src_a). git still credits the older commit, so
+    // the tie-break must pick by ancestry, not "prefer the last candidate."
+    // Pinned against git 2.50.1: `git blame -C -C dst.txt` credits c1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let block = format!("{b1}\n{b2}\n");
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "src_a.txt", block.as_bytes(), "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "src_z.txt", block.as_bytes(), "c2");
+    let c2 = head_hash(td.path());
+    make_commit(td.path(), "dst.txt", block.as_bytes(), "c3");
+
+    let out = run_in(td.path(), &["blame", "-C", "-C", "dst.txt"]);
+    assert!(out.status.success(), "blame -C -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().all(|l| l.starts_with(&c1[..12])),
+        "tie-break must credit the older ancestor source (c1/src_a), not \
+         the newer src_z ({}): {stdout:?}",
+        &c2[..12]
+    );
+}
+
+#[test]
+fn blame_porcelain_matches_git_field_block_with_boundary() {
+    // #524: grouped porcelain. c1 introduces 3 lines (a boundary/root
+    // commit); c2 edits line 2 and appends line 4. Field ordering and
+    // grouping are pinned against git 2.50.1 (mkit's documented divergences:
+    // 64-hex ids, Identity author, empty *-mail, +0000 tz, no `previous`).
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbravo\ncharlie\n", "c1 initial");
+    make_commit(
+        td.path(),
+        "f.txt",
+        b"alpha\nBRAVO2\ncharlie\ndelta\n",
+        "c2 edit+add",
+    );
+
+    let out = run_in(td.path(), &["blame", "--porcelain", "f.txt"]);
+    assert!(out.status.success(), "blame --porcelain failed: {out:?}");
+    let s = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<&str> = s.lines().collect();
+
+    // First header: "<64-hex> <orig> <final> <group-len>" then git's exact
+    // field-block ordering, with the boundary marker on the root commit.
+    let h0: Vec<&str> = rows[0].split(' ').collect();
+    assert_eq!(h0.len(), 4, "header shape: {:?}", rows[0]);
+    assert_eq!(h0[0].len(), 64, "mkit uses 64-hex ids");
+    assert_eq!((h0[1], h0[2]), ("1", "1"), "orig+final line numbers");
+    assert!(rows[1].starts_with("author ed25519:"), "{:?}", rows[1]);
+    assert_eq!(rows[2], "author-mail <>");
+    assert!(rows[3].starts_with("author-time "));
+    assert_eq!(rows[4], "author-tz +0000");
+    assert!(rows[5].starts_with("committer ed25519:"));
+    assert_eq!(rows[6], "committer-mail <>");
+    assert!(rows[7].starts_with("committer-time "));
+    assert_eq!(rows[8], "committer-tz +0000");
+    assert_eq!(rows[9], "summary c1 initial");
+    assert_eq!(rows[10], "boundary");
+    assert_eq!(rows[11], "filename f.txt");
+    assert_eq!(rows[12], "\talpha");
+
+    // Metadata is emitted once per commit (grouped): exactly 2 blocks.
+    assert_eq!(
+        s.lines().filter(|l| l.starts_with("author ")).count(),
+        2,
+        "grouped porcelain emits metadata once per commit"
+    );
+    // Only the root commit c1 is a boundary.
+    assert_eq!(s.lines().filter(|l| *l == "boundary").count(), 1);
+    // Content, in order, tab-prefixed.
+    let content: Vec<&str> = s.lines().filter_map(|l| l.strip_prefix('\t')).collect();
+    assert_eq!(content, ["alpha", "BRAVO2", "charlie", "delta"]);
+}
+
+#[test]
+fn blame_line_porcelain_repeats_header_per_line() {
+    // #524: --line-porcelain repeats the full metadata block for every line.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbravo\ncharlie\n", "c1");
+    make_commit(td.path(), "f.txt", b"alpha\nBRAVO2\ncharlie\ndelta\n", "c2");
+
+    let out = run_in(td.path(), &["blame", "--line-porcelain", "f.txt"]);
+    assert!(
+        out.status.success(),
+        "blame --line-porcelain failed: {out:?}"
+    );
+    let s = String::from_utf8(out.stdout).unwrap();
+    let content = s.lines().filter(|l| l.starts_with('\t')).count();
+    let authors = s.lines().filter(|l| l.starts_with("author ")).count();
+    assert_eq!(content, 4, "four content lines");
+    assert_eq!(
+        authors, content,
+        "line-porcelain repeats the header for every line"
+    );
+}
+
+#[test]
+fn blame_porcelain_emits_copy_source_filename() {
+    // #524: on a `-C` cross-file copy, the porcelain `filename` is the copy
+    // SOURCE (git parity), and the block is credited to the source's origin.
+    let b1 = "fn handler_alpha_beta_gamma() { compute_the_thing(); }";
+    let b2 = "fn second_helper_delta_epsilon() { do_more(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", format!("{b1}\n{b2}\n").as_bytes(), "c1");
+    // c2: shrink a.txt, add b.txt copying the block.
+    fs::write(td.path().join("a.txt"), b"leftover\n").unwrap();
+    fs::write(td.path().join("b.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "a.txt", "b.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "c2 split"])
+            .status
+            .success()
+    );
+
+    let out = run_in(td.path(), &["blame", "-C", "--porcelain", "b.txt"]);
+    assert!(out.status.success(), "blame -C --porcelain failed: {out:?}");
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        s.lines().any(|l| l == "filename a.txt"),
+        "copied block's porcelain filename is the source a.txt: {s}"
+    );
+    // Both copied lines are one group crediting the source's origin commit.
+    let first = s.lines().next().unwrap();
+    let h: Vec<&str> = first.split(' ').collect();
+    assert_eq!(h[3], "2", "the two copied lines form one group: {first:?}");
+}
+
+#[test]
 fn blame_ignore_rev_unknown_errors_like_git() {
     // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
     // text (with its own `error:` prefix and sysexits code, not git's 128).
