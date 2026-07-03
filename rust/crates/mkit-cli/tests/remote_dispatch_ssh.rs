@@ -27,6 +27,12 @@ use mkit_cli::remote_dispatch;
 use mkit_transport_ssh::{parse_mkit_ssh_url, validate_ssh_path};
 
 #[test]
+// #505 PR 5/5: spawns a real `ssh(1)` subprocess against 127.0.0.1:22 —
+// slow and environment-dependent (needs `ssh` on PATH; behavior differs
+// depending on whether anything is listening on 22). Quarantined to the
+// serial `--ignored` CI lane (cloudbuild/ci.yaml, .github/workflows/rust.yml);
+// only needs localhost networking, so it runs fine there.
+#[ignore = "real ssh(1) subprocess to 127.0.0.1:22; run via the serial --ignored CI lane"]
 fn open_accepts_syntactically_valid_mkit_ssh_url() {
     // `open()` itself short-circuits on the `mkit+ssh://` prefix and
     // calls `SshTransport::connect_with_options` (default options), which

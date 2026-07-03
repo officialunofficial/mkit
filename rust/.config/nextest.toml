@@ -54,6 +54,33 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(crash_recovery) or binary(lock_contention)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+[profile.ignored-lane]
+# #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
+# real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect
+# attempt to 127.0.0.1:22) were quarantined behind `#[ignore]` instead
+# of determinized. This profile is the single source of truth for
+# which quarantined tests the serial ignored-only CI lane runs — both
+# rust.yml and cloudbuild/ci.yaml invoke
+# `cargo nextest run --profile ignored-lane --run-ignored ignored-only`
+# instead of duplicating this test-name filter inline in two YAML files.
+#
+# Scoped by an explicit test-name filter rather than a blanket
+# `--run-ignored ignored-only`: this workspace also has PRE-EXISTING
+# `#[ignore]`d tests (native-keystore backends gated on
+# MKIT_RUN_NATIVE_KEYSTORE_TESTS, the real-ssh e2e suite gated on
+# MKIT_SSH_E2E_REAL) that are NOT provisioned on CI runners. The
+# keystore tests in particular panic outright when their gate is unset
+# (`assert!(!require_backend, ...)` in mkit-keystore's native_list.rs)
+# rather than skipping quietly, so a blanket ignored-only run would
+# fail regardless of MKIT_TEST_STRICT. Naming exactly the tests this
+# PR quarantined keeps the lane green regardless of what other
+# `#[ignore]`d tests exist.
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child/)'
+# Run serially so the quarantined tests' real timers/sockets don't
+# contend with each other; only localhost networking is needed, which
+# every CI runner (Linux + macOS) provides.
+test-threads = 1
+
 [profile.state-machine]
 # Nightly deep run of the stateful invariant suite
 # (tests/state_machine.rs). It drives the real `mkit` binary through

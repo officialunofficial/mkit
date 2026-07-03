@@ -143,6 +143,21 @@ jobs:
           MKIT_TEST_STRICT: "1"
         run: cargo nextest run --locked --workspace --all-features
 
+      # #505 PR 5/5: a handful of irreducibly-real tests (subprocess
+      # sleeps, real localhost TCP, the ~5s worktree-lock wait, a real
+      # `ssh` connect attempt to 127.0.0.1:22) were quarantined behind
+      # `#[ignore]` instead of determinized. The `ignored-lane` nextest
+      # profile (rust/.config/nextest.toml) is the single source of
+      # truth for which quarantined tests this serial lane runs and why
+      # — see that profile's comment for the full rationale (both this
+      # workflow and cloudbuild/ci.yaml invoke the same profile instead
+      # of duplicating the test-name filter inline).
+      - name: Test (nextest, ignored lane)
+        working-directory: rust
+        run: >-
+          cargo nextest run --locked --workspace --all-features
+          --profile ignored-lane --run-ignored ignored-only
+
       - name: Fuzz unit tests
         working-directory: rust
         run: cargo test --manifest-path fuzz/Cargo.toml

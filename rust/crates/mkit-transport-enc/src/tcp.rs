@@ -797,7 +797,11 @@ mod tests {
     /// session future must return (signalled over a channel) well within
     /// a bounded wall-clock window even though the client never sends a
     /// frame.
+    // #505 PR 5/5: real TCP listener/dialer threads + fixed sleeps —
+    // quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
+    // .github/workflows/rust.yml). Only needs localhost networking.
     #[test]
+    #[ignore = "real localhost TCP + fixed sleeps; run via the serial --ignored CI lane"]
     fn post_handshake_idle_timeout_drops_silent_peer() {
         use crate::recv_frame_within;
         use commonware_cryptography::Signer as _;

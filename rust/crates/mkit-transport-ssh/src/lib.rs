@@ -952,6 +952,11 @@ mod tests {
     }
 
     #[test]
+    // #505 PR 5/5: spawns a real external `sleep 5` child process —
+    // quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
+    // .github/workflows/rust.yml) instead of paying real subprocess
+    // spawn/kill overhead on every `cargo test`.
+    #[ignore = "spawns a real external subprocess; run via the serial --ignored CI lane"]
     fn wait_child_timeout_kills_stalled_child() {
         let mut child = Command::new("sleep")
             .arg("5")

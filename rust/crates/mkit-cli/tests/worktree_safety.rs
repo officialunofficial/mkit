@@ -172,7 +172,12 @@ fn stash_pop_succeeds_on_clean_worktree() {
 /// worktree/index. We acquire the lock directly (the same helper the CLI
 /// uses) and assert a concurrent `mkit add` blocks for roughly the lock
 /// timeout before failing.
+// #505 PR 5/5: blocks the full ~5s default lock timeout every run —
+// quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
+// .github/workflows/rust.yml) instead of paying that wait on every
+// `cargo test`.
 #[test]
+#[ignore = "blocks the full ~5s worktree-lock timeout; run via the serial --ignored CI lane"]
 fn second_mutating_command_blocks_on_worktree_lock() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"a\n", "base");

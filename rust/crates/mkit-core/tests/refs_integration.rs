@@ -266,8 +266,11 @@ fn repo_lock_blocks_concurrent_acquire() {
     let mkit = dir.path().join(".mkit");
     fs::create_dir_all(&mkit).unwrap();
     let _held = repo_lock::acquire_default(&mkit, "index.lock").unwrap();
-    let err =
-        repo_lock::acquire(&mkit, "index.lock", std::time::Duration::from_millis(100)).unwrap_err();
+    // #505 PR 5/5: the lock is already held, so `acquire` must reject it
+    // on the very first poll — `Duration::ZERO` proves that deterministically
+    // instead of paying a real (if short) wall-clock wait for a timeout that
+    // was never going to succeed.
+    let err = repo_lock::acquire(&mkit, "index.lock", std::time::Duration::ZERO).unwrap_err();
     assert!(matches!(err, repo_lock::LockError::Busy(_)));
 }
 

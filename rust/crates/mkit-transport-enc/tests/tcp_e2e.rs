@@ -67,6 +67,11 @@ async fn splice_direction(
 }
 
 #[test]
+// #505 PR 5/5: real `TcpListener` + a real proxy thread + fixed sleeps —
+// quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
+// .github/workflows/rust.yml) instead of paying real socket/thread setup
+// on every `cargo test`. Only needs localhost networking.
+#[ignore = "real localhost TCP + fixed sleeps; run via the serial --ignored CI lane"]
 fn list_refs_round_trip_over_real_tcp() {
     // One tokio runtime, shared between the listener / proxy / dial.
     let exec = TokioExecutor::new().expect("tokio runtime");

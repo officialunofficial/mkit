@@ -1329,6 +1329,11 @@ mod tests {
         }
 
         #[test]
+        // #505 PR 5/5: real subprocess + wall-clock timeout, several
+        // seconds of real sleep total across this module's three tests.
+        // Quarantined to the serial `--ignored` CI lane (cloudbuild/ci.yaml,
+        // .github/workflows/rust.yml) instead of running on every `cargo test`.
+        #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn hang_before_stdout_times_out_and_reaps_child() {
             // Child reads stdin then sleeps forever without writing
             // stdout — the classic "hung on a touch that never comes".
@@ -1352,6 +1357,9 @@ mod tests {
         }
 
         #[test]
+        // #505 PR 5/5: quarantined alongside the other two subprocess-sleep
+        // tests in this module — see `hang_before_stdout_times_out_and_reaps_child`.
+        #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn fills_stderr_before_stdout_does_not_deadlock() {
             // Child floods stderr (well past a pipe buffer) BEFORE
             // emitting any stdout, then hangs. Without the concurrent
@@ -1381,6 +1389,9 @@ mod tests {
         }
 
         #[test]
+        // #505 PR 5/5: quarantined alongside the other two subprocess-sleep
+        // tests in this module — see `hang_before_stdout_times_out_and_reaps_child`.
+        #[ignore = "real subprocess + wall-clock timeout; run via the serial --ignored CI lane"]
         fn valid_response_then_never_exits_is_bounded() {
             // Child emits a valid Hello+SignResponse, then sleeps forever
             // without closing. We must still bound the wait: the response

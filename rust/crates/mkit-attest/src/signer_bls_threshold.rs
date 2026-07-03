@@ -242,13 +242,42 @@ mod tests {
         trusted_dealer(&mut rng, NZU32!(4))
     }
 
-    /// Round-trip: 3 of 4 holders sign a PAE; aggregate; the
-    /// recovered threshold signature verifies against the cohort
-    /// public key.
+    /// #505 PR 5/5: split from the former `roundtrip_3_of_4_aggregates_and_verifies`
+    /// mega-test. Every holder's `keyid()` contract (algorithm, prefix,
+    /// exact length, and — the whole point of threshold signing — every
+    /// holder reporting the SAME keyid) is asserted here in isolation, so
+    /// a keyid-contract regression can't mask (or be masked by) a failure
+    /// in the sign/aggregate/verify crypto path exercised by
+    /// `threshold_3_of_4_aggregate_recovers_verifying_signature` below.
     #[test]
-    fn roundtrip_3_of_4_aggregates_and_verifies() {
+    fn threshold_3_of_4_keyids_share_one_public_identity() {
         let (sharing, shares) = deal_3_of_4();
         assert_eq!(threshold_for(4), 3);
+
+        let expected_kid = format!(
+            "{KEYID_PREFIX}{}",
+            mkit_core::to_hex_bytes(&sharing.public().encode())
+        );
+        for s in shares.iter().take(3) {
+            let signer = ThresholdSigner::new(s.clone(), sharing.clone());
+            assert_eq!(signer.algorithm(), Algorithm::Bls12381Threshold);
+            let kid = signer.keyid().expect("keyid");
+            assert!(kid.starts_with(KEYID_PREFIX));
+            assert_eq!(kid.len(), KEYID_PREFIX.len() + PUBLIC_KEY_SIZE * 2);
+            // Every holder reports the SAME keyid — that's the whole
+            // point of threshold signing: one public identity.
+            assert_eq!(kid, expected_kid);
+        }
+    }
+
+    /// #505 PR 5/5: split from the former `roundtrip_3_of_4_aggregates_and_verifies`
+    /// mega-test — the crypto path in isolation, with no interspersed
+    /// keyid assertions to mask it: 3 of 4 holders sign a PAE; aggregate;
+    /// the recovered threshold signature verifies against the cohort
+    /// public key.
+    #[test]
+    fn threshold_3_of_4_aggregate_recovers_verifying_signature() {
+        let (sharing, shares) = deal_3_of_4();
 
         // PAE the holders sign. The actual DSSE PAE shape doesn't
         // matter to BLS — it treats it as opaque bytes — but pinning
@@ -260,20 +289,6 @@ mod tests {
         let mut partials_bytes: Vec<Vec<u8>> = Vec::with_capacity(3);
         for s in shares.iter().take(3) {
             let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
-            assert_eq!(signer.algorithm(), Algorithm::Bls12381Threshold);
-            let kid = signer.keyid().expect("keyid");
-            assert!(kid.starts_with(KEYID_PREFIX));
-            assert_eq!(kid.len(), KEYID_PREFIX.len() + PUBLIC_KEY_SIZE * 2);
-            // Every holder reports the SAME keyid — that's the whole
-            // point of threshold signing: one public identity.
-            assert_eq!(
-                kid,
-                format!(
-                    "{KEYID_PREFIX}{}",
-                    mkit_core::to_hex_bytes(&sharing.public().encode())
-                )
-            );
-
             let bytes = signer.sign(pae).expect("sign partial");
             partials_bytes.push(bytes);
         }

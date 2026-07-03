@@ -260,6 +260,12 @@ fn serve_loop_rejected_upload_does_not_overwrite_existing_pack() {
 
 #[cfg(feature = "enc-transport")]
 #[test]
+// #505 PR 5/5: binds a real `TcpListener` on 127.0.0.1 and waits on a
+// 10s `recv_timeout` — quarantined to the serial `--ignored` CI lane
+// (cloudbuild/ci.yaml, .github/workflows/rust.yml) rather than paying
+// real socket/thread setup on every `cargo test`. Only needs localhost
+// networking, so it runs fine in that lane.
+#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
 fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
     use commonware_codec::Encode as _;
     use commonware_cryptography::Signer as _;

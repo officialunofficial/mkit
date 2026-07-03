@@ -20,10 +20,23 @@ pub fn use_color_stderr() -> bool {
 }
 
 fn use_color(is_tty: bool) -> bool {
-    if env::var_os("NO_COLOR").is_some() {
+    use_color_with(
+        env::var_os("NO_COLOR").is_some(),
+        matches!(env::var("CLICOLOR_FORCE").ok().as_deref(), Some("1")),
+        is_tty,
+    )
+}
+
+/// Pure decision function, taking `NO_COLOR`/`CLICOLOR_FORCE` as
+/// explicit booleans instead of reading the ambient process env. Split
+/// out so tests can drive every combination deterministically (#505 PR
+/// 5/5) instead of branching on whatever `NO_COLOR`/`CLICOLOR_FORCE`
+/// happen to be set to in the current process.
+fn use_color_with(no_color: bool, force: bool, is_tty: bool) -> bool {
+    if no_color {
         return false;
     }
-    if matches!(env::var("CLICOLOR_FORCE").ok().as_deref(), Some("1")) {
+    if force {
         return true;
     }
     is_tty
@@ -77,23 +90,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn use_color_pure_helper_honours_current_env() {
-        // We don't mutate env in tests (requires `unsafe` on 2024
-        // edition / Rust 1.95); instead we observe what the helper
-        // does with the CURRENT process env. A CI worker is not a
-        // TTY, so `use_color(false)` must be false (barring a
-        // CLICOLOR_FORCE=1 override the test will detect).
-        let no_color = env::var_os("NO_COLOR").is_some();
-        let force = env::var("CLICOLOR_FORCE").ok().as_deref() == Some("1");
-        if no_color {
-            assert!(!use_color(true));
-            assert!(!use_color(false));
-        } else if force {
-            assert!(use_color(true));
-            assert!(use_color(false));
-        } else {
-            assert!(use_color(true));
-            assert!(!use_color(false));
-        }
+    fn use_color_with_matrix_honours_precedence_and_tty() {
+        // #505 PR 5/5: inject NO_COLOR/CLICOLOR_FORCE/tty explicitly
+        // instead of branching on the ambient process env — deterministic
+        // regardless of what NO_COLOR/CLICOLOR_FORCE happen to be set to
+        // wherever the test runs.
+        //
+        // NO_COLOR wins outright, tty or not.
+        assert!(!use_color_with(true, true, true));
+        assert!(!use_color_with(true, true, false));
+        assert!(!use_color_with(true, false, true));
+        assert!(!use_color_with(true, false, false));
+        // CLICOLOR_FORCE overrides a non-tty when NO_COLOR is absent.
+        assert!(use_color_with(false, true, true));
+        assert!(use_color_with(false, true, false));
+        // Neither set: falls through to tty-ness.
+        assert!(use_color_with(false, false, true));
+        assert!(!use_color_with(false, false, false));
     }
 }
