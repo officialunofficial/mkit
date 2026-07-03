@@ -28,12 +28,13 @@
 //! Line numbers in the output are always the file's own 1-based numbers,
 //! so a `-L 40,60` slice still prints `40..=60`, matching `git blame -L`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::{self, Hash};
+use mkit_core::object::Object;
 use mkit_core::ops::blame::{
     BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
     format_blame_text,
@@ -68,6 +69,16 @@ struct BlameOpts {
     /// `author`, `timestamp`, `text` keys.
     #[arg(long, value_enum, default_value = "default")]
     format: BlameFormat,
+    /// Emit git's grouped porcelain: a per-line header block (commit id,
+    /// original + final line numbers, author/committer, summary, `boundary`,
+    /// `filename`) with each content line tab-prefixed; the metadata block
+    /// is emitted once per commit. See [`render_porcelain`] for mkit's
+    /// documented field mapping (identity, UTC tz, `filename` on `-C`).
+    #[arg(long = "porcelain", conflicts_with = "format")]
+    porcelain: bool,
+    /// Like `--porcelain`, but repeat the full header block for every line.
+    #[arg(long = "line-porcelain", conflicts_with = "format")]
+    line_porcelain: bool,
     /// Ignore whitespace when matching lines across revisions, like
     /// `git blame -w`, so a whitespace-only edit (reindent, tab↔space,
     /// spacing tweak) doesn't reattribute the line. Output still shows
@@ -260,7 +271,9 @@ pub fn run(args: &[String]) -> u8 {
         None => result,
     };
 
-    if json {
+    if opts.porcelain || opts.line_porcelain {
+        render_porcelain(&store, &result, file, opts.line_porcelain)
+    } else if json {
         render_json(&result)
     } else {
         let text = format_blame_text(&result);
@@ -533,6 +546,104 @@ fn render_json(result: &BlameResult) -> u8 {
         let _ = stdout.write_all(b"}\n");
     }
     exit::OK
+}
+
+/// Grouped / line porcelain output (`--porcelain` / `--line-porcelain`),
+/// matching git 2.50.1's field ordering and grouping for the in-scope
+/// fields.
+///
+/// Each line emits a header `<64-hex-sha> <orig> <final>` — plus the group
+/// length on the first line of a run of one commit — then a metadata block
+/// (once per commit for `--porcelain`, for **every** line under
+/// `--line-porcelain`), then the tab-prefixed content bytes.
+///
+/// mkit field mapping — deliberate, `log`-consistent divergences from git,
+/// same spirit as `blame --format=json`:
+/// - `author`/`committer` carry mkit's Identity string (e.g. `ed25519:…`),
+///   not a `Name`; `author-mail`/`committer-mail` are empty (`<>`) — mkit
+///   has no email.
+/// - mkit commits hold a single author + timestamp, so `committer*` mirror
+///   `author*` and both `*-tz` are `+0000` (mkit timestamps are UTC).
+/// - `filename` is the blamed path, or the `-C` copy source for a
+///   cross-file copy. git's `previous` line is outside the in-scope field
+///   set (#524) and is not emitted.
+fn render_porcelain(
+    store: &ObjectStore,
+    result: &BlameResult,
+    file: &str,
+    line_porcelain: bool,
+) -> u8 {
+    let mut summaries: HashMap<Hash, String> = HashMap::new();
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let lines = &result.lines;
+    let mut stdout = std::io::stdout().lock();
+
+    let mut i = 0;
+    while i < lines.len() {
+        // A group is a maximal run of consecutive lines from one commit; its
+        // length is printed on the group's first header (git's 4th field).
+        let commit = lines[i].commit_hash;
+        let mut group_len = 1;
+        while i + group_len < lines.len() && lines[i + group_len].commit_hash == commit {
+            group_len += 1;
+        }
+        for g in 0..group_len {
+            let line = &lines[i + g];
+            let hex = format::hex_hash(&line.commit_hash);
+            if g == 0 {
+                let _ = writeln!(
+                    stdout,
+                    "{hex} {} {} {group_len}",
+                    line.orig_line_num, line.line_num
+                );
+            } else {
+                let _ = writeln!(stdout, "{hex} {} {}", line.orig_line_num, line.line_num);
+            }
+            // Grouped porcelain emits the metadata once per commit;
+            // line-porcelain repeats it for every line.
+            let emit_meta = line_porcelain || seen.insert(line.commit_hash);
+            if emit_meta {
+                let ident = format::full_identity(&line.author);
+                let summary = summaries
+                    .entry(line.commit_hash)
+                    .or_insert_with(|| commit_summary(store, &line.commit_hash));
+                let _ = writeln!(stdout, "author {ident}");
+                let _ = writeln!(stdout, "author-mail <>");
+                let _ = writeln!(stdout, "author-time {}", line.timestamp);
+                let _ = writeln!(stdout, "author-tz +0000");
+                let _ = writeln!(stdout, "committer {ident}");
+                let _ = writeln!(stdout, "committer-mail <>");
+                let _ = writeln!(stdout, "committer-time {}", line.timestamp);
+                let _ = writeln!(stdout, "committer-tz +0000");
+                let _ = writeln!(stdout, "summary {summary}");
+                if line.boundary {
+                    let _ = writeln!(stdout, "boundary");
+                }
+                let filename = line.source_path.as_deref().unwrap_or(file);
+                let _ = writeln!(stdout, "filename {filename}");
+            }
+            // Content line: tab prefix + raw bytes + newline (git puts each
+            // line's exact bytes after the tab).
+            let _ = stdout.write_all(b"\t");
+            let _ = stdout.write_all(&line.text);
+            let _ = stdout.write_all(b"\n");
+        }
+        i += group_len;
+    }
+    exit::OK
+}
+
+/// First line of a commit's message (empty on any read failure), for the
+/// porcelain `summary` field.
+fn commit_summary(store: &ObjectStore, commit: &Hash) -> String {
+    match store.read_object(commit) {
+        Ok(Object::Commit(c)) => String::from_utf8_lossy(&c.message)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned(),
+        _ => String::new(),
+    }
 }
 
 use super::error as emit_err;

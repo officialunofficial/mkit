@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
+  machine-readable blame: a per-line header (`<id> <orig> <final>
+  [<group-len>]`) plus a metadata block (author/committer, `author-time`/
+  `-tz`, `summary`, `boundary` on a file-history root, and `filename`) —
+  once per commit for `--porcelain`, for every line under `--line-porcelain`
+  — with each content line tab-prefixed. Pinned against git 2.50.1 for the
+  in-scope fields. Documented divergences, consistent with `--format=json`
+  and the `log` precedent: 64-hex ids; `author`/`committer` carry mkit's
+  Identity (empty `*-mail`, `+0000` tz, single UTC author = committer);
+  `filename` is the `-C` copy source on a cross-file copy; git's `previous`
+  line is out of scope and not emitted.
 - **`mkit self update`.** The binary can now update itself in place from a
   signed GitHub Release — but only when installer-managed (the
   `.mkit-installed-tag` receipt written by `install.sh` sits next to the
