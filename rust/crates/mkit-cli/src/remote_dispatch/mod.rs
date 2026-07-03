@@ -132,11 +132,22 @@ pub enum DispatchError {
     /// is incomplete, so fetch aborts before publishing the ref.
     #[error("remote is missing object {0} needed to reconstruct the ref")]
     RemoteMissingObject(String),
-    /// A remote name passed to the applied-packs record (#409) contained
-    /// `/`, `\`, or `..`. Remote names are already restricted to a safe
-    /// charset wherever they are configured; this is defence-in-depth
-    /// against the name being used as a raw path component under
-    /// `.mkit/applied-packs/`.
+    /// The fetched tip's object closure exceeds the
+    /// [`mkit_core::ops::graph::MAX_REACHABLE`] verification cap, so
+    /// completeness could not be confirmed. On the applied-pack skip path
+    /// (#409) this closure walk is the sole guarantee the local store is
+    /// whole; a truncated walk could silently pass over missing objects, so
+    /// we fail closed rather than publish a ref we can't fully verify. This is
+    /// NOT a self-heal trigger.
+    #[error(
+        "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
+    )]
+    ClosureTooLarge(usize),
+    /// A remote name passed to the applied-packs record (#409) is not a legal
+    /// ref name (per [`mkit_core::refs::validate_ref_name`]). A remote name
+    /// *is* a ref name, so this should never occur for a config-registered
+    /// remote; it is defence-in-depth against a malformed name being used as
+    /// a raw path component under `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
 }
@@ -724,19 +735,33 @@ fn fetch_objects(
 
 /// Assert that every object reachable from `tip` is already present in the
 /// local store after the packmap chain has been unpacked. This is a pure
-/// integrity check — it walks the closure via [`mkit_core::ops::reachable_objects`]
-/// (which reads each object and re-verifies its digest) and performs NO
-/// network access. A reachable object that the chain failed to deliver
-/// surfaces as [`StoreError::ObjectNotFound`], which we re-tag as
-/// [`DispatchError::RemoteMissingObject`] so the fetch aborts loudly rather
-/// than publishing a ref to a closure we can't reconstruct.
+/// integrity check — it walks the closure via
+/// [`mkit_core::ops::reachable_closure_checked`] (which reads each object and
+/// re-verifies its digest) and performs NO network access. A reachable object
+/// that the chain failed to deliver surfaces as [`StoreError::ObjectNotFound`],
+/// which we re-tag as [`DispatchError::RemoteMissingObject`] so the fetch
+/// aborts loudly rather than publishing a ref to a closure we can't
+/// reconstruct.
+///
+/// When packs were skipped (the applied-pack fast path, #409) this walk is
+/// the *sole* guarantee the store is complete, so it must not silently pass
+/// on an unverified frontier: a closure exceeding the
+/// [`mkit_core::ops::graph::MAX_REACHABLE`] cap leaves objects past the cap
+/// unchecked, which over a partially-wiped store could hide missing objects.
+/// We therefore surface truncation as a hard [`DispatchError::ClosureTooLarge`]
+/// rather than dropping the flag. `ClosureTooLarge` is deliberately distinct
+/// from `RemoteMissingObject` so it does NOT feed the self-heal retry — a
+/// too-large history is not evidence of local staleness.
 ///
 /// Called from [`packmap::fetch_pack_chain`] (not sequenced after it) so its
-/// result participates in that function's applied-pack self-heal retry —
-/// see [`fetch_objects`]'s doc comment.
+/// `RemoteMissingObject` result participates in that function's applied-pack
+/// self-heal retry — see [`fetch_objects`]'s doc comment.
 pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), DispatchError> {
-    match mkit_core::ops::reachable_objects(store, tip) {
-        Ok(_) => Ok(()),
+    match mkit_core::ops::reachable_closure_checked(store, std::iter::once(tip)) {
+        Ok((_, false)) => Ok(()),
+        Ok((_, true)) => Err(DispatchError::ClosureTooLarge(
+            mkit_core::ops::graph::MAX_REACHABLE,
+        )),
         Err(StoreError::ObjectNotFound(hex)) => Err(DispatchError::RemoteMissingObject(hex)),
         Err(e) => Err(e.into()),
     }
