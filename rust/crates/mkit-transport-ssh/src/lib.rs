@@ -1079,16 +1079,74 @@ mod tests {
 
     #[test]
     fn body_name_covers_every_oneof_variant() {
-        // Sanity: if the proto adds a variant and we forget to update
-        // body_name, the new arm will hit the `(empty body)` fallback
-        // and these tests should be extended. Right now we just check
-        // a few representative cases.
-        let names = [
-            body_name(&None),
-            body_name(&Some(ssh_frame::Body::Close(Box::default()))),
-        ];
-        assert!(!names[0].is_empty());
-        assert!(!names[1].is_empty());
+        // Every `ssh_frame::Body` oneof variant, pinned to its exact
+        // `body_name` string. If the proto adds a variant and
+        // `body_name` isn't updated, the new arm falls through to
+        // `"(empty body)"` — exhaustively listing all 17 variants here
+        // (plus `None`) means a forgotten arm shows up as a wrong
+        // string on an EXISTING case only if it collides; the real
+        // guard is that adding a variant to the match in `body_name`
+        // without a corresponding line here is caught by nothing, so
+        // this list must be kept in sync with `ssh_frame::Body`
+        // (mirrors the exhaustive `match` in `body_name` itself).
+        use ssh_frame::Body;
+        assert_eq!(body_name(&None), "(empty body)");
+        assert_eq!(body_name(&Some(Body::Hello(Box::default()))), "hello");
+        assert_eq!(
+            body_name(&Some(Body::HelloResponse(Box::default()))),
+            "hello_response"
+        );
+        assert_eq!(body_name(&Some(Body::Error(Box::default()))), "error");
+        assert_eq!(body_name(&Some(Body::Close(Box::default()))), "close");
+        assert_eq!(
+            body_name(&Some(Body::ListRefs(Box::default()))),
+            "list_refs"
+        );
+        assert_eq!(
+            body_name(&Some(Body::ListRefsResponse(Box::default()))),
+            "list_refs_response"
+        );
+        assert_eq!(body_name(&Some(Body::ReadRef(Box::default()))), "read_ref");
+        assert_eq!(
+            body_name(&Some(Body::ReadRefResponse(Box::default()))),
+            "read_ref_response"
+        );
+        assert_eq!(
+            body_name(&Some(Body::UpdateRef(Box::default()))),
+            "update_ref"
+        );
+        assert_eq!(
+            body_name(&Some(Body::UpdateRefResponse(Box::default()))),
+            "update_ref_response"
+        );
+        assert_eq!(
+            body_name(&Some(Body::PackExists(Box::default()))),
+            "pack_exists"
+        );
+        assert_eq!(
+            body_name(&Some(Body::PackExistsResponse(Box::default()))),
+            "pack_exists_response"
+        );
+        assert_eq!(
+            body_name(&Some(Body::UploadPack(Box::default()))),
+            "upload_pack"
+        );
+        assert_eq!(
+            body_name(&Some(Body::UploadPackResponse(Box::default()))),
+            "upload_pack_response"
+        );
+        assert_eq!(
+            body_name(&Some(Body::DownloadPack(Box::default()))),
+            "download_pack"
+        );
+        assert_eq!(
+            body_name(&Some(Body::DownloadPackHeader(Box::default()))),
+            "download_pack_header"
+        );
+        assert_eq!(
+            body_name(&Some(Body::PackChunk(Box::default()))),
+            "pack_chunk"
+        );
     }
 
     // --- build_ssh_command argv wiring (issue #389) ----------------------

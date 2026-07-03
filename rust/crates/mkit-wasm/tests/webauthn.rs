@@ -11,7 +11,7 @@
 //!
 //! We have no published (authenticatorData, clientDataJSON, signature)
 //! golden triple (authenticator secrets are per-device), so — exactly
-//! like `mkit-attest`'s `webauthn_compat_compressed_and_uncompressed`
+//! like `mkit-attest`'s `webauthn_shape_self_consistency_compressed_and_uncompressed`
 //! test — we forge the assertion with the deterministic P-256 signer and
 //! assert the wrapping verifies through the wasm exports. Tests run on
 //! native: the wasm-bindgen wrappers delegate to the same Rust functions

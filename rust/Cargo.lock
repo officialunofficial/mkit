@@ -3133,6 +3133,7 @@ dependencies = [
  "mkit-core",
  "openpgp-card",
  "p256 0.13.2",
+ "regex",
  "security-framework",
  "sha2 0.10.9",
  "tempfile",

@@ -354,6 +354,11 @@ mod tests {
 
     #[test]
     fn attestation_id_stable_across_equivalent_envelopes() {
+        // `b` is built independently (not `a.clone()`) so this actually
+        // proves `attestation_id` is a pure function of an envelope's
+        // *content* — cloning `a` would only prove BLAKE3 is a function
+        // of its own bytes, which is true of any hash regardless of
+        // whether `attestation_id` reads the right fields.
         let a = Envelope {
             payload_type: PAYLOAD_TYPE_IN_TOTO.into(),
             payload: b"{}".to_vec(),
@@ -362,7 +367,14 @@ mod tests {
                 sig: vec![1],
             }],
         };
-        let b = a.clone();
+        let b = Envelope {
+            payload_type: PAYLOAD_TYPE_IN_TOTO.to_string(),
+            payload: "{}".as_bytes().to_vec(),
+            signatures: vec![Sig {
+                keyid: String::from("k"),
+                sig: [1].to_vec(),
+            }],
+        };
         assert_eq!(a.attestation_id().unwrap(), b.attestation_id().unwrap());
     }
 }

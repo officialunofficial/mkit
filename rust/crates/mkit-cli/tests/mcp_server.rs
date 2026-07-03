@@ -242,10 +242,26 @@ fn full_workflow_init_to_log() {
     );
 
     // Attestation: produce one, then inspect the commit object.
+    // `mkit attest` prints `attested <64-hex att-id> → <path> (<n>
+    // signature(s))` to stderr (surfaced as the tool text since stdout is
+    // empty) — pin that shape instead of a substring-or-length guess.
     let att = ok(&mut client, "mkit_attest", &json!({ "repo_path": repo }));
     assert!(
-        att.to_lowercase().contains("att") || att.len() >= 64,
-        "attest: {att}"
+        att.starts_with("attested ") && att.contains(" signature(s))"),
+        "attest: unexpected output shape: {att}"
+    );
+    let att_id = att
+        .strip_prefix("attested ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_default();
+    assert_eq!(
+        att_id.len(),
+        64,
+        "att-id should be a 64-char hex hash: {att}"
+    );
+    assert!(
+        att_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "att-id should be hex: {att}"
     );
     let shown = ok(
         &mut client,

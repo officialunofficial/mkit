@@ -46,7 +46,7 @@ verification path. Key files:
 | `rust/crates/mkit-attest/src/webauthn.rs` | `verify_webauthn_wrapping_with_policy(pae, wrapping, pubkey_sec1, sig_compact, policy)` + permissive `verify_webauthn_wrapping`; `WebAuthnWrapping{authenticator_data, client_data_json}`; `WebAuthnPolicy`; `build_client_data_json`; `from_b64url_fields`. **30+ tests.** |
 | `rust/crates/mkit-attest/src/signer_p256.rs` | `verify_p256(pubkey_sec1, msg, sig_compact)` — low-S enforced, SEC1 33/65-byte keys. |
 | `rust/crates/mkit-attest/src/envelope.rs` | `pae_of(payload_type, payload)` — DSSE PAE. |
-| `rust/crates/mkit-attest/tests/golden_p256.rs` | `webauthn_compat_compressed_and_uncompressed()` interop test — signs `authenticatorData ‖ SHA-256(clientDataJSON)` and verifies. |
+| `rust/crates/mkit-attest/tests/golden_p256.rs` | `webauthn_shape_self_consistency_compressed_and_uncompressed()` shape test (self-signed, no published browser vector) — signs `authenticatorData ‖ SHA-256(clientDataJSON)` and verifies. |
 
 The verifier already does the full WebAuthn two-layer check (SPEC-EXTERNAL-SIGNER
 §6.1): `type == "webauthn.get"`, `challenge == base64url-nopad(PAE)`,

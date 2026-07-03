@@ -28,6 +28,28 @@ fn read_repo_file(rel: &str) -> String {
         .unwrap_or_else(|e| panic!("read {} ({}): {e}", rel, path.display()))
 }
 
+/// True iff `needle` occurs in `haystack` as a whole token: the
+/// characters immediately before and after the match (if any) are not
+/// alphanumeric/hyphen. Plain `.contains()` would let a short command
+/// name like `"rm"` match inside an unrelated word (e.g. "perform"),
+/// so this pins word-boundary coverage instead.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    fn is_word_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-'
+    }
+    haystack.match_indices(needle).any(|(idx, m)| {
+        let before_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let after_ok = haystack[idx + m.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word_char(c));
+        before_ok && after_ok
+    })
+}
+
 /// The canonical subcommand list per `docs/CLI.md`. Keep in sync with
 /// the CLI reference when adding commands.
 const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
@@ -93,7 +115,7 @@ fn help_lists_every_documented_subcommand() {
     let text = String::from_utf8(output.stdout).expect("stdout is utf-8");
     for cmd in DOCUMENTED_SUBCOMMANDS {
         assert!(
-            text.contains(cmd),
+            contains_word(&text, cmd),
             "`mkit help` output is missing documented subcommand '{cmd}'"
         );
     }
@@ -131,7 +153,7 @@ fn completions_cover_every_subcommand() {
         let text = read_repo_file(file);
         for cmd in DOCUMENTED_SUBCOMMANDS {
             assert!(
-                text.contains(cmd),
+                contains_word(&text, cmd),
                 "{name} completion ({file}) is missing documented subcommand '{cmd}'"
             );
         }
