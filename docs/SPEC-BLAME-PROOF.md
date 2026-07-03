@@ -217,15 +217,15 @@ Shown here in JCS member order (alphabetical):
 | Field | Type / encoding | Meaning |
 |---|---|---|
 | `v` | `u32`, literal `1` for this spec | Predicate format version. Lets v2 (§8.3) swap the ancestry representation without an envelope break. |
-| `commit` | hex64 | `C`, the blamed commit. |
+| `commit` | hex64 | `C`, the blamed commit, as its **derived identity** (§6.3a) — `BLAKE3(commit_signing_bytes(commitHeader))` — not the commit's store object id. |
 | `path` | UTF-8 string | Repo-relative path of the blamed file (forward slashes, matching worktree path conventions elsewhere in mkit). |
 | `blob` | hex64 | The blamed file's blob object id at `C` — `ChunkedBlob` id (SPEC-MERKLE-OBJECTS §2) if chunked, else the flat blob id (SPEC-OBJECTS §10). Must equal the innermost `treePath` entry's `childId`. |
 | `chunkLayout` | `null` \| `{ "totalSize": u64, "chunkSize": u32 }` | `null` when `blob` is a flat (unchunked) `Blob` — recompute its id per SPEC-OBJECTS §10 directly from the file bytes. Otherwise the two `ChunkedBlob` metadata fields (SPEC-MERKLE-OBJECTS §3.1): `chunkSize = 0` means content-defined chunking (SPEC-FASTCDC, fully deterministic given the file bytes — no chunk boundary list is needed since the gear-table seed and cut parameters are normative constants); `chunkSize > 0` means fixed-size chunking at that width. Either way the verifier re-derives the chunk list and `compute_chunked_id` from the file bytes alone. |
-| `attributions` | array of `[u32 lineNum, hex64 originCommit]` pairs | Dense, 1-based, one entry per line of the file at `C`, in line order. `lineNum` values are exactly `1..=N` where `N` is the number of lines the verifier gets by splitting the provided file bytes (§4) — a gap or duplicate is a proof-shape error, not silently ignored. |
+| `attributions` | array of `[u32 lineNum, hex64 originCommit]` pairs | Dense, 1-based, one entry per line of the file at `C`, in line order. `lineNum` values are exactly `1..=N` where `N` is the number of lines the verifier gets by splitting the provided file bytes (§4) — a gap or duplicate is a proof-shape error, not silently ignored. Each `originCommit` is that origin's **derived identity** (§6.3a). |
 | `blameOptions` | object, see §9 | The `BlameOptions` the attributor ran blame with, so a verifier knows which attribution semantics (`-w`, `-M`, `-C`, ignore-revs, first-parent) produced this mapping. |
 | `treePath` | array, leaf → root, see §6.2 | BMT inclusion proof chain from the blob's tree entry up to `commitHeader.tree`. |
-| `commitHeader` | object, see §6.3 | The preimage fields of `commit_signing_bytes` for `C` — rehashing them must reproduce `commit`. |
-| `origins` | array of `{ "commit": hex64, "header": <commitHeader shape> }` | Deduplicated headers for every commit reachable while walking ancestry (§8) for each distinct origin in `attributions`, plus every commit on the connecting path(s) to `C`. Typically shared across multiple origins, so the bundle is the *union* of paths, not one path per origin. |
+| `commitHeader` | object, see §6.3 | The preimage fields of `commit_signing_bytes` for `C` — rehashing them must reproduce `commit` (the derived identity, §6.3a). |
+| `origins` | array of `{ "commit": hex64, "header": <commitHeader shape> }` | Deduplicated headers for every commit reachable while walking ancestry (§8) for each distinct origin in `attributions`, plus every commit on the connecting path(s) to `C`. Typically shared across multiple origins, so the bundle is the *union* of paths, not one path per origin. `commit` is the entry's derived identity (§6.3a); its `header` must rehash to it. |
 
 ### 6.2 `treePath` entries
 
@@ -244,13 +244,13 @@ to the tree commit `C` points at, **leaf → root** order:
 ### 6.3 `commitHeader` / `origins[].header`
 
 Every field `sign::commit_signing_bytes` folds into the signing
-preimage, so that rehashing this object reproduces the commit id
-exactly:
+preimage, so that rehashing this object reproduces the commit's
+**derived identity** (§6.3a) exactly:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `tree` | hex64 | `Commit.tree_hash`. |
-| `parents` | array of hex64 | `Commit.parents`, in order (order matters — it is part of the signing bytes). |
+| `parents` | array of hex64 | `C`'s parents, in order (order matters — it is part of the signing bytes), each encoded as the parent's own **derived identity** (§6.3a), not the raw `Commit.parents` store hash. |
 | `author` | `{ "bytes": hex, "kind": u8 }` | `Commit.author` (`Identity`): `kind` is `IdentityKind`'s raw discriminant (`1`=Ed25519, `2`=DidKey, `3`=Opaque); `bytes` is the identity payload (32-byte Ed25519 pubkey, or arbitrary bytes for the other kinds). |
 | `message` | base64 (standard alphabet) | `Commit.message`. Base64, not hex, because the message is arbitrary-length text/bytes, not a fixed-width digest — matching the DSSE envelope's own `payload`/`sig` convention (`mkit-attest::envelope`), not the fixed-hex convention used for hashes and keys elsewhere in this document. |
 | `timestamp` | `u64` | `Commit.timestamp`. |
@@ -264,6 +264,44 @@ not needed to prove `commit` is correct. The issue's initial D4 sketch
 omitted `message` from this list; it is required here because leaving
 it out would make it impossible to reproduce `commit_signing_bytes`
 byte-for-byte for any commit with a non-empty message.
+
+### 6.3a Derived commit identity
+
+A commit's real store object id is `BLAKE3` of its **full** serialized
+bytes (SPEC-OBJECTS §10 / `serialize::write_commit`), which include
+`Commit.signature`, `Commit.message_hash`, and `Commit.content_digest`
+— the three fields §6.3 deliberately omits from `commitHeader`. A
+verifier holding only a header therefore can never reconstruct the
+real object id. Every commit-identity field in this predicate —
+`commit`, `origins[].commit`, each `attributions` origin, and every
+`parents` entry inside a header — is instead the proof's own **derived
+identity**:
+
+```
+derived_id(header) = BLAKE3(commit_signing_bytes(header))
+```
+
+i.e. the plain BLAKE3 of the SPEC-SIGNING §3 signing-byte
+serialization rebuilt from the header, where the header's `parents`
+are themselves derived identities — the construction is applied
+recursively from the root commits up, so the whole identity domain is
+internally consistent without any reference to store object ids.
+
+Security rationale: `commit_signing_bytes` is exactly the byte string
+the commit's Ed25519 signature attests (SPEC-SIGNING §3), so binding
+the proof to `derived_id` binds it to precisely the content the
+commit's own signature covers — nothing weaker. The three omitted
+fields are unsigned annotations plus the signature itself, none of
+which carry attribution-relevant content. And because the derived
+preimage includes `tree`, the tree binding of §7 step 2 (blob →
+tree-path → `commitHeader.tree`) is unaffected: an attacker who swaps
+`tree` changes the derived identity and fails step 3.
+
+Carrying `parents` as derived identities is what lets a store-less
+verifier (§8.1) match a header's parent pointers directly against
+`origins[]` keys, without ever resolving a real object id. The
+trade-off for store-holding verifiers is described in §8.1's shortcut
+note.
 
 ## 7. Verification algorithm (full verifier, holds an object store)
 
@@ -284,10 +322,13 @@ Given `(predicate, fileBytes)`:
 3. **Commit identity.** Rebuild `sign::commit_signing_bytes` from
    `commitHeader` (prologue `[0x03, "MKT1", 0x01]` + `tree` + `parents`
    (count-prefixed) + `author` + `message` (length-prefixed) +
-   `timestamp` + `signer`), hash it, and check it equals `predicate.commit`.
-   This is the step that binds the verified tree root (step 2) to a
-   specific commit id — an attacker who swapped `tree` here would fail
-   this check even if steps 1–2 passed against a different tree.
+   `timestamp` + `signer`), hash it, and check it equals
+   `predicate.commit` — the **derived identity** of §6.3a, not the
+   commit's store object id (which is unreconstructable from the
+   header by design). This is the step that binds the verified tree
+   root (step 2) to a specific commit identity — an attacker who
+   swapped `tree` here would fail this check even if steps 1–2 passed
+   against a different tree.
 4. **Signature.** Verify the enclosing DSSE envelope against a trust
    registry via the existing `mkit_attest::verify::verify_envelope` /
    `Registry` path (SPEC-ATTESTATIONS.md §4–§6). At least one signature
@@ -324,14 +365,15 @@ alone ancestry.
 
 For each distinct origin `O` named in `attributions`:
 
-1. Recompute `O`'s claimed commit id from `origins[]`'s matching
-   `header` entry the same way as verification step 3 (§7) — the
-   header's rehash MUST equal its claimed `commit` hex.
+1. Recompute `O`'s claimed derived identity (§6.3a) from `origins[]`'s
+   matching `header` entry the same way as verification step 3 (§7) —
+   the header's rehash MUST equal its claimed `commit` hex.
 2. Starting from `predicate.commit`'s already-verified header (step 3
-   of §7), walk `parents` pointers through the `origins[]` map (keyed
-   by commit hex) until reaching `O`, or `O == predicate.commit`
-   itself (a line attributed to `C` in its own commit is a trivial,
-   always-true case).
+   of §7), walk `parents` pointers — themselves derived identities
+   (§6.3a) — through the `origins[]` map (keyed by derived-identity
+   hex) until reaching `O`, or `O == predicate.commit` itself (a line
+   attributed to `C` in its own commit is a trivial, always-true
+   case).
 3. If the walk exhausts reachable headers without finding `O`, the
    proof fails ancestry for that origin. The prover is expected to
    include every header on the connecting path(s) from `C` down to
@@ -341,10 +383,16 @@ For each distinct origin `O` named in `attributions`:
    the issue's design notes call out.
 
 A **store-holding** verifier MAY skip `origins[]`/the walk entirely
-and instead call `ops::merge::is_ancestor(store, origin, commit)`
-directly against its own object store. Both paths are equally valid
-implementations of "prove `O ⪯ C`"; `origins[]` exists so a
-store-less verifier can do the same check.
+and instead check ancestry against its own object store via
+`ops::merge::is_ancestor`. Because the predicate carries derived
+identities (§6.3a) while `is_ancestor` addresses real store hashes,
+the verifier must first resolve each derived identity back to a real
+commit hash by scanning its store's commit objects and rehashing each
+one's header — `O(store size)`, a known v1 cost (the predicate
+deliberately carries no real-hash anchor) — and only then call
+`is_ancestor(store, real_origin, real_commit)`. Both paths are
+equally valid implementations of "prove `O ⪯ C`"; `origins[]` exists
+so a store-less verifier can do the same check.
 
 This resolves the #349/#361 (MMR proof-size) coupling for v1 the same
 way the issue's decision does: **no MMR proofs ship in v1 at all**, so
@@ -470,7 +518,7 @@ at "the signature verifies."
 | PR | Scope | Status |
 |---|---|---|
 | A (this document) | `docs/SPEC-BLAME-PROOF.md`; `SPEC-MERKLE-OBJECTS.md` §5 freeze | Landing now |
-| B | `mkit-core`: `build_blame_proof` / `verify_blame_proof`, golden fixture repo, tamper-matrix tests (flipped attribution, dropped tree-path step, swapped origin header, truncated ancestry path, wrong file bytes — each a distinct error variant per §7) | Not started |
+| B | `mkit-core`: `build_blame_proof` / `verify_blame_proof`, golden fixture repo, tamper-matrix tests (flipped attribution, dropped tree-path step, swapped origin header, truncated ancestry path, wrong file bytes — each a distinct error variant per §7) | Landed (`ops::blame::proof`, same change as the §6.3a amendment) |
 | C | `mkit-attest`/`mkit-cli`: predicate registration, `blame --prove`, `verify-attest` deep-verify hook, `cli_wire.rs` end-to-end test, `docs/CLI.md` update | Not started |
 
 Hard prerequisite already satisfied: #458 (merge-aware blame) landed,
@@ -491,3 +539,4 @@ versioning decision.
 | Version | Changes |
 |---------|---------|
 | 1 | Initial design spec: trust model, predicate schema, verification algorithm, v1 chain-walk ancestry + v2 accumulator roadmap, pinned `BlameOptions`, CLI surface, non-goals. No implementation yet (PR A of #495). |
+| 1 (PR B amendment) | Derived commit identity (§6.3a), landed with the `mkit-core` implementation: `commit` / `origins[].commit` / attribution origins / header `parents` are `BLAKE3(commit_signing_bytes(header))`, not store object ids — the real object id hashes the full serialized commit (`signature`, `message_hash`, `content_digest`) which `commitHeader` omits by design, so it is unreconstructable from a header. §6.1/§6.3/§7 step 3/§8.1 updated accordingly; §8.1's store-holding shortcut now notes the derived→real resolution scan (`O(store size)`, known v1 cost). Same `v: 1` — this clarifies the identity domain before any envelope ever shipped; no issued proof is invalidated. |

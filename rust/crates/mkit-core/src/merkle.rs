@@ -288,6 +288,21 @@ pub fn compute_tree_id(tree: &Tree) -> Hash {
     domain_digest(TREE_TYPE_DOMAIN, &tree_inner_root(tree))
 }
 
+/// The `Tree` object id derivable from a bare inner root alone, without the
+/// full `Tree` struct — i.e. `domain_digest(TREE_TYPE_DOMAIN, inner_root)`.
+///
+/// This is [`compute_tree_id`]'s formula split out for a verifier that only
+/// holds a `treePath` entry's `innerRoot` (SPEC-MERKLE-OBJECTS §5 / a BMT
+/// inclusion proof), not the full reconstructed `Tree`. First consumer:
+/// `SPEC-BLAME-PROOF.md` §7 step 2, which walks a `treePath` leaf → root and
+/// at each level must derive "this level's own tree id" from just the
+/// level's `innerRoot` to compare against the next level's `childId` (or the
+/// root against `commitHeader.tree`).
+#[must_use]
+pub fn tree_id_from_inner_root(inner_root: &Hash) -> Hash {
+    domain_digest(TREE_TYPE_DOMAIN, inner_root)
+}
+
 /// The id of the empty `Tree` (`entries = []`) — a real, common object.
 /// Pinned from a test run (see `empty_tree_id_matches_constant`); the
 /// empty BMT root is `H(leaf_count ‖ H(""))`, NOT `H(0 ‖ 0)`.
@@ -483,6 +498,16 @@ mod tests {
         verify_tree_inclusion_proof(&root, &t.entries[1], pos, &proof).unwrap();
         let wrong = entry(b"b", EntryMode::Blob, 2);
         assert!(verify_tree_inclusion_proof(&root, &wrong, pos, &proof).is_err());
+    }
+
+    #[test]
+    fn tree_id_from_inner_root_matches_compute_tree_id() {
+        let t = tree(vec![
+            entry(b"a", EntryMode::Blob, 1),
+            entry(b"b", EntryMode::Tree, 2),
+        ]);
+        let root = tree_inner_root(&t);
+        assert_eq!(tree_id_from_inner_root(&root), compute_tree_id(&t));
     }
 
     #[test]

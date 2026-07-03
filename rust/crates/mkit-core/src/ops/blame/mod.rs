@@ -28,9 +28,16 @@ use crate::object::{EntryMode, Identity, Object};
 use crate::store::ObjectStore;
 
 mod move_copy;
+pub mod proof;
 mod walk;
 
 use walk::{WalkCtx, attribute_commit, build_file_dag, topo_order};
+
+pub use proof::{
+    BLAME_PROOF_VERSION, BlameOptionsRecord, BlameProofError, BlameProofOutcome,
+    BlameProofPredicate, ChunkLayout, CommitHeader, CopyRecord, MoveRecord, OriginHeader,
+    TreePathEntry, build_blame_proof, verify_blame_proof,
+};
 
 /// Hard cap on the per-side line count fed to the LCS matcher. The DP
 /// table is O(m*n) u32 entries: at 100 000 lines × 100 000 lines this
