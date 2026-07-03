@@ -3028,6 +3028,7 @@ dependencies = [
 name = "mkit-cli"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "buffa",
  "clap",
  "commonware-codec",

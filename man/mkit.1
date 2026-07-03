@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl Fl ignore-rev-precise Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl Fl ignore-rev-precise Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Oo Fl Fl prove Oo Fl o Ar path Oc Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -1018,6 +1018,29 @@ instead emits JSONL with
 and
 .Cm text
 keys.
+.Fl Fl prove
+.Pq optionally Fl o Ar path
+.Pq SPEC-BLAME-PROOF.md
+builds a tamper-evident proof of the whole file's blame result at the
+resolved commit instead of printing blame text: a signed DSSE envelope
+whose predicate binds the per-line attributions to the blamed file's
+blob id, the commit's own signed identity, and an ancestry bundle
+proving every distinct origin commit is really an ancestor. The
+envelope's subject is the blamed file's blob digest (not the commit),
+so it is written to a standalone file,
+.Ar file Ns Cm .blame-proof.json
+by default
+.Pq Fl o Ar path No overrides ,
+rather than into the commit's attestation set. Signing reuses
+.Cm mkit attest Ns 's
+signer-selection flags
+.Pq Fl Fl algorithm , Fl Fl signer , Fl Fl external-signer-arg , Fl Fl additional-signer .
+Cannot be combined with
+.Fl Fl reverse
+or
+.Fl L .
+Verify with
+.Cm mkit verify-attest Fl Fl envelope-file Ar path Fl Fl subject-file Ar file .
 .It Cm verify Ar rev
 Verify the signature on a commit, remix, or signed tag.
 .Ar rev
@@ -1037,7 +1060,7 @@ the full list
 .Em replaces
 .Cm attest.external_signer_args
 from config rather than appending to it.
-.It Cm verify-attest Oo Fl Fl commit Ar hash Oc Op Fl Fl trust-roots Ar path Op Fl Fl algorithm Ar filter
+.It Cm verify-attest Oo Fl Fl commit Ar hash Oc Op Fl Fl trust-roots Ar path Op Fl Fl algorithm Ar filter Oo Fl Fl envelope-file Ar path Oc Oo Fl Fl subject-file Ar path Oc
 Verify every attestation attached to the given commit. Returns success
 only if every attached envelope verifies.
 .Fl Fl algorithm
@@ -1046,6 +1069,23 @@ filters which signature lines are
 to the named algorithm; it does NOT change the pass/fail criterion — every
 envelope must still verify regardless of the filter, so it cannot be used to
 require that a specific algorithm signed.
+.Fl Fl envelope-file Ar path
+verifies a single standalone DSSE envelope file directly
+.Pq e.g. a Cm mkit blame Fl Fl prove No output
+instead of listing the commit's attestation set;
+.Fl Fl commit
+is unused in this mode, since a standalone envelope's subject need not be a
+commit hash. After the envelope's signature verifies, if its predicate type
+has a deep-verify hook registered
+.Pq today, only the blame-proof predicate ,
+the predicate is parsed back to its typed form and the hook's checks run
+too, against the file bytes supplied by
+.Fl Fl subject-file Ar path .
+Without
+.Fl Fl subject-file
+a registered hook is skipped
+.Pq noted, not a failure ; with it, a failing deep verification fails
+the whole command.
 .It Cm key Cm generate | Cm list | Cm import | Cm export | Cm delete
 Manage user-scoped keystore keys backed by the platform keystore
 (Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux, Credential

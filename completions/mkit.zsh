@@ -268,6 +268,12 @@ _mkit() {
                         '--ignore-rev-precise[content-addressed ignore-rev fall-through (requires --ignore-rev)]' \
                         '--first-parent[follow only first parents (disable merge-aware blame)]' \
                         '--reverse[walk history forward over a <start>..<end> range]' \
+                        '--prove[emit a signed blame-proof DSSE envelope instead of blame text]' \
+                        '(-o --output)'{-o,--output}'[output path for --prove]:path:_files' \
+                        '--algorithm[--prove signing algorithm]:algorithm:(ed25519 secp256k1 p256)' \
+                        '--signer[--prove signer kind]:kind:(repo-key external keystore)' \
+                        '*--additional-signer[--prove: add a co-signature]:spec:' \
+                        '*--external-signer-arg[--prove: argv token for an external signer]:arg:' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;
@@ -469,6 +475,8 @@ _mkit() {
                         '--commit[commit hash]:hash:' \
                         '--trust-roots[trust roots path]:_files' \
                         '--algorithm[algorithm filter]:alg:' \
+                        '--envelope-file[verify a standalone DSSE envelope (e.g. blame --prove output)]:_files' \
+                        '--subject-file[file bytes for a predicate deep-verify hook]:_files' \
                         '--help[show help]'
                     ;;
             esac

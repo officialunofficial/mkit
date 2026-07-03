@@ -1552,3 +1552,212 @@ fn tag_create_collision_is_rejected() {
         "expected collision diagnostic, got: {stderr}"
     );
 }
+
+// ---------- blame --prove / verify-attest deep verification (#495) -------
+//
+// SPEC-BLAME-PROOF.md D7: `mkit blame --prove` writes a signed DSSE
+// envelope; `mkit verify-attest --envelope-file <path> --subject-file
+// <file>` runs the blame-proof deep-verify hook (envelope signature, then
+// `mkit_core::ops::blame::proof::verify_blame_proof`).
+
+fn hex_lower_495(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    s
+}
+
+/// Build a trust-roots TOML trusting the repo's default ed25519 signing
+/// key (the one `init_repo`'s `mkit keygen` created), which is what `mkit
+/// blame --prove`'s default `--algorithm ed25519 --signer repo-key` signs
+/// with.
+fn blame_prove_trust_roots(td: &Path) -> std::path::PathBuf {
+    use ed25519_dalek::SigningKey;
+    let secret_bytes = fs::read(td.join(".mkit/keys/default.key")).unwrap();
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&secret_bytes);
+    let pk = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
+    let pk_hash = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
+    let toml = format!(
+        "[[trust_root]]\nkeyid = \"blake3:{}\"\nkind = \"ed25519\"\npubkey_hex = \"{}\"\n",
+        pk_hash,
+        hex_lower_495(&pk)
+    );
+    let path = td.join(".mkit/blame-prove-trust-roots.toml");
+    fs::write(&path, toml).unwrap();
+    path
+}
+
+#[test]
+fn blame_prove_then_verify_attest_envelope_file_passes() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"one\ntwo\nthree\n", "c1");
+    make_commit(td.path(), "f.txt", b"one\nTWO\nthree\n", "c2");
+
+    let prove = run_in(td.path(), &["blame", "--prove", "f.txt"]);
+    assert!(
+        prove.status.success(),
+        "blame --prove failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&prove.stdout),
+        String::from_utf8_lossy(&prove.stderr)
+    );
+
+    let proof_path = td.path().join("f.txt.blame-proof.json");
+    assert!(
+        proof_path.exists(),
+        "default output path <file>.blame-proof.json was not written"
+    );
+
+    let trust_roots = blame_prove_trust_roots(td.path());
+    let verify = run_in(
+        td.path(),
+        &[
+            "verify-attest",
+            "--envelope-file",
+            proof_path.to_str().unwrap(),
+            "--subject-file",
+            "f.txt",
+            "--trust-roots",
+            trust_roots.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        verify.status.success(),
+        "verify-attest --envelope-file failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let stderr = String::from_utf8(verify.stderr).unwrap();
+    assert!(
+        stderr.contains("blame-proof deep verification passed"),
+        "expected deep-verify pass note, got: {stderr}"
+    );
+}
+
+#[test]
+fn blame_prove_verify_attest_corrupt_payload_byte_fails() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"one\ntwo\nthree\n", "c1");
+
+    let prove = run_in(td.path(), &["blame", "--prove", "f.txt"]);
+    assert!(prove.status.success(), "blame --prove failed: {prove:?}");
+    let proof_path = td.path().join("f.txt.blame-proof.json");
+
+    // Flip one byte inside the base64-encoded DSSE `"payload"` field: the
+    // envelope stays syntactically valid JSON, but the PAE the enclosed
+    // signature covers no longer matches, so signature verification must
+    // fail before the deep-verify hook is ever reached.
+    let mut bytes = fs::read(&proof_path).unwrap();
+    let text = String::from_utf8(bytes.clone()).expect("envelope is UTF-8 JSON");
+    let key = "\"payload\":\"";
+    let start = text.find(key).expect("envelope has a payload field") + key.len();
+    bytes[start] = if bytes[start] == b'A' { b'B' } else { b'A' };
+    fs::write(&proof_path, &bytes).unwrap();
+
+    let trust_roots = blame_prove_trust_roots(td.path());
+    let verify = run_in(
+        td.path(),
+        &[
+            "verify-attest",
+            "--envelope-file",
+            proof_path.to_str().unwrap(),
+            "--subject-file",
+            "f.txt",
+            "--trust-roots",
+            trust_roots.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !verify.status.success(),
+        "corrupted envelope must not verify: {verify:?}"
+    );
+}
+
+#[test]
+fn blame_prove_verify_attest_wrong_subject_file_fails_blob_mismatch() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"one\ntwo\nthree\n", "c1");
+
+    let prove = run_in(td.path(), &["blame", "--prove", "f.txt"]);
+    assert!(prove.status.success(), "blame --prove failed: {prove:?}");
+    let proof_path = td.path().join("f.txt.blame-proof.json");
+
+    let wrong = td.path().join("wrong.txt");
+    fs::write(&wrong, b"totally different content\n").unwrap();
+
+    let trust_roots = blame_prove_trust_roots(td.path());
+    let verify = run_in(
+        td.path(),
+        &[
+            "verify-attest",
+            "--envelope-file",
+            proof_path.to_str().unwrap(),
+            "--subject-file",
+            wrong.to_str().unwrap(),
+            "--trust-roots",
+            trust_roots.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !verify.status.success(),
+        "wrong subject bytes must not verify: {verify:?}"
+    );
+    let stderr = String::from_utf8(verify.stderr).unwrap();
+    assert!(
+        stderr.contains("does not match predicate.blob"),
+        "expected blob-mismatch diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn blame_prove_default_output_path_uses_file_name() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\n", "c1");
+    let out_path = td.path().join("my-proof.json");
+
+    let prove = run_in(
+        td.path(),
+        &[
+            "blame",
+            "--prove",
+            "-o",
+            out_path.to_str().unwrap(),
+            "f.txt",
+        ],
+    );
+    assert!(prove.status.success(), "blame --prove -o failed: {prove:?}");
+    assert!(out_path.exists(), "-o output path was not written");
+    assert!(
+        !td.path().join("f.txt.blame-proof.json").exists(),
+        "-o must override the default output path, not add to it"
+    );
+}
+
+#[test]
+fn blame_prove_rejects_reverse_and_line_range() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\nb\n", "c1");
+
+    let with_reverse = run_in(
+        td.path(),
+        &["blame", "--prove", "--reverse", "HEAD..HEAD", "f.txt"],
+    );
+    assert!(
+        !with_reverse.status.success(),
+        "--prove + --reverse must be rejected"
+    );
+
+    let with_lines = run_in(td.path(), &["blame", "--prove", "-L", "1,1", "f.txt"]);
+    assert!(
+        !with_lines.status.success(),
+        "--prove + -L must be rejected"
+    );
+}

@@ -91,6 +91,11 @@ thiserror = "2"
 # chain: serde_json is already in this binary's normal dependency graph
 # via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
 serde_json = "1"
+# `commands::blame_proof`: base64 (standard alphabet) encoding for the
+# blame-proof predicate's `commitHeader.message` field (SPEC-BLAME-PROOF §6.3)
+# — zero new supply chain, mkit-attest already depends on the same version
+# for its DSSE envelope's `payload`/`sig` fields.
+base64 = "0.22"
 # `mkit self update` (commands/self_update.rs): release download over
 # rustls (same feature set + version as mkit-transport-http — zero new
 # TLS supply chain), sha256 sidecar check, and single-member tar.gz

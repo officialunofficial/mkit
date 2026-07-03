@@ -163,6 +163,18 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l first-parent -d "Follow only first parents (disable merge-aware blame)"
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l reverse -d "Walk history forward over a <start>..<end> range"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l prove -d "Emit a signed blame-proof DSSE envelope instead of blame text"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -s o -l output -d "Output path for --prove (default <file>.blame-proof.json)" -r -F
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l algorithm -d "--prove signing algorithm (ed25519|secp256k1|p256)" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l signer -d "--prove signer kind (repo-key|external|keystore)" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l additional-signer -d "--prove: add a co-signature" -r
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l external-signer-arg -d "--prove: argv token for an external signer" -r
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l oneline -d "Compact one-line log"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
@@ -310,6 +322,10 @@ complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l trust-roots -d "Trust roots path" -r
 complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l algorithm -d "Algorithm filter" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
+    -l envelope-file -d "Verify a standalone DSSE envelope (e.g. blame --prove output)" -r -F
+complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
+    -l subject-file -d "File bytes for a predicate deep-verify hook" -r -F
 
 # pack-shard flags.
 complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \

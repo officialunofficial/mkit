@@ -356,6 +356,24 @@ History / commits:
   `-L` compose with `--reverse`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
+  `--prove [-o <path>]` (SPEC-BLAME-PROOF.md, D7) builds a tamper-evident
+  proof of the *whole file's* blame result at the resolved commit — a
+  [SPEC-BLAME-PROOF §6](SPEC-BLAME-PROOF.md) predicate wrapped in a signed
+  DSSE envelope — instead of printing blame text. The predicate binds the
+  per-line attributions to the blamed file's blob id (via a BMT tree-path up
+  to the commit's tree), the commit's own signed identity, and an ancestry
+  bundle proving every distinct origin commit is really an ancestor;
+  see the spec for the full trust model and verification algorithm. The
+  envelope's subject is the blamed file's blob digest (name = the
+  repo-relative path) — not the commit — so it is written to a standalone
+  file, `<file>.blame-proof.json` by default (override with `-o <path>`),
+  rather than into `.mkit/attestations/<commit>/`. Signing reuses `mkit
+  attest`'s signer-selection flags verbatim: `--algorithm`, `--signer`,
+  `--external-signer-arg`, `--additional-signer`. Incompatible with
+  `--reverse` and `-L` — the proof always covers every line of the file (a
+  verifier is assumed to hold the exact file bytes and splits lines itself,
+  per the spec's D3). Verify with `mkit verify-attest --envelope-file
+  <path> --subject-file <file>` (see below).
 - `mkit verify <rev>` — verify the signature on a commit, remix, or
   signed tag. `<rev>` is an object hash, a branch/tag name, or `HEAD`; a
   tag name resolves to its annotated-tag object when one exists.
@@ -527,11 +545,38 @@ Attestations:
   - `--algorithm <alg>` — filter reported signatures by algorithm
     (`ed25519`, `secp256k1`, `p256`). Unmatched signatures are
     omitted from the report.
+  - `--envelope-file <path>` — verify a single standalone DSSE envelope
+    file directly (e.g. a `mkit blame --prove` output) instead of listing
+    `.mkit/attestations/<commit>/`. `--commit` is not used in this mode —
+    a standalone envelope's subject need not be a commit hash (SPEC-BLAME-PROOF.md,
+    D2: a blame-proof's subject is the blamed file's blob digest). After the
+    envelope's signature verifies, if its `predicateType` has a
+    predicate-specific **deep-verify hook** registered, the predicate is
+    parsed back to its typed form and the hook's checks run too — today
+    the only hook is the blame-proof predicate
+    (`https://github.com/officialunofficial/mkit/spec/predicate/blame-proof/v1`),
+    which runs `docs/SPEC-BLAME-PROOF.md` §7 steps 1–3 and 5 against
+    `--subject-file`.
+  - `--subject-file <path>` — file bytes for a deep-verify hook to check
+    the predicate against (SPEC-BLAME-PROOF.md §4/D3: for a blame-proof
+    predicate this must be the exact file content the proof was built
+    over). Only meaningful with `--envelope-file`. Without it, a
+    registered hook is *skipped* (noted, not a failure — the signature
+    still had to verify); with it, a failing deep verification (corrupt
+    predicate, wrong subject bytes, a broken tree-path, an untrusted
+    ancestry claim, …) fails the whole command. This flag name is this
+    PR's decision — the spec doc deliberately leaves the exact verifier-input
+    flag open (§10).
 
-  Example:
+  Examples:
 
   ```sh
   mkit verify-attest --trust-roots ~/.config/mkit/trust-roots.toml
+
+  # Verify a `mkit blame --prove` output against the file it was built over.
+  mkit verify-attest --envelope-file src/lib.rs.blame-proof.json \
+                      --subject-file src/lib.rs \
+                      --trust-roots ~/.config/mkit/trust-roots.toml
   ```
 
 Branches / refs:

@@ -9,6 +9,7 @@ pub mod attest;
 pub mod attest_factory;
 pub mod bisect;
 pub mod blame;
+pub mod blame_proof;
 pub mod branch;
 pub mod cat;
 pub mod cat_file;

@@ -84,7 +84,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet -S --gpg-sign --no-verify --no-edit --help" -- "$cur") )
             ;;
         blame)
-            COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --prove -o --output --algorithm --signer --additional-signer --external-signer-arg --help" -- "$cur") )
             ;;
         log)
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
@@ -154,7 +154,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--commit --algorithm --signer --predicate-type --predicate-file --additional-signer --external-signer-arg --help" -- "$cur") )
             ;;
         verify-attest)
-            COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --envelope-file --subject-file --help" -- "$cur") )
             ;;
         switch)
             COMPREPLY=( $(compgen -W "-c -C --help" -- "$cur") )

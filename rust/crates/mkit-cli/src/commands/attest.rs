@@ -121,20 +121,70 @@ impl Args {
     /// `None` means "flag was not passed; fall back to config";
     /// `Some(_)` means "flag was passed with these values".
     fn external_signer_args(&self) -> Option<Vec<String>> {
-        if self.external_signer_args_vec.is_empty() {
-            None
-        } else {
-            Some(self.external_signer_args_vec.clone())
+        external_signer_args_from_vec(&self.external_signer_args_vec)
+    }
+}
+
+/// Shared `--external-signer-arg` flag semantics: an empty repeatable
+/// vec means the flag was never passed (`None` ⇒ fall through to
+/// config); any values present REPLACE the config list. Used by both
+/// `mkit attest` and `mkit blame --prove` (same signer-selection
+/// surface, per `docs/SPEC-BLAME-PROOF.md` §10 / D7).
+pub(crate) fn external_signer_args_from_vec(v: &[String]) -> Option<Vec<String>> {
+    if v.is_empty() { None } else { Some(v.to_vec()) }
+}
+
+/// Build the full ordered signer list (primary, then each
+/// `--additional-signer` in argv order) from already-parsed CLI/config
+/// inputs. Shared by `mkit attest`'s `run()` and `mkit blame --prove`
+/// (D7: "signing uses the same signer selection flags as `mkit attest`").
+///
+/// All `--additional-signer` specs are parsed before any signer is
+/// built (including the primary), so a malformed spec surfaces as a
+/// usage error before any crypto/IO happens.
+///
+/// # Errors
+/// `(message, exit_code)` — a spec parse failure is [`exit::USAGE`]; a
+/// signer-build failure uses [`factory_error_code`].
+pub(crate) fn build_signer_list(
+    root: &Path,
+    cfg: &Config,
+    algorithm: Algorithm,
+    signer_kind: &str,
+    additional_signer_specs: &[String],
+) -> Result<Vec<Box<dyn Signer>>, (String, u8)> {
+    let mut parsed_specs: Vec<SignerSpec> = Vec::with_capacity(additional_signer_specs.len());
+    for spec_str in additional_signer_specs {
+        match parse_signer_spec(spec_str) {
+            Ok(s) => parsed_specs.push(s),
+            Err(e) => return Err((e, exit::USAGE)),
         }
     }
+
+    let primary_signer = attest_factory::build_signer(root, algorithm, signer_kind, cfg)
+        .map_err(|e| (format!("{e}"), factory_error_code(&e)))?;
+
+    let mut signers: Vec<Box<dyn Signer>> = Vec::with_capacity(1 + parsed_specs.len());
+    signers.push(primary_signer);
+    for spec in &parsed_specs {
+        let signer = build_additional_signer(root, spec, cfg)
+            .map_err(|e| (format!("{e}"), factory_error_code(&e)))?;
+        signers.push(signer);
+    }
+    Ok(signers)
 }
 
 /// Parsed `--additional-signer` spec. The `path` field overrides the
 /// per-algorithm key path (for `repo-key`) or the external-signer
 /// binary path (for `external`); if unset we fall back to the
 /// `[attest]` config section just like the primary signer does.
+///
+/// `pub(crate)` (rather than private) so `commands::blame`'s
+/// `--prove` signer selection — which reuses the exact same
+/// `--additional-signer` grammar per `docs/SPEC-BLAME-PROOF.md` §10 (D7)
+/// — can share this parser instead of re-implementing it.
 #[derive(Debug, PartialEq, Eq)]
-struct SignerSpec {
+pub(crate) struct SignerSpec {
     algorithm: Algorithm,
     signer_kind: String,
     path: Option<String>,
@@ -145,7 +195,7 @@ struct SignerSpec {
     args: Option<Vec<String>>,
 }
 
-fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
+pub(crate) fn parse_signer_spec(s: &str) -> Result<SignerSpec, String> {
     let mut algorithm: Option<Algorithm> = None;
     let mut signer_kind: Option<String> = None;
     let mut path: Option<String> = None;
@@ -404,7 +454,7 @@ pub fn run(args: &[String]) -> u8 {
 /// `path` overrides the per-algorithm key path (repo-key) or the
 /// external-signer binary path (external); if unset we fall through to
 /// the same `[attest]` config the primary signer uses.
-fn build_additional_signer(
+pub(crate) fn build_additional_signer(
     root: &Path,
     spec: &SignerSpec,
     base: &Config,

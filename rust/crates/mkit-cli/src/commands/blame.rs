@@ -30,13 +30,25 @@
 //!
 //! Line numbers in the output are always the file's own 1-based numbers,
 //! so a `-L 40,60` slice still prints `40..=60`, matching `git blame -L`.
+//!
+//! `--prove [-o <path>]` (SPEC-BLAME-PROOF.md, D7; issue #495 PR C) builds a
+//! tamper-evident blame-proof predicate for the whole file (via
+//! `mkit_core::ops::blame::proof::build_blame_proof`), wraps it in a signed
+//! DSSE envelope, and writes it to `<file>.blame-proof.json` (or `-o`).
+//! Signing reuses `mkit attest`'s signer-selection flags
+//! (`--algorithm`/`--signer`/`--external-signer-arg`/`--additional-signer`).
+//! Incompatible with `--reverse` and `-L` (the proof always covers every
+//! line of the file at the resolved commit — see the spec's D3). Verify with
+//! `mkit verify-attest --envelope-file <path> --subject-file <file>`.
 
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
+use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement};
 use mkit_core::hash::{self, Hash};
+use mkit_core::ops::blame::proof::build_blame_proof;
 use mkit_core::ops::blame::{
     BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
     format_blame_text,
@@ -44,6 +56,9 @@ use mkit_core::ops::blame::{
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
+use super::attest;
+use super::attest_factory;
+use super::blame_proof;
 use super::revspec;
 use crate::clap_shim;
 use crate::exit;
@@ -147,6 +162,36 @@ struct BlameOpts {
     /// `--reverse` (reverse blame is already first-parent only).
     #[arg(long = "first-parent")]
     first_parent: bool,
+    /// Emit a signed, tamper-evident blame-proof DSSE envelope for the
+    /// whole file instead of printing blame text (SPEC-BLAME-PROOF.md D7).
+    /// Incompatible with `--reverse` and `-L` (the proof always covers
+    /// every line of the file). Verify with `mkit verify-attest
+    /// --envelope-file <path> --subject-file <file>`.
+    #[arg(long = "prove")]
+    prove: bool,
+    /// Output path for `--prove`. Defaults to `<file>.blame-proof.json`.
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
+    output: Option<String>,
+    /// `--prove` signing algorithm: `ed25519`, `secp256k1`, or `p256`.
+    /// Same flag as `mkit attest --algorithm`.
+    #[arg(long, value_name = "ALG")]
+    algorithm: Option<String>,
+    /// `--prove` primary signer kind: `repo-key` (default), `keystore`, or
+    /// `external`. Same flag as `mkit attest --signer`.
+    #[arg(long, value_name = "KIND")]
+    signer: Option<String>,
+    /// `--prove`: repeatable, adds a co-signature to the envelope. Same
+    /// grammar as `mkit attest --additional-signer`.
+    #[arg(long = "additional-signer", value_name = "SPEC")]
+    additional_signers: Vec<String>,
+    /// `--prove`: repeatable argv token passed to an external signer
+    /// subprocess. Same flag as `mkit attest --external-signer-arg`.
+    #[arg(
+        long = "external-signer-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true
+    )]
+    external_signer_args_vec: Vec<String>,
     /// `[<rev>] <file>`: the file to blame, optionally preceded by the
     /// revision to blame it at (a ref, hash, or `HEAD~2`-style spec).
     /// Without a revision the file is blamed against HEAD. A `--`
@@ -215,6 +260,14 @@ pub fn run(args: &[String]) -> u8 {
         first_parent: opts.first_parent,
     };
 
+    if opts.prove {
+        let commit = match resolve_blame_commit(&store, &mkit_dir, rev_spec) {
+            Ok(h) => h,
+            Err((msg, code)) => return emit_err(&msg, code),
+        };
+        return run_prove(&opts, &cwd, &store, commit, file, &blame_opts);
+    }
+
     // `--reverse` walks forward over a `<start>..<end>` range; plain blame
     // walks backward from a single `<rev>` (or HEAD).
     let result = if opts.reverse {
@@ -229,17 +282,9 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         // Resolve the commit to blame against: an explicit <rev> via the
         // shared revspec grammar, otherwise HEAD.
-        let head = if let Some(spec) = rev_spec {
-            match revspec::resolve_revision(&store, &mkit_dir, spec) {
-                Ok(h) => h,
-                Err(e) => return emit_err(&format!("{e}"), exit::NOINPUT),
-            }
-        } else {
-            match refs::resolve_head(&mkit_dir) {
-                Ok(Some(h)) => h,
-                Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
-                Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
-            }
+        let head = match resolve_blame_commit(&store, &mkit_dir, rev_spec) {
+            Ok(h) => h,
+            Err((msg, code)) => return emit_err(&msg, code),
         };
         match blame_file_with(&store, head, file, &blame_opts) {
             Ok(r) => r,
@@ -299,7 +344,171 @@ fn check_flag_conflicts(opts: &BlameOpts) -> Result<(), (String, u8)> {
             exit::USAGE,
         ));
     }
+    // `--prove` always builds a proof over the whole file (SPEC-BLAME-PROOF
+    // §4/D3 — dense attributions covering every line) at a single resolved
+    // commit, so it cannot compose with `--reverse` (a distinct range walk)
+    // or `-L` (a line subset).
+    if opts.prove && opts.reverse {
+        return Err((
+            "--prove cannot be combined with --reverse".to_string(),
+            exit::USAGE,
+        ));
+    }
+    if opts.prove && opts.lines.is_some() {
+        return Err((
+            "--prove cannot be combined with -L".to_string(),
+            exit::USAGE,
+        ));
+    }
     Ok(())
+}
+
+/// Resolve the commit to blame against: an explicit `<rev>` via the shared
+/// revspec grammar, otherwise HEAD. Shared by plain (non-`--reverse`) blame
+/// and `--prove` (D7 always blames a single resolved commit).
+fn resolve_blame_commit(
+    store: &ObjectStore,
+    mkit_dir: &std::path::Path,
+    rev_spec: Option<&String>,
+) -> Result<Hash, (String, u8)> {
+    if let Some(spec) = rev_spec {
+        return revspec::resolve_revision(store, mkit_dir, spec)
+            .map_err(|e| (format!("{e}"), exit::NOINPUT));
+    }
+    match refs::resolve_head(mkit_dir) {
+        Ok(Some(h)) => Ok(h),
+        Ok(None) => Err(("no commits yet".to_string(), exit::GENERAL_ERROR)),
+        Err(e) => Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
+    }
+}
+
+/// `mkit blame --prove`: build the SPEC-BLAME-PROOF v1 predicate (D4), wrap
+/// it in a signed DSSE envelope whose subject is the blamed file's blob
+/// digest (D2), and write it to `<file>.blame-proof.json` or `-o <path>`.
+#[allow(clippy::too_many_lines)]
+fn run_prove(
+    opts: &BlameOpts,
+    cwd: &std::path::Path,
+    store: &ObjectStore,
+    commit: Hash,
+    file: &str,
+    blame_opts: &BlameOptions,
+) -> u8 {
+    let predicate = match build_blame_proof(store, blame_opts, commit, file) {
+        Ok(p) => p,
+        Err(e) => return emit_err(&format!("blame proof: {e}"), exit::NOINPUT),
+    };
+    let predicate_json = match blame_proof::encode_predicate(&predicate) {
+        Ok(s) => s,
+        Err(e) => {
+            return emit_err(
+                &format!("encode blame-proof predicate: {e}"),
+                exit::GENERAL_ERROR,
+            );
+        }
+    };
+
+    let stmt = statement::Statement {
+        subjects: vec![statement::Subject {
+            name: Some(file.to_owned()),
+            digest_blake3_hex: hash::to_hex(&predicate.blob),
+        }],
+        predicate_type: blame_proof::BLAME_PROOF_PREDICATE_TYPE.to_owned(),
+        predicate_jcs: predicate_json.as_bytes(),
+    };
+    let stmt_bytes = match statement::encode(&stmt) {
+        Ok(s) => s.into_bytes(),
+        Err(e) => return emit_err(&format!("statement: {e}"), exit::DATAERR),
+    };
+
+    // --- Signer selection: same flags/semantics as `mkit attest`. --------
+    let mut cfg = match crate::config::read_or_default(cwd) {
+        Ok(c) => c,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let alg_str = opts
+        .algorithm
+        .clone()
+        .unwrap_or_else(|| cfg.attest.default_algorithm_or_fallback().to_owned());
+    let Ok(algorithm) = attest_factory::parse_algorithm(&alg_str) else {
+        return emit_err(
+            &format!("unknown algorithm '{alg_str}' — expected one of: ed25519, secp256k1, p256"),
+            exit::USAGE,
+        );
+    };
+    let signer_kind = opts
+        .signer
+        .clone()
+        .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
+    // `--external-signer-arg` REPLACES `attest.external_signer_args` when
+    // present, exactly like `mkit attest`.
+    if let Some(argv) = attest::external_signer_args_from_vec(&opts.external_signer_args_vec) {
+        cfg.attest.external_signer_args = argv;
+    }
+    let mut signers = match attest::build_signer_list(
+        cwd,
+        &cfg,
+        algorithm,
+        &signer_kind,
+        &opts.additional_signers,
+    ) {
+        Ok(s) => s,
+        Err((msg, code)) => return emit_err(&msg, code),
+    };
+
+    let pae = mkit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt_bytes);
+    let mut signatures: Vec<Sig> = Vec::with_capacity(signers.len());
+    for (idx, signer) in signers.iter_mut().enumerate() {
+        let sig_bytes = match signer.sign(&pae) {
+            Ok(b) => b,
+            Err(e) => {
+                return emit_err(
+                    &format!("sign (signer #{}): {e}", idx + 1),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        };
+        let keyid = match signer.keyid() {
+            Ok(k) => k,
+            Err(e) => {
+                return emit_err(
+                    &format!("keyid (signer #{}): {e}", idx + 1),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        };
+        signatures.push(Sig {
+            keyid,
+            sig: sig_bytes,
+        });
+    }
+
+    let envelope = Envelope {
+        payload_type: PAYLOAD_TYPE_IN_TOTO.to_owned(),
+        payload: stmt_bytes,
+        signatures,
+    };
+    let encoded = match envelope.encode() {
+        Ok(s) => s,
+        Err(e) => return emit_err(&format!("encode envelope: {e}"), exit::DATAERR),
+    };
+
+    let out_path = opts
+        .output
+        .clone()
+        .unwrap_or_else(|| format!("{file}.blame-proof.json"));
+    if let Err(e) = std::fs::write(&out_path, encoded.as_bytes()) {
+        return emit_err(&format!("write '{out_path}': {e}"), exit::CANTCREAT);
+    }
+
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "blame-proof for {file}@{} → {out_path} ({} signature(s))",
+        hash::to_hex(&commit),
+        envelope.signatures.len()
+    );
+    exit::OK
 }
 
 /// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits
