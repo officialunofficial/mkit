@@ -157,20 +157,24 @@ pub struct BlameOptions {
     /// often identify the line's *true* surviving origin even when a
     /// reformat/reorder moved it to a different offset — e.g. a
     /// moved-and-reindented line matched to its real origin rather than to
-    /// whatever happens to sit at the same position. Only ever *overrides*
-    /// a positional guess when content evidence contradicts it (or fills a
-    /// `None` surplus slot with a genuine content match); when no such
-    /// evidence exists the result is identical to the positional default.
-    /// The override selection is not strictly injective: no override
-    /// collides with a content-agreeing or trivial-key keeper, nor with an
-    /// earlier override, but a line that keeps its positional fall-through
-    /// target purely for lack of any content candidate does not reserve
-    /// that target, so a single old line can end up credited by both such a
-    /// positional-fallback line and one content-exact override. This never
-    /// attributes any line worse than git's positional `--ignore-rev`
-    /// result — every override is an exact content match and every
-    /// non-overridden line retains git's positional target — so the
-    /// refinement is monotonically ≥ positional, not strictly injective.
+    /// whatever happens to sit at the same position.
+    ///
+    /// The refinement is **never worse than git's positional
+    /// `--ignore-rev`, by construction**: a line whose positional guess is
+    /// already a real parent line (`Some`) is only re-pointed when the
+    /// content evidence is a *genuine moved block* — a run of ≥ 2
+    /// file-adjacent lines matching contiguously — never for an isolated
+    /// single-line key coincidence (which could otherwise land an edited
+    /// line on an unrelated duplicate, strictly worse than positional). A
+    /// line the positional pass left unattributed (`None` — a genuine
+    /// insertion) may additionally be filled from a single exact-content
+    /// match anywhere in the parent, since that only ever improves on
+    /// "credited to the ignored commit". Trivial keys (blank lines,
+    /// `}`-only lines, sub-3-byte tokens) are never reattributed. When no
+    /// qualifying evidence exists the result is identical to the positional
+    /// default, so every line is attributed at least as well as plain
+    /// `--ignore-rev`.
+    ///
     /// The default (`false`) keeps `--ignore-rev` byte-identical to git —
     /// this is a documented divergence, not a change to the default.
     pub ignore_rev_precise: bool,
@@ -642,6 +646,24 @@ fn strip_ws(line: &[u8]) -> Vec<u8> {
         .copied()
         .filter(|b| !(b.is_ascii_whitespace() || *b == 0x0B))
         .collect()
+}
+
+/// A content key with fewer than this many non-whitespace bytes is
+/// "trivial" — blank lines, lone `}`/`)`, one- or two-character tokens —
+/// and is never content-reattributed by `--ignore-rev-precise`, so such
+/// lines don't "teleport" to a coincidental duplicate.
+pub(super) const TRIVIAL_KEY_MIN_LEN: usize = 3;
+
+/// Whether a line's content key is trivial for `--ignore-rev-precise`.
+///
+/// The length is measured on the **whitespace-stripped** form regardless of
+/// the `-w` flag: `line_key` only strips whitespace under `-w`, so without
+/// it a reindented `"    }"` is 5 raw bytes and would clear a naive
+/// `key.len() < 3` guard — letting an indented brace teleport. Stripping for
+/// the length check alone (the matching key itself is untouched) keeps the
+/// guard honest either way.
+pub(super) fn is_trivial_key(key: &[u8]) -> bool {
+    strip_ws(key).len() < TRIVIAL_KEY_MIN_LEN
 }
 
 fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
@@ -1961,20 +1983,27 @@ mod tests {
         // the trivial-key guard: a positional guess for a line whose key is
         // under 3 bytes is kept even when a perfect, unclaimed content match
         // sits elsewhere in the parent — while a longer key on the same call
-        // is still correctly reattributed when its own positional guess
-        // disagrees with content.
+        // is still correctly reattributed when it has no positional guess
+        // (a `None` genuine-insertion slot the whole-file search can fill).
         //
         // new = ["ab" (trivial, 2 bytes), "REALZZZ" (7 bytes)]
         // old = ["REALZZZ", "ab", "FILLER"]           (all LCS-unmatched)
         // positional (`fall`): new0 -> old2 ("FILLER", arbitrary/wrong),
-        //                       new1 -> old1 ("ab", wrong: disagrees with
-        //                       new1's own content "REALZZZ").
+        //                       new1 -> None (no in-hunk counterpart).
         let mapping = vec![None, None];
-        let fall = vec![Some(2), Some(1)];
+        let fall = vec![Some(2), None];
         let new_lines = vec![b"ab".to_vec(), b"REALZZZ".to_vec()];
         let parent_lines = vec![b"REALZZZ".to_vec(), b"ab".to_vec(), b"FILLER".to_vec()];
+        let matched = vec![false, false];
 
-        let out = super::walk::precise_overrides(&mapping, &fall, &new_lines, &parent_lines, false);
+        let out = super::walk::precise_overrides(&super::walk::PreciseRequest {
+            mapping: &mapping,
+            fall: &fall,
+            new_lines: &new_lines,
+            parent_lines: &parent_lines,
+            matched: &matched,
+            ignore_whitespace: false,
+        });
         assert_eq!(
             out[0],
             Some(2),
@@ -1984,50 +2013,107 @@ mod tests {
         assert_eq!(
             out[1],
             Some(0),
-            "non-trivial key 'REALZZZ' is reattributed to its true content match \
-             (old index 0), since its positional guess (old index 1) disagreed"
+            "non-trivial key 'REALZZZ' fills its None positional slot from its \
+             true content match (old index 0)"
         );
     }
 
     #[test]
-    fn precise_overrides_double_credit_never_worse_than_positional() {
-        // Pins the documented non-injective-but-never-worse case (see the
-        // `precise_overrides` doc in `walk.rs` and the `ignore_rev_precise`
-        // field doc above): Pass 1 only reserves an old index for a new line
-        // that KEEPS its positional guess because content agrees (or the key
-        // is trivial). A line that keeps its positional guess merely because
-        // Pass 2 finds no content candidate for it never reserves that old
-        // index — so a later, unrelated override can still land on the same
-        // old line, leaving two `out` slots pointing at one old index.
+    fn precise_overrides_never_teleports_edited_line_worse_than_positional() {
+        // Regression for the #523 review counterexample proving the earlier
+        // "never worse than positional" claim FALSE. The fix makes it true
+        // by construction: a slot whose positional guess is already a real
+        // parent line (`Some(j)`) is only re-pointed by a *genuine moved
+        // block* (a run of >= 2 file-adjacent lines), never by an isolated
+        // single-line key coincidence.
         //
-        // single hunk, mapping=[None, None], old=[old0="PPP", old1="QQQ"]
-        // fall = [Some(0), Some(1)] (positional pairing).
+        // parent = [A, foo, B1, B2, bar, C]  (old idx 0..=5)
+        // new    = [A, bar, B1, B2, C]        (new idx 0..=4)
+        // The ignored commit edits foo->bar (old idx 1) and deletes an
+        // unrelated `bar` authored by commit X (old idx 4). LCS anchors
+        // A/B1/B2/C, so mapping[bar]=None and the positional fall pairs the
+        // edited `bar` with old idx 1 (`foo`) — the line's TRUE positional
+        // predecessor. The only unmatched old `bar` is at old idx 4.
         //
-        //   new0 key "ZZZ": disagrees with old0's "PPP" -> not kept, not
-        //     reserved in Pass 1. Pass 2: no old line has key "ZZZ" -> no
-        //     candidate -> out[0] keeps fall[0] = Some(0) (old0), UNRESERVED.
-        //   new1 key "PPP": disagrees with old1's "QQQ" -> not kept, not
-        //     reserved in Pass 1. Pass 2: old_index["PPP"] = old0, unclaimed
-        //     -> out[1] = Some(0) (old0), an exact-content override.
-        //
-        // Result: out = [Some(0), Some(0)] — both new lines credit old0.
-        // This is intentional and benign: new0 stays exactly at git's
-        // positional target (no worse than plain `--ignore-rev`), and new1
-        // is a genuine content-exact improvement over its own (wrong)
-        // positional guess. No line is ever attributed *worse* than
-        // positional; the only anomaly is the redundant credit to old0.
-        let mapping = vec![None, None];
-        let fall = vec![Some(0), Some(1)];
-        let new_lines = vec![b"ZZZ".to_vec(), b"PPP".to_vec()];
-        let parent_lines = vec![b"PPP".to_vec(), b"QQQ".to_vec()];
+        // Old behavior: content override sends new1 to old idx 4, blaming the
+        // edited line on X — strictly worse than positional. New behavior:
+        // that single-line coincidence cannot displace the filled positional
+        // guess, so out[1] stays Some(1).
+        let mapping = vec![Some(0), None, Some(2), Some(3), Some(5)];
+        let fall = vec![None, Some(1), None, None, None];
+        let new_lines = vec![
+            b"A".to_vec(),
+            b"bar".to_vec(),
+            b"B1".to_vec(),
+            b"B2".to_vec(),
+            b"C".to_vec(),
+        ];
+        let parent_lines = vec![
+            b"A".to_vec(),
+            b"foo".to_vec(),
+            b"B1".to_vec(),
+            b"B2".to_vec(),
+            b"bar".to_vec(),
+            b"C".to_vec(),
+        ];
+        let matched = vec![false; new_lines.len()];
 
-        let out = super::walk::precise_overrides(&mapping, &fall, &new_lines, &parent_lines, false);
+        let out = super::walk::precise_overrides(&super::walk::PreciseRequest {
+            mapping: &mapping,
+            fall: &fall,
+            new_lines: &new_lines,
+            parent_lines: &parent_lines,
+            matched: &matched,
+            ignore_whitespace: false,
+        });
+        assert_eq!(
+            out[1],
+            Some(1),
+            "edited `bar` keeps its positional predecessor (foo @ old idx 1)"
+        );
+        assert_ne!(
+            out[1],
+            Some(4),
+            "must NOT teleport to the unrelated `bar` @ old idx 4 (commit X)"
+        );
         assert_eq!(
             out,
-            vec![Some(0), Some(0)],
-            "new0 keeps its unreserved positional target (old0) and new1's exact-content \
-             override independently lands on the same old0 — a benign double credit, \
-             never worse than the positional result"
+            vec![None, Some(1), None, None, None],
+            "no slot is attributed worse than the positional fall-through"
+        );
+    }
+
+    #[test]
+    fn precise_overrides_reindented_brace_does_not_teleport_without_w() {
+        // Regression for #523 finding #2: without `-w`, `line_key` keeps raw
+        // bytes, so a reindented `"    }"` is a 5-byte key that clears a
+        // naive `len < 3` guard and would teleport to any other same-indent
+        // `"    }"` in the parent. The trivial-key guard now measures the
+        // WHITESPACE-STRIPPED length regardless of `-w`, so `"    }"` -> `}`
+        // (1 byte) is trivial and stays put.
+        //
+        // The brace is a genuine-insertion slot (fall = None — its positional
+        // counterpart consumed by an anchor), which the never-worse rule
+        // would otherwise let a single exact match fill; only the
+        // stripped-length guard prevents the teleport here.
+        let mapping = vec![None];
+        let fall = vec![None];
+        let new_lines = vec![b"    }".to_vec()];
+        let parent_lines = vec![b"    }".to_vec()]; // unrelated same-indent brace
+        let matched = vec![false];
+
+        let out = super::walk::precise_overrides(&super::walk::PreciseRequest {
+            mapping: &mapping,
+            fall: &fall,
+            new_lines: &new_lines,
+            parent_lines: &parent_lines,
+            matched: &matched,
+            ignore_whitespace: false,
+        });
+        assert_eq!(
+            out[0], None,
+            "an indented brace is trivial once whitespace-stripped; it must not \
+             teleport to an unrelated brace even without -w"
         );
     }
 

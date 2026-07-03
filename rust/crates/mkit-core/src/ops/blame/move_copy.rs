@@ -381,13 +381,16 @@ impl<'a> Detector<'a> {
     fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
         let key = (commit, path.to_string());
         if !self.attrs_cache.contains_key(&key) {
+            // Keep every active option except drop `-C` (prevents unbounded
+            // recursion and matches git) and pin the effective `-M`. Spread
+            // the rest from `self.opts` so a future `BlameOptions` field is
+            // carried through copy-source blame automatically instead of
+            // being silently defaulted — this PR (`ignore_rev_precise`) is
+            // itself the proof the hand-copied list was easy to miss.
             let source_opts = BlameOptions {
-                ignore_whitespace: self.opts.ignore_whitespace,
                 moves: self.opts.effective_move(),
                 copies: CopyDetection::Off,
-                ignore_revs: self.opts.ignore_revs.clone(),
-                ignore_rev_precise: self.opts.ignore_rev_precise,
-                first_parent: self.opts.first_parent,
+                ..self.opts.clone()
             };
             let res = blame_file_with(self.store, commit, path, &source_opts)?;
             let attrs = res.lines.into_iter().map(Attribution::from).collect();
