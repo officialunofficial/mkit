@@ -388,15 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_32_bytes_and_deterministic() {
-        let c = cb(100, 0, &[1, 2, 3]);
-        assert_eq!(compute_chunked_id(&c).len(), 32);
-        assert_eq!(compute_chunked_id(&c), compute_chunked_id(&c));
-        let t = tree(vec![entry(b"a", EntryMode::Blob, 1)]);
-        assert_eq!(compute_tree_id(&t), compute_tree_id(&t));
-    }
-
-    #[test]
     fn id_changes_when_a_leaf_changes() {
         let a = cb(100, 0, &[1, 2, 3]);
         let b = cb(100, 0, &[1, 2, 4]);

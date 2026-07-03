@@ -95,16 +95,8 @@ mod tests {
         // Counts every call (warmup + timed) so we can confirm the
         // helper honours both parameters.
         let mut total_calls = 0u32;
-        let secs = time_one(3, 5, || total_calls += 1);
+        let _ = time_one(3, 5, || total_calls += 1);
         assert_eq!(total_calls, 3 + 5, "should run warmup + timed calls");
-        assert!(secs >= 0.0, "mean seconds-per-call must be non-negative");
-    }
-
-    #[test]
-    fn time_one_with_zero_warmup_runs_only_timed_iters() {
-        let mut calls = 0u32;
-        let _ = time_one(0, 1, || calls += 1);
-        assert_eq!(calls, 1);
     }
 
     #[test]

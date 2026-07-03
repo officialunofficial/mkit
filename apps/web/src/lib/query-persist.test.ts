@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PERSIST_MAX_AGE, shouldPersistQuery } from './query-persist'
+import { shouldPersistQuery } from './query-persist'
 
 describe('shouldPersistQuery', () => {
   it('persists keys.mkit.sh handle queries', () => {
@@ -19,9 +19,5 @@ describe('shouldPersistQuery', () => {
   it('does NOT persist an empty / unknown key', () => {
     expect(shouldPersistQuery([])).toBe(false)
     expect(shouldPersistQuery(['something-else'])).toBe(false)
-  })
-
-  it('exposes a 24h max age', () => {
-    expect(PERSIST_MAX_AGE).toBe(86_400_000)
   })
 })

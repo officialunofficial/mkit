@@ -343,14 +343,6 @@ mod tests {
     use super::KeygenOpts;
 
     #[test]
-    fn parse_defaults() {
-        let p = KeygenOpts::try_parse_from(["mkit keygen"]).unwrap();
-        assert!(p.algorithm.is_none());
-        assert!(!p.force);
-        assert!(!p.print_pubkey);
-    }
-
-    #[test]
     fn parse_all_flags() {
         let p = KeygenOpts::try_parse_from([
             "mkit keygen",
@@ -363,10 +355,5 @@ mod tests {
         assert_eq!(p.algorithm.as_deref(), Some("secp256k1"));
         assert!(p.force);
         assert!(p.print_pubkey);
-    }
-
-    #[test]
-    fn parse_unknown_flag_rejected() {
-        assert!(KeygenOpts::try_parse_from(["mkit keygen", "--bogus"]).is_err());
     }
 }

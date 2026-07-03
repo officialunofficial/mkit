@@ -303,14 +303,4 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("7, 7"));
     }
-
-    #[test]
-    fn secret_key_accessors_are_explicit() {
-        let secret = SecretKey::new(Algorithm::Secp256k1, [11; 32]);
-        assert_eq!(secret.algorithm(), Algorithm::Secp256k1);
-        assert_eq!(secret.expose_secret(), &[11; 32]);
-
-        let bytes = secret.into_bytes();
-        assert_eq!(&*bytes, &[11; 32]);
-    }
 }

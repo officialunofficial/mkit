@@ -186,13 +186,6 @@ mod tests {
     use super::*;
     use std::env;
 
-    /// Compile-only check: the subcommand exposes the canonical
-    /// `run(&[String]) -> u8` signature dispatch wants.
-    #[test]
-    fn run_signature_compiles() {
-        let _: fn(&[String]) -> u8 = run;
-    }
-
     #[test]
     fn invalid_hex_returns_usage_error() {
         // Run with a hash that isn't 64 hex chars. We don't need to

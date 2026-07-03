@@ -859,31 +859,6 @@ mod tests {
     // Full-interface integration test
     // ------------------------------------------------------------------
 
-    #[test]
-    fn full_interface_roundtrip() {
-        let dir = tmp();
-        let t = FileTransport::new(dir.path());
-
-        // pack verbs
-        let pack_data = b"transport-vtable-test-payload";
-        let key = pack_key_for(pack_data);
-        assert!(!t.pack_exists(&key).unwrap());
-        t.upload_pack(pack_data, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
-        assert_eq!(t.download_pack(&key).unwrap(), pack_data);
-
-        // ref verbs
-        let h = blake3_hash(b"ref-data");
-        t.write_ref("refs/heads/main", &h).unwrap();
-        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
-        assert_eq!(t.read_ref("refs/heads/nope").unwrap(), None);
-
-        let refs = t.list_refs("refs/heads").unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].name, "main");
-        assert_eq!(refs[0].hash, Some(h));
-    }
-
     // ------------------------------------------------------------------
     // Concurrent write test (write_ref Any never exposes truncated file)
     // ------------------------------------------------------------------

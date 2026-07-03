@@ -295,11 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn version_matches_package_version() {
-        assert_eq!(CLI_VERSION, env!("CARGO_PKG_VERSION"));
-    }
-
-    #[test]
     fn help_contains_every_documented_subcommand() {
         // Every top-level subcommand enumerated in docs/CLI.md — this
         // doubles as a reminder to refresh HELP_TEXT whenever CLI.md

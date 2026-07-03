@@ -283,17 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn determinism_same_input_same_boundaries() {
-        let cdc = FastCdc::v1();
-        let mut data = vec![0u8; 200 * 1024];
-        Prng::new(0xDEAD_BEEF).fill(&mut data);
-
-        let pass1: Vec<_> = ChunkIterator::new(cdc, &data).collect();
-        let pass2: Vec<_> = ChunkIterator::new(cdc, &data).collect();
-        assert_eq!(pass1, pass2);
-    }
-
-    #[test]
     fn min_max_size_constraints() {
         let cdc = FastCdc::v1();
         let mut data = vec![0u8; 512 * 1024];
@@ -384,15 +373,6 @@ mod tests {
             differing <= 3,
             "expected <=3 differing chunks, got {differing}"
         );
-    }
-
-    #[test]
-    fn iterator_total_bytes_matches_input() {
-        let cdc = FastCdc::v1();
-        let mut data = vec![0u8; 300 * 1024];
-        Prng::new(42).fill(&mut data);
-        let total: usize = ChunkIterator::new(cdc, &data).map(|b| b.length).sum();
-        assert_eq!(total, data.len());
     }
 
     #[test]

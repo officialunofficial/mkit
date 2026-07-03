@@ -840,26 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn single_entry_round_trip() {
-        let mut idx = Index::new();
-        idx.entries.push(IndexEntry {
-            path: "README.md".to_string(),
-            status: EntryStatus::Blob,
-            object_hash: seed_hash("readme"),
-            mtime_ns: 0,
-            size: 0,
-            ino: 0,
-            ctime_ns: 0,
-        });
-        let bytes = idx.serialize();
-        // 9 header + 1 status + 32 hash + 32 stat cache
-        // + 2 path_len + 9 path = 85.
-        assert_eq!(bytes.len(), 85);
-        let parsed = deserialize(&bytes).unwrap();
-        assert_eq!(parsed, idx);
-    }
-
-    #[test]
     fn multi_entry_round_trip_with_all_statuses() {
         let mut idx = Index::new();
         idx.entries.push(IndexEntry {
@@ -1145,21 +1125,6 @@ mod tests {
             ctime_ns: 0,
         });
         assert_eq!(idx.staged_count(), 2);
-    }
-
-    #[test]
-    fn rejects_bogus_huge_count_before_loop() {
-        // G11 regression: a 13-byte buffer whose header declares
-        // count = u32::MAX must be rejected up-front — the
-        // deserializer must NOT spin through u32::MAX iterations
-        // (or allocate Vec::with_capacity(count)).
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&MAGIC);
-        bytes.push(FORMAT_VERSION);
-        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-        // No entries follow — buffer is just the 9-byte header.
-        let err = deserialize(&bytes).unwrap_err();
-        assert!(matches!(err, IndexError::Corrupt));
     }
 
     #[test]

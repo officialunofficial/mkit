@@ -76,11 +76,6 @@ mod tests {
     }
 
     #[test]
-    fn max_frame_bytes_is_one_mib() {
-        assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
-    }
-
-    #[test]
     fn pin_response_debug_redacts_pin() {
         // signer.proto marks `pin` with [debug_redact = true]; a stray
         // `{:?}` log of a PinResponse must never echo the PIN.

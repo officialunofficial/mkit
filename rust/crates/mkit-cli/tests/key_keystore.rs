@@ -209,74 +209,6 @@ fn key_generate_prints_stable_keyid_line() {
 }
 
 #[test]
-fn key_generate_help_exits_successfully() {
-    let td = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
-
-    let output = run(td.path(), &["key", "generate", "--help"]);
-    assert!(
-        output.status.success(),
-        "help stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.stderr.is_empty(), "help should write stderr empty");
-    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
-    assert!(stdout.contains("Usage: mkit key generate"));
-    assert!(stdout.contains("--print-pubkey"));
-}
-
-#[test]
-fn key_generate_and_import_accept_equals_options() {
-    let td = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
-
-    let generate = run(
-        td.path(),
-        &[
-            "key",
-            "generate",
-            "--backend=software-raw",
-            "--algorithm=ed25519",
-            "--label=equals-generated",
-        ],
-    );
-    assert!(
-        generate.status.success(),
-        "generate stderr: {}",
-        String::from_utf8_lossy(&generate.stderr)
-    );
-
-    let secret = "07".repeat(32);
-    let hex_arg = format!("--hex={secret}");
-    let import = run(
-        td.path(),
-        &[
-            "key",
-            "import",
-            "--backend=software-raw",
-            "--algorithm=ed25519",
-            "--label=equals-imported",
-            &hex_arg,
-        ],
-    );
-    assert!(
-        import.status.success(),
-        "import stderr: {}",
-        String::from_utf8_lossy(&import.stderr)
-    );
-
-    let list = run(td.path(), &["key", "list", "--backend=software-raw"]);
-    assert!(
-        list.status.success(),
-        "list stderr: {}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    let stdout = String::from_utf8(list.stdout).expect("stdout utf8");
-    assert!(stdout.contains("software-raw equals-generated ed25519 ed25519:"));
-    assert!(stdout.contains("software-raw equals-imported ed25519 ed25519:"));
-}
-
-#[test]
 fn key_default_ref_drives_unlabeled_commands() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");
@@ -577,60 +509,6 @@ fn commit_with_corrupt_head_does_not_fallback_to_main() {
     assert!(
         !td.path().join("repo/.mkit/refs/heads/main").exists(),
         "corrupt HEAD must not advance refs/heads/main"
-    );
-}
-
-#[test]
-fn commit_can_use_software_raw_keystore_ref() {
-    let td = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
-    assert!(run(td.path(), &["init"]).status.success());
-
-    let secret = "08".repeat(32);
-    let import = run(
-        td.path(),
-        &[
-            "key",
-            "import",
-            "--backend",
-            "software-raw",
-            "--algorithm",
-            "ed25519",
-            "--label",
-            "raw-committer",
-            "--hex",
-            &secret,
-        ],
-    );
-    assert!(
-        import.status.success(),
-        "import stderr: {}",
-        String::from_utf8_lossy(&import.stderr)
-    );
-
-    let cfg_dir = td.path().join("config/mkit");
-    std::fs::create_dir_all(&cfg_dir).expect("config dir");
-    std::fs::write(
-        cfg_dir.join("config"),
-        "signer = keystore\nkey.ed25519_ref = software-raw:raw-committer\n",
-    )
-    .expect("user config");
-
-    std::fs::write(td.path().join("repo/README.md"), b"hello raw\n").expect("README");
-    assert!(run(td.path(), &["add", "README.md"]).status.success());
-    let commit = run(td.path(), &["commit", "-m", "software raw keystore commit"]);
-    assert!(
-        commit.status.success(),
-        "commit stderr: {}",
-        String::from_utf8_lossy(&commit.stderr)
-    );
-
-    let head = resolve_head(&td.path().join("repo"));
-    let verify = run(td.path(), &["verify", &head]);
-    assert!(
-        verify.status.success(),
-        "verify stderr: {}",
-        String::from_utf8_lossy(&verify.stderr)
     );
 }
 

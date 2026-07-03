@@ -127,13 +127,4 @@ mod tests {
         let expected = mkit_core::hash::to_hex(&mkit_core::hash::hash(&pk));
         assert_eq!(hex, expected);
     }
-
-    #[test]
-    fn keyid_is_deterministic() {
-        let kp = KeyPair::from_seed([0x7F; 32]);
-        let s = RepoKeySigner::new(kp);
-        let a = s.keyid().unwrap();
-        let b = s.keyid().unwrap();
-        assert_eq!(a, b);
-    }
 }

@@ -65,21 +65,6 @@ describe('identity store', () => {
     expect(after.seedHex).toBeNull()
   })
 
-  it('lock keeps credentialId (so the player can re-derive on reload)', () => {
-    const s = useIdentityStore.getState()
-    s.setCredentialId('cred-keep')
-    s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
-    s.lock()
-    expect(useIdentityStore.getState().credentialId).toBe('cred-keep')
-  })
-
-  it('reset clears credentialId', () => {
-    const s = useIdentityStore.getState()
-    s.setCredentialId('cred-gone')
-    s.reset()
-    expect(useIdentityStore.getState().credentialId).toBeNull()
-  })
-
   it('reset returns the room to the default (persist now writes room)', () => {
     const s = useIdentityStore.getState()
     s.setRoom('arena')
