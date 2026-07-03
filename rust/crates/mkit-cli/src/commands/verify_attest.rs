@@ -500,6 +500,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_defaults() {
+        let p = parse_args(&[]).unwrap();
+        assert!(p.commit.is_none());
+        assert!(p.trust_roots.is_none());
+        assert!(p.algorithm.is_none());
+    }
+
+    #[test]
     fn parse_args_accepts_all_flags() {
         let args = vec![
             "--commit".into(),

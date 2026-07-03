@@ -1128,6 +1128,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_bogus_huge_count_before_loop() {
+        // G11 regression: a 13-byte buffer whose header declares
+        // count = u32::MAX must be rejected up-front — the
+        // deserializer must NOT spin through u32::MAX iterations
+        // (or allocate Vec::with_capacity(count)).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        // No entries follow — buffer is just the 9-byte header.
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, IndexError::Corrupt));
+    }
+
+    #[test]
     fn validate_path_basic() {
         assert!(validate_index_path("a.txt"));
         assert!(validate_index_path("src/main.rs"));

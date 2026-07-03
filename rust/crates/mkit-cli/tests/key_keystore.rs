@@ -513,6 +513,60 @@ fn commit_with_corrupt_head_does_not_fallback_to_main() {
 }
 
 #[test]
+fn commit_can_use_software_raw_keystore_ref() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+    assert!(run(td.path(), &["init"]).status.success());
+
+    let secret = "08".repeat(32);
+    let import = run(
+        td.path(),
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software-raw",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            "raw-committer",
+            "--hex",
+            &secret,
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let cfg_dir = td.path().join("config/mkit");
+    std::fs::create_dir_all(&cfg_dir).expect("config dir");
+    std::fs::write(
+        cfg_dir.join("config"),
+        "signer = keystore\nkey.ed25519_ref = software-raw:raw-committer\n",
+    )
+    .expect("user config");
+
+    std::fs::write(td.path().join("repo/README.md"), b"hello raw\n").expect("README");
+    assert!(run(td.path(), &["add", "README.md"]).status.success());
+    let commit = run(td.path(), &["commit", "-m", "software raw keystore commit"]);
+    assert!(
+        commit.status.success(),
+        "commit stderr: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let head = resolve_head(&td.path().join("repo"));
+    let verify = run(td.path(), &["verify", &head]);
+    assert!(
+        verify.status.success(),
+        "verify stderr: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
 fn keystore_commit_missing_key_fails_without_generation() {
     let td = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir(td.path().join("repo")).expect("repo dir");

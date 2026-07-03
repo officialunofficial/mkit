@@ -80,6 +80,78 @@ fn init_repo_with_commit(root: &Path) {
 }
 
 #[test]
+fn attest_with_keystore_ed25519_roundtrip() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let repo = td.path().join("repo");
+    init_repo_with_commit(td.path());
+
+    let secret = [0x55; 32];
+    let secret_hex = hex_lower(&secret);
+    let import = run(
+        td.path(),
+        &[
+            "key",
+            "import",
+            "--backend",
+            "software-raw",
+            "--algorithm",
+            "ed25519",
+            "--label",
+            "attester",
+            "--hex",
+            &secret_hex,
+        ],
+    );
+    assert!(
+        import.status.success(),
+        "import stderr: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let cfg_dir = td.path().join("config/mkit");
+    fs::create_dir_all(&cfg_dir).expect("config dir");
+    fs::write(
+        cfg_dir.join("config"),
+        "attest.signer = keystore\nkey.ed25519_ref = software-raw:attester\n",
+    )
+    .expect("user config");
+
+    let attest = run(td.path(), &["attest", "--algorithm", "ed25519"]);
+    assert!(
+        attest.status.success(),
+        "attest stderr: {}",
+        String::from_utf8_lossy(&attest.stderr)
+    );
+
+    let public_key = ed25519_dalek::SigningKey::from_bytes(&secret)
+        .verifying_key()
+        .to_bytes();
+    let public_hex = hex_lower(&public_key);
+    fs::write(
+        repo.join(".mkit/attest-trust-roots.toml"),
+        format!(
+            "[[trust_root]]\nkeyid = \"ed25519:{public_hex}\"\nkind = \"ed25519\"\npubkey_hex = \"{public_hex}\"\n"
+        ),
+    )
+    .expect("trust roots");
+
+    let verify = run(
+        td.path(),
+        &[
+            "verify-attest",
+            "--trust-roots",
+            ".mkit/attest-trust-roots.toml",
+        ],
+    );
+    assert!(
+        verify.status.success(),
+        "verify stdout: {}\nverify stderr: {}",
+        String::from_utf8_lossy(&verify.stdout),
+        String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+#[test]
 fn attest_ignores_repo_controlled_attest_signer_and_key_ref() {
     let td = tempfile::tempdir().expect("tempdir");
     init_repo_with_commit(td.path());
