@@ -1,5 +1,36 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_ROOM, partializeIdentity, useIdentityStore } from './identity-store'
+import {
+  DEFAULT_ROOM,
+  RETIRED_DEFAULT_ROOM,
+  migrateIdentity,
+  partializeIdentity,
+  useIdentityStore,
+} from './identity-store'
+
+describe('migrateIdentity resets the retired default lobby', () => {
+  it('moves a returning visitor off the retired default room onto the fresh one', () => {
+    const migrated = migrateIdentity({ credentialId: 'c', room: RETIRED_DEFAULT_ROOM, name: 'amber-wren' }, 0)
+    expect(migrated.room).toBe(DEFAULT_ROOM)
+    // non-room fields are preserved
+    expect(migrated.credentialId).toBe('c')
+    expect(migrated.name).toBe('amber-wren')
+  })
+
+  it('leaves a user-chosen room untouched', () => {
+    const migrated = migrateIdentity({ credentialId: null, room: 'arena', name: null }, 0)
+    expect(migrated.room).toBe('arena')
+  })
+
+  it('no-ops once already at the current version', () => {
+    const already = { credentialId: null, room: RETIRED_DEFAULT_ROOM, name: null }
+    // version >= current: nothing to migrate, retired room left as-is
+    expect(migrateIdentity(already, 1).room).toBe(RETIRED_DEFAULT_ROOM)
+  })
+
+  it('tolerates empty/undefined persisted state', () => {
+    expect(migrateIdentity(undefined, 0)).toEqual({})
+  })
+})
 
 describe('identity store', () => {
   beforeEach(() => {

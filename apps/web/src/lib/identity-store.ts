@@ -47,10 +47,21 @@ export type IdentityState = {
   reset: () => void
 }
 
-export const DEFAULT_ROOM = 'lobby'
+export const DEFAULT_ROOM = 'lobby-v2'
+
+/**
+ * The prior default room, retired 2026-07-03. Its Durable Object holds chat messages written before the reaction-id fix
+ * (#522) — several share a content hash because ids weren't yet unique per post, so reactions collide across them.
+ * Rather than a destructive in-place clear, we move everyone to a fresh room; {@link migrateIdentity} rewrites a
+ * persisted `lobby` to {@link DEFAULT_ROOM}.
+ */
+export const RETIRED_DEFAULT_ROOM = 'lobby'
 
 /** LocalStorage key the persisted slice lives under. */
 export const IDENTITY_STORAGE_KEY = 'mkit-identity'
+
+/** Persisted-state schema version — bumped to 1 to run {@link migrateIdentity}. */
+export const IDENTITY_PERSIST_VERSION = 1
 
 /** The ONLY fields written to disk — never the seed/pubkey/unlock flags. */
 export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'room' | 'name'>
@@ -61,6 +72,20 @@ export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'room' | 'n
  */
 export function partializeIdentity(s: IdentityState): PersistedIdentity {
   return { credentialId: s.credentialId, room: s.room, name: s.name }
+}
+
+/**
+ * Persist migration. A returning visitor sitting on the retired default room ({@link RETIRED_DEFAULT_ROOM}) is moved to
+ * {@link DEFAULT_ROOM} so they land in the fresh lobby instead of the one with the colliding pre-fix message ids. A
+ * room the user explicitly chose (anything other than the old default) is left untouched. Pure + exported for direct
+ * testing.
+ */
+export function migrateIdentity(persisted: unknown, version: number): PersistedIdentity {
+  const p = (persisted ?? {}) as PersistedIdentity
+  if (version < IDENTITY_PERSIST_VERSION && p.room === RETIRED_DEFAULT_ROOM) {
+    return { ...p, room: DEFAULT_ROOM }
+  }
+  return p
 }
 
 /**
@@ -118,8 +143,12 @@ export const useIdentityStore = create<IdentityState>()(
     }),
     {
       name: IDENTITY_STORAGE_KEY,
+      version: IDENTITY_PERSIST_VERSION,
       // Persist ONLY the recovery anchor + room — never the in-memory seed.
       partialize: partializeIdentity,
+      // Move returning visitors off the retired `lobby` room (pre-fix colliding
+      // message ids) onto the fresh default; keeps a user-chosen room intact.
+      migrate: migrateIdentity,
       // Degrades to no persistence when localStorage is absent (SSR / tests).
       storage: identityStorage(),
     },
