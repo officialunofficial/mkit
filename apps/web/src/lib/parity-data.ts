@@ -103,7 +103,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'bisect',
         status: 'divergent',
-        note: 'start, good, bad, skip, reset. Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); no bisect run.',
+        note: 'start, good, bad, skip, reset, and run <cmd> (auto-bisect with git’s 0/125/1-127 exit-code contract). Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); run checks out each candidate transiently but still prints the first bad commit rather than parking there.',
       },
     ],
   },
