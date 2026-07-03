@@ -3043,6 +3043,7 @@ dependencies = [
  "mkit-git-bridge",
  "mkit-keystore",
  "mkit-rpc",
+ "mkit-test-util",
  "mkit-transport-enc",
  "mkit-transport-file",
  "mkit-transport-http",
@@ -3110,6 +3111,7 @@ version = "0.3.0"
 dependencies = [
  "flate2",
  "mkit-core",
+ "mkit-test-util",
  "sha1",
  "tempfile",
 ]
@@ -3188,6 +3190,10 @@ dependencies = [
  "mkit-core",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "mkit-test-util"
+version = "0.3.0"
 
 [[package]]
 name = "mkit-transport-enc"

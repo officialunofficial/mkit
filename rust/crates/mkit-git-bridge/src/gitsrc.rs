@@ -354,33 +354,7 @@ pub fn is_sha256_repo(repo: &Path) -> Result<bool, BridgeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// True if `name` can be spawned as a subprocess (i.e. it resolves on
-    /// `PATH`). We only care whether the OS could exec it, not its exit code.
-    fn tool_available(name: &str) -> bool {
-        Command::new(name)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-    }
-
-    /// Loud skip (#505 PR 2/5): if `name` is missing, panic under
-    /// `MKIT_TEST_STRICT` (a CI job that expects this tool must not
-    /// silently skip the tests it's here for) — otherwise print a loud
-    /// `SKIP:` line and return `false`.
-    fn require_tool(name: &str) -> bool {
-        if tool_available(name) {
-            return true;
-        }
-        assert!(
-            std::env::var_os("MKIT_TEST_STRICT").is_none(),
-            "{name} required (MKIT_TEST_STRICT set) but not found"
-        );
-        eprintln!("SKIP: {name} not available");
-        false
-    }
+    use mkit_test_util::require_tool;
 
     /// Build a tiny real repo: two commits + an annotated tag.
     fn fixture() -> Option<(tempfile::TempDir, Sha1Id)> {

@@ -26,6 +26,10 @@ members = [
     "crates/mkit-wasm",
     "crates/mkit-repo-client",
     "benches",
+    # Dev-only test helpers shared across crates' test suites
+    # (publish = false — never a normal dependency, see the crate's
+    # Cargo.toml header).
+    "crates/mkit-test-util",
     # The reference external-signer binaries (mkit-sign-{file,ctap,tpm}) are a
     # SEPARATE workspace under contrib/signers/ — see contrib/signers/Cargo.toml.
     # They were members here, but out-of-tree members (`../contrib/...`) break

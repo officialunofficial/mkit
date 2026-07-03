@@ -39,34 +39,11 @@ pub(crate) const KEY_SEED: [u8; 32] = [0x11; 32];
 // expected to have the dependency) a missing tool/flag panics the test
 // rather than silently skipping it.
 
-/// True if `name` can be spawned as a subprocess (i.e. it resolves on
-/// `PATH`). We only care whether the OS could exec it, not its exit code —
-/// some tools (e.g. `ssh`) reject `--version`-style flags but are still
-/// present.
-pub(crate) fn tool_available(name: &str) -> bool {
-    Command::new(name)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
-/// Returns `true` if `name` is available. If it is not: panic when
-/// `MKIT_TEST_STRICT` is set (a CI job that is supposed to have this tool
-/// silently not running the test is a bug), otherwise print a loud `SKIP:`
-/// line to stderr and return `false` so the caller can skip.
-pub(crate) fn require_tool(name: &str) -> bool {
-    if tool_available(name) {
-        return true;
-    }
-    assert!(
-        std::env::var_os("MKIT_TEST_STRICT").is_none(),
-        "{name} required (MKIT_TEST_STRICT set) but not found"
-    );
-    eprintln!("SKIP: {name} not available");
-    false
-}
+// Not every integration-test binary that compiles this module calls these
+// (see the file-level `allow(dead_code)` rationale above) — allow the
+// re-export to go unused in binaries that only need `require_env_flag`.
+#[allow(unused_imports)]
+pub(crate) use mkit_test_util::{require_tool, tool_available};
 
 /// Returns `true` if the opt-in environment flag `var` is set to `"1"`
 /// (e.g. `MKIT_SSH_E2E_REAL`). If it is not: panic when `MKIT_TEST_STRICT`

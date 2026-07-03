@@ -1,0 +1,20 @@
+# Internal dev-only crate — NOT published. Holds test helpers shared
+# across other crates' test suites (unit + integration) so trivial
+# infra like "is this tool on PATH" isn't copy-pasted per crate. Add it
+# only to `[dev-dependencies]` in consuming crates; it must never be a
+# normal dependency.
+[package]
+name = "mkit-test-util"
+description = "Internal dev-only helpers shared across mkit crates' test suites"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
