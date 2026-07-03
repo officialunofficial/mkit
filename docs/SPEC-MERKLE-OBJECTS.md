@@ -119,17 +119,39 @@ never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
 
 ## 5. Inclusion proofs
 
-> **Provisional / unstable.** This proof API and wire format have no in-tree
-> consumer yet; proofs are **not** transported today (see SPEC-TRANSPORT). The
-> format is foundation for a future light-client / API reader and **may change
-> incompatibly** before that first consumer pins it. Object identity (§2) is
-> stable; this section is not.
+> **Frozen by SPEC-BLAME-PROOF v1.** This proof API and wire format are
+> pinned by their first in-tree consumer: the provable-blame predicate's
+> `treePath` entries (see [SPEC-BLAME-PROOF](SPEC-BLAME-PROOF.md) §6.2/§7).
+> Proofs are still not carried by the wire transport protocol itself (see
+> SPEC-TRANSPORT) — they travel inside signed attestation predicates
+> instead. Object identity (§2) was already stable; this section now is
+> too. Any incompatible change to the wire layout below MUST ship as a
+> new, distinctly-named wire form rather than a mutation of this one —
+> see the versioning note at the end of this section.
 
 A single-leaf inclusion proof is the leaf count plus the bottom-up sibling
 digests. Wire form: `[u32 LE leaf_count][u32 LE n_siblings][n × 32B]`.
 Verification position-hashes the supplied leaf, folds up with the
 siblings, finalizes with `leaf_count`, and compares to the **bare**
 `tree_root` (the pre-domain-wrap root). They exist for light-client / API use.
+
+**Versioning.** This wire form carries no internal version byte, and
+freezing it does not add one. mkit's existing convention is to version
+at the *consumer* boundary rather than stamp every embedded proof
+structure with its own redundant tag: the object prologue's
+`schema_version` byte already covers `Tree`/`ChunkedBlob` bytes (§7,
+pinned at `0x01`), and the new blame-proof predicate carries its own
+`"v"` field (SPEC-BLAME-PROOF §6) for the thing that actually needs to
+evolve — the ancestry section, not this proof layout.
+`SPEC-HISTORY-PROOF.md`'s `InclusionProof` wire (§2.2 there) follows
+the identical pattern: no in-band version byte, "frozen relative to the
+next breaking migration" instead. Consequently: a future format that
+needs a genuinely different inclusion-proof shape (e.g. multi-leaf /
+batch proofs, tracked as v2 roadmap in SPEC-BLAME-PROOF §8.3) MUST
+introduce a new wire form under a new name, so bytes already produced
+under this section keep parsing under old and new implementations
+alike — the same non-mutation discipline SPEC-OBJECTS already requires
+of `schema_version` bumps.
 
 ## 6. Invariants
 
