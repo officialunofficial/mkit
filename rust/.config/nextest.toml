@@ -54,6 +54,20 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(crash_recovery) or binary(lock_contention)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# The #406 re-baseline concurrency test reaches the DEFAULT re-baseline
+# threshold (64) via 64 real appending pushes rather than overriding
+# MKIT_PACK_REBASELINE_DEPTH in-process (banned `std::env::set_var`), so it
+# spawns the `mkit` binary ~130 times. ~10-30s locally; a loaded/parallel
+# full-workspace run can drift past the default 60s / ci 120s envelope.
+# Deterministic, not a hang — same treatment as crash_recovery/lock_contention.
+[[profile.default.overrides]]
+filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 [profile.state-machine]
 # Nightly deep run of the stateful invariant suite
 # (tests/state_machine.rs). It drives the real `mkit` binary through

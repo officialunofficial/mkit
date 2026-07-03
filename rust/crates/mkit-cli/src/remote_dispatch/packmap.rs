@@ -61,11 +61,34 @@ const PACKMAP_CAS_ATTEMPTS: u32 = 8;
 /// bound additionally caps an *acyclic* but pathologically long chain.)
 ///
 /// `100_000` nodes is well beyond any honest history — one node is appended
-/// per push, and the re-baseline follow-up (#406) collapses the chain
-/// periodically — while still being cheap to reject. It is deliberately
-/// NOT tied to the per-node entry cap: conflating "packs in one node" with
-/// "nodes in the chain" overloads one number for two unrelated bounds.
+/// per push, and periodic re-baselining (#406, see [`rebaseline_depth`])
+/// now collapses a healthy chain back to a single node long before it gets
+/// anywhere near this cap — while still being cheap to reject. It is
+/// deliberately NOT tied to the per-node entry cap: conflating "packs in one
+/// node" with "nodes in the chain" overloads one number for two unrelated
+/// bounds. This constant remains the runaway/cycle guard for a chain that
+/// re-baselining never got a chance to bound (e.g. a hostile or corrupt
+/// remote advertising an ever-growing or cyclic chain).
 const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
+
+/// Default chain depth at which a push re-baselines: resets the packlist
+/// chain to a single fresh self-contained node instead of appending to it
+/// (#406). Bounds clone cost, which otherwise grows with the chain length
+/// (one node walked/downloaded per push since the last re-baseline).
+/// Overridable via `MKIT_PACK_REBASELINE_DEPTH` for tests; `0` disables
+/// re-baselining entirely.
+const DEFAULT_REBASELINE_DEPTH: usize = 64;
+
+/// Resolve the configured re-baseline threshold: the `MKIT_PACK_REBASELINE_DEPTH`
+/// environment variable if present and parsable, else [`DEFAULT_REBASELINE_DEPTH`].
+/// A value of `0` disables re-baselining (the push path never forces a
+/// full-closure reset on depth alone).
+pub(crate) fn rebaseline_depth() -> usize {
+    std::env::var("MKIT_PACK_REBASELINE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REBASELINE_DEPTH)
+}
 
 /// Download and decode one packlist node by key. Packlist nodes are
 /// auxiliary transfer metadata, not packfiles, so they travel over the
@@ -79,27 +102,31 @@ fn download_packlist_node(
 }
 
 /// Walk a branch's packlist chain from `head_key` (newest node) following
-/// `prev` pointers, and return the flat **oldest-first** list of pack keys
-/// it references — the order a fetcher must unpack so each delta's base is
-/// already present.
+/// `prev` pointers, applying the shared cycle / runaway-depth guard, and
+/// return every node visited in newest-to-oldest walk order.
+///
+/// This is the ONE place the chain walk is written: [`resolve_pack_chain`]
+/// (which flattens the visited nodes' packs into the oldest-first fetch
+/// order) and [`chain_depth`] (which only needs the visited-node count) both
+/// call through here rather than re-implementing the walk.
 ///
 /// This walks the WHOLE chain, so it doubles as the push-side integrity
 /// check: a node the chain references but the remote can't deliver/decode,
 /// a cycle, or an over-deep chain all surface as
 /// [`DispatchError::PackChainInvalid`]. A transient transport error (network
 /// blip) propagates unchanged so it is never mistaken for corruption. The
-/// walk is `O(chain length)` node downloads; chain depth is bounded by the
-/// re-baseline follow-up (#406), and a server-side atomic advance (#408)
-/// could move this check off the hot path.
-pub(crate) fn resolve_pack_chain(
+/// walk is `O(chain length)` node downloads; chain depth is bounded by
+/// periodic re-baselining (#406, see [`rebaseline_depth`]), and a
+/// server-side atomic advance (#408) could move this check off the hot path.
+fn walk_pack_chain(
     tx: &dyn Transport,
     branch: &str,
     head_key: Hash,
-) -> Result<Vec<Hash>, DispatchError> {
+) -> Result<Vec<transfer::PackListNode>, DispatchError> {
     let invalid = || DispatchError::PackChainInvalid {
         branch: branch.to_owned(),
     };
-    let mut nodes: Vec<Vec<Hash>> = Vec::new();
+    let mut nodes = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut cursor = Some(head_key);
     while let Some(key) = cursor {
@@ -120,10 +147,38 @@ pub(crate) fn resolve_pack_chain(
             Err(e) => return Err(e),
         };
         cursor = node.prev;
-        nodes.push(node.packs);
+        nodes.push(node);
     }
+    Ok(nodes)
+}
+
+/// Walk a branch's packlist chain from `head_key` and return the flat
+/// **oldest-first** list of pack keys it references — the order a fetcher
+/// must unpack so each delta's base is already present. See
+/// [`walk_pack_chain`] for the walk / integrity-check semantics.
+pub(crate) fn resolve_pack_chain(
+    tx: &dyn Transport,
+    branch: &str,
+    head_key: Hash,
+) -> Result<Vec<Hash>, DispatchError> {
+    let mut nodes = walk_pack_chain(tx, branch, head_key)?;
     nodes.reverse(); // oldest node first
-    Ok(nodes.into_iter().flatten().collect())
+    Ok(nodes.into_iter().flat_map(|n| n.packs).collect())
+}
+
+/// Resolve a branch's current packlist chain **depth** (number of linked
+/// nodes) from `head_key`, without collecting any pack keys. Used by the
+/// push side (#406) to decide, before planning a pack, whether this push
+/// would grow the chain past the re-baseline threshold. Shares
+/// [`walk_pack_chain`] with [`resolve_pack_chain`], so a corrupt/hostile
+/// remote (cycle, over-deep chain, undeliverable node) surfaces identically
+/// as [`DispatchError::PackChainInvalid`].
+pub(crate) fn chain_depth(
+    tx: &dyn Transport,
+    branch: &str,
+    head_key: Hash,
+) -> Result<usize, DispatchError> {
+    Ok(walk_pack_chain(tx, branch, head_key)?.len())
 }
 
 /// Chain `pack_key` onto the branch's packmap and CAS-advance the
@@ -151,14 +206,34 @@ pub(crate) fn resolve_pack_chain(
 ///   safe way to escape a broken chain. Otherwise we **block** the push
 ///   ([`DispatchError::PackChainInvalid`]) before the head moves, because the
 ///   deltas' bases live in the unreachable prior chain.
+///
+/// `rebaseline` (#406) is the *proactive* counterpart to the broken-chain
+/// reset above: the caller (`push_branch`) sets it when the prior chain is
+/// perfectly healthy but has simply grown past the re-baseline threshold
+/// (see [`rebaseline_depth`]). When `true`, prior-chain validation is
+/// skipped entirely and `prev` is unconditionally `None` — a re-baseline
+/// always resets, whether or not the prior chain would otherwise resolve.
+/// This requires `self_contained == true` (checked via `debug_assert` and,
+/// defensively, a runtime error): a delta pack chained onto a reset point
+/// would have its external bases go missing.
 pub(crate) fn advance_packmap(
     tx: &dyn Transport,
     branch: &str,
     pack_key: Hash,
     self_contained: bool,
+    rebaseline: bool,
     head_condition: refs::RefWriteCondition,
     tip: Hash,
 ) -> Result<(), DispatchError> {
+    debug_assert!(
+        !rebaseline || self_contained,
+        "a re-baseline push must always be self-contained"
+    );
+    if rebaseline && !self_contained {
+        return Err(DispatchError::RebaselineNotSelfContained {
+            branch: branch.to_owned(),
+        });
+    }
     let packmap_name = packmap_ref(branch);
     let head_name = format!("refs/heads/{branch}");
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
@@ -166,23 +241,29 @@ pub(crate) fn advance_packmap(
             return Err(DispatchError::Interrupted);
         }
         let prior = tx.read_ref(&packmap_name)?;
-        // Decide the new node's `prev` by validating the WHOLE prior chain.
-        let prev = match prior {
-            None => None,
-            Some(p) => match resolve_pack_chain(tx, branch, p) {
-                // Idempotency: a previous attempt already advertised this pack.
-                // The packmap is already correct, so only the head still needs
-                // to move — commit it alone.
-                Ok(packs) if packs.contains(&pack_key) => {
-                    return commit_head(tx, &head_name, head_condition, &tip, branch);
-                }
-                Ok(_) => Some(p), // healthy chain — append onto it
-                // Broken chain: a self-contained pack can reset to escape it;
-                // a delta push must block (its bases live in the broken tail).
-                // Transient transport errors propagate (don't reset on a blip).
-                Err(DispatchError::PackChainInvalid { .. }) if self_contained => None,
-                Err(e) => return Err(e),
-            },
+        // Decide the new node's `prev`. A re-baseline always resets
+        // (skipping prior-chain validation); otherwise validate the WHOLE
+        // prior chain before deciding to append vs. reset.
+        let prev = if rebaseline {
+            None
+        } else {
+            match prior {
+                None => None,
+                Some(p) => match resolve_pack_chain(tx, branch, p) {
+                    // Idempotency: a previous attempt already advertised this pack.
+                    // The packmap is already correct, so only the head still needs
+                    // to move — commit it alone.
+                    Ok(packs) if packs.contains(&pack_key) => {
+                        return commit_head(tx, &head_name, head_condition, &tip, branch);
+                    }
+                    Ok(_) => Some(p), // healthy chain — append onto it
+                    // Broken chain: a self-contained pack can reset to escape it;
+                    // a delta push must block (its bases live in the broken tail).
+                    // Transient transport errors propagate (don't reset on a blip).
+                    Err(DispatchError::PackChainInvalid { .. }) if self_contained => None,
+                    Err(e) => return Err(e),
+                },
+            }
         };
         let node = transfer::encode_packlist(prev, &[pack_key])?;
         let node_key = pack::pack_key(&node);
@@ -371,4 +452,86 @@ fn apply_pack_chain(
         applied.insert(&key);
     }
     (skipped, Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mkit_core::hash;
+    use mkit_transport_memory::MemoryTransport;
+
+    fn h(seed: &str) -> Hash {
+        hash::hash(seed.as_bytes())
+    }
+
+    /// Upload a hand-built packlist node under an explicit key — not
+    /// necessarily the content hash of `bytes` — so a chain's shape
+    /// (including a cycle, impossible to build under real content
+    /// addressing) can be constructed directly for the walk/guard tests
+    /// below.
+    fn put_node(tx: &MemoryTransport, key: Hash, prev: Option<Hash>, packs: &[Hash]) {
+        let bytes = transfer::encode_packlist(prev, packs).unwrap();
+        tx.upload_blob(&bytes, &PackKey::from_hash(key)).unwrap();
+    }
+
+    #[test]
+    fn chain_depth_counts_nodes_and_matches_resolve_pack_chain() {
+        let tx = MemoryTransport::new();
+        let n1 = h("n1");
+        let n2 = h("n2");
+        let n3 = h("n3");
+        put_node(&tx, n1, None, &[h("pack1")]);
+        put_node(&tx, n2, Some(n1), &[h("pack2")]);
+        put_node(&tx, n3, Some(n2), &[h("pack3")]);
+
+        assert_eq!(chain_depth(&tx, "main", n3).unwrap(), 3);
+
+        // Same node count as the packs resolve_pack_chain flattens, and the
+        // packs themselves come back oldest-first.
+        let packs = resolve_pack_chain(&tx, "main", n3).unwrap();
+        assert_eq!(packs, vec![h("pack1"), h("pack2"), h("pack3")]);
+        assert_eq!(chain_depth(&tx, "main", n3).unwrap(), packs.len());
+    }
+
+    #[test]
+    fn chain_depth_of_a_single_node_chain_is_one() {
+        let tx = MemoryTransport::new();
+        let solo = h("solo");
+        put_node(&tx, solo, None, &[h("pack-solo")]);
+        assert_eq!(chain_depth(&tx, "main", solo).unwrap(), 1);
+    }
+
+    #[test]
+    fn chain_depth_errors_on_a_cycle_exactly_like_resolve_pack_chain() {
+        let tx = MemoryTransport::new();
+        let a = h("cycle-a");
+        let b = h("cycle-b");
+        // a -> b -> a: only reachable via hand-built (non-content-addressed)
+        // nodes, exercising the shared cycle guard in `walk_pack_chain`.
+        put_node(&tx, a, Some(b), &[h("pack-a")]);
+        put_node(&tx, b, Some(a), &[h("pack-b")]);
+
+        assert!(matches!(
+            chain_depth(&tx, "main", a).unwrap_err(),
+            DispatchError::PackChainInvalid { .. }
+        ));
+        assert!(matches!(
+            resolve_pack_chain(&tx, "main", a).unwrap_err(),
+            DispatchError::PackChainInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn chain_depth_errors_on_an_undownloadable_node_like_resolve_pack_chain() {
+        let tx = MemoryTransport::new();
+        let ghost = h("never-uploaded");
+        assert!(matches!(
+            chain_depth(&tx, "main", ghost).unwrap_err(),
+            DispatchError::PackChainInvalid { .. }
+        ));
+        assert!(matches!(
+            resolve_pack_chain(&tx, "main", ghost).unwrap_err(),
+            DispatchError::PackChainInvalid { .. }
+        ));
+    }
 }

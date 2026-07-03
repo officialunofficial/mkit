@@ -108,8 +108,10 @@ fn mock_fresh_remote_push(
     let ref_gets = server
         .mock("GET", Matcher::Regex(r"^/myproj/refs/refs/".to_string()))
         .with_status(404)
-        // Branch-tip probe + packmap probe.
-        .expect(2)
+        // Branch-tip probe, the #406 pre-plan packmap-depth probe (read
+        // before `plan_pack` to decide whether this push must re-baseline),
+        // and `advance_packmap`'s own packmap probe.
+        .expect(3)
         .create();
     let pack_posts = server
         .mock("POST", "/myproj/packs")

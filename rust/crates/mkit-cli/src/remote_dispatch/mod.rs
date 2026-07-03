@@ -38,7 +38,9 @@ use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
-use packmap::{advance_packmap, commit_head, fetch_pack_chain, packmap_ref};
+use packmap::{
+    advance_packmap, chain_depth, commit_head, fetch_pack_chain, packmap_ref, rebaseline_depth,
+};
 
 const DEFAULT_REMOTE: &str = "default";
 
@@ -139,6 +141,16 @@ pub enum DispatchError {
     /// `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+    /// Internal invariant violation (#406): a re-baseline push (chain reset
+    /// to a single fresh node) was requested with a pack that is not
+    /// self-contained. `push_branch` only ever sets `rebaseline` alongside a
+    /// pack planned with an empty `have_old` set (always self-contained), so
+    /// this should be unreachable in practice; it exists as a defensive
+    /// runtime check alongside the `debug_assert` in `advance_packmap`.
+    #[error(
+        "internal error: re-baseline push for branch '{branch}' produced a non-self-contained pack"
+    )]
+    RebaselineNotSelfContained { branch: String },
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -486,6 +498,16 @@ pub fn push_branch_tracked(
 /// touching the head, so the head never points past a packmap that fails to
 /// reconstruct it (even under concurrent pushers to the same branch).
 ///
+/// Before planning the pack, resolves the branch's current packmap chain
+/// depth and, if it would grow past the re-baseline threshold (#406, see
+/// [`packmap::rebaseline_depth`]), forces a full-closure plan (diffs against
+/// no remote tip) and carries that decision down to [`advance_packmap`] so
+/// it resets the chain to a single fresh node instead of appending to it —
+/// bounding clone cost, which otherwise grows with chain length. A chain
+/// read that fails with [`DispatchError::PackChainInvalid`] is left for the
+/// existing broken-chain handling inside `advance_packmap` (its own
+/// self-contained reset path) rather than treated as a re-baseline.
+///
 /// On a CAS failure ([`TransportError::RefConflict`]) this returns
 /// [`DispatchError::NonFastForwardPush`] so callers can render an
 /// actionable fetch-then-retry hint. Does NOT touch local
@@ -501,7 +523,32 @@ pub fn push_branch(
     // and can delta against bases it already holds. Planning is an
     // optimization; the head CAS below remains authoritative.
     let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
-    let plan = transfer::plan_pack(store, tip, remote_tip)?;
+
+    // Re-baseline decision (#406), made BEFORE planning the pack: read the
+    // current chain depth and, if it would cross the threshold on this
+    // push, force a full-closure plan below instead of diffing against
+    // `remote_tip`. A missing prior packmap (first push) or a broken chain
+    // is left alone here — depth is only defined for a resolvable chain,
+    // and a broken chain already has its own reset path in `advance_packmap`.
+    let threshold = rebaseline_depth();
+    let mut rebaseline = false;
+    if threshold > 0
+        && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
+    {
+        match chain_depth(tx, branch, pm) {
+            Ok(depth) if depth + 1 > threshold => rebaseline = true,
+            Ok(_) | Err(DispatchError::PackChainInvalid { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    let plan = if rebaseline {
+        // Force a full-closure plan: no external bases, so the pack is
+        // self-contained and safe to reset the chain onto.
+        transfer::plan_pack(store, tip, None)?
+    } else {
+        transfer::plan_pack(store, tip, remote_tip)?
+    };
 
     if !plan.is_empty() {
         if crate::signal::is_shutdown() {
@@ -528,8 +575,17 @@ pub fn push_branch(
         // a transactional transport applies both atomically, the default does
         // packmap-then-head. Either way the head never lands past a packmap
         // that can't reconstruct it. `self_contained` lets a full-closure push
-        // reset a broken chain; a failed advance leaves the head untouched.
-        return advance_packmap(tx, branch, pack_key, plan.self_contained, condition, tip);
+        // reset a broken chain; `rebaseline` proactively resets a healthy one
+        // that has grown too deep. A failed advance leaves the head untouched.
+        return advance_packmap(
+            tx,
+            branch,
+            pack_key,
+            plan.self_contained,
+            rebaseline,
+            condition,
+            tip,
+        );
     }
 
     // Nothing to send — the remote already holds the closure; just move the
