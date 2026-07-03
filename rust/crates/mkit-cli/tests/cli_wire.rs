@@ -955,6 +955,68 @@ fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
 }
 
 #[test]
+fn blame_c_copy_tiebreak_prefers_older_ancestor_source() {
+    // #527: two equally-similar copy sources. git credits the source that
+    // traces to the OLDER (ancestor) commit — blame's push-back bias — not
+    // the first candidate in path order. Here the older source (committed
+    // first) is alphabetically LAST (src_z), so a path-order pick would
+    // wrongly credit the newer src_a. Pinned against git 2.50.1:
+    // `git blame -C -C dst.txt` credits c1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let block = format!("{b1}\n{b2}\n");
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    // c1 introduces src_z.txt (older; alphabetically last).
+    make_commit(td.path(), "src_z.txt", block.as_bytes(), "c1");
+    let c1 = head_hash(td.path());
+    // c2 introduces an identical src_a.txt (newer; alphabetically first).
+    make_commit(td.path(), "src_a.txt", block.as_bytes(), "c2");
+    let c2 = head_hash(td.path());
+    // c3 adds dst.txt copying the block; both sources are unchanged in c3,
+    // so only -C -C (level 2, whole-tree) sees them as candidates.
+    make_commit(td.path(), "dst.txt", block.as_bytes(), "c3");
+
+    let out = run_in(td.path(), &["blame", "-C", "-C", "dst.txt"]);
+    assert!(out.status.success(), "blame -C -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().all(|l| l.starts_with(&c1[..12])),
+        "tie-break must credit the older ancestor source (c1/src_z), not \
+         the newer src_a ({}): {stdout:?}",
+        &c2[..12]
+    );
+}
+
+#[test]
+fn blame_c_copy_tiebreak_older_source_wins_regardless_of_path_order() {
+    // #527 guard: the mirror of the tracer — the older source is now
+    // alphabetically FIRST (src_a). git still credits the older commit, so
+    // the tie-break must pick by ancestry, not "prefer the last candidate."
+    // Pinned against git 2.50.1: `git blame -C -C dst.txt` credits c1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let block = format!("{b1}\n{b2}\n");
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "src_a.txt", block.as_bytes(), "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "src_z.txt", block.as_bytes(), "c2");
+    let c2 = head_hash(td.path());
+    make_commit(td.path(), "dst.txt", block.as_bytes(), "c3");
+
+    let out = run_in(td.path(), &["blame", "-C", "-C", "dst.txt"]);
+    assert!(out.status.success(), "blame -C -C failed: {out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.lines().all(|l| l.starts_with(&c1[..12])),
+        "tie-break must credit the older ancestor source (c1/src_a), not \
+         the newer src_z ({}): {stdout:?}",
+        &c2[..12]
+    );
+}
+
+#[test]
 fn blame_ignore_rev_unknown_errors_like_git() {
     // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
     // text (with its own `error:` prefix and sysexits code, not git's 128).
