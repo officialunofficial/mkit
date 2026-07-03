@@ -668,6 +668,19 @@ impl Transport for HttpTransport {
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         self.list_refs_impl(prefix)
     }
+
+    /// The `/refs/advance` endpoint (mkit #408, see `advance_refs` above)
+    /// commits the head + packmap write in one server-side transaction
+    /// whenever both CAS conditions are expressible on it (i.e. not
+    /// `Any` — see `cond_to_json`), which covers every case
+    /// `remote_dispatch::push_branch`'s pack-chain re-baseline (mkit
+    /// #406/#521) can reach: a reset's packmap condition is always
+    /// `Missing`/`Match`, and its paired head condition, when `Any`, can
+    /// never fail its own precondition, so the ordered fallback
+    /// (`advance_refs_ordered`) is never unsafe for a reset either.
+    fn supports_atomic_advance(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

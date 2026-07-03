@@ -39,7 +39,8 @@ use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
 use packmap::{
-    advance_packmap, chain_depth, commit_head, fetch_pack_chain, packmap_ref, rebaseline_depth,
+    ChainAction, advance_packmap, commit_head, fetch_pack_chain, packmap_ref, probe_chain,
+    rebaseline_depth,
 };
 
 const DEFAULT_REMOTE: &str = "default";
@@ -141,16 +142,6 @@ pub enum DispatchError {
     /// `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
-    /// Internal invariant violation (#406): a re-baseline push (chain reset
-    /// to a single fresh node) was requested with a pack that is not
-    /// self-contained. `push_branch` only ever sets `rebaseline` alongside a
-    /// pack planned with an empty `have_old` set (always self-contained), so
-    /// this should be unreachable in practice; it exists as a defensive
-    /// runtime check alongside the `debug_assert` in `advance_packmap`.
-    #[error(
-        "internal error: re-baseline push for branch '{branch}' produced a non-self-contained pack"
-    )]
-    RebaselineNotSelfContained { branch: String },
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -499,14 +490,37 @@ pub fn push_branch_tracked(
 /// reconstruct it (even under concurrent pushers to the same branch).
 ///
 /// Before planning the pack, resolves the branch's current packmap chain
-/// depth and, if it would grow past the re-baseline threshold (#406, see
-/// [`packmap::rebaseline_depth`]), forces a full-closure plan (diffs against
-/// no remote tip) and carries that decision down to [`advance_packmap`] so
-/// it resets the chain to a single fresh node instead of appending to it —
-/// bounding clone cost, which otherwise grows with chain length. A chain
-/// read that fails with [`DispatchError::PackChainInvalid`] is left for the
-/// existing broken-chain handling inside `advance_packmap` (its own
-/// self-contained reset path) rather than treated as a re-baseline.
+/// depth (walking it exactly once, see [`packmap::probe_chain`]) and, if it
+/// would grow past the re-baseline threshold (#406, see
+/// [`packmap::rebaseline_depth`]) AND the transport's `advance_refs` is
+/// transactional ([`Transport::supports_atomic_advance`], mkit #521),
+/// forces a full-closure plan (diffs against no remote tip) and carries
+/// that decision down to [`advance_packmap`] as
+/// [`ChainAction::ResetSelfContained`] so it resets the chain to a single
+/// fresh node instead of appending to it — bounding clone cost, which
+/// otherwise grows with chain length.
+///
+/// On a transport WITHOUT transactional `advance_refs` (the default used by
+/// file/S3/SSH/memory), crossing the threshold never triggers a reset: the
+/// default `advance_refs` commits the packmap write before the head CAS, and
+/// a reset (unlike an append) is not a superset of the prior chain, so a
+/// lost head-CAS race after a committed reset would strand the (unmoved)
+/// head pointing at a commit the packmap can no longer reconstruct. Such a
+/// transport keeps appending — [`ChainAction::Append`] — past the
+/// threshold; `packmap::MAX_PACK_CHAIN_DEPTH` (the pure runaway/cycle guard)
+/// remains the only bound on chain growth there, unchanged by this gate.
+///
+/// A chain read that fails with [`DispatchError::PackChainInvalid`], or a
+/// missing prior packmap (first push), is left alone here — depth is only
+/// defined for a resolvable chain, and a broken chain already has its own
+/// reset path in `advance_packmap` (the broken-chain escape hatch, gated on
+/// `self_contained` alone, independent of this transactional-advance gate —
+/// see [`ChainAction::Append`]'s doc comment).
+///
+/// The already-resolved chain from this probe (when not discarded by a
+/// re-baseline decision) is threaded into [`advance_packmap`] so its first
+/// CAS attempt does not have to walk the chain a second time (#521 perf
+/// fix).
 ///
 /// On a CAS failure ([`TransportError::RefConflict`]) this returns
 /// [`DispatchError::NonFastForwardPush`] so callers can render an
@@ -524,20 +538,24 @@ pub fn push_branch(
     // optimization; the head CAS below remains authoritative.
     let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
 
-    // Re-baseline decision (#406), made BEFORE planning the pack: read the
-    // current chain depth and, if it would cross the threshold on this
-    // push, force a full-closure plan below instead of diffing against
-    // `remote_tip`. A missing prior packmap (first push) or a broken chain
-    // is left alone here — depth is only defined for a resolvable chain,
-    // and a broken chain already has its own reset path in `advance_packmap`.
+    // Re-baseline decision (#406/#521), made BEFORE planning the pack: walk
+    // the current chain once and, if it would cross the threshold on this
+    // push AND the transport can advance both refs transactionally, force a
+    // full-closure plan below instead of diffing against `remote_tip`. When
+    // NOT re-baselining, the walk is cached (`resolved_chain`) so
+    // `advance_packmap`'s append path can reuse it instead of re-walking.
     let threshold = rebaseline_depth();
     let mut rebaseline = false;
+    let mut resolved_chain = None;
     if threshold > 0
         && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
     {
-        match chain_depth(tx, branch, pm) {
-            Ok(depth) if depth + 1 > threshold => rebaseline = true,
-            Ok(_) | Err(DispatchError::PackChainInvalid { .. }) => {}
+        match probe_chain(tx, branch, pm) {
+            Ok(chain) if chain.depth + 1 > threshold && tx.supports_atomic_advance() => {
+                rebaseline = true;
+            }
+            Ok(chain) => resolved_chain = Some(chain),
+            Err(DispatchError::PackChainInvalid { .. }) => {}
             Err(e) => return Err(e),
         }
     }
@@ -574,18 +592,20 @@ pub fn push_branch(
         // Chain the pack onto the packmap AND move the head together (#408):
         // a transactional transport applies both atomically, the default does
         // packmap-then-head. Either way the head never lands past a packmap
-        // that can't reconstruct it. `self_contained` lets a full-closure push
-        // reset a broken chain; `rebaseline` proactively resets a healthy one
-        // that has grown too deep. A failed advance leaves the head untouched.
-        return advance_packmap(
-            tx,
-            branch,
-            pack_key,
-            plan.self_contained,
-            rebaseline,
-            condition,
-            tip,
-        );
+        // that can't reconstruct it. `Append`'s `self_contained` lets a
+        // full-closure push reset a broken chain (unconditionally, on any
+        // transport); `ResetSelfContained` proactively resets a healthy chain
+        // that has grown too deep, and is only ever chosen above when the
+        // transport is atomic-capable. A failed advance leaves the head
+        // untouched.
+        let action = if rebaseline {
+            ChainAction::ResetSelfContained
+        } else {
+            ChainAction::Append {
+                self_contained: plan.self_contained,
+            }
+        };
+        return advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip);
     }
 
     // Nothing to send — the remote already holds the closure; just move the

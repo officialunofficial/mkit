@@ -120,8 +120,29 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 // `mkit+file://` remote (env-var injection via subprocess, see module docs).
 // ---------------------------------------------------------------------------
 
+/// Fix for mkit #521: `mkit+file://` (`FileTransport`) uses the DEFAULT,
+/// non-transactional `advance_refs` (packmap-then-head) — it does not
+/// override [`Transport::supports_atomic_advance`], so it inherits `false`.
+/// A proactive re-baseline reset writes a fresh node with `prev = None`,
+/// which is NOT a superset of the prior chain (unlike an ordinary append);
+/// committing one while losing the paired head CAS would strand the
+/// (unmoved) head pointing at a commit the packmap can no longer
+/// reconstruct. So even after 4 pushes cross the depth-3 threshold, the
+/// chain on a non-atomic transport must keep appending — never reset — and
+/// the remote must stay fully clonable throughout.
+///
+/// This supersedes the pre-#521 version of this test (which asserted the
+/// opposite: that the chain collapses to one self-contained node here).
+/// That assertion described exactly the unsafe behavior #521 closes: on a
+/// non-atomic transport, a divergent push racing at this same depth
+/// threshold could commit a packmap reset, lose the head CAS, and leave
+/// the remote with a head pointing at an unreconstructable closure (see
+/// `RemoteMissingObject`). The re-baseline mechanism itself is still
+/// covered — on the transactional path — by
+/// `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`
+/// below, which uses `AtomicTransport`.
 #[test]
-fn four_pushes_at_depth_3_collapse_to_a_single_self_contained_node() {
+fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
     let alice = tempfile::tempdir().unwrap();
     init_repo(alice.path());
     let remote = tempfile::tempdir().unwrap();
@@ -154,20 +175,29 @@ fn four_pushes_at_depth_3_collapse_to_a_single_self_contained_node() {
     let chain = packmap_chain(&tx, "main");
     assert_eq!(
         chain.len(),
-        1,
-        "chain must collapse to a single node after crossing the threshold"
+        4,
+        "a non-atomic transport must never reset the chain, even past the \
+         re-baseline threshold — it must keep appending, one node per push"
     );
-    assert!(
-        chain_is_all_raw(&tx, &chain),
-        "the re-baseline node's pack(s) must be self-contained (no delta entries)"
-    );
+    // `packmap_chain` walks newest-first: every node but the oldest must
+    // chain to a `Some` prev, i.e. no reset (`prev = None`) happened
+    // partway through the chain.
+    for (idx, node) in chain.iter().enumerate() {
+        if idx + 1 < chain.len() {
+            assert!(
+                node.prev.is_some(),
+                "node {idx} unexpectedly reset to prev = None on a non-atomic transport"
+            );
+        }
+    }
     assert_eq!(
         tx.read_ref("refs/heads/main").unwrap(),
         Some(final_tip),
         "head must resolve to the latest tip"
     );
 
-    // A fresh clone reconstructs every commit, unchanged hashes.
+    // The remote stays clonable, and a fresh clone reconstructs every
+    // commit with unchanged hashes.
     let dest = tempfile::tempdir().unwrap();
     let out = run_in(dest.path(), &["clone", &url, "bob"], &[]);
     assert!(out.status.success(), "clone failed: {out:?}");
@@ -344,6 +374,17 @@ impl Transport for AtomicTransport {
         self.inner
             .update_ref(head_ref, head_condition, head_value)?;
         Ok(AdvanceOutcome::Committed)
+    }
+
+    // This transport's `advance_refs` above genuinely commits the head +
+    // packmap write as one indivisible transaction (both preconditions
+    // checked under one lock before either write lands), which is exactly
+    // the contract `Transport::supports_atomic_advance` gates the
+    // pack-chain re-baseline reset on (mkit #521): declaring it here is
+    // what lets `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`
+    // below still exercise the re-baseline path at all.
+    fn supports_atomic_advance(&self) -> bool {
+        true
     }
 }
 
