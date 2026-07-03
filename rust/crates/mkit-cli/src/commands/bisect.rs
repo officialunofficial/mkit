@@ -274,6 +274,13 @@ fn run_automated(store: &ObjectStore, cwd: &Path, mkit_dir: &Path, argv: &[Strin
                 let _ = writeln!(stdout, "{}", format::short_hash(&h, 12));
                 return exit::OK;
             }
+            Ok(BisectStep::Ambiguous { bad, skipped }) => {
+                // Only skipped commits remain: like git, report that the
+                // first bad commit is ambiguous rather than guessing `bad`.
+                let _ = restore_head(cwd, &state);
+                report_ambiguous(bad, &skipped);
+                return exit::GENERAL_ERROR;
+            }
             Ok(BisectStep::NeedMore) => {
                 return emit_err(
                     "bisect run: need at least one good and one bad commit first",
@@ -337,9 +344,19 @@ fn restore_head(cwd: &Path, state: &BisectState) -> Result<(), u8> {
     checkout(cwd, &target)
 }
 
-/// Re-exec this same binary as `mkit checkout <target>` to materialize a
-/// commit into the worktree, reusing checkout's full safety/index/sparse
-/// handling. On failure prints the child's diagnostics and returns a code.
+/// Re-exec this same binary as `mkit checkout --force <target>` to
+/// materialize a commit into the worktree, reusing checkout's full
+/// safety/index handling and discarding the test command's tracked-file
+/// scribbles. On failure prints the child's diagnostics and returns a code.
+///
+/// This is deliberately its own small self-exec rather than reusing
+/// `mcp::run_subprocess`: that helper wraps the result in an MCP
+/// `CallOutcome`, whereas here we only need the raw exit status plus stderr
+/// passthrough. Sparse caveat: the child checkout does not re-apply a
+/// persisted sparse cone (checkout only honors an explicit `--sparse`), so
+/// in a sparse repo each candidate materializes the full tree — a
+/// pre-existing checkout limitation, documented on `bisect run` in
+/// `docs/CLI.md`.
 fn checkout(cwd: &Path, target: &str) -> Result<(), u8> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -351,7 +368,10 @@ fn checkout(cwd: &Path, target: &str) -> Result<(), u8> {
         }
     };
     let out = Command::new(exe)
-        .args(["checkout", target])
+        // `--force`: discard the test command's scribbles on tracked files
+        // so the next candidate materializes cleanly (git bisect resets the
+        // worktree between candidates).
+        .args(["checkout", "--force", target])
         .current_dir(cwd)
         .env("NO_COLOR", "1")
         .output();
@@ -399,8 +419,30 @@ fn report_step(store: &ObjectStore, state: &BisectState) -> u8 {
             let _ = writeln!(stdout, "{}", format::short_hash(&h, 12));
             exit::OK
         }
+        Ok(BisectStep::Ambiguous { bad, skipped }) => {
+            report_ambiguous(bad, &skipped);
+            exit::GENERAL_ERROR
+        }
         Err(e) => emit_err(&format!("bisect: {e}"), exit::GENERAL_ERROR),
     }
+}
+
+/// Report an ambiguous result (only skipped commits remain), like git's
+/// "The first bad commit could be any of …". The suspect hashes go to
+/// stdout (data), the prose to stderr.
+fn report_ambiguous(bad: Hash, skipped: &[Hash]) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "there are only skipped commits left to test; the first bad commit could be any of:"
+    );
+    drop(stderr);
+    let mut stdout = std::io::stdout().lock();
+    for h in skipped {
+        let _ = writeln!(stdout, "{}", format::short_hash(h, 12));
+    }
+    // `bad` is the known-bad endpoint and also a suspect.
+    let _ = writeln!(stdout, "{}", format::short_hash(&bad, 12));
 }
 
 use super::error as emit_err;

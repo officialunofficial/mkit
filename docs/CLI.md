@@ -669,7 +669,15 @@ Branches / refs:
   candidate hash is also exported as `MKIT_BISECT_COMMIT`. (mkit's bisect is
   otherwise print-candidate — `start`/`good`/`bad`/`skip` print the next
   candidate rather than checking it out — so `run` checks out transiently
-  for the test and parks nothing at the end.)
+  for the test and parks nothing at the end.) Each candidate is checked out
+  with `--force`, so a test command that scribbles on tracked files (a
+  `Cargo.lock` refresh, a regenerated snapshot) doesn't block the next
+  checkout. If every remaining candidate is skipped (exit `125`), `run`
+  reports the result is ambiguous — like git's "the first bad commit could
+  be any of …" — and exits non-zero rather than guessing. Caveat: in a
+  sparse-checkout repo `run` materializes the **full** tree for each
+  candidate (the transient checkout doesn't re-apply a persisted sparse
+  cone).
 - `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,

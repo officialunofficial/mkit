@@ -311,22 +311,25 @@ fn bisect_run_converges_to_first_bad_commit() {
 
 #[test]
 fn bisect_run_skips_untestable_candidate_and_still_converges() {
-    // #528: exit 125 marks a candidate untestable (skip). c2 is untestable
-    // and c3 introduces the bug; the run must skip c2 and still converge
-    // to c3.
+    // #528: exit 125 marks a candidate untestable (skip). The bug is at c3;
+    // c4 (above the first-bad) is untestable. Skipping c4 is bypassed as the
+    // range narrows below it, so the run still converges to c3. (A skip that
+    // STRANDED the answer next to `bad` would instead be ambiguous — see
+    // `bisect_run_reports_ambiguity_when_all_candidates_skipped`.)
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
     make_commit(td.path(), "marker.txt", b"ok\n", "c1");
     let c1 = head_hash(td.path());
-    make_commit(td.path(), "marker.txt", b"SKIP\n", "c2");
+    make_commit(td.path(), "marker.txt", b"ok\n", "c2");
     make_commit(td.path(), "marker.txt", b"BAD\n", "c3");
     let c3 = head_hash(td.path());
-    make_commit(td.path(), "marker.txt", b"BAD\n", "c4");
-    let c4 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"SKIP\n", "c4");
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c5");
+    let c5 = head_hash(td.path());
 
     assert!(run_in(td.path(), &["bisect", "start"]).status.success());
     assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
-    assert!(run_in(td.path(), &["bisect", "bad", &c4]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c5]).status.success());
 
     // 125 (skip) when marker is SKIP; 1 (bad) when BAD; 0 (good) otherwise.
     let script = "grep -q SKIP marker.txt && exit 125; grep -q BAD marker.txt && exit 1; exit 0";
@@ -336,7 +339,72 @@ fn bisect_run_skips_untestable_candidate_and_still_converges() {
     assert_eq!(
         stdout.trim(),
         &c3[..12],
-        "bisect run must skip c2 and converge to c3: {stdout:?}"
+        "bisect run must bypass the c4 skip and converge to c3: {stdout:?}"
+    );
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
+#[test]
+fn bisect_run_survives_test_command_dirtying_a_tracked_file() {
+    // Review #1: the test command modifies a tracked file each iteration
+    // (as `cargo test` refreshing Cargo.lock, or a snapshot writer, would).
+    // The per-candidate checkout is forced, discarding the scribbles, so the
+    // run still converges instead of aborting on the second candidate.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c2");
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c3");
+    let c3 = head_hash(td.path());
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c4");
+    make_commit(td.path(), "tracked.txt", b"v0\n", "c5-track");
+    let c5 = head_hash(td.path());
+
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c5]).status.success());
+
+    // The command appends to the tracked file, then classifies from marker.
+    let script = "echo scribble >> tracked.txt; ! grep -q BAD marker.txt";
+    let out = run_in(td.path(), &["bisect", "run", "sh", "-c", script]);
+    assert!(
+        out.status.success(),
+        "bisect run must survive a tracked-file-dirtying command: {out:?}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.trim(), &c3[..12], "converges to c3: {stdout:?}");
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
+#[test]
+fn bisect_run_reports_ambiguity_when_all_candidates_skipped() {
+    // Review #3: when every remaining candidate is skipped, the run must NOT
+    // print `bad` as a definitive first-bad — it reports ambiguity (like
+    // git) and exits non-zero.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    for c in ["c2", "c3", "c4"] {
+        make_commit(td.path(), "marker.txt", b"BAD\n", c);
+    }
+    let c4 = head_hash(td.path());
+
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c4]).status.success());
+
+    // Every candidate is untestable (exit 125).
+    let out = run_in(td.path(), &["bisect", "run", "sh", "-c", "exit 125"]);
+    assert!(
+        !out.status.success(),
+        "all-skipped run must exit non-zero: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("only skipped commits left"),
+        "must report ambiguity like git: {stderr}"
     );
     let _ = run_in(td.path(), &["bisect", "reset"]);
 }
