@@ -354,19 +354,11 @@ pub fn is_sha256_repo(repo: &Path) -> Result<bool, BridgeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn git_available() -> bool {
-        Command::new("git")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
+    use mkit_test_util::require_tool;
 
     /// Build a tiny real repo: two commits + an annotated tag.
     fn fixture() -> Option<(tempfile::TempDir, Sha1Id)> {
-        if !git_available() {
+        if !require_tool("git") {
             return None;
         }
         let td = tempfile::tempdir().unwrap();

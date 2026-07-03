@@ -277,22 +277,14 @@ fn reconstruct_rejects_gitlink_mode() {
 
 // ─── differential vs real git ───────────────────────────────────────
 
-fn git_available() -> bool {
-    Command::new("git")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
+use mkit_test_util::require_tool;
 
 /// Every translated object's id must equal what `git hash-object`
 /// computes for the same content, and a repo assembled from our loose
 /// objects must pass `git fsck`.
 #[test]
 fn differential_ids_and_fsck_against_real_git() {
-    if !git_available() {
-        eprintln!("skipping: no git on PATH");
+    if !require_tool("git") {
         return;
     }
     let (_d, store) = store();

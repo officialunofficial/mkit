@@ -141,6 +141,7 @@ mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backe
 
 [dev-dependencies]
 tempfile = "3"
+mkit-test-util = { path = "../mkit-test-util" }
 mkit-transport-memory = { path = "../mkit-transport-memory" }
 # Integration tests for HTTP/S3 scheme dispatch use a local mockito
 # server. SSH dispatch tests only cover URL parsing (no live subprocess

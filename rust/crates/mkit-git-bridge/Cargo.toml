@@ -25,6 +25,7 @@ flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"
+mkit-test-util = { path = "../mkit-test-util" }
 
 [package.metadata.docs.rs]
 all-features = true

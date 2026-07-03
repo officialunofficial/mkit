@@ -198,3 +198,30 @@ fn sign_rejects_short_seed() {
     assert!(ed25519_sign(b"x", &short).is_err());
     assert!(ed25519_pubkey_from_seed(&short).is_err());
 }
+
+/// Native port of `sign_rejects_short_seed` (#505 PR 2/5): CI never runs
+/// `wasm-pack test`, so the wasm-gated test above never actually
+/// executes and the "throws on bad seed" contract goes unverified. On
+/// native, the same `JsValue` error path still constructs a `JsError` via
+/// a wasm-bindgen imported function, which panics rather than returning —
+/// so assert the panic via `catch_unwind` for both exports, following
+/// `webauthn.rs::challenge_not_bound_to_pae_is_rejected`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sign_rejects_short_seed() {
+    let short = [0u8; 31];
+    let sign_result = std::panic::catch_unwind(|| {
+        let _ = ed25519_sign(b"x", &short);
+    });
+    assert!(
+        sign_result.is_err(),
+        "ed25519_sign with a short seed must reject (panics natively via JsError)"
+    );
+    let pubkey_result = std::panic::catch_unwind(|| {
+        let _ = ed25519_pubkey_from_seed(&short);
+    });
+    assert!(
+        pubkey_result.is_err(),
+        "ed25519_pubkey_from_seed with a short seed must reject (panics natively via JsError)"
+    );
+}

@@ -29,6 +29,43 @@ use mkit_core::to_hex;
 pub(crate) const KEY_SEED: [u8; 32] = [0x11; 32];
 
 // ---------------------------------------------------------------------------
+// Loud skips (#505 PR 2/5)
+// ---------------------------------------------------------------------------
+//
+// Tests that depend on an external tool or an opt-in environment flag used
+// to `return` quietly (green) when the dependency was missing — a
+// tool-less CI reported green while validating nothing. These helpers make
+// that loud instead: under `MKIT_TEST_STRICT=1` (set in CI jobs that are
+// expected to have the dependency) a missing tool/flag panics the test
+// rather than silently skipping it.
+
+// Not every integration-test binary that compiles this module calls these
+// (see the file-level `allow(dead_code)` rationale above) — allow the
+// re-export to go unused in binaries that only need `require_env_flag`.
+#[allow(unused_imports)]
+pub(crate) use mkit_test_util::{require_tool, tool_available};
+
+/// Returns `true` if the opt-in environment flag `var` is set to `"1"`
+/// (e.g. `MKIT_SSH_E2E_REAL`). If it is not: panic when `MKIT_TEST_STRICT`
+/// is set, otherwise print a loud `SKIP:` line and return `false`.
+///
+/// Unlike `require_tool`, this doesn't test for a missing dependency — it
+/// gates an opt-in, environment-fragile e2e suite. `MKIT_TEST_STRICT`
+/// should therefore only be set alongside the flag itself in a CI job that
+/// actually provisions the real e2e environment.
+pub(crate) fn require_env_flag(var: &str) -> bool {
+    if std::env::var(var).as_deref() == Ok("1") {
+        return true;
+    }
+    assert!(
+        std::env::var_os("MKIT_TEST_STRICT").is_none(),
+        "{var}=1 required (MKIT_TEST_STRICT set) but not set"
+    );
+    eprintln!("SKIP: {var} not set to 1");
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Driving the real binary
 // ---------------------------------------------------------------------------
 

@@ -41,11 +41,10 @@
 //!    `StrictHostKeyChecking=yes`). That failure is the proof the option
 //!    reached real `ssh(1)`.
 
-use std::process::Command;
+mod common;
 
-fn real_e2e_enabled() -> bool {
-    std::env::var("MKIT_SSH_E2E_REAL").as_deref() == Ok("1")
-}
+use common::require_env_flag;
+use std::process::Command;
 
 /// Minimal liveness check: confirm the host actually has the `ssh` and
 /// `sshd` binaries this suite would need. We assert presence rather than
@@ -55,16 +54,18 @@ fn real_e2e_enabled() -> bool {
 #[test]
 #[ignore = "requires real ssh + sshd; gate with MKIT_SSH_E2E_REAL=1"]
 fn real_ssh_strict_host_key_checking_rejects_wrong_pin() {
-    if !real_e2e_enabled() {
-        eprintln!(
-            "ssh_e2e_real: skipped — set MKIT_SSH_E2E_REAL=1 to run the real-ssh suite \
-             (see module docs for the sshd recipe)."
-        );
+    // Loud skip (#505 PR 2/5): opting in is required to run this suite at
+    // all. Under `MKIT_TEST_STRICT`, a job that expects to drive the
+    // real-ssh e2e must set `MKIT_SSH_E2E_REAL=1` itself — leaving it
+    // unset there is a CI config bug, not a routine skip.
+    if !require_env_flag("MKIT_SSH_E2E_REAL") {
         return;
     }
 
-    // Precondition check: the tooling must exist. If it does not, fail
-    // with a clear message rather than a confusing connection error.
+    // Precondition check: the tooling must exist. This stays a hard
+    // `assert!` (not a loud-skip helper) — once an operator opts in via
+    // `MKIT_SSH_E2E_REAL=1` they've asked for the real suite to run, so a
+    // missing `ssh` binary is a failure, not something to skip past.
     let ssh_ok = Command::new("ssh").arg("-V").output().is_ok();
     assert!(
         ssh_ok,

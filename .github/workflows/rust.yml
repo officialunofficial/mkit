@@ -131,8 +131,16 @@ jobs:
           cargo build --locked --all-features
           cargo nextest run --locked --all-features
 
+      # #505 PR 2/5: macOS runners always have `git` on PATH, so tests that
+      # would otherwise silently `return` green when `git` is missing must
+      # fail loudly here instead. TPM (`tpm2` feature) and the real-ssh e2e
+      # suite are NOT provisioned on macOS runners, so MKIT_TEST_STRICT is
+      # deliberately left unset for the contrib/signers step below — those
+      # stay ordinary (quiet, `#[ignore]`d) skips here.
       - name: Test (nextest)
         working-directory: rust
+        env:
+          MKIT_TEST_STRICT: "1"
         run: cargo nextest run --locked --workspace --all-features
 
       - name: Fuzz unit tests

@@ -120,6 +120,13 @@ steps:
           exit 1
         fi
 
+        # #505 PR 2/5: this Linux lane provisions both `git` (baked into
+        # _CI_IMAGE) and a real TPM path (swtpm, wired above), so tests that
+        # would otherwise silently `return` green when their tool/feature is
+        # missing must instead fail loudly here — a config regression that
+        # breaks one of those two must not report a green CI run.
+        export MKIT_TEST_STRICT=1
+
         ( cd contrib/signers
           cargo fmt --check
           cargo clippy --locked --all-targets --all-features -- -D warnings

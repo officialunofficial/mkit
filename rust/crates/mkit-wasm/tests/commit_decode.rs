@@ -76,3 +76,22 @@ fn round_trip_child_commit_parent() {
 fn rejects_non_commit_bytes() {
     assert!(commit_decode(b"not a commit object").is_err());
 }
+
+/// Native port of `rejects_non_commit_bytes` (#505 PR 2/5): CI never runs
+/// `wasm-pack test` (only `wasm-pack build`), so the wasm-gated test above
+/// never actually executes and the "throws on bad bytes" contract goes
+/// unverified. On native, the same `Err` arm builds a `JsError` via a
+/// wasm-bindgen imported function, which panics rather than returning —
+/// so assert the panic via `catch_unwind`, following
+/// `webauthn.rs::challenge_not_bound_to_pae_is_rejected`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn rejects_non_commit_bytes() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = commit_decode(b"not a commit object");
+    });
+    assert!(
+        result.is_err(),
+        "commit_decode on non-commit bytes must reject (panics natively via JsError)"
+    );
+}

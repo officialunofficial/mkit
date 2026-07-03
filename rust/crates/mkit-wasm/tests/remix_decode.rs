@@ -131,6 +131,24 @@ fn remix_requires_at_least_one_source() {
     assert!(remix_encode_and_sign(TREE_HEX, "", "[]", "m", 1, SEED_HEX).is_err());
 }
 
+/// Native port of `remix_requires_at_least_one_source` (#505 PR 2/5): CI
+/// never runs `wasm-pack test`, so the wasm-gated test above never
+/// actually executes. On native the same `Err` arm panics via `JsError`
+/// (wasm-bindgen imported function), so assert the panic through
+/// `catch_unwind`, following
+/// `webauthn.rs::challenge_not_bound_to_pae_is_rejected`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn remix_requires_at_least_one_source() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = remix_encode_and_sign(TREE_HEX, "", "[]", "m", 1, SEED_HEX);
+    });
+    assert!(
+        result.is_err(),
+        "remix_encode_and_sign with no sources must reject (panics natively via JsError)"
+    );
+}
+
 /// `remix_decode` on commit bytes (and `commit_decode` on remix bytes)
 /// is a structural error, not a panic. Gated to wasm for the same
 /// `JsError` reason.
@@ -139,4 +157,19 @@ fn remix_requires_at_least_one_source() {
 fn remix_decode_rejects_commit_bytes() {
     let commit = commit_encode_and_sign(TREE_HEX, "", "c", 1, SEED_HEX).unwrap();
     assert!(remix_decode(&commit.bytes()).is_err());
+}
+
+/// Native port of `remix_decode_rejects_commit_bytes` (#505 PR 2/5): same
+/// CI gap and same `catch_unwind` porting pattern as the ports above.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn remix_decode_rejects_commit_bytes() {
+    let commit = commit_encode_and_sign(TREE_HEX, "", "c", 1, SEED_HEX).unwrap();
+    let result = std::panic::catch_unwind(|| {
+        let _ = remix_decode(&commit.bytes());
+    });
+    assert!(
+        result.is_err(),
+        "remix_decode on commit bytes must reject (panics natively via JsError)"
+    );
 }
