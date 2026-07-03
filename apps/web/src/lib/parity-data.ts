@@ -93,7 +93,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'reflog',
         status: 'divergent',
-        note: "Backed by a tamper-evident commit-history Merkle log, not git's reflog. No per-entry op label or message.",
+        note: "Reconstructs the branch's reachable first-parent chain (@{N}), cross-checked against a tamper-evident commit-history Merkle log — not git's per-operation reflog. Shows each commit's subject but no op labels, and commits superseded by amend/reset aren't listed.",
       },
       {
         cmd: 'blame',
