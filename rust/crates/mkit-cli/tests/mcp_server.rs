@@ -168,8 +168,16 @@ fn lists_all_tools_with_annotations() {
     }
 }
 
-#[test]
-fn full_workflow_init_to_log() {
+/// #505 PR 5/5: shared setup for the per-behavior tests below (split
+/// from the former `full_workflow_init_to_log` mega-test, which chained
+/// ~11 behaviors into one `#[test]` — a failure partway through gave no
+/// signal about which later behavior would have passed). Establishes
+/// init → keygen → add `hello.txt` → status → commit "via mcp", with the
+/// same assertions the mega-test made along the way, then hands back the
+/// live client plus repo path so each dependent test continues from a
+/// known-good state. Returns the repo tempdir too — it must outlive the
+/// client for tests that write more files into the worktree.
+fn init_keygen_committed() -> (tempfile::TempDir, McpClient, String) {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path().to_str().unwrap().to_string();
     let mut client = McpClient::spawn(Some(root.path()));
@@ -203,17 +211,39 @@ fn full_workflow_init_to_log() {
         "commit: {commit}"
     );
 
+    (root, client, repo)
+}
+
+#[test]
+fn mcp_workflow_init_keygen_add_status_commit() {
+    // All the assertions for this behavior live in `init_keygen_committed`
+    // itself; this test exists so the setup chain (init/keygen/add/status/
+    // commit) has its own localizable name distinct from the tests below
+    // that build on top of it.
+    let (_root, _client, _repo) = init_keygen_committed();
+}
+
+#[test]
+fn mcp_workflow_log_shows_committed_message() {
+    let (_root, mut client, repo) = init_keygen_committed();
     let log = ok(&mut client, "mkit_log", &json!({ "repo_path": repo }));
     assert!(log.contains("via mcp"), "log: {log}");
+}
 
+#[test]
+fn mcp_workflow_verify_reports_ok() {
+    let (_root, mut client, repo) = init_keygen_committed();
     let verify = ok(
         &mut client,
         "mkit_verify",
         &json!({ "repo_path": repo, "revision": "HEAD" }),
     );
     assert!(verify.contains("ok"), "verify: {verify}");
+}
 
-    // Branching round-trip.
+#[test]
+fn mcp_workflow_branch_create_and_checkout_round_trip() {
+    let (_root, mut client, repo) = init_keygen_committed();
     ok(
         &mut client,
         "mkit_create_branch",
@@ -226,8 +256,11 @@ fn full_workflow_init_to_log() {
     );
     let branches = ok(&mut client, "mkit_branch", &json!({ "repo_path": repo }));
     assert!(branches.contains("feature"), "branch: {branches}");
+}
 
-    // Unstage round-trip: stage a change, unstage everything.
+#[test]
+fn mcp_workflow_unstage_clears_staged_changes() {
+    let (root, mut client, repo) = init_keygen_committed();
     std::fs::write(root.path().join("two.txt"), "two\n").unwrap();
     ok(
         &mut client,
@@ -240,6 +273,11 @@ fn full_workflow_init_to_log() {
         !status.contains("A "),
         "after unstage, nothing staged: {status}"
     );
+}
+
+#[test]
+fn mcp_workflow_attest_then_show_reports_commit() {
+    let (_root, mut client, repo) = init_keygen_committed();
 
     // Attestation: produce one, then inspect the commit object.
     // `mkit attest` prints `attested <64-hex att-id> → <path> (<n>

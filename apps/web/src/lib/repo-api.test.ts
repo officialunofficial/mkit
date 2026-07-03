@@ -404,16 +404,34 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
   })
 
   it('decodes a single commit by hash for the detail view (tree + signature)', async () => {
-    const counters = { decode: 0, getObject: 0, getRef: 0 }
-    const graph = { c1: { message: 'detail me', signer: 'sig1' } }
-    const { backend } = harness({ head: 'c1', graph, counters })
+    // #505 PR 5/5 (Pattern 6): the previous version of this test only
+    // round-tripped opaque bytes through the fake `harness` above and
+    // never actually decoded anything — a real gap wearing a
+    // coverage-claiming name. Use the REAL wasm module + a real signed
+    // commit (mirroring `CommitDetail` in repo-browser.tsx, which fetches
+    // via `get_object` then decodes with `commit_decode`) so `tree_hex`
+    // and `signature_hex` are genuinely exercised, not asserted against
+    // a mock's own hardcoded return value.
+    const api = await mkit()
+    const TREE = '33'.repeat(32)
+    const commit = api.commit_encode_and_sign(TREE, '', 'detail me', 1n, SEED)
+
+    const wasm = {
+      get_object: async (_base: string, _room: string, hash: string) =>
+        hash === commit.hash_hex ? commit.bytes : undefined,
+    } as unknown as RepoWasmClient
+    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
 
     // The detail view fetches the object then decodes it client-side.
-    const bytes = await backend.getObject('room', 'c1')
+    const bytes = await backend.getObject('room', commit.hash_hex)
     expect(bytes).not.toBeNull()
-    // The wasm walk in commitLog already exercises commit_decode; here we just
-    // assert the bytes round-trip back to the same hash for get_object.
-    expect(new TextDecoder().decode(bytes!)).toBe('c1')
+    expect(bytes).toEqual(commit.bytes)
+
+    const info = api.commit_decode(bytes!)
+    expect(info.message).toBe('detail me')
+    expect(info.tree_hex).toBe(TREE)
+    // A real ed25519 signature: 64 bytes, hex-encoded.
+    expect(info.signature_hex).toMatch(/^[0-9a-f]{128}$/)
   })
 })
 
