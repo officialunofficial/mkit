@@ -96,12 +96,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file newly added by the merge searches every real parent, first
   included (under `--first-parent`, only the first). Documented divergences from git
   remain: inline `-M<num>`/`-C<num>` threshold forms aren't exposed on the
-  CLI (the core API takes a custom threshold); `-C -C -C` (whole-history
-  search) is approximated as `-C -C`; when one source holds the block at
-  several offsets the earliest offset wins (git scores candidates and tracks
-  line identity through its diff); and within a single unmatched run longer
-  than 10,000 lines only the whole run is matched, not sub-blocks (a cost
-  bound; the matcher already caps inputs).
+  CLI (the core API takes a custom threshold); when one source holds the
+  block at several offsets the earliest offset wins (git scores candidates
+  and tracks line identity through its diff); and within a single unmatched
+  run longer than 10,000 lines only the whole run is matched, not sub-blocks
+  (a cost bound; the matcher already caps inputs).
+- **`mkit blame -C -C -C` whole-history copy search.** git's third `-C`
+  ("copies from other files in any commit") now whole-tree-searches the
+  parent at *every* walk step, not only at the commit that creates the
+  blamed file. So a block copied into a persisting file from a source that
+  was *unmodified* in the introducing commit is credited to that source's
+  origin — previously `-C -C -C` was approximated as `-C -C` and missed it.
+  Pinned against git 2.50.1.
+- **`mkit blame -C` copy tie-break now matches git.** When two
+  equally-similar copy sources exist, blame credits the source that traces
+  to the older (ancestor) commit — git's push-blame-furthest-back bias —
+  instead of the first candidate in path order. The ordering is topological
+  (mkit commits can share a whole-second timestamp, so ancestry, not time,
+  is authoritative), pinned against git 2.50.1.
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited

@@ -103,16 +103,20 @@ struct BlameOpts {
     lines: Option<String>,
     /// Detect lines moved *within* the file, like `git blame -M`: a moved
     /// block of at least 20 alphanumeric characters is credited to its
-    /// origin commit rather than the editing one. (git's inline `-M<num>`
-    /// threshold override is not exposed; the core API accepts a custom
-    /// threshold.)
+    /// origin commit rather than the editing one. The inline
+    /// `-M<num>`/`-M<num>%` form overrides the threshold and is pulled out
+    /// of argv by [`extract_inline_thresholds`] before clap runs; this
+    /// bool captures the bare `-M`/`--find-moves` flag.
     #[arg(short = 'M', long = "find-moves")]
     find_moves: bool,
     /// Detect lines copied *from other files*, like `git blame -C`
     /// (implies `-M`). Repeat to widen the search: `-C` covers files
     /// changed in the same commit, `-C -C` every file in the parent
     /// commit. A copied block needs at least 40 alphanumeric characters.
-    /// (git's inline `-C<num>` threshold override is not exposed.)
+    /// The inline `-C<num>`/`-C<num>%` form overrides the threshold and
+    /// still counts toward the level; [`extract_inline_thresholds`] pulls
+    /// those out of argv before clap runs, so this count captures only the
+    /// bare `-C`/`--find-copies` occurrences.
     #[arg(short = 'C', long = "find-copies", action = clap::ArgAction::Count)]
     find_copies: u8,
     /// Ignore a "noise" commit (mass reformat, license header, rename)
@@ -154,12 +158,24 @@ struct BlameOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear flow: parse + resolve + blame + slice + render
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", args) {
+    // git's inline `-M<num>`/`-C<num>` forms can't be expressed with clap
+    // derive (a short flag that both repeats *and* takes an optional glued
+    // value), so pull them out of argv first; bare `-M`/`-C` and stacked
+    // short clusters (`-CC`, `-Mw`) fall through to clap below.
+    let (clap_args, inline) = extract_inline_thresholds(args);
+    let opts = match clap_shim::parse::<BlameOpts>("mkit blame", &clap_args) {
         Ok(o) => o,
         Err(code) => return code,
     };
     let json = matches!(opts.format, BlameFormat::Json);
+
+    // Merge the inline-form results with clap's bare-flag results: a
+    // `-M<num>` counts as `-M`, and each `-C<num>` still adds to the copy
+    // level like a bare `-C`.
+    let find_moves = opts.find_moves || inline.moves;
+    let find_copies = opts.find_copies.saturating_add(inline.copies);
 
     // `rev_and_file` is clamped to 1..=2 by clap: one value is the file
     // (blame against HEAD); two values are `<rev> <file>`.
@@ -185,8 +201,8 @@ pub fn run(args: &[String]) -> u8 {
     // detection, so reject the combination rather than silently ignoring
     // those flags.
     if opts.reverse
-        && (opts.find_moves
-            || opts.find_copies > 0
+        && (find_moves
+            || find_copies > 0
             || !opts.ignore_rev.is_empty()
             || !opts.ignore_revs_file.is_empty())
     {
@@ -196,16 +212,27 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
 
-    // `-M` enables move detection at git's default threshold; `-C` (a
-    // repeat count) sets the copy search level. `-C` implies `-M` in the
-    // core, so a bare `-C` still credits within-file moves too.
-    let moves = if opts.find_moves {
-        MoveDetection::GIT_DEFAULT
+    // `-M` enables move detection; `-C` (a repeat count) sets the copy
+    // search level. An inline `-M<num>`/`-C<num>` overrides the default
+    // threshold, otherwise git's defaults (20 for `-M`, 40 for `-C`) apply.
+    // `-C` implies `-M` in the core, so a bare `-C` still credits
+    // within-file moves too.
+    let moves = if find_moves {
+        match inline.move_threshold {
+            Some(threshold) => MoveDetection::On { threshold },
+            None => MoveDetection::GIT_DEFAULT,
+        }
     } else {
         MoveDetection::Off
     };
-    let copies = if opts.find_copies > 0 {
-        CopyDetection::git_default(opts.find_copies)
+    let copies = if find_copies > 0 {
+        match inline.copy_threshold {
+            Some(threshold) => CopyDetection::On {
+                level: find_copies,
+                threshold,
+            },
+            None => CopyDetection::git_default(find_copies),
+        }
     } else {
         CopyDetection::Off
     };
@@ -280,6 +307,90 @@ pub fn run(args: &[String]) -> u8 {
         let _ = stdout.write_all(text.as_bytes());
         exit::OK
     }
+}
+
+/// Inline `-M<num>`/`-C<num>` threshold state pulled from argv before clap
+/// parsing. Bare `-M`/`-C` are left for clap (which owns the help text and
+/// the `-C` repeat count); only the glued-value forms — which clap-derive
+/// can't model — are handled here.
+#[derive(Default)]
+struct InlineThresholds {
+    /// A `-M<num>` was seen (implies move detection, like a bare `-M`).
+    moves: bool,
+    /// Threshold from the last `-M<num>` seen, if any.
+    move_threshold: Option<usize>,
+    /// Count of `-C<num>` occurrences; each still adds to the copy level.
+    copies: u8,
+    /// Threshold from the last `-C<num>` seen, if any.
+    copy_threshold: Option<usize>,
+}
+
+/// Pull git's inline `-M<num>`/`-C<num>`/`-M<num>%` forms out of `args`,
+/// returning the remaining args (for clap) and the parsed thresholds.
+///
+/// clap-derive can't model a short flag that both repeats (`-C` sets the
+/// copy level) and takes an optional glued value (`-C40` sets the
+/// threshold), so the valued forms are handled here and the bare `-M`/`-C`
+/// flags fall through to clap unchanged. Only glued values are consumed:
+/// bare `-M`/`-C`, the `-L` range value (even a `-3,5`), and every
+/// positional pass through untouched, and nothing after a `--` end-of-
+/// options marker is inspected (so a file literally named `-C9` survives).
+///
+/// A glued value is consumed as a threshold **only when it is numeric**
+/// (`-M20`, `-C40%`). Everything else — bare `-M`/`-C`, stacked short
+/// clusters (`-CC` = copy level 2, `-Mw` = `-M -w`), the `-L` range value
+/// (even a `-3,5`), and positionals — passes through untouched to clap, and
+/// nothing after a `--` end-of-options marker is inspected (so a file
+/// literally named `-C9` survives). Passing non-numeric `-M`/`-C` tokens on
+/// to clap keeps git's/clap's short-flag stacking working and lets clap own
+/// the diagnostic for a genuinely bad flag.
+///
+/// The number is a minimum alphanumeric-character count — git's non-`%`
+/// `-M<n>` unit, which maps 1:1 onto mkit's core threshold. A trailing `%`
+/// is accepted for git-surface compatibility but the number is still used
+/// as a char count: mkit's block detector has no similarity-ratio model, a
+/// deliberate, `log`-consistent divergence (documented in `docs/CLI.md`).
+fn extract_inline_thresholds(args: &[String]) -> (Vec<String>, InlineThresholds) {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut out = InlineThresholds::default();
+    let mut opts_ended = false;
+    for arg in args {
+        if opts_ended {
+            rest.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            opts_ended = true;
+            rest.push(arg.clone());
+            continue;
+        }
+        if let Some(t) = arg.strip_prefix("-M").and_then(parse_threshold) {
+            out.move_threshold = Some(t);
+            out.moves = true;
+        } else if let Some(t) = arg.strip_prefix("-C").and_then(parse_threshold) {
+            out.copy_threshold = Some(t);
+            out.copies = out.copies.saturating_add(1);
+        } else {
+            // Bare `-M`/`-C`, a stacked cluster, or a non-`-M`/`-C` token:
+            // clap handles it.
+            rest.push(arg.clone());
+        }
+    }
+    (rest, out)
+}
+
+/// Parse the value glued to `-M`/`-C` into a threshold, or `None` when it
+/// is not a bare number — an empty suffix (bare `-M`), a stacked cluster
+/// (`-CC` → `"C"`), or otherwise non-numeric. A single trailing `%` is
+/// stripped first (git-surface compatibility; the number is still a char
+/// count). An all-digit value that overflows `usize` clamps to `MAX` — an
+/// unreachable threshold — rather than being mis-read as a stacked cluster.
+fn parse_threshold(val: &str) -> Option<usize> {
+    let num = val.strip_suffix('%').unwrap_or(val);
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(num.parse::<usize>().unwrap_or(usize::MAX))
 }
 
 /// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits
