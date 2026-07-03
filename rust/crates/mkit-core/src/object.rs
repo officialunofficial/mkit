@@ -697,6 +697,43 @@ mod tests {
                 chunk_size: 0,
                 chunks: vec![[7u8; 32], [8u8; 32]],
             }),
+            Object::Commit(Commit::new_unannotated(
+                [1u8; 32],
+                vec![[2u8; 32]],
+                Identity::ed25519([3u8; 32]),
+                [4u8; 32],
+                b"msg".to_vec(),
+                1_700_000_000,
+                [9u8; 64],
+            )),
+            Object::Remix(Remix {
+                tree_hash: [5u8; 32],
+                parents: vec![[6u8; 32]],
+                sources: vec![RemixSource {
+                    upstream_id: [10u8; 32],
+                    commit_hash: [11u8; 32],
+                }],
+                author: Identity::ed25519([12u8; 32]),
+                signer: [13u8; 32],
+                message: b"remix".to_vec(),
+                timestamp: 1_700_000_001,
+                signature: [14u8; 64],
+            }),
+            Object::Delta(Delta {
+                base_hash: [15u8; 32],
+                result_size: 4,
+                instructions: vec![0u8; 4],
+            }),
+            Object::Tag(Tag {
+                target: [16u8; 32],
+                target_type: ObjectType::Commit,
+                name: b"v1".to_vec(),
+                tagger: Identity::ed25519([17u8; 32]),
+                signer: [18u8; 32],
+                message: b"tag".to_vec(),
+                timestamp: 1_700_000_002,
+                signature: [19u8; 64],
+            }),
         ];
         for obj in &samples {
             let bytes = crate::serialize::serialize(obj).unwrap();

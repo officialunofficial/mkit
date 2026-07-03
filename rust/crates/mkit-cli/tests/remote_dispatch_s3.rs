@@ -116,20 +116,67 @@ fn signed_put_request_carries_sigv4_headers() {
 
 #[test]
 fn credential_env_vars_are_consulted_at_connect_time() {
-    // Document the env-var contract. `S3Transport::connect` reads the
-    // `MKIT_R2_ACCESS_KEY_ID` and `MKIT_R2_SECRET_ACCESS_KEY` variables
-    // at construction. Absent vars default to empty strings — no error
-    // at connect time. The first signed request then surfaces
-    // `AccessDenied` because the signer emits an unusable signature.
-    //
-    // We do NOT mutate env in-process here because `cargo test` runs
-    // tests concurrently and env mutation would race against sibling
-    // tests. We assert the contract textually instead, then let the
-    // `mkit` subcommand do the end-to-end env read via a subprocess.
+    // `S3Transport::connect` reads the `MKIT_R2_ACCESS_KEY_ID` and
+    // `MKIT_R2_SECRET_ACCESS_KEY` variables at construction. Absent vars
+    // default to empty strings — no error at connect time. The first
+    // signed request then surfaces `AccessDenied` because the signer
+    // emits an unusable signature.
     assert_eq!(mkit_transport_s3::ENV_ACCESS_KEY, "MKIT_R2_ACCESS_KEY_ID");
     assert_eq!(
         mkit_transport_s3::ENV_SECRET_KEY,
         "MKIT_R2_SECRET_ACCESS_KEY"
+    );
+
+    // In-process `set_var`/`remove_var` is disallowed repo-wide (races
+    // other threads on POSIX), so the env consultation is proven in a
+    // child process instead: re-spawn this test binary targeting this
+    // very test with the creds set (or removed) ONLY in the child's
+    // environment, and have the child branch print what `connect`
+    // actually resolved.
+    if std::env::var_os("MKIT_S3_CRED_PROBE_CHILD").is_some() {
+        let tx = S3Transport::connect("mkit+s3://r2.example.com/mybucket")
+            .expect("connect must not error regardless of creds env");
+        let (access_key_id, secret_access_key, _region) = tx.credentials_for_test();
+        println!("probe:ak={access_key_id};sk={secret_access_key};");
+        return;
+    }
+
+    let spawn_probe = |set_creds: bool| -> String {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "credential_env_vars_are_consulted_at_connect_time",
+            "--nocapture",
+        ])
+        .env("MKIT_S3_CRED_PROBE_CHILD", "1")
+        .env_remove(mkit_transport_s3::ENV_ACCESS_KEY)
+        .env_remove(mkit_transport_s3::ENV_SECRET_KEY);
+        if set_creds {
+            cmd.env(mkit_transport_s3::ENV_ACCESS_KEY, "test-access-key-id")
+                .env(mkit_transport_s3::ENV_SECRET_KEY, "test-secret-access-key");
+        }
+        let out = cmd.output().expect("spawn cred probe child");
+        assert!(
+            out.status.success(),
+            "cred probe child failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    // Set in the child's env → consulted at connect time.
+    let stdout = spawn_probe(true);
+    assert!(
+        stdout.contains("probe:ak=test-access-key-id;sk=test-secret-access-key;"),
+        "connect did not consult the creds env vars: {stdout}"
+    );
+
+    // Absent vars default to empty strings (the documented no-error-at-
+    // connect-time contract) rather than erroring or panicking.
+    let stdout = spawn_probe(false);
+    assert!(
+        stdout.contains("probe:ak=;sk=;"),
+        "connect with absent creds env should resolve empty strings: {stdout}"
     );
 
     // Subprocess smoke: `mkit remote add` + `mkit remote` round-trips a

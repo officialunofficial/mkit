@@ -180,10 +180,12 @@ fn streaming_pipeline_end_to_end_1mib() {
     edited[mid..mid + 4].copy_from_slice(b"EDIT");
     let d = delta_encode(&hero, &edited).unwrap();
     assert_eq!(d.full_size() as usize, edited.len());
-    // A 4-byte in-place edit with CDC-sized data should compress heavily.
+    // A 4-byte in-place edit with CDC-sized data should compress heavily —
+    // same <25% bound the dedicated delta test above pins; <50% was loose
+    // enough to pass with half the data re-sent wholesale.
     assert!(
-        (d.bytes_on_wire() as usize) < hero.len() / 2,
-        "delta should be <50% of hero"
+        (d.bytes_on_wire() as usize) < hero.len() / 4,
+        "delta should be <25% of hero"
     );
 
     // 4. bao encode + slice + verify

@@ -1416,8 +1416,21 @@ fn switch_creates_and_switches() {
 fn checkout_dash_b_creates_new_branch() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"a\n", "c1");
+    let head_before = rev(&repo, "HEAD");
     let out = repo.ok(&["checkout", "-b", "topic"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("Switched to a new branch 'topic'"));
+    // The branch must actually exist, and HEAD must have moved onto it
+    // (not just printed a message) — same commit, new symbolic ref.
+    assert_eq!(
+        stdout(&repo.ok(&["symbolic-ref", "--short", "HEAD"])).trim(),
+        "topic",
+        "HEAD did not move to the new branch 'topic'"
+    );
+    assert_eq!(
+        rev(&repo, "refs/heads/topic"),
+        head_before,
+        "new branch 'topic' does not point at the pre-checkout commit"
+    );
 }
 
 #[test]

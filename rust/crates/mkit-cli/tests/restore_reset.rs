@@ -183,11 +183,12 @@ fn restore_worktree_discards_unstaged_edit_from_index() {
     );
 }
 
-/// `restore <path>` happy path: a worktree edit with nothing additionally
-/// staged restores cleanly from the index (== HEAD) without --force,
-/// because the index still matches the worktree's *staged* baseline.
+/// `restore <path>` refuses to clobber an unstaged worktree edit even
+/// when the index is clean (== HEAD): the worktree differs from the
+/// index, so restore demands `--force`; with it, the committed content
+/// comes back.
 #[test]
-fn restore_worktree_from_head_when_index_clean() {
+fn restore_unstaged_edit_requires_force_even_with_clean_index() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"committed\n", "base");
 

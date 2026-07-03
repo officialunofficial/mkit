@@ -191,15 +191,10 @@ fn status_modified_committed_file_appears_in_status() {
     let td = init_with_commit(&[("a.txt", b"original")]);
     fs::write(td.path().join("a.txt"), b"changed").unwrap();
     let (stdout, _) = status_porcelain(td.path());
-    // The repo is NOT clean.
+    // a.txt was modified in the worktree but not staged → ` M`.
     assert!(
-        !stdout.is_empty(),
-        "tree must report a.txt as changed; got empty output"
-    );
-    // a.txt must appear somewhere.
-    assert!(
-        stdout.lines().any(|l| l.ends_with(" a.txt")),
-        "a.txt missing from status: {stdout:?}"
+        has_entry(&stdout, " M", "a.txt"),
+        "a.txt should be ` M` (unstaged-modified); got: {stdout:?}"
     );
 }
 
@@ -230,13 +225,13 @@ fn status_three_states() {
     );
     // a.txt was modified, not staged → ` M`.
     assert!(
-        stdout.lines().any(|l| l.ends_with(" a.txt")),
-        "a.txt missing from status: {stdout:?}"
+        has_entry(&stdout, " M", "a.txt"),
+        "a.txt should be ` M` (unstaged-modified); got: {stdout:?}"
     );
     // b.txt was deleted from worktree, not staged → ` D`.
     assert!(
-        stdout.lines().any(|l| l.ends_with(" b.txt")),
-        "b.txt missing from status: {stdout:?}"
+        has_entry(&stdout, " D", "b.txt"),
+        "b.txt should be ` D` (unstaged-deleted); got: {stdout:?}"
     );
 }
 

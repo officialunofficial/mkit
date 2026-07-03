@@ -26,7 +26,7 @@ use mkit_core::hash::{hash, to_hex};
 use mkit_core::object::{Identity, Object, ObjectType, Tag};
 use mkit_core::serialize;
 use mkit_core::sign::{
-    KeyPair, TAG_DOMAIN, sign_tag, tag_signing_bytes, tag_signing_hash, verify_tag,
+    COMMIT_DOMAIN, KeyPair, TAG_DOMAIN, sign_tag, tag_signing_bytes, tag_signing_hash, verify_tag,
 };
 
 fn golden_dir() -> PathBuf {
@@ -194,5 +194,13 @@ fn tag_signature_is_deterministic_and_distinct_domain() {
     assert_eq!(
         tag_sig.0, t.signature,
         "sign_tag matches kp.sign(TAG_DOMAIN)"
+    );
+    // The guard this test is named for: the identical signing bytes,
+    // signed under a DIFFERENT domain, must NOT produce the same
+    // signature (domain separation actually changes the digest).
+    let commit_domain_sig = kp.sign(COMMIT_DOMAIN, &sb);
+    assert_ne!(
+        commit_domain_sig.0, t.signature,
+        "tag signature must differ from the same bytes signed under COMMIT_DOMAIN"
     );
 }

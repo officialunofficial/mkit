@@ -312,6 +312,20 @@ mod tests {
             windows_service_pattern(),
             r"^.+\.dev\.mkit\.keystore\.signing-key\.v1$"
         );
+        // Exercise the pattern's actual matching semantics (the string
+        // above is only a change detector): it must select exactly the
+        // `<label>.<SERVICE>` targets this backend writes and nothing
+        // else — in particular the `.`-escaping and `^`/`$` anchors.
+        let re = regex::Regex::new(&windows_service_pattern()).expect("pattern compiles");
+        assert!(re.is_match("mykey.dev.mkit.keystore.signing-key.v1"));
+        assert!(re.is_match("with.dots.dev.mkit.keystore.signing-key.v1"));
+        // `.+` requires a non-empty label prefix.
+        assert!(!re.is_match("dev.mkit.keystore.signing-key.v1"));
+        // Escaped dots: a literal `.` may not match arbitrary chars.
+        assert!(!re.is_match("mykey.devXmkit.keystore.signing-key.v1"));
+        // Anchors: no foreign prefix/suffix around the service name.
+        assert!(!re.is_match("mykey.dev.mkit.keystore.signing-key.v1.bak"));
+        assert!(!re.is_match("other.app.credential"));
     }
 
     #[test]

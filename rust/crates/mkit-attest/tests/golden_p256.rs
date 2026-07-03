@@ -17,7 +17,7 @@
 //! is an interop contract test, NOT a published browser vector —
 //! there is no universally accepted `WebAuthn` golden in the spec
 //! because the bytes depend on the authenticator's private key. See
-//! the comment above `webauthn_compat_compressed_and_uncompressed`
+//! the comment above `webauthn_shape_self_consistency_compressed_and_uncompressed`
 //! for details.
 
 #![cfg(feature = "algo-p256")]
@@ -112,7 +112,7 @@ fn golden_signature_and_pubkey() {
 /// above; adding a true W3C-published triple is a follow-up once an
 /// authenticator emulator is in the workspace.
 #[test]
-fn webauthn_compat_compressed_and_uncompressed() {
+fn webauthn_shape_self_consistency_compressed_and_uncompressed() {
     let signer = P256Signer::new(SECRET).expect("signer");
 
     // Emulate a WebAuthn signing input: authenticatorData || sha256(clientDataJSON).
