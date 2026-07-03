@@ -12,6 +12,9 @@
    it reads on both surfaces. */
 [data-theme='dark'] {
   --color-bg: oklch(0.16 0 0);
+  /* A zero-alpha version of THIS theme's bg. See the light `@theme` for why we
+     never fade to the `transparent` keyword. */
+  --color-bg-0: oklch(0.16 0 0 / 0);
   --color-fg: oklch(0.96 0 0);
   --color-muted: oklch(0.62 0 0);
   --color-subtle: oklch(0.48 0 0);
@@ -25,6 +28,14 @@
    sans; we skip the site's DaVinci serif deliberately. */
 @theme {
   --color-bg: oklch(1 0 0);
+  /* A zero-alpha version of `--color-bg`, per theme. Gradients that fade a
+     solid edge into nothing MUST fade to this — NOT the CSS `transparent`
+     keyword, which resolves to transparent-BLACK (rgba(0,0,0,0)). Safari/iOS
+     interpolate a gradient in premultiplied sRGB, so white→transparent passes
+     through greys and paints a dark "shadow" band (the fade strip under the
+     header rule looked broken on iOS). Fading to the bg colour at alpha 0
+     keeps the whole ramp on-hue and truly invisible at the far end. */
+  --color-bg-0: oklch(1 0 0 / 0);
   --color-fg: oklch(0.145 0 0);
   --color-muted: oklch(0.556 0 0);
   /* `subtle` sits between `muted` and `hairline` — used for descriptive

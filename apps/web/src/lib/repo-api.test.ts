@@ -1042,12 +1042,15 @@ describe('MockRepoBackend chat: post / list / watch', () => {
     expect(msgs[0]!.authorPubkeyHex).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('content address is deterministic for the same (room, author, text)', async () => {
+  it('two identical-text posts get DISTINCT ids (per-post signed nonce)', async () => {
+    // Each send folds a unique nonce into the content hash, so the same author
+    // posting the same text twice yields two different message objects — the fix
+    // that lets reactions key on the plain id without leaking across reposts.
     const { backend } = await makeBackend()
     const a = await backend.postMessage('lobby', 'same')
-    const { backend: backend2 } = await makeBackend()
-    const b = await backend2.postMessage('lobby', 'same')
-    expect(a.messageIdHex).toBe(b.messageIdHex)
+    const b = await backend.postMessage('lobby', 'same')
+    expect(a.messageIdHex).toMatch(/^[0-9a-f]{64}$/)
+    expect(a.messageIdHex).not.toBe(b.messageIdHex)
   })
 
   it('rejects empty and over-long messages (≤280 chars)', async () => {
@@ -1210,6 +1213,25 @@ describe('aggregateReactions tallies per target with mine flag', () => {
   it('mine is false when no pubkey is supplied', () => {
     const agg = aggregateReactions([{ targetIdHex: 't', emoji: '👍', authorPubkeyHex: 'me' }])
     expect(agg.get('t')?.[0]?.mine).toBe(false)
+  })
+})
+
+describe('chat message ids are unique per post (signed nonce), so reactions do not collide', () => {
+  it('gives two identical-text posts DISTINCT ids — the Slack "reaction on both messages" bug', async () => {
+    // emerald-robin posts "hello" twice. With the per-post nonce folded into the
+    // content hash, the two posts get different message ids, so a reaction on one
+    // can never aggregate onto the other.
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => SEED)
+    const first = await backend.postMessage('room', 'hello')
+    const second = await backend.postMessage('room', 'hello')
+    expect(first.messageIdHex).not.toBe(second.messageIdHex)
+
+    // React on the second post only; it must not show on the first.
+    const rows: ReactionEntry[] = [{ targetIdHex: second.messageIdHex, emoji: '🚀', authorPubkeyHex: 'me' }]
+    const agg = aggregateReactions(rows, 'me')
+    expect(agg.get(second.messageIdHex)).toEqual([{ emoji: '🚀', count: 1, mine: true }])
+    expect(agg.get(first.messageIdHex)).toBeUndefined()
   })
 })
 

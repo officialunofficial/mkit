@@ -317,6 +317,9 @@ function Feed({
                         item.ts >= prev.ts &&
                         item.ts - prev.ts < GROUP_WINDOW_MS
                       }
+                      // Reactions key on the message id, which is unique per post (the server folds the
+                      // signed idempotency nonce into it), so identical text re-posted gets distinct ids
+                      // and a reaction can't leak across the two.
                       reactions={reactionsFor(item.message.messageIdHex)}
                       canReact={unlocked}
                       onToggle={(emoji) =>

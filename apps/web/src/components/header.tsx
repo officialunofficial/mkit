@@ -72,11 +72,14 @@ export const Header = () => {
       {/* Fade strip directly below the 2px rule: content scrolling
           upward softens into the opaque nav area instead of cutting
           at a hard edge. `pointer-events-none` keeps it from stealing
-          clicks from anything that happens to land under it. */}
+          clicks from anything that happens to land under it. Fades to
+          `--color-bg-0` (the bg colour at alpha 0), NOT the `transparent`
+          keyword — on Safari/iOS `transparent` interpolates as transparent
+          BLACK, painting a grey "shadow" band across this strip. */}
       <div
         className='pointer-events-none absolute inset-x-0 top-full h-6'
         style={{
-          backgroundImage: 'linear-gradient(to bottom, var(--color-bg), transparent)',
+          backgroundImage: 'linear-gradient(to bottom, var(--color-bg), var(--color-bg-0))',
         }}
         aria-hidden
       />
