@@ -266,8 +266,20 @@ fn patch_requires_paths() {
 fn patch_conflicts_with_all() {
     let td = init_repo();
     let p = td.path();
-    let out = run(p, &["add", "-p", "-A"]);
-    assert!(!out.status.success(), "-p with -A must fail");
+    // Give the invocation a path so the failure can only come from the
+    // -p/-A conflict guard, not the "requires paths" guard.
+    fs::write(p.join("f.txt"), b"x\n").unwrap();
+    let out = run(p, &["add", "-p", "-A", "f.txt"]);
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "-p with -A must fail with USAGE (64): {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("-p/--patch cannot be combined with -A/--all"),
+        "expected the -p/-A conflict diagnostic, got: {stderr}"
+    );
 }
 
 #[test]

@@ -899,13 +899,14 @@ mod tests {
     #[test]
     fn write_rejects_oversize() {
         let (_dir, store) = fresh_store();
-        // We obviously can't allocate 1 GiB+1 in a test, so use a small
-        // synthetic threshold check by exercising the guard surface
-        // through a fake slice header. The cleanest portable approach
-        // is to assert the constant directly and rely on the smaller
-        // overflow test below for runtime coverage.
-        let _ = MAX_RAW_OBJECT_SIZE;
-        // Realistic small write still works.
+        // A REAL cap+1 body: `vec![0u8; n]` is `alloc_zeroed`, so the
+        // 1 GiB+1 buffer costs lazily mapped zero pages, not RSS — and
+        // the guard rejects on `len()` before anything reads the bytes.
+        let oversize = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        let err = store.write(&oversize).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge), "got {err:?}");
+        drop(oversize);
+        // A realistic small write still works after the rejection.
         let h = store.write(&[0u8; 16]).unwrap();
         assert!(store.contains(&h));
     }

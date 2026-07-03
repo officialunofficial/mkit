@@ -212,16 +212,21 @@ fn s3_falls_back_to_monolithic_when_manifest_missing() {
 
 #[test]
 fn s3_tampered_shard_is_rejected_via_manifest_hash() {
-    // Build a sharded pack, then deliberately corrupt one shard's
-    // body before publishing. The decoder must reject it via the
-    // manifest's BLAKE3 entry and recover using the others.
+    // Build a sharded pack, corrupt one shard's body, and 404 all four
+    // parity shards so the decoder is FORCED to consume the tampered
+    // one: with only `minimum_shards` (16) shards servable — indices
+    // 0..=15, including tampered shard 0 — the collection loop must
+    // wait for all of them, the manifest's BLAKE3 entry must catch the
+    // tamper, and the transport must surface `InvalidResponse`. This
+    // is deterministic (no dependence on parallel arrival order): the
+    // tampered shard can never be skipped.
     let mut server = mockito::Server::new();
     let pack = synthetic_pack(64 * 1024);
     let key = key_for(&pack);
-    let (mut shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+    let config = default_config();
+    let (mut shards, manifest) = encode_pack_to_shards(&pack, config).unwrap();
     // Flip a byte in shard 0 so its BLAKE3 no longer matches the
-    // manifest. The shard layer should drop it, then reconstruct via
-    // the other 19 shards (we still have plenty of slack).
+    // manifest entry.
     let last = shards[0].bytes.len() - 1;
     shards[0].bytes[last] ^= 0xFF;
     let manifest_bytes = encode_manifest(&manifest).unwrap();
@@ -235,34 +240,44 @@ fn s3_tampered_shard_is_rejected_via_manifest_hash() {
         .with_status(200)
         .with_body(manifest_bytes)
         .create();
+    let minimum = config.minimum_shards.get();
+    let mut mocks = Vec::new();
     for shard in &shards {
         let path = format!("/bucket/packs/{hex}/shards/{}", shard.index);
-        let _m = server
-            .mock("GET", path.as_str())
-            .with_status(200)
-            .with_body(shard.bytes.clone())
-            .create();
+        if shard.index < minimum {
+            mocks.push(
+                server
+                    .mock("GET", path.as_str())
+                    .with_status(200)
+                    .with_body(shard.bytes.clone())
+                    .create(),
+            );
+        } else {
+            // Exactly `extra_shards` failures — one short of aborting
+            // the collection loop, so every servable shard (tampered
+            // shard 0 included) is consumed.
+            mocks.push(server.mock("GET", path.as_str()).with_status(404).create());
+        }
     }
 
     let t = build_transport(&server.url());
-    // The current S3 transport collects the first N successful HTTP
-    // responses without re-checking BLAKE3 before handing to the
-    // decoder. If shard 0 happens to arrive in the first 16, the
-    // decoder will reject it via the manifest's shard_hashes and the
-    // transport will surface that as InvalidResponse. Either path is
-    // acceptable: we only assert "not a successful round-trip", since
-    // the parallel order is timing-dependent.
-    //
-    // What we MUST NOT see is a silent corruption — i.e. the
-    // transport returning the (wrong) tampered bytes as the pack.
-    let result = t.download_pack(&key);
-    if let Ok(bytes) = &result {
-        assert_eq!(bytes.as_slice(), pack.as_slice(), "silent corruption");
+    match t.download_pack(&key) {
+        Err(TransportError::InvalidResponse) => {}
+        Ok(bytes) => panic!(
+            "tampered shard must be rejected via the manifest hash, \
+             got Ok ({} bytes{})",
+            bytes.len(),
+            if bytes == pack {
+                ", identical to the pack — the tamper was silently repaired \
+                 without enough healthy shards, which is impossible"
+            } else {
+                ", SILENT CORRUPTION"
+            },
+        ),
+        Err(other) => {
+            panic!("expected InvalidResponse from the manifest BLAKE3 check, got {other:?}")
+        }
     }
-    // Otherwise the failure must be InvalidResponse (shard hash
-    // mismatch caught by decode_pack_from_shards) or PackNotFound.
-    let _ = result;
-    let _ = &shards; // silence linter — we still own the vec
 }
 
 fn one_retry_backoff() -> BackoffIterator {

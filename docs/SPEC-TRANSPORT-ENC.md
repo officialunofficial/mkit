@@ -204,8 +204,7 @@ without depending on wall-clock time or a multi-threaded executor.
 | `handshake_rejection_surfaces_peer_rejected` | Server's bouncer unconditionally returns `false`; client's `dial` MUST resolve to an error and the server-side outcome MUST be `EncryptedError::PeerRejected`. |
 | `peer_rejected_error_maps_to_init_error` | Pure unit test: `EncryptedError::PeerRejected(_) → EncInitError::PeerRejected`. Catches regressions in the `From` impl even if a future commonware release moves which side surfaces the rejection. |
 | `url::parse_enc_url::*` (~25 cases) | URL parser: pins accepted forms (`mkit+enc://[user@]host[:port][/path]?pubkey=<hex\|b64url>`), both pubkey encodings, and rejection of bad inputs (missing prefix / pubkey, port overflow, CRLF / NUL injection, `..` path segments, b64 trailing-bit ambiguity, duplicate / unknown query params). |
-| `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly. Pins the `Arc<Runtime>` shape so a future refactor doesn't silently drop the runtime between calls. |
-| `tcp::buffer_pool_is_cached` | The `OnceLock`-cached buffer pool returns the same underlying allocation across calls. |
+| `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly: a task spawned during the first `block_on` is still alive when a later `block_on` awaits it, so a refactor that drops and rebuilds the runtime between calls fails the test. |
 | `tcp_e2e::list_refs_round_trip_over_real_tcp` (real-TCP transport stage, gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
 
 ---

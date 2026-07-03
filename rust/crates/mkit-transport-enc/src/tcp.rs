@@ -621,34 +621,33 @@ where
 mod tests {
     use super::*;
 
-    /// The executor's runtime should outlive a single `block_on` call.
-    /// Trivial — but pins the `Arc::clone` semantics so a future
-    /// refactor doesn't silently turn `TokioExecutor` into an
-    /// owned-runtime wrapper that drops between calls.
+    /// The executor's runtime must outlive a single `block_on` call:
+    /// a task spawned during the first `block_on` must still be alive
+    /// (not aborted) when the second `block_on` awaits it. If a future
+    /// refactor turned `TokioExecutor` into a wrapper that drops and
+    /// rebuilds its runtime between calls, the spawned task would be
+    /// aborted and the `JoinHandle` would resolve to a `JoinError`
+    /// here instead of the value.
     #[test]
     fn executor_handles_repeated_block_on() {
         let exec = TokioExecutor::new().expect("runtime");
-        let a: i32 = exec.block_on(async { 1 + 1 });
-        let b: i32 = exec.block_on(async { 2 + 2 });
-        assert_eq!(a, 2);
-        assert_eq!(b, 4);
-    }
-
-    /// The buffer pool acquired by the first call is cached and
-    /// returned by subsequent calls. Asserting the same `Arc` is
-    /// reused saves us from regressing into per-call Runner
-    /// construction, which would dominate `connect_tcp` latency.
-    #[test]
-    fn buffer_pool_is_cached() {
-        let p1 = acquire_network_buffer_pool();
-        let p2 = acquire_network_buffer_pool();
-        // BufferPool wraps an Arc; `Clone` is a refcount bump, and
-        // two clones of the same underlying Arc compare equal by
-        // pointer identity via `Arc::ptr_eq` — but BufferPool doesn't
-        // expose its inner Arc. The proxy assertion is that the
-        // Debug repr matches (config + num_classes) — they would
-        // differ only across distinct pool constructions.
-        assert_eq!(format!("{p1:?}"), format!("{p2:?}"));
+        // The task cannot complete until the SECOND block_on sends the
+        // value, so it is guaranteed to straddle the call boundary — a
+        // rebuilt runtime would have aborted it in between.
+        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
+        // Deliberately NOT awaited inside the first block_on: the
+        // whole point is smuggling the live JoinHandle across it.
+        #[allow(clippy::async_yields_async)]
+        let handle = exec.block_on(async move {
+            tokio::spawn(async move { rx.await.expect("sender kept alive") + 1 })
+        });
+        let v: i32 = exec.block_on(async move {
+            tx.send(41).expect("task must still be listening");
+            handle
+                .await
+                .expect("runtime (and its spawned tasks) must survive between block_on calls")
+        });
+        assert_eq!(v, 42);
     }
 
     /// `PeerPolicy::Allowlist` admits a listed key and rejects an

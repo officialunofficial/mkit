@@ -296,11 +296,23 @@ fn stash_list_on_empty_repo_prints_none_marker() {
 }
 
 #[test]
-fn stash_show_returns_tempfail_placeholder() {
+fn stash_show_on_empty_stash_errors_out_of_range() {
+    // `stash show` defaults to entry 0; with no stash entries that
+    // index is out of range and must fail with GENERAL_ERROR (1) and a
+    // diagnostic naming the bad index — not panic, and not exit 0.
     let td = tempfile::tempdir().unwrap();
     init_repo(td.path());
     let out = run_in(td.path(), &["stash", "show"]);
-    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "empty-stash `stash show` must exit GENERAL_ERROR: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("stash index 0 is out of range"),
+        "expected the out-of-range diagnostic, got: {stderr}"
+    );
 }
 
 // ---------- blame ---------------------------------------------------------
@@ -1225,9 +1237,13 @@ fn serve_rejects_bad_handshake_and_exits() {
     child.stdin.as_mut().unwrap().write_all(&frame).unwrap();
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait serve");
-    // The server responds with STATUS_ERROR and exits — exit code is
-    // PROTOCOL_ERROR (76).
-    assert!(!out.status.success(), "serve should reject bad handshake");
+    // The server rejects the bad handshake and exits with the specific
+    // PROTOCOL_ERROR code (76) — not a panic (101), not a generic 1.
+    assert_eq!(
+        out.status.code(),
+        Some(76),
+        "serve must exit PROTOCOL_ERROR (76) on a bad handshake: {out:?}"
+    );
 }
 
 // ---------- sparse-checkout ----------------------------------------------

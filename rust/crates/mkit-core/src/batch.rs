@@ -925,13 +925,17 @@ mod tests {
 
     #[test]
     fn batch_write_rejects_oversize() {
-        // Mirrors store::tests::write_rejects_oversize: the 1 GiB cap
-        // cannot be allocated in a unit test; assert the guard constant
-        // is wired and a realistic write succeeds. The checked-sum
-        // logic is exercised by write_parts proptests.
+        // Mirrors store::tests::write_rejects_oversize: a REAL cap+1
+        // body (lazily mapped zero pages via `alloc_zeroed`, so no RSS
+        // cost) must be refused by the batch's size guard before any
+        // hashing or staging.
         let (_dir, store) = fresh_store();
-        let _ = MAX_RAW_OBJECT_SIZE;
         let batch = store.batch();
+        let oversize = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        let err = batch.write(&oversize).unwrap_err();
+        assert!(matches!(err, StoreError::ObjectTooLarge), "got {err:?}");
+        drop(oversize);
+        // The batch stays usable after the rejection.
         let h = batch.write(&[0u8; 16]).unwrap();
         batch.commit().unwrap();
         assert!(store.contains(&h));

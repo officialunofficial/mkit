@@ -17,8 +17,8 @@ use std::time::Duration;
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError};
 use mkit_core::refs::RefWriteCondition;
-use mkit_transport_s3::S3Transport;
 use mkit_transport_s3::sigv4::Credentials;
+use mkit_transport_s3::{S3_SINGLE_PUT_MAX, S3Transport};
 
 fn demo_creds() -> Credentials {
     Credentials {
@@ -153,27 +153,22 @@ fn upload_pack_5xx_then_200_succeeds() {
 
 #[test]
 fn upload_pack_rejects_over_5gib() {
-    // Zero-allocation test — build a fake slice using a fixed-sized
-    // Vec; we can't allocate 5 GiB in unit tests. Instead, directly
-    // verify the guard via a Vec of capacity just over the limit via
-    // an unsafe trick is too risky; use a hand-rolled `from_raw_parts`
-    // on a small capacity. Simpler: rely on the real upload call at a
-    // size we CAN allocate, and assert ordering by confirming the
-    // transport never reaches the (unbound) server.
+    // A REAL over-cap body: `vec![0u8; S3_SINGLE_PUT_MAX + 1]` is
+    // allocated with `alloc_zeroed`, so the > 5 GiB body costs lazily
+    // mapped zero pages (virtual address space), not RSS — and the
+    // size guard fires before anything reads the bytes.
     //
-    // The size check lives BEFORE any network call, so we set up NO
-    // mock expectations — a failing guard returns before contacting
-    // the server.
+    // The guard sits BEFORE any network call, so NO mocks are
+    // installed: reaching the server would return mockito's 501 and
+    // fail the exact-status assertion below.
     let server = mockito::Server::new();
     let t = build_transport(&server.url());
-    // Allocate ~32 KiB and lie about its length via a safe path: we
-    // wrap the guard itself by calling `upload_pack` with a real large
-    // vector. That's too heavy; skip the real-size assertion and only
-    // ensure the normal path works. This is acceptable because
-    // `sigv4.rs` never sees the body when `bytes.len() > S3_SINGLE_PUT_MAX`.
-    // For coverage of the guard, the pure-function upper bound is
-    // re-tested via a unit test in `lib.rs` (S3_SINGLE_PUT_MAX constant).
-    let _ = t;
+    let over_cap = usize::try_from(S3_SINGLE_PUT_MAX).unwrap() + 1;
+    let body = vec![0u8; over_cap];
+    match t.upload_pack(&body, &sample_key()) {
+        Err(TransportError::ServerError { status: 413 }) => {}
+        other => panic!("expected the 413 oversize guard, got {other:?}"),
+    }
 }
 
 // -- downloadPack ------------------------------------------------------------
@@ -651,28 +646,36 @@ fn with_parts_rejects_invalid_url_prefixes() {
 
 #[test]
 fn retry_order_calls_server_enough_times() {
-    // Thread-safe counter so we can confirm the transport makes exactly
+    // Thread-safe counter so we can confirm the transport makes EXACTLY
     // (1 + N) attempts before giving up — 1 initial + N retries (N = 5
-    // in the fast ladder we installed).
+    // in the fast ladder we installed). This holds with or without the
+    // pack-shards feature: the first GET a `download_pack` issues (the
+    // shard manifest, or the monolithic pack body) is retried through
+    // the full ladder and its terminal 502 propagates without falling
+    // through to a second route.
     static CALLS: AtomicU32 = AtomicU32::new(0);
     CALLS.store(0, Ordering::SeqCst);
 
     let mut server = mockito::Server::new();
-    let _m = server
+    let m = server
         .mock("GET", mockito::Matcher::Any)
         .with_status(502)
-        .expect_at_least(2)
+        .expect(6)
         .with_body_from_request(|_| {
             CALLS.fetch_add(1, Ordering::SeqCst);
             b"err".to_vec()
         })
         .create();
     let t = build_transport(&server.url());
-    let _ = t.download_pack(&sample_key());
-    assert!(
-        CALLS.load(Ordering::SeqCst) >= 2,
-        "retries did not re-hit the server (got {} calls)",
-        CALLS.load(Ordering::SeqCst)
+    match t.download_pack(&sample_key()) {
+        Err(TransportError::ServerError { status: 502 }) => {}
+        other => panic!("expected the terminal 502 after retries, got {other:?}"),
+    }
+    m.assert();
+    assert_eq!(
+        CALLS.load(Ordering::SeqCst),
+        6,
+        "exhausted retry ladder must make exactly 1 + 5 attempts"
     );
 }
 
