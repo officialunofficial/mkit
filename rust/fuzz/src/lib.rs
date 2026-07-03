@@ -110,22 +110,34 @@ pub fn delta_one_iteration(input: &[u8]) {
     let _ = mkit_core::delta::decode(base, stream);
 }
 
-/// Apply `PackReader::read` against `input` — same panic/UB invariant.
-/// Uses an in-process tempdir so the store side-effect is isolated and
-/// auto-cleaned at scope exit.
-pub fn pack_one_iteration(input: &[u8]) {
+/// Shared pre-check for [`pack_one_iteration`] / [`pack_one_iteration_with_store`]:
+/// truncate per guardrail #2 and refuse to feed packs whose declared
+/// `entry_count` would force a giant `Vec::with_capacity` (the reader
+/// already enforces `MAX_ENTRIES`, but the cap here prevents the test
+/// from even trying). Returns `None` when the iteration should be
+/// skipped.
+fn pack_validated_input(input: &[u8]) -> Option<&[u8]> {
     let input = &input[..input.len().min(MAX_INPUT)];
     if input.len() < 12 {
-        return;
+        return None;
     }
-    // Same defensive cap as delta: refuse to feed packs whose declared
-    // entry_count would force a giant Vec::with_capacity. The reader
-    // already enforces MAX_ENTRIES, but the cap here prevents the test
-    // from even trying.
     let claimed_entries = u32::from_le_bytes([input[8], input[9], input[10], input[11]]);
     if claimed_entries > 100_000 {
-        return;
+        return None;
     }
+    Some(input)
+}
+
+/// Apply `PackReader::read` against `input` — same panic/UB invariant.
+/// Uses an in-process tempdir so the store side-effect is isolated and
+/// auto-cleaned at scope exit. Real libfuzzer / `fuzz_target!` runs call
+/// this directly, where per-call isolation matters; the unit-test loop
+/// uses [`pack_one_iteration_with_store`] instead to reuse one store
+/// across all `MAX_ITER` iterations (#505 PR 5/5).
+pub fn pack_one_iteration(input: &[u8]) {
+    let Some(input) = pack_validated_input(input) else {
+        return;
+    };
     let dir = match tempfile::TempDir::new() {
         Ok(d) => d,
         Err(_) => return,
@@ -135,6 +147,18 @@ pub fn pack_one_iteration(input: &[u8]) {
         Err(_) => return,
     };
     let _ = mkit_core::pack::PackReader::read(input, &store);
+}
+
+/// As [`pack_one_iteration`], but against a caller-provided store
+/// instead of a fresh tempdir. Lets the unit-test loop amortize the
+/// tempdir + `ObjectStore::init` cost across all `MAX_ITER` iterations
+/// instead of paying for 100 real filesystem inits per `cargo test`
+/// invocation (#505 PR 5/5).
+pub fn pack_one_iteration_with_store(input: &[u8], store: &mkit_core::store::ObjectStore) {
+    let Some(input) = pack_validated_input(input) else {
+        return;
+    };
+    let _ = mkit_core::pack::PackReader::read(input, store);
 }
 
 /// Apply `serialize::deserialize` against `input` — covers the tree
@@ -340,6 +364,25 @@ pub fn run_iterated_unit(body: fn(&[u8])) -> Result<(), GuardrailError> {
     Ok(())
 }
 
+/// As [`run_iterated_unit`], but threads a caller-owned `state: &T`
+/// through to `body` on every iteration instead of requiring `body` to
+/// build its own per-call state (#505 PR 5/5) — used by the pack target
+/// to reuse one tempdir/store across all `MAX_ITER` iterations.
+pub fn run_iterated_unit_with<T>(state: &T, body: fn(&[u8], &T)) -> Result<(), GuardrailError> {
+    let mut prng = SplitMix::new(RNG_SEED);
+    let mut buf = vec![0u8; MAX_INPUT];
+    for _ in 0..MAX_ITER {
+        let len = prng.range_usize(MAX_INPUT);
+        prng.fill(&mut buf[..len]);
+        let start = Instant::now();
+        body(&buf[..len], state);
+        if start.elapsed() > PER_ITER {
+            return Err(GuardrailError::IterationTooSlow);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,7 +430,14 @@ mod tests {
 
     #[test]
     fn pack_target_runs_within_caps() {
-        run_iterated_unit(pack_one_iteration).expect("guardrails held");
+        // #505 PR 5/5: one tempdir/store reused across all MAX_ITER
+        // iterations instead of 100 real filesystem inits — the
+        // per-iteration isolation `pack_one_iteration` gives real
+        // libfuzzer runs isn't needed by this deterministic PRNG-driven
+        // loop, which only cares whether the reader panics/UB's.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = mkit_core::store::ObjectStore::init(dir.path()).expect("store init");
+        run_iterated_unit_with(&store, pack_one_iteration_with_store).expect("guardrails held");
     }
 
     #[test]

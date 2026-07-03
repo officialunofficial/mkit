@@ -583,16 +583,23 @@ fn reconstruct_rejects_mkit_illegal_tree_names() {
     );
 }
 
-/// Helper: the translated git body of the fixture's signed head commit.
-fn signed_commit_body() -> Vec<u8> {
+/// Helper: the translated git body of a signed commit.
+///
+/// #505 PR 5/5: deliberately minimal (empty tree, no parents) — the
+/// tests below only mutate the synthesized `mkit-*` headers of a bridge
+/// commit body, so they don't need `build_fixture`'s full >1 MiB
+/// chunked-blob / nested-tree / tag fixture (that fixture exists for the
+/// full round-trip tests above, which actually exercise those shapes).
+fn minimal_signed_commit_body() -> Vec<u8> {
     let (_d, store) = store();
-    let (child, _) = build_fixture(&store);
-    let (_known, emitted) = translate_all(&store, &child);
+    let empty_tree = put(&store, &Object::Tree(Tree { entries: vec![] }));
+    let commit = signed_commit(&store, empty_tree, vec![], "minimal\n");
+    let (_known, emitted) = translate_all(&store, &commit);
     emitted
         .iter()
-        .find(|(h, _)| h == &child)
+        .find(|(h, _)| h == &commit)
         .map(|(_, g)| g.body.clone())
-        .expect("head commit emitted")
+        .expect("commit emitted")
 }
 
 fn as_commit(body: Vec<u8>) -> GitObject {
@@ -602,11 +609,13 @@ fn as_commit(body: Vec<u8>) -> GitObject {
     }
 }
 
-/// §10: tampered signatures/fields report Failed — never Unsigned,
-/// never Verified.
+/// #505 PR 5/5: split from the former `shallow_verify_reports_failed_on_tamper`
+/// mega-test (also switched off the >1 MiB `build_fixture` fixture — see
+/// `minimal_signed_commit_body`). §10: a tampered signature reports
+/// Failed — never Unsigned, never Verified.
 #[test]
-fn shallow_verify_reports_failed_on_tamper() {
-    let body = String::from_utf8(signed_commit_body()).unwrap();
+fn shallow_verify_reports_failed_on_tampered_signature() {
+    let body = String::from_utf8(minimal_signed_commit_body()).unwrap();
 
     // Flip one hex digit of the signature value.
     let sig_line_start = body.find("mkit-signature ").unwrap() + "mkit-signature ".len();
@@ -619,6 +628,14 @@ fn shallow_verify_reports_failed_on_tamper() {
         ShallowVerdict::Failed,
         "tampered signature"
     );
+}
+
+/// #505 PR 5/5: split from the former `shallow_verify_reports_failed_on_tamper`
+/// mega-test. §10: a tampered carried `mkit-tree` (signed bytes change)
+/// reports Failed — never Unsigned, never Verified.
+#[test]
+fn shallow_verify_reports_failed_on_tampered_tree() {
+    let body = String::from_utf8(minimal_signed_commit_body()).unwrap();
 
     // Flip one hex digit of the carried mkit-tree (signed bytes change).
     let tree_start = body.find("mkit-tree ").unwrap() + "mkit-tree ".len();
@@ -633,42 +650,75 @@ fn shallow_verify_reports_failed_on_tamper() {
     );
 }
 
-/// §1.2/§9: schema gating and the explicit fail-closed branches.
+/// #505 PR 5/5: split from the former table-driven `reconstruct_fail_closed_branches`
+/// mega-test (also switched off the >1 MiB `build_fixture` fixture — see
+/// `minimal_signed_commit_body`) so each fail-closed branch below is its
+/// own localizable test. §1.2/§9: a schema bump (`mkit-schema 2`) refuses.
 #[test]
-fn reconstruct_fail_closed_branches() {
-    let body = String::from_utf8(signed_commit_body()).unwrap();
-    let cases: Vec<(&str, String)> = vec![
-        ("schema 2", body.replace("mkit-schema 1", "mkit-schema 2")),
-        ("schema missing", body.replace("mkit-schema 1\n", "")),
-        (
-            "reserved header",
-            body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-remix-source 00\n"),
+fn reconstruct_fail_closed_schema_bump() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        body.replace("mkit-schema 1", "mkit-schema 2")
+    });
+}
+
+/// §1.2/§9: a missing `mkit-schema` header refuses.
+#[test]
+fn reconstruct_fail_closed_schema_missing() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        body.replace("mkit-schema 1\n", "")
+    });
+}
+
+/// §1.2/§9: an unexpected reserved header (`mkit-remix-source` on a
+/// plain commit) refuses.
+#[test]
+fn reconstruct_fail_closed_reserved_header() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-remix-source 00\n")
+    });
+}
+
+/// §1.2/§9: a duplicated `mkit-signer` header refuses.
+#[test]
+fn reconstruct_fail_closed_duplicate_signer() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        let line_start = body.find("mkit-signer ").unwrap();
+        let line_end = body[line_start..].find('\n').unwrap() + line_start + 1;
+        let line = &body[line_start..line_end];
+        format!("{}{}{}", &body[..line_end], line, &body[line_end..])
+    });
+}
+
+/// §1.2/§9: a continuation line on the `mkit-schema` header refuses.
+#[test]
+fn reconstruct_fail_closed_continuation_line() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        body.replace("mkit-schema 1\n", "mkit-schema 1\n continuation\n")
+    });
+}
+
+/// §1.2/§9: an unknown `mkit-*` header refuses.
+#[test]
+fn reconstruct_fail_closed_unknown_header() {
+    assert_fail_closed(&minimal_signed_commit_body(), |body| {
+        body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-unknown x\n")
+    });
+}
+
+/// Shared assertion for the `reconstruct_fail_closed_*` tests above:
+/// apply `mutate` to the decoded `body`, then assert `reconstruct_commit`
+/// refuses it with a typed fail-closed error.
+fn assert_fail_closed(body: &[u8], mutate: impl FnOnce(&str) -> String) {
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let mutated = mutate(&body);
+    let err = reconstruct::reconstruct_commit(mutated.as_bytes()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BridgeError::NotBridgeObject(_) | BridgeError::Integrity(_)
         ),
-        ("duplicate signer", {
-            let line_start = body.find("mkit-signer ").unwrap();
-            let line_end = body[line_start..].find('\n').unwrap() + line_start + 1;
-            let line = &body[line_start..line_end];
-            format!("{}{}{}", &body[..line_end], line, &body[line_end..])
-        }),
-        (
-            "continuation line",
-            body.replace("mkit-schema 1\n", "mkit-schema 1\n continuation\n"),
-        ),
-        (
-            "unknown mkit header",
-            body.replace("mkit-schema 1\n", "mkit-schema 1\nmkit-unknown x\n"),
-        ),
-    ];
-    for (label, mutated) in cases {
-        let err = reconstruct::reconstruct_commit(mutated.as_bytes()).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                BridgeError::NotBridgeObject(_) | BridgeError::Integrity(_)
-            ),
-            "{label}: got {err}"
-        );
-    }
+        "got {err}"
+    );
 }
 
 /// §1.2 store-side: a future-schema object refuses with the typed

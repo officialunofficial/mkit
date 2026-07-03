@@ -18,10 +18,20 @@ use std::path::Path;
 /// lexical absolute path when the target does not exist yet).
 #[must_use]
 pub fn remote_identity(dest: &str) -> String {
+    remote_identity_relative_to(dest, None)
+}
+
+/// As [`remote_identity`], but resolves a non-existent relative local
+/// path against `base` instead of the process's current directory when
+/// `base` is `Some`. Exposed (test-only) so the relative-path test can
+/// absolutize deterministically instead of mutating the shared process
+/// cwd via `set_current_dir` — a `set_current_dir` call races every
+/// other test in the binary running in parallel (#505 PR 5/5).
+fn remote_identity_relative_to(dest: &str, base: Option<&Path>) -> String {
     // file:// URLs → local path handling.
     if let Some(rest) = dest.strip_prefix("file://") {
         let path = rest.strip_prefix("localhost").unwrap_or(rest);
-        return canonical_local(path);
+        return canonical_local(path, base);
     }
 
     // Scheme URLs.
@@ -71,7 +81,7 @@ pub fn remote_identity(dest: &str) -> String {
     }
 
     // Local path.
-    canonical_local(dest)
+    canonical_local(dest, base)
 }
 
 /// Split `host[:port]`, leaving IPv6 bracket literals intact.
@@ -108,17 +118,21 @@ fn strip_path(path: &str) -> String {
     p.to_owned()
 }
 
-fn canonical_local(path: &str) -> String {
+fn canonical_local(path: &str, base: Option<&Path>) -> String {
     let p = strip_path(path);
     let pb = Path::new(&p);
     let abs = pb.canonicalize().unwrap_or_else(|_| {
         // Lexical fallback for paths that don't exist (yet, or after
-        // the `.git` strip): absolutize against cwd and normalize
-        // `.`/`..` components, so `/a/b` + `../up` and `/a/up` agree.
+        // the `.git` strip): absolutize against `base` (or cwd, when
+        // `base` is `None`) and normalize `.`/`..` components, so
+        // `/a/b` + `../up` and `/a/up` agree.
         let joined = if pb.is_absolute() {
             pb.to_path_buf()
         } else {
-            std::env::current_dir().map_or_else(|_| pb.to_path_buf(), |c| c.join(pb))
+            match base {
+                Some(b) => b.join(pb),
+                None => std::env::current_dir().map_or_else(|_| pb.to_path_buf(), |c| c.join(pb)),
+            }
         };
         lexical_normalize(&joined)
     });
@@ -190,14 +204,15 @@ mod tests {
         // canonicalize: macOS tempdirs live behind the /var symlink,
         // and cwd always reports the resolved spelling.
         let a = td.path().canonicalize().unwrap().join("a");
-        std::fs::create_dir_all(a.join("b")).unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(a.join("b")).unwrap();
+        let base = a.join("b");
+        std::fs::create_dir_all(&base).unwrap();
         // `../up.git` doesn't exist: the `.git`-stripped fallback must
         // still agree with the identity seen from the absolutized
-        // clone URL (`<td>/a/up.git` → `<td>/a/up`).
-        let from_rel = remote_identity("../up.git");
-        std::env::set_current_dir(&prev).unwrap();
+        // clone URL (`<td>/a/up.git` → `<td>/a/up`). Absolutize against
+        // an explicit `base` instead of `set_current_dir` (#505 PR 5/5):
+        // mutating the process cwd races every other test in this binary
+        // running in parallel.
+        let from_rel = remote_identity_relative_to("../up.git", Some(&base));
         let from_abs = remote_identity(&format!("{}/up.git", a.display()));
         assert_eq!(from_rel, from_abs);
     }
