@@ -57,8 +57,6 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use mkit_core::hash::{HEX_LEN, Hash, from_hex, to_hex};
 use mkit_core::protocol::PackKey;
@@ -69,8 +67,6 @@ use super::DispatchError;
 /// Subdirectory (under `.mkit/`) holding one applied-pack record file per
 /// remote.
 const APPLIED_PACKS_DIR: &str = "applied-packs";
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A local record of pack digests already unpacked into this repo's object
 /// store for one remote. See the module docs for the on-disk format and the
@@ -178,7 +174,7 @@ fn parse_lowercase_hex_line(line: &str) -> Option<Hash> {
     if line.len() != HEX_LEN
         || !line
             .bytes()
-            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return None;
     }
@@ -212,11 +208,12 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
         .file_name()
         .expect("applied_packs::write_atomic: path has file name")
         .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
+    // `with_prefix_in` already appends a random unique suffix, so this
+    // prefix only needs to be stable and recognisable — no pid/sequence
+    // needed for uniqueness.
+    let tmp_prefix = format!(".{file_name}.tmp");
 
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = NamedTempFile::with_prefix_in(tmp_prefix, parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;

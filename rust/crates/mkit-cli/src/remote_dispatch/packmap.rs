@@ -262,15 +262,22 @@ pub(crate) fn commit_head(
 /// A run's result is "downloading/unpacking every non-skipped pack, then
 /// asserting `tip`'s closure is fully present" (the latter via
 /// [`super::verify_closure_present`], folded in here rather than sequenced
-/// by the caller — see that function's doc comment for why). If EITHER
-/// half fails in a run that skipped at least one recorded pack, the local
-/// applied-pack record is treated as possibly stale relative to the object
-/// store (e.g. `.mkit/objects` was wiped out-of-band while
-/// `applied-packs/` survived) rather than a hard failure: the record is
-/// cleared and the whole chain is retried once with no skips. Only if that
-/// retry also fails is the error propagated. A [`DispatchError::Interrupted`]
-/// (user-requested shutdown) is never treated as a self-heal trigger — it
-/// propagates immediately regardless of how many packs were skipped.
+/// by the caller — see that function's doc comment for why). If that
+/// closure check fails with [`DispatchError::RemoteMissingObject`], or a
+/// skipped pack turns out to be unreadable ([`DispatchError::Pack`] from
+/// [`PackReader::read`]), in a run that skipped at least one recorded
+/// pack, the local applied-pack record is treated as possibly stale
+/// relative to the object store (e.g. `.mkit/objects` was wiped
+/// out-of-band while `applied-packs/` survived) rather than a hard
+/// failure: the record is cleared and the whole chain is retried once with
+/// no skips. Only if that retry also fails is the error propagated. Every
+/// other error kind (e.g. a transient [`DispatchError::Transport`] error,
+/// or [`DispatchError::AdvertisedPackMissing`] for a genuinely
+/// corrupt/incomplete remote) is NOT a staleness signal and propagates
+/// immediately without touching the record — a network blip or a corrupt
+/// remote is not evidence the local object store is stale. A
+/// [`DispatchError::Interrupted`] (user-requested shutdown) is likewise
+/// never treated as a self-heal trigger.
 pub(crate) fn fetch_pack_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
@@ -293,7 +300,9 @@ pub(crate) fn fetch_pack_chain(
             Ok(())
         }
         Err(DispatchError::Interrupted) => Err(DispatchError::Interrupted),
-        Err(e) if skipped > 0 => {
+        Err(e @ (DispatchError::RemoteMissingObject(_) | DispatchError::Pack(_)))
+            if skipped > 0 =>
+        {
             eprintln!(
                 "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({e}); clearing it and re-fetching the full pack chain"
             );
