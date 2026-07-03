@@ -152,12 +152,9 @@ struct BlameOpts {
 pub fn run(args: &[String]) -> u8 {
     // git's inline `-M<num>`/`-C<num>` forms can't be expressed with clap
     // derive (a short flag that both repeats *and* takes an optional glued
-    // value), so pull them out of argv first; bare `-M`/`-C` fall through
-    // to clap below.
-    let (clap_args, inline) = match extract_inline_thresholds(args) {
-        Ok(pair) => pair,
-        Err(msg) => return emit_err(&msg, exit::DATAERR),
-    };
+    // value), so pull them out of argv first; bare `-M`/`-C` and stacked
+    // short clusters (`-CC`, `-Mw`) fall through to clap below.
+    let (clap_args, inline) = extract_inline_thresholds(args);
     let opts = match clap_shim::parse::<BlameOpts>("mkit blame", &clap_args) {
         Ok(o) => o,
         Err(code) => return code,
@@ -327,12 +324,21 @@ struct InlineThresholds {
 /// positional pass through untouched, and nothing after a `--` end-of-
 /// options marker is inspected (so a file literally named `-C9` survives).
 ///
+/// A glued value is consumed as a threshold **only when it is numeric**
+/// (`-M20`, `-C40%`). Everything else — bare `-M`/`-C`, stacked short
+/// clusters (`-CC` = copy level 2, `-Mw` = `-M -w`), the `-L` range value
+/// (even a `-3,5`), and positionals — passes through untouched to clap, and
+/// nothing after a `--` end-of-options marker is inspected (so a file
+/// literally named `-C9` survives). Passing non-numeric `-M`/`-C` tokens on
+/// to clap keeps git's/clap's short-flag stacking working and lets clap own
+/// the diagnostic for a genuinely bad flag.
+///
 /// The number is a minimum alphanumeric-character count — git's non-`%`
 /// `-M<n>` unit, which maps 1:1 onto mkit's core threshold. A trailing `%`
 /// is accepted for git-surface compatibility but the number is still used
 /// as a char count: mkit's block detector has no similarity-ratio model, a
 /// deliberate, `log`-consistent divergence (documented in `docs/CLI.md`).
-fn extract_inline_thresholds(args: &[String]) -> Result<(Vec<String>, InlineThresholds), String> {
+fn extract_inline_thresholds(args: &[String]) -> (Vec<String>, InlineThresholds) {
     let mut rest = Vec::with_capacity(args.len());
     let mut out = InlineThresholds::default();
     let mut opts_ended = false;
@@ -346,36 +352,33 @@ fn extract_inline_thresholds(args: &[String]) -> Result<(Vec<String>, InlineThre
             rest.push(arg.clone());
             continue;
         }
-        if let Some(val) = arg.strip_prefix("-M") {
-            if val.is_empty() {
-                rest.push(arg.clone()); // bare `-M` → clap
-                continue;
-            }
-            out.move_threshold = Some(parse_threshold(val, arg)?);
+        if let Some(t) = arg.strip_prefix("-M").and_then(parse_threshold) {
+            out.move_threshold = Some(t);
             out.moves = true;
-        } else if let Some(val) = arg.strip_prefix("-C") {
-            if val.is_empty() {
-                rest.push(arg.clone()); // bare `-C` → clap
-                continue;
-            }
-            out.copy_threshold = Some(parse_threshold(val, arg)?);
+        } else if let Some(t) = arg.strip_prefix("-C").and_then(parse_threshold) {
+            out.copy_threshold = Some(t);
             out.copies = out.copies.saturating_add(1);
         } else {
+            // Bare `-M`/`-C`, a stacked cluster, or a non-`-M`/`-C` token:
+            // clap handles it.
             rest.push(arg.clone());
         }
     }
-    Ok((rest, out))
+    (rest, out)
 }
 
-/// Parse the numeric value glued to `-M`/`-C` (`token` is the whole flag,
-/// used only for the error message). A single trailing `%` is stripped
-/// first — see [`extract_inline_thresholds`] for why the percent is
-/// accepted but the number is treated as a char count.
-fn parse_threshold(val: &str, token: &str) -> Result<usize, String> {
+/// Parse the value glued to `-M`/`-C` into a threshold, or `None` when it
+/// is not a bare number — an empty suffix (bare `-M`), a stacked cluster
+/// (`-CC` → `"C"`), or otherwise non-numeric. A single trailing `%` is
+/// stripped first (git-surface compatibility; the number is still a char
+/// count). An all-digit value that overflows `usize` clamps to `MAX` — an
+/// unreachable threshold — rather than being mis-read as a stacked cluster.
+fn parse_threshold(val: &str) -> Option<usize> {
     let num = val.strip_suffix('%').unwrap_or(val);
-    num.parse::<usize>().map_err(|_| {
-        format!("invalid threshold in `{token}`: expected a number, optionally suffixed with `%`")
-    })
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(num.parse::<usize>().unwrap_or(usize::MAX))
 }
 
 /// Resolve `--ignore-rev` / `--ignore-revs-file` into the set of commits

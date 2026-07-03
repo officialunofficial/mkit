@@ -1018,6 +1018,52 @@ fn blame_c_inline_threshold_composes_with_repeat() {
 }
 
 #[test]
+fn blame_stacked_short_flags_reach_clap() {
+    // Review #2: the inline-threshold pre-scan must only consume a *numeric*
+    // glued value; stacked short clusters where `-M`/`-C` leads (`-CC` =
+    // `-C -C`, `-Mw` = `-M -w`) must still reach clap, not be misread as a
+    // threshold. `-CC` on an unchanged source is level 2 and credits the
+    // origin; a genuinely bad flag (`-Cxyz`) is a clap USAGE error, not a
+    // silent no-op or a DATAERR.
+    let b1 = "fn handler_alpha() { compute(); }";
+    let b2 = "fn handler_bravo() { compute(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "src.txt", format!("{b1}\n{b2}\n").as_bytes(), "c1");
+    let first = head_hash(td.path());
+    fs::write(td.path().join("dst.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "dst.txt"]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "c2"])
+            .status
+            .success()
+    );
+
+    // `-CC` == `-C -C` (level 2) → finds the unchanged source.
+    let cc = run_in(td.path(), &["blame", "-CC", "dst.txt"]);
+    assert!(cc.status.success(), "blame -CC failed: {cc:?}");
+    let cc_out = String::from_utf8(cc.stdout).unwrap();
+    assert!(
+        cc_out.lines().all(|l| l.starts_with(&first[..12])),
+        "-CC is level 2 and credits the origin: {cc_out:?}"
+    );
+    // `-Mw` == `-M -w` → succeeds (move detection + ignore-whitespace).
+    assert!(
+        run_in(td.path(), &["blame", "-Mw", "dst.txt"])
+            .status
+            .success(),
+        "-Mw (= -M -w) must be accepted"
+    );
+    // A non-numeric glued value that isn't a valid cluster is a clap error.
+    let bad = run_in(td.path(), &["blame", "-Cxyz", "dst.txt"]);
+    assert_eq!(
+        bad.status.code(),
+        Some(64),
+        "a bad -C value is a clap USAGE error (64), not DATAERR: {bad:?}"
+    );
+}
+
+#[test]
 fn blame_ignore_rev_unknown_errors_like_git() {
     // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
     // text (with its own `error:` prefix and sysexits code, not git's 128).
