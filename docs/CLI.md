@@ -266,10 +266,21 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
-  [--ignore-revs-file <file>] [--first-parent] [--reverse] [-L <start>,<end>]
-  [<rev>] <file>` —
-  show line-level commit attribution. `-w` ignores whitespace when
+- `mkit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
+  [--ignore-rev <rev>] [--ignore-revs-file <file>] [--first-parent] [--reverse]
+  [-L <start>,<end>] [<rev>] <file>` —
+  show line-level commit attribution. `--porcelain` emits git's grouped
+  machine format — a per-line header (`<id> <orig> <final> [<group-len>]`)
+  followed by a metadata block (author/committer, `author-time`/`-tz`,
+  `summary`, a `boundary` marker on a file-history root, and `filename`) once
+  per commit, with each content line tab-prefixed; `--line-porcelain` repeats
+  the full block for every line. mkit's documented divergences (consistent
+  with `--format=json` and the `log` precedent): object ids are 64-hex;
+  `author`/`committer` carry mkit's Identity string, not `Name <email>`
+  (`author-mail`/`committer-mail` are empty and both `*-tz` are `+0000`,
+  since mkit commits store a single UTC author + timestamp); `filename` is
+  the `-C` copy source on a cross-file copy; git's out-of-scope `previous`
+  line is not emitted. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's

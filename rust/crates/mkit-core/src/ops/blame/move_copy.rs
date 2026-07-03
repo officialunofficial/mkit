@@ -289,14 +289,16 @@ impl<'a> Detector<'a> {
         match source {
             BlockSource::WithinFile { offset } => {
                 let attrs = ctx.within_attrs.expect("within-file source present");
-                copy_origins(out, s, e - s, attrs, *offset);
+                // Within-file `-M`: the line stays in the blamed path, so no
+                // porcelain `filename` override.
+                copy_origins(out, s, e - s, attrs, *offset, None);
             }
             BlockSource::Copy { path, offset } => {
                 // Blame the winning source file once to get its origins.
                 // The cached slice and `out` never alias, so borrow it
                 // directly rather than cloning the whole vector per block.
                 let attrs = self.candidate_attrs(ctx.source_commit, path)?;
-                copy_origins(out, s, e - s, attrs, *offset);
+                copy_origins(out, s, e - s, attrs, *offset, Some(path.as_str()));
             }
         }
         Ok(())
@@ -496,16 +498,24 @@ impl<'a> Detector<'a> {
 }
 
 /// Copy `len` source origins starting at `src_off` into `out` at `dst`.
+/// When `source_path` is `Some` (a cross-file `-C` copy), each copied
+/// origin is tagged with that path so porcelain can emit `filename`; a
+/// within-file `-M` move passes `None` (the line stays in the blamed path).
 fn copy_origins(
     out: &mut [Attribution],
     dst: usize,
     len: usize,
     src: &[Attribution],
     src_off: usize,
+    source_path: Option<&str>,
 ) {
     for k in 0..len {
         if let Some(a) = src.get(src_off + k) {
-            out[dst + k] = a.clone();
+            let mut a = a.clone();
+            if let Some(path) = source_path {
+                a.source_path = Some(path.to_string());
+            }
+            out[dst + k] = a;
         }
     }
 }

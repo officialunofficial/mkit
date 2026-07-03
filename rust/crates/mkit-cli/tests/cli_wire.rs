@@ -1177,6 +1177,118 @@ fn blame_c_copy_tiebreak_older_source_wins_regardless_of_path_order() {
 }
 
 #[test]
+fn blame_porcelain_matches_git_field_block_with_boundary() {
+    // #524: grouped porcelain. c1 introduces 3 lines (a boundary/root
+    // commit); c2 edits line 2 and appends line 4. Field ordering and
+    // grouping are pinned against git 2.50.1 (mkit's documented divergences:
+    // 64-hex ids, Identity author, empty *-mail, +0000 tz, no `previous`).
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbravo\ncharlie\n", "c1 initial");
+    make_commit(
+        td.path(),
+        "f.txt",
+        b"alpha\nBRAVO2\ncharlie\ndelta\n",
+        "c2 edit+add",
+    );
+
+    let out = run_in(td.path(), &["blame", "--porcelain", "f.txt"]);
+    assert!(out.status.success(), "blame --porcelain failed: {out:?}");
+    let s = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<&str> = s.lines().collect();
+
+    // First header: "<64-hex> <orig> <final> <group-len>" then git's exact
+    // field-block ordering, with the boundary marker on the root commit.
+    let h0: Vec<&str> = rows[0].split(' ').collect();
+    assert_eq!(h0.len(), 4, "header shape: {:?}", rows[0]);
+    assert_eq!(h0[0].len(), 64, "mkit uses 64-hex ids");
+    assert_eq!((h0[1], h0[2]), ("1", "1"), "orig+final line numbers");
+    assert!(rows[1].starts_with("author ed25519:"), "{:?}", rows[1]);
+    assert_eq!(rows[2], "author-mail <>");
+    assert!(rows[3].starts_with("author-time "));
+    assert_eq!(rows[4], "author-tz +0000");
+    assert!(rows[5].starts_with("committer ed25519:"));
+    assert_eq!(rows[6], "committer-mail <>");
+    assert!(rows[7].starts_with("committer-time "));
+    assert_eq!(rows[8], "committer-tz +0000");
+    assert_eq!(rows[9], "summary c1 initial");
+    assert_eq!(rows[10], "boundary");
+    assert_eq!(rows[11], "filename f.txt");
+    assert_eq!(rows[12], "\talpha");
+
+    // Metadata is emitted once per commit (grouped): exactly 2 blocks.
+    assert_eq!(
+        s.lines().filter(|l| l.starts_with("author ")).count(),
+        2,
+        "grouped porcelain emits metadata once per commit"
+    );
+    // Only the root commit c1 is a boundary.
+    assert_eq!(s.lines().filter(|l| *l == "boundary").count(), 1);
+    // Content, in order, tab-prefixed.
+    let content: Vec<&str> = s.lines().filter_map(|l| l.strip_prefix('\t')).collect();
+    assert_eq!(content, ["alpha", "BRAVO2", "charlie", "delta"]);
+}
+
+#[test]
+fn blame_line_porcelain_repeats_header_per_line() {
+    // #524: --line-porcelain repeats the full metadata block for every line.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"alpha\nbravo\ncharlie\n", "c1");
+    make_commit(td.path(), "f.txt", b"alpha\nBRAVO2\ncharlie\ndelta\n", "c2");
+
+    let out = run_in(td.path(), &["blame", "--line-porcelain", "f.txt"]);
+    assert!(
+        out.status.success(),
+        "blame --line-porcelain failed: {out:?}"
+    );
+    let s = String::from_utf8(out.stdout).unwrap();
+    let content = s.lines().filter(|l| l.starts_with('\t')).count();
+    let authors = s.lines().filter(|l| l.starts_with("author ")).count();
+    assert_eq!(content, 4, "four content lines");
+    assert_eq!(
+        authors, content,
+        "line-porcelain repeats the header for every line"
+    );
+}
+
+#[test]
+fn blame_porcelain_emits_copy_source_filename() {
+    // #524: on a `-C` cross-file copy, the porcelain `filename` is the copy
+    // SOURCE (git parity), and the block is credited to the source's origin.
+    let b1 = "fn handler_alpha_beta_gamma() { compute_the_thing(); }";
+    let b2 = "fn second_helper_delta_epsilon() { do_more(); }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "a.txt", format!("{b1}\n{b2}\n").as_bytes(), "c1");
+    // c2: shrink a.txt, add b.txt copying the block.
+    fs::write(td.path().join("a.txt"), b"leftover\n").unwrap();
+    fs::write(td.path().join("b.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(
+        run_in(td.path(), &["add", "a.txt", "b.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["commit", "-m", "c2 split"])
+            .status
+            .success()
+    );
+
+    let out = run_in(td.path(), &["blame", "-C", "--porcelain", "b.txt"]);
+    assert!(out.status.success(), "blame -C --porcelain failed: {out:?}");
+    let s = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        s.lines().any(|l| l == "filename a.txt"),
+        "copied block's porcelain filename is the source a.txt: {s}"
+    );
+    // Both copied lines are one group crediting the source's origin commit.
+    let first = s.lines().next().unwrap();
+    let h: Vec<&str> = first.split(' ').collect();
+    assert_eq!(h[3], "2", "the two copied lines form one group: {first:?}");
+}
+
+#[test]
 fn blame_ignore_rev_unknown_errors_like_git() {
     // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
     // text (with its own `error:` prefix and sysexits code, not git's 128).
