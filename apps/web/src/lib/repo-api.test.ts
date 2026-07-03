@@ -11,7 +11,6 @@ import {
   type FeedItem,
   type ReactionEntry,
   aggregateReactions,
-  chatReactionTarget,
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
@@ -1043,12 +1042,15 @@ describe('MockRepoBackend chat: post / list / watch', () => {
     expect(msgs[0]!.authorPubkeyHex).toMatch(/^[0-9a-f]{64}$/)
   })
 
-  it('content address is deterministic for the same (room, author, text)', async () => {
+  it('two identical-text posts get DISTINCT ids (per-post signed nonce)', async () => {
+    // Each send folds a unique nonce into the content hash, so the same author
+    // posting the same text twice yields two different message objects — the fix
+    // that lets reactions key on the plain id without leaking across reposts.
     const { backend } = await makeBackend()
     const a = await backend.postMessage('lobby', 'same')
-    const { backend: backend2 } = await makeBackend()
-    const b = await backend2.postMessage('lobby', 'same')
-    expect(a.messageIdHex).toBe(b.messageIdHex)
+    const b = await backend.postMessage('lobby', 'same')
+    expect(a.messageIdHex).toMatch(/^[0-9a-f]{64}$/)
+    expect(a.messageIdHex).not.toBe(b.messageIdHex)
   })
 
   it('rejects empty and over-long messages (≤280 chars)', async () => {
@@ -1214,25 +1216,22 @@ describe('aggregateReactions tallies per target with mine flag', () => {
   })
 })
 
-describe('chatReactionTarget keys reactions on the (id, seq) message INSTANCE', () => {
-  const HASH = 'a'.repeat(64)
+describe('chat message ids are unique per post (signed nonce), so reactions do not collide', () => {
+  it('gives two identical-text posts DISTINCT ids — the Slack "reaction on both messages" bug', async () => {
+    // emerald-robin posts "hello" twice. With the per-post nonce folded into the
+    // content hash, the two posts get different message ids, so a reaction on one
+    // can never aggregate onto the other.
+    const api = await mkit()
+    const backend = new MockRepoBackend(api, () => SEED)
+    const first = await backend.postMessage('room', 'hello')
+    const second = await backend.postMessage('room', 'hello')
+    expect(first.messageIdHex).not.toBe(second.messageIdHex)
 
-  it('qualifies a chat message id with its seq — matching the server target grammar', () => {
-    expect(chatReactionTarget({ messageIdHex: HASH, seq: 1 })).toBe(`${HASH}:1`)
-    expect(chatReactionTarget({ messageIdHex: HASH, seq: 42 })).toBe(`${HASH}:42`)
-  })
-
-  it('separates reactions on two SAME-text posts (identical content id, distinct seq)', () => {
-    // The exact bug from the Slack report: emerald-robin posts "hello" twice.
-    // Content-addressing gives both the SAME messageIdHex; only `seq` differs.
-    const first = { messageIdHex: HASH, seq: 3 }
-    const second = { messageIdHex: HASH, seq: 9 }
-    // A reaction lands on the SECOND post only.
-    const rows: ReactionEntry[] = [{ targetIdHex: chatReactionTarget(second), emoji: '🚀', authorPubkeyHex: 'me' }]
+    // React on the second post only; it must not show on the first.
+    const rows: ReactionEntry[] = [{ targetIdHex: second.messageIdHex, emoji: '🚀', authorPubkeyHex: 'me' }]
     const agg = aggregateReactions(rows, 'me')
-    expect(agg.get(chatReactionTarget(second))).toEqual([{ emoji: '🚀', count: 1, mine: true }])
-    // ...and NOT on the first, penultimate post.
-    expect(agg.get(chatReactionTarget(first))).toBeUndefined()
+    expect(agg.get(second.messageIdHex)).toEqual([{ emoji: '🚀', count: 1, mine: true }])
+    expect(agg.get(first.messageIdHex)).toBeUndefined()
   })
 })
 

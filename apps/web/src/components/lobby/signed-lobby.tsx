@@ -17,7 +17,6 @@ import {
   MAX_MESSAGE_CHARS,
   type ReactionAgg,
   RepoBackendProvider,
-  chatReactionTarget,
   isForkRef,
   useLobbyEvents,
   useLobbyFeed,
@@ -318,13 +317,13 @@ function Feed({
                         item.ts >= prev.ts &&
                         item.ts - prev.ts < GROUP_WINDOW_MS
                       }
-                      // Reactions key on the (id, seq) message INSTANCE, not the bare content id: identical text
-                      // re-posted shares one messageIdHex, so a bare-id target would leak a reaction onto every
-                      // repeat. `chatReactionTarget` folds in the server's per-row seq (see its docs).
-                      reactions={reactionsFor(chatReactionTarget(item.message))}
+                      // Reactions key on the message id, which is unique per post (the server folds the
+                      // signed idempotency nonce into it), so identical text re-posted gets distinct ids
+                      // and a reaction can't leak across the two.
+                      reactions={reactionsFor(item.message.messageIdHex)}
                       canReact={unlocked}
                       onToggle={(emoji) =>
-                        unlocked ? toggle.mutate({ targetId: chatReactionTarget(item.message), emoji }) : onNeedIdentity()
+                        unlocked ? toggle.mutate({ targetId: item.message.messageIdHex, emoji }) : onNeedIdentity()
                       }
                     />
                   )}

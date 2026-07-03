@@ -45,26 +45,30 @@ pub fn validate_text(text: &str) -> Result<&str, &'static str> {
 }
 
 /// Canonical bytes a chat message is content-addressed by. `author_hex` is the
-/// 64-hex VERIFIED Ed25519 pubkey; `text` should already be the trimmed value
-/// from [`validate_text`]. `text` is last so its (possibly newline-bearing)
-/// content can't desync the earlier fields — `room` and `author_hex` are from
-/// restricted alphabets that contain no newline.
+/// 64-hex VERIFIED Ed25519 pubkey; `text` is the trimmed value from
+/// [`validate_text`]; `nonce` is the write envelope's per-post idempotency key
+/// (unique per send, already signed). Folding the nonce in makes each post a
+/// DISTINCT object — the same author posting the same text twice gets two
+/// different ids — the same trick Makechain's signed message envelope uses (a
+/// per-post timestamp in the hashed data). `text` is LAST so its (possibly
+/// newline-bearing) content can't desync the earlier fields; `room`,
+/// `author_hex`, and `nonce` are from restricted alphabets with no newline.
 #[must_use]
-pub fn canonical_message(room: &str, author_hex: &str, text: &str) -> Vec<u8> {
-    format!("{CHAT_CANONICAL_PREFIX}\n{room}\n{author_hex}\n{text}").into_bytes()
+pub fn canonical_message(room: &str, author_hex: &str, text: &str, nonce: &str) -> Vec<u8> {
+    format!("{CHAT_CANONICAL_PREFIX}\n{room}\n{author_hex}\n{nonce}\n{text}").into_bytes()
 }
 
-/// BLAKE3 content address (32 raw bytes) of a chat message.
+/// BLAKE3 content address (32 raw bytes) of a chat message — UNIQUE per post.
 ///
-/// This is a CONTENT hash, exactly like a commit hash: identical (room, author,
-/// text) → identical id, stored once. It is NOT a unique per-post identifier —
-/// the same author legitimately posting the same text twice yields two log rows
-/// with the SAME id but distinct `seq`. Consumers MUST key the timeline on `seq`
-/// (the monotonic per-room order), not on the id alone. Replays of a captured
-/// signature are deduped separately on (author, idempotency-key) in the DO.
+/// The `nonce` (the send's idempotency key) is folded into the canonical bytes,
+/// so the same author posting the same text twice yields two DISTINCT ids: each
+/// message is its own object and a reaction can key on the plain 64-hex id (no
+/// per-post disambiguator needed). A REPLAY of one captured envelope reuses its
+/// nonce, so it recomputes the SAME id and collapses to the original (the DO
+/// also dedupes a replay on (author, idempotency-key)).
 #[must_use]
-pub fn message_id(room: &str, author_hex: &str, text: &str) -> [u8; 32] {
-    blake3(&canonical_message(room, author_hex, text))
+pub fn message_id(room: &str, author_hex: &str, text: &str, nonce: &str) -> [u8; 32] {
+    blake3(&canonical_message(room, author_hex, text, nonce))
 }
 
 /// Whether a new post from an author should be refused for posting too soon.
@@ -97,36 +101,16 @@ pub fn is_allowed_emoji(emoji: &str) -> bool {
     REACTION_EMOJI.contains(&emoji)
 }
 
-/// A reaction target identifies one feed item. Two shapes are valid:
-///   - a bare 64-char lowercase-hex id — a commit hash (already unique), or
-///   - `{64hex}:{seq}` — a chat-message INSTANCE: the content-addressed message
-///     id plus its monotonic per-room `seq`.
-///
-/// The second shape exists because chat ids are NOT unique — identical (room,
-/// author, text) re-posted shares one `message_id` (see [`message_id`]), so a
-/// reaction keyed on the bare id would attach to every repeat of that text.
-/// Keying on the (id, seq) instance (`seq` being the DO's per-room order, which
-/// consumers must key the timeline on anyway) keeps each post's reactions its
-/// own. Rejecting anything else keeps the reactions table's cardinality bounded.
+/// A reaction target must be a 64-char lowercase-hex id (a 32-byte feed-item id:
+/// a chat message id or a commit hash — both unique now that `message_id` folds
+/// in the per-post nonce). Rejecting anything else keeps the reactions table's
+/// cardinality bounded to real feed items.
 #[must_use]
 pub fn is_valid_target_id(target: &str) -> bool {
-    match target.split_once(':') {
-        Some((id, seq)) => is_hex64(id) && is_decimal_seq(seq),
-        None => is_hex64(target),
-    }
-}
-
-/// A 64-char lowercase-hex id (a 32-byte feed-item hash).
-fn is_hex64(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
+    target.len() == 64
+        && target
+            .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-/// A decimal per-room `seq`: 1..=20 digits, no leading zero (the DO's seq starts
-/// at 1, so `0`/leading-zero forms are never real and are rejected).
-fn is_decimal_seq(s: &str) -> bool {
-    (1..=20).contains(&s.len()) && s.as_bytes()[0] != b'0' && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -137,18 +121,24 @@ mod tests {
     const OTHER: &str = "22";
 
     #[test]
-    fn canonical_is_prefixed_four_fields() {
-        let bytes = canonical_message("lobby", AUTHOR, "gm");
-        assert_eq!(String::from_utf8(bytes).unwrap(), "mkit-chat:v1\nlobby\n11\ngm");
+    fn canonical_is_prefixed_five_fields() {
+        // prefix, room, author, NONCE, text — nonce before text so newline-bearing
+        // text stays last.
+        let bytes = canonical_message("lobby", AUTHOR, "gm", "n1");
+        assert_eq!(String::from_utf8(bytes).unwrap(), "mkit-chat:v1\nlobby\n11\nn1\ngm");
     }
 
     #[test]
-    fn id_is_deterministic_and_content_addressed() {
-        assert_eq!(message_id("lobby", AUTHOR, "gm"), message_id("lobby", AUTHOR, "gm"));
-        // distinct text, author, or room each change the id
-        assert_ne!(message_id("lobby", AUTHOR, "gm"), message_id("lobby", AUTHOR, "gn"));
-        assert_ne!(message_id("lobby", AUTHOR, "gm"), message_id("lobby", OTHER, "gm"));
-        assert_ne!(message_id("lobby", AUTHOR, "gm"), message_id("other", AUTHOR, "gm"));
+    fn id_is_unique_per_nonce_and_content_addressed() {
+        // Same (room, author, text, nonce) → same id (a replay recomputes it).
+        assert_eq!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gm", "n1"));
+        // SAME text, DIFFERENT nonce → DIFFERENT id: the exact fix — two distinct
+        // posts of identical text no longer collide (so reactions can't leak across them).
+        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gm", "n2"));
+        // distinct text, author, or room each change the id too
+        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gn", "n1"));
+        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", OTHER, "gm", "n1"));
+        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("other", AUTHOR, "gm", "n1"));
     }
 
     #[test]
@@ -207,27 +197,6 @@ mod tests {
         assert!(!is_valid_target_id(&"g".repeat(64))); // non-hex
         assert!(!is_valid_target_id("0")); // a counter, not a real id
         assert!(!is_valid_target_id(""));
-    }
-
-    #[test]
-    fn target_id_accepts_seq_qualified_chat_instance() {
-        // Chat message ids are content-addressed and NOT unique — identical text
-        // re-posted shares one id (see `message_id`). A reaction therefore keys
-        // on the (id, seq) INSTANCE, `{64hex}:{seq}`, so it can't leak onto every
-        // repeat of that text. Commits stay unique by hash and react on the bare id.
-        let id = "a".repeat(64);
-        assert!(is_valid_target_id(&id)); // bare commit hash still valid
-        assert!(is_valid_target_id(&format!("{id}:1")));
-        assert!(is_valid_target_id(&format!("{id}:42")));
-        assert!(is_valid_target_id(&format!("{id}:9007199254740991")));
-        // Malformed suffixes are rejected — keeps the reactions table bounded.
-        assert!(!is_valid_target_id(&format!("{id}:"))); // empty seq
-        assert!(!is_valid_target_id(&format!("{id}:0"))); // seq starts at 1
-        assert!(!is_valid_target_id(&format!("{id}:01"))); // leading zero
-        assert!(!is_valid_target_id(&format!("{id}:1a"))); // non-digit
-        assert!(!is_valid_target_id(&format!("{id}:-1"))); // sign
-        assert!(!is_valid_target_id(&format!("{id}:1:2"))); // double suffix
-        assert!(!is_valid_target_id(&format!("{}:1", "a".repeat(63)))); // short hash
-        assert!(!is_valid_target_id(&format!("{}:1", "A".repeat(64)))); // uppercase hash
+        assert!(!is_valid_target_id(&format!("{}:1", "a".repeat(64)))); // no seq suffix — ids are unique now
     }
 }

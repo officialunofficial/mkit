@@ -452,12 +452,13 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .map(|k| k.0.clone())
             .unwrap_or_default();
 
-        // `message_id` is a CONTENT hash of the canonical message bytes (like a
-        // commit hash: identical content → identical id). It is NOT a unique
-        // per-post handle — the monotonic `seq` is the timeline key, and replays
-        // are deduped on (author, idempotency-key) in the DO.
-        let id = crate::chat::message_id(&room, &author, &text);
-        let canonical = crate::chat::canonical_message(&room, &author, &text);
+        // `message_id` folds the signed per-post idempotency key into the content
+        // hash, so each send is a DISTINCT object (identical text posted twice →
+        // two ids). That lets reactions key on the plain id. A replay reuses the
+        // same `idem`, recomputes the same id, and is deduped on (author, idem) in
+        // the DO.
+        let id = crate::chat::message_id(&room, &author, &text, &idem);
+        let canonical = crate::chat::canonical_message(&room, &author, &text, &idem);
 
         let env = self.env.clone();
         SendFuture::new(async move {
