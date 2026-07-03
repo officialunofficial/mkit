@@ -275,8 +275,11 @@ History / commits:
   tweak — doesn't reattribute the line; output still shows the file's
   current bytes. `-M` detects lines moved *within* the file and `-C` lines
   copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
-  and repeating it — `-C -C` — widens the search from files changed in the
-  commit to every file in the parent). Detection is block-based: the
+  and repeating it widens the search: `-C` covers files changed in the
+  commit, `-C -C` every file in the commit that creates the blamed file,
+  and `-C -C -C` every file in any commit — a whole-tree search at each
+  walk step, so a block copied from an unmodified source is still found).
+  Detection is block-based: the
   longest contiguous moved/copied block above git's default thresholds (20
   alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
   so a moved block next to genuinely-new lines is still split out, and

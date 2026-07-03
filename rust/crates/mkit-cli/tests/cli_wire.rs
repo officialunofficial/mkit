@@ -905,6 +905,56 @@ fn blame_c_c_widens_to_unchanged_source_file() {
 }
 
 #[test]
+fn blame_c_c_c_searches_whole_parent_tree_for_unmodified_source() {
+    // #526: git's third -C ("copies from other files in any commit")
+    // whole-tree-searches at EVERY walk step, not just the file-creating
+    // commit. Here a block is appended to a PERSISTING file (main.txt, which
+    // has a porigin) and copied from an UNMODIFIED src.txt. -C -C only
+    // searches files modified in the commit → misses (block stays on the
+    // append commit c2); -C -C -C searches the whole parent tree → credits
+    // the source's origin c1. Pinned against git 2.50.1.
+    let b1 = "fn compute_alpha_beta_gamma() { let x = 1234567; }";
+    let b2 = "fn compute_delta_epsilon_ze() { let y = 7654321; }";
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    // c1: a persisting file + the (never-again-modified) copy source.
+    fs::write(td.path().join("main.txt"), b"header line one here\n").unwrap();
+    fs::write(td.path().join("src.txt"), format!("{b1}\n{b2}\n")).unwrap();
+    assert!(run_in(td.path(), &["add", "-A"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c1"]).status.success());
+    let c1 = head_hash(td.path());
+    // c2: append the block to main.txt; src.txt untouched.
+    fs::write(
+        td.path().join("main.txt"),
+        format!("header line one here\n{b1}\n{b2}\n"),
+    )
+    .unwrap();
+    assert!(run_in(td.path(), &["add", "main.txt"]).status.success());
+    assert!(run_in(td.path(), &["commit", "-m", "c2"]).status.success());
+    let c2 = head_hash(td.path());
+
+    // Level 2 misses the unmodified source: appended block stays on c2.
+    let l2 = run_in(td.path(), &["blame", "-C", "-C", "main.txt"]);
+    assert!(l2.status.success(), "blame -C -C failed: {l2:?}");
+    let l2_out = String::from_utf8(l2.stdout).unwrap();
+    assert!(
+        l2_out.lines().nth(1).unwrap().starts_with(&c2[..12]),
+        "-C -C leaves the appended block on the append commit c2: {l2_out:?}"
+    );
+
+    // Level 3 whole-tree-searches the parent: block credited to c1/src.txt.
+    let l3 = run_in(td.path(), &["blame", "-C", "-C", "-C", "main.txt"]);
+    assert!(l3.status.success(), "blame -C -C -C failed: {l3:?}");
+    let l3_out = String::from_utf8(l3.stdout).unwrap();
+    assert!(
+        l3_out.lines().nth(1).unwrap().starts_with(&c1[..12]),
+        "-C -C -C credits the unmodified source's origin c1 ({}), not c2 ({}): {l3_out:?}",
+        &c1[..12],
+        &c2[..12]
+    );
+}
+
+#[test]
 fn blame_ignore_rev_unknown_errors_like_git() {
     // git: `fatal: cannot find revision <rev> to ignore`. mkit matches the
     // text (with its own `error:` prefix and sysexits code, not git's 128).
