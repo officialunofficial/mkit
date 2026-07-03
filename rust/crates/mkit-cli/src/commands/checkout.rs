@@ -290,7 +290,6 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
-
 use super::error as emit_err;
 
 /// Tracked paths the target drops — present in the current index but
