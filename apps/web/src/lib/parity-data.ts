@@ -98,7 +98,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed), pinned against git 2.50.1. No --porcelain; --format=json carries an mkit Identity, not Name <email>.",
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection (inline -M<num>/-C<num> thresholds and git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and git-shaped --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed) with git's ancestor tie-break, pinned against git 2.50.1. Two differences keep it divergent: --format=json and --porcelain carry an mkit Identity, not Name <email> (the same, accepted difference as log); and blame follows a fixed path, so it does not trace lines across a whole-file rename the way git does (use -C to credit copied blocks).",
       },
       {
         cmd: 'bisect',
