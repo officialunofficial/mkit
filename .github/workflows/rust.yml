@@ -146,28 +146,17 @@ jobs:
       # #505 PR 5/5: a handful of irreducibly-real tests (subprocess
       # sleeps, real localhost TCP, the ~5s worktree-lock wait, a real
       # `ssh` connect attempt to 127.0.0.1:22) were quarantined behind
-      # `#[ignore]` instead of determinized. Run them serially
-      # (`--test-threads 1`) so they don't contend with each other's real
-      # timers/sockets; only localhost networking is needed, which macOS
-      # runners provide.
-      #
-      # Scoped by an explicit test-name filter rather than a blanket
-      # `--run-ignored ignored-only`: this workspace also has
-      # PRE-EXISTING `#[ignore]`d tests (native-keystore backends gated
-      # on MKIT_RUN_NATIVE_KEYSTORE_TESTS, the real-ssh e2e suite gated
-      # on MKIT_SSH_E2E_REAL) that are NOT provisioned on this runner.
-      # The keystore tests in particular panic outright when their gate
-      # is unset (`assert!(!require_backend, ...)` in mkit-keystore's
-      # native_list.rs) rather than skipping quietly, so a blanket
-      # ignored-only run would fail here regardless of MKIT_TEST_STRICT.
-      # Naming exactly the tests this PR quarantined keeps the lane green
-      # regardless of what other `#[ignore]`d tests exist.
+      # `#[ignore]` instead of determinized. The `ignored-lane` nextest
+      # profile (rust/.config/nextest.toml) is the single source of
+      # truth for which quarantined tests this serial lane runs and why
+      # — see that profile's comment for the full rationale (both this
+      # workflow and cloudbuild/ci.yaml invoke the same profile instead
+      # of duplicating the test-name filter inline).
       - name: Test (nextest, ignored lane)
         working-directory: rust
         run: >-
           cargo nextest run --locked --workspace --all-features
-          --run-ignored ignored-only --test-threads 1
-          -E 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child/)'
+          --profile ignored-lane --run-ignored ignored-only
 
       - name: Fuzz unit tests
         working-directory: rust
