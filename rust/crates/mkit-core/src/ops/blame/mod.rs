@@ -149,6 +149,21 @@ pub struct BlameOptions {
     /// (it inherits the active ignore-revs) with an `O(1)` refcount bump
     /// rather than deep-cloning the whole set per source.
     pub ignore_revs: Arc<HashSet<Hash>>,
+    /// Refine `--ignore-rev` fall-through with content matching instead of
+    /// git's positional per-hunk guess (mkit-only, opt-in; no-op unless
+    /// [`Self::ignore_revs`] is non-empty). git pairs a fallen-through line
+    /// with whatever line sits at the same offset in the hunk, because a
+    /// textual diff is all it has; mkit hashes line content, so it can
+    /// often identify the line's *true* surviving origin even when a
+    /// reformat/reorder moved it to a different offset — e.g. a
+    /// moved-and-reindented line matched to its real origin rather than to
+    /// whatever happens to sit at the same position. Only ever *overrides*
+    /// a positional guess when content evidence contradicts it (or fills a
+    /// `None` surplus slot with a genuine content match); when no such
+    /// evidence exists the result is identical to the positional default.
+    /// The default (`false`) keeps `--ignore-rev` byte-identical to git —
+    /// this is a documented divergence, not a change to the default.
+    pub ignore_rev_precise: bool,
     /// Follow only each commit's first parent, like `git blame
     /// --first-parent`. The default (`false`) is git's merge-aware walk:
     /// at a merge, a line is credited to whichever parent's side actually
@@ -1583,6 +1598,18 @@ mod tests {
         assert_eq!(missing, None);
     }
 
+    /// Convenience: a `BlameOptions` that ignores the given commits with
+    /// `--ignore-rev-precise` on, `-w` (content matching needs `-w` to
+    /// agree with the matcher the same way `-M`/`-C` do).
+    fn ignoring_precise(revs: &[Hash]) -> BlameOptions {
+        BlameOptions {
+            ignore_revs: Arc::new(revs.iter().copied().collect()),
+            ignore_rev_precise: true,
+            ignore_whitespace: true,
+            ..Default::default()
+        }
+    }
+
     /// Convenience: a `BlameOptions` that ignores the given commits.
     fn ignoring(revs: &[Hash]) -> BlameOptions {
         BlameOptions {
@@ -1782,6 +1809,173 @@ mod tests {
         assert_eq!(
             plain.lines[2].commit_hash, c1,
             "-M did not change the result"
+        );
+    }
+
+    // --- `--ignore-rev-precise` (#496) ---------------------------------
+
+    #[test]
+    fn blame_ignore_rev_precise_reattributes_moved_reindented_lines() {
+        // A reformat commit reorders three distinct-origin lines and
+        // reindents them. Under -w the LCS matcher recognizes ZZZ as
+        // unchanged content wherever it landed and matches it directly
+        // (so it needs no fall-through at all: LCS itself is already
+        // content-aware for an exact, if relocated, match). That leaves
+        // YYY and XXX with NO positional counterpart in their own
+        // hunk — git's `--ignore-rev` treats them as genuine insertions
+        // and credits them to the noise commit itself.
+        // `--ignore-rev-precise` searches the parent's unmatched lines
+        // across the WHOLE file (not just the enclosing hunk), so it finds
+        // YYY's and XXX's true origins even though the positional pass
+        // found no local candidate for either. Not pinned against git — no
+        // git equivalent exists; documented mkit-only divergence (#496).
+        let (_d, store) = fresh_store();
+        let c0 = put_file_commit(&store, "f.txt", b"keep\ntail\n", vec![], 1, 100);
+        let c1 = put_file_commit(&store, "f.txt", b"keep\nXXX\ntail\n", vec![c0], 2, 200);
+        let c2 = put_file_commit(&store, "f.txt", b"keep\nXXX\nYYY\ntail\n", vec![c1], 3, 300);
+        let c3 = put_file_commit(
+            &store,
+            "f.txt",
+            b"keep\nXXX\nYYY\nZZZ\ntail\n",
+            vec![c2],
+            4,
+            400,
+        );
+        let c4 = put_file_commit(
+            &store,
+            "f.txt",
+            b"keep\n  ZZZ\n  YYY\n  XXX\ntail\n",
+            vec![c3],
+            5,
+            500,
+        );
+
+        // Positional (git-identical) fall-through: YYY and XXX have no
+        // in-hunk counterpart (ZZZ already consumed the only anchor
+        // available between `keep` and `tail`), so git's default leaves
+        // them on the ignored commit.
+        let positional_opts = BlameOptions {
+            ignore_whitespace: true,
+            ignore_revs: Arc::new([c4].into_iter().collect()),
+            ..Default::default()
+        };
+        let positional = blame_file_with(&store, c4, "f.txt", &positional_opts).unwrap();
+        assert_eq!(
+            positional.lines[1].commit_hash, c3,
+            "ZZZ is recognized unchanged by the LCS matcher itself (needs no fall-through)"
+        );
+        assert_eq!(
+            positional.lines[2].commit_hash, c4,
+            "positional: YYY has no in-hunk counterpart, stays on the ignored commit"
+        );
+        assert_eq!(
+            positional.lines[3].commit_hash, c4,
+            "positional: XXX has no in-hunk counterpart, stays on the ignored commit"
+        );
+
+        // Precise: content matching searches the whole parent file (not
+        // just YYY/XXX's own, counterpart-less hunk) and finds each true
+        // origin.
+        let precise = blame_file_with(&store, c4, "f.txt", &ignoring_precise(&[c4])).unwrap();
+        assert_eq!(
+            precise.lines[1].commit_hash, c3,
+            "ZZZ is unaffected by precise mode (already resolved by plain LCS)"
+        );
+        assert_eq!(
+            precise.lines[2].commit_hash, c2,
+            "precise: YYY correctly attributed to its true origin"
+        );
+        assert_eq!(
+            precise.lines[3].commit_hash, c1,
+            "precise: XXX correctly attributed to its true origin"
+        );
+        assert_eq!(precise.lines[0].commit_hash, c0, "keep is unaffected");
+        assert_eq!(precise.lines[4].commit_hash, c0, "tail is unaffected");
+    }
+
+    #[test]
+    fn blame_ignore_rev_precise_unequal_hunk_surplus_stays_put() {
+        // The ignored commit splits one line into three fabricated lines
+        // with no content match anywhere in the parent. Both modes pair the
+        // first split line positionally (the only candidate) and leave the
+        // two surplus lines on the ignored commit — `--ignore-rev-precise`
+        // must not invent a match where none exists.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"L1\nMID\nL3\n", vec![], 1, 100);
+        let c2 = put_file_commit(
+            &store,
+            "f.txt",
+            b"L1\nMIDaaa\nMIDbbb\nMIDccc\nL3\n",
+            vec![c1],
+            2,
+            200,
+        );
+
+        let plain = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        let precise = blame_file_with(&store, c2, "f.txt", &ignoring_precise(&[c2])).unwrap();
+        for r in [&plain, &precise] {
+            assert_eq!(r.lines[1].commit_hash, c1, "MIDaaa falls through to c1");
+            assert_eq!(
+                r.lines[2].commit_hash, c2,
+                "MIDbbb has no pair -> stays on c2"
+            );
+            assert_eq!(
+                r.lines[3].commit_hash, c2,
+                "MIDccc has no pair -> stays on c2"
+            );
+        }
+    }
+
+    #[test]
+    fn blame_ignore_rev_precise_no_match_falls_back_to_positional() {
+        // A single fabricated line replacing a single parent line, with no
+        // other candidate anywhere in the file: precise mode has nothing to
+        // find, so it falls back to exactly the positional result.
+        let (_d, store) = fresh_store();
+        let c1 = put_file_commit(&store, "f.txt", b"L1\nA\nL3\n", vec![], 1, 100);
+        let c2 = put_file_commit(&store, "f.txt", b"L1\nFABRICATED\nL3\n", vec![c1], 2, 200);
+
+        let plain = blame_file_with(&store, c2, "f.txt", &ignoring(&[c2])).unwrap();
+        let precise = blame_file_with(&store, c2, "f.txt", &ignoring_precise(&[c2])).unwrap();
+        assert_eq!(plain.lines[1].commit_hash, c1);
+        assert_eq!(
+            precise.lines[1].commit_hash, plain.lines[1].commit_hash,
+            "no content candidate exists anywhere in the parent: precise matches positional"
+        );
+    }
+
+    #[test]
+    fn precise_overrides_trivial_key_guard() {
+        // Unit-test the helper directly (mirroring
+        // `ignore_fallthrough_pairs_per_hunk`'s direct-call style), pinning
+        // the trivial-key guard: a positional guess for a line whose key is
+        // under 3 bytes is kept even when a perfect, unclaimed content match
+        // sits elsewhere in the parent — while a longer key on the same call
+        // is still correctly reattributed when its own positional guess
+        // disagrees with content.
+        //
+        // new = ["ab" (trivial, 2 bytes), "REALZZZ" (7 bytes)]
+        // old = ["REALZZZ", "ab", "FILLER"]           (all LCS-unmatched)
+        // positional (`fall`): new0 -> old2 ("FILLER", arbitrary/wrong),
+        //                       new1 -> old1 ("ab", wrong: disagrees with
+        //                       new1's own content "REALZZZ").
+        let mapping = vec![None, None];
+        let fall = vec![Some(2), Some(1)];
+        let new_lines = vec![b"ab".to_vec(), b"REALZZZ".to_vec()];
+        let parent_lines = vec![b"REALZZZ".to_vec(), b"ab".to_vec(), b"FILLER".to_vec()];
+
+        let out = super::walk::precise_overrides(&mapping, &fall, &new_lines, &parent_lines, false);
+        assert_eq!(
+            out[0],
+            Some(2),
+            "trivial key 'ab' keeps its positional guess even though a perfect \
+             unclaimed match ('ab' at old index 1) exists"
+        );
+        assert_eq!(
+            out[1],
+            Some(0),
+            "non-trivial key 'REALZZZ' is reattributed to its true content match \
+             (old index 0), since its positional guess (old index 1) disagreed"
         );
     }
 
@@ -2196,6 +2390,87 @@ mod tests {
         assert!(
             r.lines.iter().all(|l| l.commit_hash != c2),
             "the second parent does not win when the first parent has a counterpart"
+        );
+    }
+
+    #[test]
+    fn blame_ignore_rev_precise_merge_second_parent_composition() {
+        // Composes `--ignore-rev-precise` with the per-parent merge walk
+        // (`apply_ignore_fallthrough`'s loop over every relevant parent):
+        // the FIRST parent lacks the swapped content entirely (no positional
+        // counterpart at all, so it contributes nothing and the walk falls
+        // through to the next parent — same shape as
+        // `blame_ignore_rev_merge_falls_through_to_second_parent`), and the
+        // SECOND parent has the same moved-and-reindented reformat as
+        // `blame_ignore_rev_precise_reattributes_moved_reindented_lines`
+        // (ZZZ is recognized unchanged by plain LCS; YYY and XXX have no
+        // in-hunk counterpart and are genuine insertions under the
+        // positional default). Precise mode's whole-file search must run
+        // against the SECOND parent's file (the one that actually has the
+        // content), not the first parent's, which never pairs anything at
+        // all. Tokens are >= 3 bytes so the trivial-key guard doesn't apply.
+        let (_d, store) = fresh_store();
+        let base = put_file_commit(&store, "f.txt", b"TOP\nBOT\n", vec![], 1, 100);
+        // First (ignored merge's first) parent: never had XXX/YYY/ZZZ at all.
+        let p1 = put_file_commit(&store, "f.txt", b"TOP\nBOT\n", vec![base], 2, 200);
+        // Second parent: builds up XXX, YYY, ZZZ with distinct origins.
+        let c_x = put_file_commit(&store, "f.txt", b"TOP\nXXX\nBOT\n", vec![base], 3, 300);
+        let c_y = put_file_commit(&store, "f.txt", b"TOP\nXXX\nYYY\nBOT\n", vec![c_x], 4, 400);
+        let c_z = put_file_commit(
+            &store,
+            "f.txt",
+            b"TOP\nXXX\nYYY\nZZZ\nBOT\n",
+            vec![c_y],
+            5,
+            500,
+        );
+        // Ignored merge: reorders + reindents XXX/YYY/ZZZ (same shape as the
+        // non-merge reindent test).
+        let merge = put_file_commit(
+            &store,
+            "f.txt",
+            b"TOP\n  ZZZ\n  YYY\n  XXX\nBOT\n",
+            vec![p1, c_z],
+            6,
+            600,
+        );
+
+        let positional_opts = BlameOptions {
+            ignore_whitespace: true,
+            ignore_revs: Arc::new([merge].into_iter().collect()),
+            ..Default::default()
+        };
+        let positional = blame_file_with(&store, merge, "f.txt", &positional_opts).unwrap();
+        assert_eq!(
+            positional.lines[1].commit_hash, c_z,
+            "ZZZ is recognized unchanged by the LCS matcher itself, against the 2nd parent"
+        );
+        assert_eq!(
+            positional.lines[2].commit_hash, merge,
+            "positional: YYY has no in-hunk counterpart on either parent, stays on the merge"
+        );
+        assert_eq!(
+            positional.lines[3].commit_hash, merge,
+            "positional: XXX has no in-hunk counterpart on either parent, stays on the merge"
+        );
+
+        let precise = blame_file_with(&store, merge, "f.txt", &ignoring_precise(&[merge])).unwrap();
+        assert_eq!(
+            precise.lines[1].commit_hash, c_z,
+            "ZZZ is unaffected by precise mode (already resolved by plain LCS)"
+        );
+        assert_eq!(
+            precise.lines[2].commit_hash, c_y,
+            "precise: YYY correctly attributed to its true origin via the 2nd parent's whole file"
+        );
+        assert_eq!(
+            precise.lines[3].commit_hash, c_x,
+            "precise: XXX correctly attributed to its true origin via the 2nd parent's whole file"
+        );
+        assert!(
+            positional.lines.iter().all(|l| l.commit_hash != p1)
+                && precise.lines.iter().all(|l| l.commit_hash != p1),
+            "the content-less first parent never wins"
         );
     }
 

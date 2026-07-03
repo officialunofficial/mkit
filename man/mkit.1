@@ -903,7 +903,7 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
-.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
+.It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl Fl ignore-rev-precise Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
 as of
@@ -950,6 +950,16 @@ accepts any revision; the file holds one full hex object name per line,
 skipping blank lines and
 .Sq #
 comments.
+.Fl Fl ignore-rev-precise
+.Pq mkit-only; requires Fl Fl ignore-rev No or Fl Fl ignore-revs-file
+refines that fall-through with content matching instead of git's
+positional per-hunk guess: git pairs a fallen-through line with whatever
+line sits at the same offset in the hunk, purely by position; mkit hashes
+line content, so it searches the parent's whole file for the line's true
+surviving origin, overriding the positional guess only when content
+evidence disagrees with it. The default
+.Fl Fl ignore-rev
+fall-through is unaffected and stays byte-identical to git.
 .Fl L
 restricts output to a line range:
 .Ar start , end ,

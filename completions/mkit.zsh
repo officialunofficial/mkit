@@ -265,6 +265,7 @@ _mkit() {
                         '*--find-copies[detect lines copied from other files (repeatable)]' \
                         '*--ignore-rev[skip a noise commit during attribution]:rev:' \
                         '*--ignore-revs-file[skip commits listed in a file]:file:_files' \
+                        '--ignore-rev-precise[content-addressed ignore-rev fall-through (requires --ignore-rev)]' \
                         '--first-parent[follow only first parents (disable merge-aware blame)]' \
                         '--reverse[walk history forward over a <start>..<end> range]' \
                         '--help[show help]' \

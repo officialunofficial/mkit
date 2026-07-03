@@ -98,7 +98,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed), pinned against git 2.50.1. No --porcelain; --format=json carries an mkit Identity, not Name <email>.",
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed), pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). No --porcelain; --format=json carries an mkit Identity, not Name <email>.",
       },
       {
         cmd: 'bisect',
