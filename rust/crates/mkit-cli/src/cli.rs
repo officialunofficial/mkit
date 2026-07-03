@@ -272,6 +272,28 @@ global flags (before <command>):
 mod tests {
     use super::*;
 
+    /// True iff `needle` occurs in `haystack` as a whole token: the
+    /// characters immediately before and after the match (if any) are
+    /// not alphanumeric/hyphen. Plain `.contains()` would let a short
+    /// command name like `"rm"` match inside an unrelated word (e.g.
+    /// "perform"), so this pins word-boundary coverage instead.
+    fn contains_word(haystack: &str, needle: &str) -> bool {
+        fn is_word_char(c: char) -> bool {
+            c.is_ascii_alphanumeric() || c == '-'
+        }
+        haystack.match_indices(needle).any(|(idx, m)| {
+            let before_ok = haystack[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_word_char(c));
+            let after_ok = haystack[idx + m.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_word_char(c));
+            before_ok && after_ok
+        })
+    }
+
     #[test]
     fn version_matches_package_version() {
         assert_eq!(CLI_VERSION, env!("CARGO_PKG_VERSION"));
@@ -334,7 +356,7 @@ mod tests {
         ];
         for cmd in required {
             assert!(
-                HELP_TEXT.contains(cmd),
+                contains_word(HELP_TEXT, cmd),
                 "HELP_TEXT missing documented subcommand: {cmd}"
             );
         }

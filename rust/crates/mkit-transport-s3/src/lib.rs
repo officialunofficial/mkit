@@ -174,6 +174,21 @@ impl S3Transport {
         })
     }
 
+    /// Test-only: expose the resolved credentials so integration tests
+    /// outside this crate can assert that [`Self::connect`] actually
+    /// read [`ENV_ACCESS_KEY`] / [`ENV_SECRET_KEY`] / `MKIT_R2_REGION`,
+    /// rather than merely asserting the constant names. Not exposed via
+    /// `Debug` (deliberately, to avoid leaking secrets into logs).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn credentials_for_test(&self) -> (&str, &str, &str) {
+        (
+            &self.creds.access_key_id,
+            &self.creds.secret_access_key,
+            &self.creds.region,
+        )
+    }
+
     /// Test-only: install a fake clock. The clock returns Unix seconds.
     #[doc(hidden)]
     pub fn set_clock(&mut self, clock: Clock) {

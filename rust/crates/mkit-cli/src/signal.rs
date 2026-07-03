@@ -109,8 +109,23 @@ mod tests {
     /// in a working state.
     #[test]
     fn install_is_idempotent() {
+        // Double-install must not panic (asserted by simply reaching
+        // this point), AND the shared flag must still behave correctly
+        // afterwards — a naive re-registration bug could double-flip,
+        // wedge, or otherwise desync the flag from `is_shutdown()`.
         install();
         install();
         set_interrupted_for_tests(false);
+        assert!(
+            !is_shutdown(),
+            "flag must read false after double-install + reset"
+        );
+        set_interrupted_for_tests(true);
+        assert!(
+            is_shutdown(),
+            "flag must still flip to true after double-install"
+        );
+        set_interrupted_for_tests(false);
+        assert!(!is_shutdown(), "flag must reset back to false");
     }
 }

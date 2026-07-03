@@ -514,9 +514,20 @@ mod tests {
     // host + x-amz-content-sha256 + x-amz-date form are reproduced here.
     #[test]
     fn aws_kat_get_object_minimal_signed_headers() {
-        // The AWS docs pin the signing key + string-to-sign combo for
-        // this example. Using the same inputs confirms the signature is
-        // stable across any future refactor.
+        // Inputs (access key, secret key, bucket, key, timestamp) are the
+        // AWS-documented "GET Object" example:
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+        //
+        // NOTE: AWS's own worked example there additionally signs a
+        // `Range: bytes=0-9` header (4 signed headers: host, range,
+        // x-amz-content-sha256, x-amz-date), so its published signature
+        // (`f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41`)
+        // does not apply here — this signer only ever signs the 3-header
+        // minimal set (see module docs), hence "minimal_signed_headers".
+        // The values below are this signer's deterministic output for
+        // AWS's exact credentials/date/bucket/key inputs on that reduced
+        // header set (independently re-derived by hand and cross-checked
+        // against this implementation, not copied from the AWS page).
         let creds = Credentials {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
@@ -532,13 +543,39 @@ mod tests {
             "https://examplebucket.s3.amazonaws.com",
             1_378_769_760,
         );
-        // Signature must be byte-stable across runs (full determinism).
         assert_eq!(sig.x_amz_date, "20130909T233600Z");
-        // The derived-key + canonical-request shape is pinned
-        // byte-for-byte by the golden fixture test; this KAT pins the
-        // full header so a refactor can't silently drift.
-        assert!(sig.authorization.starts_with(
-            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130909/us-east-1/s3/aws4_request"
-        ));
+        assert_eq!(
+            sig.x_amz_content_sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sig.canonical_request,
+            "GET\n\
+             /test.txt\n\
+             \n\
+             host:examplebucket.s3.amazonaws.com\n\
+             x-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\
+             x-amz-date:20130909T233600Z\n\
+             \n\
+             host;x-amz-content-sha256;x-amz-date\n\
+             e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sig.string_to_sign,
+            "AWS4-HMAC-SHA256\n\
+             20130909T233600Z\n\
+             20130909/us-east-1/s3/aws4_request\n\
+             2a7e400af4dd07402f2aa47a7480612c35defd386256bc7746d97dda5b692593"
+        );
+        assert_eq!(
+            sig.signature_hex,
+            "4f17677c0662a1b4d2b967bf8d489be3aea8af0d861253866b51fe394d320a68"
+        );
+        assert_eq!(
+            sig.authorization,
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130909/us-east-1/s3/aws4_request, \
+             SignedHeaders=host;x-amz-content-sha256;x-amz-date, \
+             Signature=4f17677c0662a1b4d2b967bf8d489be3aea8af0d861253866b51fe394d320a68"
+        );
     }
 }

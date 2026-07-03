@@ -142,6 +142,17 @@ fn delta_pure_copy_pin_bytes() {
         0x00, 0x00, 0x00, 0x00, // offset = 0
         0x10, 0x00, // length = 16
     ];
+    // The encoder must actually emit this pinned COPY-only stream for a
+    // pure-copy edit (base == result) — an INSERT-only encoder would
+    // still round-trip via `decode` but would never produce this byte
+    // shape, so pin `encode`'s output directly instead of only
+    // exercising `decode` on a hand-built stream.
+    let encoded = delta::encode(&base, &base).unwrap();
+    assert_eq!(
+        encoded, expected,
+        "encode must emit the pinned COPY opcode stream"
+    );
+
     let restored = delta::decode(&base, &expected).unwrap();
     assert_eq!(restored, base);
 }
