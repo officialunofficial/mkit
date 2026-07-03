@@ -670,14 +670,29 @@ impl Transport for HttpTransport {
     }
 
     /// The `/refs/advance` endpoint (mkit #408, see `advance_refs` above)
-    /// commits the head + packmap write in one server-side transaction
-    /// whenever both CAS conditions are expressible on it (i.e. not
-    /// `Any` — see `cond_to_json`), which covers every case
-    /// `remote_dispatch::push_branch`'s pack-chain re-baseline (mkit
-    /// #406/#521) can reach: a reset's packmap condition is always
-    /// `Missing`/`Match`, and its paired head condition, when `Any`, can
-    /// never fail its own precondition, so the ordered fallback
-    /// (`advance_refs_ordered`) is never unsafe for a reset either.
+    /// commits the head + packmap write in one server-side transaction —
+    /// but ONLY when both CAS conditions are expressible on it (i.e. neither
+    /// is `Any` — see `cond_to_json`). This flag reports the transport's
+    /// *capability*; it is NOT a per-call guarantee.
+    ///
+    /// # Per-call `Any` fallback caveat (mkit #521)
+    ///
+    /// `advance_refs_impl` degrades to the NON-atomic ordered two-PUT path
+    /// (`advance_refs_ordered`: packmap PUT then head PUT) whenever EITHER
+    /// condition is `Any`, because `Any` has no representation on the atomic
+    /// endpoint. A force push (`PushLease::Force`) produces an `Any` head
+    /// condition and therefore lands on the ordered path even though this
+    /// method returns `true`.
+    ///
+    /// The ordered path is safe for an APPENDING packmap write (a crash /
+    /// lost head PUT leaves the packmap a superset — still reconstructable),
+    /// but NOT for a re-baseline RESET (`prev = None`, not a superset): a
+    /// committed reset packmap plus a lost head PUT strands the head at the
+    /// old divergent tip whose closure the reset can no longer rebuild. So a
+    /// caller MUST NOT request a reset when the head condition is `Any` —
+    /// `remote_dispatch::push_branch`'s re-baseline gate additionally
+    /// requires the head condition to be CAS-conditioned (not `Any`) on top
+    /// of this flag, precisely so force pushes take the safe append path.
     fn supports_atomic_advance(&self) -> bool {
         true
     }

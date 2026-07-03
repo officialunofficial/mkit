@@ -88,11 +88,11 @@ test-threads = 1
 # full-workspace run can drift past the default 60s / ci 120s envelope.
 # Deterministic, not a hang — same treatment as crash_recovery/lock_contention.
 [[profile.default.overrides]]
-filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable)'
+filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable) or test(=force_push_at_threshold_appends_and_never_resets)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable)'
+filter = 'test(=divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable) or test(=force_push_at_threshold_appends_and_never_resets)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 [profile.state-machine]

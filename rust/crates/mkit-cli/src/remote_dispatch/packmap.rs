@@ -89,10 +89,20 @@ const DEFAULT_REBASELINE_DEPTH: usize = 64;
 /// A value of `0` disables re-baselining (the push path never forces a
 /// full-closure reset on depth alone).
 pub(crate) fn rebaseline_depth() -> usize {
-    std::env::var("MKIT_PACK_REBASELINE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_REBASELINE_DEPTH)
+    // Unset (or non-UTF-8) → the default. A present-but-unparsable value is
+    // an operator mistake (`-1`, `off`, `""` — none of which disable; only
+    // `0` does), so warn loudly instead of silently re-enabling the default.
+    match std::env::var("MKIT_PACK_REBASELINE_DEPTH") {
+        Err(_) => DEFAULT_REBASELINE_DEPTH,
+        Ok(s) => s.parse::<usize>().unwrap_or_else(|_| {
+            eprintln!(
+                "warning: MKIT_PACK_REBASELINE_DEPTH='{s}' is not a valid non-negative \
+                 integer; using the default {DEFAULT_REBASELINE_DEPTH} (set it to 0 to \
+                 disable re-baselining)"
+            );
+            DEFAULT_REBASELINE_DEPTH
+        }),
+    }
 }
 
 /// Download and decode one packlist node by key. Packlist nodes are
@@ -167,9 +177,12 @@ pub(crate) fn resolve_pack_chain(
     branch: &str,
     head_key: Hash,
 ) -> Result<Vec<Hash>, DispatchError> {
-    let mut nodes = walk_pack_chain(tx, branch, head_key)?;
-    nodes.reverse(); // oldest node first
-    Ok(nodes.into_iter().flat_map(|n| n.packs).collect())
+    // Defined in terms of `probe_chain` so the flattened pack list is
+    // identical BY CONSTRUCTION to `probe_chain(..).packs` (the equivalence
+    // the `probe_chain_*_matches_resolve_pack_chain` test asserts) — the two
+    // can't drift. `probe_chain` can't delegate the other way: it also needs
+    // the node count for `depth`.
+    Ok(probe_chain(tx, branch, head_key)?.packs)
 }
 
 /// A branch's packmap chain, walked exactly once, paired with the packmap
@@ -244,9 +257,22 @@ pub(crate) enum ChainAction {
     /// single fresh self-contained node, skipping prior-chain validation
     /// entirely. `push_branch` only ever picks this alongside a
     /// full-closure pack plan (always self-contained), and only when the
-    /// transport reports [`Transport::supports_atomic_advance`] (mkit
-    /// #521) — see [`advance_packmap`]'s doc comment for why that gate
-    /// matters.
+    /// transport reports [`Transport::supports_atomic_advance`] AND the head
+    /// write is CAS-conditioned (mkit #521) — see [`advance_packmap`]'s doc
+    /// comment for why that gate matters.
+    ///
+    /// # Fetch-side cost (mkit #521)
+    ///
+    /// A reset replaces the whole chain with one new full-closure pack whose
+    /// digest no existing fetcher has in its applied-pack record. So every
+    /// incremental fetcher must re-download AND re-unpack the ENTIRE branch
+    /// closure once per re-baseline cycle (~every [`DEFAULT_REBASELINE_DEPTH`]
+    /// pushes), silently defeating #520's applied-packs skip optimization for
+    /// that fetch. Worse, the applied-packs record then accumulates the
+    /// orphaned pre-reset digests (one full cycle's worth per reset) with no
+    /// pruning — an unbounded, full-file-rewrite-per-fetch growth. (The
+    /// remote-side orphaning is documented in `transfer.rs` / makechain#849;
+    /// this note covers the fetcher impact, which nothing else did.)
     ResetSelfContained,
 }
 
@@ -317,6 +343,14 @@ pub(crate) fn advance_packmap(
     // the prior chain" branch below; a retry (another loop pass) always
     // finds this already `None` and re-walks fresh, per the doc comment.
     let mut cached = resolved;
+    // `action` (Append vs. Reset) is FROZEN by `push_branch` before this CAS
+    // loop and never re-evaluated across retries — the depth probe ran once,
+    // pre-plan. So under contention just below the re-baseline threshold, N
+    // racers can each independently decide to Append (none saw the others'
+    // node yet) and the chain overshoots the bound by ~N nodes. That is
+    // bounded (by the number of concurrent pushers) and self-correcting (the
+    // next push over the now-higher depth re-baselines), so we accept it
+    // rather than re-probe depth inside the loop.
     for _ in 0..PACKMAP_CAS_ATTEMPTS {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -326,7 +360,26 @@ pub(crate) fn advance_packmap(
         // (skipping prior-chain validation); otherwise validate the WHOLE
         // prior chain before deciding to append vs. reset.
         let prev = match action {
-            ChainAction::ResetSelfContained => None,
+            ChainAction::ResetSelfContained => {
+                // Invariant guard (mkit #521): `push_branch` only ever picks a
+                // reset on a transport whose `advance_refs` is transactional
+                // AND whose head write is CAS-conditioned (not `Any`). A reset
+                // is not a superset of the prior chain, so committing the
+                // packmap while a paired ORDERED head PUT is lost/crashes
+                // would strand the head at a closure the reset can't rebuild.
+                // Assert both here so a FUTURE direct caller fails loudly
+                // instead of silently reintroducing that stranded-head bug.
+                debug_assert!(
+                    tx.supports_atomic_advance(),
+                    "re-baseline reset requires a transactional advance_refs (mkit #521)"
+                );
+                debug_assert!(
+                    !matches!(head_condition, refs::RefWriteCondition::Any),
+                    "re-baseline reset must not run with an `Any` head condition — the \
+                     ordered advance_refs fallback would strand the head (mkit #521)"
+                );
+                None
+            }
             ChainAction::Append { self_contained } => match prior {
                 None => None,
                 Some(p) => {

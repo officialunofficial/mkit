@@ -536,3 +536,108 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
         );
     }
 }
+
+/// mkit #521 (force-push safety): a force push (`RefWriteCondition::Any`)
+/// that reaches the re-baseline threshold on an ATOMIC transport must still
+/// NOT reset the chain — it must append.
+///
+/// A force push's `Any` head condition makes even an atomic `advance_refs`
+/// fall back to the ordered two-PUT path (packmap PUT then head PUT), on
+/// which a committed reset (`prev = None`, not a superset of the prior chain)
+/// followed by a lost/crashed head PUT would strand the head at a closure the
+/// reset can no longer reconstruct → `RemoteMissingObject` for every fetcher.
+/// So `push_branch`'s depth gate excludes `Any` and takes the safe append
+/// path here, even though the transport reports `supports_atomic_advance()`.
+/// The CAS/`Match`-conditioned re-baseline (exercised by
+/// `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`)
+/// is deliberately left untouched and stays green.
+#[test]
+#[allow(clippy::too_many_lines)] // one scenario: build to threshold, force-push, re-clone
+fn force_push_at_threshold_appends_and_never_resets() {
+    let alice = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+
+    fs::write(alice.path().join("f.txt"), b"0").unwrap();
+    assert!(
+        run_in(alice.path(), &["add", "f.txt"], &[])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "base"], &[])
+            .status
+            .success()
+    );
+
+    let tx = AtomicTransport::new();
+    push_all(alice.path(), &tx).expect("alice base push");
+
+    // Base push = the chain's first node; 63 more plain appending pushes
+    // reach depth 64 exactly — the depth at which the NEXT push would itself
+    // re-baseline (64 + 1 > 64 with the default threshold).
+    for i in 1..=63u32 {
+        fs::write(alice.path().join("f.txt"), i.to_string()).unwrap();
+        assert!(
+            run_in(alice.path(), &["add", "f.txt"], &[])
+                .status
+                .success()
+        );
+        assert!(
+            run_in(alice.path(), &["commit", "-m", &format!("alice-{i}")], &[])
+                .status
+                .success()
+        );
+        push_all(alice.path(), &tx).unwrap_or_else(|e| panic!("push alice-{i}: {e}"));
+    }
+    assert_eq!(packmap_chain(&tx, "main").len(), 64);
+
+    // A FORCE push (unconditional `Any` head condition) of a new
+    // fast-forward commit. The chain sits at depth 64, so a CAS-conditioned
+    // push would re-baseline here — but `Any` forces the ordered advance
+    // path, so this must append instead.
+    fs::write(alice.path().join("f.txt"), b"forced").unwrap();
+    assert!(
+        run_in(alice.path(), &["add", "f.txt"], &[])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(alice.path(), &["commit", "-m", "forced"], &[])
+            .status
+            .success()
+    );
+    let forced_tip = head_hash(alice.path());
+    let store = ObjectStore::open(alice.path()).unwrap();
+    push_branch(&tx, &store, "main", forced_tip, RefWriteCondition::Any)
+        .expect("force push at threshold should append, not reset");
+
+    // Appended, not reset: the chain grew to 65 and its NEWEST node still
+    // chains to a `Some` prev (a re-baseline would leave one lone
+    // `prev = None` node, i.e. `chain.len() == 1`). `packmap_chain` walks
+    // newest-first, so `chain[0]` is that newest node.
+    let chain = packmap_chain(&tx, "main");
+    assert_eq!(
+        chain.len(),
+        65,
+        "a force push at the threshold must append (65 nodes), not reset to a single node"
+    );
+    assert!(
+        chain[0].prev.is_some(),
+        "newest node reset to prev = None — a re-baseline leaked through on an `Any` force push"
+    );
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(forced_tip));
+
+    // The remote stays clonable with the full 65-commit history intact.
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(bob.path());
+    pull_all(bob.path(), &tx, "default").expect("clone after the force-push append");
+    assert_eq!(fs::read(bob.path().join("f.txt")).unwrap(), b"forced");
+    assert_eq!(head_hash(bob.path()), forced_tip);
+    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let ancestry = all_ancestor_commit_hashes(&bob_store, forced_tip);
+    assert_eq!(
+        ancestry.len(),
+        65,
+        "base + 63 appending commits + the forced commit"
+    );
+}

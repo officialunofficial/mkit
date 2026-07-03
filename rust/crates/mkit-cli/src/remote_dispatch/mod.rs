@@ -489,13 +489,19 @@ pub fn push_branch_tracked(
 /// touching the head, so the head never points past a packmap that fails to
 /// reconstruct it (even under concurrent pushers to the same branch).
 ///
-/// Before planning the pack, resolves the branch's current packmap chain
-/// depth (walking it exactly once, see [`packmap::probe_chain`]) and, if it
+/// Plans the pack FIRST (diffing against the remote's current tip). A no-op
+/// push (empty plan — the remote already holds this closure) takes the cheap
+/// head-only path and walks NO packmap chain (mkit #521 perf). Only when the
+/// plan is non-empty does it resolve the branch's current packmap chain depth
+/// (walking it exactly once, see [`packmap::probe_chain`]) and, if the chain
 /// would grow past the re-baseline threshold (#406, see
 /// [`packmap::rebaseline_depth`]) AND the transport's `advance_refs` is
-/// transactional ([`Transport::supports_atomic_advance`], mkit #521),
-/// forces a full-closure plan (diffs against no remote tip) and carries
-/// that decision down to [`advance_packmap`] as
+/// transactional ([`Transport::supports_atomic_advance`], mkit #521) AND the
+/// head write is CAS-conditioned (a force push's `Any` head condition takes
+/// the safe append path — an `Any` condition makes even an atomic transport
+/// fall back to the ordered two-PUT `advance_refs`, so a reset there is not
+/// safe), re-plans as a full closure (diffs against no remote tip) and
+/// carries that decision down to [`advance_packmap`] as
 /// [`ChainAction::ResetSelfContained`] so it resets the chain to a single
 /// fresh node instead of appending to it — bounding clone cost, which
 /// otherwise grows with chain length.
@@ -538,12 +544,42 @@ pub fn push_branch(
     // optimization; the head CAS below remains authoritative.
     let remote_tip = tx.read_ref(&format!("refs/heads/{branch}"))?;
 
-    // Re-baseline decision (#406/#521), made BEFORE planning the pack: walk
-    // the current chain once and, if it would cross the threshold on this
-    // push AND the transport can advance both refs transactionally, force a
-    // full-closure plan below instead of diffing against `remote_tip`. When
-    // NOT re-baselining, the walk is cached (`resolved_chain`) so
-    // `advance_packmap`'s append path can reuse it instead of re-walking.
+    // Plan FIRST, against the remote's current tip (#521 perf): a no-op push
+    // (the remote already holds this closure) yields an empty plan and takes
+    // the cheap head-only path below WITHOUT walking the packmap chain. Only
+    // a push that actually has objects to send pays the O(depth) chain probe.
+    let mut plan = transfer::plan_pack(store, tip, remote_tip)?;
+
+    if plan.is_empty() {
+        // Nothing to send — the remote already holds the closure; just move
+        // the head (no packmap change needed, so no chain walk and no atomic
+        // two-ref advance).
+        return commit_head(tx, &format!("refs/heads/{branch}"), condition, &tip, branch);
+    }
+
+    if crate::signal::is_shutdown() {
+        return Err(DispatchError::Interrupted);
+    }
+
+    // Re-baseline decision (#406/#521), made only now that we know there IS
+    // something to send: walk the current chain exactly once and decide
+    // whether this push should reset the chain to a single self-contained
+    // node instead of appending. When NOT re-baselining, the walk is cached
+    // (`resolved_chain`) so `advance_packmap`'s append path can reuse it
+    // instead of re-walking.
+    //
+    // A reset is committed together with the head; the ordered (non-atomic)
+    // `advance_refs` fallback (packmap PUT then head PUT) would strand the
+    // head at the old tip on a torn write, and a reset — unlike an append —
+    // is not a superset of the prior chain, so it can't rebuild that stranded
+    // closure. We therefore re-baseline ONLY when BOTH hold:
+    //   * the transport advances both refs transactionally
+    //     (`supports_atomic_advance`), AND
+    //   * the head write is CAS-conditioned (not `Any`). A force push's `Any`
+    //     head condition makes even an atomic transport fall back to the
+    //     ordered two-PUT path (`Any` is not expressible on the atomic
+    //     endpoint — see `HttpTransport::supports_atomic_advance`), so a
+    //     force push MUST take the safe append path instead of resetting.
     let threshold = rebaseline_depth();
     let mut rebaseline = false;
     let mut resolved_chain = None;
@@ -551,7 +587,11 @@ pub fn push_branch(
         && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
     {
         match probe_chain(tx, branch, pm) {
-            Ok(chain) if chain.depth + 1 > threshold && tx.supports_atomic_advance() => {
+            Ok(chain)
+                if chain.depth + 1 > threshold
+                    && tx.supports_atomic_advance()
+                    && !matches!(condition, refs::RefWriteCondition::Any) =>
+            {
                 rebaseline = true;
             }
             Ok(chain) => resolved_chain = Some(chain),
@@ -560,57 +600,45 @@ pub fn push_branch(
         }
     }
 
-    let plan = if rebaseline {
+    if rebaseline {
         // Force a full-closure plan: no external bases, so the pack is
         // self-contained and safe to reset the chain onto.
-        transfer::plan_pack(store, tip, None)?
-    } else {
-        transfer::plan_pack(store, tip, remote_tip)?
-    };
-
-    if !plan.is_empty() {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
-        }
-
-        // Build the pack from the deterministic plan: raws first (non-blobs
-        // before blobs), then deltas (their bases are external — resolved
-        // from the fetcher's store via earlier packs — so no in-pack
-        // ordering is required, SPEC-PACKFILE §4).
-        let mut w = PackWriter::new();
-        for h in &plan.raw {
-            let bytes = store.read(h)?;
-            w.push_raw(*h, bytes)?;
-        }
-        for d in &plan.deltas {
-            w.push_delta(&d.base, &d.stream)?;
-        }
-        let pack = w.finish()?;
-        let pack_key = pack::pack_key(&pack);
-        tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
-
-        // Chain the pack onto the packmap AND move the head together (#408):
-        // a transactional transport applies both atomically, the default does
-        // packmap-then-head. Either way the head never lands past a packmap
-        // that can't reconstruct it. `Append`'s `self_contained` lets a
-        // full-closure push reset a broken chain (unconditionally, on any
-        // transport); `ResetSelfContained` proactively resets a healthy chain
-        // that has grown too deep, and is only ever chosen above when the
-        // transport is atomic-capable. A failed advance leaves the head
-        // untouched.
-        let action = if rebaseline {
-            ChainAction::ResetSelfContained
-        } else {
-            ChainAction::Append {
-                self_contained: plan.self_contained,
-            }
-        };
-        return advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip);
+        plan = transfer::plan_pack(store, tip, None)?;
     }
 
-    // Nothing to send — the remote already holds the closure; just move the
-    // head (no packmap change needed, so no atomic two-ref advance).
-    commit_head(tx, &format!("refs/heads/{branch}"), condition, &tip, branch)
+    // Build the pack from the deterministic plan: raws first (non-blobs
+    // before blobs), then deltas (their bases are external — resolved from
+    // the fetcher's store via earlier packs — so no in-pack ordering is
+    // required, SPEC-PACKFILE §4).
+    let mut w = PackWriter::new();
+    for h in &plan.raw {
+        let bytes = store.read(h)?;
+        w.push_raw(*h, bytes)?;
+    }
+    for d in &plan.deltas {
+        w.push_delta(&d.base, &d.stream)?;
+    }
+    let pack = w.finish()?;
+    let pack_key = pack::pack_key(&pack);
+    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+
+    // Chain the pack onto the packmap AND move the head together (#408): a
+    // transactional transport applies both atomically, the default does
+    // packmap-then-head. Either way the head never lands past a packmap that
+    // can't reconstruct it. `Append`'s `self_contained` lets a full-closure
+    // push reset a broken chain (unconditionally, on any transport);
+    // `ResetSelfContained` proactively resets a healthy chain that has grown
+    // too deep, and is only ever chosen above when the transport is
+    // atomic-capable AND the head write is CAS-conditioned. A failed advance
+    // leaves the head untouched.
+    let action = if rebaseline {
+        ChainAction::ResetSelfContained
+    } else {
+        ChainAction::Append {
+            self_contained: plan.self_contained,
+        }
+    };
+    advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip)
 }
 
 /// Fetch remote refs, then fast-forward the current local branch from
@@ -770,6 +798,19 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 /// and a present-but-incomplete packmap (even after the self-heal retry) is
 /// [`DispatchError::RemoteMissingObject`]. We never publish a
 /// remote-tracking ref to a closure we couldn't fully materialise locally.
+///
+/// # Concurrent re-baseline (mkit #521)
+///
+/// We list branch tips (`list_refs`) BEFORE reading each branch's packmap,
+/// so a concurrent push that re-baselines (resets the packmap to a fresh
+/// single node, #406) between those two reads can leave us verifying an
+/// OLD tip `h` against a packmap whose closure only covers the NEW tip —
+/// surfacing as [`DispatchError::RemoteMissingObject`] (the reset chain
+/// isn't a superset of the prior one, and the applied-pack self-heal can't
+/// rescue a genuinely stale tip). This is transient — no bad ref was
+/// published — so on that specific error we re-read the branch's CURRENT tip
+/// and packmap and retry the chain once with the fresh pair, publishing the
+/// fresh tip. A second failure (or a vanished branch) propagates unchanged.
 fn fetch_objects(
     store: &ObjectStore,
     mkit_dir: &Path,
@@ -791,8 +832,29 @@ fn fetch_objects(
         let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
             return Err(DispatchError::PackmapMissing(r.name.clone()));
         };
-        fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, chain_head, h)?;
-        refs::write_remote_ref(mkit_dir, remote, &r.name, &h)?;
+        // The tip we publish: normally the listed `h`, but if the chain fails
+        // because a concurrent re-baseline moved the branch under us, the
+        // freshly re-read tip (see this fn's doc comment).
+        let published_tip =
+            match fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, chain_head, h) {
+                Ok(()) => h,
+                Err(e @ DispatchError::RemoteMissingObject(_)) => {
+                    // Re-read the branch's CURRENT tip + packmap. If either
+                    // is gone (branch deleted mid-fetch) the original error
+                    // stands. Otherwise retry the chain ONCE with the fresh
+                    // pair; a second failure propagates via `?`.
+                    let (Some(fresh_h), Some(fresh_head)) = (
+                        tx.read_ref(&format!("refs/heads/{}", r.name))?,
+                        tx.read_ref(&packmap_ref(&r.name))?,
+                    ) else {
+                        return Err(e);
+                    };
+                    fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, fresh_head, fresh_h)?;
+                    fresh_h
+                }
+                Err(e) => return Err(e),
+            };
+        refs::write_remote_ref(mkit_dir, remote, &r.name, &published_tip)?;
         n += 1;
     }
     Ok(n)
