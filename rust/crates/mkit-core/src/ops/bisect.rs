@@ -92,7 +92,8 @@ pub enum BisectStep {
     /// Only skipped commits remain between good and bad, so the first-bad
     /// commit is ambiguous — it could be `bad` or any commit in `skipped`
     /// (git's "The first bad commit could be any of …"). Distinguished from
-    /// [`Found`] so callers don't report a skipped-over guess as definitive.
+    /// [`Found`](BisectStep::Found) so callers don't report a skipped-over
+    /// guess as definitive.
     Ambiguous { bad: Hash, skipped: Vec<Hash> },
     /// We need both at least one good and a bad before we can compute a midpoint.
     NeedMore,
