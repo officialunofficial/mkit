@@ -67,6 +67,19 @@ export type ReactionUpdate = {
 export type ReactionAgg = { emoji: string; count: number; mine: boolean }
 
 /**
+ * The reaction target for a CHAT message: its content id qualified by the server's monotonic per-room `seq`,
+ * `{messageIdHex}:{seq}`. Chat ids are content-addressed and NOT unique — the same author posting the same text twice
+ * yields two rows with the SAME `messageIdHex` (see `chat::message_id`) — so a reaction keyed on the bare id would show
+ * on EVERY repeat of that text (the "reaction on both the most recent and penultimate message" bug). Keying on the (id,
+ * seq) instance — which the server also mandates ("consumers MUST key the timeline on seq") — scopes each post's
+ * reactions to that post. Commits are already unique by hash and react on the bare hash, not through here. Mirrors the
+ * server's `is_valid_target_id`, which accepts `{64hex}` OR `{64hex}:{seq}`.
+ */
+export function chatReactionTarget(message: Pick<ChatMessageEntry, 'messageIdHex' | 'seq'>): string {
+  return `${message.messageIdHex}:${message.seq}`
+}
+
+/**
  * Aggregate raw reaction rows into per-target emoji tallies. Pure + unit-tested. Emoji order within a target is the
  * order they first appear (stable).
  */

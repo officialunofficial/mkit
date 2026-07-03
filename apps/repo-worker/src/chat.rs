@@ -97,15 +97,36 @@ pub fn is_allowed_emoji(emoji: &str) -> bool {
     REACTION_EMOJI.contains(&emoji)
 }
 
-/// A reaction target must be a 64-char lowercase-hex id (a 32-byte feed-item id:
-/// a chat message id or a commit hash). Rejecting anything else keeps the
-/// reactions table's cardinality bounded to real feed items.
+/// A reaction target identifies one feed item. Two shapes are valid:
+///   - a bare 64-char lowercase-hex id — a commit hash (already unique), or
+///   - `{64hex}:{seq}` — a chat-message INSTANCE: the content-addressed message
+///     id plus its monotonic per-room `seq`.
+///
+/// The second shape exists because chat ids are NOT unique — identical (room,
+/// author, text) re-posted shares one `message_id` (see [`message_id`]), so a
+/// reaction keyed on the bare id would attach to every repeat of that text.
+/// Keying on the (id, seq) instance (`seq` being the DO's per-room order, which
+/// consumers must key the timeline on anyway) keeps each post's reactions its
+/// own. Rejecting anything else keeps the reactions table's cardinality bounded.
 #[must_use]
 pub fn is_valid_target_id(target: &str) -> bool {
-    target.len() == 64
-        && target
-            .bytes()
+    match target.split_once(':') {
+        Some((id, seq)) => is_hex64(id) && is_decimal_seq(seq),
+        None => is_hex64(target),
+    }
+}
+
+/// A 64-char lowercase-hex id (a 32-byte feed-item hash).
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A decimal per-room `seq`: 1..=20 digits, no leading zero (the DO's seq starts
+/// at 1, so `0`/leading-zero forms are never real and are rejected).
+fn is_decimal_seq(s: &str) -> bool {
+    (1..=20).contains(&s.len()) && s.as_bytes()[0] != b'0' && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -186,5 +207,27 @@ mod tests {
         assert!(!is_valid_target_id(&"g".repeat(64))); // non-hex
         assert!(!is_valid_target_id("0")); // a counter, not a real id
         assert!(!is_valid_target_id(""));
+    }
+
+    #[test]
+    fn target_id_accepts_seq_qualified_chat_instance() {
+        // Chat message ids are content-addressed and NOT unique — identical text
+        // re-posted shares one id (see `message_id`). A reaction therefore keys
+        // on the (id, seq) INSTANCE, `{64hex}:{seq}`, so it can't leak onto every
+        // repeat of that text. Commits stay unique by hash and react on the bare id.
+        let id = "a".repeat(64);
+        assert!(is_valid_target_id(&id)); // bare commit hash still valid
+        assert!(is_valid_target_id(&format!("{id}:1")));
+        assert!(is_valid_target_id(&format!("{id}:42")));
+        assert!(is_valid_target_id(&format!("{id}:9007199254740991")));
+        // Malformed suffixes are rejected — keeps the reactions table bounded.
+        assert!(!is_valid_target_id(&format!("{id}:"))); // empty seq
+        assert!(!is_valid_target_id(&format!("{id}:0"))); // seq starts at 1
+        assert!(!is_valid_target_id(&format!("{id}:01"))); // leading zero
+        assert!(!is_valid_target_id(&format!("{id}:1a"))); // non-digit
+        assert!(!is_valid_target_id(&format!("{id}:-1"))); // sign
+        assert!(!is_valid_target_id(&format!("{id}:1:2"))); // double suffix
+        assert!(!is_valid_target_id(&format!("{}:1", "a".repeat(63)))); // short hash
+        assert!(!is_valid_target_id(&format!("{}:1", "A".repeat(64)))); // uppercase hash
     }
 }

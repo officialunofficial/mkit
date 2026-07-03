@@ -11,6 +11,7 @@ import {
   type FeedItem,
   type ReactionEntry,
   aggregateReactions,
+  chatReactionTarget,
   mergeFeed,
   parseActivityFrame,
   type PushArgs,
@@ -1210,6 +1211,28 @@ describe('aggregateReactions tallies per target with mine flag', () => {
   it('mine is false when no pubkey is supplied', () => {
     const agg = aggregateReactions([{ targetIdHex: 't', emoji: '👍', authorPubkeyHex: 'me' }])
     expect(agg.get('t')?.[0]?.mine).toBe(false)
+  })
+})
+
+describe('chatReactionTarget keys reactions on the (id, seq) message INSTANCE', () => {
+  const HASH = 'a'.repeat(64)
+
+  it('qualifies a chat message id with its seq — matching the server target grammar', () => {
+    expect(chatReactionTarget({ messageIdHex: HASH, seq: 1 })).toBe(`${HASH}:1`)
+    expect(chatReactionTarget({ messageIdHex: HASH, seq: 42 })).toBe(`${HASH}:42`)
+  })
+
+  it('separates reactions on two SAME-text posts (identical content id, distinct seq)', () => {
+    // The exact bug from the Slack report: emerald-robin posts "hello" twice.
+    // Content-addressing gives both the SAME messageIdHex; only `seq` differs.
+    const first = { messageIdHex: HASH, seq: 3 }
+    const second = { messageIdHex: HASH, seq: 9 }
+    // A reaction lands on the SECOND post only.
+    const rows: ReactionEntry[] = [{ targetIdHex: chatReactionTarget(second), emoji: '🚀', authorPubkeyHex: 'me' }]
+    const agg = aggregateReactions(rows, 'me')
+    expect(agg.get(chatReactionTarget(second))).toEqual([{ emoji: '🚀', count: 1, mine: true }])
+    // ...and NOT on the first, penultimate post.
+    expect(agg.get(chatReactionTarget(first))).toBeUndefined()
   })
 })
 
