@@ -211,7 +211,7 @@ export function PushDemo() {
                   totalLen={after.bytesLen}
                   dimSet={dimSet}
                   highlightIndex={changedIdx[0]}
-                  ariaLabel='mkit ships only a delta of the changed chunk'
+                  ariaLabel='mkit sends only a delta of the changed chunk'
                 />
               </div>
               <p className='max-w-prose text-sm text-muted'>
