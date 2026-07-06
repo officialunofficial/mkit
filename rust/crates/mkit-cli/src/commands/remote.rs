@@ -11,6 +11,7 @@ use crate::clap_shim;
 use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::format;
+use crate::remote_dispatch::{remove_record, rename_record};
 
 const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
     ("mkit+file://", "file"),
@@ -178,6 +179,7 @@ pub fn run(args: &[String]) -> u8 {
                     // Stale tracking refs would shadow a future remote
                     // reusing the name; objects stay (gc owns them).
                     remove_tracking_refs(&cwd, &name);
+                    remove_record(&cwd.join(mkit_core::MKIT_DIR), &name);
                     warn_orphaned_bridge_state(&cwd, &name);
                     exit::OK
                 }
@@ -213,6 +215,7 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(()) => {
                     move_tracking_refs(&cwd, &old, &new);
                     move_bridge_state(&cwd, &old, &new);
+                    rename_record(&cwd.join(mkit_core::MKIT_DIR), &old, &new);
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),

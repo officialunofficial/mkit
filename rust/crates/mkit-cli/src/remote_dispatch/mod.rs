@@ -21,6 +21,12 @@
 mod applied_packs;
 mod packmap;
 
+// Re-exported so the `remote remove`/`remote rename` command handlers
+// (outside this module) can keep the applied-packs record's lifecycle in
+// step with the remote's, without reaching past `applied_packs`'s own path
+// derivation (see that module's docs).
+pub(crate) use applied_packs::{remove_record, rename_record};
+
 use std::path::Path;
 use std::sync::Arc;
 

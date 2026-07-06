@@ -251,3 +251,169 @@ fn self_heal_recovers_when_object_store_is_wiped_but_record_survives() {
         "after self-heal, the record must be accurate again"
     );
 }
+
+// -- #545: `remote remove`/`remote rename` clean up the applied-packs
+// record --
+//
+// These two tests are driven fully through the real `mkit` binary (rather
+// than the in-process `fetch_all`/`push_all` used above) because `remote
+// remove`/`remote rename`/`fetch` are config-driven CLI subcommands; a
+// `mkit+file://` bare-directory remote is URL-reachable so the whole
+// add/push/fetch/remove/rename cycle runs as real subprocesses.
+
+fn file_url(dir: &Path) -> String {
+    format!("mkit+file://{}", dir.display())
+}
+
+fn applied_packs_record_path(repo: &Path, remote: &str) -> std::path::PathBuf {
+    repo.join(".mkit").join("applied-packs").join(remote)
+}
+
+#[test]
+fn remote_remove_deletes_record_and_a_later_readd_fetches_cleanly() {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let remote_store = tempfile::tempdir().unwrap();
+    let url = file_url(remote_store.path());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    commit_all(alice.path(), "c1");
+    run_in(alice.path(), &["remote", "add", "origin", &url]);
+    run_in(alice.path(), &["push", "origin"]);
+
+    run_in(bob.path(), &["remote", "add", "origin", &url]);
+    run_in(bob.path(), &["fetch", "origin"]);
+
+    let record = applied_packs_record_path(bob.path(), "origin");
+    assert!(
+        record.exists(),
+        "a successful fetch must create the applied-packs record"
+    );
+    let record_bytes = fs::read(&record).unwrap();
+    assert!(!record_bytes.is_empty(), "record must list applied packs");
+
+    run_in(bob.path(), &["remote", "remove", "origin"]);
+    assert!(
+        !record.exists(),
+        "`remote remove` must delete the applied-packs record"
+    );
+
+    // Prune the now-unreferenced fetched objects (`remote remove` dropped
+    // the tracking refs, bob has no commits of his own). This makes the
+    // stale-record hazard real: without #545's record cleanup, a surviving
+    // record + pruned store is exactly the state that trips the self-heal
+    // full re-download — see the control test below, which proves the
+    // "looks stale" assertion here is not vacuous.
+    let out = run_in(bob.path(), &["gc", "--grace-secs", "0"]);
+    assert!(out.status.success(), "gc must succeed: {out:?}");
+
+    // Re-add the same name+URL and fetch again: must succeed and must NOT
+    // emit the self-heal "looks stale" note — the record was cleanly
+    // removed, not left behind stale.
+    run_in(bob.path(), &["remote", "add", "origin", &url]);
+    let out = run_in(bob.path(), &["fetch", "origin"]);
+    assert!(out.status.success(), "re-add + fetch must succeed: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("looks stale"),
+        "no spurious self-heal note expected after a clean remove: {stderr}"
+    );
+}
+
+/// Control for the test above: prove the "looks stale" assertion is not
+/// vacuous by restoring the pre-remove record (simulating pre-#545
+/// behavior, where `remote remove` left the file behind) into the same
+/// remove + gc + re-add sequence. The stale record claims the pack is
+/// applied while the gc'd store no longer has its objects, so the fetch
+/// must emit the self-heal note — and still succeed via the full
+/// re-download retry.
+#[test]
+fn stale_record_after_gc_triggers_selfheal_note() {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let remote_store = tempfile::tempdir().unwrap();
+    let url = file_url(remote_store.path());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    commit_all(alice.path(), "c1");
+    run_in(alice.path(), &["remote", "add", "origin", &url]);
+    run_in(alice.path(), &["push", "origin"]);
+
+    run_in(bob.path(), &["remote", "add", "origin", &url]);
+    run_in(bob.path(), &["fetch", "origin"]);
+
+    let record = applied_packs_record_path(bob.path(), "origin");
+    assert!(record.exists());
+    let record_bytes = fs::read(&record).unwrap();
+    assert!(!record_bytes.is_empty(), "record must list applied packs");
+
+    run_in(bob.path(), &["remote", "remove", "origin"]);
+    assert!(!record.exists());
+    let out = run_in(bob.path(), &["gc", "--grace-secs", "0"]);
+    assert!(out.status.success(), "gc must succeed: {out:?}");
+    run_in(bob.path(), &["remote", "add", "origin", &url]);
+
+    // Simulate the pre-fix behavior: the record survives the remove.
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, &record_bytes).unwrap();
+
+    let out = run_in(bob.path(), &["fetch", "origin"]);
+    assert!(
+        out.status.success(),
+        "self-heal must recover the fetch: {out:?}"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("looks stale"),
+        "a stale record over a pruned store must trip the self-heal note: {stderr}"
+    );
+}
+
+#[test]
+fn remote_rename_moves_record_without_orphaning_the_old_file() {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let remote_store = tempfile::tempdir().unwrap();
+    let url = file_url(remote_store.path());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    commit_all(alice.path(), "c1");
+    run_in(alice.path(), &["remote", "add", "origin", &url]);
+    run_in(alice.path(), &["push", "origin"]);
+
+    run_in(bob.path(), &["remote", "add", "origin", &url]);
+    run_in(bob.path(), &["fetch", "origin"]);
+
+    let old_record = applied_packs_record_path(bob.path(), "origin");
+    let new_record = applied_packs_record_path(bob.path(), "upstream");
+    assert!(old_record.exists());
+    let original_content = fs::read(&old_record).unwrap();
+
+    run_in(bob.path(), &["remote", "rename", "origin", "upstream"]);
+    assert!(
+        !old_record.exists(),
+        "no file must remain under applied-packs/ for the old encoded name"
+    );
+    assert!(
+        new_record.exists(),
+        "the new encoded name's applied-packs file must exist after rename"
+    );
+    assert_eq!(fs::read(&new_record).unwrap(), original_content);
+
+    // The renamed remote reuses the record on its next fetch (steady
+    // state — nothing new landed on the remote since the first fetch).
+    let out = run_in(bob.path(), &["fetch", "upstream"]);
+    assert!(
+        out.status.success(),
+        "fetch after rename must succeed: {out:?}"
+    );
+}

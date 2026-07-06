@@ -196,6 +196,41 @@ fn record_path(mkit_dir: &Path, remote: &str) -> PathBuf {
         .join(record_file_name(remote))
 }
 
+/// Delete `remote`'s applied-packs record after `mkit remote remove`, so a
+/// name later reused by a different remote never inherits a cache claiming
+/// packs are applied that the (possibly gc'd) object store no longer has.
+/// The record is a pure performance cache and always safe to delete (see
+/// the module docs), so this never fails the surrounding `remote remove`:
+/// a missing record is a silent no-op, and any other I/O error is reported
+/// as a warning and otherwise ignored.
+pub(crate) fn remove_record(mkit_dir: &Path, remote: &str) {
+    match std::fs::remove_file(record_path(mkit_dir, remote)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("warning: could not remove applied-packs record for '{remote}': {e}");
+        }
+    }
+}
+
+/// Move `old`'s applied-packs record to `new` after `mkit remote rename`, so
+/// the renamed remote's next fetch reuses the cache instead of orphaning it
+/// under the old name and paying a spurious full re-download. Mirrors
+/// [`remove_record`]'s non-fatal posture: a missing source record is a
+/// silent no-op, and any other I/O error (including the destination
+/// already existing, which plain [`std::fs::rename`] overwrites) is
+/// reported as a warning and otherwise ignored — this never fails the
+/// surrounding `remote rename`.
+pub(crate) fn rename_record(mkit_dir: &Path, old: &str, new: &str) {
+    match std::fs::rename(record_path(mkit_dir, old), record_path(mkit_dir, new)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!("warning: could not rename applied-packs record '{old}' -> '{new}': {e}");
+        }
+    }
+}
+
 /// Parse the on-disk record format: one lowercase 64-hex digest per LF
 /// line. Malformed lines (wrong length, non-hex, uppercase hex) are
 /// silently ignored, per the module's forward-compatibility contract.
@@ -451,5 +486,91 @@ mod tests {
         assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
         let err = AppliedPacks::load(&mkit_dir, "").unwrap_err();
         assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+    }
+
+    #[test]
+    fn remove_record_deletes_existing_file() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        applied.insert(&pk("pack-1"));
+        applied.persist().unwrap();
+        let path = record_path(&mkit_dir, "origin");
+        assert!(path.exists());
+
+        remove_record(&mkit_dir, "origin");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_record_missing_file_is_noop() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let path = record_path(&mkit_dir, "origin");
+        assert!(!path.exists());
+
+        // Must not panic when the record was never created.
+        remove_record(&mkit_dir, "origin");
+        // Calling it again on the still-missing file is likewise a no-op.
+        remove_record(&mkit_dir, "origin");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_record_encodes_multi_segment_remote_name() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let mut applied = AppliedPacks::load(&mkit_dir, "team/upstream").unwrap();
+        applied.insert(&pk("pack-1"));
+        applied.persist().unwrap();
+        let encoded_path = mkit_dir.join(APPLIED_PACKS_DIR).join("team%2Fupstream");
+        assert!(encoded_path.exists());
+
+        remove_record(&mkit_dir, "team/upstream");
+        assert!(!encoded_path.exists());
+    }
+
+    #[test]
+    fn rename_record_moves_file_with_identical_content() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        applied.insert(&pk("pack-1"));
+        applied.insert(&pk("pack-2"));
+        applied.persist().unwrap();
+        let old_path = record_path(&mkit_dir, "origin");
+        let new_path = record_path(&mkit_dir, "renamed");
+        let original_content = fs::read(&old_path).unwrap();
+
+        rename_record(&mkit_dir, "origin", "renamed");
+        assert!(!old_path.exists(), "old path must be gone after rename");
+        assert!(new_path.exists(), "new path must exist after rename");
+        assert_eq!(fs::read(&new_path).unwrap(), original_content);
+    }
+
+    #[test]
+    fn rename_record_missing_source_is_noop() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let old_path = record_path(&mkit_dir, "origin");
+        let new_path = record_path(&mkit_dir, "renamed");
+        assert!(!old_path.exists());
+
+        // Must not panic when the source record was never created.
+        rename_record(&mkit_dir, "origin", "renamed");
+        assert!(!old_path.exists());
+        assert!(!new_path.exists());
+    }
+
+    #[test]
+    fn rename_record_encodes_multi_segment_remote_names() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let mut applied = AppliedPacks::load(&mkit_dir, "team/upstream").unwrap();
+        applied.insert(&pk("pack-1"));
+        applied.persist().unwrap();
+        let old_encoded = mkit_dir.join(APPLIED_PACKS_DIR).join("team%2Fupstream");
+        let new_encoded = mkit_dir.join(APPLIED_PACKS_DIR).join("team%2Fdownstream");
+        let original_content = fs::read(&old_encoded).unwrap();
+        assert!(old_encoded.exists());
+
+        rename_record(&mkit_dir, "team/upstream", "team/downstream");
+        assert!(!old_encoded.exists());
+        assert!(new_encoded.exists());
+        assert_eq!(fs::read(&new_encoded).unwrap(), original_content);
     }
 }
