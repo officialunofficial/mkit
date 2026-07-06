@@ -629,13 +629,14 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         Object::Blob(b) => b.data,
         Object::ChunkedBlob(cb) => {
             let mut buf: Vec<u8> = Vec::with_capacity(usize::try_from(cb.total_size).unwrap_or(0));
-            for ch in cb.chunks {
-                let chunk_obj = store.read_object(&ch)?;
+            for ch in &cb.chunks {
+                let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
                     return Err(BlameError::NotABlob);
                 };
                 buf.extend_from_slice(&b.data);
             }
+            cb.check_reassembled_size(buf.len())?;
             buf
         }
         _ => return Err(BlameError::NotABlob),
@@ -932,6 +933,46 @@ mod tests {
     // threshold of 40, so a copy of the block is detected.
     const BLOCK_A: &[u8] = b"fn handler_alpha() { compute(); }";
     const BLOCK_B: &[u8] = b"fn handler_bravo() { compute(); }";
+
+    /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."
+    /// Blame loads file content through chunked-blob reassembly, which
+    /// must reject a manifest whose forged `total_size` disagrees with
+    /// its (valid) chunks.
+    #[test]
+    fn blame_rejects_chunked_total_size_mismatch() {
+        let (_d, store) = fresh_store();
+        let chunk = put_blob(&store, b"one line\n");
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 4096,
+            chunk_size: 0,
+            chunks: vec![chunk],
+        });
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_single_file_tree(&store, "big.bin", cb_h);
+        let commit = Object::Commit(Commit::new_unannotated(
+            tree,
+            vec![],
+            Identity::opaque(1u64.to_le_bytes()),
+            [0u8; 32],
+            b"msg".to_vec(),
+            100,
+            [0u8; 64],
+        ));
+        let head = store
+            .write(&serialize::serialize(&commit).unwrap())
+            .unwrap();
+        let err = blame_file(&store, head, "big.bin").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BlameError::Object(crate::object::MkitError::ChunkedBlobSizeMismatch {
+                    expected: 4096,
+                    actual: 9,
+                })
+            ),
+            "expected ChunkedBlobSizeMismatch, got {err:?}"
+        );
+    }
 
     #[test]
     fn blame_m_attributes_within_file_move_to_origin() {
