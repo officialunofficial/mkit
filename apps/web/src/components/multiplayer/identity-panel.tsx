@@ -4,8 +4,8 @@
 // flourish, the locked create/unlock actions, and the unlocked player header.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
-import { useState } from 'react'
-import { type BindingCredential, attestEd25519Binding, enrollBindingPasskey, rpId } from '../../lib/passkey'
+import { useEffect, useState } from 'react'
+import { attestIdentityBinding, rpId } from '../../lib/passkey'
 import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
 import { Field, FieldList } from '../result-panel'
@@ -15,26 +15,45 @@ import { OwnPlayerName } from './player-label'
 import { BTN, PRIMARY_BTN, errMsg } from './shared'
 
 /**
- * Optional flourish: a P-256 _passkey_ vouches that the derived Ed25519 key is the same person's, by signing a DSSE-PAE
- * binding challenge, verified in-browser (RP-ID pinned). A hook so the trigger can sit inline in the unlocked header
- * row while the results render below it.
+ * Optional flourish: the IDENTITY passkey (the same one the Ed25519 key is derived from) vouches for the derived
+ * pubkey, by signing a DSSE-PAE binding challenge, verified in-browser (RP-ID pinned). A hook so the trigger can sit
+ * inline in the unlocked header row while the results render below it.
  */
-function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
-  const [binding, setBinding] = useState<BindingCredential | null>(null)
-  const [result, setResult] = useState<{ verified: boolean } | null>(null)
+function useAttest(
+  api: ReturnType<typeof useMkit>,
+  credentialId: string | null,
+  p256PubkeyHex: string | null,
+  ed25519PubkeyHex: string,
+) {
+  // `attestIdentityBinding` resolves ONLY on success (the WASM verifier throws
+  // on any rejection), so a non-null result IS the verified verdict — there's
+  // no `verified: false` to represent.
+  const [result, setResult] = useState<{ verified: true } | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  // Drop the verdict when the active signing key changes (New identity, or the
+  // ephemeral fallback re-mints a random seed): the "verified ✓" + P-256 pubkey
+  // below vouch for the OLD `ed25519PubkeyHex`, so a stale success must not
+  // linger against a different/ephemeral identity.
+  useEffect(() => {
+    setResult(null)
+    setErr(null)
+  }, [ed25519PubkeyHex])
+
   const onAttest = async () => {
+    // No credential/pubkey to vouch with (legacy identity or an authenticator
+    // that didn't expose getPublicKey()) — the caller already gates the
+    // trigger on this via `canAttest`; this guard just makes null
+    // unrepresentable downstream instead of relying on that alone.
+    if (credentialId == null || p256PubkeyHex == null) return
     setErr(null)
     setBusy(true)
     try {
-      const b = binding ?? (await enrollBindingPasskey())
-      setBinding(b)
-      const res = await attestEd25519Binding(api, b, ed25519PubkeyHex, {
+      await attestIdentityBinding(api, credentialId, p256PubkeyHex, ed25519PubkeyHex, {
         policyJson: JSON.stringify({ expected_rp_id: rpId() }),
       })
-      setResult({ verified: res.verified })
+      setResult({ verified: true })
     } catch (e) {
       setErr(errMsg(e))
     } finally {
@@ -42,7 +61,7 @@ function useAttest(api: ReturnType<typeof useMkit>, ed25519PubkeyHex: string) {
     }
   }
 
-  return { onAttest, busy, binding, result, err }
+  return { onAttest, busy, result, err }
 }
 
 /** Fingerprint glyph — signals that the button triggers a biometric passkey prompt. */
@@ -139,7 +158,28 @@ export function UnlockedHeader({
   ed25519PubkeyHex: string
 }) {
   const id = useIdentityStore()
-  const attest = useAttest(api, ed25519PubkeyHex)
+  const attest = useAttest(api, id.credentialId, id.p256PubkeyHex, ed25519PubkeyHex)
+  // Attestation needs the identity passkey's OWN captured P-256 public key, and
+  // it must belong to THIS session's signing key. Gate on both:
+  //   • `p256PubkeyHex != null` — a legacy identity (created before #494), a
+  //     cross-device recovery (unlock captures no pubkey), or an authenticator
+  //     that didn't expose getPublicKey() has none.
+  //   • `!id.ephemeral` — on the PRF-disabled ephemeral re-create path the seed
+  //     is RANDOM (not derived from any passkey), yet the store still holds the
+  //     PREVIOUS identity's credentialId/p256PubkeyHex. Without this guard the
+  //     old passkey would sign a binding over an Ed25519 key it never derived
+  //     and the UI would show a bogus "verified ✓".
+  const canAttest = id.p256PubkeyHex != null && !id.ephemeral
+
+  // Honest, NON-destructive explanation for the disabled state. WebAuthn
+  // assertions never expose the credential public key (`getPublicKey()` exists
+  // only on `AuthenticatorAttestationResponse`, at creation), so there is no
+  // way to re-capture it on unlock/recovery — and we must NOT steer the user to
+  // "re-create", which would mint a DIFFERENT passkey + seed (a different
+  // player), discarding the recovered one. State the limitation plainly instead.
+  const attestDisabledReason = id.ephemeral
+    ? "This is a temporary identity with no saved passkey, so there's nothing to link with."
+    : "Linking needs your passkey's own public key, which is captured only when your identity is first created on this device. Identities recovered on another device (or created before this feature) can't be linked here."
 
   // Narrate the lock so the "I can wipe my key and re-derive it" property is
   // legible.
@@ -168,7 +208,13 @@ export function UnlockedHeader({
           <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
         </span>
         <span className='flex items-center gap-1.5'>
-          <button type='button' className={BTN} onClick={attest.onAttest} disabled={attest.busy}>
+          <button
+            type='button'
+            className={BTN}
+            onClick={attest.onAttest}
+            disabled={attest.busy || !canAttest}
+            title={canAttest ? undefined : attestDisabledReason}
+          >
             {attest.busy ? 'Linking…' : 'Link with a passkey'}
           </button>
           <InfoTip label='About linking'>
@@ -177,9 +223,10 @@ export function UnlockedHeader({
               <strong className='text-fg'>private</strong> — no one else can see it or prove it.
             </p>
             <p className='mt-2'>
-              <strong className='text-fg'>Linking</strong> has a passkey publicly vouch for your signing key, turning
-              that private link into a proof anyone can verify in their browser. In this demo it’s a separate passkey
-              you approve just for this — your signing key never leaves your browser.
+              <strong className='text-fg'>Linking</strong> has your passkey publicly vouch for your signing key, turning
+              that private link into a proof anyone can verify in their browser. It’s the same passkey your signing key
+              is derived from — your passkey vouches for your signing key — and your signing key never leaves your
+              browser.
             </p>
             <p className='mt-2'>It’s optional, and pinned to this site.</p>
           </InfoTip>
@@ -193,24 +240,20 @@ export function UnlockedHeader({
           Lock
         </button>
       </div>
-      {attest.result || attest.binding ? (
+      {attest.result ? (
         <FieldList>
-          {attest.result ? (
-            <Field label='Binding attestation' compact>
-              <span
-                className={
-                  attest.result.verified ? 'text-green-700 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-                }
-              >
-                {attest.result.verified ? 'verified ✓ (checked in your browser)' : 'failed ✗'}
-              </span>
-            </Field>
-          ) : null}
-          {attest.binding ? (
-            <Field label='Binding passkey (P-256) public key' compact>
-              <code className='font-mono break-all'>{attest.binding.pubkeyHex}</code>
-            </Field>
-          ) : null}
+          <Field label='Binding attestation' compact>
+            {/* A non-null result IS the verified verdict — the WASM verifier
+                throws on rejection (surfaced via `attest.err`), so there's no
+                failure state to render here. */}
+            <span className='text-green-700 dark:text-green-400'>verified ✓ (checked in your browser)</span>
+          </Field>
+          {/* `attest.result` is set only AFTER a successful attest, which
+              requires `p256PubkeyHex` non-null and it can't go null while
+              mounted — so this Field is always shown, unconditionally. */}
+          <Field label='Identity passkey (P-256) public key' compact>
+            <code className='font-mono break-all'>{id.p256PubkeyHex}</code>
+          </Field>
         </FieldList>
       ) : null}
       {attest.err ? <p className='text-sm text-amber-700 dark:text-amber-400'>{attest.err}</p> : null}

@@ -13,7 +13,7 @@
 //!
 //! # Format
 //!
-//! One file per remote: `.mkit/applied-packs/<remote>` (the `applied-packs/`
+//! One file per remote: `.mkit/applied-packs/<record>` (the `applied-packs/`
 //! directory is created on first write). Contents are a lowercase 64-hex
 //! BLAKE3 pack digest per line, LF-terminated, with no header. Unknown or
 //! malformed lines are ignored on load, for forward compatibility. Writes
@@ -21,10 +21,16 @@
 //! the destination — the same temp+fsync+rename pattern
 //! `mkit_core::refs`/`mkit_core::atomic` use for ref files.
 //!
-//! `<remote>` is the remote *name* (e.g. `origin`); as a defence-in-depth
-//! measure (remotes are already restricted to a safe charset wherever they
-//! are configured) [`AppliedPacks::load`] rejects any name containing `/`,
-//! `\`, or `..`.
+//! `<record>` is the remote *name* with any `/` percent-encoded to `%2F`
+//! (see [`record_file_name`]) so a legal multi-segment remote like
+//! `team/upstream` maps to one flat file rather than a nested subdirectory.
+//! [`AppliedPacks::load`] validates the name with
+//! [`mkit_core::refs::validate_ref_name`] — the same check `mkit remote add`
+//! applies, so any remote that can be configured can also be recorded. That
+//! grammar admits `A-Za-z0-9._-` plus `/` as the segment separator, which
+//! guarantees the name never contains `%` (keeping the `%2F` encoding
+//! unambiguous and reversible) and rejects the control-char / `.lock` / `.`
+//! / `..` cases a bespoke blacklist would miss.
 //!
 //! # Correctness posture
 //!
@@ -58,7 +64,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use mkit_core::hash::{HEX_LEN, Hash, from_hex, to_hex};
+use mkit_core::hash::{HEX_LEN, Hash, to_hex};
 use mkit_core::protocol::PackKey;
 use tempfile::NamedTempFile;
 
@@ -85,12 +91,14 @@ impl AppliedPacks {
     ///
     /// # Errors
     ///
-    /// [`DispatchError::InvalidRemoteName`] if `remote` contains `/`, `\`,
-    /// or `..`. Any other I/O failure reading the file propagates as
-    /// [`DispatchError::Io`].
+    /// [`DispatchError::InvalidRemoteName`] if `remote` is not a legal ref
+    /// name (per [`mkit_core::refs::validate_ref_name`]). Any other I/O
+    /// failure reading the file propagates as [`DispatchError::Io`]. Callers
+    /// treat both as non-fatal — the record is a pure cache — see
+    /// [`super::packmap::fetch_pack_chain`].
     pub(crate) fn load(mkit_dir: &Path, remote: &str) -> Result<Self, DispatchError> {
         validate_remote_name(remote)?;
-        let path = mkit_dir.join(APPLIED_PACKS_DIR).join(remote);
+        let path = record_path(mkit_dir, remote);
         let set = match fs::read(&path) {
             Ok(bytes) => parse(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
@@ -101,6 +109,19 @@ impl AppliedPacks {
             path,
             dirty: false,
         })
+    }
+
+    /// An empty, in-memory record for `remote`, used as the non-fatal
+    /// fallback when [`Self::load`] fails: the applied-pack record is purely
+    /// a performance cache (#409), so a fetch whose objects durably land must
+    /// never fail because the cache couldn't be read. Persisting is still
+    /// attempted best-effort through the normal path.
+    pub(crate) fn empty(mkit_dir: &Path, remote: &str) -> Self {
+        Self {
+            set: HashSet::new(),
+            path: record_path(mkit_dir, remote),
+            dirty: false,
+        }
     }
 
     /// True iff `key`'s digest is already recorded as applied.
@@ -118,11 +139,15 @@ impl AppliedPacks {
     /// Atomically rewrite the on-disk record with the full current set
     /// (sorted, for a deterministic file), but only if [`Self::insert`] has
     /// been called since the last successful persist. A no-op call is free.
-    pub(crate) fn persist(&self) -> Result<(), DispatchError> {
+    /// Clears the dirty flag on a successful write so a subsequent no-op
+    /// call really is free.
+    pub(crate) fn persist(&mut self) -> Result<(), DispatchError> {
         if !self.dirty {
             return Ok(());
         }
-        write(&self.path, &self.set)
+        write(&self.path, &self.set)?;
+        self.dirty = false;
+        Ok(())
     }
 
     /// Discard every recorded digest and persist the now-empty set
@@ -137,14 +162,38 @@ impl AppliedPacks {
     }
 }
 
-/// Reject remote names that could escape `.mkit/applied-packs/` or collide
-/// with reserved path components. Remotes are already restricted to a safe
-/// charset wherever they are configured; this is defence-in-depth.
+/// Reject any remote name that isn't a legal ref name. A remote name *is* a
+/// ref name — `mkit remote add` runs it through
+/// [`mkit_core::refs::validate_ref_name`] — so reusing that check keeps the
+/// two in lockstep and rejects the control-char / `.lock` / `.` / `..` /
+/// backslash cases a bespoke blacklist misses. A legal name may still contain
+/// `/` (a multi-segment remote like `team/upstream`); [`record_file_name`]
+/// flattens that into the on-disk filename, so `/` is no longer rejected.
 fn validate_remote_name(remote: &str) -> Result<(), DispatchError> {
-    if remote.contains('/') || remote.contains('\\') || remote.contains("..") {
-        return Err(DispatchError::InvalidRemoteName(remote.to_string()));
+    if mkit_core::refs::validate_ref_name(remote) {
+        Ok(())
+    } else {
+        Err(DispatchError::InvalidRemoteName(remote.to_string()))
     }
-    Ok(())
+}
+
+/// Map a validated remote name to its flat record filename under
+/// `applied-packs/`. A legal remote may contain `/` (a multi-segment name
+/// like `team/upstream`), which would otherwise be read as a subdirectory
+/// separator; percent-encode it to `%2F` so every remote gets exactly one
+/// flat file and the atomic sibling-tmp+rename write stays within
+/// `applied-packs/`. [`validate_remote_name`] guarantees the name never
+/// contains `%`, so this mapping is unambiguous and reversible.
+fn record_file_name(remote: &str) -> String {
+    remote.replace('/', "%2F")
+}
+
+/// The full record path for `remote` under `mkit_dir` (the `.mkit/`
+/// directory): `applied-packs/<record_file_name(remote)>`.
+fn record_path(mkit_dir: &Path, remote: &str) -> PathBuf {
+    mkit_dir
+        .join(APPLIED_PACKS_DIR)
+        .join(record_file_name(remote))
 }
 
 /// Parse the on-disk record format: one lowercase 64-hex digest per LF
@@ -157,28 +206,16 @@ fn parse(bytes: &[u8]) -> HashSet<Hash> {
     };
     for line in s.split('\n') {
         let trimmed = line.trim_end_matches('\r');
-        if let Some(h) = parse_lowercase_hex_line(trimmed) {
+        // Strict lowercase-hex parse in a single pass — reuses the same
+        // wire parser refs files use, rather than the more permissive
+        // `hash::from_hex` (which tolerates uppercase). On-disk records must
+        // be strict so a hand-edited or foreign-cased line is treated as
+        // malformed and ignored rather than silently accepted.
+        if let Some(h) = mkit_core::refs::parse_lowercase_hash(trimmed.as_bytes()) {
             set.insert(h);
         }
     }
     set
-}
-
-/// Strict lowercase-hex line parser: exactly [`HEX_LEN`] lowercase-hex
-/// characters, nothing else. Mirrors `mkit_core::refs`'s hand-rolled
-/// lowercase-only wire parser rather than the more permissive
-/// `hash::from_hex` (which tolerates uppercase for programmatic callers) —
-/// on-disk records must be strict so a hand-edited or foreign-cased file is
-/// treated as malformed and ignored rather than silently accepted.
-fn parse_lowercase_hex_line(line: &str) -> Option<Hash> {
-    if line.len() != HEX_LEN
-        || !line
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return None;
-    }
-    from_hex(line).ok()
 }
 
 /// Atomically rewrite `path` with the sorted, LF-terminated hex encoding of
@@ -329,7 +366,7 @@ mod tests {
         let leftover: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(
             leftover.is_empty(),
@@ -340,7 +377,7 @@ mod tests {
     #[test]
     fn persist_is_noop_when_not_dirty() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
-        let applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
         // Never inserted anything, so persist() must not create the file
         // (or the applied-packs/ directory) at all.
         applied.persist().unwrap();
@@ -364,10 +401,37 @@ mod tests {
     }
 
     #[test]
-    fn remote_name_rejects_slash() {
+    fn multi_segment_remote_round_trips() {
+        // A legal multi-segment remote (`mkit remote add team/upstream`
+        // passes `validate_ref_name`) must record without error, as one flat
+        // file — the `/` is encoded, not turned into a subdirectory.
         let (_dir, mkit_dir) = fresh_mkit_dir();
-        let err = AppliedPacks::load(&mkit_dir, "evil/remote").unwrap_err();
-        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        let k1 = pk("pack-1");
+        {
+            let mut applied = AppliedPacks::load(&mkit_dir, "team/upstream").unwrap();
+            applied.insert(&k1);
+            applied.persist().unwrap();
+        }
+
+        let dir = mkit_dir.join(APPLIED_PACKS_DIR);
+        let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).collect();
+        assert_eq!(entries.len(), 1, "exactly one flat record file per remote");
+        assert!(
+            entries[0].file_type().unwrap().is_file(),
+            "the `/` must not create a subdirectory"
+        );
+        assert_eq!(
+            entries[0].file_name().to_string_lossy(),
+            "team%2Fupstream",
+            "the `/` is percent-encoded in the on-disk filename"
+        );
+
+        let reloaded = AppliedPacks::load(&mkit_dir, "team/upstream").unwrap();
+        assert!(reloaded.contains(&k1));
+        // A different remote whose encoded name could otherwise collide stays
+        // separate.
+        let other = AppliedPacks::load(&mkit_dir, "teamupstream").unwrap();
+        assert!(!other.contains(&k1), "encoded names must not collide");
     }
 
     #[test]
@@ -378,11 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_name_rejects_dotdot() {
+    fn remote_name_rejects_dotdot_and_empty() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
+        // A `.` / `..` path segment (validate_ref_name rejects both).
         let err = AppliedPacks::load(&mkit_dir, "..").unwrap_err();
         assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
-        let err = AppliedPacks::load(&mkit_dir, "a..b").unwrap_err();
+        let err = AppliedPacks::load(&mkit_dir, "../escape").unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        let err = AppliedPacks::load(&mkit_dir, "").unwrap_err();
         assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
     }
 }
