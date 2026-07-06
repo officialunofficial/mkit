@@ -42,6 +42,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Reset / op backup | `.mkit/ORIG_HEAD` | the saved pre-op HEAD |
 | Merge in progress | `.mkit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |
 | Cherry-pick in progress | `.mkit/CHERRY_PICK_HEAD` (+`ORIG_HEAD`) | `cherry_pick_head`, `orig_head` |
+| Revert in progress | `.mkit/REVERT_HEAD` (+`ORIG_HEAD`) | `revert_head`, `orig_head` |
 | Rebase in progress | `.mkit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
 | Conflict sidecar | `.mkit/mkit-conflicts` and `.mkit/rebase-apply/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
 | Attestations | `.mkit/attestations/<commit-hex>/` | each attested commit (dir name) |
@@ -95,7 +96,9 @@ an `expire` rewrite and vanish.
 **Status:** complete. The recovery log (Part 2a) and its producers
 (Part 2b) are implemented — `commit --amend`, `reset`, and `rebase` each
 record the superseded tip (op tokens `amend`/`reset`/`rebase`) before
-moving the ref, under the worktree lock — and the **`mkit gc` command**
+moving the ref, and `stash pop` records the popped commit (op token
+`stash-pop`) before restoring the worktree and dropping the manifest
+entry — each under the worktree lock — and the **`mkit gc` command**
 (#233) consumes them: under the repo lock it expires the recovery log,
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
@@ -109,7 +112,7 @@ prunes all, `--dry-run` previews).
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable — strict ref walk, no lenient skips — and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
-| A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase append to `.mkit/recovery-log` before moving the ref; every logged hash is a root ("Recovery log") |
+| A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.mkit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
