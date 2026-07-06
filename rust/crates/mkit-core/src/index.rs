@@ -30,7 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::atomic::write_atomic;
-use crate::hash::{HASH_LEN, Hash};
+use crate::hash::{self, HASH_LEN, Hash};
 use crate::object::{EntryMode, Object};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
@@ -228,6 +228,10 @@ pub enum IndexError {
     /// Path appeared more than once in the same index.
     #[error("duplicate index path '{0}'")]
     DuplicatePath(String),
+    /// A `Removed` entry carried a nonzero `object_hash` (SPEC-INDEX §3
+    /// requires the all-zero hash for removals).
+    #[error("removed index entry '{0}' has nonzero object_hash")]
+    RemovedHasHash(String),
     /// Path UTF-8 decoding failed.
     #[error("index path is not valid UTF-8")]
     InvalidPathEncoding,
@@ -326,6 +330,9 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         }
         if !seen_paths.insert(path.clone()) {
             return Err(IndexError::DuplicatePath(path));
+        }
+        if status == EntryStatus::Removed && object_hash != hash::ZERO {
+            return Err(IndexError::RemovedHasHash(path));
         }
         entries.push(IndexEntry {
             path,
@@ -1039,6 +1046,41 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_le_bytes());
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::BadStatus(0x77)));
+    }
+
+    #[test]
+    fn rejects_removed_entry_with_nonzero_hash() {
+        // Hand-roll a Removed (0x00) entry carrying a nonzero object_hash —
+        // SPEC-INDEX §3 requires the all-zero hash for removals.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(FORMAT_VERSION);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(EntryStatus::Removed as u8);
+        bytes.extend_from_slice(&seed_hash("nonzero")); // MUST be all-zero
+        bytes.extend_from_slice(&[0u8; 32]); // stat cache
+        let path = b"removed.txt";
+        bytes.extend_from_slice(&11u16.to_le_bytes());
+        bytes.extend_from_slice(path);
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, IndexError::RemovedHasHash(p) if p == "removed.txt"));
+    }
+
+    #[test]
+    fn removed_entry_with_zero_hash_round_trips() {
+        let mut idx = Index::new();
+        idx.entries.push(IndexEntry {
+            path: "gone.txt".into(),
+            status: EntryStatus::Removed,
+            object_hash: hash::ZERO,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        let round_tripped = deserialize(&idx.serialize()).unwrap();
+        assert_eq!(round_tripped.entries[0].status, EntryStatus::Removed);
+        assert_eq!(round_tripped.entries[0].object_hash, hash::ZERO);
     }
 
     #[test]

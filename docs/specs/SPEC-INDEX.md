@@ -253,7 +253,7 @@ re-emits each filename byte-identically and records every BLAKE3 in
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
 | No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.mkit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
-| Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]` (§2, §3) |
+| Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
 | The stat cache never changes an observable result | cache is an optimisation only — all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
 | A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); absent or zero-length file reads as empty (§5) |
