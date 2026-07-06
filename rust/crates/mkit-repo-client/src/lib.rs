@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 //! Browser ConnectRPC client for `mkit.repo.v1.RepoService`.
 //!
 //! Compiles to `wasm32-unknown-unknown` (build with `wasm-pack build --target

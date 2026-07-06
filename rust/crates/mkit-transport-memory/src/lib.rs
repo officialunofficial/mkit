@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 //!
 //! In-memory [`Transport`] implementation for tests and fuzz harnesses.
