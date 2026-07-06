@@ -24,6 +24,8 @@ mod packmap;
 use std::path::Path;
 use std::sync::Arc;
 
+use applied_packs::AppliedPacks;
+
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
@@ -822,11 +824,48 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 /// published — so on that specific error we re-read the branch's CURRENT tip
 /// and packmap and retry the chain once with the fresh pair, publishing the
 /// fresh tip. A second failure (or a vanished branch) propagates unchanged.
+///
+/// # Applied-packs record: load once, persist once (mkit #546)
+///
+/// The applied-pack record (`.mkit/applied-packs/<remote>`, #409) is keyed by
+/// remote, not by branch, so this function — not [`packmap::fetch_pack_chain`]
+/// — owns its lifecycle for the WHOLE fetch: it is loaded exactly once before
+/// the branch loop and persisted exactly once after, regardless of how many
+/// branches are fetched. `fetch_pack_chain` only mutates the passed-in record
+/// in memory (inserting newly-applied digests, or clearing it on self-heal);
+/// it never touches disk. The final persist is unconditional and best-effort:
+/// it runs on every outcome (success, error, or early return) so a fetch that
+/// applied packs before failing never loses that progress, and the record is
+/// a pure performance cache whose own I/O must never fail a fetch whose
+/// objects durably landed.
 fn fetch_objects(
     store: &ObjectStore,
     mkit_dir: &Path,
     tx: &dyn Transport,
     remote: &str,
+) -> Result<usize, DispatchError> {
+    // The record is a pure performance cache: a read failure must never fail
+    // a fetch whose objects land, so a load error is non-fatal — warn and
+    // continue with an empty record (every pack re-downloads, always correct).
+    let mut applied = AppliedPacks::load(mkit_dir, remote).unwrap_or_else(|e| {
+        eprintln!(
+            "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
+        );
+        AppliedPacks::empty(mkit_dir, remote)
+    });
+    let result = fetch_objects_inner(store, mkit_dir, tx, remote, &mut applied);
+    persist_record(&mut applied, remote);
+    result
+}
+
+/// The branch loop proper — see [`fetch_objects`] for the load-once /
+/// persist-once applied-packs contract this is called under.
+fn fetch_objects_inner(
+    store: &ObjectStore,
+    mkit_dir: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    applied: &mut AppliedPacks,
 ) -> Result<usize, DispatchError> {
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
@@ -847,7 +886,7 @@ fn fetch_objects(
         // because a concurrent re-baseline moved the branch under us, the
         // freshly re-read tip (see this fn's doc comment).
         let published_tip =
-            match fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, chain_head, h) {
+            match fetch_pack_chain(store, tx, remote, &r.name, chain_head, h, applied) {
                 Ok(()) => h,
                 Err(e @ DispatchError::RemoteMissingObject(_)) => {
                     // Re-read the branch's CURRENT tip + packmap. If either
@@ -860,7 +899,7 @@ fn fetch_objects(
                     ) else {
                         return Err(e);
                     };
-                    fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, fresh_head, fresh_h)?;
+                    fetch_pack_chain(store, tx, remote, &r.name, fresh_head, fresh_h, applied)?;
                     fresh_h
                 }
                 Err(e) => return Err(e),
@@ -869,6 +908,18 @@ fn fetch_objects(
         n += 1;
     }
     Ok(n)
+}
+
+/// Persist `applied` best-effort: the record is a pure performance cache, so
+/// a write failure is logged and swallowed rather than failing a fetch whose
+/// objects already landed. Called exactly once per [`fetch_objects`] call,
+/// after the whole branch loop — see that function's doc comment.
+fn persist_record(applied: &mut AppliedPacks, remote: &str) {
+    if let Err(e) = applied.persist() {
+        eprintln!(
+            "warning: could not persist applied-packs record for remote '{remote}' ({e}); it will be rebuilt on the next fetch"
+        );
+    }
 }
 
 /// Assert that every object reachable from `tip` is already present in the

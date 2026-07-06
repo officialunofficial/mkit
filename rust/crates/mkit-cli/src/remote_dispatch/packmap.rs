@@ -20,8 +20,6 @@
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
 //! them.
 
-use std::path::Path;
-
 use mkit_core::hash::Hash;
 use mkit_core::pack::{self, PackReader};
 use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
@@ -473,13 +471,21 @@ pub(crate) fn commit_head(
 /// therefore the chain — already holds), so unpacking oldest-first is
 /// sufficient: there is no per-object base prefetch.
 ///
-/// Packs already recorded in the local applied-pack record for `remote`
-/// (`.mkit/applied-packs/<remote>`, see [`applied_packs`]) are skipped —
+/// Packs already recorded in `applied` (the caller-owned, in-memory
+/// applied-pack record for `remote`; see [`applied_packs`]) are skipped —
 /// neither downloaded nor unpacked — so a steady-state fetch only pays for
 /// packs new since the last fetch (#409). The chain itself is still
 /// resolved in full every time: node downloads are small blobs and remain
 /// the source of truth for chain shape, independent of what's locally
 /// applied.
+///
+/// This function never loads or persists `applied` itself: [`super::fetch_objects`]
+/// loads the record once before iterating every branch and persists it once,
+/// best-effort, after the whole fetch — see that function's doc comment. Here
+/// we only mutate the in-memory set (inserting newly-applied digests via
+/// [`apply_pack_chain`], or discarding it via [`AppliedPacks::clear`] on
+/// self-heal below), so a multi-branch fetch pays one load and one persist
+/// total, not one per branch.
 ///
 /// # Self-heal
 ///
@@ -491,7 +497,9 @@ pub(crate) fn commit_head(
 /// on a run that skipped at least one recorded pack. That means the record
 /// claimed packs were applied but their objects aren't in the store (e.g.
 /// `.mkit/objects` was wiped out-of-band while `applied-packs/` survived), so
-/// the record is cleared and the whole chain retried once with no skips.
+/// `applied` is cleared in memory ([`AppliedPacks::clear`]) and the whole
+/// chain is retried once with no skips; the caller's single end-of-fetch
+/// persist durably reflects this post-heal state.
 ///
 /// Every other failure propagates without triggering self-heal, because none
 /// is evidence the local object store is stale:
@@ -507,97 +515,44 @@ pub(crate) fn commit_head(
 ///   verification cap — a scale limit, not staleness.
 /// * A [`DispatchError::Interrupted`] (user-requested shutdown) is never a
 ///   self-heal trigger.
-///
-/// The applied-pack record is a pure performance cache, so its own I/O is
-/// non-fatal throughout: a load failure falls back to an empty in-memory
-/// record and a persist failure is logged and ignored — a fetch whose objects
-/// durably landed must never fail because the cache couldn't be read/written.
-/// Successful inserts are persisted before any error propagates (including the
-/// self-heal retry's partial progress), so a failed run never leaves an empty
-/// on-disk record that forces every later fetch to re-download the whole chain.
 pub(crate) fn fetch_pack_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
-    mkit_dir: &Path,
     remote: &str,
     branch: &str,
     head_key: Hash,
     tip: Hash,
+    applied: &mut AppliedPacks,
 ) -> Result<(), DispatchError> {
     // Chain shape is always resolved fresh and in full — see the doc
     // comment above. Only the per-pack download+unpack loop below
     // consults / mutates the applied-pack record.
     let chain = resolve_pack_chain(tx, branch, head_key)?;
 
-    // The record is a pure performance cache: a read failure must never fail
-    // a fetch whose objects land, so a load error is non-fatal — warn and
-    // continue with an empty record (every pack re-downloads, always correct).
-    let mut applied = AppliedPacks::load(mkit_dir, remote).unwrap_or_else(|e| {
-        eprintln!(
-            "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
-        );
-        AppliedPacks::empty(mkit_dir, remote)
-    });
-
     // Phase 1: download + unpack. A failure here is a remote-side / network
-    // problem, never local staleness — persist whatever we DID apply so it
-    // isn't re-downloaded next time, then propagate unchanged.
-    let (skipped, apply_result) = apply_pack_chain(store, tx, branch, &chain, &mut applied);
-    if let Err(e) = apply_result {
-        persist_record(&mut applied, remote, branch);
-        return Err(e);
-    }
+    // problem, never local staleness — propagate unchanged. Whatever was
+    // successfully applied stays recorded in `applied` for the caller's
+    // single end-of-fetch persist.
+    let (skipped, apply_result) = apply_pack_chain(store, tx, branch, &chain, applied);
+    apply_result?;
 
     // Phase 2: closure completeness. With skips this is the sole guarantee the
     // store is whole, and a `RemoteMissingObject` here is the ONLY self-heal
     // trigger.
     match super::verify_closure_present(store, &tip) {
-        Ok(()) => {
-            persist_record(&mut applied, remote, branch);
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(e @ DispatchError::RemoteMissingObject(_)) if skipped > 0 => {
             eprintln!(
                 "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({e}); clearing it and re-fetching the full pack chain"
             );
-            // Clear the suspected-stale record and retry the whole chain with
-            // no skips. A failure to persist the cleared record is non-fatal
-            // and must NOT mask the original staleness — log it and retry.
-            if let Err(ce) = applied.clear_and_persist() {
-                eprintln!(
-                    "warning: could not clear applied-packs record for remote '{remote}' branch '{branch}' ({ce}); retrying anyway"
-                );
-            }
-            let (_, retry_apply) = apply_pack_chain(store, tx, branch, &chain, &mut applied);
-            let retry_result =
-                retry_apply.and_then(|()| super::verify_closure_present(store, &tip));
-            // Persist successfully re-applied inserts even when the retry
-            // ultimately fails, so a partial recovery isn't re-downloaded on
-            // every later fetch (#409).
-            persist_record(&mut applied, remote, branch);
-            retry_result
+            // Clear the suspected-stale record in memory and retry the whole
+            // chain with no skips. This is infallible — the caller's single
+            // end-of-fetch persist durably reflects the post-heal state.
+            applied.clear();
+            let (_, retry_apply) = apply_pack_chain(store, tx, branch, &chain, applied);
+            retry_apply.and_then(|()| super::verify_closure_present(store, &tip))
         }
-        Err(e) => {
-            // Closure is incomplete but this is NOT the stale-skip self-heal
-            // trigger (e.g. `ClosureTooLarge`, or `RemoteMissingObject` with no
-            // skips). Phase 1's successfully-unpacked-and-inserted packs are
-            // still durably good, so persist them before propagating `e` so they
-            // aren't re-downloaded next time (#409). `persist_record` swallows +
-            // warns on its own I/O failure, so it can never mask `e`.
-            persist_record(&mut applied, remote, branch);
-            Err(e)
-        }
-    }
-}
-
-/// Persist `applied` best-effort: the record is a pure performance cache, so
-/// a write failure is logged and swallowed rather than failing a fetch whose
-/// objects already landed.
-fn persist_record(applied: &mut AppliedPacks, remote: &str, branch: &str) {
-    if let Err(e) = applied.persist() {
-        eprintln!(
-            "warning: could not persist applied-packs record for remote '{remote}' branch '{branch}' ({e}); it will be rebuilt on the next fetch"
-        );
+        Err(e) => Err(e),
     }
 }
 
