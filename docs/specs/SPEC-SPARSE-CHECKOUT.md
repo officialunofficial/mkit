@@ -335,12 +335,19 @@ a large tree.
 Encoder + decoder live in
 `mkit-core::sparse::{encode_sparse_cache, decode_sparse_cache}`. The
 CLI helper that owns the file I/O lives in
-`mkit_cli::sparse_cache::{store, load, cache_path}`.
+`mkit_cli::sparse_cache::{store, load, cache_path}`, fronted by
+`mkit_cli::sparse_cache::load_or_build`, the cache-aware entry point
+`mkit checkout --sparse` / `mkit clone --sparse` call instead of
+`build_sparse` + `verify_sparse` directly (§9).
 
 A stale cache (cache hit for the same tree but a different filter) is
 NOT silently returned: `mkit_cli::sparse_cache::load` returns
-`CacheError::FilterMismatch`, and the caller treats it as a cache
-miss and re-fetches.
+`CacheError::FilterMismatch`. `load_or_build` treats that, a
+wire-decode failure (corrupt entry), and any I/O error identically —
+all three are a cache miss: it falls through to a fresh
+`build_sparse` + `verify_sparse`, which rewrites the cache entry, and
+surfaces no error to the caller for the cache read itself (the cache
+is best-effort; only a fresh-build/verify failure is an error).
 
 ## 9. CLI surface
 
@@ -350,17 +357,26 @@ sparse subset. The patterns are interpreted exactly like the existing
 `/` directory-only, `!` negation). The CLI:
 
   1. Resolves the commit's top-level tree.
-  2. Runs `build_sparse(tree, filter)` to construct the manifest.
-  3. Runs `verify_sparse` against the constructed subset
-     (self-consistency check at the seam).
-  4. Persists the bitmap to `.mkit/sparse/<tree-hex>.bitmap`.
-  5. Materialises only the matching files via the existing
-     restore-side sparse-pattern path.
+  2. Calls `sparse_cache::load_or_build(repo_root, tree, filter)`
+     (§8), which first tries the on-disk cache for
+     `(tree_hash(tree), hash_filter(filter))`:
+     - **Hit:** the `build_sparse` + `verify_sparse` Merkle-bitmap
+       reconstruction is skipped entirely.
+     - **Miss** (including a stale filter or a corrupt entry): runs
+       `build_sparse(tree, filter)` to construct the manifest, runs
+       `verify_sparse` against the constructed subset
+       (self-consistency check at the seam), then persists the
+       bitmap to `.mkit/sparse/<tree-hex>.bitmap`, overwriting
+       whatever was cached for this tree.
+  3. Materialises only the matching files via the existing
+     restore-side sparse-pattern path — unaffected by hit vs. miss,
+     since materialisation walks the tree by pattern directly rather
+     than through the manifest/proof.
 
 `mkit clone --sparse <pattern>...` — clone, persist the patterns to
-`.mkit/sparse-checkout`, then run the same `build_sparse +
-verify_sparse + cache + materialise` pipeline against the
-freshly-cloned HEAD.
+`.mkit/sparse-checkout`, then run the same cache-aware
+`load_or_build + materialise` pipeline against the freshly-cloned
+HEAD.
 
 The CLI patterns and the existing `.mkit/sparse-checkout` config file
 are kept in sync by `clone --sparse`. `checkout --sparse` does NOT

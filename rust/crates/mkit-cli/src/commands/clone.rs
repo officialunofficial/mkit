@@ -161,11 +161,11 @@ fn apply_sparse_after_clone(
     target: &std::path::Path,
     patterns: &[String],
 ) -> Result<(), (String, u8)> {
+    use crate::sparse_cache::{SparseBuildError, SparseOutcome, load_or_build};
     use mkit_core::object::Object as CoreObject;
     use mkit_core::ops::restore::{
         RestoreOptions, parse_sparse_patterns, restore_tree_to_worktree, write_sparse_checkout,
     };
-    use mkit_core::sparse::{build_sparse, verify_sparse};
     use mkit_core::store::ObjectStore;
     use std::path::PathBuf as StdPathBuf;
 
@@ -205,17 +205,28 @@ fn apply_sparse_after_clone(
         }
         filter.push(StdPathBuf::from(trimmed));
     }
-    let (delivered, manifest, proof) = build_sparse(&tree, &filter)
-        .map_err(|e| (format!("sparse build: {e}"), exit::GENERAL_ERROR))?;
-    if !verify_sparse(&manifest, &delivered, &filter, &proof) {
-        return Err((
-            "sparse build produced a manifest that fails verify".into(),
-            exit::GENERAL_ERROR,
-        ));
-    }
-    if let Err(e) = crate::sparse_cache::store(target, &manifest.tree_hash, &manifest, &proof) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "warning: sparse cache write failed: {e}");
+    // Cache-aware: a hit for this exact (tree, filter) skips the
+    // expensive build_sparse + verify_sparse Merkle-bitmap
+    // reconstruction entirely (SPEC-SPARSE-CHECKOUT §8). A miss
+    // (including a stale filter or a corrupt cache entry) falls
+    // through to a fresh build and rewrites the cache.
+    match load_or_build(target, &tree, &filter) {
+        Ok(SparseOutcome::CacheHit) => {}
+        Ok(SparseOutcome::Built { store_error }) => {
+            if let Some(e) = store_error {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "warning: sparse cache write failed: {e}");
+            }
+        }
+        Err(SparseBuildError::Build(e)) => {
+            return Err((format!("sparse build: {e}"), exit::GENERAL_ERROR));
+        }
+        Err(SparseBuildError::VerifyFailed) => {
+            return Err((
+                "sparse build produced a manifest that fails verify".into(),
+                exit::GENERAL_ERROR,
+            ));
+        }
     }
 
     let joined = patterns.join("\n");
