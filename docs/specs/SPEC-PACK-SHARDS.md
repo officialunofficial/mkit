@@ -214,8 +214,15 @@ This SPEC ships in two stages.
 * **S3 transport**: same key shape on the bucket
   (`packs/<hex>/shards/<index>`, `packs/<hex>/shards.manifest`).
   Behind `--features pack-shards` on `mkit-transport-s3`. The
-  client unconditionally tries the manifest first; a `404` or any
-  decode failure falls back to the monolithic pack key.
+  client unconditionally tries the manifest first; only a `404`
+  (no manifest published) falls back to the monolithic pack key. A
+  present-but-undecodable manifest — any other error status, or a
+  malformed `200` body — propagates instead of falling back: it is
+  indistinguishable from tampering, and silently downgrading to the
+  monolithic pack would mask that. This mirrors the HTTP transport's
+  posture, whose shard path is entered only after the server
+  advertises `X-Pack-Shards`, so a failure once inside it is treated
+  as a server-side bug and surfaced rather than downgraded.
 * **SSH transport**: explicitly skipped. SSH is a single ordered
   stream; the shard model does not fit and per-shard sigv4-style
   signing is meaningless over an authenticated tunnel.
@@ -284,7 +291,7 @@ packs. The v0 default `(16, 4)` was picked to balance:
 | A self-consistent substitute shard *set* is detected | commonware BMT `commitment` in the manifest; per-shard Merkle proof checked by `ReedSolomon::check` (§2, §3, §4.2 step 2e) |
 | Any `minimum_shards` of the `T` shards suffice; fewer fail loudly | `checked.len() >= minimum_shards` requirement, typed `ShardError` short-circuit (§4.2 step 3) |
 | The manifest is the content-addressed root of trust | fetched first, published at `/packs/<hex(pack_hash)>/shards.manifest` (§2) |
-| A failed sharded fetch degrades, never corrupts | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: manifest 404 / decode failure falls back to the monolithic pack key (§5) |
+| A failed sharded fetch degrades, never corrupts; an undecodable manifest never silently downgrades | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: only a manifest `404` falls back to the monolithic pack key — a present-but-undecodable manifest propagates as `InvalidResponse` on both S3 and HTTP (§5) |
 | Per-shard memory is bounded | each shard buffered whole under `PACK_BODY_LIMIT` (§5) |
 
 Sharding is an encoding *of* a pack, not a new pack format (see Scope,

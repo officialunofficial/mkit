@@ -211,6 +211,37 @@ fn s3_falls_back_to_monolithic_when_manifest_missing() {
 }
 
 #[test]
+fn s3_propagates_undecodable_manifest_never_falls_back() {
+    // Manifest exists (200) but its body doesn't decode. SPEC-PACK-SHARDS
+    // §5: only a 404/absent manifest falls back to the monolithic pack
+    // key; a present-but-undecodable manifest is indistinguishable from
+    // tampering and MUST propagate instead of silently downgrading. The
+    // monolithic pack key is deliberately left unmocked so the test fails
+    // loudly if a fallback is ever (re)introduced.
+    let mut server = mockito::Server::new();
+    let body = b"plain-monolithic-pack".to_vec();
+    let pack_hash: Hash = hash(&body);
+    let key = PackKey::new(pack_hash);
+    let hex = mkit_core::hash::to_hex(key.as_bytes());
+
+    let _m_manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/packs/{hex}/shards.manifest").as_str(),
+        )
+        .with_status(200)
+        .with_body(b"not-a-manifest")
+        .create();
+
+    let t = build_transport(&server.url());
+    let err = t.download_pack(&key).unwrap_err();
+    assert!(
+        matches!(err, TransportError::InvalidResponse),
+        "expected InvalidResponse, got {err:?}"
+    );
+}
+
+#[test]
 fn s3_tampered_shard_is_rejected_via_manifest_hash() {
     // Build a sharded pack, corrupt one shard's body, and 404 all four
     // parity shards so the decoder is FORCED to consume the tampered
