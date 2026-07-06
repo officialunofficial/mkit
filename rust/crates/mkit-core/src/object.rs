@@ -417,6 +417,28 @@ pub struct ChunkedBlob {
     pub chunks: Vec<Hash>,
 }
 
+impl ChunkedBlob {
+    /// Enforce the SPEC-OBJECTS §7 reassembly invariant: the concatenated
+    /// chunk contents MUST total exactly `total_size` bytes. Every
+    /// reassembly site calls this after concatenation so a manifest whose
+    /// `total_size` disagrees with its chunks is rejected instead of
+    /// silently yielding wrong-length content.
+    ///
+    /// # Errors
+    /// [`MkitError::ChunkedBlobSizeMismatch`] when `reassembled_len`
+    /// differs from `total_size`.
+    pub fn check_reassembled_size(&self, reassembled_len: usize) -> Result<(), MkitError> {
+        let actual = reassembled_len as u64;
+        if actual != self.total_size {
+            return Err(MkitError::ChunkedBlobSizeMismatch {
+                expected: self.total_size,
+                actual,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Delta object (pack-only). See `SPEC-OBJECTS.md` §8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delta {
@@ -594,6 +616,11 @@ pub enum MkitError {
     InvalidSourceOrder,
     #[error("chunked_blob.chunk_count > 1_000_000")]
     TooManyChunks,
+    /// A `ChunkedBlob`'s chunks concatenated to a different length than
+    /// its `total_size` claims — the manifest is corrupt (SPEC-OBJECTS
+    /// §7: "The concatenated length MUST equal `total_size`").
+    #[error("chunked blob reassembles to {actual} bytes, manifest total_size is {expected}")]
+    ChunkedBlobSizeMismatch { expected: u64, actual: u64 },
     #[error("identity kind byte {0:#04x} is not 0x01..=0x03")]
     UnknownIdentityKind(u8),
     #[error("identity has zero-length payload, or is Ed25519 with len != 32")]
