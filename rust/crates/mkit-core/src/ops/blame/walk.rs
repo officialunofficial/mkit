@@ -501,9 +501,13 @@ pub(super) struct PreciseRequest<'r> {
 /// a reformat/reorder moved can be attributed to its true surviving origin
 /// instead of whatever line happens to sit at the same offset in the hunk.
 ///
-/// **Never worse than git's positional `--ignore-rev`, by construction.**
-/// git's positional guess is the base; this only *overrides* a slot when
-/// the content evidence is strong enough that the result cannot be worse:
+/// **A strong heuristic against being worse than git's positional
+/// `--ignore-rev`** — not an absolute guarantee. git's positional guess is
+/// the base; this only *overrides* a slot on strong content evidence. The
+/// single-line key coincidence that could make the old code strictly worse
+/// is prevented outright (see below); a ≥ 2-line file-adjacent block whose
+/// keys happen to match could in principle still re-point coincidentally,
+/// but that is a far less likely accident than a lone duplicate line:
 ///
 /// * `fall[ni] == Some(j)` (positional already found a parent line): the
 ///   slot is re-pointed **only** by a genuine *moved block* — a run of ≥ 2
