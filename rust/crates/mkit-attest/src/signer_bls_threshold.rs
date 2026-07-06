@@ -304,6 +304,67 @@ mod tests {
         verify(&pk, pae, &agg_sig).expect("aggregated signature verifies");
     }
 
+    /// `verify`'s length gates run before any decode/pairing work is
+    /// attempted (SPEC-RELEASE-THRESHOLD §4). Feed a wrong-length
+    /// aggregate signature (not `SIGNATURE_SIZE` = 48 bytes) directly
+    /// and confirm it is rejected as a decode failure, never reaching
+    /// pairing — a well-formed public key alone is enough to observe
+    /// this, since the signature-length check runs unconditionally.
+    #[test]
+    fn verify_rejects_wrong_length_signature_before_pairing() {
+        let (sharing, _shares) = deal_3_of_4();
+        let pk = sharing.public().encode().to_vec();
+        let pae = b"DSSEv1 4 test 2 hi";
+
+        for len in [0, 1, SIGNATURE_SIZE - 1, SIGNATURE_SIZE + 1, 128] {
+            let bogus_sig = vec![0u8; len];
+            assert!(
+                matches!(
+                    verify(&pk, pae, &bogus_sig),
+                    Err(Error::BlsThresholdSignatureDecode)
+                ),
+                "signature length {len} (!= {SIGNATURE_SIZE}) must be rejected before pairing"
+            );
+        }
+    }
+
+    /// Same gate on the other operand: a wrong-length cohort public
+    /// key (not `PUBLIC_KEY_SIZE` = 96 bytes) must be rejected before
+    /// any pairing work — even paired with an otherwise well-formed
+    /// signature.
+    #[test]
+    fn verify_rejects_wrong_length_cohort_key_before_pairing() {
+        let (sharing, shares) = deal_3_of_4();
+        let pae = b"DSSEv1 4 test 2 hi";
+        let mut partials_bytes: Vec<Vec<u8>> = Vec::with_capacity(3);
+        for s in shares.iter().take(3) {
+            let mut signer = ThresholdSigner::new(s.clone(), sharing.clone());
+            partials_bytes.push(signer.sign(pae).expect("partial"));
+        }
+        let agg_sig = aggregate(&sharing, &partials_bytes).expect("aggregate");
+
+        for len in [0, 1, PUBLIC_KEY_SIZE - 1, PUBLIC_KEY_SIZE + 1, 256] {
+            let bogus_pk = vec![0u8; len];
+            assert!(
+                matches!(
+                    verify(&bogus_pk, pae, &agg_sig),
+                    Err(Error::BlsThresholdPublicKeyDecode)
+                ),
+                "public key length {len} (!= {PUBLIC_KEY_SIZE}) must be rejected before pairing"
+            );
+        }
+    }
+
+    /// The DSSE namespace literal used for domain separation appears
+    /// once in code and is shared by `ThresholdSigner::sign` and
+    /// `verify`, so an accidental edit to one call site (but not the
+    /// other) would re-verify against itself internally and pass every
+    /// other test in this module. Pin the exact bytes directly.
+    #[test]
+    fn namespace_literal_is_pinned() {
+        assert_eq!(NAMESPACE, b"mkit-attest/dsse/v1");
+    }
+
     /// Insufficient threshold (1 of 4) returns
     /// `BlsThresholdInsufficientPartials` rather than producing a
     /// signature that would fail verify downstream.
