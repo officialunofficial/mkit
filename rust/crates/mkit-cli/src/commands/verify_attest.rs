@@ -524,6 +524,33 @@ mod tests {
     }
 
     #[test]
+    fn warn_if_unsafe_trust_roots_refuses_in_repo_path_without_explicit_flag() {
+        // A hostile clone shipping `<repo>/.mkit/attest-trust-roots.toml`
+        // must not be trusted implicitly — only an explicit
+        // `--trust-roots` flag can point at an in-repo path.
+        let mkit_dir = Path::new("/repo/.mkit");
+        let trust_path = mkit_dir.join("attest-trust-roots.toml");
+        let err = warn_if_unsafe_trust_roots(&trust_path, mkit_dir, false).unwrap_err();
+        assert_eq!(err, exit::CONFIG_ERROR);
+    }
+
+    #[test]
+    fn warn_if_unsafe_trust_roots_allows_in_repo_path_when_explicitly_passed() {
+        let mkit_dir = Path::new("/repo/.mkit");
+        let trust_path = mkit_dir.join("attest-trust-roots.toml");
+        warn_if_unsafe_trust_roots(&trust_path, mkit_dir, true)
+            .expect("an explicit --trust-roots flag must be honored even in-repo");
+    }
+
+    #[test]
+    fn warn_if_unsafe_trust_roots_allows_user_scoped_path_without_flag() {
+        let mkit_dir = Path::new("/repo/.mkit");
+        let trust_path = Path::new("/home/user/.config/mkit/trust-roots.toml");
+        warn_if_unsafe_trust_roots(trust_path, mkit_dir, false)
+            .expect("a path outside the repo is never the in-repo hazard this gate guards against");
+    }
+
+    #[test]
     fn load_trust_roots_missing_file_returns_empty_registry() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("nope.toml");

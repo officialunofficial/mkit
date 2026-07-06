@@ -870,6 +870,54 @@ mod tests {
         }
     }
 
+    /// A crafted, known non-canonical signature: take a signature our
+    /// own signer produced and replace its `s` component with `s + L`
+    /// (`L` = the Ed25519 base-point order). `s + L` is congruent to
+    /// the original `s` modulo `L` — the same scalar the verification
+    /// equation cares about — but is not the canonical
+    /// least-representative encoding RFC 8032 / `verify_strict`
+    /// requires. This is the classic Ed25519 high-`s` malleability
+    /// vector (<https://hdevalence.ca/blog/2020-10-04-its-25519am>),
+    /// constructed deterministically rather than by mutating a random
+    /// byte of an otherwise-valid signature.
+    #[test]
+    fn verify_rejects_non_canonical_high_s_signature() {
+        // L = 2^252 + 27742317777372353535851937790883648493, little-endian.
+        const L: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
+        ];
+
+        let kp = fixed_kp();
+        let bytes = b"malleability test payload";
+        let sig = kp.sign(COMMIT_DOMAIN, bytes);
+        verify(&kp.public, COMMIT_DOMAIN, bytes, &sig).expect("original signature must verify");
+
+        // s_malleated = s + L, computed as a 256-bit little-endian
+        // addition (s < L < 2^253, so s + L < 2^254 — no overflow past
+        // 32 bytes).
+        let mut malleated = sig.0;
+        let mut carry: u16 = 0;
+        for i in 0..32 {
+            let sum = u16::from(malleated[32 + i]) + u16::from(L[i]) + carry;
+            malleated[32 + i] = (sum & 0xFF) as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0, "s + L must not overflow 32 bytes");
+        assert_ne!(
+            malleated[32..],
+            sig.0[32..],
+            "the malleated signature must differ from the original"
+        );
+
+        let bad_sig = Signature(malleated);
+        assert!(matches!(
+            verify(&kp.public, COMMIT_DOMAIN, bytes, &bad_sig),
+            Err(MkitError::SignatureInvalid)
+        ));
+    }
+
     // ------------------------------------------------------------------
     // Domain separation guard (SPEC §2.1)
     // ------------------------------------------------------------------
@@ -1072,6 +1120,20 @@ mod tests {
         let mut t = build_tag(&kp, b"release");
         t.signature = sign_tag(&t, &kp).unwrap().0;
         t.target = hash(b"other");
+        assert!(matches!(verify_tag(&t), Err(MkitError::SignatureInvalid)));
+    }
+
+    #[test]
+    fn annotated_unsigned_tag_fails_verify() {
+        // A tag carrying a full, otherwise-legitimate annotation body
+        // (name, tagger, message, timestamp) but an all-zero signature
+        // — the sentinel git-bridge import produces for an
+        // annotated-but-unsigned git tag — must never verify. The
+        // all-zero bytes are not a magic "no signature" marker; they
+        // are just another (invalid) signature value.
+        let kp = fixed_kp();
+        let mut t = build_tag(&kp, b"release");
+        t.signature = [0u8; 64];
         assert!(matches!(verify_tag(&t), Err(MkitError::SignatureInvalid)));
     }
 
