@@ -137,14 +137,28 @@ pub fn map_update_ref_error(
 /// is a short tag (`"ssh"` / `"enc"`) baked into the catch-all
 /// `RemoteError` message so logs say which transport surfaced the
 /// failure.
+///
+/// Per SPEC-RPC §3.3 / §4, every `Error` frame MUST carry a known
+/// non-zero `ErrorCode` — `code = 0` (`ERROR_CODE_UNSPECIFIED`) or an
+/// absent `code` field is itself a protocol violation, not a
+/// well-formed-but-uninteresting error. Receivers MUST treat it as
+/// such rather than collapsing it into the generic `RemoteError` a
+/// legitimate-but-unmapped code (e.g. `ERROR_CODE_INTERNAL`) would
+/// produce, so a server that stops setting `code` is distinguishable
+/// from one returning ordinary application errors.
 #[must_use]
 pub fn rpc_error_to_transport(e: RpcError, transport: &str) -> TransportError {
-    let msg = e.message.unwrap_or_default();
     if e.code.is_some_and(|c| c == ErrorCode::KeyNotFound) {
-        TransportError::PackNotFound
-    } else if e.code.is_some_and(|c| c == ErrorCode::UserDeclined) {
-        TransportError::AccessDenied
-    } else if msg.is_empty() {
+        return TransportError::PackNotFound;
+    }
+    if e.code.is_some_and(|c| c == ErrorCode::UserDeclined) {
+        return TransportError::AccessDenied;
+    }
+    if e.code.is_none_or(|c| c == ErrorCode::Unspecified) {
+        return TransportError::ProtocolError;
+    }
+    let msg = e.message.unwrap_or_default();
+    if msg.is_empty() {
         TransportError::RemoteError(format!("{transport} server returned an unspecified error"))
     } else {
         TransportError::RemoteError(msg)
@@ -294,6 +308,48 @@ mod tests {
         let empty = RpcError::default().with_code(ErrorCode::InvalidRequest);
         match rpc_error_to_transport(empty, "enc") {
             TransportError::RemoteError(msg) => assert!(msg.contains("enc server")),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rpc_error_to_transport_treats_zero_code_as_protocol_error() {
+        // SPEC-RPC §3.3/§4: ERROR_CODE_UNSPECIFIED (wire 0) is itself a
+        // protocol violation, not a well-formed-but-generic error — it
+        // must be distinguishable from a legitimate unmapped code like
+        // ERROR_CODE_INTERNAL, even when a message is present.
+        let zero_with_message = RpcError::default()
+            .with_code(ErrorCode::Unspecified)
+            .with_message("something went wrong");
+        assert!(matches!(
+            rpc_error_to_transport(zero_with_message, "ssh"),
+            TransportError::ProtocolError
+        ));
+    }
+
+    #[test]
+    fn rpc_error_to_transport_treats_absent_code_as_protocol_error() {
+        // A completely absent `code` field (never set by a conforming
+        // producer) must classify the same as the explicit zero value —
+        // both mean "no known non-zero ErrorCode was carried".
+        let absent = RpcError::default().with_message("no code at all");
+        assert_eq!(absent.code, None);
+        assert!(matches!(
+            rpc_error_to_transport(absent, "enc"),
+            TransportError::ProtocolError
+        ));
+    }
+
+    #[test]
+    fn rpc_error_to_transport_distinguishes_unspecified_from_mapped_internal_error() {
+        // A legitimate, mapped-but-uninteresting code (INTERNAL = 99)
+        // must still fall through to the generic RemoteError path — only
+        // the zero/absent case gets the stricter ProtocolError treatment.
+        let internal = RpcError::default()
+            .with_code(ErrorCode::Internal)
+            .with_message("boom");
+        match rpc_error_to_transport(internal, "ssh") {
+            TransportError::RemoteError(msg) => assert_eq!(msg, "boom"),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
