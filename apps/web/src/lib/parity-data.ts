@@ -98,12 +98,12 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection, and --ignore-rev fall-through. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed), pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). No --porcelain; --format=json carries an mkit Identity, not Name <email>.",
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection (inline -M<num>/-C<num> thresholds and git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and git-shaped --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed) with git's ancestor tie-break, pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). Two differences keep it divergent: --format=json and --porcelain carry an mkit Identity, not Name <email> (the same, accepted difference as log); and blame follows a fixed path, so it does not trace lines across a whole-file rename the way git does (use -C to credit copied blocks).",
       },
       {
         cmd: 'bisect',
         status: 'divergent',
-        note: 'start, good, bad, skip, reset. Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); no bisect run.',
+        note: 'start, good, bad, skip, reset, and run <cmd> (auto-bisect with git’s 0/125/1-127 exit-code contract). Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); run checks out each candidate transiently but still prints the first bad commit rather than parking there.',
       },
     ],
   },

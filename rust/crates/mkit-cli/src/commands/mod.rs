@@ -87,6 +87,21 @@ use std::path::Path;
 /// Open the object store for a mutating command, honoring the repo's
 /// configured durability schedule (`durability.objects`, see
 /// [`crate::config::Config::object_sync_policy`]). Falls back to the
+/// First line of a commit/remix message (empty string on any read
+/// failure). Shared by `checkout`'s detached-HEAD report and `blame`'s
+/// porcelain `summary` field so the "subject" extraction can't drift.
+pub(crate) fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
+    let msg = match store.read_object(commit) {
+        Ok(Object::Commit(c)) => c.message,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&msg)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_owned()
+}
+
 /// batched default when the config cannot be read — a broken config
 /// must not change write semantics silently, and Batch is the default
 /// contract.

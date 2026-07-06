@@ -43,6 +43,12 @@ pub const BLAME_MAX_LINES: usize = 100_000;
 pub struct BlameLine {
     /// 1-based line number in the final blob.
     pub line_num: usize,
+    /// 1-based line number in the origin commit's version of the file —
+    /// git porcelain's "original line number". Equals [`Self::line_num`]
+    /// unless lines were inserted/removed above this one after it was
+    /// introduced, or it was copied in from another file (then it is the
+    /// line number in that source).
+    pub orig_line_num: usize,
     /// Commit that last touched this line.
     pub commit_hash: Hash,
     /// Author Identity of `commit_hash`, deep-copied from the commit
@@ -50,6 +56,13 @@ pub struct BlameLine {
     pub author: Identity,
     /// Commit timestamp.
     pub timestamp: u64,
+    /// The origin commit is a file-history root (no relevant parent still
+    /// has the file) — git porcelain's `boundary` marker.
+    pub boundary: bool,
+    /// Source file path when this line was copied from **another** file
+    /// (`-C`); `None` when it lives in the blamed path. Feeds git
+    /// porcelain's `filename` field.
+    pub source_path: Option<String>,
     /// Final line text (no trailing newline).
     pub text: Vec<u8>,
 }
@@ -223,6 +236,15 @@ struct Attribution {
     commit_hash: Hash,
     author: Identity,
     timestamp: u64,
+    /// 1-based line number in the origin commit's version of the file
+    /// (git porcelain's original line number). Propagates unchanged as the
+    /// line is carried back through history.
+    orig_line_num: usize,
+    /// The origin commit is a file-history root (git porcelain `boundary`).
+    boundary: bool,
+    /// Set when this line was copied from another file (`-C`); the source
+    /// path. `None` for a line living in the blamed path.
+    source_path: Option<String>,
 }
 
 impl From<BlameLine> for Attribution {
@@ -231,6 +253,9 @@ impl From<BlameLine> for Attribution {
             commit_hash: l.commit_hash,
             author: l.author,
             timestamp: l.timestamp,
+            orig_line_num: l.orig_line_num,
+            boundary: l.boundary,
+            source_path: l.source_path,
         }
     }
 }
@@ -354,9 +379,12 @@ pub fn blame_file_with(
         let a = &head_attrs[i];
         out.push(BlameLine {
             line_num: i + 1,
+            orig_line_num: a.orig_line_num,
             commit_hash: a.commit_hash,
             author: a.author.clone(),
             timestamp: a.timestamp,
+            boundary: a.boundary,
+            source_path: a.source_path.clone(),
             text,
         });
     }
@@ -378,6 +406,12 @@ impl From<&ReverseEntry> for Attribution {
             commit_hash: e.commit_hash,
             author: e.author.clone(),
             timestamp: e.timestamp,
+            // Reverse blame doesn't track porcelain origin fields; the
+            // final `BlameLine` fills sensible defaults (orig = final line,
+            // no boundary/copy). `-M`/`-C` are rejected under `--reverse`.
+            orig_line_num: 0,
+            boundary: false,
+            source_path: None,
         }
     }
 }
@@ -542,9 +576,14 @@ pub fn blame_file_reverse(
         let a = &attributions[i];
         out.push(BlameLine {
             line_num: i + 1,
+            // Reverse blame has no origin-side line tracking; use the final
+            // line number so porcelain still emits a coherent header.
+            orig_line_num: i + 1,
             commit_hash: a.commit_hash,
             author: a.author.clone(),
             timestamp: a.timestamp,
+            boundary: false,
+            source_path: None,
             text,
         });
     }
