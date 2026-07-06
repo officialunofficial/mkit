@@ -123,7 +123,7 @@ export function useIdentityActions(): IdentityActions {
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
-      setStatus('Welcome back — your identity is unlocked.')
+      setStatus('Your identity is unlocked.')
       recordActivity({
         kind: 'unlock',
         title: `Recovered ${playerName(pubkey)} — same key, no key file`,
