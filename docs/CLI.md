@@ -266,25 +266,45 @@ History / commits:
   full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
-- `mkit blame [--format=json] [-w] [-M] [-C] [--ignore-rev <rev>]
-  [--ignore-revs-file <file>] [--first-parent] [--reverse] [-L <start>,<end>]
-  [<rev>] <file>` —
-  show line-level commit attribution. `-w` ignores whitespace when
+- `mkit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
+  [--ignore-rev <rev>] [--ignore-revs-file <file>] [--first-parent] [--reverse]
+  [-L <start>,<end>] [<rev>] <file>` —
+  show line-level commit attribution. `--porcelain` emits git's grouped
+  machine format — a per-line header (`<id> <orig> <final> [<group-len>]`)
+  followed by a metadata block (author/committer, `author-time`/`-tz`,
+  `summary`, a `boundary` marker on a file-history root, and `filename`) once
+  per commit, with each content line tab-prefixed; `--line-porcelain` repeats
+  the full block for every line. mkit's documented divergences (consistent
+  with `--format=json` and the `log` precedent): object ids are 64-hex;
+  `author`/`committer` carry mkit's Identity string, not `Name <email>`
+  (`author-mail`/`committer-mail` are empty and both `*-tz` are `+0000`,
+  since mkit commits store a single UTC author + timestamp); `filename` is
+  the `-C` copy source on a cross-file copy; git's out-of-scope `previous`
+  line is not emitted. `-w` ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
   whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
   tweak — doesn't reattribute the line; output still shows the file's
   current bytes. `-M` detects lines moved *within* the file and `-C` lines
   copied *from other files* (like `git blame -M`/`-C`; `-C` implies `-M`,
-  and repeating it — `-C -C` — widens the search from files changed in the
-  commit to every file in the parent). Detection is block-based: the
+  and repeating it widens the search: `-C` covers files changed in the
+  commit, `-C -C` every file in the commit that creates the blamed file,
+  and `-C -C -C` every file in any commit — a whole-tree search at each
+  walk step, so a block copied from an unmodified source is still found).
+  Detection is block-based: the
   longest contiguous moved/copied block above git's default thresholds (20
   alphanumeric characters for `-M`, 40 for `-C`) is credited to its origin,
   so a moved block next to genuinely-new lines is still split out, and
   combined with `-w` a block copied with a whitespace change is still
-  detected. Divergences from git: inline numeric threshold forms
-  (`-M<num>`/`-C<num>`) aren't exposed on the CLI (the core API accepts a
-  custom threshold); a single unmatched run over 10,000 lines is matched
-  only as a whole, not by sub-block. Move/copy detection is merge-aware and
+  detected. The inline numeric forms override the default threshold, like
+  git: `-M<num>`/`-C<num>` (glued, no space) set the minimum alphanumeric
+  character count, and a numeric `-C<num>` still counts toward the `-C`
+  level (so `-C40 -C` is level 2 with threshold 40). The percent form
+  `-M<num>%`/`-C<num>%` is accepted for git-surface compatibility, but
+  because mkit's block detector has no similarity-ratio model the number is
+  treated as the same char-count threshold — a deliberate, `log`-consistent
+  divergence. Remaining divergence from git: a single unmatched run over
+  10,000 lines is matched only as a whole, not by sub-block. Move/copy
+  detection is merge-aware and
   implements git's per-parent mechanism (pinned against git 2.50.1): at a
   merge, every **real** parent is offered the unexplained lines in commit
   order, first-found-wins. A parent that contains the blamed file (and
@@ -661,7 +681,23 @@ Branches / refs:
   mutation. Removing every line resets the branch to the base. A
   `reword`/`squash` whose replay hits a conflict still reopens the editor
   on `--continue`. `edit` (stop-to-amend) is not yet supported.
-- `mkit bisect start | good | bad | reset` — binary search for a bug.
+- `mkit bisect start | good | bad | skip | reset | run <cmd> [args…]` —
+  binary search for a bug. `run` drives the loop automatically: it checks
+  out each candidate, runs `<cmd>`, and classifies from the exit status
+  (git's contract: `0`=good, `125`=skip, `1`–`127` else=bad, `≥128`=abort),
+  then restores the original HEAD and prints the first bad commit. The
+  candidate hash is also exported as `MKIT_BISECT_COMMIT`. (mkit's bisect is
+  otherwise print-candidate — `start`/`good`/`bad`/`skip` print the next
+  candidate rather than checking it out — so `run` checks out transiently
+  for the test and parks nothing at the end.) Each candidate is checked out
+  with `--force`, so a test command that scribbles on tracked files (a
+  `Cargo.lock` refresh, a regenerated snapshot) doesn't block the next
+  checkout. If every remaining candidate is skipped (exit `125`), `run`
+  reports the result is ambiguous — like git's "the first bad commit could
+  be any of …" — and exits non-zero rather than guessing. Caveat: in a
+  sparse-checkout repo `run` materializes the **full** tree for each
+  candidate (the transient checkout doesn't re-apply a persisted sparse
+  cone).
 - `mkit gc [-n|--dry-run] [--grace-secs <secs>]` — reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,

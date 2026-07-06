@@ -29,12 +29,18 @@ pub(super) struct DagNode {
 }
 
 impl DagNode {
-    /// This commit as the origin for one of its own lines.
-    fn own_attribution(&self, commit_hash: Hash) -> Attribution {
+    /// This commit as the origin for one of its own lines. `boundary` is
+    /// whether this commit is a file-history root (no relevant parent still
+    /// has the file); `orig_line_num` is left 0 for the caller to set to the
+    /// line's index in this commit's blob.
+    fn own_attribution(&self, commit_hash: Hash, boundary: bool) -> Attribution {
         Attribution {
             commit_hash,
             author: self.author.clone(),
             timestamp: self.timestamp,
+            orig_line_num: 0,
+            boundary,
+            source_path: None,
         }
     }
 }
@@ -221,7 +227,19 @@ pub(super) fn attribute_commit(
     }
 
     let lines = load_blob_lines(ctx.store, node.blob_hash)?;
-    let own = node.own_attribution(commit);
+    // A commit with no relevant parent is a file-history root — git's
+    // `boundary`. Each own line's porcelain origin line number is its index
+    // in this commit's blob.
+    let boundary = node.parents.is_empty();
+    let own_attrs = |len: usize| -> Vec<Attribution> {
+        (0..len)
+            .map(|i| {
+                let mut a = node.own_attribution(commit, boundary);
+                a.orig_line_num = i + 1;
+                a
+            })
+            .collect()
+    };
 
     // Root/boundary: the file first appears here (no *relevant* parent still
     // has it), so every line is introduced — but a block may have been
@@ -231,7 +249,7 @@ pub(super) fn attribute_commit(
     // first included, in order, first-found-wins (pinned against git
     // 2.50.1 — see the `blame_c_merge_boundary_*` tests in `mod.rs`).
     if node.parents.is_empty() {
-        let mut attrs = vec![own; lines.len()];
+        let mut attrs = own_attrs(lines.len());
         if matches!(ctx.opts.copies, CopyDetection::On { .. }) {
             let pass = CommitPass {
                 node,
@@ -246,7 +264,7 @@ pub(super) fn attribute_commit(
     }
 
     let first_parent = node.parents[0];
-    let mut attrs = vec![own; lines.len()];
+    let mut attrs = own_attrs(lines.len());
     let mut matched = vec![false; lines.len()];
     let first_parent_lines = load_blob_lines(ctx.store, ctx.nodes[&first_parent].blob_hash)?;
     let pass = CommitPass {

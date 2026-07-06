@@ -89,6 +89,12 @@ pub enum BisectStep {
     Testing { hash: Hash, remaining: usize },
     /// First-bad commit identified.
     Found(Hash),
+    /// Only skipped commits remain between good and bad, so the first-bad
+    /// commit is ambiguous — it could be `bad` or any commit in `skipped`
+    /// (git's "The first bad commit could be any of …"). Distinguished from
+    /// [`Found`](BisectStep::Found) so callers don't report a skipped-over
+    /// guess as definitive.
+    Ambiguous { bad: Hash, skipped: Vec<Hash> },
     /// We need both at least one good and a bad before we can compute a midpoint.
     NeedMore,
 }
@@ -348,12 +354,35 @@ pub fn next_step(store: &ObjectStore, state: &BisectState) -> BisectResult<Bisec
         .copied()
         .filter(|h| !state.skipped.contains(h))
         .collect();
+    // Skipped commits that are still in the live range — the candidates
+    // that make the answer ambiguous if nothing testable is left to
+    // disambiguate them.
+    let skipped_in_range: Vec<Hash> = candidates
+        .iter()
+        .copied()
+        .filter(|h| state.skipped.contains(h))
+        .collect();
     if non_skipped.len() == 1 {
-        return Ok(BisectStep::Found(non_skipped[0]));
+        let only = non_skipped[0];
+        // The lone survivor is normally the first-bad commit. But when it is
+        // the `bad` boundary itself and in-range candidates were skipped, the
+        // first bad commit is ambiguous — it could be `bad` or any skipped
+        // one (git's "only skipped commits left") — so don't report a guess
+        // as definitive.
+        if only == bad && !skipped_in_range.is_empty() {
+            return Ok(BisectStep::Ambiguous {
+                bad,
+                skipped: skipped_in_range,
+            });
+        }
+        return Ok(BisectStep::Found(only));
     }
     if non_skipped.is_empty() {
-        // All remaining commits are skipped; fall back to bad.
-        return Ok(BisectStep::Found(bad));
+        // Defensive: every candidate (bad not among them) is skipped.
+        return Ok(BisectStep::Ambiguous {
+            bad,
+            skipped: skipped_in_range,
+        });
     }
     let mid = pick_midpoint_skip(&candidates, &state.skipped);
     Ok(BisectStep::Testing {
@@ -724,6 +753,7 @@ mod tests {
                     }
                 }
                 BisectStep::NeedMore => panic!("unexpected NeedMore"),
+                BisectStep::Ambiguous { .. } => panic!("unexpected ambiguous"),
             }
         }
     }
@@ -770,7 +800,10 @@ mod tests {
     #[test]
     fn next_step_skip_advances_then_finds() {
         // 5-commit chain: c1 good, c6 bad, truth = c4 (index 3).
-        // Skip the first midpoint candidate; bisect should still converge.
+        // Skip a good-side commit (c2) far from the truth: it is bypassed as
+        // `good` advances, so bisect still converges definitively (a skip
+        // that STRANDED the truth next to `bad` would instead be ambiguous —
+        // covered by the CLI `bisect run` tests).
         let (_d, store) = fresh_store();
         let blob = put_blob(&store, b"data");
         let tree = put_tree(&store, "f.txt", blob);
@@ -782,11 +815,8 @@ mod tests {
         }
         let truth = commits[3]; // c4
 
-        // Skip the natural first midpoint.
-        let cands = enumerate_range(&store, commits[5], &[commits[0]]).unwrap();
-        let first_natural = pick_midpoint(&cands);
         let mut skipped = BTreeSet::new();
-        skipped.insert(first_natural);
+        skipped.insert(commits[1]); // skip c2, a good-side commit
 
         let mut state = BisectState {
             orig_head: commits[5],
@@ -812,6 +842,7 @@ mod tests {
                     }
                 }
                 BisectStep::NeedMore => panic!("unexpected NeedMore"),
+                BisectStep::Ambiguous { .. } => panic!("unexpected ambiguous"),
             }
         }
     }
