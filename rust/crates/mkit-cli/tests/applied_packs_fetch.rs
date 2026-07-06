@@ -375,6 +375,45 @@ fn stale_record_after_gc_triggers_selfheal_note() {
     );
 }
 
+/// The flat default remote (one-argument `remote add <url>`) gets the same
+/// cleanup as named remotes: its record is keyed by the reserved name
+/// `default` (matching the fetch side), and `remote remove default` must
+/// delete it.
+#[test]
+fn remote_remove_default_deletes_flat_remote_record() {
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let remote_store = tempfile::tempdir().unwrap();
+    let url = file_url(remote_store.path());
+
+    fs::write(alice.path().join("a.txt"), b"v1").unwrap();
+    commit_all(alice.path(), "c1");
+    // One-argument form: configures the flat default remote.
+    run_in(alice.path(), &["remote", "add", &url]);
+    run_in(alice.path(), &["push"]);
+
+    run_in(bob.path(), &["remote", "add", &url]);
+    run_in(bob.path(), &["fetch"]);
+
+    let record = applied_packs_record_path(bob.path(), "default");
+    assert!(
+        record.exists(),
+        "a successful default-remote fetch must create the applied-packs record \
+         under the reserved name `default`"
+    );
+    let record_bytes = fs::read(&record).unwrap();
+    assert!(!record_bytes.is_empty(), "record must list applied packs");
+
+    run_in(bob.path(), &["remote", "remove", "default"]);
+    assert!(
+        !record.exists(),
+        "`remote remove default` must delete the applied-packs record"
+    );
+}
+
 #[test]
 fn remote_rename_moves_record_without_orphaning_the_old_file() {
     let alice = tempfile::tempdir().unwrap();

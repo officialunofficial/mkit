@@ -203,6 +203,10 @@ fn record_path(mkit_dir: &Path, remote: &str) -> PathBuf {
 /// the module docs), so this never fails the surrounding `remote remove`:
 /// a missing record is a silent no-op, and any other I/O error is reported
 /// as a warning and otherwise ignored.
+///
+/// Unlike [`AppliedPacks::load`], this does not run `validate_remote_name`
+/// itself: it relies on the caller passing a pre-validated name (any name
+/// reaching `remote remove` was validated when it was added to the config).
 pub(crate) fn remove_record(mkit_dir: &Path, remote: &str) {
     match std::fs::remove_file(record_path(mkit_dir, remote)) {
         Ok(()) => {}
@@ -221,6 +225,10 @@ pub(crate) fn remove_record(mkit_dir: &Path, remote: &str) {
 /// already existing, which plain [`std::fs::rename`] overwrites) is
 /// reported as a warning and otherwise ignored — this never fails the
 /// surrounding `remote rename`.
+///
+/// Like [`remove_record`], this relies on the caller passing pre-validated
+/// names: `old` was validated when it was added to the config, and `remote
+/// rename` validates `new` before calling.
 pub(crate) fn rename_record(mkit_dir: &Path, old: &str, new: &str) {
     match std::fs::rename(record_path(mkit_dir, old), record_path(mkit_dir, new)) {
         Ok(()) => {}
