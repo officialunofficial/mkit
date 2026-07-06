@@ -910,10 +910,9 @@ fn fetch_objects_inner(
     Ok(n)
 }
 
-/// Persist `applied` best-effort: the record is a pure performance cache, so
-/// a write failure is logged and swallowed rather than failing a fetch whose
-/// objects already landed. Called exactly once per [`fetch_objects`] call,
-/// after the whole branch loop — see that function's doc comment.
+/// Best-effort persist of `applied` (a write failure is logged and
+/// swallowed), called exactly once per fetch — see [`fetch_objects`] for
+/// the load-once / persist-once contract.
 fn persist_record(applied: &mut AppliedPacks, remote: &str) {
     if let Err(e) = applied.persist() {
         eprintln!(

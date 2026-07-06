@@ -479,13 +479,9 @@ pub(crate) fn commit_head(
 /// the source of truth for chain shape, independent of what's locally
 /// applied.
 ///
-/// This function never loads or persists `applied` itself: [`super::fetch_objects`]
-/// loads the record once before iterating every branch and persists it once,
-/// best-effort, after the whole fetch — see that function's doc comment. Here
-/// we only mutate the in-memory set (inserting newly-applied digests via
-/// [`apply_pack_chain`], or discarding it via [`AppliedPacks::clear`] on
-/// self-heal below), so a multi-branch fetch pays one load and one persist
-/// total, not one per branch.
+/// This function never loads or persists `applied` itself — it only mutates
+/// the in-memory set; see [`super::fetch_objects`] for the load-once /
+/// persist-once contract it runs under.
 ///
 /// # Self-heal
 ///
@@ -548,6 +544,9 @@ pub(crate) fn fetch_pack_chain(
             // Clear the suspected-stale record in memory and retry the whole
             // chain with no skips. This is infallible — the caller's single
             // end-of-fetch persist durably reflects the post-heal state.
+            // Clearing intentionally discards digests inserted by other
+            // branches earlier in this same fetch: the store wipe that trips
+            // self-heal makes those entries just as stale.
             applied.clear();
             let (_, retry_apply) = apply_pack_chain(store, tx, branch, &chain, applied);
             retry_apply.and_then(|()| super::verify_closure_present(store, &tip))
