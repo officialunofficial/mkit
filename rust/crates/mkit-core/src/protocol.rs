@@ -398,6 +398,31 @@ pub trait Transport: Send + Sync {
             Err(e) => Err(e),
         }
     }
+
+    /// Whether [`Self::advance_refs`] commits the head + packmap advance as
+    /// one indivisible transaction, rather than the default's ordered
+    /// packmap-then-head writes.
+    ///
+    /// The default (non-transactional) `advance_refs` is safe for an
+    /// **appending** packmap write: per its doc comment, a crash or lost
+    /// head-CAS race between the two writes leaves the packmap a strict
+    /// superset of what the (unmoved) head needs — still reconstructable.
+    /// That safety argument does NOT extend to a packmap **reset** (a fresh
+    /// node with `prev = None`, produced by the pack-chain re-baseline,
+    /// mkit #406): a reset is not a superset of the prior chain, so a
+    /// packmap write that commits while the paired head write loses its CAS
+    /// would strand the (still-unmoved) head pointing at a commit whose
+    /// closure the reset packmap can no longer reconstruct (mkit #521).
+    ///
+    /// Callers MUST treat `false` (the default) as "never request a
+    /// packmap reset against this transport" — see
+    /// `remote_dispatch::push_branch`'s re-baseline gate. Override to
+    /// `true` ONLY when [`Self::advance_refs`] is overridden with a
+    /// genuinely transactional implementation (e.g. the HTTP transport's
+    /// single-request `/refs/advance` endpoint, mkit #408).
+    fn supports_atomic_advance(&self) -> bool {
+        false
+    }
 }
 
 /// Result of [`Transport::advance_refs`] — a two-ref branch advance.
