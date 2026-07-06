@@ -603,6 +603,96 @@ fn listen_enc_cas_conflict_classifies_as_ref_conflict() {
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
 }
 
+#[cfg(feature = "enc-transport")]
+#[test]
+// Same quarantine rationale as the other real-TCP enc tests above:
+// this drives MAX_FRAMES_PER_CONN + 1 real round trips.
+#[ignore = "real localhost TCP + MAX_FRAMES_PER_CONN round trips; run via the serial --ignored CI lane"]
+fn listen_enc_terminates_connection_past_frame_budget() {
+    // #559 / SPEC-TRANSPORT §4.4 parity with the stdin/stdout `serve_loop`:
+    // the encrypted listener must enforce the same cumulative per-
+    // connection frame budget, not just the per-frame idle timeout, so a
+    // peer that stays under the per-frame cap but never closes the
+    // connection can't hold a worker and stream unbounded work.
+    use commonware_codec::Encode as _;
+    use commonware_cryptography::Signer as _;
+    use commonware_cryptography::ed25519::PrivateKey;
+    use mkit_core::protocol::TransportError;
+    use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    let td = enc_repo();
+    let server_tx = Arc::new(FileTransport::new(td.path()));
+
+    let exec = TokioExecutor::new().expect("tokio runtime");
+    let server_key = PrivateKey::from_seed(5005);
+    let server_pubkey = {
+        let encoded = server_key.public_key().encode();
+        let bytes = encoded.as_ref();
+        assert_eq!(bytes.len(), 32);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        out
+    };
+
+    let (addr_tx, addr_rx) = mpsc::channel();
+    let exec_for_server = exec.clone();
+    let _server_handle = thread::spawn(move || {
+        let serve_fn =
+            move |sess: mkit_transport_enc::EncSession<
+                mkit_transport_enc::tokio_io::TokioStream,
+                mkit_transport_enc::tokio_io::TokioSink,
+            >,
+                  _peer: commonware_cryptography::ed25519::PublicKey| {
+                let tx = server_tx.clone();
+                async move {
+                    serve_enc_session(tx, sess, Some(Duration::from_secs(30))).await;
+                }
+            };
+        let _ = serve_tcp_with_addr(
+            "127.0.0.1:0",
+            server_key,
+            exec_for_server,
+            move |addr| {
+                let _ = addr_tx.send(addr);
+            },
+            serve_fn,
+        );
+    });
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("encrypted listener address");
+    let client_key = PrivateKey::from_seed(6006);
+    let client = connect_tcp_with_executor(
+        &addr.ip().to_string(),
+        addr.port(),
+        &server_pubkey,
+        client_key,
+        exec,
+    )
+    .expect("connect encrypted client");
+
+    // Cheap, budget-neutral-per-frame requests: each one costs the
+    // `frame_byte_estimate` baseline (64 bytes), so only the frame-count
+    // cap — not the byte cap — can trip here.
+    for _ in 0..MAX_FRAMES_PER_CONN {
+        client
+            .read_ref("refs/heads/does-not-exist")
+            .expect("request under the frame budget must succeed");
+    }
+    // The (MAX_FRAMES_PER_CONN + 1)th top-level frame exceeds the budget;
+    // the server must reject it and tear down the connection rather than
+    // serve it or silently keep counting forever.
+    let err = client.read_ref("refs/heads/does-not-exist").unwrap_err();
+    assert!(
+        !matches!(err, TransportError::InvalidRef(_)),
+        "budget rejection must not be misclassified as a client-side validation error, got {err:?}"
+    );
+}
+
 // Note: containment via MKIT_SERVE_ROOT is enforced — tested via
 // an integration test in tests/ rather than here, since this
 // crate forbids `unsafe` (which `std::env::set_var` requires

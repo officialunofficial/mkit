@@ -334,6 +334,16 @@ pub(super) async fn serve_enc_session(
         return;
     }
 
+    // Cumulative per-connection resource caps (#559), mirroring the
+    // stdin/stdout `serve_loop`'s `frame_count`/`byte_count` tracking and
+    // sharing its `MAX_FRAMES_PER_CONN`/`MAX_BYTES_PER_CONN` constants so
+    // the two servers cannot drift on the budget. Without this, a peer
+    // that stays under the per-frame cap but never closes the connection
+    // could stream unbounded work through the encrypted listener even
+    // though the SSH path would have terminated it.
+    let mut frame_count: u32 = 0;
+    let mut byte_count: u64 = 0;
+
     // Verb loop. Mirrors the stdin/stdout `serve_loop`'s dispatch
     // decisions but uses async encrypted-frame helpers so we never
     // block the listener's tokio worker.
@@ -344,6 +354,33 @@ pub(super) async fn serve_enc_session(
         if let Some(ssh_frame::Body::Close(_)) = frame.body {
             return;
         }
+
+        frame_count = frame_count.saturating_add(1);
+        if frame_count > MAX_FRAMES_PER_CONN {
+            let _ = send_frame(
+                &mut sender,
+                &mkit_rpc::ssh_error_frame(
+                    ErrorCode::InvalidRequest,
+                    "per-connection frame budget exceeded",
+                ),
+            )
+            .await;
+            return;
+        }
+
+        byte_count = byte_count.saturating_add(frame_byte_estimate(&frame));
+        if byte_count > MAX_BYTES_PER_CONN {
+            let _ = send_frame(
+                &mut sender,
+                &mkit_rpc::ssh_error_frame(
+                    ErrorCode::InvalidRequest,
+                    "per-connection byte budget exceeded",
+                ),
+            )
+            .await;
+            return;
+        }
+
         if dispatch_enc_one(&tx, frame, &mut sender, &mut receiver, idle_timeout)
             .await
             .is_err()
