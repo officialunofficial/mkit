@@ -193,3 +193,17 @@ own change, and are listed here so the gap is explicit:
 - **Default remote name `default`** — mkit's flat default remote is `default`,
   not git's `origin` (tracking refs live under `refs/remotes/default/`).
   Renaming is a load-bearing migration, deferred.
+- **`mkit blame --ignore-rev-precise`** — opt-in, content-addressed
+  refinement of `--ignore-rev` fall-through (#496). git's `--ignore-rev`
+  decides which parent line a fallen-through line should inherit blame from
+  by *position*: within a changed hunk it pairs the k-th added line with
+  the k-th removed line, purely by offset, because a textual diff is all it
+  has. mkit hashes line content, so for a reformat/reorder commit it can
+  often identify the line's true surviving origin directly — including
+  cases where the positional pass finds no in-hunk counterpart at all and
+  git would credit the noise commit itself. This is the same shape as
+  mkit's content-addressed rename detection giving a more reliable `R` than
+  git's similarity heuristic in `status`/`diff`. The **default**
+  `--ignore-rev` fall-through is git's exact positional guess, byte-for-byte
+  — parity is the contract there; `--ignore-rev-precise` is a conscious,
+  documented better-than-git mode, not a changed default.

@@ -85,7 +85,12 @@ const MAX_DETECT_RUN: usize = 10_000;
 
 /// Line-key → the offsets at which it occurs in a source, for `O(1)`
 /// "where could a block starting with this line be?" lookups.
-type KeyIndex = HashMap<Vec<u8>, Vec<usize>>;
+///
+/// `pub(super)` (rather than private): `--ignore-rev-precise`
+/// (`walk::precise_overrides`) reuses [`build_index`] to index a parent's
+/// unmatched-old lines by content, the same primitive `-M`/`-C` detection
+/// uses to index a move/copy source.
+pub(super) type KeyIndex = HashMap<Vec<u8>, Vec<usize>>;
 
 /// Inputs for one [`Detector::reassign`] call. Bundled to keep the entry
 /// point off the positional-argument hazard and to make the "what does
@@ -474,20 +479,25 @@ impl<'a> Detector<'a> {
     /// (cached; expensive).
     ///
     /// The source blame keeps the *active* `-w`, (effective) `-M`,
-    /// `--ignore-rev` set, and first-parent mode so a copied block is credited
-    /// through a prior whitespace-only edit, same-file move, ignored noise
-    /// commit, or merge in the source — matching git. Only `-C` is dropped,
-    /// which both prevents unbounded recursion and matches git (a copy source
-    /// is blamed without further cross-file copy detection).
+    /// `--ignore-rev` set (including `--ignore-rev-precise`), and
+    /// first-parent mode so a copied block is credited through a prior
+    /// whitespace-only edit, same-file move, ignored noise commit, or merge
+    /// in the source — matching git. Only `-C` is dropped, which both
+    /// prevents unbounded recursion and matches git (a copy source is
+    /// blamed without further cross-file copy detection).
     fn candidate_attrs(&mut self, commit: Hash, path: &str) -> BlameOutcome<&[Attribution]> {
         let key = (commit, path.to_string());
         if !self.attrs_cache.contains_key(&key) {
+            // Keep every active option except drop `-C` (prevents unbounded
+            // recursion and matches git) and pin the effective `-M`. Spread
+            // the rest from `self.opts` so a future `BlameOptions` field is
+            // carried through copy-source blame automatically instead of
+            // being silently defaulted — this PR (`ignore_rev_precise`) is
+            // itself the proof the hand-copied list was easy to miss.
             let source_opts = BlameOptions {
-                ignore_whitespace: self.opts.ignore_whitespace,
                 moves: self.opts.effective_move(),
                 copies: CopyDetection::Off,
-                ignore_revs: self.opts.ignore_revs.clone(),
-                first_parent: self.opts.first_parent,
+                ..self.opts.clone()
             };
             let res = blame_file_with(self.store, commit, path, &source_opts)?;
             let attrs = res.lines.into_iter().map(Attribution::from).collect();
@@ -549,8 +559,9 @@ fn longest_match(needle: &[Vec<u8>], hay: &[Vec<u8>], index: &KeyIndex) -> Optio
     best
 }
 
-/// Build a line-key → offsets index over `keys`.
-fn build_index(keys: &[Vec<u8>]) -> KeyIndex {
+/// Build a line-key → offsets index over `keys`. `pub(super)`: also used
+/// by `walk::precise_overrides` (`--ignore-rev-precise`).
+pub(super) fn build_index(keys: &[Vec<u8>]) -> KeyIndex {
     let mut index: KeyIndex = HashMap::with_capacity(keys.len());
     for (i, k) in keys.iter().enumerate() {
         index.entry(k.clone()).or_default().push(i);
