@@ -257,8 +257,24 @@ impl ExternalSigner {
         };
         let stdout_rx = spawn_stdout_reader(stdout);
 
-        // Tolerate signers that emit only the response (skip Hello) by
-        // peeking at the first frame.
+        // SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4: the version handshake
+        // MUST complete (a HelloResponse) before any other request is
+        // processed. A signer that pipelines straight to SignResponse
+        // or Error, skipping HelloResponse, is non-conforming — fail
+        // closed rather than silently tolerating it, so a signer that
+        // never negotiated a protocol version can't slip a response
+        // through unnoticed.
+        let hello_resp = match recv_frame_until_deadline(&stdout_rx, deadline) {
+            Ok(frame) => frame,
+            Err(FrameTimeout::Timeout) => {
+                return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
+            }
+            Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
+        };
+        if let Err(e) = require_hello_response(&hello_resp) {
+            return Err(conv.fail(e));
+        }
+
         let resp = match recv_frame_until_deadline(&stdout_rx, deadline) {
             Ok(frame) => frame,
             Err(FrameTimeout::Timeout) => {
@@ -266,30 +282,9 @@ impl ExternalSigner {
             }
             Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
         };
-        let (signature, key_id) = match resp.body {
-            Some(signer_frame::Body::HelloResponse(_)) => {
-                let next = match recv_frame_until_deadline(&stdout_rx, deadline) {
-                    Ok(frame) => frame,
-                    Err(FrameTimeout::Timeout) => {
-                        return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
-                    }
-                    Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
-                };
-                match self.extract_signature_with_policy(next, pae) {
-                    Ok(v) => v,
-                    Err(e) => return Err(conv.fail(e)),
-                }
-            }
-            Some(signer_frame::Body::SignResponse(_) | signer_frame::Body::Error(_)) => {
-                match self.extract_signature_with_policy(resp, pae) {
-                    Ok(v) => v,
-                    Err(e) => return Err(conv.fail(e)),
-                }
-            }
-            other => {
-                let msg = format!("unexpected first frame: {}", frame_name(&other));
-                return Err(conv.fail(Error::ExternalSignerBadResponse(msg)));
-            }
+        let (signature, key_id) = match self.extract_signature_with_policy(resp, pae) {
+            Ok(v) => v,
+            Err(e) => return Err(conv.fail(e)),
         };
 
         // --- Drain stderr to completion (bounded) -----------------
@@ -999,6 +994,21 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+/// Require that `frame` is a `HelloResponse` — the version handshake
+/// SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4 mandates before any other
+/// request is processed. A signer that pipelines a `SignResponse` or
+/// `Error` straight through, skipping `HelloResponse`, never completed
+/// the handshake and is rejected outright rather than tolerated.
+fn require_hello_response(frame: &SignerFrame) -> Result<(), Error> {
+    match &frame.body {
+        Some(signer_frame::Body::HelloResponse(_)) => Ok(()),
+        other => Err(Error::ExternalSignerBadResponse(format!(
+            "expected HelloResponse as the first frame, got {}",
+            frame_name(other)
+        ))),
+    }
+}
+
 fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
     use signer_frame::Body;
     match b {
@@ -1031,6 +1041,50 @@ mod tests {
     #[test]
     fn new_accepts_absolute_path() {
         ExternalSigner::new("/usr/bin/foo").expect("absolute path accepted");
+    }
+
+    #[test]
+    fn require_hello_response_accepts_hello_response() {
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::HelloResponse(Box::default())),
+            ..Default::default()
+        };
+        require_hello_response(&frame).expect("HelloResponse must be accepted");
+    }
+
+    #[test]
+    fn require_hello_response_rejects_sign_response_without_hello() {
+        // SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4: a signer that pipelines
+        // straight to SignResponse, skipping the version handshake,
+        // never completed it and must be rejected, not tolerated.
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::SignResponse(Box::default())),
+            ..Default::default()
+        };
+        let err = require_hello_response(&frame).unwrap_err();
+        assert!(matches!(err, Error::ExternalSignerBadResponse(_)));
+        assert!(err.to_string().contains("sign_response"));
+    }
+
+    #[test]
+    fn require_hello_response_rejects_error_without_hello() {
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::Error(Box::default())),
+            ..Default::default()
+        };
+        let err = require_hello_response(&frame).unwrap_err();
+        assert!(matches!(err, Error::ExternalSignerBadResponse(_)));
+        assert!(err.to_string().contains("error"));
+    }
+
+    #[test]
+    fn require_hello_response_rejects_empty_body() {
+        let frame = SignerFrame {
+            body: None,
+            ..Default::default()
+        };
+        let err = require_hello_response(&frame).unwrap_err();
+        assert!(matches!(err, Error::ExternalSignerBadResponse(_)));
     }
 
     #[cfg(feature = "algo-ed25519")]
@@ -1457,6 +1511,54 @@ mod tests {
             let sig = signer.sign(PAE).expect("happy path within timeout");
             assert_eq!(sig.len(), 64, "Ed25519 signature is 64 bytes");
             assert_eq!(signer.keyid().unwrap(), "opaque:test");
+        }
+
+        #[test]
+        fn signer_that_skips_hello_response_is_rejected() {
+            // #558 / SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4: a signer that
+            // pipelines straight to a valid SignResponse, never sending
+            // HelloResponse, never completed the version handshake and
+            // must be rejected outright rather than tolerated as it was
+            // before this fix.
+            use ed25519_dalek::{Signer as _, SigningKey};
+
+            let dir = tempfile::tempdir().unwrap();
+            let sk = SigningKey::from_bytes(&[0x42; 32]);
+            let pk = sk.verifying_key().to_bytes().to_vec();
+            let sig = sk.sign(PAE).to_bytes().to_vec();
+            let sign_resp = SignerFrame {
+                body: Some(signer_frame::Body::SignResponse(Box::new(
+                    SignResponse::default()
+                        .with_signature(sig)
+                        .with_public_key(pk)
+                        .with_algorithm(RpcAlgorithm::Ed25519)
+                        .with_key_id("opaque:test".to_owned()),
+                ))),
+                ..Default::default()
+            };
+            let mut bytes = Vec::new();
+            write_frame(&mut bytes, &sign_resp).unwrap();
+            let resp = dir.path().join("response.bin");
+            std::fs::write(&resp, &bytes).unwrap();
+
+            let script = format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", resp.display());
+            let bin = dir.path().join("signer.sh");
+            std::fs::write(&bin, script).unwrap();
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+
+            let mut signer = ExternalSigner::new(&bin)
+                .unwrap()
+                .with_timeout(Duration::from_secs(30));
+            let err = signer
+                .sign(PAE)
+                .expect_err("a signer that skips HelloResponse must be rejected");
+            assert!(
+                matches!(err, Error::ExternalSignerBadResponse(_)),
+                "expected ExternalSignerBadResponse, got {err:?}"
+            );
+            assert!(err.to_string().contains("HelloResponse"));
         }
     }
 }

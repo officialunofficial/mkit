@@ -128,6 +128,14 @@ signer -> mkit:    SignResponse { signature, public_key, algorithm, key_id, ... 
                    Error { code, message, details }
 ```
 
+The host writes `Hello` and `SignRequest` together so a pipelining
+signer can respond to both without an intermediate round trip, but it
+still requires `HelloResponse` as the first frame it reads back: a
+signer that skips straight to `SignResponse` or `Error` never
+completed the version handshake and is rejected outright (fail
+closed), matching SPEC-RPC §4's general conformance rule that the
+handshake precedes any other request.
+
 Optional PIN round-trip mid-sign:
 
 ```
@@ -402,4 +410,5 @@ compromised signer can still do; nothing below claims otherwise.
 | Missing credential metadata fails closed | CTAP signers MUST error rather than return an empty `public_key` (§6, §8.2) |
 | A setup failure cannot desync the framing | non-zero exit with no stdout frame (§7) |
 | Oversized frames cannot exhaust the reader | `MAX_FRAME_BYTES = 1 MiB`, connection-fatal (§3) |
+| A `SignResponse`/`Error` is never accepted without a completed handshake | the host requires `HelloResponse` as the first frame read back; a signer that pipelines straight to a response is rejected (§4) |
 | Fixed `(payload, key)` gives fixed signature bytes for non-WebAuthn algorithms | RFC 6979 (ECDSA) / RFC 8032 (Ed25519) determinism, pinned by golden vectors (§9) |
