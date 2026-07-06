@@ -267,8 +267,8 @@ History / commits:
   commits superseded by `commit --amend` or a reset are not listed; see
   "Divergences from Git" below.
 - `mkit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
-  [--ignore-rev <rev>] [--ignore-revs-file <file>] [--first-parent] [--reverse]
-  [-L <start>,<end>] [<rev>] <file>` —
+  [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
+  [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` —
   show line-level commit attribution. `--porcelain` emits git's grouped
   machine format — a per-line header (`<id> <orig> <final> [<group-len>]`)
   followed by a metadata block (author/committer, `author-time`/`-tz`,
@@ -332,7 +332,22 @@ History / commits:
   `--ignore-revs-file` entries must be full hex object names, one per line,
   with blank lines and `#` comments (including inline) skipped — both
   matching git. (mkit does not auto-read a `.git-blame-ignore-revs` file or
-  a `blame.ignoreRevsFile` config key; pass the file explicitly.) Blame is
+  a `blame.ignoreRevsFile` config key; pass the file explicitly.)
+  `--ignore-rev-precise` (mkit-only; requires `--ignore-rev` or
+  `--ignore-revs-file` — a usage error otherwise) refines that fall-through
+  with content matching instead of git's positional per-hunk guess: git
+  pairs the k-th added line of a changed hunk with the k-th removed line
+  purely by position, so a reformat/reorder can land a line on the wrong
+  parent counterpart (or leave it credited to the noise commit as a
+  "genuine insertion" when the hunk has no local counterpart at all); mkit
+  hashes line content, so it searches the **whole parent file** — not just
+  the enclosing hunk — for the line's true surviving origin, and only
+  overrides the positional guess when content evidence disagrees with it.
+  Composes with `-w` (matching is over `-w`-normalized keys, same as
+  `-M`/`-C`) and with merges (the search runs per relevant parent,
+  first-parent-wins, same as the positional default). This is a
+  **documented divergence** — the default `--ignore-rev` fall-through stays
+  byte-identical to git; see "Divergences from Git" below. Blame is
   **merge-aware by default** (like `git blame`): at a merge, a line is
   credited to whichever parent's side actually wrote it, so a line merged in
   from a side branch is attributed to its authoring commit rather than the
@@ -1169,6 +1184,16 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   accepted by the parser but `clone` rejects it with a `--depth is not
   yet wired` usage error rather than silently producing a full clone.
   Shallow-clone history truncation is a follow-up.
+- **`mkit blame --ignore-rev-precise` (opt-in) is a content-addressed
+  refinement of `--ignore-rev` fall-through, not git's positional guess.**
+  git's `--ignore-rev` pairs a changed hunk's k-th added line with its k-th
+  removed line purely by position; mkit hashes line content, so it can
+  identify a fallen-through line's true surviving origin across a
+  reformat/reorder — including cases the positional pass leaves credited
+  to the noise commit as a "genuine insertion" because its own hunk has no
+  local counterpart. The **default** `--ignore-rev` fall-through is
+  unchanged and stays byte-identical to git; `--ignore-rev-precise` must be
+  passed explicitly (and requires `--ignore-rev`/`--ignore-revs-file`).
 - `mkit reset [--soft|--mixed|--hard] [-f] [<commit>]` — `--soft` moves
   HEAD only; `--mixed` (the default) also resets the index; both leave the
   worktree untouched. `--hard` additionally resets the worktree to the

@@ -237,15 +237,17 @@ commands:
                     (--fork-audit re-derives referenced content) (feature: git-bridge)
   git status         Show bridge state dirs: direction, endpoints, key, refs (feature: git-bridge)
   git format-patch <range>  Render native commits as `git am`-able patches (feature: git-bridge)
-  blame [--format=json|--porcelain|--line-porcelain] [-w] [-M[<num>]] [-C[<num>]] [--ignore-rev <rev>] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
+  blame [--format=json|--porcelain|--line-porcelain] [-w] [-M[<num>]] [-C[<num>]] [--ignore-rev <rev>] [--ignore-rev-precise] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
                     Show line-level commit attribution; -L limits to a line
                     range, -w ignores whitespace, -M/-C detect moved/copied
                     lines (inline -M<num>/-C<num> sets the threshold),
                     --ignore-rev/--ignore-revs-file skip noise commits,
-                    --first-parent limits the merge-aware walk to first
-                    parents, --reverse <start>..<end> walks history forward,
-                    <rev> blames as of a revision (default HEAD; JSONL with
-                    --format=json, or git-shaped --porcelain/--line-porcelain)
+                    --ignore-rev-precise refines that fall-through by content
+                    (mkit-only), --first-parent limits the merge-aware walk to
+                    first parents, --reverse <start>..<end> walks history
+                    forward, <rev> blames as of a revision (default HEAD; JSONL
+                    with --format=json, or git-shaped
+                    --porcelain/--line-porcelain)
   verify <rev>      Verify the signature on a commit, remix, or signed tag
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]... [--external-signer-arg <V>]...

@@ -250,7 +250,7 @@ export function usePushCommit() {
 export function useRepoEvents(room: string, prefix = ''): void {
   const qc = useQueryClient()
   // Gate on the backend value from context: in worker mode it's null until the
-  // wasm client loads, so the effect simply returns until a backend is present.
+  // wasm client loads, so the effect returns until a backend is present.
   // When the backend instance changes (null → mock/wasm, or mock → wasm), the
   // effect re-runs and (re-)subscribes — `backend!` is never dereferenced null.
   const backend = useRepoBackend()

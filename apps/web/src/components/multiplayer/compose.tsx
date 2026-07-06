@@ -22,7 +22,7 @@ import {
 import { INPUT_CLASSES } from '../result-panel'
 import { bytesToHex, hexToBytes, useMkit } from '../use-mkit'
 import { InfoTip } from './info-tip'
-import { PRIMARY_BTN, errMsg } from './shared'
+import { CAS_CONFLICT_COPY, IDENTITY_LOCKED_COPY, PRIMARY_BTN, errMsg } from './shared'
 
 export function Compose({
   api,
@@ -122,9 +122,9 @@ export function Compose({
 
   const pushErr =
     push.error instanceof CasConflictError
-      ? 'Someone pushed first — the preview re-parented onto the new head. Push again.'
+      ? `${CAS_CONFLICT_COPY} The preview already re-parented onto the new head.`
       : push.error instanceof IdentityLockedError
-        ? 'Your identity is locked. Unlock it before pushing.'
+        ? IDENTITY_LOCKED_COPY
         : push.error
           ? errMsg(push.error)
           : null
@@ -163,8 +163,8 @@ export function Compose({
           </label>
           <InfoTip label='About branches'>
             <p>
-              A <strong className='text-fg'>branch</strong> is a line of history, just like git. Pushing advances it
-              under a <strong className='text-fg'>compare-and-set</strong>, so concurrent pushes serialize cleanly.
+              A <strong className='text-fg'>branch</strong> is a line of history, as in git. Pushing advances it under a{' '}
+              <strong className='text-fg'>compare-and-set</strong>, so concurrent pushes serialize cleanly.
             </p>
             <p className='mt-2'>
               Pick an existing branch to add onto it, or start a new one. Remixing a commit makes its own branch under{' '}
