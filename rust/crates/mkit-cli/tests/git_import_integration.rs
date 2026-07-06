@@ -461,6 +461,84 @@ fn passthrough_export_creates_prable_fork() {
 }
 
 #[test]
+fn passthrough_refuses_to_move_an_existing_remote_tag() {
+    // SPEC-GIT-BRIDGE fork-mode export never moves an existing tag: if
+    // `refs/tags/<name>` already exists on the destination at a
+    // different object than what this export would push, the whole
+    // export must refuse (exit USAGE) before issuing any push, and the
+    // remote's tag must stay exactly where it was.
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    f.mkit_ok(&fork, &["keygen"]);
+    std::fs::write(fork.join("local.txt"), "l\n").unwrap();
+    f.mkit_ok(&fork, &["add", "local.txt"]);
+    f.mkit_ok(&fork, &["commit", "-m", "local work"]);
+
+    let up = f.upstream();
+    let forkgit = f.root.path().join("forkgit");
+    git_ok(
+        f.root.path(),
+        &[
+            "clone",
+            "--bare",
+            "--quiet",
+            up.to_str().unwrap(),
+            "forkgit",
+        ],
+    );
+
+    // Move the destination's v1 tag to point at the FIRST upstream
+    // commit instead of the second — a real divergence from what this
+    // export would push (tags otherwise pass through byte-identical,
+    // per `passthrough_export_creates_prable_fork`).
+    let first_commit = git_stdout(&up, &["rev-parse", "HEAD^"]);
+    git_ok(&forkgit, &["update-ref", "refs/tags/v1", &first_commit]);
+    let moved_tag = git_stdout(&forkgit, &["rev-parse", "refs/tags/v1"]);
+    assert_eq!(moved_tag, first_commit);
+
+    let out = f.mkit(
+        &fork,
+        &[
+            "git",
+            "export",
+            "--passthrough",
+            "--remote-name",
+            "upstream",
+            forkgit.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "fork-mode tag-move must exit USAGE (64): {out:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refs/tags/v1") && stderr.contains("never moves an existing tag"),
+        "expected the fork-mode tag-move diagnostic, got: {stderr}"
+    );
+
+    // The remote is unchanged: the tag is still at the first commit,
+    // and `main` never received the local commit either (the whole
+    // export refuses atomically, before any push).
+    assert_eq!(
+        git_stdout(&forkgit, &["rev-parse", "refs/tags/v1"]),
+        first_commit,
+        "remote tag must be untouched by the refused export"
+    );
+    let up_tip = git_stdout(&up, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_stdout(&forkgit, &["rev-parse", "main"]),
+        up_tip,
+        "remote main must be untouched by the refused export"
+    );
+}
+
+#[test]
 fn passthrough_requires_import_state_and_locks_direction() {
     if !git_available() {
         return;

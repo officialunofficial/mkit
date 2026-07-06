@@ -315,6 +315,64 @@ fn golden_import_vectors_match() {
     assert_eq!(c.timestamp, 1_600_000_200, "committer epoch, not author");
 }
 
+/// Historic git tags created before `git tag -a` began requiring a
+/// tagger identity (or produced with `GIT_COMMITTER_*` unset) have no
+/// `tagger` line at all. `import.rs` assigns these a pinned sentinel
+/// identity (`Identity::opaque(b"(no tagger)")`) and epoch 0 —
+/// deterministic, so the resulting mkit object hash is a golden
+/// vector separate from the SPEC-GIT-IMPORT §9 suite above (which pins
+/// exactly nine tagged/tagger-present vectors). If the sentinel bytes
+/// or its encoding ever change, this fails instead of silently forking
+/// the mkit hash for every consumer that already imported a tag like
+/// this — a cross-implementation hash fork.
+#[test]
+fn tagger_less_tag_import_hash_is_pinned() {
+    let mut src = MemGitSource::default();
+    let blob = src.put(GitObjKind::Blob, b"vector content\n".to_vec());
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"100644 file.txt\0");
+    tree.extend_from_slice(&blob);
+    let tree = src.put(GitObjKind::Tree, tree);
+    let commit = src.put(
+        GitObjKind::Commit,
+        format!(
+            "tree {}\nauthor A <a@x> 1600000000 +0000\ncommitter A <a@x> 1600000000 +0000\n\ntagged commit\n",
+            hex(&tree)
+        )
+        .into_bytes(),
+    );
+    let tag = src.put(
+        GitObjKind::Tag,
+        format!(
+            "object {}\ntype commit\ntag v0.0.1\n\nhistoric tagger-less tag\n",
+            hex(&commit)
+        )
+        .into_bytes(),
+    );
+
+    let vectors = vec![("tagger_less", tag)];
+    let (sink, map) = import_all(&mut src, &vectors);
+    let blake3 = map[&tag];
+
+    let mkit_core::object::Object::Tag(t) = mkit_core::deserialize(&sink.0[&blake3]).unwrap()
+    else {
+        panic!("expected a Tag object");
+    };
+    assert_eq!(
+        t.tagger,
+        mkit_core::object::Identity::opaque(b"(no tagger)".to_vec()),
+        "tagger-less tags must carry the pinned sentinel identity"
+    );
+    assert_eq!(t.timestamp, 0, "tagger-less tags must carry epoch 0");
+    verify_tag(&t).expect("sentinel-identity tag must still verify under the import signer");
+
+    assert_eq!(
+        mkit_core::to_hex(&blake3),
+        "d27c7e45a7d0241437f17927c96fc9235ccbffe84763d62185e9dd81397e6811",
+        "tagger-less tag import hash drifted"
+    );
+}
+
 /// SPEC-GIT-IMPORT §9 refusal vectors, pinned: each hostile input is
 /// built deterministically and its TYPED refusal is recorded in
 /// `REFUSALS.txt` (`<name> <git-sha1> <refusal-variant>`). Catches a
