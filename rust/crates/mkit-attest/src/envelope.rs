@@ -1,6 +1,6 @@
 //! DSSE envelope — outer signed container for every mkit attestation.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` §2 / §4.1 and the upstream
+//! See `docs/specs/SPEC-ATTESTATIONS.md` §2 / §4.1 and the upstream
 //! <https://github.com/secure-systems-lab/dsse/blob/master/envelope.md>.
 //!
 //! Envelope shape (JCS-canonical key order):

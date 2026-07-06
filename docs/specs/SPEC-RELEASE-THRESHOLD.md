@@ -59,7 +59,7 @@ dealer/aggregator CLI and the CI integration that makes the flow usable.
   "M maintainers approved this release." Both ride in the same SLSA
   bundle.
 - BLS is **not** for commit signing. Ed25519 stays canonical at the
-  commit layer (`docs/SPEC-SIGNING.md`). The threshold scheme exists
+  commit layer (`docs/specs/SPEC-SIGNING.md`). The threshold scheme exists
   for release-cadence artefacts only.
 
 ---

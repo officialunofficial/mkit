@@ -62,7 +62,7 @@ thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
-# Windows path uses default ACLs as documented in `docs/SPEC-SIGNING.md`.
+# Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

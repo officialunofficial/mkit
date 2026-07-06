@@ -17,7 +17,7 @@
 //!   shape — a fixed-item journal of node digests plus a metadata
 //!   sidecar for pruned pinned nodes — laid out under
 //!   `<mkit_dir>/history/<sanitized_branch>/`. See
-//!   `docs/SPEC-HISTORY-PROOF.md` §4.
+//!   `docs/specs/SPEC-HISTORY-PROOF.md` §4.
 //! - **Commit-field integration** (planned, v0.2): `Commit.history_root`
 //!   proto field, new signing-bytes layout. Out of scope here.
 //!
@@ -636,7 +636,7 @@ fn sanitize_branch(name: &str) -> String {
 /// thread). The returned Context's inner `Arc<Executor>` keeps the
 /// bootstrap runtime alive after the bootstrap thread joins.
 ///
-/// See `docs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
+/// See `docs/specs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
 /// the trade-off with the alternative "share the caller's tokio
 /// runtime" approach.
 fn bootstrap_commonware_context(

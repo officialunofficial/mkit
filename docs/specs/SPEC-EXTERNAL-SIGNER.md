@@ -112,7 +112,7 @@ toolchain emitting the same wire bytes is conformant. See
 prefix, endianness, and the `MAX_FRAME_BYTES = 1 MiB` cap (frames
 exceeding the cap are a connection-fatal error).
 
-Schema: [`rust/crates/mkit-rpc/proto/signer.proto`](../rust/crates/mkit-rpc/proto/signer.proto).
+Schema: [`rust/crates/mkit-rpc/proto/signer.proto`](../../rust/crates/mkit-rpc/proto/signer.proto).
 
 ---
 

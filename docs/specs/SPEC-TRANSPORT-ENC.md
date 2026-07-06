@@ -9,8 +9,8 @@ audience: implementers of mkit encrypted-stream clients and servers
 
 `mkit-transport-enc` is the encrypted-stream sibling of
 `mkit-transport-ssh`. It implements the same seven-verb
-[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait, exchanging
-the same [`SshFrame`](../rust/crates/mkit-rpc/proto/ssh.proto) protobuf
+[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait, exchanging
+the same [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto) protobuf
 messages, but over an authenticated, encrypted byte stream provided by
 [`commonware-stream::encrypted`](https://docs.rs/commonware-stream)
 instead of a system `ssh(1)` child process.
@@ -126,7 +126,7 @@ Not provided (also inherited):
 
 The application protocol on top of the encrypted stream is the same
 `SshFrame` protobuf message set used by `mkit-transport-ssh`, defined
-in [`ssh.proto`](../rust/crates/mkit-rpc/proto/ssh.proto). Verb
+in [`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto). Verb
 semantics, error mapping, ref-CAS encoding, and pack-streaming chunk
 boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 
@@ -135,7 +135,7 @@ boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 The one deliberate departure from the SSH transport's wire is the
 inner framing. `mkit-transport-ssh` wraps each `SshFrame` in a 4-byte
 LE u32 length prefix (defined in
-[`mkit-rpc/src/framing.rs`](../rust/crates/mkit-rpc/src/framing.rs))
+[`mkit-rpc/src/framing.rs`](../../rust/crates/mkit-rpc/src/framing.rs))
 because SSH's stdin/stdout pipe is an unframed byte stream.
 
 `commonware-stream::encrypted` already frames each ciphertext record
@@ -192,7 +192,7 @@ keeps the protocol-version dance in one place.
 ## 5. Test plan
 
 The in-tree test suite lives in
-[`mkit-transport-enc/src/lib.rs`](../rust/crates/mkit-transport-enc/src/lib.rs)
+[`mkit-transport-enc/src/lib.rs`](../../rust/crates/mkit-transport-enc/src/lib.rs)
 under `#[cfg(test)] mod tests`. Tests run inside a single
 `commonware_runtime::deterministic::Runner` so they exercise the same
 async code paths the real-TCP transport stage's tokio wiring will hit,

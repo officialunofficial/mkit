@@ -1,7 +1,7 @@
 //! `mkit-sign-tpm` — TPM 2.0-backed P-256 external signer for mkit.
 //!
 //! Implements the mkit-rpc signer protocol defined in
-//! `docs/SPEC-EXTERNAL-SIGNER.md` (and the schemas in
+//! `docs/specs/SPEC-EXTERNAL-SIGNER.md` (and the schemas in
 //! `rust/crates/mkit-rpc/proto/`) with a P-256 signing primary key
 //! held inside a TPM 2.0 device. Linux-native analog of the Apple
 //! Secure Enclave signer.
@@ -423,7 +423,7 @@ USAGE:
 
 `sign` speaks the mkit-rpc v1 external-signer protocol over stdin/stdout:
 length-prefixed protobuf SignerFrame messages (Hello + SignRequest →
-HelloResponse + SignResponse/Error). See docs/SPEC-EXTERNAL-SIGNER.md
+HelloResponse + SignResponse/Error). See docs/specs/SPEC-EXTERNAL-SIGNER.md
 for the wire protocol; signer.proto is the schema source of truth.
 
 Persistent handles are TPM-owner-hierarchy 32-bit values, conventionally

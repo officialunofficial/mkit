@@ -1161,7 +1161,7 @@ Implementation options:
 
 Required cleanup:
 
-- `docs/SPEC-SIGNING.md` now describes `BLAKE3(len_le16(domain) || domain ||
+- `docs/specs/SPEC-SIGNING.md` now describes `BLAKE3(len_le16(domain) || domain ||
   signing_bytes)` and matches the implementation. **Done.** Cross-reference
   SPEC-SIGNING §3 for the canonical formula and `mkit_core::sign::domain_digest`
   for the implementation.
@@ -1403,7 +1403,7 @@ Tests:
 
 Docs/spec cleanup:
 
-- `docs/SPEC-SIGNING.md` is updated to match current implementation:
+- `docs/specs/SPEC-SIGNING.md` is updated to match current implementation:
   `BLAKE3(len_le16(domain) || domain || signing_bytes)`. **Done** — see
   `digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)` in
   SPEC-SIGNING §3 and the matching `domain_digest` implementation in

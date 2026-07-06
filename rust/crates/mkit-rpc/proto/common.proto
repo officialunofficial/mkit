@@ -43,7 +43,7 @@ enum Algorithm {
   // M-of-N cohort emits a partial signature that combines into a
   // single signature verifiable against one keyid.
   //
-  // Defined in docs/SPEC-RELEASE-THRESHOLD.md. Used by the
+  // Defined in docs/specs/SPEC-RELEASE-THRESHOLD.md. Used by the
   // "release party" flow where N maintainers co-sign a release
   // without each maintainer's signature appearing on the wire.
   ALGORITHM_BLS12381_THRESHOLD = 5;

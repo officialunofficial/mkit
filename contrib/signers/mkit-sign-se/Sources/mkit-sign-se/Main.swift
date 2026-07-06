@@ -9,7 +9,7 @@
 //
 // The `sign` subcommand is what mkit drives as an external signer; it
 // speaks the v1 wire protocol — length-prefixed protobuf `SignerFrame`
-// messages on stdin/stdout. See `docs/SPEC-EXTERNAL-SIGNER.md` and
+// messages on stdin/stdout. See `docs/specs/SPEC-EXTERNAL-SIGNER.md` and
 // `rust/crates/mkit-rpc/proto/signer.proto`.
 //
 // The tag identifying the Secure Enclave key can be supplied two ways:
@@ -133,7 +133,7 @@ struct ParsedArgs {
 
         `sign` speaks the v1 external-signer wire protocol — length-prefixed
         protobuf SignerFrame messages on stdin/stdout. See
-        docs/SPEC-EXTERNAL-SIGNER.md for the protocol surface.
+        docs/specs/SPEC-EXTERNAL-SIGNER.md for the protocol surface.
 
         The P-256 key lives in the Secure Enclave and is non-extractable by
         design. `--require-biometric` on keygen makes signing prompt for

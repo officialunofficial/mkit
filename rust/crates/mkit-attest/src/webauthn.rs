@@ -1,6 +1,6 @@
 //! `WebAuthn` signature-wrapping helper — Protocol v1.1 extension.
 //!
-//! See `docs/SPEC-EXTERNAL-SIGNER.md` §14 for the normative description.
+//! See `docs/specs/SPEC-EXTERNAL-SIGNER.md` §14 for the normative description.
 //!
 //! Background: FIDO2/`WebAuthn` roaming authenticators (`YubiKey`,
 //! `Nitrokey`, `SoloKey`) do NOT sign arbitrary byte strings. They sign
@@ -178,7 +178,7 @@ impl WebAuthnPolicy {
 ///
 /// NOTE: this helper enforces *ceremony* policy only. Trust-root binding
 /// (which public key is authorised to attest) stays in envelope
-/// verification — see `docs/SPEC-EXTERNAL-SIGNER.md` §14.
+/// verification — see `docs/specs/SPEC-EXTERNAL-SIGNER.md` §14.
 ///
 /// # Errors
 /// * [`Error::WebAuthnBadAuthenticatorData`] — `authenticator_data`

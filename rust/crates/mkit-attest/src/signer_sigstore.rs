@@ -1,7 +1,7 @@
 //! Sigstore signer — scaffold only.
 //!
 //! Will eventually wrap Fulcio OIDC + Rekor. Tracked in
-//! `docs/SPEC-ATTESTATIONS.md` §6.2. The scaffold exists so a signer
+//! `docs/specs/SPEC-ATTESTATIONS.md` §6.2. The scaffold exists so a signer
 //! router can dispatch on signer kind and get a concrete
 //! `Error::SigstoreNotImplemented` back instead of a compile-time
 //! branch.

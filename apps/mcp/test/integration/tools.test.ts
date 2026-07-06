@@ -89,9 +89,9 @@ describe("MCP tools (integration)", () => {
     expect(text).toContain("core object model and hashing");
   });
 
-  it("get_spec resolves a bare spec name and its docs/SPEC- path form identically", async () => {
+  it("get_spec resolves a bare spec name and its docs/specs/SPEC- path form identically", async () => {
     const bare = toolText(await callTool(client, "get_spec", { name: "OBJECTS" }));
-    const full = toolText(await callTool(client, "get_spec", { name: "docs/SPEC-OBJECTS.md" }));
+    const full = toolText(await callTool(client, "get_spec", { name: "docs/specs/SPEC-OBJECTS.md" }));
 
     expect(bare).toContain("# Objects");
     expect(bare).toContain("on-disk object formats");

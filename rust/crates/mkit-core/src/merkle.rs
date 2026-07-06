@@ -36,7 +36,7 @@
 //! * the finalized root is `H(leaf_count_be32 ‖ tree_root)`, which binds
 //!   the leaf count and defeats the odd-node-duplication malleability.
 //!
-//! Normative crypto: `docs/SPEC-MERKLE-OBJECTS.md`.
+//! Normative crypto: `docs/specs/SPEC-MERKLE-OBJECTS.md`.
 //!
 //! ## Identity formulas
 //!
@@ -62,7 +62,7 @@
 //! Object identity (`compute_tree_id` / `compute_chunked_id`) is stable and on
 //! the hot path. The inclusion-proof API — `build_`/`verify_chunk_inclusion_proof`,
 //! `build_`/`verify_tree_inclusion_proof`, and the proof wire format
-//! `[leaf_count_le:u32][n:u32][n × 32B sibling]` (`docs/SPEC-MERKLE-OBJECTS.md`
+//! `[leaf_count_le:u32][n:u32][n × 32B sibling]` (`docs/specs/SPEC-MERKLE-OBJECTS.md`
 //! §5) — is **provisional**. It is foundation for a future light-client / API
 //! consumer and has no in-tree reader yet; proofs are **not** transported
 //! today. The construction is tested and fuzzed, but the wire format may change

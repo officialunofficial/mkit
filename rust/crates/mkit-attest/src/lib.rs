@@ -3,7 +3,7 @@
 //! mkit-attest — JCS + in-toto v1 Statement + DSSE envelope + signers.
 //!
 //! The wire format and on-disk layout this crate produces are defined,
-//! normatively, in `docs/SPEC-ATTESTATIONS.md` — any change to this
+//! normatively, in `docs/specs/SPEC-ATTESTATIONS.md` — any change to this
 //! crate MUST update the spec in the same PR.
 //!
 //! The crate is layered as follows (each module's doc-comment has the

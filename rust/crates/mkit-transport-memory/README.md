@@ -4,7 +4,7 @@ In-memory transport for mkit, `HashMap`-backed, used in unit tests and fuzz
 harnesses.
 
 A `HashMap`-backed store that holds pack bytes and refs entirely in RAM,
-implementing the same `Transport` trait (`docs/SPEC-TRANSPORT.md`) every
+implementing the same `Transport` trait (`docs/specs/SPEC-TRANSPORT.md`) every
 other backend does. The trait's 7 verbs don't include attestation methods —
 those live in `mkit-attest`.
 

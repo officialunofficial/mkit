@@ -16,15 +16,15 @@ responsibility boundaries — there is no "common" or "utils" crate.
 |--------------------------------|---------------------------------------|------------------------------------------------------------------------|
 | `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing |
 | `mkit-attest`                  | `rust/crates/mkit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
-| `mkit-keystore`                | `rust/crates/mkit-keystore/`          | Key vault interface and backends (`SPEC-KEYSTORE.md`)                  |
-| `mkit-git-bridge`              | `rust/crates/mkit-git-bridge/`        | Git import/export bridge incl. fork mode (`SPEC-GIT-BRIDGE.md`)        |
-| `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`SPEC-RPC.md`)          |
+| `mkit-keystore`                | `rust/crates/mkit-keystore/`          | Key vault interface and backends (`specs/SPEC-KEYSTORE.md`)                  |
+| `mkit-git-bridge`              | `rust/crates/mkit-git-bridge/`        | Git import/export bridge incl. fork mode (`specs/SPEC-GIT-BRIDGE.md`)        |
+| `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
 | `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest + rustls transport with bearer auth and `If-Match` CAS         |
 | `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 + S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
-| `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`SPEC-TRANSPORT-ENC.md`) |
+| `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`specs/SPEC-TRANSPORT-ENC.md`) |
 | `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
 | `mkit-wasm`                    | `rust/crates/mkit-wasm/`              | WASM bindings for browsers and Cloudflare Workers                      |
 | `mkit-fuzz`                    | `rust/fuzz/`                          | cargo-fuzz harnesses (`docs/FUZZ.md`)                                  |
@@ -39,7 +39,7 @@ workspace under `contrib/signers/` — they are **not** members of the
 They share package metadata, lint config, and dependency pins by
 inheriting from `contrib/signers/Cargo.toml`, and they are not part of
 the `mkit` binary's link graph. They communicate over the protocol
-defined in `SPEC-EXTERNAL-SIGNER.md`.
+defined in `specs/SPEC-EXTERNAL-SIGNER.md`.
 
 ---
 
@@ -116,7 +116,7 @@ to a verifier keyed on `keyid`, and consults trust roots from
 
 ## 4. External signer protocol
 
-The contract is `docs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
+The contract is `docs/specs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
 adds optional WebAuthn wrapping). Shape:
 
 ```
@@ -139,22 +139,22 @@ Pick the closest match.
 
 ### "I'm modifying the parser for an on-disk object."
 Start at `rust/crates/mkit-core/src/serialize.rs`, then read
-`docs/SPEC-OBJECTS.md`. Update the matching golden vector under
+`docs/specs/SPEC-OBJECTS.md`. Update the matching golden vector under
 `rust/tests/golden/`. If you change the wire shape, version it.
 
 ### "I'm adding a new transport."
 Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
-trait, then read `docs/SPEC-TRANSPORT.md` for the verb set. Use
+trait, then read `docs/specs/SPEC-TRANSPORT.md` for the verb set. Use
 `mkit-transport-memory` as the smallest implementation reference.
 
 ### "I'm adding a new signer algorithm or implementation."
 For an in-tree algorithm, edit `mkit-attest`'s `Algorithm` enum and
 the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
-token), implement `docs/SPEC-EXTERNAL-SIGNER.md` and ship a binary —
+token), implement `docs/specs/SPEC-EXTERNAL-SIGNER.md` and ship a binary —
 see `contrib/signers/mkit-sign-file/` for a minimal example.
 
 ### "I'm changing the wire format."
-Bump the spec version in the relevant `docs/SPEC-*.md`, write a
+Bump the spec version in the relevant `docs/specs/SPEC-*.md`, write a
 new golden vector alongside the old one, and gate the new shape
 behind a version field. Do not delete the old vector until a major
 release window.
@@ -169,16 +169,16 @@ the change affects.
 
 ## 6. Cross-references
 
-- `SPEC-OBJECTS.md` — on-disk object format
-- `SPEC-PACKFILE.md` — packfile wire format
-- `SPEC-DELTA.md` — delta encoding
-- `SPEC-FASTCDC.md` — content-defined chunking
-- `SPEC-REFS.md` — ref names, CAS variants
-- `SPEC-INDEX.md` — repo-local index
-- `SPEC-TRANSPORT.md` — seven-verb wire protocol
-- `SPEC-SIGNING.md` — commit / remix signing
-- `SPEC-ATTESTATIONS.md` — DSSE + in-toto v1
-- `SPEC-EXTERNAL-SIGNER.md` — external signer subprocess protocol
+- `specs/SPEC-OBJECTS.md` — on-disk object format
+- `specs/SPEC-PACKFILE.md` — packfile wire format
+- `specs/SPEC-DELTA.md` — delta encoding
+- `specs/SPEC-FASTCDC.md` — content-defined chunking
+- `specs/SPEC-REFS.md` — ref names, CAS variants
+- `specs/SPEC-INDEX.md` — repo-local index
+- `specs/SPEC-TRANSPORT.md` — seven-verb wire protocol
+- `specs/SPEC-SIGNING.md` — commit / remix signing
+- `specs/SPEC-ATTESTATIONS.md` — DSSE + in-toto v1
+- `specs/SPEC-EXTERNAL-SIGNER.md` — external signer subprocess protocol
 - `SSH-SECURITY.md` — SSH trust model (informative)
 - `THREAT-MODEL.md` — security boundaries (informative)
 - `FUZZ.md` — fuzz harness conventions

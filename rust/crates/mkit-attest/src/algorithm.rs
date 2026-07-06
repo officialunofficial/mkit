@@ -34,7 +34,7 @@ pub enum Algorithm {
     P256,
     /// BLS12-381 M-of-N threshold (`MinSig` variant — signature in
     /// G1, public key in G2). Used by the release-party flow; see
-    /// `docs/SPEC-RELEASE-THRESHOLD.md`. No COSE id is registered for
+    /// `docs/specs/SPEC-RELEASE-THRESHOLD.md`. No COSE id is registered for
     /// BLS threshold; [`Algorithm::cose_id`] returns a **provisional**
     /// project-local negative integer (`-256`) chosen outside the IANA
     /// reserved ranges. This value is NOT stable — it will be swapped
@@ -75,7 +75,7 @@ impl Algorithm {
     /// Short textual prefix used at the front of the canonical keyid.
     ///
     /// `<prefix>:<hex-pubkey>` is the canonical keyid shape. See
-    /// `docs/SPEC-ATTESTATIONS.md` §6.3.
+    /// `docs/specs/SPEC-ATTESTATIONS.md` §6.3.
     #[must_use]
     pub fn prefix(self) -> &'static str {
         match self {

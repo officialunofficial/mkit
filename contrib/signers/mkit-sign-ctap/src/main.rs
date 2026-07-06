@@ -33,7 +33,7 @@
 //!   request via `SignRequest.key_ref`.
 //! * `list-credentials` — dumps the local metadata store.
 //!
-//! See `docs/SPEC-EXTERNAL-SIGNER.md` for the wire protocol and
+//! See `docs/specs/SPEC-EXTERNAL-SIGNER.md` for the wire protocol and
 //! `contrib/signers/README.md` for how mkit wires this binary in.
 
 use std::io;
@@ -248,7 +248,7 @@ non-zero with a stderr message. Per-request errors are returned as
 protobuf Error frames on stdout.
 
 Requires a plugged-in FIDO2 roaming authenticator (YubiKey / Nitrokey /
-SoloKey). See docs/SPEC-EXTERNAL-SIGNER.md for the wire protocol.
+SoloKey). See docs/specs/SPEC-EXTERNAL-SIGNER.md for the wire protocol.
 ";
 
 // -- Errors -----------------------------------------------------------

@@ -2,7 +2,7 @@
 //! [`ObjectStore`] and confirm the resulting on-disk path and hash are
 //! stable.
 //!
-//! Cross-binds the store layout (`docs/SPEC-OBJECTS.md` §10) to the
+//! Cross-binds the store layout (`docs/specs/SPEC-OBJECTS.md` §10) to the
 //! canonical byte format pinned by `tests/golden.rs`.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 

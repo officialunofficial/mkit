@@ -1,6 +1,6 @@
 //! Signer trait — uniform interface for producing a DSSE signature.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` §6.1. A signer is handed the DSSE PAE
+//! See `docs/specs/SPEC-ATTESTATIONS.md` §6.1. A signer is handed the DSSE PAE
 //! bytes by the envelope builder and returns the raw signature bytes;
 //! `envelope::encode` base64-wraps them on the way into the final JSON.
 //!

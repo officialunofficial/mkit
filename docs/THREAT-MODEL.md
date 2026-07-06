@@ -14,8 +14,8 @@ auth, or the release pipeline.
 ## 1. Scope
 
 mkit is a content-addressed VCS with cryptographic signing
-(`SPEC-SIGNING.md`) and an attestation subsystem
-(`SPEC-ATTESTATIONS.md`, `SPEC-EXTERNAL-SIGNER.md`). mkit defends:
+(`specs/SPEC-SIGNING.md`) and an attestation subsystem
+(`specs/SPEC-ATTESTATIONS.md`, `specs/SPEC-EXTERNAL-SIGNER.md`). mkit defends:
 
 - The integrity of objects, packs, refs, and attestations stored in a
   repository — content addressing plus signed commits and DSSE
@@ -73,7 +73,7 @@ mkit defends:
 
 - Object/pack/ref integrity. Tampered bytes fail BLAKE3 verification
   on read; pack readers refuse oversize allocations
-  (`SPEC-PACKFILE.md`, `SPEC-DELTA.md`).
+  (`specs/SPEC-PACKFILE.md`, `specs/SPEC-DELTA.md`).
 - Worktree containment. Symlinks pointing outside the repo root, and
   paths matching `.mkit` / `.git` (case-insensitive), are rejected
   during checkout.
@@ -280,7 +280,7 @@ and are ignored when they appear in repo config.
 
 The per-key classification, the read-site fence, the runtime credential
 gate on `remote_endpoint`, and the rules for adding a new config key
-are codified in `docs/SPEC-CONFIG-SECURITY.md`. That spec is the
+are codified in `docs/specs/SPEC-CONFIG-SECURITY.md`. That spec is the
 authoritative reference when reviewing a change that touches
 `mkit-cli/src/config.rs` or a transport that consumes a
 config-derived endpoint, key path, or credential.
@@ -431,7 +431,7 @@ document honest. A change that weakens any of these requires a
 matching update here.
 
 - Golden vectors at `rust/tests/golden/` pin signing-byte and
-  signing-hash shapes (`SPEC-SIGNING.md` §3, `SPEC-ATTESTATIONS.md` §4).
+  signing-hash shapes (`specs/SPEC-SIGNING.md` §3, `specs/SPEC-ATTESTATIONS.md` §4).
 - `mkit-keystore` golden vectors pin deterministic imported-key behavior for
   explicit `software-raw` Ed25519, secp256k1, and P-256 signing, while unit
   storage tests assert that `software` writes encrypted records rather than raw

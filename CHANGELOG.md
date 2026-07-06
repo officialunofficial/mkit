@@ -173,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `state-machine`, `supply-chain`, `typos`, `pr-title`) plus their configs
   (`typos.toml`, `scripts/verify-rename.sh`). Also removed the completed
   `docs/MERKELIZATION-PLAN.md` (the work shipped — see
-  `docs/SPEC-MERKLE-OBJECTS.md` and ADR 0001). The license grant
+  `docs/specs/SPEC-MERKLE-OBJECTS.md` and ADR 0001). The license grant
   (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`), `SECURITY.md`,
   `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and the `geiger` unsafe-code
   ceiling check are retained.
@@ -224,7 +224,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejected at open (`IncompatibleRepoFormat`) instead of silently
   mis-reading every `Tree`/`ChunkedBlob`. Pre-1.0 API/format break, no
   migration. New normative spec
-  [`docs/SPEC-MERKLE-OBJECTS.md`](docs/SPEC-MERKLE-OBJECTS.md) pins the
+  [`docs/specs/SPEC-MERKLE-OBJECTS.md`](docs/specs/SPEC-MERKLE-OBJECTS.md) pins the
   construction; see also ADR
   [`docs/adr/0001-merkelize-chunkedblob-and-tree.md`](docs/adr/0001-merkelize-chunkedblob-and-tree.md)
   ([#414](https://github.com/officialunofficial/mkit/pull/414)).
@@ -317,7 +317,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --passthrough`, `mkit git verify|status|format-patch`; behind the
   same default-off `git-bridge` feature;
   [#330](https://github.com/officialunofficial/mkit/pull/330)).
-  [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md) pins the
+  [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md) pins the
   inbound mapping: a git upstream imports as a downstream fork whose
   every commit/tag is signed by a dedicated, per-state-dir-pinned
   import key (per-key deterministic — same key + upstream ⇒ same
@@ -341,7 +341,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **git-bridge: deterministic one-way export to git mirrors**
   (`mkit git export`, behind the default-off `git-bridge` feature;
   [#330](https://github.com/officialunofficial/mkit/pull/330)).
-  New normative spec [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md)
+  New normative spec [`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md)
   pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
   translation with mkit-only fields — signer, signature, identity,
   annotation slots — carried in `mkit-*` commit/tag headers), so the
@@ -355,7 +355,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force-with-lease` from rebuildable state under `.mkit/git/`,
   skips untranslatable refs loudly (remix ancestry, git-illegal
   names, non-canonical chunking); the import direction is specified
-  separately in [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md). PARITY.md gains a scope amendment per its
+  separately in [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md). PARITY.md gains a scope amendment per its
   own renegotiation rule. Closes the export-bridge foundation scope of the
   git-interop exploration.
 
@@ -479,8 +479,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **additive** allocation within object schema v1 — no existing object
   layout, signing bytes, hash, or golden vector changes. New golden
   vectors are pinned under `rust/tests/golden/tags/`. Specs:
-  [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) §6a,
-  [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) §4a.
+  [`docs/specs/SPEC-OBJECTS.md`](docs/specs/SPEC-OBJECTS.md) §6a,
+  [`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md) §4a.
 - **`mkit-keystore` crate** — pluggable signing-key vault subsystem
   (PR [#109](https://github.com/officialunofficial/mkit/pull/109),
   hardened in
@@ -490,7 +490,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS Keychain, Windows Credential Store, Linux Secret Service,
   systemd-creds, and YubiKey (PIV and OpenPGP applets). Public
   interface and threat model are documented in
-  [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md).
+  [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md).
 - **`mkit key …` subcommand family** — `generate`, `list`, `import`,
   `export`, and `delete` against any built-in keystore backend, with
   `--backend`/`--label`/`--algorithm` selectors and a `--json`
@@ -505,7 +505,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mkit-rpc` crate** — shared length-prefixed framing and wire
   schemas (`signer.proto`, `common.proto`) used by the external
   signer subprocess protocol and reserved for future agent
-  protocols. See [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md).
+  protocols. See [`docs/specs/SPEC-RPC.md`](docs/specs/SPEC-RPC.md).
 - **`mkit status --porcelain=v1`** — machine-readable status output
   matching the `git status --porcelain=v1` shape, plus the mkit-
   specific `T` (mode change) status letter as the only extension.

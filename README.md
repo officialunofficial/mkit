@@ -116,7 +116,7 @@ Cloudflare Workers examples in
 ### Hardware signers (optional)
 
 External signers are separate binaries that mkit drives over the
-[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md). The signer crates
+[v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md). The signer crates
 live under [`contrib/signers/`](contrib/signers/) outside the
 top-level Cargo workspace at `rust/`, so the install path is
 `git clone` + `cargo install --path .`:
@@ -148,13 +148,13 @@ recognises:
   hosts that have it.
 - **yubikey** — hardware-backed via PIV / OpenPGP applets.
 - **external signers** — separate subprocess binaries speaking the
-  [v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md); reference
+  [v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md); reference
   signers under [`contrib/signers/`](contrib/signers/).
 
 The keystore vault abstracts these behind one interface so commit
 signing, attestation signing, and SSH push-auth share key references.
 The normative interface is in
-[`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md); end-user overview
+[`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md); end-user overview
 in [`docs/keystore.md`](docs/keystore.md). The backends a given
 binary supports depend on enabled build features — see CLI.md
 §"Config keys".
@@ -192,8 +192,8 @@ Workspace crates:
 |---|---|
 | `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
-| `mkit-git-bridge` | deterministic mkit↔git bridge: export mirroring, importer-signed import, fork-mode publishing ([`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md), [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md), [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md)) |
-| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) |
+| `mkit-git-bridge` | deterministic mkit↔git bridge: export mirroring, importer-signed import, fork-mode publishing ([`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md), [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md), [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md)) |
+| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) |
 | `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers) |
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
 | `mkit-cli` | the `mkit` binary |
@@ -202,7 +202,7 @@ Workspace crates:
 
 Each transport implements the same trait — `list_refs`, `read_ref`,
 `write_ref`, `pack_exists`, `download_pack`, `upload_pack` — described
-in [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md). The URL scheme
+in [`docs/specs/SPEC-TRANSPORT.md`](docs/specs/SPEC-TRANSPORT.md). The URL scheme
 picks the transport: `mkit+ssh://`, `mkit+enc://`, `mkit+s3://`,
 `mkit+https://`, `mkit+file://`. There is no "smart" fallback — the scheme is part of
 the contract. Deeper layering notes in
@@ -216,7 +216,7 @@ dichotomy. Hashes are stable across all transports and storage
 backends, including WASM.
 
 Object kinds (full schema in
-[`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md)):
+[`docs/specs/SPEC-OBJECTS.md`](docs/specs/SPEC-OBJECTS.md)):
 
 | Kind         | Purpose                                                    |
 |--------------|------------------------------------------------------------|
@@ -231,10 +231,10 @@ Object kinds (full schema in
 
 mkit ships **native attestation as a first-class object type**, not a
 side-channel. A signed in-toto v1 Statement wrapped in a DSSE envelope
-(spec at [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md)) is
+(spec at [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md)) is
 stored under `.mkit/attestations/<commit-hash>/<att-id>.dsse` and can
 be produced by any signer that speaks the
-[v1 stdio protocol](docs/SPEC-EXTERNAL-SIGNER.md):
+[v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md):
 
 ```text
                        ┌──────────────────────────────┐
@@ -258,7 +258,7 @@ verifiers). Anything that produces a valid DSSE envelope with an
 in-toto v1 Statement can attest to an mkit commit; conversely, mkit's
 attestations are consumable by any standards-compliant verifier.
 Multi-signer envelopes (one envelope, N signatures) work out of the
-box — see [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) §6.
+box — see [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) §6.
 
 Multi-algo attestation flow:
 
@@ -274,9 +274,9 @@ mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
 
 `.mkit/keys/default.key` is a raw Ed25519 seed. The same seed covers:
 
-- commit / remix signing ([`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md));
+- commit / remix signing ([`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md));
 - DSSE attestation signing via the `repo-key` signer
-  ([`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) §6.2);
+  ([`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) §6.2);
 - SSH transport authentication — OpenSSH 8.0+ accepts a raw Ed25519
   seed as `id_ed25519`, so the same key authenticates `mkit push`
   over `mkit+ssh://`.
@@ -341,29 +341,29 @@ they describe are pinned by the test vectors under
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
 | [`docs/PARITY.md`](docs/PARITY.md) | Contributors — v1 scope gate, machine-output contract, and tracked divergences (the per-command matrix is the web `/parity` page) |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
-| [`docs/SPEC-INDEX.md`](docs/SPEC-INDEX.md) | Implementers — staging-index format |
-| [`docs/SPEC-OBJECTS.md`](docs/SPEC-OBJECTS.md) | Implementers — object on-disk format |
-| [`docs/SPEC-MERKLE-OBJECTS.md`](docs/SPEC-MERKLE-OBJECTS.md) | Implementers — BMT-root identity for `Tree`/`ChunkedBlob` |
-| [`docs/SPEC-GC.md`](docs/SPEC-GC.md) | Implementers — garbage-collection retention roots & recovery |
-| [`docs/SPEC-PACKFILE.md`](docs/SPEC-PACKFILE.md) | Implementers — packfile wire format |
-| [`docs/SPEC-DELTA.md`](docs/SPEC-DELTA.md) | Implementers — delta encoding |
-| [`docs/SPEC-PACK-SHARDS.md`](docs/SPEC-PACK-SHARDS.md) | Implementers — erasure-coded pack delivery |
-| [`docs/SPEC-REFS.md`](docs/SPEC-REFS.md) | Implementers — ref names and CAS |
-| [`docs/SPEC-TRANSPORT.md`](docs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
-| [`docs/SPEC-TRANSPORT-ENC.md`](docs/SPEC-TRANSPORT-ENC.md) | Implementers — `mkit+enc://` no-OpenSSH encrypted transport |
-| [`docs/SPEC-SPARSE-CHECKOUT.md`](docs/SPEC-SPARSE-CHECKOUT.md) | Implementers — verifiable server-side sparse delivery |
-| [`docs/SPEC-FASTCDC.md`](docs/SPEC-FASTCDC.md) | Implementers — content chunking |
-| [`docs/SPEC-SIGNING.md`](docs/SPEC-SIGNING.md) | Implementers — commit signing format |
-| [`docs/SPEC-KEYSTORE.md`](docs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface |
-| [`docs/SPEC-RPC.md`](docs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
-| [`docs/SPEC-EXTERNAL-SIGNER.md`](docs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
-| [`docs/SPEC-ATTESTATIONS.md`](docs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation (in-toto v1 + DSSE) |
-| [`docs/SPEC-HISTORY-PROOF.md`](docs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
-| [`docs/SPEC-GIT-IMPORT.md`](docs/SPEC-GIT-IMPORT.md) | Implementers — importer-signed git→mkit translation |
-| [`docs/SPEC-GIT-BRIDGE.md`](docs/SPEC-GIT-BRIDGE.md) | Implementers — deterministic mkit→git translation |
-| [`docs/SPEC-RELEASE-THRESHOLD.md`](docs/SPEC-RELEASE-THRESHOLD.md) | Implementers — BLS12-381 threshold signatures for releases |
+| [`docs/specs/SPEC-INDEX.md`](docs/specs/SPEC-INDEX.md) | Implementers — staging-index format |
+| [`docs/specs/SPEC-OBJECTS.md`](docs/specs/SPEC-OBJECTS.md) | Implementers — object on-disk format |
+| [`docs/specs/SPEC-MERKLE-OBJECTS.md`](docs/specs/SPEC-MERKLE-OBJECTS.md) | Implementers — BMT-root identity for `Tree`/`ChunkedBlob` |
+| [`docs/specs/SPEC-GC.md`](docs/specs/SPEC-GC.md) | Implementers — garbage-collection retention roots & recovery |
+| [`docs/specs/SPEC-PACKFILE.md`](docs/specs/SPEC-PACKFILE.md) | Implementers — packfile wire format |
+| [`docs/specs/SPEC-DELTA.md`](docs/specs/SPEC-DELTA.md) | Implementers — delta encoding |
+| [`docs/specs/SPEC-PACK-SHARDS.md`](docs/specs/SPEC-PACK-SHARDS.md) | Implementers — erasure-coded pack delivery |
+| [`docs/specs/SPEC-REFS.md`](docs/specs/SPEC-REFS.md) | Implementers — ref names and CAS |
+| [`docs/specs/SPEC-TRANSPORT.md`](docs/specs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
+| [`docs/specs/SPEC-TRANSPORT-ENC.md`](docs/specs/SPEC-TRANSPORT-ENC.md) | Implementers — `mkit+enc://` no-OpenSSH encrypted transport |
+| [`docs/specs/SPEC-SPARSE-CHECKOUT.md`](docs/specs/SPEC-SPARSE-CHECKOUT.md) | Implementers — verifiable server-side sparse delivery |
+| [`docs/specs/SPEC-FASTCDC.md`](docs/specs/SPEC-FASTCDC.md) | Implementers — content chunking |
+| [`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md) | Implementers — commit signing format |
+| [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface |
+| [`docs/specs/SPEC-RPC.md`](docs/specs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
+| [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](docs/specs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
+| [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation (in-toto v1 + DSSE) |
+| [`docs/specs/SPEC-HISTORY-PROOF.md`](docs/specs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
+| [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md) | Implementers — importer-signed git→mkit translation |
+| [`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md) | Implementers — deterministic mkit→git translation |
+| [`docs/specs/SPEC-RELEASE-THRESHOLD.md`](docs/specs/SPEC-RELEASE-THRESHOLD.md) | Implementers — BLS12-381 threshold signatures for releases |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
-| [`docs/SPEC-CONFIG-SECURITY.md`](docs/SPEC-CONFIG-SECURITY.md) | Operators + implementers — repo-vs-user config trust split |
+| [`docs/specs/SPEC-CONFIG-SECURITY.md`](docs/specs/SPEC-CONFIG-SECURITY.md) | Operators + implementers — repo-vs-user config trust split |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 | [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |

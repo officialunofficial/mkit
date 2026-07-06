@@ -53,7 +53,7 @@ reproducible-build smoke test diffs two sequential release builds
 
 - Every on-disk / wire byte is pinned by golden vectors under
   `tests/golden/`. Any change must update both the vector and the
-  relevant `docs/SPEC-*.md` in the same PR.
+  relevant `docs/specs/SPEC-*.md` in the same PR.
 - `mkit version` emits exactly `mkit <X.Y.Z>\n` — asserted by both a
   snapshot test in `crates/mkit-cli/tests/version_snapshot.rs` and a CI
   step that runs the release binary.

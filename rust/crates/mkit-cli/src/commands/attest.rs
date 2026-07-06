@@ -60,7 +60,7 @@ use crate::exit;
 /// Default predicate type URI — placeholder; real callers pass their own.
 ///
 /// Uses the GitHub-anchored URI scheme defined in
-/// `docs/SPEC-ATTESTATIONS.md` §6.4
+/// `docs/specs/SPEC-ATTESTATIONS.md` §6.4
 /// (`https://github.com/officialunofficial/mkit/spec/predicate/<name>/v<n>`)
 /// so the only predicate URI mkit ships out-of-the-box points at a
 /// location the project actually controls.

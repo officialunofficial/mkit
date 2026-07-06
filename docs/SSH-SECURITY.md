@@ -127,7 +127,7 @@ idiomatic integration is the same one Git forges have used for a
 decade:
 
 1. User generates one Ed25519 key (`mkit keygen` — the seed doubles as
-   an `id_ed25519` for OpenSSH 8.0+; see `docs/SPEC-SIGNING.md` §8).
+   an `id_ed25519` for OpenSSH 8.0+; see `docs/specs/SPEC-SIGNING.md` §8).
 2. Server runs `sshd` with:
 
    ```

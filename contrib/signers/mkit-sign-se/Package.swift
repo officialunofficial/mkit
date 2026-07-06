@@ -3,7 +3,7 @@
 // mkit-sign-se — Apple Secure Enclave external signer for mkit.
 //
 // Speaks the v1 external-signer protocol defined in
-// `docs/SPEC-EXTERNAL-SIGNER.md`: length-prefixed protobuf `SignerFrame`
+// `docs/specs/SPEC-EXTERNAL-SIGNER.md`: length-prefixed protobuf `SignerFrame`
 // messages on stdin/stdout. The schema is shared with the Rust
 // reference signers (`rust/crates/mkit-rpc/proto/signer.proto`); the
 // Swift package consumes pre-generated `.pb.swift` sources from

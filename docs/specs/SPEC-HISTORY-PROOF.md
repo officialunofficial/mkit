@@ -64,7 +64,7 @@ tie our own pre-`v0.2` window to it: see §4.
 ### 2.1 Digest
 
 All node digests are 32-byte **BLAKE3** outputs, identical in length
-and primitive to mkit's existing [`hash::Hash`](../rust/crates/mkit-core/src/hash.rs).
+and primitive to mkit's existing [`hash::Hash`](../../rust/crates/mkit-core/src/hash.rs).
 
 The MMR's hashing schedule is *not* the same as `hash::hash()`:
 commonware's `Hasher` trait injects each node's MMR position into the
@@ -195,7 +195,7 @@ Failure modes that MUST return `false` (not panic):
   consumer-pointer check).
 
 The reference implementation lives at
-[`mkit-core::history::verify_inclusion`](../rust/crates/mkit-core/src/history.rs).
+[`mkit-core::history::verify_inclusion`](../../rust/crates/mkit-core/src/history.rs).
 Its acceptance tests cover the 1000-commit / position-712
 round-trip and the bit-flip tamper case.
 

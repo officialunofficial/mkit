@@ -215,7 +215,7 @@ export default {
 ## Hardware signers
 
 External signers are separate binaries that mkit drives over the
-[v1 stdio protocol](SPEC-EXTERNAL-SIGNER.md). Wire one up with
+[v1 stdio protocol](specs/SPEC-EXTERNAL-SIGNER.md). Wire one up with
 `attest.external_signer_path` in `.mkit/config`. Each signer ships its
 own README with setup, hardware notes, and troubleshooting — the lines
 below cover only how to install the binary.
@@ -302,7 +302,7 @@ on your `PATH` is not a release build of this repo.
 
 Run `mkit --help` to enumerate subcommands, then jump into the
 [CLI reference](CLI.md) or the
-[attestation spec](SPEC-ATTESTATIONS.md).
+[attestation spec](specs/SPEC-ATTESTATIONS.md).
 
 ## Updating
 

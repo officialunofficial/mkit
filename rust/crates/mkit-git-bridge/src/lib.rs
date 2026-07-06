@@ -2,7 +2,7 @@
 //!
 //! Deterministic mkit↔git bridge translation core.
 //!
-//! Implements [`SPEC-GIT-BRIDGE`](../../../docs/SPEC-GIT-BRIDGE.md):
+//! Implements [`SPEC-GIT-BRIDGE`](../../../docs/specs/SPEC-GIT-BRIDGE.md):
 //! every mkit v1 object maps to a git object whose bytes are a pure
 //! function of the source bytes, with mkit-only fields carried in
 //! `mkit-*` commit/tag headers so the original object — and its

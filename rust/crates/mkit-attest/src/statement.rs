@@ -1,6 +1,6 @@
 //! in-toto v1 Statement — payload of every DSSE envelope mkit produces.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` §4.2 and the upstream
+//! See `docs/specs/SPEC-ATTESTATIONS.md` §4.2 and the upstream
 //! <https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md>.
 //!
 //! Statement shape (JCS-canonical key order shown):

@@ -11,7 +11,7 @@ mkit speaks to processes outside its address space — external signers
 running as subprocesses, and remote `mkit-server` instances reached
 over `ssh(1)` — using a single shared wire protocol.
 
-The schemas live in [`rust/crates/mkit-rpc/proto/`](../rust/crates/mkit-rpc/proto/):
+The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/proto/):
 
 | File | Purpose |
 |---|---|
@@ -97,7 +97,7 @@ the next available number.
 | `ALGORITHM_SECP256K1` | 2 | ECDSA over SHA-256. DSSE-compatible. |
 | `ALGORITHM_P256` | 3 | ECDSA P-256 / secp256r1 / prime256v1 over SHA-256. |
 | `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (CTAP signers). |
-| `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/SPEC-RELEASE-THRESHOLD.md`. |
+| `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/specs/SPEC-RELEASE-THRESHOLD.md`. |
 
 ### 3.2 `KeyForm`
 
@@ -148,13 +148,13 @@ A signer or server is mkit-rpc-compliant if and only if:
 
 Reference implementations (all in this repository):
 
-- [`contrib/signers/mkit-sign-file/`](../contrib/signers/mkit-sign-file/) —
+- [`contrib/signers/mkit-sign-file/`](../../contrib/signers/mkit-sign-file/) —
   `KEY_FORM_RAW_BYTES`, Ed25519 / secp256k1 / P-256.
-- [`contrib/signers/mkit-sign-ctap/`](../contrib/signers/mkit-sign-ctap/) —
+- [`contrib/signers/mkit-sign-ctap/`](../../contrib/signers/mkit-sign-ctap/) —
   FIDO2/WebAuthn signer, P-256 / Ed25519-WebAuthn.
-- [`contrib/signers/mkit-sign-tpm/`](../contrib/signers/mkit-sign-tpm/) —
+- [`contrib/signers/mkit-sign-tpm/`](../../contrib/signers/mkit-sign-tpm/) —
   TPM 2.0 P-256 signer.
-- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
+- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
   `mkit serve` SSH server (consumes `ssh.proto`).
 
 The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)

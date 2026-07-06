@@ -1,4 +1,4 @@
-//! Attestation verification — §5.3 of `docs/SPEC-ATTESTATIONS.md`.
+//! Attestation verification — §5.3 of `docs/specs/SPEC-ATTESTATIONS.md`.
 //!
 //! This module only validates envelope well-formedness and per-signature
 //! cryptographic integrity against a caller-supplied trust-root registry.

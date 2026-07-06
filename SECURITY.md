@@ -98,7 +98,7 @@ In scope:
   `mkit-transport-*` crates).
 - The reference external signers under `contrib/signers/`.
 - Release pipeline integrity (signing, SBOM, reproducibility claims).
-- On-disk format parsers (v1 format documented in `docs/SPEC-*.md`).
+- On-disk format parsers (v1 format documented in `docs/specs/SPEC-*.md`).
 
 Out of scope (please report to upstream instead):
 

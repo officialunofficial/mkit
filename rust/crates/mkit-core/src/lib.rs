@@ -3,7 +3,7 @@
 //! mkit-core — BLAKE3 hashing and canonical v1 object byte format.
 //!
 //! The byte layout implemented here is defined, normatively, in
-//! `docs/SPEC-OBJECTS.md` (version `0x01`, magic `"MKT1"`). Any change
+//! `docs/specs/SPEC-OBJECTS.md` (version `0x01`, magic `"MKT1"`). Any change
 //! to this crate MUST update the spec in the same PR.
 //!
 //! The library depends on `std` to keep the code readable. No `serde`,
@@ -35,7 +35,7 @@ pub mod pack;
 // the dep stack (`commonware-coding` + `commonware-cryptography` +
 // `commonware-parallel` + `commonware-storage`) is large and only
 // needed by the shard-aware transports — see
-// `docs/SPEC-PACK-SHARDS.md`. Sibling of `pack`, not nested: the
+// `docs/specs/SPEC-PACK-SHARDS.md`. Sibling of `pack`, not nested: the
 // on-disk pack format stays untouched; shards are a wire-level
 // encoding *of* a pack.
 #[cfg(feature = "pack-shards")]
@@ -60,7 +60,7 @@ pub mod protocol;
 // O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
 // dep tree only materialises for downstream callers that opt in.
 // Persisted (journaled) MMR is in this build; commit-field integration
-// is planned — see docs/SPEC-HISTORY-PROOF.md.
+// is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
 #[cfg(feature = "history-mmr")]
 pub mod history;
 

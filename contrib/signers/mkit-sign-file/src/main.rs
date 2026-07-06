@@ -7,7 +7,7 @@
 //! `mkit-sign-file` — reference external-signer binary.
 //!
 //! Speaks the mkit-rpc signer protocol (`signer.proto`, length-prefixed
-//! buffa frames over stdin/stdout) defined in `docs/SPEC-EXTERNAL-SIGNER.md`.
+//! buffa frames over stdin/stdout) defined in `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
 //!
 //! * Reads framed [`SignerFrame`] messages from stdin.
 //! * Loads a 32-byte raw private key from disk (`--key <path>` or env var
@@ -401,7 +401,7 @@ USAGE:
     mkit-sign-file --key <path> [--algorithm <ed25519|secp256k1|p256>]
 
 Speaks the mkit-rpc signer protocol over stdin/stdout — see
-docs/SPEC-EXTERNAL-SIGNER.md and rust/crates/mkit-rpc/proto/signer.proto.
+docs/specs/SPEC-EXTERNAL-SIGNER.md and rust/crates/mkit-rpc/proto/signer.proto.
 
 Setup-phase errors (no key, bad permissions, bad argv) exit non-zero
 with a stderr message. Per-request errors are returned as protobuf

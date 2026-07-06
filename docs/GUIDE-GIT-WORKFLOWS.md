@@ -4,8 +4,8 @@ How to live with git from mkit: migrate a repository, track a git
 upstream while working natively, and send work back. Everything here
 needs a binary built with `--features git-bridge` (alias
 `git-export`) and a `git` on `PATH`. The mechanics are specified in
-[`SPEC-GIT-IMPORT.md`](SPEC-GIT-IMPORT.md) (inbound) and
-[`SPEC-GIT-BRIDGE.md`](SPEC-GIT-BRIDGE.md) (outbound, fork mode);
+[`SPEC-GIT-IMPORT.md`](specs/SPEC-GIT-IMPORT.md) (inbound) and
+[`SPEC-GIT-BRIDGE.md`](specs/SPEC-GIT-BRIDGE.md) (outbound, fork mode);
 this guide is the journey-level view.
 
 One model to keep in mind: an import is a **downstream fork**, not a

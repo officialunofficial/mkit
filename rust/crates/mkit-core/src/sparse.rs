@@ -1,6 +1,6 @@
 //! Verifiable sparse-checkout (in-process manifest-build + verify core).
 //!
-//! Spec reference: `docs/SPEC-SPARSE-CHECKOUT.md`. Issue #158.
+//! Spec reference: `docs/specs/SPEC-SPARSE-CHECKOUT.md`. Issue #158.
 //!
 //! # What this is
 //!
@@ -36,7 +36,7 @@
 //!
 //! # Wire format
 //!
-//! Strictly defined by `docs/SPEC-SPARSE-CHECKOUT.md`. This build does
+//! Strictly defined by `docs/specs/SPEC-SPARSE-CHECKOUT.md`. This build does
 //! not yet wire `SparseProof` into any transport — the type is the
 //! in-memory carrier between [`build_sparse`] and [`verify_sparse`].
 //!

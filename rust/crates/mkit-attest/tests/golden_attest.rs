@@ -10,7 +10,7 @@
 //!    accepts the embedded Ed25519 signature against the trust root
 //!    recovered from the deterministic seed.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/attest/MANIFEST.txt`.
+//! See `docs/specs/SPEC-ATTESTATIONS.md` and `rust/tests/golden/attest/MANIFEST.txt`.
 //!
 //! Feature-gated on `algo-ed25519` because the pinned vectors here are
 //! Ed25519 signatures produced by `RepoKeySigner`, which is gated on

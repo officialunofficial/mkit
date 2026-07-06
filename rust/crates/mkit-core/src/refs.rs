@@ -1,6 +1,6 @@
 //! Refs subsystem.
 //!
-//! Implements the local-disk side of `docs/SPEC-REFS.md`: ref names,
+//! Implements the local-disk side of `docs/specs/SPEC-REFS.md`: ref names,
 //! the 65-byte wire encoding, the symbolic-or-detached `HEAD` file, and
 //! shallow-boundary persistence at `.mkit/shallow`.
 //!

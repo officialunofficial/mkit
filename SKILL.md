@@ -275,6 +275,6 @@ reference. In a checkout, the same content lives at:
 
 - Full command reference: `docs/CLI.md` and `man mkit`.
 - Git-parity scope & deliberate divergences: `docs/PARITY.md`.
-- Wire/on-disk formats and subsystems: `docs/SPEC-*.md` (objects, signing,
+- Wire/on-disk formats and subsystems: `docs/specs/SPEC-*.md` (objects, signing,
   attestations, transport, packfile, keystore, …).
 - Install channels (release archives, hardware signers, WASM/npm): `docs/INSTALL.md`.

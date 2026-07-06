@@ -6,7 +6,7 @@ repositories.
 This is a real local/served transport, not a test-only fixture: it's the
 backend for `mkit+file://` remotes and for repositories served via
 `mkit serve`. It also doubles as the in-tree test transport. See
-`docs/SPEC-TRANSPORT.md` for the `Transport` trait it implements.
+`docs/specs/SPEC-TRANSPORT.md` for the `Transport` trait it implements.
 
 ## On-disk layout
 

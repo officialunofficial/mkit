@@ -54,7 +54,7 @@
 //! - Real TCP via `tcp::connect_tcp` (client) and
 //!   `tcp::serve_tcp_with_policy_and_bounds` (server).
 //! - `mkit+enc://` URL parsing via [`url::parse_enc_url`]. See
-//!   [docs/SPEC-TRANSPORT-ENC.md](../../../docs/SPEC-TRANSPORT-ENC.md)
+//!   [docs/specs/SPEC-TRANSPORT-ENC.md](../../../docs/specs/SPEC-TRANSPORT-ENC.md)
 //!   §6.
 
 #![forbid(unsafe_code)]

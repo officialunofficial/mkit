@@ -3,7 +3,7 @@
 Third-party signer implementations for mkit's `external` signer slot
 live here. They all speak the same wire protocol:
 
-> [**SPEC-EXTERNAL-SIGNER.md**](../../docs/SPEC-EXTERNAL-SIGNER.md) — v1
+> [**SPEC-EXTERNAL-SIGNER.md**](../../docs/specs/SPEC-EXTERNAL-SIGNER.md) — v1
 > length-prefixed protobuf [`SignerFrame`](../../rust/crates/mkit-rpc/proto/signer.proto)
 > messages over stdin/stdout. Schema is `mkit-rpc/proto/signer.proto`
 > (with `common.proto` for shared types); the Rust runtime is `buffa`.
@@ -49,7 +49,7 @@ signed over, and it returns the enrolled credential public key in
 `authenticator_data || SHA256(client_data_json)` and check the
 signature against it, after asserting that
 `clientDataJSON.challenge == base64url_nopad(PAE)`. The full spec is
-in [`docs/SPEC-EXTERNAL-SIGNER.md`](../../docs/SPEC-EXTERNAL-SIGNER.md)
+in [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../docs/specs/SPEC-EXTERNAL-SIGNER.md)
 §14, and the reference verifier helper lives at
 `rust/crates/mkit-attest/src/webauthn.rs` (`verify_webauthn_wrapping`).
 
@@ -175,7 +175,7 @@ match and exits 0 with a skip message when none is present.
 
 ## Writing your own signer
 
-1. Read [`docs/SPEC-EXTERNAL-SIGNER.md`](../../docs/SPEC-EXTERNAL-SIGNER.md).
+1. Read [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../docs/specs/SPEC-EXTERNAL-SIGNER.md).
    It's ~400 lines and covers invocation, wire format, errors,
    timeouts, and the security model.
 2. Copy `mkit-sign-file/tests/end_to_end.rs` as a contract test. It

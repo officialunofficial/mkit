@@ -8,7 +8,7 @@ audience: config-key authors, config.rs reviewers, transport authors
 # SPEC-CONFIG-SECURITY — repo-vs-user config trust split
 
 Status: **Normative.** Companion to `docs/THREAT-MODEL.md` §4 and
-`docs/SPEC-KEYSTORE.md` §8.2. Audience: anyone adding a new config
+`docs/specs/SPEC-KEYSTORE.md` §8.2. Audience: anyone adding a new config
 key, anyone reviewing a change that touches `mkit-cli/src/config.rs`,
 and anyone writing a transport that consumes a config-derived
 endpoint, key path, or credential.
@@ -285,7 +285,7 @@ When you add a key to `Config`:
 - `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs` — per-key
   CLI regression suite.
 - `docs/THREAT-MODEL.md` §4 — wider trust-boundary discussion.
-- `docs/SPEC-KEYSTORE.md` §8.2 — the keystore-side requirement that
+- `docs/specs/SPEC-KEYSTORE.md` §8.2 — the keystore-side requirement that
   every keystore selector be repo-forbidden.
 - Issue #97 — the credential-exfiltration follow-up that motivated
   the runtime gate on `remote_endpoint`.
