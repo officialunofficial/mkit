@@ -184,7 +184,9 @@ export function AttestDemo() {
               </Field>
             </FieldList>
           ) : (
-            <p className='text-sm text-red-600 dark:text-red-400'>{(!signed.ok && signed.error) || 'Key error.'}</p>
+            <p className='text-sm text-red-600 dark:text-red-400'>
+              {(!signed.ok && signed.error) || 'Couldn’t derive the key. Reload the page and try again.'}
+            </p>
           )}
 
           <label className='block'>

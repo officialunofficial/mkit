@@ -23,7 +23,7 @@ import { Tooltip } from '../tooltip'
 import { useMkit } from '../use-mkit'
 import { useDerive } from './compose'
 import { PlayerLabel } from './player-label'
-import { BTN, errMsg } from './shared'
+import { BTN, CAS_CONFLICT_COPY, IDENTITY_LOCKED_COPY, errMsg } from './shared'
 
 /**
  * The two ways to build on a commit, shared down to the rows that trigger them: • Remix — a first-class remix object
@@ -99,16 +99,16 @@ export function RepoLog({
                 `remix branch ${ref}`,
               ]
             : [
-                'Created a new branch pointing AT the commit — no new object, no attribution. Just a fresh line of history (git branch).',
+                'Created a new branch pointing AT the commit — no new object, no attribution, a fresh line of history (git branch).',
                 `branch ${ref}`,
               ],
       })
     } catch (e) {
       setStatus(
         e instanceof CasConflictError
-          ? 'That branch just moved (a concurrent push) — try again.'
+          ? CAS_CONFLICT_COPY
           : e instanceof IdentityLockedError
-            ? 'Unlock or create an identity first.'
+            ? IDENTITY_LOCKED_COPY
             : errMsg(e),
       )
     }

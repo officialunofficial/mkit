@@ -24,3 +24,8 @@ export const PRIMARY_BTN =
 // the single place to keep raw browser strings (WebAuthn DOMExceptions, fetch
 // failures) out of the UI. It delegates to the shared humanizer.
 export { humanizeError as errMsg } from '../../lib/humanize-error'
+
+// One wording per state, shared by the compose and repo-browser surfaces
+// (style guide: same state, same words).
+export const CAS_CONFLICT_COPY = 'Someone pushed first — try again.'
+export const IDENTITY_LOCKED_COPY = 'Your identity is locked. Unlock it and try again.'

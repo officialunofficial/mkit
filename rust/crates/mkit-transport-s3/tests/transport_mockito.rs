@@ -442,6 +442,57 @@ fn read_ref_invalid_body_returns_invalid_response() {
     ));
 }
 
+/// SPEC-REFS §1 (#552): uppercase hex is forbidden on the wire and
+/// readers MUST reject it. The tolerant parser used to accept it via
+/// the general `from_hex`.
+#[test]
+fn read_ref_uppercase_hex_returns_invalid_response() {
+    let mut server = mockito::Server::new();
+    let h = [0xEEu8; 32];
+    let mut body = to_hex(&h).to_uppercase().into_bytes();
+    body.push(b'\n');
+    let _m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(body)
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.read_ref("refs/heads/main"),
+        Err(TransportError::InvalidResponse)
+    ));
+}
+
+/// SPEC-REFS §1 (#552): the wire form is exactly 65 bytes — 64 lowercase
+/// hex + `\n`. S3 stores ref bytes verbatim, so CRLF, extra whitespace,
+/// or a missing terminal newline are corruption, not tolerated variants.
+#[test]
+fn read_ref_non_canonical_body_returns_invalid_response() {
+    let h = [0xEEu8; 32];
+    let hex = to_hex(&h);
+    let malformed: [Vec<u8>; 3] = [
+        format!("{hex}\r\n").into_bytes(), // CRLF
+        format!("{hex}  \n").into_bytes(), // trailing spaces
+        hex.clone().into_bytes(),          // missing newline
+    ];
+    for body in malformed {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(body.clone())
+            .create();
+        let t = build_transport(&server.url());
+        assert!(
+            matches!(
+                t.read_ref("refs/heads/main"),
+                Err(TransportError::InvalidResponse)
+            ),
+            "body {body:?} must be rejected"
+        );
+    }
+}
+
 /// A ref body that exceeds `REF_BODY_LIMIT` (256 bytes) must surface a
 /// non-retryable `PayloadTooLarge` (#223: was a retryable 507), and the
 /// transport must NOT retry it — exactly one GET is expected.
@@ -509,6 +560,57 @@ fn list_refs_200_parses_xml_and_sorts() {
     assert_eq!(refs[1].name, "zebra");
     assert_eq!(refs[0].hash.unwrap(), h_alpha);
     assert_eq!(refs[1].hash.unwrap(), h_zebra);
+}
+
+/// SPEC-REFS §1 (#552): `list_refs` resolves each key with the same
+/// strict parser as `read_ref`. A malformed body (uppercase hex, CRLF)
+/// is skipped — mirroring the file transport, which drops undecodable
+/// ref files from listings — while valid entries are still returned.
+#[test]
+fn list_refs_skips_non_canonical_ref_bodies() {
+    let mut server = mockito::Server::new();
+
+    let xml = br#"<ListBucketResult>
+        <Contents><Key>refs/heads/crlf</Key></Contents>
+        <Contents><Key>refs/heads/good</Key></Contents>
+        <Contents><Key>refs/heads/upper</Key></Contents>
+    </ListBucketResult>"#;
+    let _m_list = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"/bucket\?list-type=2".into()),
+        )
+        .with_status(200)
+        .with_body(xml)
+        .create();
+
+    let h_good = [0x01u8; 32];
+    let mut body_good = to_hex(&h_good).into_bytes();
+    body_good.push(b'\n');
+    let body_upper = format!("{}\n", to_hex(&[0xABu8; 32]).to_uppercase()).into_bytes();
+    let body_crlf = format!("{}\r\n", to_hex(&[0x03u8; 32])).into_bytes();
+
+    let _m_good = server
+        .mock("GET", "/bucket/refs/heads/good")
+        .with_status(200)
+        .with_body(body_good)
+        .create();
+    let _m_upper = server
+        .mock("GET", "/bucket/refs/heads/upper")
+        .with_status(200)
+        .with_body(body_upper)
+        .create();
+    let _m_crlf = server
+        .mock("GET", "/bucket/refs/heads/crlf")
+        .with_status(200)
+        .with_body(body_crlf)
+        .create();
+
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads/").unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "good");
+    assert_eq!(refs[0].hash.unwrap(), h_good);
 }
 
 #[test]

@@ -492,13 +492,14 @@ fn restore_blob(
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
         Object::ChunkedBlob(cb) => {
             let mut buf: Vec<u8> = Vec::with_capacity(usize::try_from(cb.total_size).unwrap_or(0));
-            for ch in cb.chunks {
-                let chunk_obj = store.read_object(&ch)?;
+            for ch in &cb.chunks {
+                let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
                     return Err(RestoreError::NotABlob);
                 };
                 buf.extend_from_slice(&b.data);
             }
+            cb.check_reassembled_size(buf.len())?;
             write_file_atomic(dir, name, &buf, executable)?;
         }
         _ => return Err(RestoreError::NotABlob),
@@ -1057,6 +1058,44 @@ mod tests {
         restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap();
         let content = fs::read(target.path().join("out.txt")).unwrap();
         assert_eq!(content, b"Hello, chunked world!");
+    }
+
+    /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."
+    /// A manifest whose forged `total_size` disagrees with its (valid)
+    /// chunks must fail restore instead of writing wrong-length content.
+    #[test]
+    fn restore_rejects_chunked_total_size_mismatch() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let c0 = put_blob(&store, b"Hello, ");
+        let c1 = put_blob(&store, b"world!");
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 7 + 6 + 1,
+            chunk_size: 0,
+            chunks: vec![c0, c1],
+        });
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+        let err =
+            restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Object(object::MkitError::ChunkedBlobSizeMismatch {
+                    expected: 14,
+                    actual: 13,
+                })
+            ),
+            "expected ChunkedBlobSizeMismatch, got {err:?}"
+        );
+        assert!(!target.path().join("out.txt").exists());
     }
 
     #[cfg(unix)]

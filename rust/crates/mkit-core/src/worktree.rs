@@ -792,6 +792,8 @@ pub fn stat_matches(entry: &crate::index::IndexEntry, meta: &fs::Metadata) -> bo
 /// - [`WorktreeError::Store`] if `hash` or any chunk is missing.
 /// - [`WorktreeError::Io`] if `hash` (or a chunk) resolves to an object
 ///   that is neither a `Blob` nor a `ChunkedBlob` of `Blob`s.
+/// - [`WorktreeError::Object`] if the concatenated chunks do not total
+///   the manifest's `total_size` (SPEC-OBJECTS §7).
 pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
     store: &S,
     hash: &Hash,
@@ -812,6 +814,7 @@ pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
                     }
                 }
             }
+            manifest.check_reassembled_size(data.len())?;
             Ok(data)
         }
         other => Err(WorktreeError::Io(io::Error::other(format!(
@@ -1723,6 +1726,40 @@ mod tests {
         assert_eq!(t.entries[0].object_hash, chunked_hash);
         // Reassembly via the shared helper round-trips the source bytes.
         assert_eq!(read_blob(&store, &chunked_hash).unwrap(), big);
+    }
+
+    /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."
+    /// A manifest with valid chunks but a forged `total_size` (stored under
+    /// its real merkle id — the forgery changes the id, not its validity as
+    /// a store entry) must fail reassembly, not silently return
+    /// wrong-length content.
+    #[test]
+    fn read_blob_rejects_chunked_total_size_mismatch() {
+        let (_sd, store) = fresh_store();
+        let chunk = serialize::serialize(&Object::Blob(crate::object::Blob {
+            data: b"twelve bytes".to_vec(),
+        }))
+        .unwrap();
+        let chunk_hash = store.write(&chunk).unwrap();
+        let manifest = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 999,
+            chunk_size: 0,
+            chunks: vec![chunk_hash],
+        });
+        let h = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let err = read_blob(&store, &h).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WorktreeError::Object(crate::object::MkitError::ChunkedBlobSizeMismatch {
+                    expected: 999,
+                    actual: 12,
+                })
+            ),
+            "expected ChunkedBlobSizeMismatch, got {err:?}"
+        );
     }
 
     /// A symlink entry MUST still address a single `Blob` (its target
