@@ -36,7 +36,9 @@ use mkit_core::hash::{Hash, to_hex};
 use mkit_core::protocol::{
     BackoffIterator, PackKey, Transport, TransportError, TransportResult, is_retryable,
 };
-use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
+use mkit_core::refs::{
+    Ref, RefWriteCondition, parse_lowercase_hash, validate_ref_name, validate_ref_prefix,
+};
 use reqwest::Method;
 use reqwest::blocking::{Client, Response};
 
@@ -733,13 +735,16 @@ impl Transport for S3Transport {
 }
 
 fn parse_ref_body(body: &[u8]) -> TransportResult<Hash> {
-    // Ref wire format is 64 hex chars + optional trailing whitespace.
-    let s = std::str::from_utf8(body).map_err(|_| TransportError::InvalidResponse)?;
-    let trimmed = s.trim_end_matches(['\n', '\r', ' ', '\t']);
-    if trimmed.len() != 64 {
+    // SPEC-REFS §1: a ref value on the wire is exactly 64 lowercase hex
+    // chars + a single '\n' — 65 bytes. S3 exposes ref bytes verbatim
+    // (the byte-exact ETag/CAS contract in SPEC-REFS §5 depends on it),
+    // so the tolerance SPEC-REFS grants local ref *files* does not apply:
+    // uppercase hex, CRLF, extra whitespace, or any other length is a
+    // corrupt or foreign object and must be rejected.
+    let Some((&b'\n', hex)) = body.split_last() else {
         return Err(TransportError::InvalidResponse);
-    }
-    mkit_core::hash::from_hex(trimmed).map_err(|_| TransportError::InvalidResponse)
+    };
+    parse_lowercase_hash(hex).ok_or(TransportError::InvalidResponse)
 }
 
 /// One parsed page of a `ListObjectsV2` response: the keys it contained
@@ -1275,11 +1280,16 @@ mod tests {
         assert_eq!(got.len(), 34);
     }
 
+    const CANONICAL_HEX: &[u8; 64] =
+        b"0101010101010101010101010101010101010101010101010101010101010101";
+
+    /// Positive: the canonical 65-byte wire body (64 lowercase hex +
+    /// `\n`) parses.
     #[test]
-    fn parse_ref_body_accepts_trailing_newline() {
-        let mut body = Vec::new();
-        body.extend_from_slice(b"0101010101010101010101010101010101010101010101010101010101010101");
+    fn parse_ref_body_accepts_canonical_65_byte_body() {
+        let mut body = CANONICAL_HEX.to_vec();
         body.push(b'\n');
+        assert_eq!(body.len(), 65);
         let h = parse_ref_body(&body).unwrap();
         assert_eq!(h[0], 0x01);
     }
@@ -1287,6 +1297,91 @@ mod tests {
     #[test]
     fn parse_ref_body_rejects_short() {
         assert!(parse_ref_body(b"deadbeef").is_err());
+    }
+
+    /// SPEC-REFS §1: uppercase hex MUST be rejected on read.
+    #[test]
+    fn parse_ref_body_rejects_uppercase_hex() {
+        let mut body = CANONICAL_HEX.to_vec();
+        body[0] = b'A';
+        body.push(b'\n');
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    /// The terminal `\n` is part of the 65-byte wire form; a bare
+    /// 64-hex body is malformed.
+    #[test]
+    fn parse_ref_body_rejects_missing_newline() {
+        assert!(matches!(
+            parse_ref_body(CANONICAL_HEX),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    /// CRLF is not the wire form — S3 stores ref bytes verbatim, so the
+    /// local-file `\r` tolerance does not apply here.
+    #[test]
+    fn parse_ref_body_rejects_crlf() {
+        let mut body = CANONICAL_HEX.to_vec();
+        body.extend_from_slice(b"\r\n");
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn parse_ref_body_rejects_trailing_spaces() {
+        let mut body = CANONICAL_HEX.to_vec();
+        body.extend_from_slice(b"  \n");
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+
+        // Space after the newline is equally malformed.
+        let mut body = CANONICAL_HEX.to_vec();
+        body.extend_from_slice(b"\n ");
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn parse_ref_body_rejects_wrong_length() {
+        // 63 hex chars + newline.
+        let mut body = CANONICAL_HEX[..63].to_vec();
+        body.push(b'\n');
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+
+        // 65 hex chars + newline.
+        let mut body = CANONICAL_HEX.to_vec();
+        body.extend_from_slice(b"0\n");
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+
+        // Doubled newline (66 bytes).
+        let mut body = CANONICAL_HEX.to_vec();
+        body.extend_from_slice(b"\n\n");
+        assert!(matches!(
+            parse_ref_body(&body),
+            Err(TransportError::InvalidResponse)
+        ));
+
+        // Empty body.
+        assert!(matches!(
+            parse_ref_body(b""),
+            Err(TransportError::InvalidResponse)
+        ));
     }
 
     #[test]
