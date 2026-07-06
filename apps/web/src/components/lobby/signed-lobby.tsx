@@ -574,7 +574,7 @@ function Composer({ room }: { room: string }) {
           onClick={() => void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())}
         >
           {actions.busy ? (
-            'One moment…'
+            'Waiting for your passkey…'
           ) : (
             <span className='inline-flex items-center gap-1.5'>
               {/* Fingerprint — the passkey/biometric this action unlocks with

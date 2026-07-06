@@ -201,7 +201,7 @@ export const methodology = {
       'non-durable objects. git does not fsync loose objects by default, so every row above has mkit doing strictly ' +
       'more durability work. Per-object flushing is available via the durability.objects = per-object config key.',
     'One machine, one filesystem, one day. Ratios on spinning disks, network filesystems, or Linux will differ — ' +
-      'flush cost in particular is very hardware-dependent.',
+      'flush cost in particular is hardware-dependent.',
     'Both tools were run through their CLI end to end (process spawn included), with stock configuration: no git ' +
       'core.fsmonitor, no mkit tuning.',
   ],
