@@ -334,3 +334,25 @@ signing-bytes golden vector anyway, the wire format documented in §2 and the on
 documented in §4 are both "frozen relative to the v0.2 break" — any
 change to commonware between now and v0.2 lands as part of the same
 migration, not as a separate break.
+
+---
+
+## 6. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| A commit's `Position(n)` never shifts | the MMR is append-only; positions are 0-based dense leaf indices (§2.4) |
+| A leaf digest cannot be replayed at another position | commonware's hasher injects the node's MMR position into every digest (§2.1) |
+| The root binds the commit *sequence* and its length | `root = Blake3(leaf_count_be_u64 \|\| fold(peak_digests))` (§2.3) |
+| Producers and verifiers compute the same root | peak bagging pinned to `Bagging::ForwardFold` on both sides (§2.3) |
+| A tampered digest, wrong position, wrong commit, foreign root, mismatched `leaves`, or truncated/over-long `digests` never verifies | `verify_inclusion` returns `false` — never panics — per the enumerated failure modes (§3) |
+| Two distinct branches never share a history partition | the hex-escape sanitiser is injective on the `validate_ref_name` domain (§4.2) |
+| A ref advance and its MMR append cannot interleave with another writer | both run under `<mkit_dir>/refs-history.lock` (§4.3) |
+| An appended leaf is durable before the update returns | `CommitHistory::append` calls `Journaled::sync` (§4.3) |
+| A crash leaves the ref at most one commit ahead of the MMR | ref CAS precedes the append; recovery is the rebuild shim (§4.3, §4.5) |
+| Reopening a half-written journal never panics or silently exposes stale data | torn trailing leaf rewound by `mmr::full::Mmr::init`; anything deeper surfaces as `HistoryError::Corrupted` (§4.4) |
+| Proof bytes decode identically for every consumer | commonware-codec at the pinned `=2026.5.0` (§2.2) |
+
+These invariants are frozen relative to the v0.2 break: any upstream
+commonware change to the proof layout or partition shape lands as part
+of that migration, not as a separate break (§5).

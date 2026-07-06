@@ -190,3 +190,22 @@ choice is deliberate:
 The buffa runtime (`buffa = "0.7"`) is used by the Rust reference
 implementations. Other languages can use any compliant protobuf 3 /
 edition 2023 toolchain.
+
+---
+
+## 6. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| No frame exceeds 1 MiB, in either direction | `MAX_FRAME_BYTES` checked on receive AND send; conformance requires both (§1, §4) |
+| A hostile length prefix cannot force a large allocation | length validated against the cap **before** buffers are allocated; no streaming decode of a single frame (§1) |
+| A truncated frame is never mis-parsed as a shorter one | truncation is connection-fatal; the receiver MUST close the stream, no recovery (§1) |
+| No request is processed before version agreement | first frame MUST be `Hello` with `PROTOCOL_VERSION_1`; `HelloResponse` echoes it before any other processing (§2, §4) |
+| Every error is machine-actionable | `Error` frames MUST carry a known non-zero `ErrorCode` and non-empty `message`; `ERROR_CODE_UNSPECIFIED` is itself a protocol error (§3.3, §4) |
+| Wire numbers never change meaning | `Algorithm` / `KeyForm` / `ErrorCode` integers are append-only, never renumbered; field renumbering/removal requires a sibling `*2.proto` + `ProtocolVersion` bump (§2, §3.1) |
+| v1 additions cannot break existing peers | new enum values fall back to unknown-variant handling; new oneof variants are rejected with `ERROR_CODE_INVALID_REQUEST` (§2) |
+| Bulk data never violates the frame cap | flows over 1 MiB use the streaming pattern (`PackChunk`) instead of a bigger frame (§1) |
+| Programs never couple to vendor-opaque bytes | `Error.details` MUST NOT be pattern-matched (§3.3) |
+
+The conformance checklist in §4 is the normative test of these
+properties; the `.proto` files remain the source of truth (§5).

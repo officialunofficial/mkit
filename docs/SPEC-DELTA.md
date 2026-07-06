@@ -266,4 +266,24 @@ refuse unknown versions.
 
 ---
 
+## 10. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| A reader executes only streams it understands | `stream_version` byte; `!= 0x01` → `UnsupportedDeltaVersion` (§2) |
+| The stream is applied only to the base it was written against | `base_len` MUST equal the supplied base length, checked before any opcode executes (§2, §4) |
+| COPY never reads outside the base | `offset + length <= base_len` → `DeltaCorrupt` (§2, §4) |
+| Output never exceeds the declared size, even mid-stream | per-opcode `out.len() + length <= result_len` check (§2, §4) |
+| Output is exactly `result_len` bytes at end-of-stream | final length check → `DeltaCorrupt` (§2, §4) |
+| No degenerate or reserved encodings decode | opcode `0x00`, zero-length COPY, and non-zero reserved COPY bits all → `DeltaCorrupt` (§3, §4) |
+| Truncation is distinguishable from structural corruption | `UnexpectedEof` vs `DeltaCorrupt` (§2, §4) |
+| A crafted stream cannot panic the decoder, read out of bounds, or force a multi-GiB reservation | fuzz requirement (§8 vector 15); capacity-hint cap, implementation guidance (§4) |
+| Stream and result sizes are bounded | fixed field widths, the enclosing pack-entry cap, and the 1 GiB per-object limit on `result_len` (§7) |
+
+The stream itself carries no integrity or signature (§6): tamper
+detection is transitive through the packfile trailer, the object-store
+hash check on the reconstructed object, and the commit signature.
+
+---
+
 *~1000 words.*

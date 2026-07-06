@@ -377,3 +377,29 @@ Mitigations the host SHOULD take:
 This document and `signer.proto` are jointly v1. Wire-compatible
 additions land in v0.1.x patch releases. Breaking changes bump to v2
 with a sibling `signer2.proto`. See [SPEC-RPC §2](SPEC-RPC.md#2-versioning).
+
+---
+
+## 12. Invariants
+
+Properties the mkit host upholds regardless of signer behaviour, plus
+the fail-closed rules signers MUST honour. §10 defines what a
+compromised signer can still do; nothing below claims otherwise.
+
+| Invariant | Enforced by |
+|---|---|
+| The payload never appears on argv or in fresh environment variables | PAE travels only inside `SignRequest.payload` on stdin (§2, §6) |
+| The signer binary cannot be swapped via `$PATH` | absolute path required, relative paths rejected at config time (§2) |
+| No shell interpolation of signer argv | tokens passed verbatim, no metacharacters (§2) |
+| A hostile repo cannot choose the signer or hang the host | `attest.external_signer_path` / `_args` / `_timeout_secs` are user-scoped only (§2.1) |
+| The conversation always terminates; no zombie, no orphaned hardware session | single wall-clock deadline over spawn → … → child-exit; kill + reap on expiry (§2.1) |
+| A stderr-heavy signer cannot deadlock the host | mandatory concurrent stderr drain to EOF (§2) |
+| A signer cannot claim a signature it did not make over the requested bytes | host verifies `signature` against the returned `public_key` and requested `payload`, and requires the `algorithm` echo (§6) |
+| A signer cannot mis-bind a canonical `key_id` to a different key | host recomputes the id from `public_key` for `blake3:` / `ed25519:` / `secp256k1:` / `p256:` prefixes and rejects mismatches (§6) |
+| A WebAuthn assertion is bound to the mkit payload | `clientDataJSON.challenge == base64url-nopad(PAE)`; signature checked over `authenticatorData ‖ SHA-256(clientDataJSON)` (§6.1) |
+| Unsupported requests fail before signing | requested algorithm + key form checked against advertised `Capabilities` (§5) |
+| An ill-formed `key_ref` never silently falls through to the argv default | `ERROR_CODE_INVALID_REQUEST` required (§6) |
+| Missing credential metadata fails closed | CTAP signers MUST error rather than return an empty `public_key` (§6, §8.2) |
+| A setup failure cannot desync the framing | non-zero exit with no stdout frame (§7) |
+| Oversized frames cannot exhaust the reader | `MAX_FRAME_BYTES = 1 MiB`, connection-fatal (§3) |
+| Fixed `(payload, key)` gives fixed signature bytes for non-WebAuthn algorithms | RFC 6979 (ECDSA) / RFC 8032 (Ed25519) determinism, pinned by golden vectors (§9) |

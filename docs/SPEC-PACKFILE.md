@@ -285,4 +285,26 @@ verification fails.
 
 ---
 
-*~1300 words.*
+## 12. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| A pack is unambiguously an mkit pack of a known version | `"MKIT"` magic → `InvalidMagic`; unknown `version` → `UnsupportedPackVersion`, distinguishably (§1) |
+| Any bit-flip or truncation before the trailer is detected | 32-byte BLAKE3 trailer, verified **before** any entry is stored (§8) |
+| No entry read past the pack tail | mandatory `payload_len` bounds-check against the remaining pre-trailer bytes → `UnexpectedEof` (§2) |
+| Only known entry types are processed | anything but `0x00`/`0x02` (incl. reserved `0x01`) → `InvalidEntryType` (§3) |
+| Every stored object's bytes match its storage path | BLAKE3 verified before writing `objects/<dd>/<rr…>`; delta targets reconstructed, then hashed the same way (§3.1, §3.2) |
+| No malformed or pack-only object reaches the object store | canonical SPEC-OBJECTS deserialization gate; `Object::Delta` payloads rejected (§3) |
+| Every delta is resolvable when encountered | ordering rule: base precedes its delta in-pack or pre-exists in the store; else `DeltaBaseMissing`; no buffering of undefined chains (§4) |
+| Resource use is bounded | `entry_count ≤ 10M` → `TooManyObjects`; payload sum ≤ 4 GiB → `PackfileTooLarge`, never silent truncation (§5) |
+| No hidden trailing data | bytes between the entry list and the trailer are rejected even if the trailer hashes them (§6) |
+| Pack identity is deterministic and byte-exact | key = lowercase hex `BLAKE3(pack_bytes)` over the whole pack including the trailer; byte-exact comparison (§7) |
+| Streaming unpack cannot leave corrupt state | trailer verified at end-of-stream; partially-stored objects retroactively rejected (§11) |
+
+The trailer detects accidental corruption; it is not a signature (§1).
+Authenticity rests on the caller-supplied content address (§7) and the
+per-object hash verification of §3.
+
+---
+
+*~1600 words.*

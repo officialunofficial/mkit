@@ -401,3 +401,25 @@ Anti-goals (called out in #158 and still preserved):
 * This document does NOT define an HTTP/S3 server reference
   implementation — only the contract such a server MUST honour. The
   Cloudflare Worker in `apps/web/` is the reference deployment.
+
+## 11. Invariants
+
+| Server / cache mutation | Detected because |
+|---|---|
+| filter substituted mid-transfer | `manifest.filter_hash` must equal `hash_filter(filter)` (§2.3, §3 step 2) |
+| entry delivered that the client never asked for | every delivered entry must be selected by a filter prefix (§3 step 5) |
+| entries added or dropped vs. the commitment | set-bit count must equal `delivered_entries.len()` (§3 step 4) |
+| extra bits smuggled past the committed range | bitmap length must be exactly `ceil(leaf_count / 8)`; trailing envelope bytes refused (§3 step 3, §5) |
+| bitmap bytes forged | reconstructed root compared byte-for-byte against `manifest.bitmap_root` (§3 step 6) |
+| wrong source tree served | `tree_hash` is the canonical SPEC-OBJECTS hash, cross-checkable against commits / the object store (§2.4) |
+| query/body filter disagreement (HTTP) | server recanonicalises and refuses with 409 (§6) |
+| cached bitmap reused for a different filter | `load` returns `CacheError::FilterMismatch`; caller treats it as a miss (§8) |
+| allocation-exhaustion input | `MAX_LEAVES` / `MAX_FILTER_PATHS` checked before any proportional allocation (§3 step 1, §4); envelope capped at 16 MiB before parsing (§5) |
+
+Two properties hold by contract rather than by a check: the transports
+are trust-thin, so callers MUST run `verify_sparse` before trusting any
+delivered entry (§6, §7), and the verifier MUST NOT panic on any caller
+input — all failures return `false` (§3). One property is deliberately
+NOT yet guaranteed: the verifier cannot confirm that a delivered
+entry's name is the canonical name at its leaf index — the leaf-index →
+name cross-check belongs to the streamed-transport stage (§3).

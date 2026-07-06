@@ -664,3 +664,27 @@ under steps 2–3**; SHA-1 remains a locator everywhere else (§2).
 | Version | Changes |
 |---------|---------|
 | 1 | Initial mapping: blob/chunked-blob/tree/commit/tag export, remix refused with reserved carrier, shallow/deep verification, `git-bridge/v1` attestation, ref CAS mirror semantics. Amended in-series (pre-merge): fork/passthrough mode + origin guard + fork audit (§14), §1.4 determinism domain restated, attestation scoping, import direction split out to SPEC-GIT-IMPORT. |
+
+---
+
+## 16. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| Two implementations translating the same mkit history emit byte- and SHA-identical git objects, with no shared state | translation is a pure function of source object bytes (fork mode: of *(store, import map)*); no clock, locale, config, or key material consulted (§1.4) |
+| Every translated object reconstructs to bit-exact mkit bytes and its original signature re-verifies | the §3/§4/§7.1/§12.1 refusal set (oversize plain blobs, non-canonical manifests, git-illegal names) plus the verification-only inverse (§9), which fails closed on anything not bridge-shaped |
+| Only `schema_version = 0x01` objects are ever translated | version keying refuses any other prologue, per ref (§1.2) |
+| A carried signature never verifies over git bytes; SHA-1 is a locator, never identity or proof | shallow/deep verification rebuilds mkit signing bytes only (§10); integrity rides on BLAKE3 + Ed25519 (§2, §11) |
+| An all-zero signature reports "unsigned", never "tampered" | pinned reporting rule (§10) |
+| A translated ref head is bound to its mkit identity, not its git sha | `git-bridge/v1` subject digest is blake3; `gitCommit` is a predicate-side locator (§11) |
+| A lost export race never produces divergent translation | idempotent object writes + CAS ref updates + `--atomic` push (§12.2) |
+| Wiping bridge state loses nothing | mapping cache and lease state are rebuildable from the store and the mirror's observed values (§12.3) |
+| One state dir never serves two mirrors | destination binding recorded at first export (§12.3) |
+| Plain export can never force-replace an upstream it was imported from | origin guard compares canonical remote identities and refuses (§14.2) |
+| Fork-mode push never rewinds a branch or moves a tag on a repo the exporter doesn't own | fast-forward-only rule against a fresh `ls-remote` observation (§14.1) |
+| Adding remix support later cannot break v1 consumers | `mkit-remix-source` / `mkit-object-type` header names reserved, never emitted (§8) |
+
+§10 is the concentrated statement of what verification does and does
+not prove per mode (shallow: carried fields; deep: the whole graph;
+fork audit §14.3: bridge-shaped objects plus checked boundary bytes);
+this table does not extend those claims.

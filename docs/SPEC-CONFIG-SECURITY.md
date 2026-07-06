@@ -289,3 +289,26 @@ When you add a key to `Config`:
   every keystore selector be repo-forbidden.
 - Issue #97 — the credential-exfiltration follow-up that motivated
   the runtime gate on `remote_endpoint`.
+
+---
+
+## 8. Invariants
+
+§3 is the enforcement contract; this table restates what it guarantees
+and where each guarantee is anchored.
+
+| Invariant | Enforced by |
+|---|---|
+| An UNSAFE key in `<repo>/.mkit/config` never reaches `Config` | read-site drop in `apply_file_inner` before `apply_kv`; the field stays at its default (§3.1) |
+| Serialising repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
+| `mkit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
+| A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
+| Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |
+| The classification cannot silently drift from the code | `REPO_FORBIDDEN_KEYS` is the single source of truth (§1); the meta-test iterates the whole array and panics on a missing arm (§4) |
+| Every drop is user-visible with pinned wording | stderr warning, snapshot-tested (§3.3) |
+| A hostile repo cannot authorize itself as an encrypted-transport peer or swap identity keys | no repo config knob exists for those values — CLI flags, env var, or user-scoped path only (§6) |
+
+Every new key defaults to UNSAFE until argued SAFE on the §2 table
+(§5); a SAFE key that later gains credential-routing or process-spawn
+behaviour MUST be promoted to UNSAFE in the same patch that introduces
+the consumer (§2, §2.1).

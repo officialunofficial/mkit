@@ -742,3 +742,29 @@ Items currently marked **(planned)** — §5.2 (`--add-signature`),
 (`attest.auto_sign_commit`), §6.4 review predicate URI — are
 forward-compatible additions and will not require a version bump
 when implemented.
+
+---
+
+## 13. Invariants
+
+§10 is the authoritative statement of what this format does and does
+not protect. This table maps each guarantee to its enforcement point.
+
+| Invariant | Enforced by |
+|---|---|
+| Any byte change to an envelope yields a new att-id | att-id = `BLAKE3(envelope-bytes)`; JCS makes the bytes a stable function of content (§3, §4.3) |
+| Reposting an identical attestation is idempotent | filename derived from the envelope hash (§3) |
+| An envelope round-trips only if byte-identical to what `encode` emits | strict decoder: exact key order, no whitespace tolerance (§4.3) |
+| A DSSE signature can never be replayed as a commit/remix/tag signature | PAE prefix `"DSSEv1 "` is disjoint from every SPEC-SIGNING domain (§7.2) |
+| `keyid` alone never authenticates | keyid is a dispatch key only; trust-root lookup + signature verification decide (§6.3, §5.3) |
+| A hostile clone cannot plant trust roots | in-repo trust-roots file rejected unless `--trust-roots` is explicit (§6.5, §10) |
+| Missing trust roots fail closed | empty registry ⇒ every signature `UnknownKeyid` ⇒ no envelope verifies (§6.5) |
+| A hostile repo cannot redirect signing | `attest.*` signer/key/path keys are user-scoped only (§9) |
+| Ed25519 verdicts are identical across honest verifiers | `verify_strict` rejects malleable encodings (§5.3, §10) |
+| A malicious predicate body cannot subvert mkit | the predicate is never parsed beyond "is a JSON object" (§1, §10) |
+| No partial envelope reaches disk | any signer failure aborts before write; writes are tmp + fsync + rename atomic (§5.1, §3) |
+| Malformed reads are bounded | 1 MiB envelope size cap (§3) |
+
+What the format does NOT guarantee — revocation timing, predicate
+semantics, honesty of an external signer — is enumerated in §10 and is
+not restated here.

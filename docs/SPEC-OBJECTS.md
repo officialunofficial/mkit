@@ -504,4 +504,32 @@ digest, so external implementations can cross-verify byte-for-byte.
 
 ---
 
+## 14. Invariants
+
+Properties that MUST hold for every conformant reader/writer, and the
+mechanism that enforces or detects each:
+
+| Invariant | Enforced by |
+|---|---|
+| Every stored object is one of the seven known types under `"MKT1"` / `schema_version 0x01` | prologue rejection: `InvalidObjectType` / `InvalidMagic` / `UnsupportedObjectVersion` (§2) |
+| An object's bytes always match its id | read-time recomputation under the type-dependent id rule → `HashMismatch`; for merkelized types this also proves the child set present and correctly ordered (§10) |
+| No stored object exceeds 1 GiB | storage-layer rejection (§3, §10) |
+| An object encodes exactly its declared layout, nothing more | trailing-byte rule → `TrailingData` (§11) |
+| Tree entries are canonical: lex-sorted byte-wise, no duplicates | reader rejection `InvalidEntryOrder` (§4) |
+| Tree entry names cannot alias, escape, or shadow repo metadata | name grammar → `InvalidEntryName` (§4.1); mode whitelist → `InvalidEntryMode` (§4.2) |
+| Remix sources are canonical and duplicate-free | `(upstream_id, commit_hash)` sort → `InvalidSourceOrder` (§6.1) |
+| Collection counts are bounded | `TooManyEntries` ≤ 1 000 000 (§4); `TooManyParents` ≤ 1 000 (§5.2); `source_count` ≤ 10 000 (§6); `TooManyChunks` ≤ 1 000 000 (§7) |
+| Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity` / `IdentityTooLarge` / `UnknownIdentityKind` (§9) |
+| A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
+| Delta objects never appear in the object store | pack-only rule (§1, §8) |
+| Reassembled `ChunkedBlob` content is exactly `total_size` bytes | reassembly length check (§7) |
+| A merkle-addressing reader never mis-reads a pre-merkle store | mandatory `.mkit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
+| A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file + rename write and the ordering invariant (§10.1) |
+
+These are format-level guarantees. Signature guarantees are specified in
+SPEC-SIGNING; per-object tamper evidence for merkelized types in
+SPEC-MERKLE-OBJECTS §6.
+
+---
+
 *~1750 words.*

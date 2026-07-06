@@ -274,4 +274,20 @@ The vectors below are exercised by
 
 ---
 
+## 10. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| Chunk boundaries — and therefore `chunked_blob` hashes — are a pure function of the input bytes | frozen seed (§3), parameters (§4), and mask derivation (§5); any change requires a format-version bump (§2) |
+| Every implementation derives the identical gear table | the `"MKITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8.1) |
+| `avg_size` is a power of two; `min_size < avg_size < max_size` holds strictly | normative parameter constraint (§4) |
+| Input of ≤ `min_size` bytes is a single chunk, never a `chunked_blob` | `cut` returns the full input length (§4, §5) |
+| No chunk exceeds `max_size` | forced cut at `max_size` (§5) |
+| Chunk lengths sum to the input length; `total_size` equals the file size | iterative consumption until all bytes are cut (§5); reassembly length check against `total_size` (§6); pinned by §8 vector 8 |
+| Content-defined manifests are distinguishable from fixed-size ones | `chunk_size = 0` sentinel (§6; SPEC-OBJECTS §7) |
+| Any two conformant chunkers agree on chunk count, byte offsets, chunk hashes, and manifest hash | cross-implementation contract (§7); boundary goldens (§8 vectors 4–5) |
+| A build with the wrong seed or parameters cannot ship silently | gear-table-hash pin and boundary goldens fail loudly at test time (§8 vectors 9–10) |
+
+---
+
 *~900 words.*

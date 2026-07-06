@@ -523,3 +523,26 @@ A native SSH implementation (with in-process host-key pinning) is a
 future enhancement; [`SSH-SECURITY.md`](SSH-SECURITY.md) tracks the
 gaps inherited from delegating to `ssh(1)`. S3 multipart upload
 (for packs above the 5 GiB single-PUT cap) is similarly deferred.
+
+---
+
+## 10. Invariants
+
+These hold for every conformant transport, regardless of scheme:
+
+| Invariant | Enforced by |
+|---|---|
+| Errors form a closed taxonomy; no coupling to message strings | `TransportError` variants at the trait boundary; advisory messages MUST NOT be pattern-matched (§2) |
+| No scheme guessing or fallback | `mkit+` prefix required; unsupported schemes error at dispatch instead of guessing (§3) |
+| No plaintext HTTP off loopback | `validate_http_scheme` → `InsecureScheme` for any non-loopback `http://` host (§3, §5) |
+| Stored pack bytes match their announced digest | SSH: server verifies `BLAKE3(received) == pack_id` before storing (§4.2); HTTP: client cross-checks the server-returned key against its pre-computed digest → `InvalidResponse` (§5.1) |
+| A rejected upload never creates or overwrites the destination pack | SSH upload-stream validation: `total_bytes` required and capped, `pack_id` match, contiguous offsets, exact end (§4.2) |
+| Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §5.3, §6.3); conflict → `RefConflict`; 409/412 never retried (§5.3, §6.5, §7.1) |
+| A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
+| `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
+| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
+| Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
+| A proxy cannot substitute a sparse-checkout filter | `?sparse=<filter-hex>` MUST equal `BLAKE3` of the canonicalised filter; server re-canonicalises and rejects with `409` (§5.6) |
+
+Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
+the normative summary is the table in §7.1.

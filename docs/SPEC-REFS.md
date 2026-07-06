@@ -355,4 +355,28 @@ base/ours/theirs material lives only in this sidecar.
 
 ---
 
+## 8. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| A ref value on any byte-exact transport is exactly 65 bytes: 64 lowercase hex + `\n` | writers MUST emit lowercase; readers reject uppercase with `InvalidRef` (§1) |
+| Every ref name crossing a transport boundary satisfies the §3 grammar | validation at **every** boundary — write, read, list, client-supplied parse; no silent case-folding or canonicalisation (§3) |
+| No ref shadows `HEAD` or a lock file | grammar rejections for final-segment `HEAD` and the `.lock` suffix (§3) |
+| `listRefs(prefix)` is byte-identical across transports | single normative stripping algorithm; lexicographic order, no duplicates; conformance-tested (§4, §4.1, test vector 3) |
+| A `.missing` write succeeds at most once per ref | `O_EXCL` / `If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
+| A `.match(H)` write on s3/http/ssh cannot clobber a moved ref | conditional-write CAS per transport encoding (§5.1, §5.2) |
+| An `.any` conditional hint is never binding CAS | clients requiring CAS MUST use `.match` explicitly (§5.3) |
+| A default push cannot silently rewind a remote that advanced | `Match(tracked)` / `Missing` CAS lease on the remote-tracking ref (§2) |
+| Fetched tips never overwrite local branches | fetch writes only `refs/remotes/<remote>/<name>`; `pull` fast-forwards from it (§2) |
+| Local ref reads never observe a torn write | atomic write-then-rename with the SPEC-INDEX §4 temp-name pattern (§6) |
+| Ref parsing is allocation-bounded | 128 B ref / 4 KiB `HEAD` / 1 MiB shallow caps; 32-level listing depth cap (§6) |
+| At most one of merge / cherry-pick / rebase is in progress | starting a second operation while state files exist is refused (§6.1) |
+
+One property is deliberately **not** guaranteed in v1: `.match` on the
+memory and file transports is a read-then-write race (§5.1, test
+vector 5). Callers needing CAS under concurrency MUST use s3/http/ssh
+until the W4 lockfile lands.
+
+---
+
 *~1450 words.*

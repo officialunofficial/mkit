@@ -100,3 +100,21 @@ moving the ref, under the worktree lock — and the **`mkit gc` command**
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
 prunes all, `--dry-run` previews).
+
+## Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| No live object is ever pruned | prune set is `store ∖ live_objects`, the reachable closure over the complete `collect_roots` set ("Retention roots") |
+| gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable — strict ref walk, no lenient skips — and gc MUST abort on that error ("Fail-closed requirement") |
+| gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
+| A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
+| A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase append to `.mkit/recovery-log` before moving the ref; every logged hash is a root ("Recovery log") |
+| A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
+| A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
+| Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
+| An unset ref never pins an object | the all-zero hash is excluded from roots ("Retention roots") |
+
+The load-bearing rule is the fail-closed requirement: every guarantee
+above degrades to "gc aborts" rather than "gc guesses" whenever any
+input cannot be read completely.

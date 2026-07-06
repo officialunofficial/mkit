@@ -295,3 +295,25 @@ Application protocol version is the same as the rest of mkit
 (`mkit/transport-enc/v1`) is bumped independently if the handshake or
 record layer needs a hard break that the application-level
 `HelloResponse` mismatch can't catch.
+
+---
+
+## 8. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| The peer is the key the URL advertises, or no session exists | `?pubkey=` carried out-of-band in the URL; mismatch → `EncInitError::PeerRejected`; no TOFU cache, no CA fallback (§1) |
+| Two distinct URL strings cannot decode to the same pubkey | hex (exactly 64 chars) or unpadded b64url (43 chars, trailing 2 bits zero) — ambiguous encodings rejected at parse (§1) |
+| Mutual authentication and forward secrecy | static-key signatures over the handshake transcript; ephemeral X25519 (§2.3) |
+| No nonce reuse, no cross-session replay | per-record counter nonces never on the wire; `SynAck` transcript-bound to `Syn` (§2.3) |
+| No cross-application replay of handshakes | `namespace = b"mkit/transport-enc/v1"` transcript binding (§2.1) |
+| No frame exceeds 1 MiB — enforced twice | `max_message_size = mkit_rpc::MAX_FRAME_BYTES` at the record layer (§2.1) and by every existing `SshFrame` consumer (§3.1) |
+| One `SshFrame` per encrypted record, no framing ambiguity | single protobuf payload per `Sender::send`; no second length prefix (§3.1) |
+| No verb exchanged before version agreement | post-handshake `Hello`/`HelloResponse` with `PROTOCOL_VERSION_1`; disagreement closes the connection (§3.2) |
+| The listener is fail-closed: an unlisted peer gets nothing | binding requires `--enc-authorized-peers` (or the loud `--unsafe-allow-any-enc-peer` escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |
+| Verb semantics never diverge from the SSH transport | same `SshFrame` message set; semantics byte-for-byte per SPEC-TRANSPORT §4 (§3) |
+| Application plaintext never appears on the wire | pinned by the byte-sniffing round-trip tests (§5) |
+
+Explicitly **not** guaranteed, inherited from the stream layer:
+anonymity (peer identities exchanged in cleartext) and length padding
+(message sizes leak) (§2.3).

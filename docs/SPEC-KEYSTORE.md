@@ -1590,3 +1590,27 @@ Foundation V1 uses these fixed conservative defaults:
 - no implicit export
 - no repo-controlled key refs
 - no hardware capability claims without runtime proof
+
+## 18. Invariants
+
+§2 fixes the design-level invariants and §13 the security requirements;
+this table indexes them (plus the backend rules of §5–§6) by the
+property that MUST always hold. Rows cite the normative text; nothing
+here adds a new requirement.
+
+| Invariant | Enforced by |
+|---|---|
+| A repo can never choose the key, backend, label, signer, or algorithm that signs | every §8.1 selector (and the §8.3 legacy ones) is in `REPO_FORBIDDEN_KEYS` (§2.5, §8.2, §13.1) |
+| No signing command ever creates or rotates a key | explicit `mkit key generate` / legacy `mkit keygen` only; missing keys are hard errors (§2.6, §10, §13.2) |
+| An unavailable backend never silently degrades to a weaker one | construction/operations return unavailable errors; Linux protector selection fails closed (§5.3, §6.1) |
+| Capabilities never overstate what a backend can do | operation booleans tied to trait availability; per-backend honesty rules (§2.7, §5.3, §13.4) |
+| Requested key attributes are honored or refused, never silently weakened | backends reject unsupported attribute combinations (§5.2, §13.4) |
+| Secret bytes never leak via Debug, logs, or implicit paths | `Zeroizing` storage, manual `Debug`, `expose_secret` naming, redacting `Display` (§5.5, §5.8, §13.3) |
+| Export happens only explicitly and only for extractable keys | `--unsafe-print-secret` gate; typed non-extractable error; non-exportable backends omit `KeyExporter` (§5.7, §9.4, §13.3) |
+| `software` keys are encrypted at rest under an OS protector, never a password | per-record DEK + AEAD, OS-wrapped, fail closed with no usable protector (§2.11–2.12, §6.1) |
+| An encrypted record cannot be re-bound to different metadata | AAD binds version/backend/label/algorithm/pubkey/keyid/attrs; BLS AAD additionally binds cohort pubkey + share index + M + N (§6.1, §6.1.1) |
+| `(label, algorithm)` is never silently overwritten, and delete removes exactly one key | overwrite requires `--force` / `overwrite: true`; no prefix deletes (§5.7, §9.1, §9.5) |
+| A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |
+| Keystore signing is byte-equal to legacy signing where determinism allows | golden equivalence vectors for deterministic software backends; verification-equivalence otherwise (§2.8, §14.3) |
+| The keystore never invents protocol-level domain separation | `sign` signs the supplied bytes under existing mkit semantics (commit hash per §10, DSSE PAE per §11) (§5.6) |
+| FIDO2/CTAP labels fail closed through the keystore API | dedicated label guard returns `UnsupportedOperation`, routing to the external signer path (§6.7) |
