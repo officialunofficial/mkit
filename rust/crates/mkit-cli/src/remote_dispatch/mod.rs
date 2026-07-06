@@ -504,16 +504,16 @@ pub fn push_branch_tracked(
 /// push (empty plan — the remote already holds this closure) takes the cheap
 /// head-only path and walks NO packmap chain (mkit #521 perf). Only when the
 /// plan is non-empty does it resolve the branch's current packmap chain depth
-/// (walking it exactly once, see [`packmap::probe_chain`]) and, if the chain
+/// (walking it exactly once, see `packmap::probe_chain`) and, if the chain
 /// would grow past the re-baseline threshold (#406, see
-/// [`packmap::rebaseline_depth`]) AND the transport's `advance_refs` is
+/// `packmap::rebaseline_depth`) AND the transport's `advance_refs` is
 /// transactional ([`Transport::supports_atomic_advance`], mkit #521) AND the
 /// head write is CAS-conditioned (a force push's `Any` head condition takes
 /// the safe append path — an `Any` condition makes even an atomic transport
 /// fall back to the ordered two-PUT `advance_refs`, so a reset there is not
 /// safe), re-plans as a full closure (diffs against no remote tip) and
-/// carries that decision down to [`advance_packmap`] as
-/// [`ChainAction::ResetSelfContained`] so it resets the chain to a single
+/// carries that decision down to `advance_packmap` as
+/// `ChainAction::ResetSelfContained` so it resets the chain to a single
 /// fresh node instead of appending to it — bounding clone cost, which
 /// otherwise grows with chain length.
 ///
@@ -523,7 +523,7 @@ pub fn push_branch_tracked(
 /// a reset (unlike an append) is not a superset of the prior chain, so a
 /// lost head-CAS race after a committed reset would strand the (unmoved)
 /// head pointing at a commit the packmap can no longer reconstruct. Such a
-/// transport keeps appending — [`ChainAction::Append`] — past the
+/// transport keeps appending — `ChainAction::Append` — past the
 /// threshold; `packmap::MAX_PACK_CHAIN_DEPTH` (the pure runaway/cycle guard)
 /// remains the only bound on chain growth there, unchanged by this gate.
 ///
@@ -532,10 +532,10 @@ pub fn push_branch_tracked(
 /// defined for a resolvable chain, and a broken chain already has its own
 /// reset path in `advance_packmap` (the broken-chain escape hatch, gated on
 /// `self_contained` alone, independent of this transactional-advance gate —
-/// see [`ChainAction::Append`]'s doc comment).
+/// see `ChainAction::Append`'s doc comment).
 ///
 /// The already-resolved chain from this probe (when not discarded by a
-/// re-baseline decision) is threaded into [`advance_packmap`] so its first
+/// re-baseline decision) is threaded into `advance_packmap` so its first
 /// CAS attempt does not have to walk the chain a second time (#521 perf
 /// fix).
 ///
