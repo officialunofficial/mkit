@@ -171,6 +171,7 @@ fn bisect_runs_to_completion_finds_first_bad_commit() {
                 }
             }
             BisectStep::NeedMore => panic!("unexpected NeedMore"),
+            BisectStep::Ambiguous { .. } => panic!("unexpected ambiguous"),
         }
     };
     assert_eq!(found, truth);
