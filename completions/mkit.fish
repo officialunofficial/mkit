@@ -158,6 +158,8 @@ complete -c mkit -n "__fish_seen_subcommand_from blame" \
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l ignore-revs-file -d "Skip commits listed in a file" -r -F
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
+    -l ignore-rev-precise -d "Content-addressed ignore-rev fall-through (requires --ignore-rev)"
+complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l first-parent -d "Follow only first parents (disable merge-aware blame)"
 complete -c mkit -n "__fish_seen_subcommand_from blame" \
     -l reverse -d "Walk history forward over a <start>..<end> range"

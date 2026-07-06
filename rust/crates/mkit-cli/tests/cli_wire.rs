@@ -1481,6 +1481,99 @@ fn blame_ignore_revs_file_errors_are_git_faithful() {
 }
 
 #[test]
+fn blame_ignore_rev_precise_requires_ignore_rev() {
+    // `--ignore-rev-precise` only refines an active `--ignore-rev` /
+    // `--ignore-revs-file` set; without one it has nothing to refine, so it
+    // is a usage error rather than a silent no-op (#496).
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"a\n", "first");
+    let out = run_in(td.path(), &["blame", "--ignore-rev-precise", "f.txt"]);
+    assert!(
+        !out.status.success(),
+        "expected --ignore-rev-precise without an ignore set to be rejected"
+    );
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("--ignore-rev-precise requires --ignore-rev or --ignore-revs-file"),
+        "expected the documented usage error"
+    );
+}
+
+#[test]
+fn blame_ignore_rev_precise_diverges_from_positional_default() {
+    // End-to-end (#496): a noise commit reorders three distinct-origin
+    // lines around a fixed middle line and reindents them. Under -w the
+    // matcher recognizes the middle-reordered line unchanged wherever it
+    // landed, but the other two end up with no in-hunk counterpart at all,
+    // so git's positional `--ignore-rev` default leaves them credited to
+    // the noise commit. `--ignore-rev-precise` searches the whole parent
+    // file by content and finds their true origins instead — a genuinely
+    // divergent, documented mkit-only attribution. Mirrors the mkit-core
+    // unit test `blame_ignore_rev_precise_reattributes_moved_reindented_lines`.
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "f.txt", b"keep\ntail\n", "c0");
+    make_commit(td.path(), "f.txt", b"keep\nXXX\ntail\n", "c1");
+    make_commit(td.path(), "f.txt", b"keep\nXXX\nYYY\ntail\n", "c2");
+    make_commit(td.path(), "f.txt", b"keep\nXXX\nYYY\nZZZ\ntail\n", "c3");
+    make_commit(
+        td.path(),
+        "f.txt",
+        b"keep\n  ZZZ\n  YYY\n  XXX\ntail\n",
+        "noise",
+    );
+    let noise = head_hash(td.path());
+
+    let positional = run_in(td.path(), &["blame", "-w", "--ignore-rev", &noise, "f.txt"]);
+    assert!(
+        positional.status.success(),
+        "positional blame failed: {positional:?}"
+    );
+    let positional_out = String::from_utf8(positional.stdout).unwrap();
+    let positional_lines: Vec<&str> = positional_out.lines().collect();
+    assert!(
+        positional_lines[2].starts_with(&noise[..12]),
+        "positional: YYY has no in-hunk counterpart, stays on the noise commit: {positional_lines:?}"
+    );
+    assert!(
+        positional_lines[3].starts_with(&noise[..12]),
+        "positional: XXX has no in-hunk counterpart, stays on the noise commit: {positional_lines:?}"
+    );
+
+    let precise = run_in(
+        td.path(),
+        &[
+            "blame",
+            "-w",
+            "--ignore-rev",
+            &noise,
+            "--ignore-rev-precise",
+            "f.txt",
+        ],
+    );
+    assert!(
+        precise.status.success(),
+        "precise blame failed: {precise:?}"
+    );
+    let precise_out = String::from_utf8(precise.stdout).unwrap();
+    let precise_lines: Vec<&str> = precise_out.lines().collect();
+    assert!(
+        !precise_lines[2].starts_with(&noise[..12]),
+        "precise: YYY is reattributed off the noise commit: {precise_lines:?}"
+    );
+    assert!(
+        !precise_lines[3].starts_with(&noise[..12]),
+        "precise: XXX is reattributed off the noise commit: {precise_lines:?}"
+    );
+    assert_ne!(
+        positional_out, precise_out,
+        "precise mode must produce a genuinely different (divergent) attribution here"
+    );
+}
+
+#[test]
 fn blame_reverse_attributes_lines_to_last_surviving_commit() {
     // `--reverse <start>..<end>` blames the start version and attributes
     // each line to the last commit it survived in. Mirrors real

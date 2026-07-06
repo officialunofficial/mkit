@@ -42,7 +42,7 @@ export function HashDemo() {
   // The whole demo: bytes → BLAKE3. Encode the text and the image as blobs and
   // read back their content-addressed names — no tree, no commit. Composing
   // many of these into one signed root is the `tree` demo's job; here a hash is
-  // simply the name of a single object's bytes.
+  // the name of a single object's bytes.
   const hashes = useMemo(() => {
     try {
       const textBytes = TEXT_ENCODER.encode(text)
