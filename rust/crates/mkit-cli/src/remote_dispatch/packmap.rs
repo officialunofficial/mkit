@@ -353,7 +353,16 @@ pub(crate) fn fetch_pack_chain(
             persist_record(&mut applied, remote, branch);
             retry_result
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            // Closure is incomplete but this is NOT the stale-skip self-heal
+            // trigger (e.g. `ClosureTooLarge`, or `RemoteMissingObject` with no
+            // skips). Phase 1's successfully-unpacked-and-inserted packs are
+            // still durably good, so persist them before propagating `e` so they
+            // aren't re-downloaded next time (#409). `persist_record` swallows +
+            // warns on its own I/O failure, so it can never mask `e`.
+            persist_record(&mut applied, remote, branch);
+            Err(e)
+        }
     }
 }
 
