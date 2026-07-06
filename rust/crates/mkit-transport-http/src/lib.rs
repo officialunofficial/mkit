@@ -43,7 +43,7 @@ use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
-use mkit_core::hash::{Hash, from_hex, to_hex};
+use mkit_core::hash::{Hash, from_hex};
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
     TransportResult, is_retryable,
@@ -51,12 +51,18 @@ use mkit_core::protocol::{
 use mkit_core::refs::Ref;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, IF_MATCH, IF_NONE_MATCH};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde::Deserialize;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
 mod ref_ops;
+
+// `cas_headers` lives in `ref_ops` (mkit #423 review) — its only
+// non-test caller is `update_ref_impl` there, alongside its sibling
+// `cond_to_json`. Re-exported here so the crate's public API surface
+// (`mkit_transport_http::cas_headers`) is unchanged.
+pub use ref_ops::cas_headers;
 
 /// Environment variable consulted at [`HttpTransport::connect`] time for
 /// an optional Bearer token.
@@ -487,39 +493,6 @@ fn map_status(status: StatusCode, on_not_found: TransportError) -> TransportErro
 }
 
 // ---------------------------------------------------------------------------
-// CAS header selection
-// ---------------------------------------------------------------------------
-
-/// Derive the conditional header for a `PUT /refs/<name>` based on the
-/// CAS condition.
-///
-/// - [`RefWriteCondition::Missing`] → `If-None-Match: *`
-/// - `RefWriteCondition::Match(h)` → `If-Match: "<md5-style quoted hex>"`
-/// - [`RefWriteCondition::Any`] → no conditional header
-///
-/// Returns an empty [`HeaderMap`] for `Any` so call sites can always
-/// call `.headers(…)`.
-#[must_use]
-pub fn cas_headers(cond: RefWriteCondition) -> HeaderMap {
-    let mut h = HeaderMap::new();
-    match cond {
-        RefWriteCondition::Any => {}
-        RefWriteCondition::Missing => {
-            h.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
-        }
-        RefWriteCondition::Match(expected) => {
-            let hex = to_hex(&expected);
-            // Quote per RFC 7232 §2.3 — ETags are always quoted strings.
-            let value = format!("\"{hex}\"");
-            if let Ok(v) = HeaderValue::from_str(&value) {
-                h.insert(IF_MATCH, v);
-            }
-        }
-    }
-    h
-}
-
-// ---------------------------------------------------------------------------
 // Transport impl
 // ---------------------------------------------------------------------------
 
@@ -544,11 +517,11 @@ impl Transport for HttpTransport {
 
         // Parse `{"key": "<hex>"}` and cross-check against the caller's
         // pre-computed digest so a misbehaving server can't silently
-        // swap the pack under us. Cap the read so a hostile/compromised
-        // remote can't OOM us with an unbounded response body.
-        let body = Self::read_body_capped_to(resp, CONTROL_BODY_LIMIT)?;
-        let parsed: PackUploadResponse =
-            serde_json::from_slice(&body).map_err(|_| TransportError::InvalidResponse)?;
+        // swap the pack under us. Routed through `parse_json_body` (the
+        // same single bounded path every ref read/write uses) so a
+        // hostile/compromised remote can't OOM us with an unbounded
+        // response body.
+        let parsed: PackUploadResponse = Self::parse_json_body(resp, CONTROL_BODY_LIMIT)?;
         let server_key = from_hex(&parsed.key).map_err(|_| TransportError::InvalidResponse)?;
         if server_key != *key.as_bytes() {
             return Err(TransportError::InvalidResponse);
@@ -696,9 +669,8 @@ impl Transport for HttpTransport {
 
 #[cfg(feature = "sparse-checkout")]
 mod sparse_fetch {
-    use super::{
-        Hash, HttpTransport, RequestBuilder, TransportError, TransportResult, map_status, to_hex,
-    };
+    use super::{Hash, HttpTransport, RequestBuilder, TransportError, TransportResult, map_status};
+    use mkit_core::hash::to_hex;
     use mkit_core::sparse::{
         SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
     };
@@ -980,6 +952,7 @@ mod tests {
     use super::*;
     use mkit_core::hash::{HASH_LEN, to_hex};
     use mockito::{Matcher, Server};
+    use reqwest::header::{IF_MATCH, IF_NONE_MATCH};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     static RECORDED_SLEEP_COUNT: AtomicUsize = AtomicUsize::new(0);
