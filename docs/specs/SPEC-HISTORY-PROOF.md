@@ -251,15 +251,35 @@ A ref advance on a `history-mmr`-enabled mkit goes through
 the durable couple:
 
 1. Acquire `<mkit_dir>/refs-history.lock` via `repo_lock::RepoLock`.
-2. CAS-write `<mkit_dir>/refs/heads/<branch>`.
-3. Call [`CommitHistory::append`], which itself calls commonware's
+2. [`CommitHistory::reopen`] — re-derive the caller's `CommitHistory`
+   handle from the current on-disk journal. The handle is typically
+   opened (via `open_at`) *before* this lock is taken (the caller has
+   no lock yet at that point), so another process could have appended
+   in the window between that `open_at` and this call taking the
+   lock; reopening under the lock guarantees the next two steps act
+   on what is truly on disk, not a stale in-memory view.
+3. Crash-recovery check: if the journal is non-empty, verify that its
+   last leaf already matches the ref's *current* (pre-this-write)
+   value via an inclusion proof. A mismatch means a prior call's step
+   5 never landed (see below) — heal by appending the ref's current
+   value directly, since it is precisely the one missing leaf; no
+   parent-chain walk is needed. An empty journal is left untouched
+   here — see §4.5 for why.
+4. CAS-write `<mkit_dir>/refs/heads/<branch>`.
+5. Call [`CommitHistory::append`], which itself calls commonware's
    `Journaled::sync` after applying the leaf-batch, so the new node
    is fsync'd before the function returns.
-4. Drop the lock.
+6. Drop the lock.
 
-If step 2 fails the lock is released without touching the MMR. If
-step 3 fails after step 2 succeeded, the ref is one commit ahead of
-the MMR; this is the rebuild-shim recovery case (§4.5).
+If step 4 fails the lock is released without touching the MMR. If
+step 5 fails after step 4 succeeded, the ref is one commit ahead of
+the MMR; the next call's step 3 heals it automatically. If the
+journal was empty going into step 3 (no prior leaf to check against)
+and the crash happened on the branch's very first tracked write, or
+the repo is mid-migration per §4.5, the same next call's
+`mkit-cli`-level rebuild shim (§4.5) is what heals it instead — step 3
+alone cannot, since it has no `ObjectStore` access to discover what
+(if anything) should already be there.
 
 ### 4.4 Crash recovery
 
@@ -293,19 +313,37 @@ data, and MUST surface any unrecoverable state through `HistoryError`.**
 A repo created against an older mkit has `refs/heads/<branch>` on
 disk but no `history/<branch>/` directory. The first
 [`CommitHistory::open_at`] against such a repo returns an empty
-journaled MMR. To populate it, the caller invokes
-[`mkit_core::history::rebuild_from_chain(history, tip, parent_of)`],
+journaled MMR. Its production call site is `mkit-cli`'s
+`write_ref_recording_history`: before delegating to
+`update_ref_with_history`, if the journal is empty AND the branch
+already has a ref value on disk, it opens an `ObjectStore` rooted at
+the repo and invokes
+[`mkit_core::history::rebuild_from_chain(history, current, parent_of)`],
 which:
 
-1. Walks the first-parent chain from `tip` via the caller-supplied
-   `parent_of` function (typically backed by `ObjectStore`).
+1. Walks the first-parent chain from `current` (the ref's value
+   *before* this write) via the caller-supplied `parent_of` function,
+   backed here by `ObjectStore::read_object`.
 2. Reverses the chain so the root commit is appended first.
 3. Calls [`CommitHistory::append`] for each entry in order.
+
+This same call degenerates safely to a single append when `current`
+is a root commit — which is exactly what happens when the "empty
+journal" case is not a deep v0.1.x migration but a crash on the
+branch's very first tracked write (§4.3): `rebuild_from_chain` just
+walks the one-commit chain and appends it, no different in effect
+from the §4.3 step-3 heal that the non-empty case uses. This is why
+`update_ref_with_history` itself does not need to distinguish the two
+sub-cases of an empty journal — only `mkit-core::refs`, which has no
+`ObjectStore` access, defers *both* to this shim.
 
 The shim is one-shot (subsequent `open_at` calls find a non-empty
 journal and skip it). Cost is `O(n)` BLAKE3 hashes for an `n`-commit
 branch; on commodity hardware this completes in single-digit
-milliseconds for branches up to a few hundred thousand commits.
+milliseconds for branches up to a few hundred thousand commits. A
+backfill failure (an unreadable or non-commit object anywhere on the
+chain) is fail-closed: `write_ref_recording_history` propagates the
+error rather than proceeding with a silently incomplete journal.
 
 ## 5. Implementation status and roadmap
 
@@ -347,9 +385,9 @@ migration, not as a separate break.
 | Producers and verifiers compute the same root | peak bagging pinned to `Bagging::ForwardFold` on both sides (§2.3) |
 | A tampered digest, wrong position, wrong commit, foreign root, mismatched `leaves`, or truncated/over-long `digests` never verifies | `verify_inclusion` returns `false` — never panics — per the enumerated failure modes (§3) |
 | Two distinct branches never share a history partition | the hex-escape sanitiser is injective on the `validate_ref_name` domain (§4.2) |
-| A ref advance and its MMR append cannot interleave with another writer | both run under `<mkit_dir>/refs-history.lock` (§4.3) |
+| A ref advance and its MMR append cannot interleave with another writer | both run under `<mkit_dir>/refs-history.lock`; the handle is re-derived from disk (`CommitHistory::reopen`) after the lock is taken, even if it was opened before (§4.3) |
 | An appended leaf is durable before the update returns | `CommitHistory::append` calls `Journaled::sync` (§4.3) |
-| A crash leaves the ref at most one commit ahead of the MMR | ref CAS precedes the append; recovery is the rebuild shim (§4.3, §4.5) |
+| A crash leaves the ref at most one commit ahead of the MMR, and the next write heals it without manual intervention | ref CAS precedes the append; the next `update_ref_with_history` call detects a non-empty journal's stale last leaf via an inclusion-proof check and appends the ref's current value directly, or (empty journal) `write_ref_recording_history`'s rebuild shim backfills from the object store (§4.3, §4.5) |
 | Reopening a half-written journal never panics or silently exposes stale data | torn trailing leaf rewound by `mmr::full::Mmr::init`; anything deeper surfaces as `HistoryError::Corrupted` (§4.4) |
 | Proof bytes decode identically for every consumer | commonware-codec at the pinned `=2026.5.0` (§2.2) |
 

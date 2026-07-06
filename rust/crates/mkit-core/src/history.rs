@@ -392,6 +392,37 @@ impl<X: Executor + 'static> CommitHistory<X> {
         }
     }
 
+    /// Re-derive this handle's in-memory state from the current
+    /// on-disk journal. A no-op for the mem-only flavour.
+    ///
+    /// [`CommitHistory::open_at`] may run before the caller has taken
+    /// any cross-process lock (opening the journal is cheap and the
+    /// lock is only needed around the ref-write + append critical
+    /// section — see [`crate::refs::update_ref_with_history`]). If
+    /// another process appended to the same on-disk journal in the
+    /// window between that `open_at` and this handle's own locked
+    /// critical section, this handle's leaf count / root would be
+    /// stale, and appending against stale state risks writing a leaf
+    /// at a position the on-disk journal has already used. Callers
+    /// that hold a cross-process lock around their critical section
+    /// MUST call this once after acquiring it and before appending, so
+    /// the append is always against what is truly on disk.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`CommitHistory::open_at`]: [`HistoryError::Corrupted`]
+    /// if commonware cannot recover the journal,
+    /// [`HistoryError::RuntimeBootstrap`] if the runtime bootstrap
+    /// fails, [`HistoryError::Io`] for filesystem failures.
+    pub fn reopen(&mut self) -> Result<(), HistoryError> {
+        let Backend::Journaled(b) = &self.backend else {
+            return Ok(());
+        };
+        let fresh = Self::open_at(b.executor.clone(), &b.mkit_dir, &b.branch)?;
+        *self = fresh;
+        Ok(())
+    }
+
     /// Append a commit hash. Returns its leaf [`Position`].
     ///
     /// Positions are dense: the *n*-th append returns `Position(n)`.
