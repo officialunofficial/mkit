@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use mkit_core::hash::hash;
-use mkit_core::protocol::{PackKey, RefWriteCondition, Transport};
+use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
     ReadRefResponse, RefExpectation, SshFrame, UploadPack, UploadPackResponse,
@@ -476,7 +476,10 @@ fn list_refs_entries(refs: Vec<mkit_core::refs::Ref>) -> Vec<RefEntry> {
 }
 
 /// Outcome of a non-streaming verb: either a single response body or a
-/// protocol error to surface to the client.
+/// protocol error to surface to the client. The `Ok` body may itself be
+/// an `Error` frame when the reply needs dynamic payload the static
+/// `VerbError` shape cannot carry (the §4.2.1 CAS-conflict reply built
+/// by [`cas_conflict_body`]); dispatchers send it like any response.
 type SimpleVerb = Result<ssh_frame::Body, VerbError>;
 
 /// Handle every non-streaming verb (`PackExists`, `ReadRef`, `UpdateRef`,
@@ -518,6 +521,13 @@ fn handle_simple_verb(tx: &FileTransport, body: &ssh_frame::Body) -> Option<Simp
             };
             match tx.update_ref(&name, condition, &new_h) {
                 Ok(()) => Ok(ssh_frame::Body::UpdateRefResponse(Box::default())),
+                // SPEC-TRANSPORT §4.2.1: a CAS mismatch is answered with
+                // `Error{INVALID_REQUEST}` carrying the CURRENT ref value
+                // in `details`, which clients classify as `RefConflict`.
+                // Built here (as an Ok response body) rather than through
+                // the static `VerbError` path because it carries dynamic
+                // `details` bytes.
+                Err(TransportError::RefConflict) => Ok(cas_conflict_body(tx, &name)),
                 Err(_) => Err((ErrorCode::InvalidRequest, "update ref failed")),
             }
         }
@@ -536,6 +546,44 @@ fn handle_simple_verb(tx: &FileTransport, body: &ssh_frame::Body) -> Option<Simp
         // Streaming and protocol-control frames are handled by the caller.
         _ => return None,
     })
+}
+
+/// Build the SPEC-TRANSPORT §4.2.1 CAS-mismatch reply for `update_ref`:
+/// `Error { code = ERROR_CODE_INVALID_REQUEST }` with the current ref
+/// value (the raw 32-byte digest) in `Error.details`.
+///
+/// `FileTransport::update_ref` reports a conflict without the winning
+/// value, so we read the ref back here. The read happens outside the
+/// CAS critical section, which is fine: any value it observes was the
+/// ref's current value at some point after the failed CAS, exactly
+/// what the loser needs to recover.
+///
+/// Ref-absent case: when the read finds no ref (a `MATCH` expectation
+/// against a ref that never existed, or the ref vanished between the
+/// failed CAS and this read) there is no current value to surface.
+/// `details` stays empty — mirroring `ReadRefResponse`'s
+/// empty-means-absent encoding — and strict clients (which require
+/// non-empty `details` to classify `RefConflict`) surface the
+/// descriptive message as a remote error instead of fabricating a
+/// current id.
+fn cas_conflict_body(tx: &FileTransport, name: &str) -> ssh_frame::Body {
+    let current = tx.read_ref(name).ok().flatten();
+    let (details, message) = match current {
+        Some(h) => (
+            h.to_vec(),
+            "ref update conflict: expectation does not match current ref value",
+        ),
+        None => (
+            Vec::new(),
+            "ref update conflict: expectation not met and ref is currently absent",
+        ),
+    };
+    ssh_frame::Body::Error(Box::new(
+        mkit_rpc::mkit::rpc::v1::Error::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message(message)
+            .with_details(details),
+    ))
 }
 
 struct UploadDrain {

@@ -106,8 +106,8 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
     ssh_frame,
 };
 use mkit_rpc::{
-    CHUNK_DATA_MAX, MAX_FRAME_BYTES, MAX_REF_NAME, body_name, cond_to_wire, ref_entry_to_ref,
-    rpc_error_to_transport, unexpected_frame,
+    CHUNK_DATA_MAX, MAX_FRAME_BYTES, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error,
+    ref_entry_to_ref, rpc_error_to_transport, unexpected_frame,
 };
 
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
@@ -557,16 +557,11 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
         match resp.body {
             Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => {
-                if e.code
-                    .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest)
-                    && !matches!(condition, RefWriteCondition::Any)
-                {
-                    Err(TransportError::RefConflict)
-                } else {
-                    Err(rpc_error_to_transport(*e, "enc"))
-                }
-            }
+            // Same details-based CAS classification as the SSH client
+            // (SPEC-TRANSPORT §4.2.1): `InvalidRequest` is only a
+            // `RefConflict` when the write carried a precondition AND
+            // the server surfaced the current id in `details`.
+            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "enc")),
             other => Err(unexpected_frame("enc", "UpdateRefResponse", other)),
         }
     }
@@ -1090,6 +1085,45 @@ mod tests {
     fn peer_rejected_error_maps_to_init_error() {
         let mapped: EncInitError = EncryptedError::PeerRejected(b"fake-peer-key".to_vec()).into();
         assert!(matches!(mapped, EncInitError::PeerRejected));
+    }
+
+    /// `update_ref` error classification (SPEC-TRANSPORT §4.2.1): a
+    /// genuine invalid-request — `InvalidRequest` with EMPTY `details`
+    /// — must NOT classify as `RefConflict` even under a CAS
+    /// precondition. This pins the enc client to the same strict
+    /// details-based rule the SSH client uses (both call
+    /// `mkit_rpc::map_update_ref_error`); the previous looser
+    /// presence-based rule wrongly conflated the two.
+    #[test]
+    fn update_ref_plain_invalid_request_is_not_ref_conflict() {
+        use mkit_core::refs::RefWriteCondition;
+        use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
+
+        let e = RpcError::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message("malformed ref name");
+        match map_update_ref_error(e, RefWriteCondition::Match([0u8; 32]), "enc") {
+            TransportError::RemoteError(msg) => assert_eq!(msg, "malformed ref name"),
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    /// The positive half of the §4.2.1 rule: `InvalidRequest` carrying
+    /// the current id in `details` under a precondition write IS a
+    /// `RefConflict`, identically to the SSH client.
+    #[test]
+    fn update_ref_cas_mismatch_with_details_is_ref_conflict() {
+        use mkit_core::refs::RefWriteCondition;
+        use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
+
+        let e = RpcError::default()
+            .with_code(ErrorCode::InvalidRequest)
+            .with_message("ref update conflict")
+            .with_details(vec![0xCDu8; 32]);
+        assert!(matches!(
+            map_update_ref_error(e, RefWriteCondition::Match([0u8; 32]), "enc"),
+            TransportError::RefConflict
+        ));
     }
 
     /// Naive subsequence search — `Vec<u8>::contains_slice` is not

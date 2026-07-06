@@ -258,6 +258,183 @@ fn serve_loop_rejected_upload_does_not_overwrite_existing_pack() {
     assert_eq!(tx.download_pack(&key).unwrap(), bytes);
 }
 
+/// Build an `UpdateRef` request body. `expected` is only set for MATCH.
+fn update_ref_body(
+    name: &str,
+    new_id: [u8; 32],
+    expectation: RefExpectation,
+    expected: Option<[u8; 32]>,
+) -> ssh_frame::Body {
+    let mut req = mkit_rpc::mkit::rpc::v1::ssh::UpdateRef::default()
+        .with_name(name)
+        .with_new_id(new_id.to_vec())
+        .with_expectation(expectation);
+    if let Some(e) = expected {
+        req = req.with_expected_id(e.to_vec());
+    }
+    ssh_frame::Body::UpdateRef(Box::new(req))
+}
+
+/// SPEC-TRANSPORT §4.2.1 over the real sync server: two writers race a
+/// create-only (`MISSING`) update; the loser's reply is
+/// `Error{INVALID_REQUEST}` carrying the WINNER's id in `details`, and
+/// the shared client classifier maps it to `RefConflict` — not
+/// `RemoteError`. Before the #551 fix the server sent empty `details`,
+/// so the strict SSH classifier degraded the conflict to `RemoteError`.
+#[test]
+fn serve_loop_cas_conflict_carries_current_id_in_details() {
+    let td = tempfile::tempdir().unwrap();
+    let tx = FileTransport::new(td.path());
+    let id_winner = [0xA1u8; 32];
+    let id_loser = [0xB2u8; 32];
+
+    let mut input = Vec::new();
+    write_body(
+        &mut input,
+        ssh_frame::Body::Hello(Box::new(
+            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
+                .with_proto(ProtocolVersion::ProtocolVersion1),
+        )),
+    );
+    // Writer A: create-only, wins.
+    write_body(
+        &mut input,
+        update_ref_body("refs/heads/main", id_winner, RefExpectation::Missing, None),
+    );
+    // Writer B: create-only, loses the race.
+    write_body(
+        &mut input,
+        update_ref_body("refs/heads/main", id_loser, RefExpectation::Missing, None),
+    );
+
+    let mut reader = Cursor::new(input);
+    let mut output = Vec::new();
+    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+    // The ref holds the winner's id; the loser clobbered nothing.
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(id_winner));
+
+    let mut out = Cursor::new(output);
+    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let win: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    assert!(matches!(
+        win.body,
+        Some(ssh_frame::Body::UpdateRefResponse(_))
+    ));
+    let lose: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let Some(ssh_frame::Body::Error(err)) = lose.body else {
+        panic!("loser must receive an Error frame, got {:?}", lose.body);
+    };
+    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert_eq!(
+        err.details.as_deref(),
+        Some(&id_winner[..]),
+        "details must carry the CURRENT ref value (the winner's id)"
+    );
+    // The exact frame the server produced classifies as RefConflict
+    // through the shared client-side mapping both transports use.
+    assert!(matches!(
+        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Missing, "ssh"),
+        mkit_core::protocol::TransportError::RefConflict
+    ));
+}
+
+/// A stale `MATCH` update against the real sync server: the reply's
+/// `details` carries the current (unchanged) ref value.
+#[test]
+fn serve_loop_match_conflict_reports_current_value() {
+    let td = tempfile::tempdir().unwrap();
+    let tx = FileTransport::new(td.path());
+    let current = [0x11u8; 32];
+    let stale = [0x22u8; 32];
+    let next = [0x33u8; 32];
+    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &current)
+        .unwrap();
+
+    let mut input = Vec::new();
+    write_body(
+        &mut input,
+        ssh_frame::Body::Hello(Box::new(
+            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
+                .with_proto(ProtocolVersion::ProtocolVersion1),
+        )),
+    );
+    write_body(
+        &mut input,
+        update_ref_body("refs/heads/main", next, RefExpectation::Match, Some(stale)),
+    );
+
+    let mut reader = Cursor::new(input);
+    let mut output = Vec::new();
+    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
+
+    let mut out = Cursor::new(output);
+    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let Some(ssh_frame::Body::Error(err)) = reply.body else {
+        panic!(
+            "stale MATCH must receive an Error frame, got {:?}",
+            reply.body
+        );
+    };
+    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert_eq!(err.details.as_deref(), Some(&current[..]));
+}
+
+/// `MATCH` against a ref that does not exist: still a CAS conflict on
+/// the wire (`INVALID_REQUEST`), but there is no current value to
+/// surface, so `details` stays empty — mirroring `ReadRefResponse`'s
+/// empty-means-absent encoding. Strict clients surface this as a
+/// remote error carrying the server's descriptive message rather than
+/// a `RefConflict` with a fabricated id.
+#[test]
+fn serve_loop_match_conflict_on_absent_ref_has_empty_details() {
+    let td = tempfile::tempdir().unwrap();
+    let tx = FileTransport::new(td.path());
+
+    let mut input = Vec::new();
+    write_body(
+        &mut input,
+        ssh_frame::Body::Hello(Box::new(
+            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
+                .with_proto(ProtocolVersion::ProtocolVersion1),
+        )),
+    );
+    write_body(
+        &mut input,
+        update_ref_body(
+            "refs/heads/ghost",
+            [0x44u8; 32],
+            RefExpectation::Match,
+            Some([0x55u8; 32]),
+        ),
+    );
+
+    let mut reader = Cursor::new(input);
+    let mut output = Vec::new();
+    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
+    assert_eq!(tx.read_ref("refs/heads/ghost").unwrap(), None);
+
+    let mut out = Cursor::new(output);
+    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
+    let Some(ssh_frame::Body::Error(err)) = reply.body else {
+        panic!("absent-ref MATCH must receive an Error frame");
+    };
+    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert_eq!(err.details.as_deref().map_or(0, <[u8]>::len), 0);
+    // Empty details → strict classifier reports the server's message,
+    // not RefConflict.
+    let mapped =
+        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Match([0x55u8; 32]), "ssh");
+    match mapped {
+        mkit_core::protocol::TransportError::RemoteError(msg) => {
+            assert!(msg.contains("absent"), "message should say absent: {msg}");
+        }
+        other => panic!("expected RemoteError, got {other:?}"),
+    }
+}
+
 #[cfg(feature = "enc-transport")]
 #[test]
 // #505 PR 5/5: binds a real `TcpListener` on 127.0.0.1 and waits on a
@@ -334,6 +511,96 @@ fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
 
     assert!(client.upload_pack(b"wrong", &key).is_err());
     assert_eq!(tx.download_pack(&key).unwrap(), bytes);
+}
+
+#[cfg(feature = "enc-transport")]
+#[test]
+// Same quarantine rationale as
+// `listen_enc_rejected_upload_does_not_overwrite_existing_pack` above:
+// real localhost TCP + wall-clock recv_timeout → serial `--ignored` lane.
+#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
+fn listen_enc_cas_conflict_classifies_as_ref_conflict() {
+    // #551 / SPEC-TRANSPORT §4.2.1 over the REAL encrypted listener: a
+    // stale MATCH update must surface as `TransportError::RefConflict`
+    // through the enc client (which now requires the server's
+    // current-id `details` payload), not as a generic RemoteError. The
+    // losing write must not clobber the ref.
+    use commonware_codec::Encode as _;
+    use commonware_cryptography::Signer as _;
+    use commonware_cryptography::ed25519::PrivateKey;
+    use mkit_core::protocol::TransportError;
+    use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor, serve_tcp_with_addr};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    let td = tempfile::tempdir().unwrap();
+    let tx = FileTransport::new(td.path());
+    let current = [0x11u8; 32];
+    let stale = [0x22u8; 32];
+    let next = [0x33u8; 32];
+    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &current)
+        .unwrap();
+
+    let exec = TokioExecutor::new().expect("tokio runtime");
+    let server_key = PrivateKey::from_seed(3003);
+    let server_pubkey = {
+        let encoded = server_key.public_key().encode();
+        let bytes = encoded.as_ref();
+        assert_eq!(bytes.len(), 32);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        out
+    };
+
+    let server_tx = Arc::new(FileTransport::new(td.path()));
+    let (addr_tx, addr_rx) = mpsc::channel();
+    let exec_for_server = exec.clone();
+    let _server_handle = thread::spawn(move || {
+        let serve_fn =
+            move |sess: mkit_transport_enc::EncSession<
+                mkit_transport_enc::tokio_io::TokioStream,
+                mkit_transport_enc::tokio_io::TokioSink,
+            >,
+                  _peer: commonware_cryptography::ed25519::PublicKey| {
+                let tx = server_tx.clone();
+                async move {
+                    serve_enc_session(tx, sess, Some(std::time::Duration::from_secs(30))).await;
+                }
+            };
+        let _ = serve_tcp_with_addr(
+            "127.0.0.1:0",
+            server_key,
+            exec_for_server,
+            move |addr| {
+                let _ = addr_tx.send(addr);
+            },
+            serve_fn,
+        );
+    });
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("encrypted listener address");
+    let client_key = PrivateKey::from_seed(4004);
+    let client = connect_tcp_with_executor(
+        &addr.ip().to_string(),
+        addr.port(),
+        &server_pubkey,
+        client_key,
+        exec,
+    )
+    .expect("connect encrypted client");
+
+    let err = client
+        .update_ref("refs/heads/main", RefWriteCondition::Match(stale), &next)
+        .unwrap_err();
+    assert!(
+        matches!(err, TransportError::RefConflict),
+        "stale MATCH over the enc transport must classify as RefConflict, got {err:?}"
+    );
+    // The losing write clobbered nothing.
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
 }
 
 // Note: containment via MKIT_SERVE_ROOT is enforced — tested via

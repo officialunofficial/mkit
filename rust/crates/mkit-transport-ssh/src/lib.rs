@@ -57,8 +57,8 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
     ssh_frame,
 };
 use mkit_rpc::{
-    CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, read_frame,
-    ref_entry_to_ref, rpc_error_to_transport, unexpected_frame, write_frame,
+    CHUNK_DATA_MAX, FrameError, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error,
+    read_frame, ref_entry_to_ref, rpc_error_to_transport, unexpected_frame, write_frame,
 };
 
 pub use crate::url::{MKIT_SSH_PREFIX, SshTarget, parse_mkit_ssh_url, validate_ssh_path};
@@ -357,7 +357,7 @@ impl Transport for SshTransport {
         let resp = read_child_frame_or_err(&mut io)?;
         match resp.body {
             Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition)),
+            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "ssh")),
             other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
         }
     }
@@ -440,40 +440,6 @@ impl Transport for SshTransport {
 // Helpers (transport-ssh-specific I/O wrappers; shared frame helpers
 // live in `mkit_rpc::helpers`)
 // ---------------------------------------------------------------------------
-
-/// Map a server `Error` reply to an `update_ref` request into a
-/// [`TransportError`].
-///
-/// Per SPEC-TRANSPORT / `UpdateRefResponse`, the server signals a
-/// compare-and-swap mismatch as `ERROR_CODE_INVALID_REQUEST` carrying
-/// the *current* ref id in `details`. We treat that as
-/// [`TransportError::RefConflict`].
-///
-/// The bare `ERROR_CODE_INVALID_REQUEST` code alone is ambiguous: the
-/// server reuses it for genuine bad requests (malformed ref, backend
-/// failure) as well as CAS mismatches. To avoid masking a real error as
-/// a conflict we only treat it as `RefConflict` when:
-///   - the write carried a CAS precondition (`condition != Any`), and
-///   - the error carries non-empty `details` (the documented current-id
-///     payload that disambiguates a true CAS mismatch).
-///
-/// When `details` is absent we fall back to [`rpc_error_to_transport`]
-/// so a genuine invalid-request surfaces its real message instead of a
-/// misleading `RefConflict`.
-fn map_update_ref_error(
-    e: mkit_rpc::mkit::rpc::v1::Error,
-    condition: RefWriteCondition,
-) -> TransportError {
-    let is_invalid_request = e
-        .code
-        .is_some_and(|c| c == mkit_rpc::mkit::rpc::v1::ErrorCode::InvalidRequest);
-    let has_cas_details = e.details.as_deref().is_some_and(|d| !d.is_empty());
-    if is_invalid_request && !matches!(condition, RefWriteCondition::Any) && has_cas_details {
-        TransportError::RefConflict
-    } else {
-        rpc_error_to_transport(e, "ssh")
-    }
-}
 
 /// Assemble the response side of `download_pack` from a frame source.
 ///
@@ -812,6 +778,9 @@ mod tests {
 
     /// A CAS mismatch — `InvalidRequest` with the current id in
     /// `details` under a precondition write — maps to `RefConflict`.
+    /// (The mapping now lives in `mkit_rpc::map_update_ref_error`,
+    /// shared with the enc transport; these tests pin the SSH client's
+    /// contract against it.)
     #[test]
     fn update_ref_error_maps_cas_mismatch_to_conflict() {
         let e = RpcError::default()
@@ -819,7 +788,7 @@ mod tests {
             .with_message("ref changed")
             .with_details(vec![0xABu8; 32]);
         assert!(matches!(
-            map_update_ref_error(e, RefWriteCondition::Missing),
+            map_update_ref_error(e, RefWriteCondition::Missing, "ssh"),
             TransportError::RefConflict
         ));
     }
@@ -832,7 +801,7 @@ mod tests {
         let e = RpcError::default()
             .with_code(ErrorCode::InvalidRequest)
             .with_message("malformed ref name");
-        match map_update_ref_error(e, RefWriteCondition::Match([0u8; 32])) {
+        match map_update_ref_error(e, RefWriteCondition::Match([0u8; 32]), "ssh") {
             TransportError::RemoteError(msg) => assert_eq!(msg, "malformed ref name"),
             other => panic!("expected RemoteError, got {other:?}"),
         }
@@ -847,7 +816,7 @@ mod tests {
             .with_message("bad")
             .with_details(vec![0xABu8; 32]);
         assert!(!matches!(
-            map_update_ref_error(e, RefWriteCondition::Any),
+            map_update_ref_error(e, RefWriteCondition::Any, "ssh"),
             TransportError::RefConflict
         ));
     }
