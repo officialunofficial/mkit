@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
+  machine-readable blame: a per-line header (`<id> <orig> <final>
+  [<group-len>]`) plus a metadata block (author/committer, `author-time`/
+  `-tz`, `summary`, `boundary` on a file-history root, and `filename`) —
+  once per commit for `--porcelain`, for every line under `--line-porcelain`
+  — with each content line tab-prefixed. Pinned against git 2.50.1 for the
+  in-scope fields. Documented divergences, consistent with `--format=json`
+  and the `log` precedent: 64-hex ids; `author`/`committer` carry mkit's
+  Identity (empty `*-mail`, `+0000` tz, single UTC author = committer);
+  `filename` is the `-C` copy source on a cross-file copy; git's `previous`
+  line is out of scope and not emitted.
+- **`mkit bisect run <cmd> [args…]`.** Drives the bisection loop
+  automatically: it checks out each candidate, runs the command, and
+  classifies from the exit status using git's contract (`0`=good, `125`=skip,
+  `1`–`127` else=bad, `≥128` or signal=abort), converging on the first bad
+  commit. The candidate is also exported as `MKIT_BISECT_COMMIT`. mkit's
+  bisect stays print-candidate by design, so `run` checks out each candidate
+  transiently for the test, then restores the original HEAD and *prints* the
+  first bad commit rather than parking there. Each candidate is checked out
+  with `--force`, so a test command that dirties a tracked file doesn't block
+  the next iteration; and when only skipped candidates remain, `run` reports
+  the result as ambiguous (like git) and exits non-zero instead of guessing.
+- **`mkit checkout --force` / `-f`.** Discard local changes that would block
+  the switch (git `checkout -f`): skip the dirty-tracked/staged safety gate
+  and overwrite locally-modified tracked paths with the target's version;
+  untracked files are still preserved. Used by `bisect run`.
 - **`mkit self update`.** The binary can now update itself in place from a
   signed GitHub Release — but only when installer-managed (the
   `.mkit-installed-tag` receipt written by `install.sh` sits next to the
@@ -85,12 +111,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file newly added by the merge searches every real parent, first
   included (under `--first-parent`, only the first). Documented divergences from git
   remain: inline `-M<num>`/`-C<num>` threshold forms aren't exposed on the
-  CLI (the core API takes a custom threshold); `-C -C -C` (whole-history
-  search) is approximated as `-C -C`; when one source holds the block at
-  several offsets the earliest offset wins (git scores candidates and tracks
-  line identity through its diff); and within a single unmatched run longer
-  than 10,000 lines only the whole run is matched, not sub-blocks (a cost
-  bound; the matcher already caps inputs).
+  CLI (the core API takes a custom threshold); when one source holds the
+  block at several offsets the earliest offset wins (git scores candidates
+  and tracks line identity through its diff); and within a single unmatched
+  run longer than 10,000 lines only the whole run is matched, not sub-blocks
+  (a cost bound; the matcher already caps inputs).
+- **`mkit blame -C -C -C` whole-history copy search.** git's third `-C`
+  ("copies from other files in any commit") now whole-tree-searches the
+  parent at *every* walk step, not only at the commit that creates the
+  blamed file. So a block copied into a persisting file from a source that
+  was *unmodified* in the introducing commit is credited to that source's
+  origin — previously `-C -C -C` was approximated as `-C -C` and missed it.
+  Pinned against git 2.50.1.
+- **`mkit blame -C` copy tie-break now matches git.** When two
+  equally-similar copy sources exist, blame credits the source that traces
+  to the older (ancestor) commit — git's push-blame-furthest-back bias —
+  instead of the first candidate in path order. The ordering is topological
+  (mkit commits can share a whole-second timestamp, so ancestry, not time,
+  is authoritative), pinned against git 2.50.1.
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
   commits — mass reformats, license-header sweeps, renames — during
   attribution, like `git blame --ignore-rev`. A line that would be credited
