@@ -404,6 +404,52 @@ number.
 - Incorrect: **info** Available in **mkit-core 0.4 and above**.
 - Incorrect: **info** Available in **mkit-core 0.4 and below**.
 
+## User-facing copy
+
+Any string a person reads is user-facing copy: CLI stdout and stderr,
+error and progress messages, `--help` text, the manpage,
+shell-completion descriptions, prompts, the web demo, and the docs
+site. A dynamic `format!` string is still user-facing copy.
+
+Every string earns its place by doing at least one of: saying what
+happened, saying what happens next, or telling the reader what to do.
+Get straight to the point.
+
+- **State facts, not feelings.** No "please", "sorry", or
+  "unfortunately". Say what happened and what to do next:
+  `non-fast-forward push rejected: fetch and retry`, not
+  `Sorry, we couldn't push your changes. Please try again.`
+- **Errors carry the next action.** The exit code carries the class
+  (BSD `sysexits(3)`, see [CLI.md](CLI.md)); the message carries the
+  specifics and, when one exists, the recovery step.
+- **Plain terms first.** Spec vocabulary (DSSE, CAS, BMT, packmap)
+  belongs in the specs and implementer docs. In help text, errors,
+  and the web demo, prefer the plain term ("conditional ref update",
+  "attestation envelope"); when the spec term is the accurate one,
+  expand or link it on first use.
+- **Exact verbs on prompts and buttons.** A confirmation names the
+  action it performs — "Delete branch", "Overwrite key" — never
+  "Yes" or "OK". Prompt copy is a complete sentence saying what
+  happens and why, not a bare imperative.
+- **Same state, same words.** Never word one state differently on
+  two surfaces (CLI vs web demo vs a JSON `message` field). Route a
+  repeated string through one helper instead of hand-writing it per
+  call site.
+- **Sentence case everywhere** — headings, labels, buttons, table
+  headers. Title Case only for real proper nouns.
+- **Parity wins over style.** Output pinned byte-for-byte to git's
+  (the `COMMIT_EDITMSG` template, porcelain formats — see
+  [PARITY.md](PARITY.md)) keeps git's wording even where it breaks
+  these rules.
+
+Before opening a PR that touches copy, grep the diff for `please`,
+`sorry`, `unfortunately`, `simply`, and `easy`, and check whether an
+existing helper already words the state you are adding.
+
+Apple's
+[Human Interface Guidelines on writing](https://developer.apple.com/design/human-interface-guidelines/writing)
+is the reference for tone: clear, direct, specific.
+
 ## Tools for visualization and interactivity
 
 When a topic is easier to grasp visually or interactively, reach for
