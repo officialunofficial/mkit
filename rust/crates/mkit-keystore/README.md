@@ -2,7 +2,7 @@
 
 Platform-aware signing-key vault abstraction for mkit: software keys, OS
 keychains, systemd-creds, `YubiKey`, and external signer subprocesses. See
-`docs/SPEC-KEYSTORE.md` for the normative backend contract.
+`docs/specs/SPEC-KEYSTORE.md` for the normative backend contract.
 
 This crate owns keystore backends and signer handles; `mkit-core` remains
 independent and continues to own canonical object signing bytes.
@@ -25,4 +25,4 @@ API for encrypted-at-rest BLS12-381 threshold signing shares
 
 External hardware signers that don't fit a native OS keystore API (Secure
 Enclave, TPM 2.0, `FIDO2`/`WebAuthn`) are driven as subprocesses instead — see
-`contrib/signers/README.md` and `docs/SPEC-EXTERNAL-SIGNER.md`.
+`contrib/signers/README.md` and `docs/specs/SPEC-EXTERNAL-SIGNER.md`.

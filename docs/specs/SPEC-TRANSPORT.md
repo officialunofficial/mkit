@@ -9,19 +9,19 @@ audience: implementers of compatible transport clients and servers
 
 mkit talks to remote stores through a small set of pluggable
 transports (memory, file, HTTP, S3, SSH). All implement the same
-[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait —
+[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait —
 a small set of verbs over a synchronous, object-safe interface — but the
 wire shape and authentication model differ per scheme.
 
 There is no negotiation between transports and no scheme fallback.
 The URL scheme is part of the remote address; if the scheme is
 unsupported, the dispatcher returns an error rather than guessing
-([`mkit-cli`'s `remote_dispatch::open`](../rust/crates/mkit-cli/src/remote_dispatch/mod.rs)
+([`mkit-cli`'s `remote_dispatch::open`](../../rust/crates/mkit-cli/src/remote_dispatch/mod.rs)
 performs the scheme switch).
 
 The SSH wire format is defined in
 [`SPEC-RPC`](SPEC-RPC.md) and lives in the generated
-[`ssh.proto`](../rust/crates/mkit-rpc/proto/ssh.proto) bindings.
+[`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto) bindings.
 This document covers the cross-transport contract: verbs, URL
 parsing, authentication, the forced-command server pattern, size
 caps, retry policy, and the error taxonomy.
@@ -31,7 +31,7 @@ caps, retry policy, and the error taxonomy.
 ## 1. Verbs
 
 Every transport implements the verbs exposed by the
-[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait. Method
+[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait. Method
 signatures are synchronous and take `&self`; transports that need
 interior mutability (connection pools, child-process stdio) use an
 internal `Mutex` so the trait object remains object-safe.
@@ -66,7 +66,7 @@ true conflict.
 
 Implementations MAY wrap transport-specific errors internally but
 MUST surface one of the following variants at the trait boundary
-([`TransportError`](../rust/crates/mkit-core/src/protocol.rs)):
+([`TransportError`](../../rust/crates/mkit-core/src/protocol.rs)):
 
 ```rust
 TransportError::PackNotFound        // download_pack on missing digest
@@ -95,7 +95,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 | `mkit+https://host/project` | HTTPS REST + JSON (`HttpTransport`) | The `mkit+` prefix is stripped before the inner `reqwest` call; production uses `https://`. |
 | `mkit+http://localhost…` | Plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
-| `mkit+ssh://user@host[:port]/path` | SSH child + `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty / `.` / `..` segments. SCP-style `mkit+ssh://user@host:path` / `mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../rust/crates/mkit-transport-ssh/src/url.rs)). |
+| `mkit+ssh://user@host[:port]/path` | SSH child + `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty / `.` / `..` segments. SCP-style `mkit+ssh://user@host:path` / `mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
 | `mkit+enc://[user@]host[:port]/path?pubkey=<…>` | Encrypted-stream (`EncTransport`) | Self-contained ChaCha20-Poly1305 + ed25519 transport — does not shell out to `ssh(1)`. The server's static public key MUST be carried out-of-band in the URL. URL parsing + CLI plumbing land with the real-TCP transport stage; see [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
@@ -108,13 +108,13 @@ of any sibling tool.
 ## 4. SSH transport
 
 mkit's SSH transport spawns a long-lived `ssh(1)` child process and
-exchanges length-prefixed [`SshFrame`](../rust/crates/mkit-rpc/proto/ssh.proto)
+exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto)
 messages on its stdin/stdout. The framing layer is defined in
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
 
 The transport is implemented with `std::process::Command` — mkit does
 NOT ship its own SSH stack (no `russh`, no in-process crypto). See
-[`SSH-SECURITY.md`](SSH-SECURITY.md) for the trade-offs that choice
+[`SSH-SECURITY.md`](../SSH-SECURITY.md) for the trade-offs that choice
 implies.
 
 ### 4.1 Forced-command server pattern
@@ -210,7 +210,7 @@ SSH transport security is delegated to the user's `ssh(1)` CLI:
 - Kex / cipher / auth → `ssh(1)` / sshd.
 
 Three `.mkit/config` keys override `ssh(1)` defaults for the mkit SSH
-child only (see [`SshOptions`](../rust/crates/mkit-transport-ssh/src/lib.rs)):
+child only (see [`SshOptions`](../../rust/crates/mkit-transport-ssh/src/lib.rs)):
 
 ```
 ssh.strict_host_key_checking = yes
@@ -226,13 +226,13 @@ implicitly passes `-o StrictHostKeyChecking=accept-new` so the first
 connection is not an interactive prompt. `-o BatchMode=yes` is
 always passed so a missing key never blocks on a password prompt.
 
-See [`SSH-SECURITY.md`](SSH-SECURITY.md) for the full trust model.
+See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 ### 4.4 Resource caps
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-cli/src/commands/serve/mod.rs`](../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
+[`mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
 
 - `MAX_FRAMES_PER_CONN = 10_000` — hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  — cap on cumulative request payload bytes.
@@ -262,7 +262,7 @@ mentioning the client cap.
 
 ## 5. HTTP transport
 
-The HTTP transport ([`mkit-transport-http`](../rust/crates/mkit-transport-http/))
+The HTTP transport ([`mkit-transport-http`](../../rust/crates/mkit-transport-http/))
 speaks a simple JSON REST dialect against an mkit VCS Worker
 (Cloudflare Worker + R2 is the reference deployment).
 
@@ -348,7 +348,7 @@ proxy cannot silently substitute a different filter.
 
 ## 6. S3 / R2 transport
 
-The S3 transport ([`mkit-transport-s3`](../rust/crates/mkit-transport-s3/))
+The S3 transport ([`mkit-transport-s3`](../../rust/crates/mkit-transport-s3/))
 talks SigV4 against Cloudflare R2 (primary target) or AWS S3
 (works but with weaker CAS guarantees — see §6.3).
 
@@ -384,7 +384,7 @@ The ref body is the 65-byte wire form: 64 hex chars + `\n`.
 ### 6.2 Authentication
 
 Credentials from environment at `connect` time
-([`mkit-transport-s3::ENV_*`](../rust/crates/mkit-transport-s3/src/lib.rs)):
+([`mkit-transport-s3::ENV_*`](../../rust/crates/mkit-transport-s3/src/lib.rs)):
 
 - `MKIT_R2_ACCESS_KEY_ID`
 - `MKIT_R2_SECRET_ACCESS_KEY`
@@ -459,7 +459,7 @@ backoff: `ConnectionFailed`, `ServerError{status >= 500}`, and
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s,
 8s, 16s` (5 attempts), with subsequent delays doubling and capped
 at 300 s. The ladder is exposed via
-[`BackoffIterator`](../rust/crates/mkit-core/src/protocol.rs) and the
+[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs) and the
 classifier as [`is_retryable`].
 
 `update_ref` with `Missing` or `Match` is NOT idempotent across
@@ -504,7 +504,7 @@ the default trait impls delegate the blob verbs to the pack verbs.
 Transports MUST NOT inspect or rewrite blob bytes either.
 
 The 32-byte digest is the BLAKE3 hash of the full bytes buffer, wrapped
-in [`PackKey`](../rust/crates/mkit-core/src/protocol.rs) to keep digests
+in [`PackKey`](../../rust/crates/mkit-core/src/protocol.rs) to keep digests
 and object hashes from silently crossing purposes at API boundaries.
 (The `PackKey` name predates the blob verbs; it addresses any
 content-addressed blob the transport stores, pack or auxiliary.)
@@ -520,6 +520,29 @@ trait surface (`Transport`, `TransportError`, `PackKey`,
 versioning.
 
 A native SSH implementation (with in-process host-key pinning) is a
-future enhancement; [`SSH-SECURITY.md`](SSH-SECURITY.md) tracks the
+future enhancement; [`SSH-SECURITY.md`](../SSH-SECURITY.md) tracks the
 gaps inherited from delegating to `ssh(1)`. S3 multipart upload
 (for packs above the 5 GiB single-PUT cap) is similarly deferred.
+
+---
+
+## 10. Invariants
+
+These hold for every conformant transport, regardless of scheme:
+
+| Invariant | Enforced by |
+|---|---|
+| Errors form a closed taxonomy; no coupling to message strings | `TransportError` variants at the trait boundary; advisory messages MUST NOT be pattern-matched (§2) |
+| No scheme guessing or fallback | `mkit+` prefix required; unsupported schemes error at dispatch instead of guessing (§3) |
+| No plaintext HTTP off loopback | `validate_http_scheme` → `InsecureScheme` for any non-loopback `http://` host (§3, §5) |
+| Stored pack bytes match their announced digest | SSH: server verifies `BLAKE3(received) == pack_id` before storing (§4.2); HTTP: client cross-checks the server-returned key against its pre-computed digest → `InvalidResponse` (§5.1) |
+| A rejected upload never creates or overwrites the destination pack | SSH upload-stream validation: `total_bytes` required and capped, `pack_id` match, contiguous offsets, exact end (§4.2) |
+| Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §5.3, §6.3); conflict → `RefConflict`; 409/412 never retried (§5.3, §6.5, §7.1) |
+| A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
+| `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
+| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
+| Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
+| A proxy cannot substitute a sparse-checkout filter | `?sparse=<filter-hex>` MUST equal `BLAKE3` of the canonicalised filter; server re-canonicalises and rejects with `409` (§5.6) |
+
+Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
+the normative summary is the table in §7.1.

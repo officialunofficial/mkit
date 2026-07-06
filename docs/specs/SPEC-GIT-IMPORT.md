@@ -412,3 +412,26 @@ MUST `verify_commit`/`verify_tag` under the test key.
 | Version | Changes |
 |---------|---------|
 | 1 | Initial importer-signed mapping: blobs/trees/commits/tags, refusal matrix, dedicated-key + pinning model, three-layer provenance, canonical remote identity, fetch/pull semantics, golden vectors. |
+
+---
+
+## 11. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| Re-running an import reproduces byte-identical mkit objects | import is a pure function of *(upstream bytes, importer key, import-spec version)*; RFC 8032 signing is deterministic (§1.2) |
+| Two importers under the same key produce identical hashes; under different keys, unrelated forks — never a silent mix | hashes are a function of the signing key (§1.2); the pinned key refuses imports under any other key (§4) |
+| Translation-rule drift can never silently fork hashes for one key | recorded import-spec version; unimplemented versions refuse incremental extension (§1.2) |
+| Every imported commit/tag carries a verifiable importer vouch, never an authorship claim | importer Ed25519 under the existing `COMMIT_DOMAIN`/`TAG_DOMAIN`; attribution rides in the author/tagger Identity (§1.1, §3.2, §3.4) |
+| Historic malformations (person lines, modes, tagger-less tags) hash identically across implementations | byte-exact identity-slice rule, exhaustive mode-spelling table, pinned `(no tagger)` sentinel (§3.2, §3.3, §3.4) |
+| Untrusted upstream input is never silently altered | parse-and-carry or typed per-ref refusal — the §3 refusal matrix; never crash or normalize undeclared (§2, §3) |
+| Imported stores are always exportable | normative 1 MiB threshold + writer-side FastCDC rule, so SPEC-GIT-BRIDGE §4 refusals never trigger (§3.1) |
+| The translation is byte-auditable after the fact | framed raw commit/tag bytes retained sha1-addressed; head attestation transitively pins the signed closure (§5.1, §5.2) |
+| A forged `content_digest` cannot defeat verification | the slot is advisory and excluded from signing bytes; the attestation and retained bytes are the proof surface (§5.3) |
+| One state dir tracks exactly one upstream, in exactly one direction | canonical remote identity (§8) immutable after first use; mixed import/plain-export use refused at open (§6) |
+| Re-importing an already-imported upstream in the same store is caught | state-dir identity check (structural) + content probe (best-effort) (§6.1) |
+| An upstream force-push never silently rewrites local work | tracking refs move with a loud warning; the current branch advances only by fast-forward (§7) |
+
+The content probe (§6.1) is explicitly best-effort — it catches the
+realistic accident, not an adversary; the pinned-key refusal (§4) is
+the structural guarantee.

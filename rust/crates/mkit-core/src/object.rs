@@ -1,6 +1,6 @@
 //! mkit object types.
 //!
-//! Spec reference: `docs/SPEC-OBJECTS.md` §1–§9. Briefly:
+//! Spec reference: `docs/specs/SPEC-OBJECTS.md` §1–§9. Briefly:
 //!
 //! * Every stored object begins with the 6-byte v1 prologue
 //!   `[u8 object_type][4B "MKT1"][u8 0x01]`.

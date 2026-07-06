@@ -256,7 +256,7 @@ pub enum Algorithm {
     /// are pinned at 32 bytes, refuse this variant with
     /// [`Error::UnsupportedAlgorithm`]. Software-backend storage flows
     /// through the dedicated BLS-share API on
-    /// [`crate::SoftwareKeystore`]; see `docs/SPEC-KEYSTORE.md` §"BLS
+    /// [`crate::SoftwareKeystore`]; see `docs/specs/SPEC-KEYSTORE.md` §"BLS
     /// share storage".
     ///
     /// Feature-gated behind `bls-threshold` because the share producers

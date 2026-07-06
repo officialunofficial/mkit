@@ -7,7 +7,7 @@ Every mkit v1 object maps to a git object whose bytes are a pure function of
 the source bytes, with mkit-only fields carried in `mkit-*` commit/tag
 headers so the original object — and its Ed25519 signature — can be
 reconstructed and re-verified. Export is specified by
-`docs/SPEC-GIT-BRIDGE.md`; import is specified by `docs/SPEC-GIT-IMPORT.md`;
+`docs/specs/SPEC-GIT-BRIDGE.md`; import is specified by `docs/specs/SPEC-GIT-IMPORT.md`;
 see `docs/GUIDE-GIT-WORKFLOWS.md` for the end-user flow.
 
 ## Layout

@@ -10,9 +10,9 @@ address space:
 
 - **External signers** (`signer.proto`) — `mkit-cli` ↔ a subprocess signer
   (file, `FIDO2`, TPM, future hardware backends). See
-  `docs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
+  `docs/specs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
 - **SSH transport** (`ssh.proto`) — `mkit-cli` ↔ a remote `mkit-server` over
-  an `ssh(1)` child process. See `docs/SPEC-TRANSPORT.md`.
+  an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
 
 Shared vocabulary (`common.proto`) — algorithms, key forms, error codes,
 protocol-version negotiation — is re-exported at the crate root for

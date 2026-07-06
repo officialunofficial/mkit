@@ -20,7 +20,7 @@ use crate::common::{
 /// Serialize a blob object and return `{ bytes, hash_hex }`.
 ///
 /// The returned `bytes` are the canonical on-disk v1 object bytes
-/// (see `docs/SPEC-OBJECTS.md`); `hash_hex` is the object's content id
+/// (see `docs/specs/SPEC-OBJECTS.md`); `hash_hex` is the object's content id
 /// (via `id_from_object`) — for a non-merkelized `Blob`, BLAKE3 of those bytes.
 #[wasm_bindgen]
 pub fn blob_encode(data: &[u8]) -> Result<EncodedObject, JsValue> {

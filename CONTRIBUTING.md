@@ -25,7 +25,7 @@ Advisories. Full policy: [SECURITY.md](SECURITY.md).
 | Attestations (in-toto v1, DSSE, signers) | `rust/crates/mkit-attest/` |
 | Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh,enc}/` |
 | External signers (TPM, SE, CTAP, file) | `contrib/signers/` |
-| On-disk + wire format specs | `docs/SPEC-*.md` |
+| On-disk + wire format specs | `docs/specs/SPEC-*.md` |
 | Golden vectors | `rust/tests/golden/` |
 | Fuzz harness | `rust/fuzz/` |
 
@@ -191,7 +191,7 @@ Every PR is held to:
 3. **Formatted** — `cargo fmt --check`.
 4. **No new RUSTSEC advisories** — `cargo deny check advisories`.
 5. **Spec changes are versioned** — anything that mutates an on-disk
-   or wire format requires a corresponding `docs/SPEC-*.md` change
+   or wire format requires a corresponding `docs/specs/SPEC-*.md` change
    and, where applicable, a new golden vector under
    `rust/tests/golden/`.
 6. **Crypto / key-handling changes** require a second reviewer and an

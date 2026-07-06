@@ -1,6 +1,6 @@
 //! BLS12-381 threshold signer — partial signing + aggregation.
 //!
-//! Part of the release-party flow (see `docs/SPEC-RELEASE-THRESHOLD.md`).
+//! Part of the release-party flow (see `docs/specs/SPEC-RELEASE-THRESHOLD.md`).
 //! This module exposes:
 //!
 //! * [`ThresholdSigner`] — a per-holder [`crate::Signer`] adapter that

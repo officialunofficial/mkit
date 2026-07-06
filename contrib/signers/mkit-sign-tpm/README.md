@@ -1,7 +1,7 @@
 # mkit-sign-tpm — TPM 2.0 P-256 external signer for mkit
 
 `mkit-sign-tpm` is a pure-Rust binary that implements the mkit external
-signer v1 wire protocol ([`docs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/SPEC-EXTERNAL-SIGNER.md))
+signer v1 wire protocol ([`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md))
 backed by a TPM 2.0 device. It is the Linux/Windows-native analog of
 `mkit-sign-se` (Apple Secure Enclave).
 
@@ -130,8 +130,8 @@ Enters the external-signer v1 protocol loop. The wire is
 **length-prefixed protobuf `SignerFrame` messages** (4-byte
 little-endian length prefix, `MAX_FRAME_BYTES = 1 MiB`) on stdin and
 stdout — NOT a JSON line protocol. See
-[`docs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/SPEC-EXTERNAL-SIGNER.md)
-and [`docs/SPEC-RPC.md`](../../../docs/SPEC-RPC.md); the schema is
+[`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md)
+and [`docs/specs/SPEC-RPC.md`](../../../docs/specs/SPEC-RPC.md); the schema is
 [`rust/crates/mkit-rpc/proto/signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto).
 
 The conversation:

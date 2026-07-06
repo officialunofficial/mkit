@@ -1,6 +1,6 @@
 //! Ed25519 commit / remix signing.
 //!
-//! Spec: `docs/SPEC-SIGNING.md`. The exact bytes covered by an Ed25519
+//! Spec: `docs/specs/SPEC-SIGNING.md`. The exact bytes covered by an Ed25519
 //! signature, and the domain separator used, are normative; this module
 //! reproduces them byte-for-byte. The golden tests in
 //! `tests/golden_sign.rs` pin the output.
@@ -46,7 +46,7 @@ pub fn effective_uid() -> u32 {
 }
 
 /// Domain separator used when signing commit objects. The trailing
-/// `\x00` is load-bearing — see `docs/SPEC-SIGNING.md` §2. Twelve bytes.
+/// `\x00` is load-bearing — see `docs/specs/SPEC-SIGNING.md` §2. Twelve bytes.
 pub const COMMIT_DOMAIN: &[u8] = b"mkit.commit\x00";
 
 /// Domain separator used when signing remix objects. Eleven bytes
@@ -58,7 +58,7 @@ pub const REMIX_DOMAIN: &[u8] = b"mkit.remix\x00";
 ///
 /// DELIBERATELY DISTINCT from [`COMMIT_DOMAIN`] / [`REMIX_DOMAIN`] so a
 /// tag signature can never be replayed as a commit/remix signature, or
-/// vice versa — see `docs/SPEC-SIGNING.md` §2 and §4a.
+/// vice versa — see `docs/specs/SPEC-SIGNING.md` §2 and §4a.
 pub const TAG_DOMAIN: &[u8] = b"mkit.tag\x00";
 
 /// 32-byte Ed25519 public key.
@@ -496,7 +496,7 @@ pub fn verify_remix(r: &Remix) -> Result<(), MkitError> {
 ///
 /// On non-Unix hosts the symlink/owner/mode checks are a no-op;
 /// callers should keep keys under `%USERPROFILE%` and rely on default
-/// ACLs (documented in `docs/SPEC-SIGNING.md` §7).
+/// ACLs (documented in `docs/specs/SPEC-SIGNING.md` §7).
 pub fn load_key(path: &Path) -> Result<KeyPair, MkitError> {
     let seed = load_raw_32(path)?;
     // Borrowing through `from_seed_zeroizing` avoids the `*seed` Copy

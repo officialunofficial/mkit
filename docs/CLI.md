@@ -728,7 +728,7 @@ Branches / refs:
   (gc prints a warning). **Fail-closed:** a missing/corrupt root, a
   malformed ref, or the reachability cap aborts the run with nothing
   deleted, and an object whose age can't be read is kept. See
-  [`docs/SPEC-GC.md`](SPEC-GC.md).
+  [`docs/specs/SPEC-GC.md`](specs/SPEC-GC.md).
 
 ### Resolving conflicts
 
@@ -919,7 +919,7 @@ Remote / sync:
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   — deterministic **one-way** export of
   branches and tags to a git mirror
-  ([`SPEC-GIT-BRIDGE`](SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
+  ([`SPEC-GIT-BRIDGE`](specs/SPEC-GIT-BRIDGE.md)). `<dest>` is a git URL or
   a local path (a missing/empty local path is initialized bare);
   `--remote-name` defaults to `mirror`, and `--ref` takes full names
   (`refs/heads/...` / `refs/tags/...`).
@@ -946,7 +946,7 @@ Remote / sync:
   not exist.
 - `mkit git import <url> [<dir>] [--remote-name <name>] [--key <path>]
   [--json]` — import a git upstream as an **importer-signed downstream
-  fork** ([`SPEC-GIT-IMPORT`](SPEC-GIT-IMPORT.md)). With `<dir>`:
+  fork** ([`SPEC-GIT-IMPORT`](specs/SPEC-GIT-IMPORT.md)). With `<dir>`:
   init a fresh mkit repo, import all branches/tags, and check out the
   upstream default branch. Without: add the upstream to the current
   repo as `refs/remotes/<name>/*` tracking refs + tags. Every
@@ -1223,7 +1223,7 @@ Note: object garbage collection (`mkit gc`) **is shipped** (issue #233).
 History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
 the superseded commit in the recovery log, and `mkit gc` reclaims
 unreachable objects once they fall outside the grace window. See
-[`docs/SPEC-GC.md`](SPEC-GC.md).
+[`docs/specs/SPEC-GC.md`](specs/SPEC-GC.md).
 
 ## Config keys
 
@@ -1263,7 +1263,7 @@ sensitive selector keys are ignored from repo-local config; set them in
 ### `user.identity`
 
 The commit author Identity, encoded as `[kind:u8][len:u16 LE][bytes]`
-in lowercase hex per `docs/SPEC-OBJECTS.md §9`. Accepted shorthands at
+in lowercase hex per `docs/specs/SPEC-OBJECTS.md §9`. Accepted shorthands at
 parse time:
 
 ```
@@ -1306,7 +1306,7 @@ Accepted schemes:
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 
-See `docs/SPEC-TRANSPORT.md` for the wire protocol.
+See `docs/specs/SPEC-TRANSPORT.md` for the wire protocol.
 
 ## Version output contract
 

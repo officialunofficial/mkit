@@ -1,5 +1,5 @@
 //! Delta instruction stream — implements the versioned format required
-//! by `docs/SPEC-DELTA.md`.
+//! by `docs/specs/SPEC-DELTA.md`.
 //!
 //! Stream layout (SPEC-DELTA §2):
 //!

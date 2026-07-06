@@ -2,7 +2,7 @@
 
 Encrypted-stream transport for mkit, layering `mkit-rpc`'s `SshFrame` on top
 of `commonware-stream::encrypted` (`ChaCha20-Poly1305`, `X25519` + `Ed25519`
-handshake). Full picture in `docs/SPEC-TRANSPORT-ENC.md`.
+handshake). Full picture in `docs/specs/SPEC-TRANSPORT-ENC.md`.
 
 Implements the `Transport` trait by carrying the existing mkit-rpc
 `SshFrame` message set over an authenticated, encrypted byte stream. The

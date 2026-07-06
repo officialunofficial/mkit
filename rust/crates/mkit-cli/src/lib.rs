@@ -140,7 +140,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
             let _ = writeln!(
                 stderr,
                 "error: the git bridge is not compiled into this binary; \
-                 rebuild with `--features git-bridge` (see docs/SPEC-GIT-BRIDGE.md)"
+                 rebuild with `--features git-bridge` (see docs/specs/SPEC-GIT-BRIDGE.md)"
             );
             exit::UNAVAILABLE
         }

@@ -7,7 +7,7 @@
 //! from any `N` of those shards.
 //!
 //! The wire format and motivation are normatively documented in
-//! `docs/SPEC-PACK-SHARDS.md`. The implementation here matches the v0
+//! `docs/specs/SPEC-PACK-SHARDS.md`. The implementation here matches the v0
 //! spec; transport-level shard fetch (HTTP, S3) is **out of scope** and
 //! lands later under `mkit-transport-*`.
 //!
@@ -36,7 +36,7 @@
 //!
 //! `Config { minimum_shards: 16, extra_shards: 4 }` — 20 total shards,
 //! 25% redundancy. Any 16 of 20 shards reconstruct the pack. Tuning
-//! lives in `docs/SPEC-PACK-SHARDS.md` §6.
+//! lives in `docs/specs/SPEC-PACK-SHARDS.md` §6.
 
 use std::num::NonZeroU16;
 

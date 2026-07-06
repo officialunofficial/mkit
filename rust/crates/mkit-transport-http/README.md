@@ -6,7 +6,7 @@ bounded body sizes.
 Speaks a simple JSON REST dialect against a mkit VCS Worker (e.g. a
 Cloudflare Worker + R2). User-facing URL shape: `mkit+https://<host>/<project>`
 — the `mkit+` prefix is stripped before the inner `reqwest` call. Full
-contract in `docs/SPEC-TRANSPORT.md` §5.1.
+contract in `docs/specs/SPEC-TRANSPORT.md` §5.1.
 
 ## Wire contract
 

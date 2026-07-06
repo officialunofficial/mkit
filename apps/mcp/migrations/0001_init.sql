@@ -6,7 +6,7 @@
 -- repo credentials. Rows are keyed by version so multiple releases coexist;
 -- the published-version dimension is forward-compatible with future deploys.
 
--- Every indexed file: crate source, docs/SPEC-*.md, READMEs, CLI reference, SKILL.md.
+-- Every indexed file: crate source, docs/specs/SPEC-*.md, READMEs, CLI reference, SKILL.md.
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   version TEXT NOT NULL,

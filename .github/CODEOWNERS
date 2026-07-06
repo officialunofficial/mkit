@@ -20,5 +20,5 @@
 /scripts/                        @officialunofficial/makechain
 
 # On-disk + wire formats — changes need spec sign-off
-/docs/SPEC-*.md                  @officialunofficial/makechain
+/docs/specs/SPEC-*.md                  @officialunofficial/makechain
 /rust/tests/golden/              @officialunofficial/makechain

@@ -29,7 +29,7 @@
 //! and comparing against the requested hash; mismatch returns
 //! [`StoreError::HashMismatch`].
 //!
-//! See `docs/SPEC-OBJECTS.md` §10 for the path-layout rule.
+//! See `docs/specs/SPEC-OBJECTS.md` §10 for the path-layout rule.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -56,7 +56,7 @@ pub const OBJECTS_DIR: &str = "objects";
 /// than silently mis-read once merkle addressing is in effect.
 pub const FORMAT_FILE: &str = "format";
 /// The only supported object-addressing format value (see
-/// `docs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
+/// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
 pub const FORMAT_VALUE: &str = "bmt-v1";
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
@@ -89,7 +89,7 @@ pub enum StoreError {
     #[error(".mkit already exists in this directory")]
     AlreadyInitialized,
     #[error(
-        "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this mkit (pre-1.0: no migration). See docs/SPEC-MERKLE-OBJECTS.md.",
+        "repository object-addressing format is {found:?}, expected \"{}\" — this repository predates merkle object addressing and is not readable by this mkit (pre-1.0: no migration). See docs/specs/SPEC-MERKLE-OBJECTS.md.",
         FORMAT_VALUE
     )]
     IncompatibleRepoFormat { found: Option<String> },

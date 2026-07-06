@@ -1,6 +1,6 @@
 //! Canonical byte (de)serialization for [`Object`].
 //!
-//! Spec: `docs/SPEC-OBJECTS.md`. The byte layout produced here is the
+//! Spec: `docs/specs/SPEC-OBJECTS.md`. The byte layout produced here is the
 //! v1 on-disk format; the golden-vector tests in `tests/golden.rs` pin
 //! it byte-for-byte.
 //!

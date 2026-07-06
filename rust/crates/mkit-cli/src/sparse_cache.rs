@@ -1,6 +1,6 @@
 //! On-disk bitmap cache for verified sparse-checkout deliveries.
 //!
-//! Spec: `docs/SPEC-SPARSE-CHECKOUT.md` §6. Cache layout:
+//! Spec: `docs/specs/SPEC-SPARSE-CHECKOUT.md` §6. Cache layout:
 //!
 //! ```text
 //! <repo-root>/.mkit/sparse/<tree-hex>.bitmap

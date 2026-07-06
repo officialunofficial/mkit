@@ -39,7 +39,7 @@ describe("getLanguage / stripCratePrefix / isValidPath", () => {
     expect(stripCratePrefix("core")).toBe("core");
   });
   it("rejects traversal and absolute paths", () => {
-    expect(isValidPath("docs/SPEC-OBJECTS.md")).toBe(true);
+    expect(isValidPath("docs/specs/SPEC-OBJECTS.md")).toBe(true);
     expect(isValidPath("../etc/passwd")).toBe(false);
     expect(isValidPath("/etc/passwd")).toBe(false);
   });

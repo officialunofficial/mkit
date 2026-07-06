@@ -2,7 +2,7 @@
  * mkit MCP
  *
  * A Model Context Protocol server that exposes the mkit toolkit — workspace
- * crate source, the docs/SPEC-* corpus, and the CLI reference — to AI
+ * crate source, the docs/specs/SPEC-* corpus, and the CLI reference — to AI
  * assistants. The corpus is baked into D1 at deploy time by
  * scripts/build-index.mjs, so this Worker serves everything from D1 with
  * no runtime credentials.
@@ -89,7 +89,7 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
     tool(
       "get_file",
       "Retrieve a file from the mkit repository by its path (relative to the repo " +
-        "root, e.g. 'rust/crates/mkit-attest/src/envelope.rs' or 'docs/SPEC-ATTESTATIONS.md'). " +
+        "root, e.g. 'rust/crates/mkit-attest/src/envelope.rs' or 'docs/specs/SPEC-ATTESTATIONS.md'). " +
         "Optionally pass a version (e.g. 'v0.2.0', defaults to latest) and a " +
         "start_line/end_line range (0-indexed, inclusive) matching search_code output.",
       {
@@ -149,7 +149,7 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
     // --- search_docs -------------------------------------------------------
     tool(
       "search_docs",
-      "Search the mkit prose docs (docs/SPEC-*.md, CLI.md, PARITY.md, READMEs, " +
+      "Search the mkit prose docs (docs/specs/SPEC-*.md, CLI.md, PARITY.md, READMEs, " +
         "SKILL.md) for a pattern. Use this for wire-format / on-disk / design questions; " +
         "use search_code for Rust source.",
       {
@@ -252,16 +252,16 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
     // --- list_specs --------------------------------------------------------
     tool(
       "list_specs",
-      "List the mkit SPEC documents (docs/SPEC-*.md) — the authoritative wire-format, " +
+      "List the mkit SPEC documents (docs/specs/SPEC-*.md) — the authoritative wire-format, " +
         "on-disk, and subsystem specifications.",
       { version: z.string().optional() },
       async ({ version }) => {
         const ver = version || (await this.latestVersion());
         const specs = (await this.fileList(ver))
-          .filter((p) => /^docs\/SPEC-.*\.md$/.test(p))
+          .filter((p) => /^docs\/specs\/SPEC-.*\.md$/.test(p))
           .sort();
         if (specs.length === 0) return err(`Error: no SPEC docs indexed for ${ver}`);
-        const names = specs.map((p) => p.replace(/^docs\/SPEC-/, "").replace(/\.md$/, ""));
+        const names = specs.map((p) => p.replace(/^docs\/specs\/SPEC-/, "").replace(/\.md$/, ""));
         return ok(
           `# mkit SPEC documents (${ver})\n\n` +
             specs.map((p, i) => `- **${names[i]}** — \`${p}\``).join("\n") +
@@ -274,16 +274,17 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
     tool(
       "get_spec",
       "Get a mkit SPEC document by name (e.g. 'ATTESTATIONS', 'SPEC-OBJECTS', or " +
-        "'docs/SPEC-SIGNING.md' all work). Use list_specs to discover names.",
+        "'docs/specs/SPEC-SIGNING.md' all work). Use list_specs to discover names.",
       { name: z.string().describe("Spec name, e.g. 'OBJECTS'"), version: z.string().optional() },
       async ({ name, version }) => {
         const ver = version || (await this.latestVersion());
         const bare = name
           .replace(/^docs\//, "")
+          .replace(/^specs\//, "")
           .replace(/^SPEC-/i, "")
           .replace(/\.md$/i, "")
           .toUpperCase();
-        const path = `docs/SPEC-${bare}.md`;
+        const path = `docs/specs/SPEC-${bare}.md`;
         if (!isValidPath(path)) return err(`Error: invalid spec name '${name}'`);
         const content = await this.fetchFile(ver, path);
         if (content === null) return err(`Error: spec '${bare}' not found (${ver}). Use list_specs.`);

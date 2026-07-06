@@ -18,7 +18,7 @@
 //!   `p256-sec1` (alias `p256`), or `bls12381-thr`. Anything else is
 //!   ignored.
 //! * `algorithm` is accepted as an alias for `kind` (per
-//!   `docs/SPEC-RELEASE-THRESHOLD.md`); either field name works.
+//!   `docs/specs/SPEC-RELEASE-THRESHOLD.md`); either field name works.
 //! * `pubkey_hex` is the raw public key bytes in lowercase hex. For
 //!   `bls12381-thr`, the bytes are the 96-byte G2 compressed
 //!   aggregated cohort public key (the `MinSig` variant).
@@ -363,7 +363,7 @@ fn load_trust_roots(path: &Path) -> Result<Registry, (String, u8)> {
         match key {
             "keyid" => keyid = val,
             // `algorithm` is an alias for `kind` to match the wording
-            // in `docs/SPEC-RELEASE-THRESHOLD.md` §6. Either field
+            // in `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. Either field
             // name parses to the same arm.
             "kind" | "algorithm" => kind = val,
             "pubkey_hex" => pubkey_hex = val,
@@ -413,7 +413,7 @@ fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &st
             reg.add(keyid.to_owned(), TrustRoot::Secp256k1PubKeySec1(pk_bytes));
         }
         // BLS12-381 threshold cohort public key — see
-        // `docs/SPEC-RELEASE-THRESHOLD.md` §6. The `bls12381-thr`
+        // `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. The `bls12381-thr`
         // prefix matches the canonical algorithm tag returned by
         // `mkit_attest::Algorithm::prefix`. Pinned to the 96-byte
         // MinSig G2 compressed encoding; anything else is dropped.
@@ -658,7 +658,7 @@ mod tests {
         assert!(reg.lookup(&lookup).is_some());
     }
 
-    /// Spec wording in `docs/SPEC-RELEASE-THRESHOLD.md` says
+    /// Spec wording in `docs/specs/SPEC-RELEASE-THRESHOLD.md` says
     /// `algorithm = "bls12381-thr"`; the parser accepts that as an
     /// alias for `kind` to keep both forms compatible.
     #[cfg(feature = "bls-threshold")]

@@ -1,7 +1,7 @@
 # mkit-sign-se — Apple Secure Enclave signer for mkit
 
 `mkit-sign-se` is a Swift binary that implements the mkit external
-signer v1 wire protocol ([`docs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/SPEC-EXTERNAL-SIGNER.md))
+signer v1 wire protocol ([`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md))
 backed by Apple's Secure Enclave.
 
 Headline properties:

@@ -9,8 +9,8 @@ audience: implementers of mkit encrypted-stream clients and servers
 
 `mkit-transport-enc` is the encrypted-stream sibling of
 `mkit-transport-ssh`. It implements the same seven-verb
-[`Transport`](../rust/crates/mkit-core/src/protocol.rs) trait, exchanging
-the same [`SshFrame`](../rust/crates/mkit-rpc/proto/ssh.proto) protobuf
+[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait, exchanging
+the same [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto) protobuf
 messages, but over an authenticated, encrypted byte stream provided by
 [`commonware-stream::encrypted`](https://docs.rs/commonware-stream)
 instead of a system `ssh(1)` child process.
@@ -126,7 +126,7 @@ Not provided (also inherited):
 
 The application protocol on top of the encrypted stream is the same
 `SshFrame` protobuf message set used by `mkit-transport-ssh`, defined
-in [`ssh.proto`](../rust/crates/mkit-rpc/proto/ssh.proto). Verb
+in [`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto). Verb
 semantics, error mapping, ref-CAS encoding, and pack-streaming chunk
 boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 
@@ -135,7 +135,7 @@ boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 The one deliberate departure from the SSH transport's wire is the
 inner framing. `mkit-transport-ssh` wraps each `SshFrame` in a 4-byte
 LE u32 length prefix (defined in
-[`mkit-rpc/src/framing.rs`](../rust/crates/mkit-rpc/src/framing.rs))
+[`mkit-rpc/src/framing.rs`](../../rust/crates/mkit-rpc/src/framing.rs))
 because SSH's stdin/stdout pipe is an unframed byte stream.
 
 `commonware-stream::encrypted` already frames each ciphertext record
@@ -192,7 +192,7 @@ keeps the protocol-version dance in one place.
 ## 5. Test plan
 
 The in-tree test suite lives in
-[`mkit-transport-enc/src/lib.rs`](../rust/crates/mkit-transport-enc/src/lib.rs)
+[`mkit-transport-enc/src/lib.rs`](../../rust/crates/mkit-transport-enc/src/lib.rs)
 under `#[cfg(test)] mod tests`. Tests run inside a single
 `commonware_runtime::deterministic::Runner` so they exercise the same
 async code paths the real-TCP transport stage's tokio wiring will hit,
@@ -295,3 +295,25 @@ Application protocol version is the same as the rest of mkit
 (`mkit/transport-enc/v1`) is bumped independently if the handshake or
 record layer needs a hard break that the application-level
 `HelloResponse` mismatch can't catch.
+
+---
+
+## 8. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| The peer is the key the URL advertises, or no session exists | `?pubkey=` carried out-of-band in the URL; mismatch → `EncInitError::PeerRejected`; no TOFU cache, no CA fallback (§1) |
+| Two distinct URL strings cannot decode to the same pubkey | hex (exactly 64 chars) or unpadded b64url (43 chars, trailing 2 bits zero) — ambiguous encodings rejected at parse (§1) |
+| Mutual authentication and forward secrecy | static-key signatures over the handshake transcript; ephemeral X25519 (§2.3) |
+| No nonce reuse, no cross-session replay | per-record counter nonces never on the wire; `SynAck` transcript-bound to `Syn` (§2.3) |
+| No cross-application replay of handshakes | `namespace = b"mkit/transport-enc/v1"` transcript binding (§2.1) |
+| No frame exceeds 1 MiB — enforced twice | `max_message_size = mkit_rpc::MAX_FRAME_BYTES` at the record layer (§2.1) and by every existing `SshFrame` consumer (§3.1) |
+| One `SshFrame` per encrypted record, no framing ambiguity | single protobuf payload per `Sender::send`; no second length prefix (§3.1) |
+| No verb exchanged before version agreement | post-handshake `Hello`/`HelloResponse` with `PROTOCOL_VERSION_1`; disagreement closes the connection (§3.2) |
+| The listener is fail-closed: an unlisted peer gets nothing | binding requires `--enc-authorized-peers` (or the loud `--unsafe-allow-any-enc-peer` escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |
+| Verb semantics never diverge from the SSH transport | same `SshFrame` message set; semantics byte-for-byte per SPEC-TRANSPORT §4 (§3) |
+| Application plaintext never appears on the wire | pinned by the byte-sniffing round-trip tests (§5) |
+
+Explicitly **not** guaranteed, inherited from the stream layer:
+anonymity (peer identities exchanged in cleartext) and length padding
+(message sizes leak) (§2.3).

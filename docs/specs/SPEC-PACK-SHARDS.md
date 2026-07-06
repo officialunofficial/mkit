@@ -270,3 +270,23 @@ packs. The v0 default `(16, 4)` was picked to balance:
   slow-tail-shard scenario (25% over-provision)
 * Total shard count comfortably below `u16::MAX` and below
   commonware's internal `ReedSolomonEncoder` limits
+
+---
+
+## 7. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| The reconstructed pack is bit-identical to the original | `BLAKE3(pack) == manifest.pack_hash` after decode (§4.2 step 5) |
+| The manifest parses one way or not at all | `b"MKSH"` magic + version check, non-zero `(minimum, extra)`, `shard_hashes_len == minimum + extra`, `MANIFEST_MAX_BYTES` cap, trailing bytes rejected (§2.1) |
+| A corrupted or substituted shard never reaches the Reed-Solomon decoder | `BLAKE3(shard.bytes)` checked against `manifest.shard_hashes[index]` first → `ShardHashMismatch` (§3, §4.2 step 2c) |
+| A shard cannot claim a foreign index | `index < T`, index-vs-fetch-URL match (§3), duplicate indices rejected (§4.2 step 2b) |
+| A self-consistent substitute shard *set* is detected | commonware BMT `commitment` in the manifest; per-shard Merkle proof checked by `ReedSolomon::check` (§2, §3, §4.2 step 2e) |
+| Any `minimum_shards` of the `T` shards suffice; fewer fail loudly | `checked.len() >= minimum_shards` requirement, typed `ShardError` short-circuit (§4.2 step 3) |
+| The manifest is the content-addressed root of trust | fetched first, published at `/packs/<hex(pack_hash)>/shards.manifest` (§2) |
+| A failed sharded fetch degrades, never corrupts | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: manifest 404 / decode failure falls back to the monolithic pack key (§5) |
+| Per-shard memory is bounded | each shard buffered whole under `PACK_BODY_LIMIT` (§5) |
+
+Sharding is an encoding *of* a pack, not a new pack format (see Scope,
+header): once reconstructed, the pack is verified again by the
+SPEC-PACKFILE trailer and per-object rules like any monolithic download.

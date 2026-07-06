@@ -72,7 +72,7 @@ export async function seedCorpus(): Promise<void> {
     ),
     db.prepare("INSERT INTO files (version, path, content) VALUES (?, ?, ?)").bind(
       v,
-      "docs/SPEC-OBJECTS.md",
+      "docs/specs/SPEC-OBJECTS.md",
       "# Objects\n\nWire and on-disk object formats.\n",
     ),
     db.prepare("INSERT INTO files (version, path, content) VALUES (?, ?, ?)").bind(

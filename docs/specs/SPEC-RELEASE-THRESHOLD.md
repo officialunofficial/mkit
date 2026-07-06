@@ -59,7 +59,7 @@ dealer/aggregator CLI and the CI integration that makes the flow usable.
   "M maintainers approved this release." Both ride in the same SLSA
   bundle.
 - BLS is **not** for commit signing. Ed25519 stays canonical at the
-  commit layer (`docs/SPEC-SIGNING.md`). The threshold scheme exists
+  commit layer (`docs/specs/SPEC-SIGNING.md`). The threshold scheme exists
   for release-cadence artefacts only.
 
 ---
@@ -350,3 +350,24 @@ Acceptance for the issue overall (#160):
   that don't affect wire bytes.
 - **Bridge to sigstore.** Could a Fulcio cert ever certify a BLS
   public key? Out of scope for now; would be a separate spec.
+
+---
+
+## 8. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| No single maintainer can produce a valid release signature | M-of-N threshold with quorum = ceil(2n/3) under the `N3f1` fault model (§1, §2.1) |
+| Verifiers check exactly one signature against exactly one public key, with a binary verdict | single `verify_message::<MinSig>` pairing check; any step failure is fatal, no per-share verdict at the aggregated layer (§4) |
+| Malformed key or signature bytes never reach the pairing | fixed sizes (96-byte G2 key, 48-byte G1 signature) and point-decode rejection, verifier steps 1–4 (§3.2, §3.3, §4) |
+| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `mkit-attest/dsse/v1` (§3.6) |
+| The DSSE `keyid` resolves to the intended cohort key, not an attacker-supplied one | trust-root registry maps `bls12381-thr:<hex>` to pinned public-key bytes (§3.3, §4) |
+| A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README + trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
+| Maintainer rotation never invalidates existing verifier pins | resharing keeps the aggregated public key unchanged (§1, §5.3) |
+| A stored 1-of-N share cannot be passed off as M-of-N (or swapped across cohorts) | `BlsShareRecord` AAD binds the share to cohort key, holder index, threshold, and total (§7) |
+| Envelope shape, Statement shape, and `attestation_id` never diverge from ordinary attestations | inherited unchanged from SPEC-ATTESTATIONS; this spec defines only the signer/verifier pair (scope statement, preamble) |
+| The BLS aggregate never stands in for build provenance or commit signatures | cosign keyless and Ed25519 commit signing remain separate, co-shipped surfaces (§1.1) |
+
+Dealer honesty at the moment of dealing (§2.1 item 1) is a **trust
+assumption**, not an enforced invariant; it becomes structural only
+with DKG (§2.2), which is specified separately.

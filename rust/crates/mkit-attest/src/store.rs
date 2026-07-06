@@ -1,6 +1,6 @@
 //! On-disk store for DSSE attestation envelopes.
 //!
-//! See `docs/SPEC-ATTESTATIONS.md` §3. Layout (rooted at `<root>` —
+//! See `docs/specs/SPEC-ATTESTATIONS.md` §3. Layout (rooted at `<root>` —
 //! typically `.mkit/`, NOT the `attestations/` subdir):
 //!
 //! ```text

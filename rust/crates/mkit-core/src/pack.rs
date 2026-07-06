@@ -1,4 +1,4 @@
-//! Packfile writer / reader — conformant to `docs/SPEC-PACKFILE.md`.
+//! Packfile writer / reader — conformant to `docs/specs/SPEC-PACKFILE.md`.
 //!
 //! Layout (SPEC-PACKFILE §1, §2, §3, §8):
 //!

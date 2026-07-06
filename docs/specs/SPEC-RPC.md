@@ -11,7 +11,7 @@ mkit speaks to processes outside its address space — external signers
 running as subprocesses, and remote `mkit-server` instances reached
 over `ssh(1)` — using a single shared wire protocol.
 
-The schemas live in [`rust/crates/mkit-rpc/proto/`](../rust/crates/mkit-rpc/proto/):
+The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/proto/):
 
 | File | Purpose |
 |---|---|
@@ -97,7 +97,7 @@ the next available number.
 | `ALGORITHM_SECP256K1` | 2 | ECDSA over SHA-256. DSSE-compatible. |
 | `ALGORITHM_P256` | 3 | ECDSA P-256 / secp256r1 / prime256v1 over SHA-256. |
 | `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (CTAP signers). |
-| `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/SPEC-RELEASE-THRESHOLD.md`. |
+| `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/specs/SPEC-RELEASE-THRESHOLD.md`. |
 
 ### 3.2 `KeyForm`
 
@@ -148,13 +148,13 @@ A signer or server is mkit-rpc-compliant if and only if:
 
 Reference implementations (all in this repository):
 
-- [`contrib/signers/mkit-sign-file/`](../contrib/signers/mkit-sign-file/) —
+- [`contrib/signers/mkit-sign-file/`](../../contrib/signers/mkit-sign-file/) —
   `KEY_FORM_RAW_BYTES`, Ed25519 / secp256k1 / P-256.
-- [`contrib/signers/mkit-sign-ctap/`](../contrib/signers/mkit-sign-ctap/) —
+- [`contrib/signers/mkit-sign-ctap/`](../../contrib/signers/mkit-sign-ctap/) —
   FIDO2/WebAuthn signer, P-256 / Ed25519-WebAuthn.
-- [`contrib/signers/mkit-sign-tpm/`](../contrib/signers/mkit-sign-tpm/) —
+- [`contrib/signers/mkit-sign-tpm/`](../../contrib/signers/mkit-sign-tpm/) —
   TPM 2.0 P-256 signer.
-- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
+- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
   `mkit serve` SSH server (consumes `ssh.proto`).
 
 The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)
@@ -190,3 +190,22 @@ choice is deliberate:
 The buffa runtime (`buffa = "0.7"`) is used by the Rust reference
 implementations. Other languages can use any compliant protobuf 3 /
 edition 2023 toolchain.
+
+---
+
+## 6. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| No frame exceeds 1 MiB, in either direction | `MAX_FRAME_BYTES` checked on receive AND send; conformance requires both (§1, §4) |
+| A hostile length prefix cannot force a large allocation | length validated against the cap **before** buffers are allocated; no streaming decode of a single frame (§1) |
+| A truncated frame is never mis-parsed as a shorter one | truncation is connection-fatal; the receiver MUST close the stream, no recovery (§1) |
+| No request is processed before version agreement | first frame MUST be `Hello` with `PROTOCOL_VERSION_1`; `HelloResponse` echoes it before any other processing (§2, §4) |
+| Every error is machine-actionable | `Error` frames MUST carry a known non-zero `ErrorCode` and non-empty `message`; `ERROR_CODE_UNSPECIFIED` is itself a protocol error (§3.3, §4) |
+| Wire numbers never change meaning | `Algorithm` / `KeyForm` / `ErrorCode` integers are append-only, never renumbered; field renumbering/removal requires a sibling `*2.proto` + `ProtocolVersion` bump (§2, §3.1) |
+| v1 additions cannot break existing peers | new enum values fall back to unknown-variant handling; new oneof variants are rejected with `ERROR_CODE_INVALID_REQUEST` (§2) |
+| Bulk data never violates the frame cap | flows over 1 MiB use the streaming pattern (`PackChunk`) instead of a bigger frame (§1) |
+| Programs never couple to vendor-opaque bytes | `Error.details` MUST NOT be pattern-matched (§3.3) |
+
+The conformance checklist in §4 is the normative test of these
+properties; the `.proto` files remain the source of truth (§5).

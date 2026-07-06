@@ -368,4 +368,28 @@ ergonomics, not a security property.
 
 ---
 
+## 11. Invariants
+
+Properties that MUST hold for every v1 commit / remix / tag signature,
+and the mechanism that enforces or detects each.
+
+| Invariant | Enforced by |
+|---|---|
+| A signature in one domain never verifies in another (commit ↔ remix ↔ tag; R-17) | `u16_le(domain.len)` prefix + disjoint domain strings, both preceding any user-controlled byte (§2.1, §5) |
+| Flipping any covered field (tree, parents, author, message, timestamp, signer, tag target/type/name) invalidates the signature | signing bytes cover every identity field of the object (§3, §4, §4a) |
+| No field-boundary ambiguity in signing bytes | every variable-length field is length-prefixed (`Identity`, `message_len`, `parent_count`, `name_len`) (§3, §4, §4a) |
+| A signature is bound to one object type and schema version | the 6-byte PROLOGUE leads the signing bytes (§3) |
+| `message_hash` / `content_digest` annotations never shift the signing hash (R-45) | both fields excluded from signing bytes (§3) |
+| Malleable / non-canonical signatures are rejected identically by all verifiers | `verify_strict` (non-canonical `R`, high-`s`, non-canonical `A` all fail) (§1) |
+| An annotated-but-unsigned tag never passes verification | all-zero signature fails the strict Ed25519 check (§4a) |
+| The verification key is the object's own `signer` field, never caller-supplied | verifier rebuilds signing bytes and parses `signer` from the object (§6) |
+| `author == signer` is never assumed | a verifier MUST NOT accept on identity match; pairing is application policy (§6) |
+| Signing hash is deterministic across machines | all count/length/timestamp fields fixed little-endian; domains are compile-time constants (§2, §3) |
+| The key file is never world-readable, symlink-swapped, or raced at load (POSIX) | `O_NOFOLLOW`, ancestor-symlink rejection, `fstat` on the open fd, mode/owner/length checks (§7.2) |
+| Key writes are crash-atomic and clobber-safe | `O_EXCL` temp create + fsync + `rename(2)` + parent fsync; `create_new` variant for keygen (§7.1) |
+
+Test vectors 3–5 and 9 (§9) pin the tamper-detection and cross-domain
+rows as executable negatives. The key-file rows degrade to no-ops on
+non-POSIX hosts per §7.2.
+
 *~1400 words.*

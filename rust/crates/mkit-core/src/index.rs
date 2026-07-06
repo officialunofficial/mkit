@@ -1,6 +1,6 @@
 //! Staging-area index.
 //!
-//! On-disk layout per `docs/SPEC-INDEX.md`:
+//! On-disk layout per `docs/specs/SPEC-INDEX.md`:
 //!
 //! ```text
 //! [4B magic "MKIX"][1B version=0x02][4B LE entry_count][entries...]

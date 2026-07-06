@@ -6,7 +6,7 @@
 //! thin and makes the algorithm -> signer-impl mapping a single place
 //! to audit.
 //!
-//! Key material layout on disk (per `docs/SPEC-ATTESTATIONS.md` §6.1):
+//! Key material layout on disk (per `docs/specs/SPEC-ATTESTATIONS.md` §6.1):
 //!
 //! * Ed25519 — path resolved from `cfg.signing_key`
 //! (default `.mkit/keys/default.key`). Shared with the commit signer.

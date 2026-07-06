@@ -1,6 +1,6 @@
 //! `FastCDC` content-defined chunker.
 //!
-//! Spec reference: `docs/SPEC-FASTCDC.md`. Frozen v1 parameters:
+//! Spec reference: `docs/specs/SPEC-FASTCDC.md`. Frozen v1 parameters:
 //!
 //! * Gear seed: ASCII `"MKITFCDC"` interpreted as a big-endian `u64`
 //!   (`0x4D4B_4954_4643_4443`). Splitmix64-derived 256-entry table.

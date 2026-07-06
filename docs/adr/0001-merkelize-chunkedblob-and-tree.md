@@ -3,7 +3,7 @@
 - Status: Accepted (pre-1.0, breaking, no migration)
 - Date: 2026-06-20
 - Supersedes: n/a
-- Normative crypto in `docs/SPEC-MERKLE-OBJECTS.md` (created by this work).
+- Normative crypto in `docs/specs/SPEC-MERKLE-OBJECTS.md` (created by this work).
 
 ## Context
 
@@ -36,8 +36,8 @@ inclusion of any chunk/entry is provable and completeness is verifiable for free
   `blake3` (`mkit-core/src/merkle.rs`) so `mkit-core` stays wasm32-clean; `commonware-storage`/
   `-cryptography` are **dev-dependencies** — a byte-for-byte cross-check oracle, not runtime deps.
   Inclusion proofs are hand-rolled and **provisional** (no in-tree consumer; see
-  `SPEC-MERKLE-OBJECTS.md` §5). A `no_std` upstream `bmt` is tracked by commonwarexyz/monorepo#4090.
+  `specs/SPEC-MERKLE-OBJECTS.md` §5). A `no_std` upstream `bmt` is tracked by commonwarexyz/monorepo#4090.
 - Golden vectors for Tree/ChunkedBlob (and git-bridge round-trips) are regenerated.
 - The design decisions that needed human sign-off (domain-wrap vs bare root, wasm viability of
   non-optional storage, marker semantics, persisted git↔mkit oid maps) were resolved during
-  implementation; the normative outcome is `docs/SPEC-MERKLE-OBJECTS.md`.
+  implementation; the normative outcome is `docs/specs/SPEC-MERKLE-OBJECTS.md`.

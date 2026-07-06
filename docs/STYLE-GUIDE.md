@@ -290,12 +290,12 @@ Link the appropriate noun phrase rather than using the word "here".
 The linked text should describe the destination and act as a Call to
 Action (CTA).
 
-- Correct: See the [pack file specification](SPEC-PACKFILE.md) for
+- Correct: See the [pack file specification](specs/SPEC-PACKFILE.md) for
   the byte-level layout.
-- Incorrect: The pack file specification is available [here](SPEC-PACKFILE.md).
+- Incorrect: The pack file specification is available [here](specs/SPEC-PACKFILE.md).
 
 Use **relative links** when referencing another file in the
-repository (`./SPEC-OBJECTS.md`, `../README.md`). When linking from
+repository (`./specs/SPEC-OBJECTS.md`, `../README.md`). When linking from
 prose into the Rust API docs, prefer a stable docs.rs URL or an
 intra-doc rustdoc link inside the source — not a path into
 `rust/target/doc/`.
@@ -428,33 +428,33 @@ relevant `SPEC-*.md` page) on first use.
 
 - **Object** — a content-addressed unit stored in the repository.
   Subtypes are **blob**, **tree**, and **commit** (see
-  [SPEC-OBJECTS](SPEC-OBJECTS.md)).
+  [SPEC-OBJECTS](specs/SPEC-OBJECTS.md)).
 - **Digest** / **object ID** — the BLAKE3 hash that names an
   object. Always 32 bytes; rendered as bare 64-character lowercase
   hex with no prefix.
 - **Pack** — a single-file container holding many objects, used
   for transport and on-disk storage (see
-  [SPEC-PACKFILE](SPEC-PACKFILE.md)).
+  [SPEC-PACKFILE](specs/SPEC-PACKFILE.md)).
 - **Index** — the staging area for the next commit, plus the
   cache of file metadata that tracks the working tree (see
-  [SPEC-INDEX](SPEC-INDEX.md)).
+  [SPEC-INDEX](specs/SPEC-INDEX.md)).
 - **Ref** — a named pointer into the object graph, usually
-  resolving to a commit (see [SPEC-REFS](SPEC-REFS.md)).
+  resolving to a commit (see [SPEC-REFS](specs/SPEC-REFS.md)).
 - **Working tree** — the user-visible files on disk that the
   index and HEAD describe.
 - **Transport** — the protocol that moves packs between
   repositories. mkit transports are `mkit+file`, `mkit+https`,
   `mkit+s3`, `mkit+ssh`, and `mkit+enc` (see
-  [SPEC-TRANSPORT](SPEC-TRANSPORT.md)).
+  [SPEC-TRANSPORT](specs/SPEC-TRANSPORT.md)).
 - **Signer** — a component that produces a signature over a payload
   using a private key. Built-in signers live in `mkit-attest`;
   external signers (TPM, secure element, CTAP, file) live under
-  `contrib/signers/` (see [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md)).
+  `contrib/signers/` (see [SPEC-EXTERNAL-SIGNER](specs/SPEC-EXTERNAL-SIGNER.md)).
 - **Witness** — a third party that signs an attestation about a
   commit or another artifact. Witness signatures are attached as
   additional DSSE signatures on the same envelope.
 - **Statement** — the in-toto v1 payload that an attestation
-  describes (subject + predicate). See [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md).
+  describes (subject + predicate). See [SPEC-ATTESTATIONS](specs/SPEC-ATTESTATIONS.md).
 - **Envelope** — a Dead Simple Signing Envelope (DSSE) wrapping a
   Statement, carrying one or more signatures.
 - **Predicate** — the payload type carried inside a Statement.

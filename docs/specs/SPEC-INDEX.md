@@ -241,3 +241,24 @@ re-emits each filename byte-identically and records every BLAKE3 in
   regime; if they become common, future work.
 - No reflog or journal embedded in the index; those are separate
   sidecar files (out of scope for v2 spec).
+
+---
+
+## 9. Invariants
+
+| Invariant | Enforced by |
+|---|---|
+| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; version whitelist `0x01`/`0x02` → `IndexError::UnsupportedVersion` (§2, §5) |
+| A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
+| The file encodes exactly its declared entries | trailing bytes rejected (§5) |
+| Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
+| No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.mkit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
+| Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]` (§2, §3) |
+| The stat cache never changes an observable result | cache is an optimisation only — all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
+| A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
+| A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); absent or zero-length file reads as empty (§5) |
+| A read-only command never breaks an older binary sharing the worktree | query commands MUST NOT upgrade a v1 index (§5) |
+
+The index is local-only and advisory: never transported, never signed,
+no merkle structure (§1, §8). Nothing above is load-bearing for history
+integrity — that lives in SPEC-OBJECTS.

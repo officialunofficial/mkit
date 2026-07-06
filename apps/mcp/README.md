@@ -3,7 +3,7 @@
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for the
 **mkit** toolkit, deployed at **https://mcp.mkit.sh**. It gives AI
 assistants a version-pinned, searchable index of mkit's crate source, the
-`docs/SPEC-*` corpus, and the CLI reference — so they build against the real
+`docs/specs/SPEC-*` corpus, and the CLI reference — so they build against the real
 API instead of guessing or scraping GitHub.
 
 ## Tools
@@ -17,7 +17,7 @@ API instead of guessing or scraping GitHub.
 | `get_file` | A file by repo-relative path, optionally a line range. |
 | `search_code` | Ranked snippet search over Rust/TOML source. |
 | `list_versions` | Indexed mkit versions (newest first). |
-| `list_specs` | The `docs/SPEC-*.md` specifications. |
+| `list_specs` | The `docs/specs/SPEC-*.md` specifications. |
 | `get_spec` | One SPEC doc by name (e.g. `ATTESTATIONS`). |
 | `get_command` | One CLI subcommand's reference (e.g. `attest`); omit `name` to list all. |
 | `get_cli_reference` | The agent-oriented CLI guide (the repo's `SKILL.md`). |
