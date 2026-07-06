@@ -11,9 +11,9 @@ A content-addressed version control toolkit written in Rust.
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
 and transports — with a native, predicate-agnostic attestation
 subsystem (in-toto v1 Statements in DSSE envelopes) that lets any
-downstream service attach witness signatures to commits. The v1
-on-disk and wire formats are pinned by golden vectors under
-[`rust/tests/golden/`](rust/tests/golden/).
+downstream service attach witness signatures to commits. Golden
+vectors under [`rust/tests/golden/`](rust/tests/golden/) pin the v1
+on-disk and wire formats.
 
 ## Status
 
@@ -23,9 +23,9 @@ change in any 0.x release. See [`CHANGELOG.md`](CHANGELOG.md) for the
 breaking-change record.
 
 **MSRV** is Rust 1.95.0, pinned in
-[`rust/rust-toolchain.toml`](rust/rust-toolchain.toml). MSRV bumps
-are documented in the CHANGELOG; we follow a "current stable minus
-one" policy unless a feature requires otherwise.
+[`rust/rust-toolchain.toml`](rust/rust-toolchain.toml). The
+CHANGELOG documents MSRV bumps; the policy is "current stable minus
+one" unless a feature requires otherwise.
 
 ## Quick start
 
@@ -230,11 +230,13 @@ Object kinds (full schema in
 ## Attestations
 
 mkit ships **native attestation as a first-class object type**, not a
-side-channel. A signed in-toto v1 Statement wrapped in a DSSE envelope
-(spec at [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md)) is
-stored under `.mkit/attestations/<commit-hash>/<att-id>.dsse` and can
-be produced by any signer that speaks the
-[v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md):
+side-channel. mkit stores a signed in-toto v1 Statement in a DSSE
+envelope (spec:
+[`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md))
+under `.mkit/attestations/<commit-hash>/<att-id>.dsse`; any signer
+that speaks the
+[v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md) can produce
+one:
 
 ```text
                        ┌──────────────────────────────┐
@@ -328,10 +330,10 @@ with `cargo bench --workspace -- --quick` plus
 Guides and operational docs live in [`docs/`](docs/); the wire-format
 and subsystem specifications live in [`docs/specs/`](docs/specs/README.md).
 Each spec carries its own `status:` header reflecting how settled that
-document is; regardless of header, the v1 wire and on-disk formats
-they describe are pinned by the test vectors under
-[`rust/tests/golden/`](rust/tests/golden/) and remain stable through
-the 0.x series.
+document is; regardless of header, the test vectors under
+[`rust/tests/golden/`](rust/tests/golden/) pin the v1 wire and
+on-disk formats they describe, which remain stable through the 0.x
+series.
 
 | Doc | Audience |
 |---|---|
