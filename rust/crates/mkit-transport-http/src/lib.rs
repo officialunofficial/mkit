@@ -1582,6 +1582,37 @@ mod tests {
         }
 
         #[test]
+        fn shard_download_propagates_undecodable_manifest_never_falls_back() {
+            // Server advertises X-Pack-Shards, but the manifest body it
+            // serves is garbage. SPEC-PACK-SHARDS §5: a present-but-
+            // undecodable manifest MUST propagate as an error, never
+            // silently downgrade to the monolithic body (which in this
+            // test would otherwise be the distinguishable "real" pack).
+            let mut server = mockito::Server::new();
+            let pack = synthetic_pack(64 * 1024);
+            let key = key_for(&pack);
+            let pack_path = format!("/myproj/packs/{}", key.to_hex());
+            let _pack_mock = server
+                .mock("GET", pack_path.as_str())
+                .with_status(200)
+                .with_header(X_PACK_SHARDS_HEADER, "16+4")
+                .with_body("")
+                .create();
+            let manifest_path = format!("/myproj/packs/{}/shards.manifest", key.to_hex());
+            let _manifest_mock = server
+                .mock("GET", manifest_path.as_str())
+                .with_status(200)
+                .with_body(b"not-a-manifest")
+                .create();
+            let t = make_transport(&server, None);
+            let err = t.download_pack(&key).unwrap_err();
+            assert!(
+                matches!(err, TransportError::InvalidResponse),
+                "expected InvalidResponse, got {err:?}"
+            );
+        }
+
+        #[test]
         fn monolithic_fallback_when_server_omits_x_pack_shards() {
             // Server doesn't speak Pack-Shards — the response body IS
             // the pack and the client must accept it.
