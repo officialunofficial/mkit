@@ -1093,6 +1093,74 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(MkitError::UnexpectedEof));
     }
 
+    #[test]
+    fn rejects_too_many_commit_parents() {
+        let mut buf = vec![0x03, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&(MAX_PARENTS + 1).to_le_bytes()); // parent_count
+        assert_eq!(deserialize(&buf), Err(MkitError::TooManyParents));
+    }
+
+    #[test]
+    fn rejects_too_many_remix_parents() {
+        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&(MAX_PARENTS + 1).to_le_bytes()); // parent_count
+        assert_eq!(deserialize(&buf), Err(MkitError::TooManyParents));
+    }
+
+    #[test]
+    fn rejects_too_many_remix_sources() {
+        let mut buf = vec![0x04, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&[0u8; 32]); // tree_hash
+        buf.extend_from_slice(&0u32.to_le_bytes()); // parent_count
+        buf.extend_from_slice(&(MAX_REMIX_SOURCES + 1).to_le_bytes()); // source_count
+        assert_eq!(deserialize(&buf), Err(MkitError::TooManySources));
+    }
+
+    #[test]
+    fn rejects_too_many_chunks() {
+        let mut buf = vec![0x05, b'M', b'K', b'T', b'1', 0x01];
+        buf.extend_from_slice(&1024u64.to_le_bytes()); // total_size
+        buf.extend_from_slice(&0u32.to_le_bytes()); // chunk_size
+        buf.extend_from_slice(&(MAX_CHUNKS + 1).to_le_bytes()); // chunk_count
+        assert_eq!(deserialize(&buf), Err(MkitError::TooManyChunks));
+    }
+
+    #[test]
+    fn rejects_remix_out_of_order_sources() {
+        // read_remix's decode-path sort check: sources must be strictly
+        // ascending by (upstream_id, commit_hash) (SPEC-OBJECTS remix
+        // source ordering). The encoder (write_remix) does not itself
+        // sort or validate — it trusts the caller — so a decode-path
+        // regression here would only be caught by feeding a crafted
+        // (but encoder-producible) out-of-order Remix through
+        // `serialize` + `deserialize`, not by round-tripping a
+        // well-formed one.
+        let sources = vec![
+            RemixSource {
+                upstream_id: [2u8; 32],
+                commit_hash: [0u8; 32],
+            },
+            RemixSource {
+                upstream_id: [1u8; 32], // decreases -> violates strict ascending order
+                commit_hash: [0u8; 32],
+            },
+        ];
+        let remix = Remix {
+            tree_hash: hash(b"tree"),
+            parents: vec![],
+            sources,
+            author: Identity::ed25519([0u8; 32]),
+            signer: [0u8; 32],
+            message: b"msg".to_vec(),
+            timestamp: 0,
+            signature: [0u8; 64],
+        };
+        let bytes = serialize(&Object::Remix(remix)).unwrap();
+        assert_eq!(deserialize(&bytes), Err(MkitError::InvalidSourceOrder));
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn checked_u32_rejects_oversize() {

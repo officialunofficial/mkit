@@ -1067,9 +1067,39 @@ mod tests {
     }
 
     #[test]
+    fn read_head_rejects_oversize_file() {
+        // SPEC-REFS §6: HEAD content is capped at 4 KiB.
+        let dir = TempDir::new().unwrap();
+        let mkit = dir.path().join(".mkit");
+        fs::create_dir_all(&mkit).unwrap();
+        fs::write(
+            mkit.join(HEAD_FILE),
+            vec![b'a'; usize::try_from(HEAD_MAX_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        let err = read_head(&mkit).unwrap_err();
+        assert!(matches!(err, RefError::InvalidHead));
+    }
+
+    #[test]
     fn nonexistent_branch_returns_none() {
         let (_dir, mkit) = fresh_repo();
         assert_eq!(read_ref(&mkit, "nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn read_ref_rejects_oversize_file() {
+        // SPEC-REFS §6: a single ref file is capped at 128 bytes.
+        let (_dir, mkit) = fresh_repo();
+        let path = ref_path(&mkit, HEADS_DIR, "main");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            vec![b'0'; usize::try_from(REF_FILE_MAX_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        let err = read_ref(&mkit, "main").unwrap_err();
+        assert!(matches!(err, RefError::InvalidRef(_)));
     }
 
     #[test]
@@ -1097,6 +1127,28 @@ mod tests {
         let refs = list_refs(&mkit).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "feature/deep/topic");
+    }
+
+    #[test]
+    fn list_refs_silently_skips_entries_beyond_max_depth() {
+        // SPEC-REFS §6: listing recurses with a hard depth cap of 32
+        // levels to defeat adversarial nesting; anything deeper is
+        // silently skipped (not an error, not a stack overflow).
+        let (_dir, mkit) = fresh_repo();
+        let deep_name = (0..40)
+            .map(|i| format!("d{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        write_ref(&mkit, &deep_name, &h("deep")).unwrap();
+        write_ref(&mkit, "main", &h("shallow")).unwrap();
+
+        let refs = list_refs(&mkit).unwrap();
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"main"), "shallow ref must still be listed");
+        assert!(
+            !names.contains(&deep_name.as_str()),
+            "a ref nested beyond MAX_REF_DEPTH must be silently skipped, got {names:?}"
+        );
     }
 
     #[test]
@@ -1257,6 +1309,20 @@ mod tests {
         assert!(load_shallow_boundaries(&mkit).unwrap().is_some());
         write_shallow_boundaries(&mkit, &[]).unwrap();
         assert_eq!(load_shallow_boundaries(&mkit).unwrap(), None);
+    }
+
+    #[test]
+    fn load_shallow_rejects_oversize_file() {
+        // SPEC-REFS §6: the shallow file is capped at 1 MiB.
+        let (_dir, mkit) = fresh_repo();
+        let path = mkit.join(SHALLOW_FILE);
+        fs::write(
+            &path,
+            vec![b'a'; usize::try_from(SHALLOW_MAX_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        let err = load_shallow_boundaries(&mkit).unwrap_err();
+        assert!(matches!(err, RefError::InvalidRef(_)));
     }
 
     #[test]
