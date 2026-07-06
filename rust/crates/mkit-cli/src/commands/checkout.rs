@@ -404,9 +404,9 @@ fn prepare_sparse_restore(
     tree_hash: Hash,
     patterns: &[String],
 ) -> Result<RestoreOptions, (String, u8)> {
+    use crate::sparse_cache::{SparseBuildError, SparseOutcome, load_or_build};
     use mkit_core::object::Object as CoreObject;
     use mkit_core::ops::restore::parse_sparse_patterns;
-    use mkit_core::sparse::{build_sparse, verify_sparse};
     use std::path::PathBuf;
 
     let tree = match store.read_object(&tree_hash) {
@@ -439,26 +439,31 @@ fn prepare_sparse_restore(
         filter.push(PathBuf::from(trimmed));
     }
 
-    // Self-consistency round-trip: build the manifest, then verify
-    // the delivered subset against it. This is the local equivalent
-    // of "server delivers manifest, client checks it" — it catches a
-    // regression in either side without standing up a transport.
-    let (delivered, manifest, proof) = build_sparse(&tree, &filter)
-        .map_err(|e| (format!("sparse build: {e}"), exit::GENERAL_ERROR))?;
-    if !verify_sparse(&manifest, &delivered, &filter, &proof) {
-        return Err((
-            "sparse build produced a manifest that fails verify".to_string(),
-            exit::GENERAL_ERROR,
-        ));
-    }
-
-    // Persist to the on-disk cache. Errors are non-fatal — a missing
-    // cache just means the next checkout re-runs the verifier — but
-    // we surface them on stderr so the user knows the persistent
-    // optimisation is broken.
-    if let Err(e) = crate::sparse_cache::store(cwd, &manifest.tree_hash, &manifest, &proof) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "warning: sparse cache write failed: {e}");
+    // Cache-aware self-consistency round-trip: a cache hit for this
+    // exact (tree, filter) skips the expensive build_sparse +
+    // verify_sparse Merkle-bitmap reconstruction entirely
+    // (SPEC-SPARSE-CHECKOUT §8). A miss (including a stale filter or a
+    // corrupt cache entry) falls through to a fresh build — the local
+    // equivalent of "server delivers manifest, client checks it",
+    // catching a regression in either side without standing up a
+    // transport — and rewrites the cache.
+    match load_or_build(cwd, &tree, &filter) {
+        Ok(SparseOutcome::CacheHit) => {}
+        Ok(SparseOutcome::Built { store_error }) => {
+            if let Some(e) = store_error {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "warning: sparse cache write failed: {e}");
+            }
+        }
+        Err(SparseBuildError::Build(e)) => {
+            return Err((format!("sparse build: {e}"), exit::GENERAL_ERROR));
+        }
+        Err(SparseBuildError::VerifyFailed) => {
+            return Err((
+                "sparse build produced a manifest that fails verify".to_string(),
+                exit::GENERAL_ERROR,
+            ));
+        }
     }
 
     // Translate the CLI patterns into the restore-side pattern grammar.
