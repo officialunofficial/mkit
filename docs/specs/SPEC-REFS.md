@@ -223,15 +223,18 @@ not exist or contains a different hash → `RefConflict`.
 | Transport | `.any`      | `.missing`                            | `.match`                                                       | Notes |
 |-----------|-------------|---------------------------------------|----------------------------------------------------------------|-------|
 | memory    | atomic*     | atomic*                               | **NOT atomic** — read-then-write race                          | *Single-threaded by construction. Across fibres: no lock. |
-| file      | atomic      | atomic (via `O_EXCL` create)          | **NOT atomic** — read-then-write race across processes         | v1 known gap; W4 will replace with lockfile. |
+| file      | atomic      | atomic (via `O_EXCL` create)          | atomic — OS exclusive file lock (`<root>/.mkit/refs/.lock`) serialises the read-check-write across processes | Lock guard released on drop (including panic-unwind). |
 | s3        | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<md5-of-wire>"`                         | Requires server that supports conditional writes (R2 and post-2024 AWS S3 do; generic S3 may not). |
 | http      | atomic      | atomic via `If-None-Match: *`         | atomic via `If-Match: "<hex-hash>"`                            | Worker-flavoured server. Generic S3 + nginx does NOT conform. |
 | ssh       | atomic      | atomic (`OP_WRITE_REF_IF_ABSENT` path via condition byte) | atomic (`CONDITION_MATCH` with 32-byte expected hash)          | Server enforces CAS; client trusts `STATUS_ERROR`. |
 
-*memory/file CAS:* v1 ships the non-atomic implementations; SPEC-TRANSPORT
-documents this explicitly. Concurrent callers on the file transport MAY
-lose updates. Production deployments should use s3/http/ssh for CAS
-critical paths.
+*memory CAS:* v1 ships the non-atomic `.match` implementation for the
+in-process memory transport only. The file transport's `.match` is atomic
+across processes via the OS lock above; the read-then-write race survives
+only in the local `mkit-core` `refs::cas_write` helper used by commands that
+mutate refs directly on disk without going through the file transport.
+Production deployments needing CAS across processes without the file
+transport's lock should use s3/http/ssh.
 
 ### 5.2 ETag encoding divergence
 
@@ -341,9 +344,12 @@ base/ours/theirs material lives only in this sidecar.
 4. **`.missing` race**: two concurrent `.missing` writers to the same
    ref — exactly one succeeds, the other returns `RefConflict`. Run on
    s3, http, ssh.
-5. **`.match` on file transport**: document expected non-atomicity —
-   two concurrent `.match` to the same ref may both succeed. This is a
-   negative test showing the spec's documented gap.
+5. **`.match` on file transport, exactly-one-winner**: two concurrent
+   `.match` writers to the same ref — exactly one succeeds, the other
+   returns `RefConflict` and the ref is left at the winner's value.
+   Enforced by the OS exclusive lock (§5.1); a corresponding negative
+   test still documents the read-then-write race in the local
+   `mkit-core` `refs::cas_write` helper (not the file transport).
 6. **Ref name grammar**: valid — `main`, `feat/v1.0-beta`,
    `release/2024_09`. Invalid — `feat/..`, `/main`, `main@v1`,
    `feat\branch`, `` (empty).
@@ -364,7 +370,7 @@ base/ours/theirs material lives only in this sidecar.
 | No ref shadows `HEAD` or a lock file | grammar rejections for final-segment `HEAD` and the `.lock` suffix (§3) |
 | `listRefs(prefix)` is byte-identical across transports | single normative stripping algorithm; lexicographic order, no duplicates; conformance-tested (§4, §4.1, test vector 3) |
 | A `.missing` write succeeds at most once per ref | `O_EXCL` / `If-None-Match: *` / condition byte, per the atomicity matrix (§5.1) |
-| A `.match(H)` write on s3/http/ssh cannot clobber a moved ref | conditional-write CAS per transport encoding (§5.1, §5.2) |
+| A `.match(H)` write on s3/http/ssh/file cannot clobber a moved ref | conditional-write CAS per transport encoding, or the OS exclusive lock for file (§5.1, §5.2) |
 | An `.any` conditional hint is never binding CAS | clients requiring CAS MUST use `.match` explicitly (§5.3) |
 | A default push cannot silently rewind a remote that advanced | `Match(tracked)` / `Missing` CAS lease on the remote-tracking ref (§2) |
 | Fetched tips never overwrite local branches | fetch writes only `refs/remotes/<remote>/<name>`; `pull` fast-forwards from it (§2) |
@@ -373,9 +379,12 @@ base/ours/theirs material lives only in this sidecar.
 | At most one of merge / cherry-pick / rebase is in progress | starting a second operation while state files exist is refused (§6.1) |
 
 One property is deliberately **not** guaranteed in v1: `.match` on the
-memory and file transports is a read-then-write race (§5.1, test
-vector 5). Callers needing CAS under concurrency MUST use s3/http/ssh
-until the W4 lockfile lands.
+in-process memory transport, and on the local `mkit-core` `refs::cas_write`
+helper used by commands that write refs directly rather than through the
+file transport, is a read-then-write race (§5.1, test vector 5). The file
+transport's own `.match` is race-free (OS exclusive lock). Callers needing
+CAS under concurrency through a code path other than the file transport
+MUST use s3/http/ssh.
 
 ---
 
