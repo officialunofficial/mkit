@@ -1,6 +1,6 @@
 //! `mkit blame [-w] [-M] [-C] [--ignore-rev <rev>] [--ignore-revs-file <file>]
-//! [--first-parent] [--reverse] [<rev>] [-L <range>] <file>` — line-level
-//! attribution.
+//! [--ignore-rev-precise] [--first-parent] [--reverse] [<rev>] [-L <range>]
+//! <file>` — line-level attribution.
 //!
 //! Blames `<file>` as of `<rev>` (default `HEAD`), optionally restricted
 //! to a line range with `-L`. `-w` ignores whitespace when matching
@@ -8,7 +8,10 @@
 //! the file / copied from other files (git `-M`/`-C`); `--ignore-rev` /
 //! `--ignore-revs-file` skip "noise" commits during attribution (git
 //! `--ignore-rev`), falling through to the commit that previously changed
-//! each line. Blame is merge-aware by default (a line merged from a side
+//! each line. `--ignore-rev-precise` (mkit-only; requires `--ignore-rev`/
+//! `--ignore-revs-file`) refines that fall-through with content matching
+//! instead of git's positional per-hunk guess — a documented divergence,
+//! opt-in only. Blame is merge-aware by default (a line merged from a side
 //! branch is credited to the commit that wrote it); `--first-parent`
 //! restricts the walk to first parents (git `--first-parent`).
 //! `--reverse <start>..<end>` instead walks history forward, attributing
@@ -132,6 +135,15 @@ struct BlameOpts {
     /// repeated.
     #[arg(long = "ignore-revs-file", value_name = "FILE")]
     ignore_revs_file: Vec<String>,
+    /// Refine `--ignore-rev`/`--ignore-revs-file` fall-through with content
+    /// matching instead of git's positional per-hunk guess (mkit-only
+    /// divergence; the default fall-through stays git-identical). git pairs
+    /// a fallen-through line with whatever line sits at the same offset in
+    /// the hunk; mkit hashes content, so it can often identify the line's
+    /// true surviving origin even when a reformat/reorder moved it to a
+    /// different offset. Requires `--ignore-rev` or `--ignore-revs-file`.
+    #[arg(long = "ignore-rev-precise")]
+    ignore_rev_precise: bool,
     /// Walk history *forward* instead of backward, like
     /// `git blame --reverse`. Blames the `<start>` version of the file and
     /// attributes each line to the last commit in the range in which it
@@ -196,20 +208,11 @@ pub fn run(args: &[String]) -> u8 {
     };
     let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    // `--reverse` is a distinct walk that resolves line survival via the
-    // LCS matcher only — it runs neither move/copy nor ignore-rev
-    // detection, so reject the combination rather than silently ignoring
-    // those flags.
-    if opts.reverse
-        && (find_moves
-            || find_copies > 0
-            || !opts.ignore_rev.is_empty()
-            || !opts.ignore_revs_file.is_empty())
-    {
-        return emit_err(
-            "--reverse cannot be combined with -M/-C or --ignore-rev/--ignore-revs-file",
-            exit::USAGE,
-        );
+    // Uses the *effective* move/copy state (`find_moves`/`find_copies`),
+    // which folds in the inline `-M<num>`/`-C<num>` forms, so a combination
+    // like `-M20 --reverse` is still rejected.
+    if let Err((msg, code)) = check_flag_conflicts(&opts, find_moves, find_copies) {
+        return emit_err(&msg, code);
     }
 
     // `-M` enables move detection; `-C` (a repeat count) sets the copy
@@ -248,6 +251,7 @@ pub fn run(args: &[String]) -> u8 {
         moves,
         copies,
         ignore_revs,
+        ignore_rev_precise: opts.ignore_rev_precise,
         first_parent: opts.first_parent,
     };
 
@@ -307,6 +311,46 @@ pub fn run(args: &[String]) -> u8 {
         let _ = stdout.write_all(text.as_bytes());
         exit::OK
     }
+}
+
+/// Reject flag combinations `run` cannot satisfy, before any store/revision
+/// resolution work. On error returns `(message, exit_code)`.
+///
+/// `find_moves`/`find_copies` are the *effective* move/copy state (clap's
+/// bare `-M`/`-C` folded together with the inline `-M<num>`/`-C<num>`
+/// forms), so the check fires even when detection was requested only via an
+/// inline threshold.
+fn check_flag_conflicts(
+    opts: &BlameOpts,
+    find_moves: bool,
+    find_copies: u8,
+) -> Result<(), (String, u8)> {
+    // `--reverse` is a distinct walk that resolves line survival via the
+    // LCS matcher only — it runs neither move/copy nor ignore-rev
+    // detection, so reject the combination rather than silently ignoring
+    // those flags.
+    if opts.reverse
+        && (find_moves
+            || find_copies > 0
+            || !opts.ignore_rev.is_empty()
+            || !opts.ignore_revs_file.is_empty())
+    {
+        return Err((
+            "--reverse cannot be combined with -M/-C or --ignore-rev/--ignore-revs-file"
+                .to_string(),
+            exit::USAGE,
+        ));
+    }
+    // `--ignore-rev-precise` only refines an active ignore-rev set; without
+    // one it has nothing to refine, so reject it outright rather than
+    // silently no-op'ing.
+    if opts.ignore_rev_precise && opts.ignore_rev.is_empty() && opts.ignore_revs_file.is_empty() {
+        return Err((
+            "--ignore-rev-precise requires --ignore-rev or --ignore-revs-file".to_string(),
+            exit::USAGE,
+        ));
+    }
+    Ok(())
 }
 
 /// Inline `-M<num>`/`-C<num>` threshold state pulled from argv before clap
