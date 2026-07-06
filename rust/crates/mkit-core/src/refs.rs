@@ -220,10 +220,14 @@ pub fn decode_ref_wire(data: &[u8]) -> Option<Hash> {
     parse_lowercase_hash(trimmed.as_bytes())
 }
 
-/// Strict lowercase-only hex parser. SPEC-REFS §1 forbids uppercase on
-/// read; the general `hash::from_hex` tolerates both cases for
-/// programmatic callers, so we hand-roll a stricter variant here.
-fn parse_lowercase_hash(bytes: &[u8]) -> Option<Hash> {
+/// Strict lowercase-only hex parser: exactly [`HEX_LEN`] lowercase-hex
+/// bytes, decoded in a single pass. SPEC-REFS §1 forbids uppercase on read;
+/// the general `hash::from_hex` tolerates both cases for programmatic
+/// callers, so this is the stricter variant every on-the-wire / on-disk
+/// reader (ref wire blobs, the applied-packs record) shares to keep a
+/// hand-edited or foreign-cased line malformed rather than silently accepted.
+#[must_use]
+pub fn parse_lowercase_hash(bytes: &[u8]) -> Option<Hash> {
     if bytes.len() != HEX_LEN {
         return None;
     }
