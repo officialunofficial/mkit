@@ -376,7 +376,10 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
 
     // A filter selecting a pseudo-random subset of the same two-letter
     // names, so it sometimes matches and sometimes doesn't.
-    let filter_count = input.get(1).copied().map_or(0, |b| usize::from(b) % (n + 1));
+    let filter_count = input
+        .get(1)
+        .copied()
+        .map_or(0, |b| usize::from(b) % (n + 1));
     let mut filter = Vec::with_capacity(filter_count);
     for i in 0..filter_count {
         let a = b'a' + u8::try_from(i / 26).unwrap_or(0);
