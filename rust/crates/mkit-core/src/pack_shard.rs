@@ -640,6 +640,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn index_out_of_range_is_rejected() {
+        let pack = synthetic_pack(64 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let total = manifest.config.total_shards();
+
+        // A shard claiming an index at (or beyond) the manifest's total
+        // shard count. Its bytes never need to be real — the range
+        // check fires before anything is hashed or decoded.
+        let bogus = Shard {
+            index: u16::try_from(total).unwrap(),
+            bytes: vec![0u8; 32],
+        };
+        let err = decode_pack_from_shards(&[bogus], &manifest).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ShardError::IndexOutOfRange { index, total: t } if index == u16::try_from(total).unwrap() && t == total
+            ),
+            "expected IndexOutOfRange, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_index_is_rejected() {
+        let pack = synthetic_pack(64 * 1024);
+        let (shards, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+
+        // Two entries claiming the SAME index: the first is the real,
+        // correctly-hashed shard 0; the second is garbage. The
+        // duplicate-index check on the second entry must fire before
+        // its (bogus) bytes are ever hashed or decoded.
+        let real_shard_0 = shards[0].clone();
+        let impostor = Shard {
+            index: 0,
+            bytes: vec![0xFFu8; real_shard_0.bytes.len()],
+        };
+        let err = decode_pack_from_shards(&[real_shard_0, impostor], &manifest).unwrap_err();
+        assert!(
+            matches!(err, ShardError::DuplicateIndex { index: 0 }),
+            "expected DuplicateIndex{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn pack_hash_mismatch_on_forged_but_consistent_shard_set() {
+        // A "forged-but-consistent" shard set: every per-shard hash,
+        // the Merkle commitment, and the Reed-Solomon reconstruction
+        // all check out — the manifest's final `pack_hash` is the only
+        // thing that lies. This is the last line of defence (step 6)
+        // after every other cross-check in `decode_pack_from_shards`
+        // has already passed.
+        let pack = synthetic_pack(256 * 1024);
+        let (shards, mut manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        manifest.pack_hash = hash::hash(b"not the real pack");
+
+        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
+        let err = decode_pack_from_shards(&subset, &manifest).unwrap_err();
+        assert!(
+            matches!(err, ShardError::PackHashMismatch),
+            "expected PackHashMismatch, got {err:?}"
+        );
+    }
+
     // ---- Manifest wire-format tests --------------------------------
 
     #[test]

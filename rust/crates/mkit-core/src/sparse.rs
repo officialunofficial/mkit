@@ -932,6 +932,37 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_wrong_length_bitmap_bytes() {
+        // Distinct from bit-tampering (above): the bitmap-length check
+        // fires on a `bitmap_bytes` whose BYTE COUNT no longer matches
+        // `ceil(leaf_count / 8)`, before any root reconstruction is
+        // attempted. A truncated bitmap and an over-long one (padded
+        // with extra bytes the manifest never committed to) must both
+        // be rejected.
+        let tree = make_tree(10);
+        let filter = vec![PathBuf::from("aa"), PathBuf::from("ab")];
+        let (delivered, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+        assert_eq!(
+            proof.bitmap_bytes.len(),
+            usize::try_from(manifest.leaf_count).unwrap().div_ceil(8)
+        );
+
+        let mut truncated = proof.clone();
+        truncated.bitmap_bytes.pop();
+        assert!(
+            !verify_sparse(&manifest, &delivered, &filter, &truncated),
+            "a truncated bitmap must be rejected by the length check"
+        );
+
+        let mut over_long = proof;
+        over_long.bitmap_bytes.push(0x00);
+        assert!(
+            !verify_sparse(&manifest, &delivered, &filter, &over_long),
+            "an over-long bitmap must be rejected by the length check"
+        );
+    }
+
+    #[test]
     fn verify_rejects_tampered_manifest_root() {
         // Symmetric to the above: server preserves the bitmap but
         // claims a different root. Catches an attacker substituting

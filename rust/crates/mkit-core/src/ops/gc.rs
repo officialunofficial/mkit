@@ -538,6 +538,47 @@ mod tests {
         );
     }
 
+    /// Test-only mirror of [`live_objects`] with an injectable
+    /// reachability cap, so the `GcRootsError::Truncated` fail-closed
+    /// abort can be exercised without constructing `MAX_REACHABLE` (10
+    /// million) objects.
+    fn live_objects_with_cap(
+        store: &ObjectStore,
+        mkit_dir: &Path,
+        cap: usize,
+    ) -> Result<BTreeSet<Hash>, GcRootsError> {
+        let roots = collect_roots(mkit_dir)?;
+        let (live, truncated) =
+            super::super::graph::reachable_closure_checked_with_cap(store, roots.iter(), cap)?;
+        if truncated {
+            return Err(GcRootsError::Truncated);
+        }
+        Ok(live)
+    }
+
+    #[test]
+    fn live_objects_aborts_truncated_when_closure_exceeds_cap() {
+        // gc's fail-closed contract: beyond the reachability cap the
+        // "unreachable" verdict is unsound, so live_objects (and
+        // therefore run_gc) must abort rather than prune against a
+        // partial closure. Each commit_one call adds 3 objects
+        // (commit + tree + blob); two commits give 6 reachable objects,
+        // comfortably over an injected cap of 2.
+        let (d, s) = repo();
+        let md = mkit_dir(&d);
+        let (c1, _) = commit_one(&s, b"a", b"a", vec![]);
+        let (c2, _) = commit_one(&s, b"b", b"b", vec![c1]);
+        write_ref(&md, "refs/heads/main", &c2);
+
+        let err = live_objects_with_cap(&s, &md, 2).unwrap_err();
+        assert!(matches!(err, GcRootsError::Truncated));
+
+        // Sanity: the same closure with a generous cap succeeds and
+        // contains every object from both commits.
+        let live = live_objects_with_cap(&s, &md, 1000).unwrap();
+        assert!(live.contains(&c1) && live.contains(&c2));
+    }
+
     #[test]
     fn reachable_closure_is_union_of_single_root_closures() {
         let (_d, s) = repo();

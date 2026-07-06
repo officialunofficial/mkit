@@ -307,6 +307,20 @@ impl PackReader {
     /// every `u32::from_le_bytes`). They `expect`-panic only if the
     /// compiler's slice-bounds elision is wrong.
     pub fn read(pack_bytes: &[u8], store: &ObjectStore) -> Result<UnpackReport, PackError> {
+        Self::read_with_payload_cap(pack_bytes, store, MAX_TOTAL_PAYLOAD)
+    }
+
+    /// Same as [`Pack::read`], but with a caller-supplied running-total
+    /// payload cap instead of the hardcoded [`MAX_TOTAL_PAYLOAD`] (4
+    /// GiB). `pub(crate)`, not part of the public API — test-only
+    /// injection point so `PackfileTooLarge` can be exercised without
+    /// constructing a multi-gigabyte pack. Real callers MUST use
+    /// [`Pack::read`] instead.
+    pub(crate) fn read_with_payload_cap(
+        pack_bytes: &[u8],
+        store: &ObjectStore,
+        payload_cap: u64,
+    ) -> Result<UnpackReport, PackError> {
         // 1. Length sanity: must fit header + trailer at minimum.
         if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
             return Err(PackError::PackfileTooShort);
@@ -363,7 +377,7 @@ impl PackReader {
             pos += 4;
 
             total_payload = total_payload.saturating_add(payload_len as u64);
-            if total_payload > MAX_TOTAL_PAYLOAD {
+            if total_payload > payload_cap {
                 return Err(PackError::PackfileTooLarge);
             }
             if pos + payload_len > split {
@@ -886,6 +900,38 @@ mod tests {
             matches!(err, PackError::TooManyObjects(_)),
             "expected TooManyObjects, got {err:?}"
         );
+    }
+
+    #[test]
+    fn payload_sum_over_cap_is_rejected_before_bounds_or_decode() {
+        // `PackfileTooLarge` on the reader's running-payload-total is
+        // enforced against MAX_TOTAL_PAYLOAD (4 GiB) in production —
+        // impractical to trip directly in a unit test without
+        // allocating gigabytes. `read_with_payload_cap` is the
+        // test-only injection point: same check, caller-supplied cap.
+        let blob_a = write_blob_via_serialize(&[0xAA; 64]);
+        let blob_b = write_blob_via_serialize(&[0xBB; 64]);
+        let mut w = PackWriter::new();
+        w.push_raw(hash::hash(&blob_a), blob_a.clone()).unwrap();
+        w.push_raw(hash::hash(&blob_b), blob_b.clone()).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+
+        // Cap smaller than the combined payload but big enough that
+        // the first entry alone fits — the SECOND entry's running
+        // total must trip the cap, not an entry-count or bounds check.
+        let cap = (blob_a.len() as u64) + 10;
+        let err = PackReader::read_with_payload_cap(&pack, &store, cap).unwrap_err();
+        assert!(
+            matches!(err, PackError::PackfileTooLarge),
+            "expected PackfileTooLarge, got {err:?}"
+        );
+
+        // Sanity: the same pack with a generous cap (the real
+        // MAX_TOTAL_PAYLOAD) unpacks normally.
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(report.raw_count, 2);
     }
 
     #[test]

@@ -146,6 +146,25 @@ pub fn reachable_closure_checked<'a, I>(
 where
     I: IntoIterator<Item = &'a Hash>,
 {
+    reachable_closure_checked_with_cap(store, roots, MAX_REACHABLE)
+}
+
+/// Same walk as [`reachable_closure_checked`], but with a caller-supplied
+/// cap instead of the hardcoded [`MAX_REACHABLE`] (10 million).
+///
+/// Test-only injection point: `gc`'s fail-closed `Truncated` abort has
+/// no other way to exercise a truncation without actually constructing
+/// ten million objects. `pub(crate)`, not part of the public API — real
+/// external callers MUST use [`reachable_closure_checked`] (or
+/// [`reachable_closure`]) instead.
+pub(crate) fn reachable_closure_checked_with_cap<'a, I>(
+    store: &ObjectStore,
+    roots: I,
+    cap: usize,
+) -> Result<(BTreeSet<Hash>, bool), StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
     let mut out: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = VecDeque::new();
     for root in roots {
@@ -154,7 +173,7 @@ where
 
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
-        if out.len() >= MAX_REACHABLE {
+        if out.len() >= cap {
             // Still had work to do but hit the cap — the closure is
             // incomplete.
             truncated = true;
