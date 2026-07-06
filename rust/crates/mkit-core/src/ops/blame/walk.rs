@@ -4,12 +4,14 @@
 //! drives this; the single-parent path reproduces the old linear replay.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{
     Attribution, BlameError, BlameOptions, BlameOutcome, CopyDetection, find_blob_in_tree,
-    ignore_fallthrough, load_blob_lines, match_lines_with_options, move_copy,
+    ignore_fallthrough, is_trivial_key, line_key, load_blob_lines, match_lines_with_options,
+    move_copy,
 };
 use crate::hash::Hash;
 use crate::object::{Identity, Object};
@@ -301,7 +303,7 @@ pub(super) fn attribute_commit(
     }
 
     if ctx.opts.is_ignored(&commit) {
-        apply_ignore_fallthrough(memo, &pass, &parents_data, &mut attrs, &mut matched);
+        apply_ignore_fallthrough(ctx, memo, &pass, &parents_data, &mut attrs, &mut matched);
     }
 
     if ctx.opts.detection_enabled() {
@@ -330,7 +332,14 @@ pub(super) fn attribute_commit(
 /// `matched` so the detector does not overwrite it (`--ignore-rev` takes
 /// precedence over `-M`/`-C`). With one parent this is exactly the old
 /// single-parent fall-through.
+///
+/// When [`BlameOptions::ignore_rev_precise`] is set, [`precise_overrides`]
+/// refines each parent's positional `fall` result with content matching
+/// before it is applied here — the credit loop below, the first-parent-wins
+/// per-parent ordering, and the `matched` marking are all unchanged either
+/// way.
 fn apply_ignore_fallthrough(
+    ctx: &WalkCtx,
     memo: &HashMap<Hash, Rc<[Attribution]>>,
     pass: &CommitPass,
     parents_data: &[ParentData],
@@ -341,6 +350,18 @@ fn apply_ignore_fallthrough(
         // Reuse the lines + mapping loaded once in `attribute_commit`.
         let (parent_lines, mapping) = &parents_data[k];
         let fall = ignore_fallthrough(mapping, parent_lines.len());
+        let fall = if ctx.opts.ignore_rev_precise {
+            precise_overrides(&PreciseRequest {
+                mapping,
+                fall: &fall,
+                new_lines: pass.lines,
+                parent_lines,
+                matched,
+                ignore_whitespace: ctx.opts.ignore_whitespace,
+            })
+        } else {
+            fall
+        };
         let parent_attrs = &memo[&parent];
         for (ni, &paired) in fall.iter().enumerate() {
             if matched[ni] {
@@ -434,4 +455,289 @@ fn apply_detection(
         )?;
     }
     Ok(())
+}
+
+/// Cap on how many content candidates a single new line's key may have
+/// before that line is deemed too ambiguous to refine cheaply and simply
+/// keeps its positional guess. Bounds the per-line fan-out, mirroring
+/// [`move_copy::MAX_DETECT_RUN`]'s role as a per-step blow-up guard.
+const PRECISE_MAX_CANDIDATES_PER_KEY: usize = 256;
+
+/// Total forward-run comparison budget for one [`precise_overrides`] call.
+/// Many identical ≥3-byte lines (generated/log-like files) make candidate
+/// ranking degenerate toward `O(n³)`; once the cumulative run-extension work
+/// crosses this bound the whole refinement is abandoned and the plain
+/// positional `fall` is returned unchanged — a graceful fallback that can
+/// never hang, the same "cap the blow-up rather than fail" stance as
+/// [`super::BLAME_MAX_LINES`].
+const PRECISE_MAX_RUN_WORK: usize = 1 << 22; // ~4.2M key comparisons
+
+/// Inputs for [`precise_overrides`], bundled so the two adjacent
+/// `&[Option<usize>]` (`mapping`, `fall`) and two adjacent `&[Vec<u8>]`
+/// (`new_lines`, `parent_lines`) can't be silently transposed at the call
+/// site — the same positional-argument hazard [`move_copy::ReassignRequest`]
+/// bundles away.
+pub(super) struct PreciseRequest<'r> {
+    /// LCS mapping: `mapping[ni]` = the parent line this commit's line `ni`
+    /// is unchanged from, or `None` (changed/introduced).
+    pub(super) mapping: &'r [Option<usize>],
+    /// git's positional [`ignore_fallthrough`] guess — the base this refines.
+    pub(super) fall: &'r [Option<usize>],
+    /// This commit's blob lines.
+    pub(super) new_lines: &'r [Vec<u8>],
+    /// The parent's blob lines.
+    pub(super) parent_lines: &'r [Vec<u8>],
+    /// Lines already explained by an earlier parent at a merge. Excluded
+    /// from refinement so they neither reserve nor steal a content candidate
+    /// a genuinely-unresolved line needs (their override would be discarded
+    /// by the credit loop's `matched` check anyway).
+    pub(super) matched: &'r [bool],
+    /// `-w`: content keys are whitespace-stripped for matching.
+    pub(super) ignore_whitespace: bool,
+}
+
+/// `--ignore-rev-precise` (#496): refine one parent's positional
+/// [`ignore_fallthrough`] result (`fall`) with content matching, so a line
+/// a reformat/reorder moved can be attributed to its true surviving origin
+/// instead of whatever line happens to sit at the same offset in the hunk.
+///
+/// **A strong heuristic against being worse than git's positional
+/// `--ignore-rev`** — not an absolute guarantee. git's positional guess is
+/// the base; this only *overrides* a slot on strong content evidence. The
+/// single-line key coincidence that could make the old code strictly worse
+/// is prevented outright (see below); a ≥ 2-line file-adjacent block whose
+/// keys happen to match could in principle still re-point coincidentally,
+/// but that is a far less likely accident than a lone duplicate line:
+///
+/// * `fall[ni] == Some(j)` (positional already found a parent line): the
+///   slot is re-pointed **only** by a genuine *moved block* — a run of ≥ 2
+///   file-adjacent lines whose keys match the candidate contiguously. An
+///   isolated single-line key coincidence never displaces a filled
+///   positional guess: that is exactly how the old code could land an
+///   edited line (`foo`→`bar`, whose positional predecessor `foo` is its
+///   true history) onto an unrelated duplicate `bar` deleted elsewhere —
+///   strictly worse than positional. Content that agrees with the guess, or
+///   a trivial key, is likewise kept.
+/// * `fall[ni] == None` (positional left the line on the ignored commit —
+///   a genuine insertion): may be filled from a single exact-content match
+///   anywhere in the parent's **whole file** (not just the enclosing hunk —
+///   the point is finding lines a reformat moved across hunk boundaries).
+///   Any exact origin only improves on "credited to the noise commit", so
+///   even a single-line match is safe here.
+/// * A trivial key ([`is_trivial_key`] — blank lines, `}`-only lines,
+///   sub-3-byte tokens, measured whitespace-stripped even without `-w`) is
+///   never content-reattributed, so trivial lines don't "teleport".
+///
+/// Resolution is three phases:
+///
+/// * **Pass 1** reserves, for every keeper (trivial key or content already
+///   agrees with `fall[ni]`), its positional old index, so no override can
+///   steal a line its positional owner is keeping.
+/// * **Pass 2a** proposes at most one override per remaining line — its best
+///   content candidate (longest file-contiguous run; ties toward the
+///   positional guess, then lowest old index) — subject to the never-worse
+///   rule above and the ambiguity/work caps
+///   ([`PRECISE_MAX_CANDIDATES_PER_KEY`], [`PRECISE_MAX_RUN_WORK`]).
+/// * **Pass 2b** applies proposals longest-run-first, so a genuine moved
+///   block wins any old line a weaker single-line match also wanted; a
+///   proposal that loses the contest keeps its positional target (still
+///   ≥ positional). This global ranking replaces the old ascending-index
+///   greedy claim, which let an early weak single-candidate match starve a
+///   later longer-run block head.
+///
+/// Does not touch `ignore_fallthrough` itself or its shape: callers see the
+/// same `Vec<Option<usize>>` domain (only unmatched new lines are ever
+/// `Some`/reattributed), so the credit loop in [`apply_ignore_fallthrough`]
+/// is unchanged either way.
+///
+/// `pub(super)`: exercised directly by `blame::tests` unit tests (mirroring
+/// how `ignore_fallthrough_pairs_per_hunk` unit-tests `ignore_fallthrough`),
+/// alongside the full `blame_file_with` integration tests.
+/// One candidate override in [`precise_overrides`]' Pass 2: reattribute new
+/// line `ni` to old line `real_old`, backed by a file-contiguous run of
+/// `run_len` matching lines (the priority for contested-claim resolution).
+struct Proposal {
+    ni: usize,
+    real_old: usize,
+    run_len: usize,
+}
+
+pub(super) fn precise_overrides(req: &PreciseRequest) -> Vec<Option<usize>> {
+    let &PreciseRequest {
+        mapping,
+        fall,
+        new_lines,
+        parent_lines,
+        matched,
+        ignore_whitespace: iw,
+    } = req;
+
+    // `fall` is only ever defined over the LCS-unmatched new lines (the
+    // domain `ignore_fallthrough` pairs); further exclude lines an earlier
+    // merge parent already explained (finding #3) — they must not compete
+    // for candidates a still-unresolved line needs.
+    let unmatched_new: Vec<usize> = (0..mapping.len())
+        .filter(|&ni| mapping[ni].is_none() && !matched[ni])
+        .collect();
+    if unmatched_new.is_empty() {
+        return fall.to_vec();
+    }
+
+    // The parent's unmatched-old lines, across the WHOLE file — a reformat
+    // can move a line across hunk boundaries, which per-hunk pairing alone
+    // can never see.
+    let matched_old: HashSet<usize> = mapping.iter().filter_map(|&m| m).collect();
+    let unmatched_old: Vec<usize> = (0..parent_lines.len())
+        .filter(|oi| !matched_old.contains(oi))
+        .collect();
+    if unmatched_old.is_empty() {
+        return fall.to_vec();
+    }
+
+    let old_keys: Vec<Vec<u8>> = unmatched_old
+        .iter()
+        .map(|&oi| line_key(&parent_lines[oi], iw))
+        .collect();
+    let old_index = move_copy::build_index(&old_keys);
+    let new_keys: Vec<Vec<u8>> = unmatched_new
+        .iter()
+        .map(|&ni| line_key(&new_lines[ni], iw))
+        .collect();
+
+    // Pass 1: reserve each keeper's positional old index (trivial key, or
+    // content already agrees) so no override elsewhere can steal it.
+    let mut keeps: HashSet<usize> = HashSet::new(); // ni values that keep `fall[ni]` as-is
+    let mut claimed: HashSet<usize> = HashSet::new(); // old indices reserved / taken
+    for (pos, &ni) in unmatched_new.iter().enumerate() {
+        let Some(j) = fall[ni] else { continue };
+        let key = &new_keys[pos];
+        if is_trivial_key(key) || *line_key(&parent_lines[j], iw) == **key {
+            keeps.insert(ni);
+            claimed.insert(j);
+        }
+    }
+
+    // Pass 2a: propose one best override per non-keeper, enforcing the
+    // never-worse rule (a filled `Some` guess is only re-pointed by a real
+    // moved block, run ≥ 2).
+    let mut proposals: Vec<Proposal> = Vec::new();
+    let mut work = 0usize;
+    for (pos, &ni) in unmatched_new.iter().enumerate() {
+        let key = &new_keys[pos];
+        if keeps.contains(&ni) || is_trivial_key(key) {
+            continue; // kept as-is, or a trivial key that never teleports
+        }
+        let Some(offsets) = old_index.get(key) else {
+            continue; // no content candidate anywhere in the parent
+        };
+        if offsets.len() > PRECISE_MAX_CANDIDATES_PER_KEY {
+            continue; // too ambiguous to refine cheaply — keep positional
+        }
+        let Some((d, run_len)) = best_content_candidate(
+            pos,
+            offsets,
+            &unmatched_new,
+            &new_keys,
+            &old_keys,
+            &unmatched_old,
+            fall[ni],
+            &mut work,
+        ) else {
+            continue;
+        };
+        if work > PRECISE_MAX_RUN_WORK {
+            return fall.to_vec(); // graceful global fallback — never hang
+        }
+        // Never-worse: only a genuine moved block (≥ 2 file-adjacent lines)
+        // may displace a positional `Some`; a `None` guess (positional gave
+        // nothing) may take even a single exact-content line.
+        if fall[ni].is_some() && run_len < 2 {
+            continue;
+        }
+        proposals.push(Proposal {
+            ni,
+            real_old: unmatched_old[d],
+            run_len,
+        });
+    }
+
+    // Pass 2b: apply longest-run-first so a real moved block wins a contested
+    // old line; a loser simply keeps its positional target (still ≥ positional).
+    proposals.sort_by(|a, b| b.run_len.cmp(&a.run_len).then(a.ni.cmp(&b.ni)));
+    let mut out = fall.to_vec();
+    for p in proposals {
+        if claimed.insert(p.real_old) {
+            out[p.ni] = Some(p.real_old);
+        }
+    }
+    out
+}
+
+/// The best content candidate for the unmatched new line at dense `pos`:
+/// the dense old offset (into `old_keys`/`unmatched_old`) with the longest
+/// forward **file-contiguous** matching run, plus that run length. Returns
+/// `None` only if `offsets` is empty.
+///
+/// The run extends while the new and old lines stay adjacent *in their
+/// respective files* (consecutive `unmatched_new` / `unmatched_old` indices)
+/// AND their keys match — so a run of length ≥ 2 is a genuine moved block,
+/// not lines that merely share keys across LCS anchors. This is the
+/// forward-extension *idea* of [`move_copy::longest_match`], but that helper
+/// runs over file-contiguous lines directly; here the arrays are dense
+/// (unmatched-only), so the file-adjacency check is added explicitly (the
+/// old dense run overstated the parallel — a fragmented decoy could tie a
+/// genuinely contiguous block; #523 finding #7).
+///
+/// Longer run wins; a length tie breaks toward git's positional guess
+/// (`positional`), if any, then by lowest old-line index. `work` accumulates
+/// the run-extension budget the caller bounds against
+/// [`PRECISE_MAX_RUN_WORK`].
+#[allow(clippy::too_many_arguments)]
+fn best_content_candidate(
+    pos: usize,
+    offsets: &[usize],
+    unmatched_new: &[usize],
+    new_keys: &[Vec<u8>],
+    old_keys: &[Vec<u8>],
+    unmatched_old: &[usize],
+    positional: Option<usize>,
+    work: &mut usize,
+) -> Option<(usize, usize)> {
+    let mut run_len = |d: usize| -> usize {
+        let mut k = 0usize;
+        while pos + k < new_keys.len()
+            && d + k < old_keys.len()
+            && new_keys[pos + k] == old_keys[d + k]
+            && (k == 0
+                || (unmatched_new[pos + k] == unmatched_new[pos + k - 1] + 1
+                    && unmatched_old[d + k] == unmatched_old[d + k - 1] + 1))
+        {
+            k += 1;
+            *work += 1;
+        }
+        k
+    };
+    let mut best: Option<(usize, usize)> = None; // (dense old offset, run length)
+    for &d in offsets {
+        let len = run_len(d);
+        let better = match best {
+            None => true,
+            Some((bd, bl)) => match len.cmp(&bl) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => match positional {
+                    Some(expected) => {
+                        let cur = unmatched_old[d].abs_diff(expected);
+                        let prev = unmatched_old[bd].abs_diff(expected);
+                        cur < prev || (cur == prev && unmatched_old[d] < unmatched_old[bd])
+                    }
+                    None => unmatched_old[d] < unmatched_old[bd],
+                },
+            },
+        };
+        if better {
+            best = Some((d, len));
+        }
+    }
+    best
 }
