@@ -4,7 +4,7 @@
 // flourish, the locked create/unlock actions, and the unlocked player header.
 // Moved verbatim out of `multiplayer-demo.tsx`.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { attestIdentityBinding, rpId } from '../../lib/passkey'
 import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
@@ -31,6 +31,15 @@ function useAttest(
   const [result, setResult] = useState<{ verified: true } | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+
+  // Drop the verdict when the active signing key changes (New identity, or the
+  // ephemeral fallback re-mints a random seed): the "verified ✓" + P-256 pubkey
+  // below vouch for the OLD `ed25519PubkeyHex`, so a stale success must not
+  // linger against a different/ephemeral identity.
+  useEffect(() => {
+    setResult(null)
+    setErr(null)
+  }, [ed25519PubkeyHex])
 
   const onAttest = async () => {
     // No credential/pubkey to vouch with (legacy identity or an authenticator
