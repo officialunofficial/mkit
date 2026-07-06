@@ -245,6 +245,19 @@ the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
 
+The encrypted-transport listener (`mkit serve --listen-enc`,
+[`mkit-cli/src/commands/serve/enc.rs`](../../rust/crates/mkit-cli/src/commands/serve/enc.rs))
+enforces the same two constants against its own top-level frame loop —
+sharing `MAX_FRAMES_PER_CONN` / `MAX_BYTES_PER_CONN` with the SSH
+server rather than defining a second set of numbers — on top of its
+per-frame idle timeout (`--enc-idle-timeout-secs`). Without this, a
+peer that stays under the per-frame idle timeout but never closes the
+connection could hold a listener worker and stream unbounded work
+indefinitely; the SSH path already terminates such a peer via the
+cumulative caps above. A cap trip sends an
+`Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the connection,
+matching the SSH server's response shape.
+
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;
 pack data flows through `PackChunk` streams to stay under that limit.
@@ -540,7 +553,7 @@ These hold for every conformant transport, regardless of scheme:
 | Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §5.3, §6.3); conflict → `RefConflict`; 409/412 never retried (§5.3, §6.5, §7.1) |
 | A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
-| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
+| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` shared by the SSH and enc-listener frame loops (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 | A proxy cannot substitute a sparse-checkout filter | `?sparse=<filter-hex>` MUST equal `BLAKE3` of the canonicalised filter; server re-canonicalises and rejects with `409` (§5.6) |
 
