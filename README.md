@@ -9,10 +9,10 @@
 A content-addressed version control toolkit written in Rust.
 
 `mkit` is a generic content-addressed VCS — Git-like commits, refs,
-transports — plus a native, predicate-agnostic attestation subsystem
-(in-toto v1 Statements wrapped in DSSE envelopes) that any downstream
-service can attach witness signatures to commits with. The v1 on-disk
-and wire formats are pinned by golden vectors under
+and transports — with a native, predicate-agnostic attestation
+subsystem (in-toto v1 Statements in DSSE envelopes) that lets any
+downstream service attach witness signatures to commits. The v1
+on-disk and wire formats are pinned by golden vectors under
 [`rust/tests/golden/`](rust/tests/golden/).
 
 ## Status
@@ -46,11 +46,11 @@ mkit push origin            # first push records `origin` as the branch upstream
 mkit push                   # subsequent pushes go to the recorded upstream
 ```
 
-`mkit push` (no args) pushes the current branch to its upstream only,
-rejecting a non-fast-forward update unless you pass `--force-with-lease`
-or `--force`. Use `mkit push --all` to mirror every local branch (also
-CAS-safe). `mkit remote add <url>` (no name) still configures the flat
-default remote for back-compat.
+Bare `mkit push` pushes the current branch to its recorded upstream
+and rejects a non-fast-forward update unless you pass
+`--force-with-lease` or `--force`; `mkit push --all` mirrors every
+local branch with the same CAS safety. `mkit remote add <url>` (no
+name) still configures the flat default remote for back-compat.
 
 Full CLI reference: [`docs/CLI.md`](docs/CLI.md).
 
@@ -65,11 +65,11 @@ Pick one. Long-form guide with verification steps in
 curl mkit.sh | sh
 ```
 
-Detects your OS + architecture, downloads the matching signed release
-archive, verifies its cosign signature by default, and installs `mkit`
-into `~/.local/bin`. Equivalent explicit form:
-`curl -sSfL https://mkit.sh/install.sh | sh`. Pass `--version vX.Y.Z` to
-pin an exact release (`curl -sSfL https://mkit.sh/install.sh | sh -s -- --version v0.3.0`).
+Detects your OS and architecture, downloads the matching signed
+release archive, verifies its cosign signature by default, and
+installs `mkit` into `~/.local/bin`. Equivalent explicit form:
+`curl -sSfL https://mkit.sh/install.sh | sh`; append
+`-s -- --version v0.3.0` to pin an exact release.
 
 ### From source
 
@@ -98,9 +98,8 @@ curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSIO
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
-The one-liner `curl mkit.sh | sh` (or `curl -sSfL https://mkit.sh/install.sh | sh`)
-picks the right archive and verifies the cosign bundle by default. Pass
-`--version vX.Y.Z` to pin an exact release.
+Verification steps — cosign bundle, `SHA256SUMS`, SBOM — are in
+[`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### WASM (npm)
 
@@ -108,8 +107,8 @@ picks the right archive and verifies the cosign bundle by default. Pass
 bun add @makechain/mkit-wasm     # or: npm i @makechain/mkit-wasm
 ```
 
-The `@makechain` scope is intentional — Makechain is an internal team
-within Official Unofficial, Inc., not a separate entity. TypeScript and
+The `@makechain` scope is intentional (Makechain is an internal team
+at Official Unofficial, Inc., not a separate entity). TypeScript and
 Cloudflare Workers examples in
 [`docs/INSTALL.md`](docs/INSTALL.md#wasm--npm).
 
@@ -138,7 +137,7 @@ Each signer ships its own README under
 ## Keystore
 
 Signing keys live in a pluggable keystore vault. Out of the box mkit
-recognises:
+recognizes:
 
 - **software** / **software-raw** — encrypted-at-rest software vault
   on disk; the cross-platform foundation backend.
@@ -156,8 +155,8 @@ signing, attestation signing, and SSH push-auth share key references.
 The normative interface is in
 [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md); end-user overview
 in [`docs/keystore.md`](docs/keystore.md). The backends a given
-binary supports depend on enabled build features — see CLI.md
-§"Config keys".
+binary supports depend on enabled build features — see
+[`docs/CLI.md`](docs/CLI.md) §"Config keys".
 
 ## Architecture
 
@@ -224,8 +223,9 @@ Object kinds (full schema in
 | Tree         | Directory snapshot                                         |
 | Commit       | Tree + parents + Ed25519 signature + author Identity       |
 | Remix        | Signed derivative of one or more commits                   |
-| ChunkedBlob  | Index of FastCDC chunks for blob > chunk threshold         |
+| ChunkedBlob  | Index of FastCDC chunks for blobs over the chunk threshold |
 | Delta        | Bsdiff-like delta between two blobs (pack-internal)        |
+| Tag          | Annotated, optionally signed pointer to another object     |
 
 ## Attestations
 
@@ -281,7 +281,7 @@ mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
   seed as `id_ed25519`, so the same key authenticates `mkit push`
   over `mkit+ssh://`.
 
-For `mkit+ssh://` push authorisation the idiomatic pattern is Git's:
+For `mkit+ssh://` push authorization the idiomatic pattern is Git's:
 server `sshd` runs an `AuthorizedKeysCommand` that maps an incoming
 pubkey to an account, and `mkit serve` executes as that account. mkit
 core ships **no custom push-auth protocol** — SSH's KEX already does
@@ -325,12 +325,13 @@ with `cargo bench --workspace -- --quick` plus
 
 ## Documentation
 
-Each SPEC carries its own `status:` header — `draft`, `stable`,
-`transport-delivery-shipped`, `implemented`, or `normative` — reflecting how settled
-that document is. Regardless of header, the v1 wire and on-disk formats
+Guides and operational docs live in [`docs/`](docs/); the wire-format
+and subsystem specifications live in [`docs/specs/`](docs/specs/README.md).
+Each spec carries its own `status:` header reflecting how settled that
+document is; regardless of header, the v1 wire and on-disk formats
 they describe are pinned by the test vectors under
-[`rust/tests/golden/`](rust/tests/golden/) and remain stable through the
-0.x series.
+[`rust/tests/golden/`](rust/tests/golden/) and remain stable through
+the 0.x series.
 
 | Doc | Audience |
 |---|---|
@@ -338,36 +339,15 @@ they describe are pinned by the test vectors under
 | [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
 | [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users — migrate from git, track a git upstream, push work back |
+| [`docs/specs/`](docs/specs/README.md) | Implementers + integrators — the wire-format and subsystem specifications, indexed with one-line summaries |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
 | [`docs/PARITY.md`](docs/PARITY.md) | Contributors — v1 scope gate, machine-output contract, and tracked divergences (the per-command matrix is the web `/parity` page) |
 | [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
-| [`docs/specs/SPEC-INDEX.md`](docs/specs/SPEC-INDEX.md) | Implementers — staging-index format |
-| [`docs/specs/SPEC-OBJECTS.md`](docs/specs/SPEC-OBJECTS.md) | Implementers — object on-disk format |
-| [`docs/specs/SPEC-MERKLE-OBJECTS.md`](docs/specs/SPEC-MERKLE-OBJECTS.md) | Implementers — BMT-root identity for `Tree`/`ChunkedBlob` |
-| [`docs/specs/SPEC-GC.md`](docs/specs/SPEC-GC.md) | Implementers — garbage-collection retention roots & recovery |
-| [`docs/specs/SPEC-PACKFILE.md`](docs/specs/SPEC-PACKFILE.md) | Implementers — packfile wire format |
-| [`docs/specs/SPEC-DELTA.md`](docs/specs/SPEC-DELTA.md) | Implementers — delta encoding |
-| [`docs/specs/SPEC-PACK-SHARDS.md`](docs/specs/SPEC-PACK-SHARDS.md) | Implementers — erasure-coded pack delivery |
-| [`docs/specs/SPEC-REFS.md`](docs/specs/SPEC-REFS.md) | Implementers — ref names and CAS |
-| [`docs/specs/SPEC-TRANSPORT.md`](docs/specs/SPEC-TRANSPORT.md) | Implementers — 7-verb transport protocol incl. SSH OP_HELLO |
-| [`docs/specs/SPEC-TRANSPORT-ENC.md`](docs/specs/SPEC-TRANSPORT-ENC.md) | Implementers — `mkit+enc://` no-OpenSSH encrypted transport |
-| [`docs/specs/SPEC-SPARSE-CHECKOUT.md`](docs/specs/SPEC-SPARSE-CHECKOUT.md) | Implementers — verifiable server-side sparse delivery |
-| [`docs/specs/SPEC-FASTCDC.md`](docs/specs/SPEC-FASTCDC.md) | Implementers — content chunking |
-| [`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md) | Implementers — commit signing format |
-| [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) | Implementers — keystore vault interface |
-| [`docs/specs/SPEC-RPC.md`](docs/specs/SPEC-RPC.md) | Implementers — shared stdio framing for subprocess protocols |
-| [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](docs/specs/SPEC-EXTERNAL-SIGNER.md) | Integrators — external signer stdio protocol |
-| [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) | Implementers + integrators — native attestation (in-toto v1 + DSSE) |
-| [`docs/specs/SPEC-HISTORY-PROOF.md`](docs/specs/SPEC-HISTORY-PROOF.md) | Implementers — MMR commit-chain inclusion proofs (light-client attestation) |
-| [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md) | Implementers — importer-signed git→mkit translation |
-| [`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md) | Implementers — deterministic mkit→git translation |
-| [`docs/specs/SPEC-RELEASE-THRESHOLD.md`](docs/specs/SPEC-RELEASE-THRESHOLD.md) | Implementers — BLS12-381 threshold signatures for releases |
-| [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
-| [`docs/specs/SPEC-CONFIG-SECURITY.md`](docs/specs/SPEC-CONFIG-SECURITY.md) | Operators + implementers — repo-vs-user config trust split |
-| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
-| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 | [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
 | [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commits |
+| [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 
 ## Build
 
