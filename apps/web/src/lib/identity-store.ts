@@ -4,10 +4,11 @@
 // store owns *who I am this session*. Only client-side, UI-owned, synchronous
 // identity lives here — never server data (refs, objects, commit logs).
 //
-// PERSISTENCE INVARIANT: only `{ credentialId, room, name }` are written to
-// localStorage (see `partialize`) — all non-secret. The Ed25519 `seedHex` — and
-// the derived `ed25519PubkeyHex` / `unlocked` flags — are transient and held in
-// memory ONLY: re-derived from the passkey each session, NEVER persisted to disk.
+// PERSISTENCE INVARIANT: only `{ credentialId, p256PubkeyHex, room, name }` are
+// written to localStorage (see `partialize`) — all non-secret (a P-256 PUBLIC
+// key is safe to cache). The Ed25519 `seedHex` — and the derived
+// `ed25519PubkeyHex` / `unlocked` flags — are transient and held in memory
+// ONLY: re-derived from the passkey each session, NEVER persisted to disk.
 // Persisting the credentialId lets a returning user RECOVER the same player
 // (deriveEd25519Seed re-mints the same seed from the same passkey) without
 // ever putting signing material on disk.
@@ -18,6 +19,13 @@ import { type PersistStorage, createJSONStorage, persist } from 'zustand/middlew
 export type IdentityState = {
   /** Base64url credential id of the enrolled passkey, or null before enrolment. */
   credentialId: string | null
+  /**
+   * SEC1 uncompressed hex of the identity passkey's own P-256 public key, captured at creation time (#494). Unlike the
+   * seed, a PUBLIC key is safe to persist — it's what `attestIdentityBinding` needs to drive the "Link with a passkey"
+   * attestation. `null` for identities created before this field existed, or when `getPublicKey()` wasn't available at
+   * creation time; either way the attest button stays disabled (see `identity-panel.tsx`).
+   */
+  p256PubkeyHex: string | null
   /** Hex Ed25519 public key derived from the passkey (the anonymous player id). */
   ed25519PubkeyHex: string | null
   /** Transient 32-byte signing seed (64 hex). In-memory only — cleared on lock. */
@@ -36,6 +44,8 @@ export type IdentityState = {
   name: string | null
 
   setCredentialId: (id: string | null) => void
+  /** Record the identity credential's own P-256 public key (§1/§2 of #494), or `null` if it couldn't be captured. */
+  setP256PubkeyHex: (hex: string | null) => void
   /** Set the derived seed + pubkey together and mark unlocked. */
   unlock: (args: { seedHex: string; ed25519PubkeyHex: string; ephemeral?: boolean }) => void
   /** Record this player's own handle (the petname written to the passkey). */
@@ -63,15 +73,19 @@ export const IDENTITY_STORAGE_KEY = 'mkit-identity'
 /** Persisted-state schema version — bumped to 1 to run {@link migrateIdentity}. */
 export const IDENTITY_PERSIST_VERSION = 1
 
-/** The ONLY fields written to disk — never the seed/pubkey/unlock flags. */
-export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'room' | 'name'>
+/**
+ * The ONLY fields written to disk — never the seed/`ed25519PubkeyHex`/unlock flags. `p256PubkeyHex` IS persisted:
+ * unlike the Ed25519 signing material, a P-256 public key reveals nothing secret — it's the whole point of a public key
+ * — so caching it means a returning user doesn't need a passkey prompt just to re-enable the attest button.
+ */
+export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'p256PubkeyHex' | 'room' | 'name'>
 
 /**
  * Persisted slice: which passkey to recover, the last room, and this player's own handle. Exported so the invariant (no
  * seed material on disk) is directly testable.
  */
 export function partializeIdentity(s: IdentityState): PersistedIdentity {
-  return { credentialId: s.credentialId, room: s.room, name: s.name }
+  return { credentialId: s.credentialId, p256PubkeyHex: s.p256PubkeyHex, room: s.room, name: s.name }
 }
 
 /**
@@ -112,6 +126,7 @@ export const useIdentityStore = create<IdentityState>()(
   persist(
     (set) => ({
       credentialId: null,
+      p256PubkeyHex: null,
       ed25519PubkeyHex: null,
       seedHex: null,
       unlocked: false,
@@ -120,6 +135,7 @@ export const useIdentityStore = create<IdentityState>()(
       name: null,
 
       setCredentialId: (id) => set({ credentialId: id }),
+      setP256PubkeyHex: (hex) => set({ p256PubkeyHex: hex }),
       unlock: ({ seedHex, ed25519PubkeyHex, ephemeral = false }) =>
         set({ seedHex, ed25519PubkeyHex, unlocked: true, ephemeral }),
       setName: (name) => set({ name }),
@@ -133,6 +149,7 @@ export const useIdentityStore = create<IdentityState>()(
       reset: () =>
         set({
           credentialId: null,
+          p256PubkeyHex: null,
           ed25519PubkeyHex: null,
           seedHex: null,
           unlocked: false,

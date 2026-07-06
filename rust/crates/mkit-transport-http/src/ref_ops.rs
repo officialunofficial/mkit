@@ -30,10 +30,11 @@ use mkit_core::hash::{Hash, from_hex, to_hex};
 use mkit_core::protocol::{AdvanceOutcome, RefWriteCondition, TransportError, TransportResult};
 use mkit_core::refs::{Ref, validate_ref_name, validate_ref_prefix};
 use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderValue, IF_MATCH, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{CONTROL_BODY_LIMIT, HttpTransport, REF_LIST_BODY_LIMIT, cas_headers, map_status};
+use crate::{CONTROL_BODY_LIMIT, HttpTransport, REF_LIST_BODY_LIMIT, map_status};
 
 // ---------------------------------------------------------------------------
 // JSON request / response DTOs
@@ -58,6 +59,19 @@ struct RefAdvanceJson {
     ref_name: String,
     value: String,
     condition: CondJson,
+}
+
+impl RefAdvanceJson {
+    /// Build a single ref spec for the advance body. Takes a
+    /// [`ValidatedRefName`] rather than a raw `&str` so the advance-body
+    /// builder can't be handed an unvalidated ref name (invariant 1).
+    fn new(ref_name: &ValidatedRefName, value: &Hash, condition: CondJson) -> Self {
+        Self {
+            ref_name: ref_name.as_str().to_string(),
+            value: to_hex(value),
+            condition,
+        }
+    }
 }
 
 /// CAS precondition in the advance body. `Any` has no representation — the
@@ -99,19 +113,84 @@ struct RefListResponse {
     refs: Vec<RefListEntry>,
 }
 
+/// A ref name that has already passed [`validate_ref_name`].
+///
+/// The only way to construct one is [`ValidatedRefName::new`], which runs
+/// the validation. [`HttpTransport::ref_url`] and [`RefAdvanceJson::new`]
+/// (the advance-body builder) both require this type rather than a raw
+/// `&str`, so validate-first (invariant 1) is enforced by the type system:
+/// there is no code path that can build a ref URL or an advance-body ref
+/// spec from a name that hasn't gone through `validate_ref_name`.
+struct ValidatedRefName(String);
+
+impl ValidatedRefName {
+    /// Validate `name` and wrap it. On failure, returns the same
+    /// [`TransportError::InvalidRef`] each `*_impl` method previously
+    /// constructed by hand after a failed `validate_ref_name` check.
+    fn new(name: &str) -> TransportResult<Self> {
+        if validate_ref_name(name) {
+            Ok(Self(name.to_string()))
+        } else {
+            Err(TransportError::InvalidRef(name.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CAS header selection
+// ---------------------------------------------------------------------------
+
+/// Derive the conditional header for a `PUT /refs/<name>` based on the
+/// CAS condition.
+///
+/// - [`RefWriteCondition::Missing`] → `If-None-Match: *`
+/// - `RefWriteCondition::Match(h)` → `If-Match: "<md5-style quoted hex>"`
+/// - [`RefWriteCondition::Any`] → no conditional header
+///
+/// Returns an empty [`HeaderMap`] for `Any` so call sites can always
+/// call `.headers(…)`.
+///
+/// Moved into `ref_ops` (mkit #423 review) alongside `cond_to_json`: its
+/// only non-test caller is `update_ref_impl` in this module. Re-exported
+/// from `lib.rs` via `pub use` so the public API is unchanged.
+#[must_use]
+pub fn cas_headers(cond: RefWriteCondition) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    match cond {
+        RefWriteCondition::Any => {}
+        RefWriteCondition::Missing => {
+            h.insert(IF_NONE_MATCH, HeaderValue::from_static("*"));
+        }
+        RefWriteCondition::Match(expected) => {
+            let hex = to_hex(&expected);
+            // Quote per RFC 7232 §2.3 — ETags are always quoted strings.
+            let value = format!("\"{hex}\"");
+            if let Ok(v) = HeaderValue::from_str(&value) {
+                h.insert(IF_MATCH, v);
+            }
+        }
+    }
+    h
+}
+
 impl HttpTransport {
-    fn ref_url(&self, name: &str) -> TransportResult<Url> {
+    fn ref_url(&self, name: &ValidatedRefName) -> TransportResult<Url> {
         let mut u = self.base.clone();
         {
             let mut seg = u
                 .path_segments_mut()
                 .map_err(|()| TransportError::InvalidResponse)?;
             seg.pop_if_empty().push("refs");
-            // Ref names contain `/` separators (`refs/heads/main`). We've
-            // already validated via `validate_ref_name` — push each
-            // segment so the url crate percent-encodes safely without
-            // collapsing the slashes.
-            for part in name.split('/') {
+            // Ref names contain `/` separators (`refs/heads/main`). The
+            // `ValidatedRefName` parameter type means only a name that has
+            // already passed `validate_ref_name` can reach here — push
+            // each segment so the url crate percent-encodes safely
+            // without collapsing the slashes.
+            for part in name.as_str().split('/') {
                 seg.push(part);
             }
         }
@@ -171,10 +250,8 @@ impl HttpTransport {
         condition: RefWriteCondition,
         hash: &Hash,
     ) -> TransportResult<()> {
-        if !validate_ref_name(name) {
-            return Err(TransportError::InvalidRef(name.to_string()));
-        }
-        let url = self.ref_url(name)?;
+        let name = ValidatedRefName::new(name)?;
+        let url = self.ref_url(&name)?;
         let body = RefPayload { hash: to_hex(hash) };
         let body_json = serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
         let headers = cas_headers(condition);
@@ -198,7 +275,7 @@ impl HttpTransport {
             // creates refs on PUT. Treat as InvalidRef for clarity.
             Err(map_status(
                 status,
-                TransportError::InvalidRef(name.to_string()),
+                TransportError::InvalidRef(name.as_str().to_string()),
             ))
         }
     }
@@ -219,13 +296,11 @@ impl HttpTransport {
         packmap_value: &Hash,
     ) -> TransportResult<AdvanceOutcome> {
         // Same client-side ref-name boundary `update_ref` enforces — an
-        // invalid ref must not reach the wire.
-        if !validate_ref_name(head_ref) {
-            return Err(TransportError::InvalidRef(head_ref.to_string()));
-        }
-        if !validate_ref_name(packmap_ref) {
-            return Err(TransportError::InvalidRef(packmap_ref.to_string()));
-        }
+        // invalid ref must not reach the wire. Producing `ValidatedRefName`
+        // here means the advance-body builder below can't be handed an
+        // unvalidated name.
+        let head_ref_v = ValidatedRefName::new(head_ref)?;
+        let packmap_ref_v = ValidatedRefName::new(packmap_ref)?;
 
         let (Some(head_cond), Some(packmap_cond)) = (
             cond_to_json(head_condition),
@@ -243,16 +318,8 @@ impl HttpTransport {
 
         let url = self.advance_url()?;
         let body = AdvanceBody {
-            head: RefAdvanceJson {
-                ref_name: head_ref.to_string(),
-                value: to_hex(head_value),
-                condition: head_cond,
-            },
-            packmap: RefAdvanceJson {
-                ref_name: packmap_ref.to_string(),
-                value: to_hex(packmap_value),
-                condition: packmap_cond,
-            },
+            head: RefAdvanceJson::new(&head_ref_v, head_value, head_cond),
+            packmap: RefAdvanceJson::new(&packmap_ref_v, packmap_value, packmap_cond),
         };
         let body_json = serde_json::to_vec(&body).map_err(|_| TransportError::InvalidResponse)?;
 
@@ -281,10 +348,8 @@ impl HttpTransport {
     }
 
     pub(crate) fn read_ref_impl(&self, name: &str) -> TransportResult<Option<Hash>> {
-        if !validate_ref_name(name) {
-            return Err(TransportError::InvalidRef(name.to_string()));
-        }
-        let url = self.ref_url(name)?;
+        let name = ValidatedRefName::new(name)?;
+        let url = self.ref_url(&name)?;
         let resp = self.retrying(|| self.apply_auth(self.client.get(url.clone())))?;
         let status = resp.status();
 
@@ -294,7 +359,7 @@ impl HttpTransport {
         if !status.is_success() {
             return Err(map_status(
                 status,
-                TransportError::InvalidRef(name.to_string()),
+                TransportError::InvalidRef(name.as_str().to_string()),
             ));
         }
 

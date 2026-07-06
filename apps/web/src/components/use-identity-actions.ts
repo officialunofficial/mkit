@@ -57,7 +57,13 @@ export function useIdentityActions(): IdentityActions {
       // ephemeral fallback returns a credentialId too, but its seed is RANDOM —
       // not derived from that passkey — so persisting it would flip `hasPasskey`
       // true and surface an "Unlock" that derives a DIFFERENT seed.
-      if (res.credentialId && res.via !== 'ephemeral') id.setCredentialId(res.credentialId)
+      if (res.credentialId && res.via !== 'ephemeral') {
+        id.setCredentialId(res.credentialId)
+        // Populate the attestation pubkey alongside the credential — null on
+        // legacy/exotic authenticators just disables the "Link with a
+        // passkey" button, it never blocks identity creation.
+        id.setP256PubkeyHex(res.p256PubkeyHex)
+      }
       // Time ONLY the local key-derivation compute (seed → Ed25519 pubkey) — NOT
       // the passkey ceremony, which is user/OS-gated and would misrepresent the
       // "fast" story. This is the genuinely sub-ms part worth flexing.
@@ -104,6 +110,15 @@ export function useIdentityActions(): IdentityActions {
     try {
       const res = await deriveEd25519Seed(id.credentialId ?? undefined)
       if (res.credentialId) id.setCredentialId(res.credentialId)
+      // NOTE: we deliberately do NOT (and CANNOT) set `p256PubkeyHex` here. The
+      // credential's own P-256 public key is exposed only by
+      // `AuthenticatorAttestationResponse.getPublicKey()` — a CREATION-time API.
+      // A `get()` assertion (this unlock/recovery path) never carries it. So a
+      // cross-device recovery or any pre-#494 identity keeps `p256PubkeyHex`
+      // null, which just disables the optional "Link with a passkey" attest
+      // button (see identity-panel `canAttest`) — the signing identity itself is
+      // fully usable. There is no non-destructive way to re-capture it: minting a
+      // new passkey would derive a DIFFERENT seed, i.e. a different player.
       const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
       const deriveMs = performance.now() - t0

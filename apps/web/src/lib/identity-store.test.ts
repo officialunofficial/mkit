@@ -120,15 +120,36 @@ describe('identity store', () => {
   })
 
   describe('persistence partialize', () => {
-    it('persists ONLY credentialId + room + name', () => {
+    it('persists ONLY credentialId + p256PubkeyHex + room + name', () => {
       const s = useIdentityStore.getState()
       s.setCredentialId('cred-1')
+      s.setP256PubkeyHex('ab'.repeat(65))
       s.setRoom('arena')
       s.setName('amber-wren')
       s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
       const persisted = partializeIdentity(useIdentityStore.getState())
-      expect(persisted).toEqual({ credentialId: 'cred-1', room: 'arena', name: 'amber-wren' })
-      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'name', 'room'])
+      expect(persisted).toEqual({
+        credentialId: 'cred-1',
+        p256PubkeyHex: 'ab'.repeat(65),
+        room: 'arena',
+        name: 'amber-wren',
+      })
+      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'name', 'p256PubkeyHex', 'room'])
+    })
+
+    // A public key is safe to cache (unlike the seed/derived Ed25519 material):
+    // it's what re-enables the "Link with a passkey" button on a returning
+    // visit without another passkey prompt.
+    it('DOES persist p256PubkeyHex (a public key, unlike seedHex/ed25519PubkeyHex)', () => {
+      const s = useIdentityStore.getState()
+      s.setP256PubkeyHex('cd'.repeat(65))
+      const persisted = partializeIdentity(useIdentityStore.getState())
+      expect(persisted.p256PubkeyHex).toBe('cd'.repeat(65))
+    })
+
+    it('p256PubkeyHex round-trips through partialize as null when never set', () => {
+      const persisted = partializeIdentity(useIdentityStore.getState())
+      expect(persisted.p256PubkeyHex).toBeNull()
     })
 
     it('NEVER persists seedHex / pubkey / unlocked (no signing material on disk)', () => {
@@ -139,5 +160,12 @@ describe('identity store', () => {
       expect('unlocked' in persisted).toBe(false)
       expect('ephemeral' in persisted).toBe(false)
     })
+  })
+
+  it('reset clears p256PubkeyHex too', () => {
+    const s = useIdentityStore.getState()
+    s.setP256PubkeyHex('ef'.repeat(65))
+    s.reset()
+    expect(useIdentityStore.getState().p256PubkeyHex).toBeNull()
   })
 })
