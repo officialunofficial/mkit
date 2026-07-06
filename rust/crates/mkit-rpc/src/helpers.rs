@@ -10,7 +10,8 @@
 //!   per-request `Error` responses.
 //!
 //! * Transport-side frame helpers (`cond_to_wire`,
-//!   `rpc_error_to_transport`, `unexpected_frame`, `body_name`,
+//!   `rpc_error_to_transport`, `map_update_ref_error`,
+//!   `unexpected_frame`, `body_name`,
 //!   `ref_entry_to_ref`, plus the `MAX_REF_NAME` and `CHUNK_DATA_MAX`
 //!   limits): shared between `mkit-transport-ssh` and
 //!   `mkit-transport-enc`. Both transports speak the same
@@ -90,6 +91,45 @@ pub fn cond_to_wire(c: RefWriteCondition) -> (Vec<u8>, RefExpectation) {
         RefWriteCondition::Any => (Vec::new(), RefExpectation::Any),
         RefWriteCondition::Missing => (Vec::new(), RefExpectation::Missing),
         RefWriteCondition::Match(h) => (h.to_vec(), RefExpectation::Match),
+    }
+}
+
+/// Map a server `Error` reply to an `update_ref` request into a
+/// [`TransportError`]. Shared by `mkit-transport-ssh` and
+/// `mkit-transport-enc` so the two clients classify CAS conflicts
+/// identically and cannot drift.
+///
+/// Per SPEC-TRANSPORT §4.2.1, the server signals a compare-and-swap
+/// mismatch as `ERROR_CODE_INVALID_REQUEST` carrying the *current* ref
+/// id in `details`. We treat that as [`TransportError::RefConflict`].
+///
+/// The bare `ERROR_CODE_INVALID_REQUEST` code alone is ambiguous: the
+/// server reuses it for genuine bad requests (malformed ref, backend
+/// failure) as well as CAS mismatches. To avoid masking a real error as
+/// a conflict we only treat it as `RefConflict` when:
+///   - the write carried a CAS precondition (`condition != Any`), and
+///   - the error carries non-empty `details` (the documented current-id
+///     payload that disambiguates a true CAS mismatch).
+///
+/// When `details` is absent we fall back to [`rpc_error_to_transport`]
+/// so a genuine invalid-request surfaces its real message instead of a
+/// misleading `RefConflict`. That fallback also covers the rare
+/// conflict-then-ref-absent case (a `MATCH` expectation against a ref
+/// that does not exist): the server has no current value to put in
+/// `details`, so the failure surfaces as a `RemoteError` carrying the
+/// server's descriptive message.
+#[must_use]
+pub fn map_update_ref_error(
+    e: RpcError,
+    condition: RefWriteCondition,
+    transport: &str,
+) -> TransportError {
+    let is_invalid_request = e.code.is_some_and(|c| c == ErrorCode::InvalidRequest);
+    let has_cas_details = e.details.as_deref().is_some_and(|d| !d.is_empty());
+    if is_invalid_request && !matches!(condition, RefWriteCondition::Any) && has_cas_details {
+        TransportError::RefConflict
+    } else {
+        rpc_error_to_transport(e, transport)
     }
 }
 

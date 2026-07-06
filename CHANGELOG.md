@@ -235,6 +235,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-workspace consumers were affected. (release-plz's `semver_check`
   enforces the matching version bump at release time.)
 
+### Fixed
+
+- **CAS conflicts over `mkit serve` now surface as `RefConflict`.**
+  Per SPEC-TRANSPORT §4.2.1 the server answers a compare-and-swap
+  mismatch on `updateRef` with `Error{INVALID_REQUEST}` carrying the
+  current ref value in `Error.details`; previously `mkit serve`
+  collapsed every `update_ref` failure into a generic invalid-request
+  with empty `details`, so a genuine conflict degraded to `RemoteError`
+  on the SSH client (whose classifier requires the current-id payload).
+  Both the stdin/stdout SSH server and the encrypted listener now emit
+  the spec shape via the shared verb handler, and the enc client was
+  tightened from a looser presence-based rule to the same strict
+  details-based classification the SSH client uses (shared
+  `mkit_rpc::map_update_ref_error`), so genuine invalid requests no
+  longer misclassify as conflicts
+  ([#551](https://github.com/officialunofficial/mkit/issues/551)).
+
 ### Internal
 
 - Open-source / publish readiness sweep: scrubbed internal identifiers,

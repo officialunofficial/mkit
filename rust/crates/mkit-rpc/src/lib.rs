@@ -58,7 +58,7 @@ pub use framing::{
     FRAME_RECURSION_LIMIT, FrameError, frame_decode_options, read_frame, write_frame,
 };
 pub use helpers::{
-    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, ref_entry_to_ref,
+    CHUNK_DATA_MAX, MAX_REF_NAME, body_name, cond_to_wire, map_update_ref_error, ref_entry_to_ref,
     rpc_error_to_transport, signer_error_frame, ssh_error_frame, unexpected_frame,
 };
 
