@@ -784,6 +784,80 @@ mod tests {
         );
     }
 
+    /// SPEC-HISTORY-PROOF §3 enumerates six failure modes
+    /// `verify_inclusion` MUST reject without panicking. Three are
+    /// already covered above (tampered digest, wrong commit, wrong
+    /// root); the remaining three — wrong position, mismatched leaf
+    /// count, and a truncated/over-long `digests` vector — were only
+    /// exercised indirectly, by trusting commonware's own test suite at
+    /// the pinned version. Pin them directly here.
+    #[test]
+    fn verify_inclusion_rejects_wrong_position() {
+        let mut h = CommitHistory::open();
+        let commits: Vec<Hash> = (0..64u64).map(synth).collect();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        let target = Position(42);
+        let proof = h.prove(target).unwrap();
+        let root = h.root();
+
+        assert!(verify_inclusion(&commits[42], target, &proof, &root));
+        // Same commit_hash, proof, and root — only the claimed position
+        // differs. The proof was built for position 42; claiming it
+        // proves position 41 (or any other) instead must fail.
+        assert!(!verify_inclusion(&commits[42], Position(41), &proof, &root));
+        assert!(!verify_inclusion(&commits[42], Position(0), &proof, &root));
+    }
+
+    #[test]
+    fn verify_inclusion_rejects_mismatched_leaf_count() {
+        let mut h = CommitHistory::open();
+        let commits: Vec<Hash> = (0..64u64).map(synth).collect();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        let target = Position(42);
+        let mut proof = h.prove(target).unwrap();
+        let root = h.root();
+        assert!(verify_inclusion(&commits[42], target, &proof, &root));
+
+        // `proof.leaves` claims how many leaves the MMR had when the
+        // proof was built. Disagreeing with the actual count (64) must
+        // fail — this is the prover asserting a different-length
+        // history than the root it's paired with actually commits to.
+        proof.leaves = MmrLocation::new(63);
+        assert!(!verify_inclusion(&commits[42], target, &proof, &root));
+    }
+
+    #[test]
+    fn verify_inclusion_rejects_truncated_or_over_long_digests() {
+        let mut h = CommitHistory::open();
+        let commits: Vec<Hash> = (0..64u64).map(synth).collect();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        let target = Position(42);
+        let proof = h.prove(target).unwrap();
+        let root = h.root();
+        assert!(verify_inclusion(&commits[42], target, &proof, &root));
+        assert!(
+            !proof.digests.is_empty(),
+            "non-trivial proof must carry at least one digest"
+        );
+
+        // Truncated: drop the last digest the fold-consumer expects.
+        let mut truncated = proof.clone();
+        truncated.digests.pop();
+        assert!(!verify_inclusion(&commits[42], target, &truncated, &root));
+
+        // Over-long: append a bogus extra digest past what the
+        // consumer-pointer walk expects to find.
+        let mut over_long = proof;
+        over_long.digests.push(over_long.digests[0]);
+        assert!(!verify_inclusion(&commits[42], target, &over_long, &root));
+    }
+
     // ---- journaled API --------------------------------------------
 
     #[test]

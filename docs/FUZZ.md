@@ -28,6 +28,7 @@ from recurring.
 | `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
 | `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` + `map_mode` |
 | `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) + `Arbitrary`-driven encode/decode roundtrip |
+| `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in

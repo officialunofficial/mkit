@@ -519,6 +519,109 @@ fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
 // `listen_enc_rejected_upload_does_not_overwrite_existing_pack` above:
 // real localhost TCP + wall-clock recv_timeout → serial `--ignored` lane.
 #[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
+fn listen_enc_rejects_non_hello_first_frame() {
+    // #564: the app-level handshake (SPEC-RPC §4) requires `Hello` as
+    // the first frame after the crypto handshake completes. A peer
+    // that skips it and sends an ordinary verb request instead must
+    // get no response at all — `serve_enc_session` silently drops the
+    // connection rather than processing the request or replying with
+    // an error frame.
+    use commonware_codec::Encode as _;
+    use commonware_cryptography::Signer as _;
+    use commonware_cryptography::ed25519::PrivateKey;
+    use mkit_rpc::mkit::rpc::v1::ssh::ListRefs;
+    use mkit_transport_enc::tcp::{TokioExecutor, dial_tcp_session_for_test, serve_tcp_with_addr};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    let td = tempfile::tempdir().unwrap();
+    let tx = Arc::new(FileTransport::new(td.path()));
+
+    let exec = TokioExecutor::new().expect("tokio runtime");
+    let server_key = PrivateKey::from_seed(5005);
+    let server_pubkey = {
+        let encoded = server_key.public_key().encode();
+        let bytes = encoded.as_ref();
+        assert_eq!(bytes.len(), 32);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        out
+    };
+
+    let (addr_tx, addr_rx) = mpsc::channel();
+    let exec_for_server = exec.clone();
+    let server_tx = tx.clone();
+    let _server_handle = thread::spawn(move || {
+        let serve_fn =
+            move |sess: mkit_transport_enc::EncSession<
+                mkit_transport_enc::tokio_io::TokioStream,
+                mkit_transport_enc::tokio_io::TokioSink,
+            >,
+                  _peer: commonware_cryptography::ed25519::PublicKey| {
+                let tx = server_tx.clone();
+                async move {
+                    serve_enc_session(tx, sess, Some(Duration::from_secs(30))).await;
+                }
+            };
+        let _ = serve_tcp_with_addr(
+            "127.0.0.1:0",
+            server_key,
+            exec_for_server,
+            move |addr| {
+                let _ = addr_tx.send(addr);
+            },
+            serve_fn,
+        );
+    });
+
+    let addr = addr_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("encrypted listener address");
+    let client_key = PrivateKey::from_seed(6006);
+    // Raw dial: completes the crypto handshake but skips the
+    // app-level Hello `connect_tcp_with_executor` would send
+    // automatically, so we can send whatever frame we like first.
+    let session = dial_tcp_session_for_test(
+        &addr.ip().to_string(),
+        addr.port(),
+        &server_pubkey,
+        client_key,
+        mkit_transport_enc::HANDSHAKE_NAMESPACE.to_vec(),
+        &exec,
+    )
+    .expect("crypto handshake succeeds");
+    let (mut sender, mut receiver) = session.into_parts();
+
+    let bogus_first_frame = ssh_frame::Body::ListRefs(Box::<ListRefs>::default());
+    exec.handle().block_on(async {
+        mkit_transport_enc::send_frame(
+            &mut sender,
+            &SshFrame {
+                body: Some(bogus_first_frame),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("send bogus first frame");
+
+        // The server must never respond — no HelloResponse, no error
+        // frame, nothing — so a bounded receive must time out.
+        let result =
+            mkit_transport_enc::recv_frame_within(&mut receiver, Duration::from_secs(2)).await;
+        assert!(
+            result.is_err(),
+            "server must not respond to a non-Hello first frame, got {result:?}"
+        );
+    });
+}
+
+#[cfg(feature = "enc-transport")]
+#[test]
+// Same quarantine rationale as
+// `listen_enc_rejected_upload_does_not_overwrite_existing_pack` above:
+// real localhost TCP + wall-clock recv_timeout → serial `--ignored` lane.
+#[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
 fn listen_enc_cas_conflict_classifies_as_ref_conflict() {
     // #551 / SPEC-TRANSPORT §4.2.1 over the REAL encrypted listener: a
     // stale MATCH update must surface as `TransportError::RefConflict`

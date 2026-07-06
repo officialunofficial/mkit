@@ -38,7 +38,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = "1"
 buffa = "0.8.1"
-mkit-core = { path = "../crates/mkit-core" }
+mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
 mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
 mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
@@ -141,6 +141,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "merkle_proof"
 path = "fuzz_targets/merkle_proof.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "sparse_verify"
+path = "fuzz_targets/sparse_verify.rs"
 test = false
 doc = false
 bench = false

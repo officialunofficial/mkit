@@ -350,6 +350,48 @@ pub fn connect_tcp_with_executor(
     EncTransport::from_session(session, executor, host, port)
 }
 
+/// Test-only: dial the TCP + encrypted-stream handshake with a
+/// caller-supplied handshake namespace, returning the raw
+/// [`EncSession`] WITHOUT the application-level `Hello`/`HelloResponse`
+/// exchange [`connect_tcp`] performs automatically. Lets a caller drive
+/// the session with arbitrary frames — e.g. to test a server's "first
+/// frame must be `Hello`" rejection, or a mismatched handshake
+/// namespace. `#[doc(hidden)]`, not part of the stable API.
+///
+/// # Errors
+///
+/// [`EncInitError`] if the TCP connection or encrypted-stream handshake
+/// fails — the same failure modes as [`connect_tcp_with_executor`],
+/// since this shares its dial path up to (but not including) the
+/// application-level `Hello`.
+#[doc(hidden)]
+pub fn dial_tcp_session_for_test(
+    host: &str,
+    port: u16,
+    server_pubkey: &[u8; 32],
+    signing_key: PrivateKey,
+    namespace: Vec<u8>,
+    executor: &TokioExecutor,
+) -> Result<EncSession<TokioStream, TokioSink>, EncInitError> {
+    let pool = acquire_network_buffer_pool();
+    let ctx = TokioContext::new(pool);
+    let host_owned = host.to_string();
+    let server_pk = *server_pubkey;
+    executor.handle().block_on(async move {
+        let addr = resolve(&host_owned, port).await?;
+        let tcp = TcpStream::connect(addr)
+            .await
+            .map_err(|e| EncInitError::HandshakeFailed(format!("tcp connect: {e}")))?;
+        let (sink, stream) =
+            split_tcp(tcp).map_err(|e| EncInitError::HandshakeFailed(format!("tcp split: {e}")))?;
+        let mut cfg = default_handshake_config(signing_key);
+        cfg.namespace = namespace;
+        let peer = decode_peer_pubkey(&server_pk)?;
+        let (sender, receiver) = dial(ctx, cfg, peer, stream, sink).await?;
+        Ok::<_, EncInitError>(EncSession::new(sender, receiver))
+    })
+}
+
 /// Best-effort `host:port` → `SocketAddr` resolution. Numeric addrs are
 /// parsed locally; named hosts fall through to `tokio::net::lookup_host`
 /// (libc resolver on Unix, registry on Windows).
@@ -789,6 +831,75 @@ mod tests {
                 "non-allowlisted client must not complete a round trip, got {result:?}"
             );
         }
+    }
+
+    /// SPEC-TRANSPORT-ENC §2.1: `HANDSHAKE_NAMESPACE` is bound into the
+    /// encrypted-stream handshake transcript so peers that share
+    /// `ed25519` keys with some other `commonware-stream` user can
+    /// never cross-replay a handshake into this application. A dialer
+    /// using any OTHER namespace must fail the handshake against a
+    /// server using the real one — same key, same wire, only the
+    /// namespace differs.
+    #[test]
+    fn mismatched_handshake_namespace_is_rejected_over_tcp() {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use std::sync::mpsc;
+        use std::thread;
+
+        fn pubkey_bytes(sk: &PrivateKey) -> [u8; 32] {
+            let encoded = sk.public_key().encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(encoded.as_ref());
+            out
+        }
+
+        let exec = TokioExecutor::new().expect("runtime");
+        let server_key = PrivateKey::from_seed(4321);
+        let server_pubkey = pubkey_bytes(&server_key);
+        let client_key = PrivateKey::from_seed(1234);
+
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let _server = thread::spawn(move || {
+            let serve_fn = move |sess: EncSession<TokioStream, TokioSink>, _peer: PublicKey| {
+                let (mut sender, mut receiver) = sess.into_parts();
+                async move {
+                    if let Ok(bufs) = receiver.recv().await {
+                        let _ = sender.send(bufs.coalesce().as_ref().to_vec()).await;
+                    }
+                }
+            };
+            // AllowAny: the only variable under test is the namespace,
+            // not peer authorization.
+            let _ = serve_tcp_with_addr(
+                "127.0.0.1:0",
+                server_key,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("listener address");
+
+        let result = dial_tcp_session_for_test(
+            &addr.ip().to_string(),
+            addr.port(),
+            &server_pubkey,
+            client_key,
+            b"totally-wrong-namespace".to_vec(),
+            &exec,
+        );
+        assert!(
+            result.is_err(),
+            "a dialer using the wrong handshake namespace must never complete the \
+             handshake against a server using the real one, got {result:?}"
+        );
     }
 
     /// Slow-loris guard: a peer that completes the handshake but

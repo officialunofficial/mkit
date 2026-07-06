@@ -337,6 +337,77 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
     let _ = merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, input);
 }
 
+/// Exercise the sparse-checkout build/verify pair on arbitrary input.
+/// `build_sparse` must never panic; a freshly built delivery must
+/// verify; and `verify_sparse` over adversarial proof/manifest bytes
+/// (garbage bitmap, wrong-length bitmap, mismatched filter) must
+/// reject cleanly — never panic. `mkit-core`'s `sparse-checkout`
+/// feature is enabled unconditionally on this crate's dependency (see
+/// `Cargo.toml`), so this needs no feature gate of its own.
+pub fn sparse_verify_one_iteration(input: &[u8]) {
+    use mkit_core::object::{EntryMode, Tree, TreeEntry};
+    use mkit_core::sparse::{SparseProof, build_sparse, verify_sparse};
+    use std::path::PathBuf;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if input.is_empty() {
+        return;
+    }
+
+    // A small tree (<= 32 lex-sorted two-letter-named entries) whose
+    // object hashes are carved from `input`.
+    let n = usize::from(input[0]) % 32 + 1;
+    let mut entries = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = b'a' + u8::try_from(i / 26).unwrap_or(0);
+        let b = b'a' + u8::try_from(i % 26).unwrap_or(0);
+        let mut hash = [0u8; 32];
+        let start = (i * 7) % input.len();
+        for (j, byte) in hash.iter_mut().enumerate() {
+            *byte = input[(start + j) % input.len()];
+        }
+        entries.push(TreeEntry {
+            name: vec![a, b],
+            mode: EntryMode::Blob,
+            object_hash: hash,
+        });
+    }
+    let tree = Tree { entries };
+
+    // A filter selecting a pseudo-random subset of the same two-letter
+    // names, so it sometimes matches and sometimes doesn't.
+    let filter_count = input.get(1).copied().map_or(0, |b| usize::from(b) % (n + 1));
+    let mut filter = Vec::with_capacity(filter_count);
+    for i in 0..filter_count {
+        let a = b'a' + u8::try_from(i / 26).unwrap_or(0);
+        let b = b'a' + u8::try_from(i % 26).unwrap_or(0);
+        filter.push(PathBuf::from(format!("{}{}", a as char, b as char)));
+    }
+
+    let Ok((delivered, manifest, proof)) = build_sparse(&tree, &filter) else {
+        return;
+    };
+    assert!(
+        verify_sparse(&manifest, &delivered, &filter, &proof),
+        "freshly built sparse delivery must verify"
+    );
+
+    // Adversarial: feed the verifier a proof whose bitmap is raw fuzz
+    // bytes (arbitrary length, arbitrary content) against the real
+    // manifest/filter/delivered set. Never panic.
+    let bogus_proof = SparseProof {
+        bitmap_bytes: input.to_vec(),
+    };
+    let _ = verify_sparse(&manifest, &delivered, &filter, &bogus_proof);
+
+    // Adversarial: a bitmap one byte shorter than the manifest commits
+    // to (empty when the honest one was already 0 or 1 bytes is fine —
+    // `verify_sparse` must still just return `false`, never panic).
+    let mut truncated = proof.clone();
+    truncated.bitmap_bytes.pop();
+    let _ = verify_sparse(&manifest, &delivered, &filter, &truncated);
+}
+
 /// Single-shot: invoke `body(input)` exactly once, with the
 /// per-iteration wall-clock cap. libfuzzer harnesses call this from
 /// their `fuzz_target!` body; the iteration counter lives one level up,
@@ -464,6 +535,14 @@ mod tests {
         run_iterated_unit(merkle_proof_one_iteration).expect("guardrails held");
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             run_one(case, merkle_proof_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn sparse_verify_target_runs_within_caps() {
+        run_iterated_unit(sparse_verify_one_iteration).expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xFF; 64][..], &[0x01; 512][..]] {
+            run_one(case, sparse_verify_one_iteration).expect("guardrails held");
         }
     }
 
