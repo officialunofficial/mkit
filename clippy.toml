@@ -17,4 +17,5 @@ allow-expect-in-tests = true
 
 disallowed-methods = [
     { path = "std::env::set_var", reason = "races other threads on POSIX; set env at process start" },
+    { path = "reqwest::blocking::Response::json", reason = "use parse_json_body with a named cap" },
 ]
