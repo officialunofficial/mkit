@@ -404,15 +404,29 @@ pub fn update_ref(
 /// 1. Acquire [`crate::repo_lock::RepoLock`] on
 ///    `<mkit_dir>/refs-history.lock` so concurrent writers in other
 ///    mkit processes block until this caller is done.
-/// 2. CAS-write the ref under `<mkit_dir>/refs/heads/<branch>`.
-/// 3. Append `hash` to the branch's
+/// 2. [`crate::history::CommitHistory::reopen`] `history` from the
+///    current on-disk journal — the handle may have been opened
+///    before this lock was taken, so this guards against a concurrent
+///    writer's append in that window going unseen.
+/// 3. If the (now-fresh) journal is non-empty and its last leaf
+///    doesn't already verify as the ref's current value, append that
+///    value directly — this heals a prior call that CAS-wrote the ref
+///    (its step 4) but crashed before its own append (its step 5). See
+///    SPEC-HISTORY-PROOF §4.3.
+/// 4. CAS-write the ref under `<mkit_dir>/refs/heads/<branch>`.
+/// 5. Append `hash` to the branch's
 ///    [`crate::history::CommitHistory`], which syncs the journal to
 ///    disk before returning.
-/// 4. Release the lock.
+/// 6. Release the lock.
 ///
-/// On any failure between steps 2 and 3 the ref will be ahead of the
-/// history journal by one commit; the v0.1.x rebuild shim
-/// ([`crate::history::rebuild_from_chain`]) recovers from this state.
+/// On any failure between steps 4 and 5 the ref will be ahead of the
+/// history journal by one commit; the next call's step 3 heals it as
+/// above. If the journal was empty going into step 3, healing instead
+/// falls to `mkit-cli`'s `write_ref_recording_history`, which has the
+/// `ObjectStore` access needed to invoke
+/// [`crate::history::rebuild_from_chain`] (SPEC-HISTORY-PROOF §4.5) —
+/// this function alone can't tell a fresh branch's first write apart
+/// from a v0.1.x-era repo's deep, un-migrated history.
 ///
 /// # Design note (Option B vs Option A)
 ///
@@ -484,10 +498,79 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
         })?;
 
+    // `history` may have been opened (its `CommitHistory::open_at`
+    // bootstrap read the on-disk journal) before this call took the
+    // lock above. Re-derive it from the current on-disk state now that
+    // we hold the lock, so a concurrent writer's append in that window
+    // can't be appended over (SPEC-HISTORY-PROOF §4.3).
+    history
+        .reopen()
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: history reopen: {e}")))?;
+
+    // Crash recovery (§4.5): if a prior `update_ref_with_history` call
+    // CAS-wrote the ref but crashed before its own append + sync, the
+    // ref is one commit ahead of the journal. Detect that by checking
+    // whether the journal's last leaf already covers the ref's CURRENT
+    // (pre-this-write) value, and heal by appending it directly — we
+    // know exactly which hash is missing without walking any parent
+    // chain, because it's precisely the value already sitting in the
+    // ref file.
+    if let Some(current) = read_ref(mkit_dir, branch)? {
+        heal_one_ahead_gap(history, &current)
+            .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
+    }
+
     update_ref(mkit_dir, branch, condition, hash)?;
     history
         .append(hash)
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history append: {e}")))?;
+    Ok(())
+}
+
+/// Heal a journal that is missing its last append relative to
+/// `current_ref_value` (SPEC-HISTORY-PROOF §4.5 crash-recovery case).
+///
+/// If the journal is non-empty, checks whether its last leaf already
+/// verifies as `current_ref_value` via an inclusion proof against the
+/// journal's own root. A verified match means the journal is already
+/// in sync — nothing to do. A failed or unbuildable proof means the
+/// journal's last leaf is stale (or the journal has one fewer leaf
+/// than the ref implies); append `current_ref_value` directly to catch
+/// it up.
+///
+/// An empty journal is left untouched here: it is ambiguous between a
+/// genuinely fresh branch (whose next real write supplies the correct
+/// first leaf) and a deep v0.1.x-style backfill that only a
+/// [`rebuild_from_chain`] with real parent-chain data can resolve —
+/// that migration path needs `ObjectStore` access this module doesn't
+/// have, so it is the caller's (`mkit-cli`) responsibility.
+///
+/// # Errors
+///
+/// Propagates [`HistoryError`] from [`CommitHistory::append`].
+#[cfg(feature = "history-mmr")]
+fn heal_one_ahead_gap<X: crate::protocol::async_shim::Executor + 'static>(
+    history: &mut crate::history::CommitHistory<X>,
+    current_ref_value: &Hash,
+) -> Result<(), crate::history::HistoryError> {
+    let len = history.len();
+    let Some(last) = len.checked_sub(1) else {
+        return Ok(());
+    };
+    let in_sync = history
+        .prove(crate::history::Position(last))
+        .is_ok_and(|proof| {
+            crate::history::verify_inclusion(
+                current_ref_value,
+                crate::history::Position(last),
+                &proof,
+                &history.root(),
+            )
+        });
+    if in_sync {
+        return Ok(());
+    }
+    history.append(current_ref_value)?;
     Ok(())
 }
 
@@ -1357,6 +1440,92 @@ mod tests {
                 0,
                 "CAS failure must NOT have appended to history"
             );
+        }
+
+        #[test]
+        fn update_ref_with_history_heals_one_ahead_gap_before_appending_new_value() {
+            use crate::history::{Position, verify_inclusion};
+
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let c0 = h("c0");
+            let c1 = h("c1");
+            let c2 = h("c2");
+
+            // A real, properly-recorded genesis commit — the journal is
+            // non-empty, which is what distinguishes this crash-recovery
+            // case (core-level, no `ObjectStore` needed: the missing leaf
+            // is exactly the ref's current value) from the deeper
+            // v0.1.x-migration case (`mkit-cli`-level, needs
+            // `rebuild_from_chain` over the object store).
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &c0, &mut hist).unwrap();
+            assert_eq!(hist.len(), 1);
+
+            // Simulate steps 1-2 of a PRIOR `update_ref_with_history` call
+            // that crashed before its own step 3 (append): the ref
+            // already advanced to `c1`, but the journal never recorded
+            // it, so `hist` here is one leaf behind what the ref implies.
+            write_ref(&mkit, "main", &c1).unwrap();
+            assert_eq!(hist.len(), 1, "journal is still missing c1's append");
+
+            // The next write proceeds normally against the ref's actual
+            // current value.
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Match(c1), &c2, &mut hist)
+                .unwrap();
+
+            // c0 (already recorded), the backfilled c1, and the new c2
+            // must all be recorded, in order — proof state has caught up
+            // to the ref, with no manual intervention.
+            assert_eq!(hist.len(), 3);
+            let root = hist.root();
+            let proof0 = hist.prove(Position(0)).unwrap();
+            assert!(verify_inclusion(&c0, Position(0), &proof0, &root));
+            let proof1 = hist.prove(Position(1)).unwrap();
+            assert!(verify_inclusion(&c1, Position(1), &proof1, &root));
+            let proof2 = hist.prove(Position(2)).unwrap();
+            assert!(verify_inclusion(&c2, Position(2), &proof2, &root));
+        }
+
+        #[test]
+        fn update_ref_with_history_concurrent_handles_do_not_interleave_or_corrupt() {
+            use crate::history::{Position, verify_inclusion};
+
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+
+            // Two independent handles opened before either has taken the
+            // `refs-history.lock` — simulating two racing processes, each
+            // of which called `CommitHistory::open_at` first (as
+            // `mkit-cli`'s `write_ref_recording_history` does) and only
+            // takes the lock inside `update_ref_with_history`.
+            let mut hist_a = CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
+            let mut hist_b = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            let a1 = h("a1");
+            let b1 = h("b1");
+
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &a1, &mut hist_a)
+                .unwrap();
+
+            // `hist_b` is stale (opened before `hist_a`'s append landed)
+            // but must re-derive its state from disk under its own lock
+            // acquisition and append on top of `a1`, not clobber or
+            // duplicate its leaf.
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &b1, &mut hist_b)
+                .unwrap();
+
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(b1));
+            assert_eq!(
+                hist_b.len(),
+                2,
+                "b's append must land after a's, not clobber it"
+            );
+            let root = hist_b.root();
+            let proof0 = hist_b.prove(Position(0)).unwrap();
+            assert!(verify_inclusion(&a1, Position(0), &proof0, &root));
+            let proof1 = hist_b.prove(Position(1)).unwrap();
+            assert!(verify_inclusion(&b1, Position(1), &proof1, &root));
         }
     }
 }

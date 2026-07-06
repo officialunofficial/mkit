@@ -498,6 +498,15 @@ pub(crate) fn history_executor() -> std::sync::Arc<mkit_core::history::TokioExec
 ///   call returns. See `mkit-core::refs::update_ref_with_history` and
 ///   SPEC-HISTORY-PROOF §4 for the contract.
 ///
+/// If the journal is empty but `branch` already has a ref value on
+/// disk (a v0.1.x-era repo enabling `history-mmr` for the first time,
+/// or a crash on the branch's very first tracked write), this backfills
+/// the full known chain via [`mkit_core::history::rebuild_from_chain`]
+/// before proceeding — SPEC-HISTORY-PROOF §4.5. This is the shim's
+/// production call site; `update_ref_with_history` itself only heals
+/// the cheaper "journal missing exactly its last append" crash case,
+/// since it has no `ObjectStore` access to walk an unknown-depth chain.
+///
 /// All CLI subcommands that move a branch ref MUST funnel through this
 /// helper rather than calling `refs::write_ref` or `refs::update_ref`
 /// directly. Detached-HEAD writes (`refs::write_head_detached`) are
@@ -514,12 +523,58 @@ pub fn write_ref_recording_history(
         let exec = history_executor();
         let mut history = mkit_core::history::CommitHistory::open_at(exec, mkit_dir, branch)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
+
+        if history.is_empty()
+            && let Ok(Some(current)) = refs::read_ref(mkit_dir, branch)
+        {
+            backfill_history_from_object_store(mkit_dir, branch, &mut history, current)?;
+        }
+
         refs::update_ref_with_history(mkit_dir, branch, condition, new_hash, &mut history)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
         refs::update_ref(mkit_dir, branch, condition, new_hash)
     }
+}
+
+/// Backfill an empty history journal from `current`'s on-disk
+/// first-parent chain (SPEC-HISTORY-PROOF §4.5 v0.1.x rebuild shim).
+///
+/// Opens an [`ObjectStore`] rooted at `mkit_dir`'s parent and walks
+/// `current`'s parent chain via [`mkit_core::history::rebuild_from_chain`].
+/// Degenerates safely to a single append when `current` is a root
+/// commit (nothing to migrate, just the missed first write).
+///
+/// # Errors
+///
+/// [`RefError::InvalidRef`] if the store can't be opened, a commit in
+/// the chain can't be read or isn't a commit/remix, or the underlying
+/// `CommitHistory::append` fails. Fail-closed: a partial or corrupt
+/// backfill must not be silently accepted, since it would leave the
+/// journal's proof state permanently incomplete for this branch.
+#[cfg(feature = "history-mmr")]
+fn backfill_history_from_object_store<X: mkit_core::protocol::async_shim::Executor + 'static>(
+    mkit_dir: &Path,
+    branch: &str,
+    history: &mut mkit_core::history::CommitHistory<X>,
+    current: Hash,
+) -> Result<(), RefError> {
+    let repo_root = mkit_dir.parent().unwrap_or(mkit_dir);
+    let store = ObjectStore::open(repo_root)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
+
+    mkit_core::history::rebuild_from_chain(history, current, |h| match store.read_object(h) {
+        Ok(Object::Commit(c)) => Ok(c.parents.first().copied()),
+        Ok(Object::Remix(r)) => Ok(r.parents.first().copied()),
+        Ok(_) => Err(format!(
+            "{}: object is not a commit or remix",
+            mkit_core::hash::to_hex(h)
+        )),
+        Err(e) => Err(e.to_string()),
+    })
+    .map_err(|e| RefError::InvalidRef(format!("{branch}: history backfill: {e}")))?;
+    Ok(())
 }
 
 /// Current branch name for recovery logging — empty for a detached HEAD
@@ -936,6 +991,97 @@ pub fn read_or_seed_index_from_head(
 mod tests {
     use super::{advance_head, c_quote_path, restore_head_ref};
     use mkit_core::hash::Hash;
+
+    #[cfg(feature = "history-mmr")]
+    fn write_commit(store: &mkit_core::store::ObjectStore, parents: Vec<Hash>, seed: u8) -> Hash {
+        use mkit_core::object::{Commit, Identity, Object};
+
+        let commit = Commit::new_unannotated(
+            [seed; 32],
+            parents,
+            Identity::ed25519([seed; 32]),
+            [seed; 32],
+            b"msg".to_vec(),
+            0,
+            [0u8; 64],
+        );
+        let bytes = mkit_core::serialize::serialize(&Object::Commit(commit)).unwrap();
+        store.write(&bytes).unwrap()
+    }
+
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_backfills_v01x_style_repo_from_object_store() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::{CommitHistory, Position, TokioExecutor, verify_inclusion};
+        use mkit_core::refs::{self, RefWriteCondition};
+        use mkit_core::store::ObjectStore;
+        use std::sync::Arc;
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let store = ObjectStore::init(repo_root).unwrap();
+        let mkit_dir = repo_root.join(mkit_core::MKIT_DIR);
+
+        // Build a 3-commit chain entirely via the object store and point
+        // `refs/heads/main` at the tip directly — simulating a repo
+        // whose commits predate `history-mmr`: the ref exists, but
+        // `<mkit_dir>/history/` has never been touched.
+        let c0 = write_commit(&store, vec![], 1);
+        let c1 = write_commit(&store, vec![c0], 2);
+        let c2 = write_commit(&store, vec![c1], 3);
+        refs::write_ref(&mkit_dir, "main", &c2).unwrap();
+
+        // The first history-mmr-enabled write for this branch: a new
+        // commit c3 on top of the pre-existing tip c2.
+        let c3 = write_commit(&store, vec![c2], 4);
+        write_ref_recording_history(&mkit_dir, "main", RefWriteCondition::Match(c2), &c3).unwrap();
+
+        assert_eq!(refs::read_ref(&mkit_dir, "main").unwrap(), Some(c3));
+
+        // The journal must now hold the full backfilled chain (c0, c1,
+        // c2) PLUS the new c3 — not just c3 alone.
+        let exec = Arc::new(TokioExecutor::new().unwrap());
+        let hist = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        assert_eq!(hist.len(), 4);
+        let root = hist.root();
+        for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
+            let pos = Position(i as u64);
+            let proof = hist.prove(pos).unwrap();
+            assert!(
+                verify_inclusion(&c, pos, &proof, &root),
+                "commit at position {i} failed inclusion proof after backfill"
+            );
+        }
+    }
+
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_does_not_backfill_a_genuinely_fresh_branch() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::{CommitHistory, TokioExecutor};
+        use mkit_core::refs::RefWriteCondition;
+        use mkit_core::store::ObjectStore;
+        use std::sync::Arc;
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let store = ObjectStore::init(repo_root).unwrap();
+        let mkit_dir = repo_root.join(mkit_core::MKIT_DIR);
+
+        // No pre-existing ref: this is a brand new branch's first ever
+        // commit, not a v0.1.x migration. There is nothing to backfill.
+        let c0 = write_commit(&store, vec![], 1);
+        write_ref_recording_history(&mkit_dir, "main", RefWriteCondition::Missing, &c0).unwrap();
+
+        let exec = Arc::new(TokioExecutor::new().unwrap());
+        let hist = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        assert_eq!(
+            hist.len(),
+            1,
+            "only the one real write, no phantom backfill entries"
+        );
+    }
 
     #[test]
     fn c_quote_leaves_plain_paths_alone() {
