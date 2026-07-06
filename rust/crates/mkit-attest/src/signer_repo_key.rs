@@ -107,6 +107,48 @@ mod tests {
         assert!(vk.verify_strict(tampered, &sig).is_err());
     }
 
+    /// DSSE signs the raw PAE bytes directly (this module's `sign`);
+    /// commit/remix/tag sign `BLAKE3(domain || signing_bytes)` via
+    /// `mkit_core::sign::KeyPair::sign`. The two schemes share no
+    /// domain tag at the raw-Ed25519-verify layer, so a signature
+    /// produced under one must never verify under the other, even with
+    /// the same key and the same underlying bytes.
+    #[test]
+    fn dsse_signature_never_verifies_as_a_commit_signature_and_vice_versa() {
+        use mkit_core::sign::{self, COMMIT_DOMAIN, Signature as CoreSignature};
+
+        let kp = KeyPair::from_seed([0x77; 32]);
+        let payload = b"shared bytes reused across both schemes";
+
+        // A DSSE-style signature: raw Ed25519 over `payload` directly.
+        let mut dsse_signer = RepoKeySigner::new(KeyPair::from_seed([0x77; 32]));
+        let dsse_sig_bytes = dsse_signer.sign(payload).unwrap();
+        let mut dsse_sig = [0u8; 64];
+        dsse_sig.copy_from_slice(&dsse_sig_bytes);
+
+        // It must not verify as a commit signature over the same bytes:
+        // commit verification hashes `payload` through
+        // `BLAKE3(COMMIT_DOMAIN || payload)` first, but the DSSE
+        // signature was produced directly over `payload`, never over
+        // that digest.
+        assert!(
+            sign::verify(&kp.public, COMMIT_DOMAIN, payload, &CoreSignature(dsse_sig)).is_err(),
+            "a DSSE-domain signature must not verify as a commit signature"
+        );
+
+        // Converse: a commit-domain signature over `payload` must not
+        // verify as a raw DSSE signature over those same `payload`
+        // bytes — the commit signature was produced over the domain
+        // digest, not over `payload` itself.
+        let commit_sig = kp.sign(COMMIT_DOMAIN, payload);
+        let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
+        let dalek_commit_sig = DalekSig::from_bytes(&commit_sig.0);
+        assert!(
+            vk.verify_strict(payload, &dalek_commit_sig).is_err(),
+            "a commit-domain signature must not verify as a DSSE signature over the same bytes"
+        );
+    }
+
     #[test]
     fn keyid_shape_blake3_of_pubkey() {
         let kp = KeyPair::from_seed([0x11; 32]);
