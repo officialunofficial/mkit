@@ -41,7 +41,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = super::resolve_layout(&cwd);
+    let layout = match super::resolve_layout(&cwd) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
     // Read both layers: the merged view drives `show`, but a write must
     // persist ONLY the repo layer — serializing the merged config would
     // copy user-scoped values (e.g. a private `user.email`) into

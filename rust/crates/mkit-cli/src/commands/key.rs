@@ -675,7 +675,7 @@ fn read_config() -> Result<Config, u8> {
         Ok(cwd) => cwd,
         Err(error) => return Err(emit_err(&format!("cwd: {error}"), exit::NOINPUT)),
     };
-    let layout = super::resolve_layout(&cwd);
+    let layout = super::resolve_layout(&cwd)?;
     config::read_or_default(&layout)
         .map_err(|error| emit_err(&format!("config: {error}"), exit::CONFIG_ERROR))
 }

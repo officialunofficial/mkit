@@ -69,6 +69,8 @@ pub enum DispatchError {
     Refs(#[from] refs::RefError),
     #[error("repo lock: {0}")]
     RepoLock(#[from] mkit_core::repo_lock::LockError),
+    #[error("worktree discovery: {0}")]
+    Discover(#[from] mkit_core::layout::DiscoverError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("store: {0}")]
@@ -367,7 +369,7 @@ pub fn push_all_with(
     remote: Option<&str>,
     force: bool,
 ) -> Result<usize, DispatchError> {
-    let layout = crate::commands::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     let refs_list = refs::list_refs(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
@@ -401,7 +403,7 @@ pub fn is_fast_forward(cwd: &Path, old: Option<Hash>, new: Hash) -> Result<bool,
         None => Ok(true),
         Some(o) if o == new => Ok(true),
         Some(o) => {
-            let layout = crate::commands::resolve_layout(cwd);
+            let layout = mkit_core::layout::discover(cwd)?;
             let store = crate::commands::open_store_configured(&layout)?;
             Ok(is_ancestor(&store, o, new)?)
         }
@@ -436,7 +438,7 @@ pub fn lease_condition(
     if matches!(lease, PushLease::Force) {
         return Ok(refs::RefWriteCondition::Any);
     }
-    let layout = crate::commands::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)?;
     Ok(match refs::read_remote_ref(&layout, remote, branch)? {
         Some(tracked) => refs::RefWriteCondition::Match(tracked),
         None => refs::RefWriteCondition::Missing,
@@ -458,7 +460,7 @@ pub fn push_branch_tracked(
     remote_branch: &str,
     lease: PushLease,
 ) -> Result<Hash, DispatchError> {
-    let layout = crate::commands::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     let tip = refs::read_ref(&layout, branch)?
         .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.to_owned()))?;
@@ -659,7 +661,7 @@ pub fn push_branch(
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
 pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    let layout = crate::commands::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)?;
     // ONE repo lock across BOTH phases — the fetch (object write + remote
     // refs) and the fast-forward (branch ref + HEAD + worktree). Validate
     // the repo first for a clean non-repo error, and do NOT re-acquire the
@@ -774,7 +776,7 @@ fn rollback_pull_ref(
 /// the object's own digest) and writes the ref into
 /// `refs/remotes/default/<branch>`.
 pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    let layout = crate::commands::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)?;
     // Validate the repo BEFORE locking so a non-repo reports cleanly rather
     // than as a lock error, then hold the repo lock across the whole
     // object-write + remote-ref-publish window. This serializes fetch

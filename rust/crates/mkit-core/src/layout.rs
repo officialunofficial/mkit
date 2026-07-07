@@ -14,9 +14,32 @@
 //!
 //! In the classic single-worktree layout both directories are the same
 //! `<root>/.mkit/`, so [`RepoLayout::single`] produces byte-identical
-//! paths to the historical ad-hoc joins. Linked working trees (later
-//! phases of #493) will construct layouts whose two directories differ;
-//! nothing outside this module may assume they coincide.
+//! paths to the historical ad-hoc joins. In a **linked** working tree
+//! (#493 Phase 1) they differ: the linked tree's per-tree state lives
+//! under the main repository's `.mkit/worktrees/<id>/`, and the linked
+//! tree's own `.mkit` is a plain FILE — the pointer file — instead of
+//! a directory. Nothing outside this module may assume the two
+//! directories coincide.
+//!
+//! # Linked-worktree on-disk model (#493 Phase 1)
+//!
+//! ```text
+//! <main>/.mkit/                       # common dir (shared state)
+//!   worktrees/<id>/                   # one per linked tree
+//!     commondir                       # path to the common dir, `../..`
+//!     mkitdir                         # abs path of the tree's pointer file
+//!     HEAD, index, ORIG_HEAD, ...     # per-tree state, as classified below
+//! <linked-tree>/.mkit                 # pointer FILE, not a directory:
+//!     `mkitdir: <path to .mkit/worktrees/<id>>\n`
+//! ```
+//!
+//! The pointer path may be absolute or relative to the linked tree
+//! root; `commondir` may be absolute or relative to the state dir.
+//! Both files are UTF-8, single-line, LF-terminated, and capped at
+//! [`MAX_POINTER_FILE_BYTES`]. Discovery ([`discover`]) fails closed on
+//! any malformed or dangling pointer; a `.mkit` DIRECTORY (every
+//! pre-Phase-1 repository) always resolves to the single-worktree
+//! layout, byte-identical to before.
 //!
 //! # Classification table
 //!
@@ -102,6 +125,24 @@ pub const GIT_STATE_DIR_NAME: &str = "git";
 pub const SPARSE_CACHE_DIR_NAME: &str = "sparse";
 /// Default pack-shard output directory name under the common dir.
 pub const PACK_SHARDS_DIR_NAME: &str = "pack-shards";
+/// Directory under the common dir holding one per-tree state dir per
+/// linked worktree.
+pub const WORKTREES_DIR_NAME: &str = "worktrees";
+/// Prefix of the linked-tree pointer file (`<tree>/.mkit` as a FILE):
+/// `mkitdir: <path>\n` — the analog of git's `gitdir:` file.
+pub const POINTER_PREFIX: &str = "mkitdir: ";
+/// File inside a per-tree state dir recording the path back to the
+/// common dir (relative to the state dir, or absolute). Written as
+/// `../..` by `worktree add`.
+pub const COMMONDIR_FILE_NAME: &str = "commondir";
+/// File inside a per-tree state dir recording the absolute path of the
+/// linked tree's pointer file — the back-pointer `worktree prune`
+/// checks before deleting a state dir.
+pub const BACKPOINTER_FILE_NAME: &str = "mkitdir";
+/// Hard cap on the pointer, `commondir`, and back-pointer files. Far
+/// above any real path, small enough that a corrupt or hostile file
+/// cannot balloon discovery.
+pub const MAX_POINTER_FILE_BYTES: u64 = 4096;
 
 /// Resolved repository layout: worktree root plus the two state
 /// directories (see the module docs for the classification table).
@@ -160,6 +201,43 @@ impl RepoLayout {
     #[must_use]
     pub fn is_single(&self) -> bool {
         self.common_dir == self.worktree_state_dir
+    }
+
+    /// Layout of a linked working tree (#493 Phase 1): working files at
+    /// `worktree_root`, per-tree state in `worktree_state_dir` (a
+    /// `worktrees/<id>` dir under the main repository's common dir),
+    /// shared state in `common_dir`.
+    ///
+    /// Pure construction — no filesystem access, no validation beyond
+    /// types. Production code obtains linked layouts via [`discover`],
+    /// which validates the on-disk pointers; this constructor is the
+    /// seam `discover` and `worktree add` build on.
+    #[must_use]
+    pub fn linked(
+        worktree_root: impl Into<PathBuf>,
+        worktree_state_dir: impl Into<PathBuf>,
+        common_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            worktree_root: worktree_root.into(),
+            common_dir: common_dir.into(),
+            worktree_state_dir: worktree_state_dir.into(),
+        }
+    }
+
+    /// `worktrees/` — the common-dir directory holding every linked
+    /// tree's per-tree state dir.
+    #[must_use]
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.common_dir.join(WORKTREES_DIR_NAME)
+    }
+
+    /// The per-tree state dir a linked worktree with `id` would use:
+    /// `worktrees/<id>` under the common dir. The caller must have
+    /// validated `id` via [`validate_worktree_id`].
+    #[must_use]
+    pub fn worktree_state_dir_for(&self, id: &str) -> PathBuf {
+        self.worktrees_dir().join(id)
     }
 
     // ------------------------------------------------------------------
@@ -361,6 +439,158 @@ impl RepoLayout {
     }
 }
 
+/// Errors surfaced by [`discover`] on a broken linked-worktree setup.
+///
+/// A repository whose `.mkit` is a directory (every single-worktree
+/// repository) can never produce one of these — discovery only engages
+/// the fail-closed path once `.mkit` is a pointer FILE.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DiscoverError {
+    #[error("worktree pointer {0}: {1}")]
+    PointerUnreadable(PathBuf, std::io::Error),
+    #[error("worktree pointer {0} is malformed: expected a single `{POINTER_PREFIX}<path>` line")]
+    PointerMalformed(PathBuf),
+    #[error("worktree pointer {0} exceeds {MAX_POINTER_FILE_BYTES} bytes — refusing to parse")]
+    PointerTooLarge(PathBuf),
+    #[error(
+        "worktree state dir {0} is missing or not a directory — was this worktree pruned? \
+         run `mkit worktree` maintenance from the main repository"
+    )]
+    StateDirMissing(PathBuf),
+    #[error("worktree commondir file {0}: {1}")]
+    CommonDirUnreadable(PathBuf, std::io::Error),
+    #[error("worktree common dir {0} is missing or not a directory")]
+    CommonDirMissing(PathBuf),
+}
+
+/// Validate a linked-worktree id (the `worktrees/<id>` directory name).
+///
+/// Same shape as the git-bridge remote-name rule: ASCII alphanumeric
+/// plus `.`, `_`, `-`; non-empty; at most 255 bytes; never `.` or `..`.
+/// Keeps the id a single safe path component — no separators, no
+/// traversal, no NUL.
+#[must_use]
+pub fn validate_worktree_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 255
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+/// Read a single-line, LF-terminated, size-capped pointer-style file
+/// (`.mkit` pointer, `commondir`, back-pointer). Returns the line
+/// without its trailing newline. `Ok(None)` when the file is absent.
+fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(DiscoverError::PointerUnreadable(path.to_path_buf(), e)),
+    };
+    if meta.len() > MAX_POINTER_FILE_BYTES {
+        return Err(DiscoverError::PointerTooLarge(path.to_path_buf()));
+    }
+    let raw =
+        std::fs::read(path).map_err(|e| DiscoverError::PointerUnreadable(path.to_path_buf(), e))?;
+    let text = std::str::from_utf8(&raw)
+        .map_err(|_| DiscoverError::PointerMalformed(path.to_path_buf()))?;
+    let line = text
+        .strip_suffix('\n')
+        .map_or(text, |l| l.strip_suffix('\r').unwrap_or(l));
+    if line.is_empty() || line.contains('\n') {
+        return Err(DiscoverError::PointerMalformed(path.to_path_buf()));
+    }
+    Ok(Some(line.to_owned()))
+}
+
+/// Write the linked-tree pointer file: `<tree>/.mkit` containing
+/// `mkitdir: <state_dir>\n`. Used by `worktree add` (#493 Phase 2);
+/// public now so the format has exactly one writer and one reader.
+///
+/// # Errors
+/// Propagates filesystem errors from the atomic write.
+pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result<()> {
+    let body = format!("{POINTER_PREFIX}{}\n", state_dir.display());
+    crate::atomic::write_atomic(&tree_root.join(MKIT_DIR), body.as_bytes(), false)
+}
+
+/// Resolve the [`RepoLayout`] for the repository whose working tree is
+/// rooted at `worktree_root` (#493 Phase 1 discovery).
+///
+/// - `.mkit` is a directory, or absent: the classic single-worktree
+///   layout ([`RepoLayout::single`]) — absence is NOT an error here so
+///   the store-open path keeps producing today's "not a repository"
+///   diagnostics unchanged.
+/// - `.mkit` is a FILE: a linked worktree. The pointer is parsed
+///   (`mkitdir: <path>`, absolute or relative to `worktree_root`), the
+///   per-tree state dir must exist, and the common dir is resolved via
+///   the state dir's `commondir` file (defaulting to `../..` when the
+///   file is absent, matching what `worktree add` writes) and must
+///   exist. Every failure along that chain is a typed, fail-closed
+///   [`DiscoverError`] — a broken linked tree must never silently
+///   degrade into "operate on some other directory".
+///
+/// # Errors
+/// See [`DiscoverError`].
+pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
+    let dot_mkit = worktree_root.join(MKIT_DIR);
+    let Ok(meta) = std::fs::symlink_metadata(&dot_mkit) else {
+        return Ok(RepoLayout::single(worktree_root));
+    };
+    if meta.is_dir() {
+        return Ok(RepoLayout::single(worktree_root));
+    }
+
+    // `.mkit` exists and is not a directory: pointer file (or garbage).
+    let Some(line) = read_capped_line(&dot_mkit)? else {
+        // Raced away between the two stats; treat like absent.
+        return Ok(RepoLayout::single(worktree_root));
+    };
+    let Some(target) = line.strip_prefix(POINTER_PREFIX) else {
+        return Err(DiscoverError::PointerMalformed(dot_mkit));
+    };
+    let target = Path::new(target);
+    let state_dir = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        worktree_root.join(target)
+    };
+    if !state_dir.is_dir() {
+        return Err(DiscoverError::StateDirMissing(state_dir));
+    }
+
+    let commondir_file = state_dir.join(COMMONDIR_FILE_NAME);
+    let common_dir = match read_capped_line(&commondir_file) {
+        Ok(Some(rel)) => {
+            let p = Path::new(&rel);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                state_dir.join(p)
+            }
+        }
+        // Absent commondir: the layout `worktree add` writes puts the
+        // state dir exactly two levels under the common dir.
+        Ok(None) => state_dir.join("../.."),
+        Err(DiscoverError::PointerUnreadable(p, e)) => {
+            return Err(DiscoverError::CommonDirUnreadable(p, e));
+        }
+        Err(e) => return Err(e),
+    };
+    // Normalize the `../..` hops so every accessor yields a clean path.
+    let common_dir = common_dir
+        .canonicalize()
+        .map_err(|_| DiscoverError::CommonDirMissing(common_dir.clone()))?;
+    if !common_dir.is_dir() {
+        return Err(DiscoverError::CommonDirMissing(common_dir));
+    }
+
+    Ok(RepoLayout::linked(worktree_root, state_dir, common_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +787,231 @@ mod tests {
             l.objects_dir(),
             Path::new("/definitely/not/a/real/path/.mkit/objects")
         );
+    }
+
+    /// Linked-mode classification invariant: with distinct dirs, every
+    /// accessor resolves under the dir its class prescribes — the whole
+    /// point of the seam.
+    #[test]
+    fn linked_layout_splits_accessors_by_class() {
+        let l = RepoLayout::linked(
+            "/trees/feature-x",
+            "/main/.mkit/worktrees/feature-x",
+            "/main/.mkit",
+        );
+        assert!(!l.is_single());
+        // NOTE: the state dir deliberately nests UNDER the common dir
+        // (`.mkit/worktrees/<id>`), so "under the common dir" is
+        // trivially true for everything; the leak checks that matter
+        // are (a) worktree-class accessors resolve under the state
+        // dir, and (b) common-class accessors do NOT.
+        for (name, got, _relative, class) in accessor_table(&l) {
+            match class {
+                Class::Common => {
+                    assert!(
+                        got.starts_with(l.common_dir()),
+                        "accessor {name} must live under the common dir"
+                    );
+                    assert!(
+                        !got.starts_with(l.worktree_state_dir()),
+                        "shared accessor {name} leaked into the per-tree state dir"
+                    );
+                }
+                Class::Worktree => {
+                    assert!(
+                        got.starts_with(l.worktree_state_dir()),
+                        "per-tree accessor {name} must live under the state dir"
+                    );
+                }
+            }
+        }
+        // The per-tree state dirs of OTHER worktrees live under the
+        // common dir's worktrees/, not under this tree's state dir.
+        assert_eq!(
+            l.worktree_state_dir_for("other"),
+            Path::new("/main/.mkit/worktrees/other")
+        );
+    }
+
+    #[test]
+    fn worktree_id_grammar() {
+        for ok in ["feature-x", "a", "wt.1", "A_B-c.d", &"x".repeat(255)] {
+            assert!(validate_worktree_id(ok), "{ok:?} should be valid");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "a b",
+            "a\0b",
+            "\u{e9}clair",
+            &"x".repeat(256),
+        ] {
+            assert!(!validate_worktree_id(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    // ---- discover() ---------------------------------------------------
+
+    fn scaffold_linked(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let main = tmp.join("main");
+        let tree = tmp.join("tree");
+        let state = main.join(".mkit/worktrees/tree");
+        std::fs::create_dir_all(main.join(".mkit/objects")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&tree).unwrap();
+        write_pointer_file(&tree, &state).unwrap();
+        (main, tree, state)
+    }
+
+    #[test]
+    fn discover_dir_and_absent_yield_single() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Absent .mkit: single (store open reports not-a-repo later).
+        let l = discover(tmp.path()).unwrap();
+        assert!(l.is_single());
+        // Directory .mkit: single, byte-identical to Phase 0.
+        std::fs::create_dir_all(tmp.path().join(".mkit")).unwrap();
+        let l = discover(tmp.path()).unwrap();
+        assert!(l.is_single());
+        assert_eq!(l.common_dir(), tmp.path().join(".mkit"));
+    }
+
+    #[test]
+    fn discover_follows_pointer_to_linked_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, tree, state) = scaffold_linked(tmp.path());
+        let l = discover(&tree).unwrap();
+        assert!(!l.is_single());
+        assert_eq!(l.worktree_root(), tree.as_path());
+        assert_eq!(l.worktree_state_dir(), state.as_path());
+        // commondir file absent => ../.. default, canonicalized.
+        assert_eq!(
+            l.common_dir(),
+            main.join(".mkit").canonicalize().unwrap().as_path()
+        );
+        // The seam in action: HEAD is per-tree, refs are shared.
+        assert_eq!(l.head_file(), state.join("HEAD"));
+        assert!(l.heads_dir().starts_with(l.common_dir()));
+    }
+
+    #[test]
+    fn discover_honors_explicit_commondir_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, tree, state) = scaffold_linked(tmp.path());
+        std::fs::write(state.join(COMMONDIR_FILE_NAME), "../..\n").unwrap();
+        let l = discover(&tree).unwrap();
+        assert_eq!(
+            l.common_dir(),
+            main.join(".mkit").canonicalize().unwrap().as_path()
+        );
+        // Absolute commondir works too.
+        std::fs::write(
+            state.join(COMMONDIR_FILE_NAME),
+            format!("{}\n", main.join(".mkit").display()),
+        )
+        .unwrap();
+        let l = discover(&tree).unwrap();
+        assert_eq!(
+            l.common_dir(),
+            main.join(".mkit").canonicalize().unwrap().as_path()
+        );
+    }
+
+    #[test]
+    fn discover_accepts_relative_pointer_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        std::fs::write(
+            tree.join(MKIT_DIR),
+            "mkitdir: ../main/.mkit/worktrees/tree\n",
+        )
+        .unwrap();
+        let l = discover(&tree).unwrap();
+        assert_eq!(
+            l.worktree_state_dir(),
+            tree.join("../main/.mkit/worktrees/tree")
+        );
+        assert!(l.worktree_state_dir().is_dir());
+        let _ = state;
+    }
+
+    /// Fail-closed matrix: every malformed/dangling pointer shape is a
+    /// typed error, never a silent fallback to some other directory.
+    #[test]
+    fn discover_fails_closed_on_broken_pointers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        let pointer = tree.join(MKIT_DIR);
+
+        // Wrong prefix.
+        std::fs::write(&pointer, "gitdir: /somewhere\n").unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::PointerMalformed(_))
+        ));
+        // Empty.
+        std::fs::write(&pointer, "").unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::PointerMalformed(_))
+        ));
+        // Multi-line.
+        std::fs::write(&pointer, "mkitdir: /a\nmkitdir: /b\n").unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::PointerMalformed(_))
+        ));
+        // Non-UTF-8.
+        std::fs::write(&pointer, [0x6d, 0x6b, 0xff, 0xfe]).unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::PointerMalformed(_))
+        ));
+        // Oversized.
+        std::fs::write(
+            &pointer,
+            format!(
+                "mkitdir: /{}\n",
+                "x".repeat(usize::try_from(MAX_POINTER_FILE_BYTES).unwrap())
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::PointerTooLarge(_))
+        ));
+        // Dangling target (state dir removed — a pruned worktree).
+        write_pointer_file(&tree, &state).unwrap();
+        std::fs::remove_dir_all(&state).unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::StateDirMissing(_))
+        ));
+    }
+
+    #[test]
+    fn discover_fails_closed_on_missing_common_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, tree, state) = scaffold_linked(tmp.path());
+        // commondir points somewhere that does not exist.
+        std::fs::write(state.join(COMMONDIR_FILE_NAME), "../../nope\n").unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::CommonDirMissing(_))
+        ));
+        let _ = main;
+    }
+
+    /// The pointer file has exactly one writer and one reader; pin the
+    /// bytes so the format cannot drift silently.
+    #[test]
+    fn pointer_file_golden_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pointer_file(tmp.path(), Path::new("/main/.mkit/worktrees/w1")).unwrap();
+        let bytes = std::fs::read(tmp.path().join(MKIT_DIR)).unwrap();
+        assert_eq!(bytes, b"mkitdir: /main/.mkit/worktrees/w1\n");
     }
 }

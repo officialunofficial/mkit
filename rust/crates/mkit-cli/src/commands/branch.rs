@@ -104,7 +104,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = super::resolve_layout(&cwd);
+    let layout = match super::resolve_layout(&cwd) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
 
     // `--show-current`: print the checked-out branch (nothing when
     // detached), then exit — like `git branch --show-current`.
