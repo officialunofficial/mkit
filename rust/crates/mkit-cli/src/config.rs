@@ -422,7 +422,16 @@ pub fn resolve_key_path(layout: &RepoLayout, value: &str) -> Result<PathBuf, Con
         };
     }
 
-    let joined = layout.worktree_root().join(path);
+    // A relative key path is repo-relative with a mandatory
+    // `.mkit/keys/` prefix. Resolve the `.mkit/` component against the
+    // layout's COMMON dir — the one shared key store — so a linked
+    // worktree (#493) signs with the same repo keys as the main tree.
+    // Single-worktree repos resolve byte-identically to the historical
+    // `<root>/.mkit/…` join.
+    let Ok(under_mkit) = path.strip_prefix(mkit_core::MKIT_DIR) else {
+        return Err(ConfigError::InvalidKeyPath(value.to_owned()));
+    };
+    let joined = layout.common_dir().join(under_mkit);
     let repo_keys = layout.keys_dir();
     if !joined.starts_with(&repo_keys) {
         return Err(ConfigError::InvalidKeyPath(value.to_owned()));
@@ -1893,6 +1902,15 @@ mod tests {
         assert!(validate_key_path("").is_ok());
         assert!(validate_key_path(".mkit/keys/default.key").is_ok());
         assert!(validate_key_path("/home/user/.mkit/global.key").is_ok());
+    }
+
+    #[test]
+    fn resolve_key_path_resolves_against_common_dir_in_linked_worktree() {
+        // #493 Phase 1: a linked tree signs with the ONE shared repo
+        // key store, not a phantom keys dir under its own root.
+        let layout = RepoLayout::linked("/trees/wt1", "/main/.mkit/worktrees/wt1", "/main/.mkit");
+        let out = resolve_key_path(&layout, ".mkit/keys/default.key").unwrap();
+        assert_eq!(out, std::path::Path::new("/main/.mkit/keys/default.key"));
     }
 
     #[test]

@@ -26,7 +26,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cannot read cwd: {e}"), exit::NOINPUT),
     };
-    let layout = super::resolve_layout(&cwd);
+    let layout = match super::resolve_layout(&cwd) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
     match ObjectStore::init(&layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => {

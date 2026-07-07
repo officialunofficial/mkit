@@ -180,6 +180,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Linked-worktree on-disk model + discovery (#493 Phase 1).**
+  `mkit_core::layout` gains the linked-worktree groundwork: a linked
+  tree's `.mkit` is a pointer FILE (`mkitdir: <path>`, the analog of
+  git's `gitdir:` file) naming its per-tree state dir under the main
+  repository's `.mkit/worktrees/<id>/` (with `commondir` and a
+  `mkitdir` back-pointer inside, git-style); `layout::discover`
+  resolves it — a `.mkit` directory or absent `.mkit` still yields the
+  classic single-worktree layout byte-identically, while a malformed,
+  oversized, or dangling pointer fails closed with a typed
+  `DiscoverError`. The CLI's `commands::resolve_layout` now performs
+  this discovery, so every command already works from inside a linked
+  tree: commits write into the one shared object store and move shared
+  refs, while HEAD/index/op-state/stash stay in the invoking tree's
+  state dir. Repo-relative signing-key paths (`.mkit/keys/…`) resolve
+  against the shared common dir so linked trees sign with the same
+  repo keys. No user-facing `worktree` command yet (that lands with
+  `mkit worktree add/list/remove/prune`); linked trees can only be
+  assembled by hand at this stage.
 - **`RepoLayout` path-resolution seam (#493 Phase 0).** `mkit-core` gains
   `layout::RepoLayout`, the single authority for resolving repository
   state under `.mkit/`, classifying every path as **common-dir** state

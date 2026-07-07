@@ -111,7 +111,8 @@ fn resolve_state(layout: &RepoLayout, remote_name: Option<&str>) -> CmdResult<(S
 }
 
 fn open_repo(cwd: &Path) -> CmdResult<(RepoLayout, ObjectStore)> {
-    let layout = super::resolve_layout(cwd);
+    let layout = mkit_core::layout::discover(cwd)
+        .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))?;
     if !layout.common_dir().is_dir() {
         return Err(("not a mkit repository".into(), exit::USAGE));
     }

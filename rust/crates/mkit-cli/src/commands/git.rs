@@ -101,7 +101,10 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(c) => c,
                 Err(e) => return emit_err(&format!("cwd: {e}"), exit::CONFIG_ERROR),
             };
-            let layout = super::resolve_layout(&cwd);
+            let layout = match super::resolve_layout(&cwd) {
+                Ok(layout) => layout,
+                Err(code) => return code,
+            };
             match export(&layout, &opts) {
                 Ok(code) => code,
                 Err((msg, code)) => emit_err(&msg, code),
