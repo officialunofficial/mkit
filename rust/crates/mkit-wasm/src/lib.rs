@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 //! WASM bindings for the mkit demo site.
 //!
 //! Thin wrappers over the pure byte-format and crypto paths in

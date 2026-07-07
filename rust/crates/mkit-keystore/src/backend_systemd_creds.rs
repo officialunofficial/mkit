@@ -64,6 +64,10 @@ impl SystemdCredsKeystore {
         self.load_secret_for_list_with_command(label, algorithm, "systemd-creds")
     }
 
+    // Deliberate fail-soft warning during list: one undecryptable credential must
+    // not break the listing, and the user needs to see why it was skipped (issue
+    // #441 kept this as the one sanctioned stderr write).
+    #[allow(clippy::print_stderr)]
     fn load_secret_for_list_with_command(
         &self,
         label: &str,
