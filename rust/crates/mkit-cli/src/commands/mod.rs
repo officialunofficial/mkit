@@ -116,15 +116,17 @@ pub fn open_store_configured(
     Ok(store)
 }
 
-/// Resolve the [`RepoLayout`] a command operates on. Phase 0 of #493:
-/// the invoking directory is the worktree root of a classic
-/// single-worktree repository, so this is a pure constructor. Phase 1
-/// replaces this body with pointer-following discovery for linked
-/// worktrees; command code must obtain its layout HERE and never
-/// construct one ad hoc.
-#[must_use]
-pub fn resolve_layout(cwd: &Path) -> RepoLayout {
-    RepoLayout::single(cwd)
+/// Resolve the [`RepoLayout`] a command operates on (#493 Phase 1):
+/// pointer-following discovery. A `.mkit` DIRECTORY (or none at all)
+/// resolves to the classic single-worktree layout exactly as before; a
+/// `.mkit` pointer FILE resolves to the linked tree's split layout. On
+/// a broken pointer the error has already been printed and the
+/// returned code is the exit status to propagate — a broken linked
+/// tree must never silently operate on the wrong directory. Command
+/// code must obtain its layout HERE and never construct one ad hoc.
+pub fn resolve_layout(cwd: &Path) -> Result<RepoLayout, u8> {
+    mkit_core::layout::discover(cwd)
+        .map_err(|e| error(&format!("worktree discovery: {e}"), exit::DATAERR))
 }
 
 /// Shared helper: emit a "not yet wired" notice and return the

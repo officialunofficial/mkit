@@ -70,7 +70,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layout = super::resolve_layout(&cwd);
+    let layout = match super::resolve_layout(&cwd) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
 
     // -s implies -a (a signed tag is an annotated tag with a signature).
     let annotated = opts.annotate || opts.sign;

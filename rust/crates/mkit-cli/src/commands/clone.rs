@@ -93,7 +93,10 @@ pub fn run(args: &[String]) -> u8 {
             exit::CANTCREAT,
         );
     }
-    let target_layout = crate::commands::resolve_layout(&target);
+    let target_layout = match crate::commands::resolve_layout(&target) {
+        Ok(layout) => layout,
+        Err(code) => return code,
+    };
     match ObjectStore::init(&target_layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => {
@@ -170,7 +173,8 @@ fn apply_sparse_after_clone(
     use mkit_core::store::ObjectStore;
     use std::path::PathBuf as StdPathBuf;
 
-    let layout = crate::commands::resolve_layout(target);
+    let layout = mkit_core::layout::discover(target)
+        .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))?;
 
     // Persist patterns to .mkit/sparse-checkout for follow-up commands.
     let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();

@@ -89,7 +89,11 @@ pub fn run_import(opts: &ImportArgs) -> u8 {
         Some(dir) => fresh_clone(opts, dir),
         None => std::env::current_dir()
             .map_err(|e| (format!("cwd: {e}"), exit::CONFIG_ERROR))
-            .and_then(|cwd| import_into(&super::resolve_layout(&cwd), opts, true)),
+            .and_then(|cwd| {
+                mkit_core::layout::discover(&cwd)
+                    .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))
+                    .and_then(|l| import_into(&l, opts, true))
+            }),
     };
     finish(outcome, opts.json)
 }
@@ -98,7 +102,11 @@ pub fn run_import(opts: &ImportArgs) -> u8 {
 pub fn run_fetch(opts: &FetchArgs, pull: bool) -> u8 {
     let outcome = std::env::current_dir()
         .map_err(|e| (format!("cwd: {e}"), exit::CONFIG_ERROR))
-        .and_then(|cwd| fetch_and_maybe_pull(&super::resolve_layout(&cwd), opts, pull));
+        .and_then(|cwd| {
+            mkit_core::layout::discover(&cwd)
+                .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))
+                .and_then(|l| fetch_and_maybe_pull(&l, opts, pull))
+        });
     finish(outcome, opts.json)
 }
 
@@ -154,7 +162,8 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
     }
     let created = !target.exists();
     std::fs::create_dir_all(&target).map_err(|e| (format!("mkdir: {e}"), exit::CANTCREAT))?;
-    let layout = super::resolve_layout(&target);
+    let layout = mkit_core::layout::discover(&target)
+        .map_err(|e| (format!("worktree discovery: {e}"), exit::DATAERR))?;
     ObjectStore::init(&layout).map_err(|e| (format!("init: {e}"), exit::CANTCREAT))?;
     refs::init(&layout).map_err(|e| (format!("refs init: {e}"), exit::CANTCREAT))?;
     let mut summary = match import_into(&layout, opts, false) {
