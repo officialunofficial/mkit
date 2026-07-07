@@ -169,6 +169,28 @@ Working-tree commands:
   green additions, red deletions); the default `auto` colorizes only on a
   tty (honoring `NO_COLOR`/`CLICOLOR_FORCE`), and `--no-color` forces it
   off. (Color for `status`/`log`/`branch` is a tracked follow-up.)
+- `mkit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
+  `remove [--force] <path>` / `prune [--dry-run]` — manage linked working
+  trees (git-worktree parity, #493). Linked trees share the one object
+  store and the shared refs; each tree keeps its own `HEAD`, index,
+  in-progress-operation state, and stash (note: git shares the stash
+  across worktrees; mkit's stash is deliberately per-tree). `add` with no
+  `<commit-ish>` creates a new branch named after the path's basename
+  (refusing if it already exists); with a branch name it checks that
+  branch out, and with any other revision the new tree starts on a
+  detached HEAD. A branch may be checked out in at most one tree at a
+  time — `worktree add`, `checkout`/`switch`, `branch -d`, and
+  `branch -m` all refuse with `already checked out at '<path>'`, naming
+  the holding tree (branch moves are single-writer by design; see
+  SPEC-HISTORY-PROOF). `remove` refuses when the tree has local changes,
+  untracked files, or an operation in progress unless `--force` is
+  given, and never removes the main tree or the tree you are standing
+  in. `prune` deletes registry entries whose tree has vanished
+  (`--dry-run` previews). On-disk: a linked tree's `.mkit` is a pointer
+  *file* (`mkitdir: <path>`) into the main repository's
+  `.mkit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
+  linked worktrees exist (cross-tree root collection is a tracked
+  follow-up phase of #493) — remove or prune them first.
 - `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index

@@ -558,6 +558,11 @@ pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
     } else {
         worktree_root.join(target)
     };
+    // Canonicalize so identity comparisons against registry paths hold
+    // even through symlinked tempdir prefixes (macOS `/var`).
+    let state_dir = state_dir
+        .canonicalize()
+        .map_err(|_| DiscoverError::StateDirMissing(state_dir.clone()))?;
     if !state_dir.is_dir() {
         return Err(DiscoverError::StateDirMissing(state_dir));
     }
@@ -589,6 +594,116 @@ pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
     }
 
     Ok(RepoLayout::linked(worktree_root, state_dir, common_dir))
+}
+
+/// One entry of the linked-worktree registry (`<common>/worktrees/*`),
+/// as reported by [`worktrees`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    /// The registry id (the `worktrees/<id>` directory name).
+    pub id: String,
+    /// The per-tree state dir (`<common>/worktrees/<id>`).
+    pub state_dir: PathBuf,
+    /// The linked tree's root, derived from the back-pointer file
+    /// (its parent, since the back-pointer names `<tree>/.mkit`).
+    /// `None` when the entry is broken — see `prunable`.
+    pub tree_root: Option<PathBuf>,
+    /// `Some(reason)` when the entry no longer corresponds to a live
+    /// linked tree and `worktree prune` may delete its state dir:
+    /// missing/unreadable back-pointer, vanished tree, or a tree whose
+    /// pointer no longer points back at this state dir.
+    pub prunable: Option<String>,
+}
+
+/// Enumerate the linked-worktree registry of `layout`'s repository,
+/// sorted by id. The main worktree is NOT an entry — its state dir is
+/// the common dir itself.
+///
+/// Ids that fail [`validate_worktree_id`] and non-directory entries
+/// are reported as prunable rather than skipped, so `worktree list`
+/// and `worktree prune` see the same picture and nothing lingers
+/// invisibly.
+///
+/// # Errors
+/// [`DiscoverError::PointerUnreadable`] only for an unreadable
+/// `worktrees/` directory itself; a missing `worktrees/` dir yields an
+/// empty list.
+pub fn worktrees(layout: &RepoLayout) -> Result<Vec<WorktreeEntry>, DiscoverError> {
+    let dir = layout.worktrees_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(DiscoverError::PointerUnreadable(dir, e)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| DiscoverError::PointerUnreadable(dir.clone(), e))?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let state_dir = entry.path();
+        let mut wt = WorktreeEntry {
+            id: id.clone(),
+            state_dir: state_dir.clone(),
+            tree_root: None,
+            prunable: None,
+        };
+        if !validate_worktree_id(&id) || !state_dir.is_dir() {
+            wt.prunable = Some("invalid registry entry".to_owned());
+            out.push(wt);
+            continue;
+        }
+        // Follow the back-pointer to the tree and verify the tree's
+        // pointer still points back HERE — a moved/re-created tree
+        // must not be claimed by a stale registry entry.
+        match read_capped_line(&state_dir.join(BACKPOINTER_FILE_NAME)) {
+            Ok(Some(back)) => {
+                let pointer_path = PathBuf::from(back);
+                let tree_root = pointer_path.parent().map(Path::to_path_buf);
+                match discover_pointer_target(&pointer_path) {
+                    Some(target) if paths_refer_to_same(&target, &state_dir) => {
+                        wt.tree_root = tree_root;
+                    }
+                    Some(_) => {
+                        wt.tree_root = tree_root;
+                        wt.prunable =
+                            Some("tree's pointer no longer points at this state dir".to_owned());
+                    }
+                    None => {
+                        wt.tree_root = tree_root;
+                        wt.prunable = Some("linked tree is gone".to_owned());
+                    }
+                }
+            }
+            Ok(None) => wt.prunable = Some("back-pointer file missing".to_owned()),
+            Err(_) => wt.prunable = Some("back-pointer file unreadable".to_owned()),
+        }
+        out.push(wt);
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// Best-effort read of a pointer file's target (absolute or relative
+/// to the pointer's parent). `None` when the file is missing or
+/// malformed — callers use this for registry health checks, where a
+/// broken pointer means "prunable", not "abort".
+fn discover_pointer_target(pointer_path: &Path) -> Option<PathBuf> {
+    let line = read_capped_line(pointer_path).ok().flatten()?;
+    let target = line.strip_prefix(POINTER_PREFIX)?;
+    let target = Path::new(target);
+    if target.is_absolute() {
+        Some(target.to_path_buf())
+    } else {
+        Some(pointer_path.parent()?.join(target))
+    }
+}
+
+/// Path equality up to canonicalization, tolerant of either side not
+/// existing (falls back to literal comparison).
+fn paths_refer_to_same(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -886,14 +1001,19 @@ mod tests {
         let l = discover(&tree).unwrap();
         assert!(!l.is_single());
         assert_eq!(l.worktree_root(), tree.as_path());
-        assert_eq!(l.worktree_state_dir(), state.as_path());
+        // State dir is canonicalized by discovery (symlinked tempdir
+        // prefixes must not defeat cross-tree identity comparisons).
+        assert_eq!(
+            l.worktree_state_dir(),
+            state.canonicalize().unwrap().as_path()
+        );
         // commondir file absent => ../.. default, canonicalized.
         assert_eq!(
             l.common_dir(),
             main.join(".mkit").canonicalize().unwrap().as_path()
         );
         // The seam in action: HEAD is per-tree, refs are shared.
-        assert_eq!(l.head_file(), state.join("HEAD"));
+        assert_eq!(l.head_file(), state.canonicalize().unwrap().join("HEAD"));
         assert!(l.heads_dir().starts_with(l.common_dir()));
     }
 
@@ -933,6 +1053,8 @@ mod tests {
         assert_eq!(
             l.worktree_state_dir(),
             tree.join("../main/.mkit/worktrees/tree")
+                .canonicalize()
+                .unwrap()
         );
         assert!(l.worktree_state_dir().is_dir());
         let _ = state;

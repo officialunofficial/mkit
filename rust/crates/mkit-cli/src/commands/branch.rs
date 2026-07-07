@@ -197,6 +197,18 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
     // Capture the tip before deletion for git's `Deleted branch <name>
     // (was <hash>).` confirmation.
     let was = refs::read_ref(layout, name).ok().flatten();
+    // Refuse to delete a branch a SIBLING worktree has checked out
+    // (#493) — delete_ref_safe below only knows about this tree's HEAD.
+    match super::branch_checked_out_elsewhere(layout, name) {
+        Ok(Some(at)) => {
+            return super::error(
+                &format!("branch '{name}' is checked out at '{}'", at.display()),
+                crate::exit::DATAERR,
+            );
+        }
+        Ok(None) => {}
+        Err(e) => return super::error(&e, crate::exit::DATAERR),
+    }
     match refs::delete_ref_safe(layout, name) {
         Ok(()) => {
             let mut stderr = std::io::stderr().lock();
@@ -255,6 +267,20 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Ok(None) => return emit_err(&format!("branch '{old}' not found"), exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read {old}: {e}"), exit::GENERAL_ERROR),
     };
+
+    // Refuse to rename a branch a SIBLING worktree has checked out
+    // (#493): its HEAD would dangle on the old name. (Renaming the
+    // branch checked out HERE is fine — HEAD is moved below.)
+    match super::branch_checked_out_elsewhere(layout, &old) {
+        Ok(Some(at)) => {
+            return emit_err(
+                &format!("branch '{old}' is checked out at '{}'", at.display()),
+                exit::DATAERR,
+            );
+        }
+        Ok(None) => {}
+        Err(e) => return emit_err(&e, exit::DATAERR),
+    }
 
     // Create the destination first under a CAS that refuses to clobber an
     // existing branch. Only after it lands do we drop the source, so a
