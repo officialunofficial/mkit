@@ -159,15 +159,14 @@ impl AppliedPacks {
         Ok(())
     }
 
-    /// Discard every recorded digest and persist the now-empty set
-    /// unconditionally. Used by the fetch-side self-heal path when the
-    /// local record is suspected stale relative to the object store (e.g.
-    /// the store was wiped but `applied-packs/` survived).
-    pub(crate) fn clear_and_persist(&mut self) -> Result<(), DispatchError> {
+    /// Discard every recorded digest, in memory only, and mark the record
+    /// dirty. Used by the fetch-side self-heal path when the local record is
+    /// suspected stale relative to the object store (e.g. the store was
+    /// wiped but `applied-packs/` survived) — the caller persists once at
+    /// the end of the fetch, so this does not touch disk itself.
+    pub(crate) fn clear(&mut self) {
         self.set.clear();
-        write(&self.path, &self.set)?;
-        self.dirty = false;
-        Ok(())
+        self.dirty = true;
     }
 
     /// Delete the on-disk record for `remote`, if any. The record's
@@ -456,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_and_persist_empties_the_record() {
+    fn clear_empties_the_record_in_memory_and_marks_it_dirty() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
@@ -464,11 +463,17 @@ mod tests {
         applied.persist().unwrap();
         assert!(applied.contains(&k1));
 
-        applied.clear_and_persist().unwrap();
+        applied.clear();
         assert!(!applied.contains(&k1));
 
+        // `clear` is in-memory only — the on-disk record is untouched until
+        // the caller persists.
         let reloaded = AppliedPacks::load(&mkit_dir, "origin").unwrap();
-        assert!(!reloaded.contains(&k1));
+        assert!(reloaded.contains(&k1));
+
+        applied.persist().unwrap();
+        let reloaded_after_persist = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        assert!(!reloaded_after_persist.contains(&k1));
     }
 
     #[test]
