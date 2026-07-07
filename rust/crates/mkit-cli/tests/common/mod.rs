@@ -73,17 +73,32 @@ pub(crate) fn require_env_flag(var: &str) -> bool {
 /// Spawn the real `mkit` binary, fully isolated from the developer's
 /// environment, with a non-interactive editor so nothing ever blocks.
 pub(crate) fn mkit(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mkit"))
-        .args(args)
+    mkit_env(cwd, xdg, args, &[])
+}
+
+/// [`mkit`] with extra environment variables set on the CHILD process —
+/// never on this test process, where `std::env::set_var` is banned by
+/// `clippy::disallowed_methods` (it races other threads on POSIX). This is
+/// how a test injects an env-var knob such as `MKIT_PACK_REBASELINE_DEPTH`.
+pub(crate) fn mkit_env(
+    cwd: &Path,
+    xdg: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mkit"));
+    cmd.args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", xdg)
         .env("HOME", xdg)
         .env("EDITOR", "true")
         .env("VISUAL", "true")
         .env("GIT_EDITOR", "true")
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn mkit")
+        .stdin(Stdio::null());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("spawn mkit")
 }
 
 /// Prewrite a deterministic Ed25519 signing key at the default path.
@@ -347,9 +362,27 @@ impl Repo {
         mkit(self.path(), self.xdg(), args)
     }
 
+    /// [`Repo::run`] with extra environment variables on the child (see
+    /// [`mkit_env`]).
+    pub(crate) fn run_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        mkit_env(self.path(), self.xdg(), args, extra_env)
+    }
+
     /// Run and assert success.
     pub(crate) fn ok(&self, args: &[&str]) -> Output {
         let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "expected `mkit {}` to succeed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    /// [`Repo::ok`] with extra environment variables on the child.
+    pub(crate) fn ok_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        let out = self.run_env(args, extra_env);
         assert!(
             out.status.success(),
             "expected `mkit {}` to succeed: {}",

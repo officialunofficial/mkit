@@ -1,30 +1,39 @@
 //! Periodic re-baseline integration tests (#406).
 //!
 //! `push_branch` bounds a branch's packlist chain depth: once a push would
-//! grow the chain past `MKIT_PACK_REBASELINE_DEPTH` (default 64, see
+//! grow the chain past the re-baseline threshold (default 64, see
 //! `remote_dispatch::packmap::rebaseline_depth`), it resets the chain to a
 //! single self-contained node instead of appending to it. This is a
 //! storage/transfer-encoding change only — every commit keeps its hash and
 //! stays checkout-able (see issue #406's "does NOT squash history" note).
 //!
-//! ## Env-var injection without `std::env::set_var`
+//! ## Injecting a small threshold (#547)
 //!
-//! `rebaseline_depth()` reads `MKIT_PACK_REBASELINE_DEPTH` from the
-//! process environment. `std::env::set_var` is banned by
-//! `clippy::disallowed_methods` in this repo (races other threads on
-//! POSIX), so the depth-threshold tests below spawn the real `mkit`
-//! binary and set the var on the child `Command` — never on this test
-//! process — following the same pattern `push_named_remote.rs` already
-//! uses for a real, URL-reachable `mkit+file://` remote.
+//! Two seams, one per kind of test:
+//!
+//! * The depth-threshold tests exercise the CLI's env-var knob
+//!   (`MKIT_PACK_REBASELINE_DEPTH`) end-to-end. `std::env::set_var` is
+//!   banned by `clippy::disallowed_methods` in this repo (races other
+//!   threads on POSIX), so they spawn the real `mkit` binary through the
+//!   shared harness's env-capable runner (`common::mkit_env`) and set the
+//!   var on the child `Command` — never on this test process.
+//! * The concurrency tests drive `push_branch_with_depth` in-process (they
+//!   need to control the exact CAS race, like the divergent-push tests in
+//!   `push_delta.rs`) with an explicit small threshold — instead of
+//!   reaching the default threshold (64) with ~64 real pushes.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
+
+mod common;
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
 use std::sync::Mutex;
 
-use mkit_cli::remote_dispatch::{DispatchError, fetch_all, pull_all, push_all, push_branch};
+use common::Repo;
+use mkit_cli::remote_dispatch::{
+    DispatchError, fetch_all, pull_all, push_all, push_branch_with_depth,
+};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
@@ -36,38 +45,10 @@ use mkit_core::transfer::{self, PackListNode};
 use mkit_transport_file::FileTransport;
 use mkit_transport_memory::MemoryTransport;
 
-fn mkit_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_mkit")
-}
-
-/// Spawn the real `mkit` binary, isolated from the developer's real
-/// `XDG_CONFIG_HOME`. `extra_env` carries any additional vars a specific
-/// invocation needs (namely `MKIT_PACK_REBASELINE_DEPTH`).
-fn run_in(cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
-    let xdg = tempfile::tempdir().expect("xdg tempdir");
-    let mut cmd = Command::new(mkit_bin());
-    cmd.args(args)
-        .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", xdg.path());
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let out = cmd.output().expect("spawn mkit");
-    drop(xdg);
-    out
-}
-
-fn init_repo(dir: &Path) {
-    assert!(run_in(dir, &["init"], &[]).status.success());
-    assert!(run_in(dir, &["keygen"], &[]).status.success());
-}
-
-fn commit_file(dir: &Path, name: &str, content: &[u8], msg: &str) {
-    fs::write(dir.join(name), content).unwrap();
-    assert!(run_in(dir, &["add", name], &[]).status.success());
-    let out = run_in(dir, &["commit", "-m", msg], &[]);
-    assert!(out.status.success(), "commit failed: {out:?}");
-}
+/// The small threshold the in-process concurrency tests inject via
+/// `push_branch_with_depth` (#547) — reachable with a handful of pushes,
+/// unlike the default 64.
+const TEST_DEPTH: usize = 3;
 
 fn head_hash(dir: &Path) -> Hash {
     refs::read_ref(&RepoLayout::single(dir), "main")
@@ -146,31 +127,16 @@ fn all_ancestor_commit_hashes(store: &ObjectStore, tip: Hash) -> HashSet<Hash> {
 /// below, which uses `AtomicTransport`.
 #[test]
 fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
-    let alice = tempfile::tempdir().unwrap();
-    init_repo(alice.path());
+    let alice = Repo::new();
     let remote = tempfile::tempdir().unwrap();
     let url = file_url(remote.path());
-    assert!(
-        run_in(alice.path(), &["remote", "add", &url], &[])
-            .status
-            .success()
-    );
+    alice.ok(&["remote", "add", &url]);
 
     let mut tips = Vec::new();
     for i in 0..4u32 {
-        commit_file(
-            alice.path(),
-            "f.txt",
-            i.to_string().as_bytes(),
-            &format!("c{i}"),
-        );
+        alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
         tips.push(head_hash(alice.path()));
-        let out = run_in(
-            alice.path(),
-            &["push"],
-            &[("MKIT_PACK_REBASELINE_DEPTH", "3")],
-        );
-        assert!(out.status.success(), "push {i} failed: {out:?}");
+        alice.ok_env(&["push"], &[("MKIT_PACK_REBASELINE_DEPTH", "3")]);
     }
     let final_tip = *tips.last().unwrap();
 
@@ -202,7 +168,8 @@ fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
     // The remote stays clonable, and a fresh clone reconstructs every
     // commit with unchanged hashes.
     let dest = tempfile::tempdir().unwrap();
-    let out = run_in(dest.path(), &["clone", &url, "bob"], &[]);
+    let xdg = tempfile::tempdir().unwrap();
+    let out = common::mkit(dest.path(), xdg.path(), &["clone", &url, "bob"]);
     assert!(out.status.success(), "clone failed: {out:?}");
     let bob = dest.path().join("bob");
     assert_eq!(head_hash(&bob), final_tip);
@@ -220,29 +187,14 @@ fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
 
 #[test]
 fn two_pushes_below_depth_3_threshold_keep_two_nodes() {
-    let alice = tempfile::tempdir().unwrap();
-    init_repo(alice.path());
+    let alice = Repo::new();
     let remote = tempfile::tempdir().unwrap();
     let url = file_url(remote.path());
-    assert!(
-        run_in(alice.path(), &["remote", "add", &url], &[])
-            .status
-            .success()
-    );
+    alice.ok(&["remote", "add", &url]);
 
     for i in 0..2u32 {
-        commit_file(
-            alice.path(),
-            "f.txt",
-            i.to_string().as_bytes(),
-            &format!("c{i}"),
-        );
-        let out = run_in(
-            alice.path(),
-            &["push"],
-            &[("MKIT_PACK_REBASELINE_DEPTH", "3")],
-        );
-        assert!(out.status.success(), "push {i} failed: {out:?}");
+        alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
+        alice.ok_env(&["push"], &[("MKIT_PACK_REBASELINE_DEPTH", "3")]);
     }
 
     let tx = FileTransport::new(remote.path());
@@ -256,29 +208,14 @@ fn two_pushes_below_depth_3_threshold_keep_two_nodes() {
 
 #[test]
 fn depth_zero_disables_rebaseline() {
-    let alice = tempfile::tempdir().unwrap();
-    init_repo(alice.path());
+    let alice = Repo::new();
     let remote = tempfile::tempdir().unwrap();
     let url = file_url(remote.path());
-    assert!(
-        run_in(alice.path(), &["remote", "add", &url], &[])
-            .status
-            .success()
-    );
+    alice.ok(&["remote", "add", &url]);
 
     for i in 0..4u32 {
-        commit_file(
-            alice.path(),
-            "f.txt",
-            i.to_string().as_bytes(),
-            &format!("c{i}"),
-        );
-        let out = run_in(
-            alice.path(),
-            &["push"],
-            &[("MKIT_PACK_REBASELINE_DEPTH", "0")],
-        );
-        assert!(out.status.success(), "push {i} failed: {out:?}");
+        alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("c{i}"));
+        alice.ok_env(&["push"], &[("MKIT_PACK_REBASELINE_DEPTH", "0")]);
     }
 
     let tx = FileTransport::new(remote.path());
@@ -391,76 +328,59 @@ impl Transport for AtomicTransport {
     }
 }
 
+/// `TEST_DEPTH - 1` plain appending pushes of successive `f.txt` contents
+/// (`"1"`, `"2"`, …) on top of an already-pushed base commit, growing the
+/// remote's chain for `main` to exactly [`TEST_DEPTH`] nodes — the depth at
+/// which the NEXT push would itself re-baseline
+/// (`TEST_DEPTH + 1 > TEST_DEPTH`). Returns the final tip.
+///
+/// These build-up pushes go through the ordinary [`push_all`] (default
+/// threshold): they sit far below it, so they append — only the decisive
+/// push under test injects [`TEST_DEPTH`] via `push_branch_with_depth`.
+fn grow_chain_to_test_depth(alice: &Repo, tx: &dyn Transport) -> Hash {
+    for i in 1..TEST_DEPTH {
+        alice.commit_file("f.txt", i.to_string().as_bytes(), &format!("alice-{i}"));
+        push_all(alice.path(), tx).unwrap_or_else(|e| panic!("push alice-{i}: {e}"));
+    }
+    assert_eq!(packmap_chain(tx, "main").len(), TEST_DEPTH);
+    head_hash(alice.path())
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // one scenario: race, blocked re-baseline, retry, re-clone
 fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
-    // Reaches the DEFAULT re-baseline threshold (64) with 64 real
-    // appending pushes rather than overriding MKIT_PACK_REBASELINE_DEPTH —
-    // this test drives `push_branch` in-process (like the existing
+    // Drives `push_branch_with_depth` in-process (like the existing
     // divergent-push tests in push_delta.rs) to control the exact CAS
-    // race, and there is no policy-compliant way to inject an env var into
-    // this test's own process (see module docs).
-    let alice = tempfile::tempdir().unwrap();
-    let bob = tempfile::tempdir().unwrap();
-    init_repo(alice.path());
-    init_repo(bob.path());
-
-    fs::write(alice.path().join("f.txt"), b"0").unwrap();
-    assert!(
-        run_in(alice.path(), &["add", "f.txt"], &[])
-            .status
-            .success()
-    );
-    assert!(
-        run_in(alice.path(), &["commit", "-m", "base"], &[])
-            .status
-            .success()
-    );
+    // race, at an injected small threshold (#547) instead of reaching the
+    // default one with ~64 real pushes.
+    let alice = Repo::new();
+    let bob = Repo::new();
 
     let tx = AtomicTransport::new();
+    alice.commit_file("f.txt", b"0", "base");
     push_all(alice.path(), &tx).expect("alice base push");
     pull_all(bob.path(), &tx, "default").expect("bob clones base");
     let shared_tip = head_hash(alice.path());
 
-    // The base push above already contributed the chain's first node,
-    // so 63 more plain appending pushes reach depth 64 exactly (not 65 —
-    // the 65th push is the one that would itself re-baseline).
-    for i in 1..=63u32 {
-        fs::write(alice.path().join("f.txt"), i.to_string()).unwrap();
-        assert!(
-            run_in(alice.path(), &["add", "f.txt"], &[])
-                .status
-                .success()
-        );
-        assert!(
-            run_in(alice.path(), &["commit", "-m", &format!("alice-{i}")], &[])
-                .status
-                .success()
-        );
-        push_all(alice.path(), &tx).unwrap_or_else(|e| panic!("push alice-{i}: {e}"));
-    }
-    let alice_tip = head_hash(alice.path());
-    assert_eq!(packmap_chain(&tx, "main").len(), 64);
+    // The base push above already contributed the chain's first node;
+    // grow to TEST_DEPTH exactly (the next push is the one that would
+    // itself re-baseline).
+    let alice_tip = grow_chain_to_test_depth(&alice, &tx);
 
     // bob, still at the shared base, races with a stale expectation. The
-    // remote's current depth (64) means this push, if it reached the
-    // packmap CAS, WOULD re-baseline (64 + 1 > 64).
-    fs::write(bob.path().join("f.txt"), b"bob-divergent").unwrap();
-    assert!(run_in(bob.path(), &["add", "f.txt"], &[]).status.success());
-    assert!(
-        run_in(bob.path(), &["commit", "-m", "bob-divergent"], &[])
-            .status
-            .success()
-    );
+    // remote's current depth (TEST_DEPTH) means this push, if it reached
+    // the packmap CAS, WOULD re-baseline (TEST_DEPTH + 1 > TEST_DEPTH).
+    bob.commit_file("f.txt", b"bob-divergent", "bob-divergent");
     let bob_tip = head_hash(bob.path());
     let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
 
-    let err = push_branch(
+    let err = push_branch_with_depth(
         &tx,
         &bob_store,
         "main",
         bob_tip,
         RefWriteCondition::Match(shared_tip),
+        TEST_DEPTH,
     )
     .unwrap_err();
     assert!(
@@ -471,37 +391,33 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     // The remote must be untouched: the atomic advance never let bob's
     // would-be re-baseline reset land without also winning the head CAS.
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));
-    assert_eq!(packmap_chain(&tx, "main").len(), 64);
-    let carol = tempfile::tempdir().unwrap();
-    init_repo(carol.path());
+    assert_eq!(packmap_chain(&tx, "main").len(), TEST_DEPTH);
+    let carol = Repo::new();
     pull_all(carol.path(), &tx, "default")
         .expect("remote must stay clonable after the loser's blocked re-baseline");
-    assert_eq!(fs::read(carol.path().join("f.txt")).unwrap(), b"63");
+    assert_eq!(
+        fs::read(carol.path().join("f.txt")).unwrap(),
+        (TEST_DEPTH - 1).to_string().as_bytes()
+    );
 
     // The loser retries: fast-forward onto alice's tip, recommit, push
-    // again. The chain is still at depth 64, so this retry ALSO decides to
-    // re-baseline — and this time it wins the head CAS outright (nothing
+    // again. The chain is still at TEST_DEPTH, so this retry ALSO decides
+    // to re-baseline — and this time it wins the head CAS outright (nothing
     // else moved the head), collapsing the chain to one self-contained
     // node covering the full merged history.
     fetch_all(bob.path(), &tx, "default").expect("bob's retry fetch");
     let alice_hex = mkit_core::to_hex(&alice_tip);
-    let out = run_in(bob.path(), &["reset", "--hard", "-f", &alice_hex], &[]);
-    assert!(out.status.success(), "bob reset onto alice's tip: {out:?}");
-    fs::write(bob.path().join("f.txt"), b"bob-retry").unwrap();
-    assert!(run_in(bob.path(), &["add", "f.txt"], &[]).status.success());
-    assert!(
-        run_in(bob.path(), &["commit", "-m", "bob-retry"], &[])
-            .status
-            .success()
-    );
+    bob.ok(&["reset", "--hard", "-f", &alice_hex]);
+    bob.commit_file("f.txt", b"bob-retry", "bob-retry");
     let bob_retry_tip = head_hash(bob.path());
     let bob_store2 = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
-    push_branch(
+    push_branch_with_depth(
         &tx,
         &bob_store2,
         "main",
         bob_retry_tip,
         RefWriteCondition::Match(alice_tip),
+        TEST_DEPTH,
     )
     .expect("bob's retry push should succeed");
 
@@ -510,11 +426,10 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     assert_eq!(chain.len(), 1, "retry re-baseline collapses the chain");
     assert!(chain_is_all_raw(&tx, &chain));
 
-    // Still clonable, with the full merged history (alice's base + 63
-    // appending commits, plus bob's retried commit) present and
-    // hash-verified.
-    let dave = tempfile::tempdir().unwrap();
-    init_repo(dave.path());
+    // Still clonable, with the full merged history (alice's base +
+    // TEST_DEPTH - 1 appending commits, plus bob's retried commit) present
+    // and hash-verified.
+    let dave = Repo::new();
     pull_all(dave.path(), &tx, "default").expect("clone after the retry re-baseline");
     assert_eq!(fs::read(dave.path().join("f.txt")).unwrap(), b"bob-retry");
     let dave_tip = head_hash(dave.path());
@@ -523,8 +438,9 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     let ancestry = all_ancestor_commit_hashes(&dave_store, dave_tip);
     assert_eq!(
         ancestry.len(),
-        65,
-        "base + 63 alice commits + bob's retry commit"
+        TEST_DEPTH + 1,
+        "base + {} alice commits + bob's retry commit",
+        TEST_DEPTH - 1
     );
     for h in &ancestry {
         let bytes = dave_store
@@ -555,74 +471,39 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
 /// `divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable`)
 /// is deliberately left untouched and stays green.
 #[test]
-#[allow(clippy::too_many_lines)] // one scenario: build to threshold, force-push, re-clone
 fn force_push_at_threshold_appends_and_never_resets() {
-    let alice = tempfile::tempdir().unwrap();
-    init_repo(alice.path());
-
-    fs::write(alice.path().join("f.txt"), b"0").unwrap();
-    assert!(
-        run_in(alice.path(), &["add", "f.txt"], &[])
-            .status
-            .success()
-    );
-    assert!(
-        run_in(alice.path(), &["commit", "-m", "base"], &[])
-            .status
-            .success()
-    );
-
+    let alice = Repo::new();
     let tx = AtomicTransport::new();
+    alice.commit_file("f.txt", b"0", "base");
     push_all(alice.path(), &tx).expect("alice base push");
-
-    // Base push = the chain's first node; 63 more plain appending pushes
-    // reach depth 64 exactly — the depth at which the NEXT push would itself
-    // re-baseline (64 + 1 > 64 with the default threshold).
-    for i in 1..=63u32 {
-        fs::write(alice.path().join("f.txt"), i.to_string()).unwrap();
-        assert!(
-            run_in(alice.path(), &["add", "f.txt"], &[])
-                .status
-                .success()
-        );
-        assert!(
-            run_in(alice.path(), &["commit", "-m", &format!("alice-{i}")], &[])
-                .status
-                .success()
-        );
-        push_all(alice.path(), &tx).unwrap_or_else(|e| panic!("push alice-{i}: {e}"));
-    }
-    assert_eq!(packmap_chain(&tx, "main").len(), 64);
+    grow_chain_to_test_depth(&alice, &tx);
 
     // A FORCE push (unconditional `Any` head condition) of a new
-    // fast-forward commit. The chain sits at depth 64, so a CAS-conditioned
-    // push would re-baseline here — but `Any` forces the ordered advance
-    // path, so this must append instead.
-    fs::write(alice.path().join("f.txt"), b"forced").unwrap();
-    assert!(
-        run_in(alice.path(), &["add", "f.txt"], &[])
-            .status
-            .success()
-    );
-    assert!(
-        run_in(alice.path(), &["commit", "-m", "forced"], &[])
-            .status
-            .success()
-    );
+    // fast-forward commit. The chain sits at TEST_DEPTH, so a
+    // CAS-conditioned push would re-baseline here — but `Any` forces the
+    // ordered advance path, so this must append instead.
+    alice.commit_file("f.txt", b"forced", "forced");
     let forced_tip = head_hash(alice.path());
     let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
-    push_branch(&tx, &store, "main", forced_tip, RefWriteCondition::Any)
-        .expect("force push at threshold should append, not reset");
+    push_branch_with_depth(
+        &tx,
+        &store,
+        "main",
+        forced_tip,
+        RefWriteCondition::Any,
+        TEST_DEPTH,
+    )
+    .expect("force push at threshold should append, not reset");
 
-    // Appended, not reset: the chain grew to 65 and its NEWEST node still
-    // chains to a `Some` prev (a re-baseline would leave one lone
-    // `prev = None` node, i.e. `chain.len() == 1`). `packmap_chain` walks
-    // newest-first, so `chain[0]` is that newest node.
+    // Appended, not reset: the chain grew to TEST_DEPTH + 1 and its NEWEST
+    // node still chains to a `Some` prev (a re-baseline would leave one
+    // lone `prev = None` node, i.e. `chain.len() == 1`). `packmap_chain`
+    // walks newest-first, so `chain[0]` is that newest node.
     let chain = packmap_chain(&tx, "main");
     assert_eq!(
         chain.len(),
-        65,
-        "a force push at the threshold must append (65 nodes), not reset to a single node"
+        TEST_DEPTH + 1,
+        "a force push at the threshold must append, not reset to a single node"
     );
     assert!(
         chain[0].prev.is_some(),
@@ -630,9 +511,8 @@ fn force_push_at_threshold_appends_and_never_resets() {
     );
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(forced_tip));
 
-    // The remote stays clonable with the full 65-commit history intact.
-    let bob = tempfile::tempdir().unwrap();
-    init_repo(bob.path());
+    // The remote stays clonable with the full history intact.
+    let bob = Repo::new();
     pull_all(bob.path(), &tx, "default").expect("clone after the force-push append");
     assert_eq!(fs::read(bob.path().join("f.txt")).unwrap(), b"forced");
     assert_eq!(head_hash(bob.path()), forced_tip);
@@ -640,7 +520,8 @@ fn force_push_at_threshold_appends_and_never_resets() {
     let ancestry = all_ancestor_commit_hashes(&bob_store, forced_tip);
     assert_eq!(
         ancestry.len(),
-        65,
-        "base + 63 appending commits + the forced commit"
+        TEST_DEPTH + 1,
+        "base + {} appending commits + the forced commit",
+        TEST_DEPTH - 1
     );
 }
