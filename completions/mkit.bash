@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame verify attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -131,6 +131,10 @@ _mkit_complete() {
             ;;
         gc)
             COMPREPLY=( $(compgen -W "-n --dry-run --grace-secs --help" -- "$cur") )
+            ;;
+        worktree)
+            COMPREPLY=( $(compgen -W "add list remove prune --help" -- "$cur") )
+            return
             ;;
         stash)
             COMPREPLY=( $(compgen -W "save list pop apply drop clear show" -- "$cur") )

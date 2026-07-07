@@ -869,6 +869,32 @@ write an object before publishing its ref), so
 must be run only when no other mkit process is operating on the repo (gc prints
 a warning). Fails closed: a corrupt root or unreadable ref aborts with nothing
 removed.
+.It Cm worktree Oo Cm add Ar path Op Ar commit-ish | Cm list Op Fl Fl porcelain | Cm remove Oo Fl Fl force Oc Ar path | Cm prune Op Fl Fl dry-run Oc
+Manage linked working trees.
+Linked trees share the one object store and the shared refs; each tree
+keeps its own
+.Pa HEAD ,
+index, in-progress-operation state, and stash (the stash is
+deliberately per-tree, unlike
+.Xr git 1 ) .
+.Cm add
+with no
+.Ar commit-ish
+creates a new branch named after the path's basename; a branch argument
+checks it out, any other revision detaches. A branch can be checked out
+in at most one tree —
+.Cm worktree add , checkout , switch , branch Fl d ,
+and
+.Cm branch Fl m
+refuse when another tree holds it.
+.Cm remove
+refuses to delete local changes, untracked files, or an in-progress
+operation without
+.Fl Fl force ,
+and never removes the main tree.
+.Cm prune
+deletes registry entries whose tree is gone. On-disk format:
+.Pa docs/specs/SPEC-WORKTREE.md .
 .It Cm stash Oo Cm save Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
 Save or restore a snapshot of working-tree changes.
 .Cm pop

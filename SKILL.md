@@ -67,8 +67,11 @@ never blocks on an editor.
    who signed.
 
 Accepted-but-no-op / out of scope (so you don't wait on them): `log --graph` is
-accepted but does nothing; submodules, hooks, `git worktree`, `git notes`, and
-`.git/`-format interop are explicit non-goals.
+accepted but does nothing; submodules, hooks, `git notes`, and `.git/`-format
+interop are explicit non-goals. Linked working trees ARE supported:
+`mkit worktree add/list/remove/prune` (linked trees share the object store and
+refs; each tree keeps its own HEAD/index/stash, and a branch can be checked
+out in at most one tree).
 
 ## Signing keys
 
