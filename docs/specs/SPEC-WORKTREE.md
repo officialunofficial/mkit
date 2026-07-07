@@ -69,6 +69,11 @@ mkitdir: <path>\n
 - UTF-8, LF-terminated (a trailing CR before the LF is tolerated and
   stripped), no second line, at most **4096 bytes**
   (`MAX_POINTER_FILE_BYTES`).
+- MUST be a **regular file**. Readers MUST reject a symlinked pointer
+  (likewise `commondir` and the back-pointer): the size cap is checked
+  against the file itself, and following a hostile link (e.g.
+  `.mkit -> /dev/zero` in an untarred tree) would turn discovery into
+  an unbounded read.
 - Writers MUST produce the canonical form (prefix `mkitdir: `, one
   trailing `\n`); `layout::write_pointer_file` is the single writer.
 
@@ -144,10 +149,25 @@ the registry cannot be enumerated.
 | `worktrees.lock` | common dir | registry mutations (`worktree add`/`remove`/`prune`) |
 | `refs-history.lock` | common dir | ref-write + history-MMR append critical section (pre-existing) |
 
-gc's "shared lock spanning trees" is the union of every tree's
-`worktree.lock`, acquired in deterministic order — main tree first,
-then registry ids ascending — before root collection, and held through
-the sweep. Multi-lock takers MUST use that order.
+**Global lock order.** A process that takes more than one of these
+MUST acquire in the order `worktrees.lock` ≺ per-tree
+`worktree.lock`(s) ≺ `refs-history.lock`. Holders:
+
+- gc takes the registry lock first (freezing the worktree set — a
+  concurrent `worktree add` cannot register a tree between root
+  collection and the sweep), then every tree's `worktree.lock` in
+  deterministic order — main tree first, then registry ids ascending —
+  and holds them all through the sweep.
+- `checkout`/`switch` hold the registry lock across the
+  branch-checked-out-elsewhere guard and the HEAD write, making
+  §4.2's check-then-write atomic against racing checkouts and
+  `worktree add`s; `branch -d`/`-m` do the same around their guard +
+  ref mutation; `worktree add` re-verifies the guard after acquiring
+  the registry lock.
+- `worktree remove` holds the registry lock plus the condemned tree's
+  own `worktree.lock` before deleting; `worktree prune` snapshots the
+  registry only AFTER acquiring the registry lock (a pre-lock snapshot
+  could condemn a mid-`add` entry).
 
 ### 4.4 gc root collection
 
