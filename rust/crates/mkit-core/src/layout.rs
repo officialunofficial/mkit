@@ -682,6 +682,45 @@ pub fn worktrees(layout: &RepoLayout) -> Result<Vec<WorktreeEntry>, DiscoverErro
     Ok(out)
 }
 
+/// Every per-tree STATE layout of the repository, for cross-worktree
+/// root collection (#493 Phase 3): the main tree first, then one
+/// layout per `worktrees/<id>` state dir that exists on disk — in
+/// deterministic order (main, then ids ascending), so multi-lock
+/// acquisition over the result cannot deadlock against itself.
+///
+/// Deliberately INCLUDES prunable registry entries whose state dir is
+/// still present: until `worktree prune` reaps a state dir, whatever
+/// its HEAD/index/op-state pin stays pinned — gc must never treat "the
+/// tree wandered off" as "its staged objects are garbage".
+///
+/// For entries whose linked tree root is unknown (broken back-pointer)
+/// the layout's `worktree_root` falls back to the state dir itself;
+/// root collection never touches worktree files, only state.
+///
+/// # Errors
+/// Propagates registry enumeration failures — callers (gc) must abort,
+/// never prune on a partial view.
+pub fn all_state_layouts(layout: &RepoLayout) -> Result<Vec<RepoLayout>, DiscoverError> {
+    let mut out = Vec::new();
+    let main_root = layout
+        .common_dir()
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+    out.push(RepoLayout::linked(
+        main_root,
+        layout.common_dir(),
+        layout.common_dir(),
+    ));
+    for wt in worktrees(layout)? {
+        if !wt.state_dir.is_dir() {
+            continue;
+        }
+        let root = wt.tree_root.clone().unwrap_or_else(|| wt.state_dir.clone());
+        out.push(RepoLayout::linked(root, wt.state_dir, layout.common_dir()));
+    }
+    Ok(out)
+}
+
 /// Best-effort read of a pointer file's target (absolute or relative
 /// to the pointer's parent). `None` when the file is missing or
 /// malformed — callers use this for registry health checks, where a

@@ -3,8 +3,7 @@
 //! a second tree shares the one object store; branch double-checkout
 //! is refused everywhere; tree-local commands stay tree-local;
 //! `remove` protects local work; `prune` reaps only dead registry
-//! entries; and `gc` fails closed until Phase 3 makes it
-//! worktree-aware.
+//! entries; and gc unions retention roots across every tree (Phase 3).
 
 mod common;
 
@@ -317,27 +316,45 @@ fn worktree_ids_uniquify_on_basename_collision() {
 }
 
 #[test]
-fn gc_fails_closed_while_linked_worktrees_exist() {
+fn gc_keeps_sibling_staged_objects_and_prunes_real_garbage() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"one\n", "seed");
     let (_host, tree, out) = wt_add(&repo, &[], "topic");
     assert!(out.status.success());
 
-    // Stage (don't commit) work in the sibling — exactly the object a
-    // non-worktree-aware gc would prune.
+    // Stage (don't commit) work in the SIBLING — exactly the object a
+    // non-worktree-aware gc would prune (#493 Phase 3 acceptance).
     std::fs::write(tree.join("staged-only.txt"), b"precious\n").unwrap();
     let out = mkit(&tree, repo.xdg(), &["add", "staged-only.txt"]);
     assert!(out.status.success());
 
-    // gc from the main tree refuses until Phase 3.
-    let out = repo.run(&["gc", "--grace-secs", "0"]);
-    assert!(
-        !out.status.success(),
-        "gc must fail closed with linked worktrees"
-    );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not yet supported"),);
+    // Manufacture true garbage in the MAIN tree: stage a blob, then
+    // unstage it (mixed reset), leaving it reachable from nothing.
+    repo.write("garbage.txt", b"transient\n");
+    repo.ok(&["add", "garbage.txt"]);
+    repo.ok(&["rm", "--cached", "garbage.txt"]);
+    std::fs::remove_file(repo.path().join("garbage.txt")).unwrap();
+    let before = object_count(&repo.mkit_dir());
 
-    // And the staged object is still intact in the shared store.
+    // gc with a zero grace window, from the main tree.
+    repo.ok(&["gc", "--grace-secs", "0"]);
+
+    // The garbage went; the sibling's staged object did not.
+    assert!(
+        object_count(&repo.mkit_dir()) < before,
+        "unreachable object must be pruned"
+    );
     let out = mkit(&tree, repo.xdg(), &["status", "--porcelain"]);
-    assert!(String::from_utf8_lossy(&out.stdout).contains("staged-only.txt"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("staged-only.txt"),
+        "sibling staged entry must survive"
+    );
+    // And it still commits cleanly afterwards — the blob is intact.
+    let out = mkit(&tree, repo.xdg(), &["commit", "-m", "staged survived"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    common::check_invariants(repo.path(), "after cross-tree gc").unwrap();
 }
