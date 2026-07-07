@@ -10,6 +10,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit, time_one};
+use mkit_core::layout::RepoLayout;
 use mkit_core::store::{ObjectStore, SyncPolicy};
 use mkit_core::worktree::store_file_object;
 
@@ -66,14 +67,14 @@ fn bench_store_write(c: &mut Criterion) {
                 b.iter_with_setup(
                     || {
                         let dir = tempfile::tempdir().unwrap();
-                        let store = ObjectStore::init(dir.path()).unwrap();
+                        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                         (dir, store)
                     },
                     |(_dir, store)| write_all(&store, policy, &data),
                 );
             });
             let dir = tempfile::tempdir().unwrap();
-            let store = ObjectStore::init(dir.path()).unwrap();
+            let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
             let ms = time_ms(|| write_all(&store, policy, &data));
             samples.push(Sample {
                 category: "store_write".into(),
@@ -100,7 +101,7 @@ fn bench_store_write(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     let dir = tempfile::tempdir().unwrap();
-                    let store = ObjectStore::init(dir.path()).unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
                     (dir, store)
                 },
                 |(_dir, store)| {
@@ -111,7 +112,7 @@ fn bench_store_write(c: &mut Criterion) {
             );
         });
         let dir = tempfile::tempdir().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         let ms = time_ms(|| {
             let batch = store.batch();
             store_file_object(&batch, &blob).unwrap();

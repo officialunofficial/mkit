@@ -1,7 +1,7 @@
 //! Local content-addressed object store.
 //!
-//! Layout (rooted at the working-tree directory passed to [`ObjectStore::open`]
-//! / [`ObjectStore::init`]):
+//! Layout (under the [`crate::layout::RepoLayout`] common dir passed to
+//! [`ObjectStore::open`] / [`ObjectStore::init`]):
 //!
 //! ```text
 //! .mkit/
@@ -43,6 +43,7 @@ use tempfile::NamedTempFile;
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
+use crate::layout::RepoLayout;
 use crate::object::{MkitError, Object, object_id_from_bytes, object_id_from_parts};
 use crate::serialize;
 
@@ -205,19 +206,19 @@ pub struct ObjectStore {
 }
 
 impl ObjectStore {
-    /// Open an existing repository rooted at `root`. Returns
-    /// [`StoreError::NotAMkitRepository`] if `<root>/.mkit/objects` does
-    /// not exist.
-    pub fn open(root: &Path) -> StoreResult<Self> {
-        let mkit_root = root.join(MKIT_DIR);
-        let objects_root = mkit_root.join(OBJECTS_DIR);
+    /// Open the existing repository described by `layout`. Returns
+    /// [`StoreError::NotAMkitRepository`] if the layout's `objects/`
+    /// directory does not exist. The object store is common-dir
+    /// (shared) state — see [`crate::layout`].
+    pub fn open(layout: &RepoLayout) -> StoreResult<Self> {
+        let objects_root = layout.objects_dir();
         if !objects_root.is_dir() {
             return Err(StoreError::NotAMkitRepository);
         }
         // Reject a repository that does not declare merkle object
         // addressing — a pre-merkle repo would mis-read every Tree /
         // ChunkedBlob (and thus every Commit) under the new id scheme.
-        match fs::read_to_string(mkit_root.join(FORMAT_FILE)) {
+        match fs::read_to_string(layout.format_file()) {
             Ok(s) if s.trim() == FORMAT_VALUE => {}
             Ok(s) => {
                 return Err(StoreError::IncompatibleRepoFormat {
@@ -236,21 +237,18 @@ impl ObjectStore {
         })
     }
 
-    /// Initialise a fresh `.mkit/` directory under `root`. Returns
-    /// [`StoreError::AlreadyInitialized`] if `.mkit/` already exists.
-    pub fn init(root: &Path) -> StoreResult<Self> {
-        let mkit_root = root.join(MKIT_DIR);
-        if mkit_root.exists() {
+    /// Initialise a fresh common dir for the repository described by
+    /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
+    /// common dir already exists.
+    pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
+        if layout.common_dir().exists() {
             return Err(StoreError::AlreadyInitialized);
         }
-        let objects_root = mkit_root.join(OBJECTS_DIR);
+        let objects_root = layout.objects_dir();
         fs::create_dir_all(&objects_root)?;
         // Declare the object-addressing format so a future open by an
         // incompatible (older) mkit fails loudly (SPEC-MERKLE-OBJECTS §7).
-        fs::write(
-            mkit_root.join(FORMAT_FILE),
-            format!("{FORMAT_VALUE}\n").as_bytes(),
-        )?;
+        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
         Ok(Self {
             objects_root,
             syncer: Arc::new(RealSyncer),
@@ -780,14 +778,14 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().expect("tempdir");
-        let store = ObjectStore::init(dir.path()).expect("init");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
         (dir, store)
     }
 
     #[test]
     fn init_creates_layout() {
         let dir = TempDir::new().unwrap();
-        let _ = ObjectStore::init(dir.path()).unwrap();
+        let _ = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         assert!(dir.path().join(MKIT_DIR).is_dir());
         assert!(dir.path().join(MKIT_DIR).join(OBJECTS_DIR).is_dir());
     }
@@ -795,26 +793,28 @@ mod tests {
     #[test]
     fn init_rejects_already_initialized() {
         let dir = TempDir::new().unwrap();
-        ObjectStore::init(dir.path()).unwrap();
-        let err = ObjectStore::init(dir.path()).unwrap_err();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let err = ObjectStore::init(&layout).unwrap_err();
         assert!(matches!(err, StoreError::AlreadyInitialized));
     }
 
     #[test]
     fn open_rejects_non_repo() {
         let dir = TempDir::new().unwrap();
-        let err = ObjectStore::open(dir.path()).unwrap_err();
+        let err = ObjectStore::open(&RepoLayout::single(dir.path())).unwrap_err();
         assert!(matches!(err, StoreError::NotAMkitRepository));
     }
 
     #[test]
     fn init_writes_format_marker_and_open_accepts_it() {
         let dir = TempDir::new().unwrap();
-        ObjectStore::init(dir.path()).unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
         let marker = fs::read_to_string(dir.path().join(MKIT_DIR).join(FORMAT_FILE)).unwrap();
         assert_eq!(marker.trim(), FORMAT_VALUE);
         // A freshly-init'd repo opens cleanly.
-        ObjectStore::open(dir.path()).unwrap();
+        ObjectStore::open(&layout).unwrap();
     }
 
     #[test]
@@ -822,19 +822,20 @@ mod tests {
         // A pre-merkle repo (objects dir present, no format marker) must be
         // rejected loudly rather than silently mis-read.
         let dir = TempDir::new().unwrap();
-        ObjectStore::init(dir.path()).unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
         let marker_path = dir.path().join(MKIT_DIR).join(FORMAT_FILE);
 
         fs::remove_file(&marker_path).unwrap();
         assert!(matches!(
-            ObjectStore::open(dir.path()),
+            ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: None })
         ));
 
         // A repo declaring some other (e.g. future) format is also rejected.
         fs::write(&marker_path, b"flat-v0\n").unwrap();
         assert!(matches!(
-            ObjectStore::open(dir.path()),
+            ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
         ));
     }
@@ -843,7 +844,7 @@ mod tests {
     fn is_repo_root_predicate() {
         let dir = TempDir::new().unwrap();
         assert!(!ObjectStore::is_repo_root(dir.path()));
-        ObjectStore::init(dir.path()).unwrap();
+        ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         assert!(ObjectStore::is_repo_root(dir.path()));
     }
 
@@ -1017,7 +1018,7 @@ mod bulk_writer_tests {
     #[test]
     fn bulk_writer_round_trips_and_rewrites() {
         let td = tempfile::tempdir().unwrap();
-        let store = ObjectStore::init(td.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
         let obj = crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
             data: b"bulk".to_vec(),
         }))

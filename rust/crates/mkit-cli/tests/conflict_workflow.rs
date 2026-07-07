@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -86,9 +87,12 @@ impl Repo {
     fn mkit_dir(&self) -> std::path::PathBuf {
         self.path().join(".mkit")
     }
+    fn layout(&self) -> RepoLayout {
+        RepoLayout::single(self.path())
+    }
     fn head_tree_blob(&self, rel: &str) -> Vec<u8> {
-        let store = ObjectStore::open(self.path()).unwrap();
-        let head = refs::resolve_head(&self.mkit_dir()).unwrap().unwrap();
+        let store = ObjectStore::open(&self.layout()).unwrap();
+        let head = refs::resolve_head(&self.layout()).unwrap().unwrap();
         let Object::Commit(c) = store.read_object(&head).unwrap() else {
             panic!("HEAD not a commit");
         };
@@ -174,8 +178,8 @@ fn merge_text_conflict_continue_uses_resolved_index() {
     assert_eq!(repo.head_tree_blob("a.txt"), b"resolved-third\n");
 
     // The merge commit has two parents.
-    let store = ObjectStore::open(repo.path()).unwrap();
-    let head = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let store = ObjectStore::open(&repo.layout()).unwrap();
+    let head = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     let Object::Commit(c) = store.read_object(&head).unwrap() else {
         panic!();
     };
@@ -187,7 +191,7 @@ fn merge_abort_restores_everything() {
     let repo = Repo::new();
     diverge_modify(&repo, "a.txt");
 
-    let head_before = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let head_before = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     let index_before = fs::read(repo.mkit_dir().join("index")).unwrap();
 
     fail(repo.path(), repo.xdg(), &["merge", "feature"]);
@@ -196,7 +200,7 @@ fn merge_abort_restores_everything() {
 
     assert!(!repo.mkit_dir().join("MERGE_HEAD").exists());
     assert!(!repo.mkit_dir().join("mkit-conflicts").exists());
-    let head_after = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let head_after = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     assert_eq!(head_before, head_after, "HEAD must be restored");
     // Semantic restore: same paths, statuses, and object hashes. The
     // v2 stat-cache fields (SPEC-INDEX §4) are advisory and may come
@@ -467,15 +471,15 @@ fn cherry_pick_conflict_continue_and_abort() {
     // feature: a distinct change to cherry-pick
     ok(repo.path(), repo.xdg(), &["checkout", "feature"]);
     repo.commit_file("a.txt", b"feature-change\n", "feature change");
-    let store = ObjectStore::open(repo.path()).unwrap();
-    let feature_tip = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let store = ObjectStore::open(&repo.layout()).unwrap();
+    let feature_tip = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     let feature_hex = mkit_core::hash::to_hex(&feature_tip);
     // main: a conflicting change
     ok(repo.path(), repo.xdg(), &["checkout", "main"]);
     repo.commit_file("a.txt", b"main-change\n", "main change");
     drop(store);
 
-    let head_before = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let head_before = refs::resolve_head(&repo.layout()).unwrap().unwrap();
 
     fail(repo.path(), repo.xdg(), &["cherry-pick", &feature_hex]);
     assert!(repo.mkit_dir().join("CHERRY_PICK_HEAD").exists());
@@ -485,7 +489,7 @@ fn cherry_pick_conflict_continue_and_abort() {
     assert!(!repo.mkit_dir().join("CHERRY_PICK_HEAD").exists());
     assert_eq!(
         head_before,
-        refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap()
+        refs::resolve_head(&repo.layout()).unwrap().unwrap()
     );
 
     // Now do it again and continue with a resolved value.
@@ -505,8 +509,8 @@ fn second_op_refused_while_one_in_progress() {
 
     // Starting a cherry-pick or rebase while a merge is in progress
     // must be refused.
-    let store = ObjectStore::open(repo.path()).unwrap();
-    let head = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
+    let store = ObjectStore::open(&repo.layout()).unwrap();
+    let head = refs::resolve_head(&repo.layout()).unwrap().unwrap();
     let head_hex = mkit_core::hash::to_hex(&head);
     drop(store);
     let out = fail(repo.path(), repo.xdg(), &["cherry-pick", &head_hex]);
@@ -625,16 +629,12 @@ fn rebase_abort_restores_head() {
     ok(repo.path(), repo.xdg(), &["checkout", "feature"]);
     repo.commit_file("a.txt", b"feature-change\n", "feature change");
 
-    let feature_before = refs::read_ref(&repo.mkit_dir(), "feature")
-        .unwrap()
-        .unwrap();
+    let feature_before = refs::read_ref(&repo.layout(), "feature").unwrap().unwrap();
     fail(repo.path(), repo.xdg(), &["rebase", "main"]);
     ok(repo.path(), repo.xdg(), &["rebase", "--abort"]);
 
     assert!(!repo.path().join(".mkit/rebase-apply").exists());
-    let feature_after = refs::read_ref(&repo.mkit_dir(), "feature")
-        .unwrap()
-        .unwrap();
+    let feature_after = refs::read_ref(&repo.layout(), "feature").unwrap().unwrap();
     assert_eq!(
         feature_before, feature_after,
         "feature tip must be restored after abort"

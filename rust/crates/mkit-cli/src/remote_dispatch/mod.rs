@@ -21,6 +21,7 @@
 mod applied_packs;
 mod packmap;
 
+use mkit_core::layout::RepoLayout;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -366,9 +367,9 @@ pub fn push_all_with(
     remote: Option<&str>,
     force: bool,
 ) -> Result<usize, DispatchError> {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = crate::commands::open_store_configured(cwd)?;
-    let refs_list = refs::list_refs(&mkit_dir)?;
+    let layout = crate::commands::resolve_layout(cwd);
+    let store = crate::commands::open_store_configured(&layout)?;
+    let refs_list = refs::list_refs(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
     for r in refs_list {
@@ -379,13 +380,13 @@ pub fn push_all_with(
         let condition = if force {
             refs::RefWriteCondition::Any
         } else {
-            match refs::read_remote_ref(&mkit_dir, remote, &r.name)? {
+            match refs::read_remote_ref(&layout, remote, &r.name)? {
                 Some(tracked) => refs::RefWriteCondition::Match(tracked),
                 None => refs::RefWriteCondition::Missing,
             }
         };
         push_branch(tx, &store, &r.name, h, condition)?;
-        refs::write_remote_ref(&mkit_dir, remote, &r.name, &h)?;
+        refs::write_remote_ref(&layout, remote, &r.name, &h)?;
         n += 1;
     }
     Ok(n)
@@ -400,7 +401,8 @@ pub fn is_fast_forward(cwd: &Path, old: Option<Hash>, new: Hash) -> Result<bool,
         None => Ok(true),
         Some(o) if o == new => Ok(true),
         Some(o) => {
-            let store = crate::commands::open_store_configured(cwd)?;
+            let layout = crate::commands::resolve_layout(cwd);
+            let store = crate::commands::open_store_configured(&layout)?;
             Ok(is_ancestor(&store, o, new)?)
         }
     }
@@ -434,8 +436,8 @@ pub fn lease_condition(
     if matches!(lease, PushLease::Force) {
         return Ok(refs::RefWriteCondition::Any);
     }
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    Ok(match refs::read_remote_ref(&mkit_dir, remote, branch)? {
+    let layout = crate::commands::resolve_layout(cwd);
+    Ok(match refs::read_remote_ref(&layout, remote, branch)? {
         Some(tracked) => refs::RefWriteCondition::Match(tracked),
         None => refs::RefWriteCondition::Missing,
     })
@@ -456,9 +458,9 @@ pub fn push_branch_tracked(
     remote_branch: &str,
     lease: PushLease,
 ) -> Result<Hash, DispatchError> {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = crate::commands::open_store_configured(cwd)?;
-    let tip = refs::read_ref(&mkit_dir, branch)?
+    let layout = crate::commands::resolve_layout(cwd);
+    let store = crate::commands::open_store_configured(&layout)?;
+    let tip = refs::read_ref(&layout, branch)?
         .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.to_owned()))?;
     // Default safe push requires a TRUE fast-forward: the new tip must
     // descend from the last-seen remote-tracking ref. The CAS `Match`
@@ -469,7 +471,7 @@ pub fn push_branch_tracked(
     // (`WithLease`) intentionally skips this check (overwrite as long as
     // the remote matches what we last saw); `Force` skips everything.
     if matches!(lease, PushLease::FastForward)
-        && let Some(tracked) = refs::read_remote_ref(&mkit_dir, remote, remote_branch)?
+        && let Some(tracked) = refs::read_remote_ref(&layout, remote, remote_branch)?
         && !is_ancestor(&store, tracked, tip)?
     {
         return Err(DispatchError::NonFastForwardPush {
@@ -478,7 +480,7 @@ pub fn push_branch_tracked(
     }
     let condition = lease_condition(cwd, remote, remote_branch, lease)?;
     push_branch(tx, &store, remote_branch, tip, condition)?;
-    refs::write_remote_ref(&mkit_dir, remote, remote_branch, &tip)?;
+    refs::write_remote_ref(&layout, remote, remote_branch, &tip)?;
     Ok(tip)
 }
 
@@ -657,16 +659,19 @@ pub fn push_branch(
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
 pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = crate::commands::resolve_layout(cwd);
     // ONE repo lock across BOTH phases — the fetch (object write + remote
     // refs) and the fast-forward (branch ref + HEAD + worktree). Validate
     // the repo first for a clean non-repo error, and do NOT re-acquire the
     // lock (it is a non-reentrant file lock): the fetch phase runs via the
     // non-locking `fetch_objects`, not `fetch_all` (#267).
-    let store = crate::commands::open_store_configured(cwd)?;
-    let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
-    let n = fetch_objects(&store, &mkit_dir, tx, remote)?;
-    let remote_refs = refs::list_remote_refs(&mkit_dir, remote)?
+    let store = crate::commands::open_store_configured(&layout)?;
+    let _lock = mkit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        crate::commands::WORKTREE_LOCK,
+    )?;
+    let n = fetch_objects(&store, &layout, tx, remote)?;
+    let remote_refs = refs::list_remote_refs(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
@@ -674,10 +679,10 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
         return Ok(n);
     }
 
-    let original_head = refs::read_head(&mkit_dir).ok();
+    let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
         Some(Head::Branch(branch)) => {
-            let local_tip = refs::read_ref(&mkit_dir, branch)?;
+            let local_tip = refs::read_ref(&layout, branch)?;
             let selected = if local_tip.is_some() {
                 remote_refs
                     .iter()
@@ -708,16 +713,16 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
     };
 
     let tree = load_tree_hash(&store, remote_tip)?;
-    crate::commands::ensure_restore_safe(cwd, &store, tree)
+    crate::commands::ensure_restore_safe(&layout, &store, tree)
         .map_err(DispatchError::RestoreSafety)?;
-    crate::commands::write_ref_recording_history(&mkit_dir, &branch, ref_condition, &remote_tip)?;
-    if let Err(e) = refs::write_head_branch(&mkit_dir, &branch) {
-        rollback_pull_ref(&mkit_dir, &branch, local_tip, remote_tip)?;
+    crate::commands::write_ref_recording_history(&layout, &branch, ref_condition, &remote_tip)?;
+    if let Err(e) = refs::write_head_branch(&layout, &branch) {
+        rollback_pull_ref(&layout, &branch, local_tip, remote_tip)?;
         return Err(e.into());
     }
-    if let Err(e) = crate::commands::restore_worktree_and_index(cwd, &store, tree) {
+    if let Err(e) = crate::commands::restore_worktree_and_index(&layout, &store, tree) {
         if let Err(rollback) =
-            rollback_pull_ref_and_head(&mkit_dir, &branch, local_tip, remote_tip, original_head)
+            rollback_pull_ref_and_head(&layout, &branch, local_tip, remote_tip, original_head)
         {
             return Err(DispatchError::RestoreSafety(format!(
                 "{e}; additionally failed to roll back ref: {rollback}"
@@ -729,36 +734,36 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
 }
 
 fn rollback_pull_ref_and_head(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     local_tip: Option<Hash>,
     remote_tip: Hash,
     original_head: Option<Head>,
 ) -> Result<(), String> {
-    rollback_pull_ref(mkit_dir, branch, local_tip, remote_tip).map_err(|e| e.to_string())?;
+    rollback_pull_ref(layout, branch, local_tip, remote_tip).map_err(|e| e.to_string())?;
     match original_head {
-        Some(Head::Branch(name)) => refs::write_head_branch(mkit_dir, &name),
-        Some(Head::Detached(hash)) => refs::write_head_detached(mkit_dir, &hash),
+        Some(Head::Branch(name)) => refs::write_head_branch(layout, &name),
+        Some(Head::Detached(hash)) => refs::write_head_detached(layout, &hash),
         None => Ok(()),
     }
     .map_err(|e| e.to_string())
 }
 
 fn rollback_pull_ref(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     local_tip: Option<Hash>,
     remote_tip: Hash,
 ) -> Result<(), refs::RefError> {
     if let Some(local_tip) = local_tip {
         crate::commands::write_ref_recording_history(
-            mkit_dir,
+            layout,
             branch,
             refs::RefWriteCondition::Match(remote_tip),
             &local_tip,
         )
-    } else if refs::read_ref(mkit_dir, branch)? == Some(remote_tip) {
-        refs::delete_ref(mkit_dir, branch)
+    } else if refs::read_ref(layout, branch)? == Some(remote_tip) {
+        refs::delete_ref(layout, branch)
     } else {
         Ok(())
     }
@@ -769,15 +774,18 @@ fn rollback_pull_ref(
 /// the object's own digest) and writes the ref into
 /// `refs/remotes/default/<branch>`.
 pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = crate::commands::resolve_layout(cwd);
     // Validate the repo BEFORE locking so a non-repo reports cleanly rather
     // than as a lock error, then hold the repo lock across the whole
     // object-write + remote-ref-publish window. This serializes fetch
     // against `gc` so a concurrent `gc --grace-secs 0` can't prune freshly
     // downloaded objects before their refs make them reachable (#267).
-    let store = crate::commands::open_store_configured(cwd)?;
-    let _lock = mkit_core::repo_lock::acquire_default(&mkit_dir, "worktree.lock")?;
-    fetch_objects(&store, &mkit_dir, tx, remote)
+    let store = crate::commands::open_store_configured(&layout)?;
+    let _lock = mkit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        crate::commands::WORKTREE_LOCK,
+    )?;
+    fetch_objects(&store, &layout, tx, remote)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -824,7 +832,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 /// fresh tip. A second failure (or a vanished branch) propagates unchanged.
 fn fetch_objects(
     store: &ObjectStore,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
 ) -> Result<usize, DispatchError> {
@@ -847,7 +855,7 @@ fn fetch_objects(
         // because a concurrent re-baseline moved the branch under us, the
         // freshly re-read tip (see this fn's doc comment).
         let published_tip =
-            match fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, chain_head, h) {
+            match fetch_pack_chain(store, tx, layout, remote, &r.name, chain_head, h) {
                 Ok(()) => h,
                 Err(e @ DispatchError::RemoteMissingObject(_)) => {
                     // Re-read the branch's CURRENT tip + packmap. If either
@@ -860,12 +868,12 @@ fn fetch_objects(
                     ) else {
                         return Err(e);
                     };
-                    fetch_pack_chain(store, tx, mkit_dir, remote, &r.name, fresh_head, fresh_h)?;
+                    fetch_pack_chain(store, tx, layout, remote, &r.name, fresh_head, fresh_h)?;
                     fresh_h
                 }
                 Err(e) => return Err(e),
             };
-        refs::write_remote_ref(mkit_dir, remote, &r.name, &published_tip)?;
+        refs::write_remote_ref(layout, remote, &r.name, &published_tip)?;
         n += 1;
     }
     Ok(n)

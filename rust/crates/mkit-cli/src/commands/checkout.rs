@@ -10,6 +10,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
 use mkit_core::refs;
@@ -73,12 +74,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -93,7 +94,7 @@ pub fn run(args: &[String]) -> u8 {
     let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
         if let Some(new) = create_new {
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
-            let start = match super::revspec::resolve_revision(&store, &mkit_dir, start_spec) {
+            let start = match super::revspec::resolve_revision(&store, &layout, start_spec) {
                 Ok(h) => h,
                 Err(e) => {
                     return emit_err(
@@ -102,7 +103,7 @@ pub fn run(args: &[String]) -> u8 {
                     );
                 }
             };
-            let existed = matches!(refs::read_ref(&mkit_dir, new), Ok(Some(_)));
+            let existed = matches!(refs::read_ref(&layout, new), Ok(Some(_)));
             if existed && opts.create_force.is_none() {
                 return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
             }
@@ -140,7 +141,7 @@ pub fn run(args: &[String]) -> u8 {
     // WITHOUT short-circuiting the safety gate (a dirty same-branch
     // checkout must still refuse, like mkit always has).
     let already_on = matches!(
-        refs::read_head(&mkit_dir),
+        refs::read_head(&layout),
         Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
     );
 
@@ -148,7 +149,7 @@ pub fn run(args: &[String]) -> u8 {
     // otherwise resolve `<name>` via the shared revspec resolver.
     let commit_hash: Hash = match &create_plan {
         Some((_, start, ..)) => *start,
-        None => match super::revspec::resolve_revision(&store, &mkit_dir, name) {
+        None => match super::revspec::resolve_revision(&store, &layout, name) {
             Ok(h) => h,
             Err(e) => {
                 return emit_err(
@@ -192,7 +193,7 @@ pub fn run(args: &[String]) -> u8 {
             sparse_patterns: None,
         }
     } else {
-        match prepare_sparse_restore(&cwd, &store, tree_hash, &opts.sparse) {
+        match prepare_sparse_restore(&layout, &store, tree_hash, &opts.sparse) {
             Ok(o) => o,
             Err((msg, code)) => return emit_err(&msg, code),
         }
@@ -212,7 +213,7 @@ pub fn run(args: &[String]) -> u8 {
     // `--force` (git checkout -f) skips the gate, discarding local edits.
     if !opts.force
         && let Err(e) =
-            super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &sparse_opts)
+            super::ensure_restore_safe_with_options(&layout, &store, tree_hash, &sparse_opts)
     {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
@@ -220,7 +221,8 @@ pub fn run(args: &[String]) -> u8 {
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
     // first if any of them carries local edits (unless `--force`).
-    let dropped = match dropped_paths_guarded(&cwd, &store, tree_hash, &sparse_opts, opts.force) {
+    let dropped = match dropped_paths_guarded(&layout, &store, tree_hash, &sparse_opts, opts.force)
+    {
         Ok(d) => d,
         Err(code) => return code,
     };
@@ -229,7 +231,7 @@ pub fn run(args: &[String]) -> u8 {
     // it to here means a refused switch above leaves no orphan branch
     // behind (git creates nothing when it refuses the operation).
     if let Some((new, start, cond, _)) = &create_plan {
-        match super::write_ref_recording_history(&mkit_dir, new, *cond, start) {
+        match super::write_ref_recording_history(&layout, new, *cond, start) {
             Ok(()) => {}
             Err(refs::RefError::Conflict(_)) => {
                 return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
@@ -248,11 +250,11 @@ pub fn run(args: &[String]) -> u8 {
     // ordinary local changes and a re-run of `mkit checkout` repairs.
     // The `ensure_restore_safe` gate above already guaranteed no real
     // user work is at risk, so the stale-worktree window is benign.
-    let is_branch = matches!(refs::read_ref(&mkit_dir, name), Ok(Some(_)));
+    let is_branch = matches!(refs::read_ref(&layout, name), Ok(Some(_)));
     let head_err = if is_branch {
-        refs::write_head_branch(&mkit_dir, name)
+        refs::write_head_branch(&layout, name)
     } else {
-        refs::write_head_detached(&mkit_dir, &commit_hash)
+        refs::write_head_detached(&layout, &commit_hash)
     };
     if let Err(e) = head_err {
         return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
@@ -271,7 +273,7 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(code) = remove_dropped(&cwd, &dropped) {
         return code;
     }
-    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
 
@@ -314,14 +316,14 @@ use super::error as emit_err;
 /// worktree snapshot — refuses (returning the exit code) when one is
 /// found.
 fn dropped_paths_guarded(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
     opts: &RestoreOptions,
     force: bool,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, u8> {
     let dropped: Vec<(String, EntryStatus, Hash)> =
-        match super::dropped_tracked_paths(cwd, store, tree_hash) {
+        match super::dropped_tracked_paths(layout, store, tree_hash) {
             Ok(all) => all
                 .into_iter()
                 .filter(|(path, _, _)| super::restore_affects_path(opts, path))
@@ -332,7 +334,7 @@ fn dropped_paths_guarded(
     if force {
         return Ok(dropped);
     }
-    match super::locally_modified_dropped_path(cwd, store, &dropped) {
+    match super::locally_modified_dropped_path(layout.worktree_root(), store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(
                 "restore would overwrite local changes; commit, stash, or reset '{path}' first"
@@ -399,7 +401,7 @@ fn prune_empty_parents(root: &std::path::Path, rel_path: &str) {
 /// thread it back through the existing `emit_err` plumbing.
 #[cfg(feature = "sparse-checkout")]
 fn prepare_sparse_restore(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
     patterns: &[String],
@@ -447,7 +449,7 @@ fn prepare_sparse_restore(
     // equivalent of "server delivers manifest, client checks it",
     // catching a regression in either side without standing up a
     // transport — and rewrites the cache.
-    match load_or_build(cwd, &tree, &filter) {
+    match load_or_build(layout, &tree, &filter) {
         Ok(SparseOutcome::CacheHit) => {}
         Ok(SparseOutcome::Built { store_error }) => {
             if let Some(e) = store_error {

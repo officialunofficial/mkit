@@ -390,16 +390,18 @@ fn commit_all_tracks_executable_bit_changes() {
 #[test]
 fn commit_all_preserves_existing_executable_mode_on_non_unix() {
     use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+    use mkit_core::layout::RepoLayout;
     use mkit_core::object::{Blob, Object};
     use mkit_core::serialize;
     use mkit_core::store::ObjectStore;
 
     let td = init_repo();
     let p = td.path();
+    let layout = RepoLayout::single(p);
     let script = p.join("run.sh");
 
     fs::write(&script, b"v1").unwrap();
-    let store = ObjectStore::open(p).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let blob = Object::Blob(Blob {
         data: b"v1".to_vec(),
     });
@@ -415,7 +417,7 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
         ino: 0,
         ctime_ns: 0,
     });
-    index::write_index(p, &idx).unwrap();
+    index::write_index(&layout, &idx).unwrap();
     ok(p, &["commit", "-m", "first"]);
 
     fs::write(&script, b"v2").unwrap();
@@ -433,16 +435,18 @@ fn commit_all_preserves_existing_executable_mode_on_non_unix() {
 #[test]
 fn add_one_preserves_existing_executable_mode_on_non_unix() {
     use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+    use mkit_core::layout::RepoLayout;
     use mkit_core::object::{Blob, Object};
     use mkit_core::serialize;
     use mkit_core::store::ObjectStore;
 
     let td = init_repo();
     let p = td.path();
+    let layout = RepoLayout::single(p);
     let script = p.join("run.sh");
 
     fs::write(&script, b"v1").unwrap();
-    let store = ObjectStore::open(p).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let blob = Object::Blob(Blob {
         data: b"v1".to_vec(),
     });
@@ -458,7 +462,7 @@ fn add_one_preserves_existing_executable_mode_on_non_unix() {
         ino: 0,
         ctime_ns: 0,
     });
-    index::write_index(p, &idx).unwrap();
+    index::write_index(&layout, &idx).unwrap();
 
     fs::write(&script, b"v2").unwrap();
     ok(p, &["add", "run.sh"]);
@@ -476,6 +480,7 @@ fn add_one_preserves_existing_executable_mode_on_non_unix() {
 fn commit_all_rejects_invalid_index_path_before_refreshing() {
     use mkit_core::hash::ZERO;
     use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+    use mkit_core::layout::RepoLayout;
 
     let td = init_repo();
     let p = td.path();
@@ -489,7 +494,7 @@ fn commit_all_rejects_invalid_index_path_before_refreshing() {
         ino: 0,
         ctime_ns: 0,
     });
-    index::write_index(p, &idx).unwrap();
+    index::write_index(&RepoLayout::single(p), &idx).unwrap();
 
     let out = run(p, &["commit", "-a", "-m", "should fail"]);
     assert!(

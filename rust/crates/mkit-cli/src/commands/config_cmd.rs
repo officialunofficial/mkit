@@ -41,11 +41,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
+    let layout = super::resolve_layout(&cwd);
     // Read both layers: the merged view drives `show`, but a write must
     // persist ONLY the repo layer — serializing the merged config would
     // copy user-scoped values (e.g. a private `user.email`) into
     // `.mkit/config`, which travels with clones.
-    let layered = match config::read_layered(&cwd) {
+    let layered = match config::read_layered(&layout) {
         Ok(l) => l,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -105,7 +106,7 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(code) = apply(&mut repo_cfg, key, &normalized_value) {
         return code;
     }
-    match config::write(&cwd, &repo_cfg) {
+    match config::write(&layout, &repo_cfg) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write config: {e}"), exit::CANTCREAT),
     }

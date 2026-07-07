@@ -407,9 +407,10 @@ fn amend_advance_is_recorded_in_journal() {
     ok(root, &["commit", "--amend", "-m", "amended"]);
     // amend moves the branch via write_ref_recording_history → 3rd
     // recorded advance.
-    let mkit = root.join(mkit_core::MKIT_DIR);
     let exec = Arc::new(TokioExecutor::new().expect("tokio runtime"));
-    let history = CommitHistory::open_at(exec, &mkit, "main").expect("reopen journal");
+    let history =
+        CommitHistory::open_at(exec, &mkit_core::layout::RepoLayout::single(root), "main")
+            .expect("reopen journal");
     assert_eq!(
         history.len(),
         3,

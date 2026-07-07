@@ -27,10 +27,11 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::atomic::write_atomic;
 use crate::hash::{self, HASH_LEN, Hash};
+use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
@@ -350,10 +351,11 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     Ok(Index { entries })
 }
 
-/// Read the index from `<root>/.mkit/index`. Returns an empty index if
-/// the file is absent or zero-length.
-pub fn read_index(root: &Path) -> IndexResult<Index> {
-    let path = root.join(INDEX_FILE);
+/// Read this worktree's staging index. Returns an empty index if the
+/// file is absent or zero-length. The index is per-worktree state —
+/// see [`crate::layout`].
+pub fn read_index(layout: &RepoLayout) -> IndexResult<Index> {
+    let path = layout.index_file();
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Index::new()),
@@ -412,7 +414,7 @@ pub fn read_index(root: &Path) -> IndexResult<Index> {
 /// filesystems.
 const RACY_WINDOW_NS: u64 = 1_000_000_000;
 
-/// Write the index atomically to `<root>/.mkit/index`. The `.mkit/`
+/// Write this worktree's staging index atomically. The containing
 /// directory is created if absent.
 ///
 /// Stat-cache fields are written verbatim; the racy-clean rule is
@@ -421,8 +423,8 @@ const RACY_WINDOW_NS: u64 = 1_000_000_000;
 /// racy-marked entry persists the zeroed cache for it — sound (zero
 /// always re-hashes) and healed by the next add/status touching the
 /// path; only the racy window's worth of entries is affected.
-pub fn write_index(root: &Path, idx: &Index) -> IndexResult<()> {
-    let path = root.join(INDEX_FILE);
+pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
+    let path = layout.index_file();
     write_atomic(&path, &idx.serialize(), true)?;
     Ok(())
 }
@@ -494,10 +496,10 @@ fn push_tree_entries(
     Ok(())
 }
 
-/// Compute the absolute path of the index file under `root`.
+/// Compute the absolute path of this worktree's index file.
 #[must_use]
-pub fn index_path(root: &Path) -> PathBuf {
-    root.join(INDEX_FILE)
+pub fn index_path(layout: &RepoLayout) -> PathBuf {
+    layout.index_file()
 }
 
 /// Validate a staged path: non-empty, relative, no traversal, no NUL,
@@ -657,6 +659,7 @@ mod tests {
     #[test]
     fn read_index_invalidates_racy_entries() {
         let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let now_ns = u64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -686,14 +689,14 @@ mod tests {
                 },
             ],
         };
-        write_index(dir.path(), &idx).unwrap();
+        write_index(&layout, &idx).unwrap();
         // Pin the index FILE's mtime to exactly the racy entry's time so
         // the test is deterministic regardless of scheduling delays and
         // the granularity-derived window size: an entry whose mtime
         // equals the index mtime is racy under any window.
         let f = fs::File::options()
             .write(true)
-            .open(index_path(dir.path()))
+            .open(index_path(&layout))
             .unwrap();
         f.set_times(
             fs::FileTimes::new()
@@ -701,7 +704,7 @@ mod tests {
         )
         .unwrap();
         drop(f);
-        let read = read_index(dir.path()).unwrap();
+        let read = read_index(&layout).unwrap();
         let racy = &read.entries[read.find_entry("racy.txt").unwrap()];
         let settled = &read.entries[read.find_entry("settled.txt").unwrap()];
         assert_eq!(
@@ -720,6 +723,7 @@ mod tests {
     #[test]
     fn coarse_entry_mtime_keeps_one_second_window() {
         let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let base_ns: u64 = 1_700_000_000_000_000_000; // whole-second tick
         let idx = Index {
             entries: vec![
@@ -747,11 +751,11 @@ mod tests {
                 },
             ],
         };
-        write_index(dir.path(), &idx).unwrap();
+        write_index(&layout, &idx).unwrap();
         // Index file mtime: ns-precise, 500ms after the coarse entry.
         let f = fs::File::options()
             .write(true)
-            .open(index_path(dir.path()))
+            .open(index_path(&layout))
             .unwrap();
         f.set_times(fs::FileTimes::new().set_modified(
             std::time::UNIX_EPOCH + std::time::Duration::from_nanos(base_ns - 500_000_000 + 777),
@@ -759,7 +763,7 @@ mod tests {
         .unwrap();
         drop(f);
 
-        let read = read_index(dir.path()).unwrap();
+        let read = read_index(&layout).unwrap();
         let coarse = &read.entries[read.find_entry("coarse.txt").unwrap()];
         let precise = &read.entries[read.find_entry("precise.txt").unwrap()];
         assert_eq!(
@@ -1097,15 +1101,16 @@ mod tests {
             ino: 0,
             ctime_ns: 0,
         });
-        write_index(dir.path(), &idx).unwrap();
-        let read = read_index(dir.path()).unwrap();
+        let layout = RepoLayout::single(dir.path());
+        write_index(&layout, &idx).unwrap();
+        let read = read_index(&layout).unwrap();
         assert_eq!(read, idx);
     }
 
     #[test]
     fn read_missing_file_returns_empty_index() {
         let dir = TempDir::new().unwrap();
-        let idx = read_index(dir.path()).unwrap();
+        let idx = read_index(&RepoLayout::single(dir.path())).unwrap();
         assert!(idx.entries.is_empty());
     }
 
@@ -1114,7 +1119,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join(".mkit")).unwrap();
         fs::write(dir.path().join(INDEX_FILE), b"").unwrap();
-        let idx = read_index(dir.path()).unwrap();
+        let idx = read_index(&RepoLayout::single(dir.path())).unwrap();
         assert!(idx.entries.is_empty());
     }
 
@@ -1132,7 +1137,7 @@ mod tests {
             .unwrap();
         f.set_len(MAX_INDEX_BYTES + 1).unwrap();
         drop(f);
-        let err = read_index(dir.path()).unwrap_err();
+        let err = read_index(&RepoLayout::single(dir.path())).unwrap_err();
         assert!(matches!(err, IndexError::TooLarge));
     }
 
@@ -1213,7 +1218,7 @@ mod tests {
         }
 
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         let file = put(
             &store,
             &Object::Blob(Blob {
@@ -1287,7 +1292,7 @@ mod tests {
         }
 
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         let blob = put(
             &store,
             &Object::Blob(Blob {

@@ -68,6 +68,7 @@ use std::path::Path;
 use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
 use mkit_core::index::{self, EntryStatus, Index};
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::{
     DiffEntry, DiffKind, StatusEntry, StatusStaging, detect_exact_renames, status_diff_observed,
 };
@@ -132,16 +133,16 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     // Resolve HEAD tree hash (None on a HEAD-less repo). Use the shared
     // helper so a `Remix` HEAD is compared against its tree like every
     // other command, not treated as "no HEAD".
-    let head_tree: Option<mkit_core::Hash> = match super::current_head_tree(&cwd, &store) {
+    let head_tree: Option<mkit_core::Hash> = match super::current_head_tree(&layout, &store) {
         Ok(t) => t,
         Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
     };
@@ -149,7 +150,7 @@ pub fn run(args: &[String]) -> u8 {
     // Load the index, falling back to None only when absent/empty.
     // Corrupt or invalid persisted state must surface instead of
     // silently reverting to the HEAD<->worktree comparison.
-    let idx = match index::read_index(&cwd) {
+    let idx = match index::read_index(&layout) {
         Ok(idx) if idx.entries.is_empty() => None,
         Ok(idx) => Some(idx),
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
@@ -177,7 +178,7 @@ pub fn run(args: &[String]) -> u8 {
     // stat (never a later one — see StatObservation). Purely an
     // optimisation — skipped on lock contention or any error.
     if idx.is_some() {
-        refresh_stat_cache(&cwd, &observations);
+        refresh_stat_cache(&layout, &observations);
     }
 
     // Rename detection (on by default, like git): pair identical-content
@@ -188,12 +189,12 @@ pub fn run(args: &[String]) -> u8 {
 
     if porcelain {
         if opts.porcelain == Some(PorcelainVersion::V2) {
-            render_porcelain_v2(&store, head_tree.as_ref(), &cwd, &entries, opts.z)
+            render_porcelain_v2(&store, head_tree.as_ref(), &layout, &entries, opts.z)
         } else {
             render_porcelain(&entries, opts.z)
         }
     } else {
-        render_human(&mkit_dir, &entries)
+        render_human(&layout, &entries)
     }
 }
 
@@ -213,12 +214,12 @@ pub fn run(args: &[String]) -> u8 {
 ///
 /// Lock contention or any error skips the refresh — it is an
 /// optimisation.
-fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObservation]) {
+fn refresh_stat_cache(layout: &RepoLayout, observations: &[mkit_core::worktree::StatObservation]) {
     if observations.is_empty() {
         return;
     }
     // Version sniff: never auto-upgrade a v1 index from a query command.
-    match std::fs::File::open(mkit_core::index::index_path(root)) {
+    match std::fs::File::open(mkit_core::index::index_path(layout)) {
         Ok(mut f) => {
             use std::io::Read as _;
             let mut header = [0u8; 5];
@@ -231,13 +232,13 @@ fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObse
     // Try-take the worktree lock with a near-zero timeout and no error
     // output; a concurrent mutator wins and we silently skip.
     let Ok(_lock) = mkit_core::repo_lock::acquire(
-        &root.join(mkit_core::MKIT_DIR),
+        layout.worktree_state_dir(),
         super::WORKTREE_LOCK,
         std::time::Duration::from_millis(10),
     ) else {
         return;
     };
-    let Ok(mut fresh) = index::read_index(root) else {
+    let Ok(mut fresh) = index::read_index(layout) else {
         return;
     };
     let by_path: std::collections::HashMap<&str, &mkit_core::worktree::StatObservation> =
@@ -267,7 +268,7 @@ fn refresh_stat_cache(root: &Path, observations: &[mkit_core::worktree::StatObse
         }
     }
     if updated {
-        let _ = index::write_index(root, &fresh);
+        let _ = index::write_index(layout, &fresh);
     }
 }
 
@@ -321,7 +322,7 @@ fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
 fn render_porcelain_v2(
     store: &ObjectStore,
     head_tree: Option<&Hash>,
-    root: &Path,
+    layout: &RepoLayout,
     entries: &[StatusEntry],
     z: bool,
 ) -> u8 {
@@ -334,7 +335,7 @@ fn render_porcelain_v2(
         },
         None => Index::new(),
     };
-    let work_index = match super::read_or_seed_index_from_head(root, store) {
+    let work_index = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -354,7 +355,7 @@ fn render_porcelain_v2(
             // means hH == hI and the score is `R100`. Verified vs git.
             let (m_head, h_head) = v2_mode_and_id(&head_index, old);
             let (m_index, h_index) = v2_mode_and_id(&work_index, path);
-            let m_work = worktree_mode(root, path);
+            let m_work = worktree_mode(layout.worktree_root(), path);
             let prefix =
                 format!("2 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} R100 ");
             emit_v2_rename_record(&mut stdout, &prefix, path, old, z);
@@ -362,7 +363,7 @@ fn render_porcelain_v2(
         }
         let (m_head, h_head) = v2_mode_and_id(&head_index, path);
         let (m_index, h_index) = v2_mode_and_id(&work_index, path);
-        let m_work = worktree_mode(root, path);
+        let m_work = worktree_mode(layout.worktree_root(), path);
         let prefix = format!("1 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} ");
         emit_v2_record(&mut stdout, &prefix, path, z);
     }
@@ -545,14 +546,14 @@ fn porcelain_code(staging: StatusStaging, kind: DiffKind) -> &'static str {
 /// docs/CLI.md). A consumer that wants the human format in a pipeline can
 /// `mkit status 2>&1` explicitly; the default pipeline behaviour stays
 /// empty-on-clean. The (use "mkit …") hints name mkit commands, not git.
-fn render_human(mkit_dir: &std::path::Path, entries: &[StatusEntry]) -> u8 {
+fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
     let mut stderr = std::io::stderr().lock();
 
     // Branch / HEAD line, matching git's banners.
-    match refs::read_head(mkit_dir) {
+    match refs::read_head(layout) {
         Ok(refs::Head::Branch(name)) => {
             let _ = writeln!(stderr, "On branch {name}");
-            if refs::resolve_head(mkit_dir).ok().flatten().is_none() {
+            if refs::resolve_head(layout).ok().flatten().is_none() {
                 let _ = writeln!(stderr, "\nNo commits yet");
             }
         }

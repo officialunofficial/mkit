@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mkit_cli::remote_dispatch::{DispatchError, pull_all, push_all, push_branch};
 use mkit_core::hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::reachable_objects;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
 use mkit_core::refs::{self, Ref};
@@ -202,13 +203,15 @@ fn clone_after_delta_push_reconstructs_byte_identical() {
     // Every object in the closure must read back hash-verified (ObjectStore
     // ::read re-hashes and rejects mismatches), proving the delta chain
     // reconstructed to the correct ids.
-    let alice_mkit = alice.path().join(".mkit");
-    let bob_mkit = bob.path().join(".mkit");
-    let alice_tip = refs::read_ref(&alice_mkit, "main").unwrap().unwrap();
-    let bob_tip = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
+        .unwrap()
+        .unwrap();
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
+        .unwrap()
+        .unwrap();
     assert_eq!(alice_tip, bob_tip, "clone must land on the same tip");
 
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
     let closure = reachable_objects(&bob_store, &bob_tip).unwrap();
     assert!(closure.len() > 4, "closure should include several chunks");
     for h in &closure {
@@ -254,10 +257,10 @@ fn clone_reconstructs_multi_commit_delta_chain() {
     assert_eq!(fs::read(bob.path().join("big.bin")).unwrap(), latest);
 
     // Hash-verify the whole reconstructed closure.
-    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
         .unwrap()
         .unwrap();
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
     for h in reachable_objects(&bob_store, &bob_tip).unwrap() {
         let bytes = bob_store
             .read(&h)
@@ -350,10 +353,10 @@ fn head_not_moved_when_packmap_cannot_be_established() {
     fs::write(alice.path().join("big.bin"), big_buffer()).unwrap();
     commit_all(alice.path(), "v1");
 
-    let tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let store = ObjectStore::open(alice.path()).unwrap();
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
     let tx = PackmapBlockingTransport::new();
 
     let err = push_branch(&tx, &store, "main", tip, RefWriteCondition::Missing).unwrap_err();
@@ -388,7 +391,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     push_all(alice.path(), &tx).expect("alice base push");
     pull_all(bob.path(), &tx, "default").expect("bob clones base");
 
-    let shared_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let shared_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
 
@@ -406,14 +409,14 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     fs::write(bob.path().join("big.bin"), &bv).unwrap();
     commit_all(bob.path(), "B1");
 
-    let alice_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
         .unwrap()
         .unwrap();
-    let alice_store = ObjectStore::open(alice.path()).unwrap();
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let alice_store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
 
     // alice wins the head CAS off the shared base.
     push_branch(
@@ -447,11 +450,11 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     pull_all(carol.path(), &tx, "default").expect("carol clones");
     assert_eq!(fs::read(carol.path().join("big.bin")).unwrap(), av);
 
-    let carol_tip = refs::read_ref(&carol.path().join(".mkit"), "main")
+    let carol_tip = refs::read_ref(&RepoLayout::single(carol.path()), "main")
         .unwrap()
         .unwrap();
     assert_eq!(carol_tip, alice_tip);
-    let carol_store = ObjectStore::open(carol.path()).unwrap();
+    let carol_store = ObjectStore::open(&RepoLayout::single(carol.path())).unwrap();
     for h in reachable_objects(&carol_store, &carol_tip).unwrap() {
         let b = carol_store.read(&h).expect("hash-verified");
         assert_eq!(
@@ -540,7 +543,7 @@ fn fetch_fails_loudly_when_advertised_pack_is_missing() {
     );
     // Bob must NOT have recorded a remote-tracking ref for the broken branch.
     assert!(
-        refs::read_remote_ref(&bob.path().join(".mkit"), "default", "main")
+        refs::read_remote_ref(&RepoLayout::single(bob.path()), "default", "main")
             .unwrap()
             .is_none(),
         "no ref should be published for an incompletely-fetched branch"
@@ -559,7 +562,7 @@ fn push_blocks_on_a_corrupt_prior_packmap_without_moving_head() {
 
     let tx = MemoryTransport::new();
     push_all(alice.path(), &tx).expect("push v1");
-    let v1_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let v1_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
 
@@ -576,10 +579,10 @@ fn push_blocks_on_a_corrupt_prior_packmap_without_moving_head() {
     v2[500_000] ^= 0xFF;
     fs::write(alice.path().join("big.bin"), &v2).unwrap();
     commit_all(alice.path(), "v2");
-    let v2_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let v2_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let store = ObjectStore::open(alice.path()).unwrap();
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
 
     let err = push_branch(
         &tx,
@@ -631,10 +634,10 @@ fn self_contained_push_resets_a_corrupt_packmap_chain() {
     };
     fs::write(carol.path().join("c.bin"), &carol_data).unwrap();
     commit_all(carol.path(), "carol-root");
-    let carol_tip = refs::read_ref(&carol.path().join(".mkit"), "main")
+    let carol_tip = refs::read_ref(&RepoLayout::single(carol.path()), "main")
         .unwrap()
         .unwrap();
-    let carol_store = ObjectStore::open(carol.path()).unwrap();
+    let carol_store = ObjectStore::open(&RepoLayout::single(carol.path())).unwrap();
 
     // Force-push over the divergent head; the self-contained plan resets the
     // broken chain instead of blocking.
@@ -673,7 +676,7 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
     push_all(alice.path(), &tx).expect("push v2");
     let n2 = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
     assert_ne!(n1, n2, "v2 must chain a new head node");
-    let v2_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let v2_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
 
@@ -685,10 +688,10 @@ fn push_blocks_on_a_corrupt_deeper_packmap_node() {
     data[1_200_000] ^= 0xAA;
     fs::write(alice.path().join("big.bin"), &data).unwrap();
     commit_all(alice.path(), "v3");
-    let v3_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let v3_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let store = ObjectStore::open(alice.path()).unwrap();
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
 
     let err = push_branch(
         &tx,

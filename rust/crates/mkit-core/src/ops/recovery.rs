@@ -38,10 +38,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
-use std::path::Path;
 
 use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::hash::{self, Hash};
+use crate::layout::RepoLayout;
 
 /// File name under `.mkit/` for the append-only recovery log.
 pub const RECOVERY_LOG: &str = "recovery-log";
@@ -114,7 +114,7 @@ impl Default for RetentionPolicy {
 /// # Errors
 /// [`RecoveryError::InvalidField`] if `op`/`branch` contain a tab or
 /// newline; [`RecoveryError::Io`] on filesystem failure.
-pub fn record(mkit_dir: &Path, entry: &RecoveryEntry) -> Result<()> {
+pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
     if entry.op.contains(['\t', '\n']) {
         return Err(RecoveryError::InvalidField("op"));
     }
@@ -124,7 +124,7 @@ pub fn record(mkit_dir: &Path, entry: &RecoveryEntry) -> Result<()> {
     if entry.superseded == hash::ZERO {
         return Ok(());
     }
-    fs::create_dir_all(mkit_dir)?;
+    fs::create_dir_all(layout.common_dir())?;
     let line = format!(
         "{}\t{}\t{}\t{}\n",
         entry.timestamp,
@@ -132,13 +132,13 @@ pub fn record(mkit_dir: &Path, entry: &RecoveryEntry) -> Result<()> {
         hash::to_hex(&entry.superseded),
         entry.branch,
     );
-    let path = mkit_dir.join(RECOVERY_LOG);
+    let path = layout.recovery_log_file();
     let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
     f.write_all(line.as_bytes())?;
     // fsync the data, then the directory entry (cheap — records happen
     // only on history rewrites, and durability is the whole point).
     f.sync_all()?;
-    sync_parent_dir(mkit_dir)?;
+    sync_parent_dir(layout.common_dir())?;
     Ok(())
 }
 
@@ -146,8 +146,8 @@ pub fn record(mkit_dir: &Path, entry: &RecoveryEntry) -> Result<()> {
 ///
 /// # Errors
 /// Strict: any unparseable line or bad hash errors (fail closed for gc).
-pub fn read_all(mkit_dir: &Path) -> Result<Vec<RecoveryEntry>> {
-    let raw = match fs::read_to_string(mkit_dir.join(RECOVERY_LOG)) {
+pub fn read_all(layout: &RepoLayout) -> Result<Vec<RecoveryEntry>> {
+    let raw = match fs::read_to_string(layout.recovery_log_file()) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
@@ -164,8 +164,8 @@ pub fn read_all(mkit_dir: &Path) -> Result<Vec<RecoveryEntry>> {
 ///
 /// # Errors
 /// Propagates [`RecoveryError`] from a strict [`read_all`].
-pub fn roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>> {
-    Ok(read_all(mkit_dir)?
+pub fn roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>> {
+    Ok(read_all(layout)?
         .into_iter()
         .map(|e| e.superseded)
         .filter(|h| *h != hash::ZERO)
@@ -193,8 +193,8 @@ fn is_retained(
 ///
 /// # Errors
 /// [`RecoveryError`] from a strict [`read_all`].
-pub fn would_expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Result<usize> {
-    let all = read_all(mkit_dir)?;
+pub fn would_expire(layout: &RepoLayout, now: u64, policy: &RetentionPolicy) -> Result<usize> {
+    let all = read_all(layout)?;
     let total = all.len();
     Ok(all
         .iter()
@@ -213,8 +213,8 @@ pub fn would_expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Resu
 ///
 /// # Errors
 /// [`RecoveryError`] on a strict read or filesystem failure.
-pub fn expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Result<usize> {
-    let all = read_all(mkit_dir)?;
+pub fn expire(layout: &RepoLayout, now: u64, policy: &RetentionPolicy) -> Result<usize> {
+    let all = read_all(layout)?;
     let total = all.len();
     if total == 0 {
         return Ok(0);
@@ -240,7 +240,7 @@ pub fn expire(mkit_dir: &Path, now: u64, policy: &RetentionPolicy) -> Result<usi
             e.branch
         );
     }
-    write_atomic(&mkit_dir.join(RECOVERY_LOG), buf.as_bytes(), true)?;
+    write_atomic(&layout.recovery_log_file(), buf.as_bytes(), true)?;
     Ok(pruned)
 }
 
@@ -273,10 +273,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn md() -> (TempDir, std::path::PathBuf) {
+    fn md() -> (TempDir, RepoLayout) {
         let d = TempDir::new().unwrap();
-        let md = d.path().join(crate::MKIT_DIR);
-        fs::create_dir_all(&md).unwrap();
+        let md = RepoLayout::single(d.path());
+        fs::create_dir_all(md.common_dir()).unwrap();
         (d, md)
     }
 
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn read_fails_closed_on_corrupt_line() {
         let (_d, md) = md();
-        fs::write(md.join(RECOVERY_LOG), "not-a-valid-line\n").unwrap();
+        fs::write(md.recovery_log_file(), "not-a-valid-line\n").unwrap();
         assert!(read_all(&md).is_err(), "corrupt log must fail closed");
     }
 

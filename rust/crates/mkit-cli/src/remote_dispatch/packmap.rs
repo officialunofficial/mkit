@@ -20,7 +20,7 @@
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
 //! them.
 
-use std::path::Path;
+use mkit_core::layout::RepoLayout;
 
 use mkit_core::hash::Hash;
 use mkit_core::pack::{self, PackReader};
@@ -518,7 +518,7 @@ pub(crate) fn commit_head(
 pub(crate) fn fetch_pack_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     remote: &str,
     branch: &str,
     head_key: Hash,
@@ -532,11 +532,11 @@ pub(crate) fn fetch_pack_chain(
     // The record is a pure performance cache: a read failure must never fail
     // a fetch whose objects land, so a load error is non-fatal — warn and
     // continue with an empty record (every pack re-downloads, always correct).
-    let mut applied = AppliedPacks::load(mkit_dir, remote).unwrap_or_else(|e| {
+    let mut applied = AppliedPacks::load(layout, remote).unwrap_or_else(|e| {
         eprintln!(
             "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
         );
-        AppliedPacks::empty(mkit_dir, remote)
+        AppliedPacks::empty(layout, remote)
     });
 
     // Phase 1: download + unpack. A failure here is a remote-side / network

@@ -2,10 +2,10 @@
 //! (named, or the flat default) and fast-forward the current branch.
 
 use std::io::Write;
-use std::path::Path;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 
 use crate::clap_shim;
@@ -31,7 +31,8 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let cfg = match config::read_layered(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let cfg = match config::read_layered(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -48,21 +49,20 @@ pub fn run(args: &[String]) -> u8 {
     // Snapshot the current branch tip so we can report a git-style
     // `Updating <old>..<new>` / `Fast-forward` block (or `Already up to
     // date.`) once the fast-forward completes.
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let branch = match mkit_core::refs::read_head(&mkit_dir) {
+    let branch = match mkit_core::refs::read_head(&layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => Some(b),
         _ => None,
     };
     let old_tip = branch
         .as_deref()
-        .and_then(|b| mkit_core::refs::read_ref(&mkit_dir, b).ok().flatten());
+        .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
     match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
         Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref(), &resolved.name) {
             Ok(_) => {
                 let new_tip = branch
                     .as_deref()
-                    .and_then(|b| mkit_core::refs::read_ref(&mkit_dir, b).ok().flatten());
-                report_pull(&cwd, endpoint, old_tip, new_tip);
+                    .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
+                report_pull(&layout, endpoint, old_tip, new_tip);
                 exit::OK
             }
             Err(remote_dispatch::DispatchError::Interrupted) => {
@@ -81,7 +81,7 @@ pub fn run(args: &[String]) -> u8 {
 /// no-op, else `From <url>` + `Updating <old>..<new>` + `Fast-forward` +
 /// the diffstat. The diffstat is best-effort — a failure to compute it
 /// still leaves the headline lines intact.
-fn report_pull(cwd: &Path, endpoint: &str, old: Option<Hash>, new: Option<Hash>) {
+fn report_pull(layout: &RepoLayout, endpoint: &str, old: Option<Hash>, new: Option<Hash>) {
     let mut stderr = std::io::stderr().lock();
     match (old, new) {
         (o, n) if o == n => {
@@ -97,7 +97,7 @@ fn report_pull(cwd: &Path, endpoint: &str, old: Option<Hash>, new: Option<Hash>)
             );
             let _ = writeln!(stderr, "Fast-forward");
             drop(stderr);
-            print_ff_stat(cwd, o, n);
+            print_ff_stat(layout, o, n);
         }
         _ => {
             // First-ever pull populating an empty branch: objects, HEAD,
@@ -109,8 +109,8 @@ fn report_pull(cwd: &Path, endpoint: &str, old: Option<Hash>, new: Option<Hash>)
 
 /// Best-effort `Fast-forward` diffstat between two commits' trees,
 /// reusing `diff`'s renderer.
-fn print_ff_stat(cwd: &Path, old: Hash, new: Hash) {
-    let Ok(store) = crate::commands::open_store_configured(cwd) else {
+fn print_ff_stat(layout: &RepoLayout, old: Hash, new: Hash) {
+    let Ok(store) = crate::commands::open_store_configured(layout) else {
         return;
     };
     let (Some(old_tree), Some(new_tree)) = (tree_of(&store, old), tree_of(&store, new)) else {

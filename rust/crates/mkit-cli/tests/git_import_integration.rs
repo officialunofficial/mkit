@@ -9,6 +9,7 @@
 mod common;
 
 use common::Repo;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -138,13 +139,14 @@ fn fresh_clone_imports_checks_out_and_verifies() {
 
     // Tag imported as an mkit tag object on refs/tags/v1.
     let mkit_dir = fork.join(".mkit");
-    let tag = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
-    let store = ObjectStore::open(&fork).unwrap();
+    let layout = RepoLayout::single(&fork);
+    let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     assert!(matches!(store.read_object(&tag), Ok(Object::Tag(_))));
 
     // Tracking ref exists and the dedicated import key was pinned.
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .is_some()
     );
@@ -198,8 +200,8 @@ fn upstream_force_push_warns_and_rewinds_tracking_ref() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
-    let before = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let layout = RepoLayout::single(&fork);
+    let before = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
     let up = f.upstream();
@@ -215,7 +217,7 @@ fn upstream_force_push_warns_and_rewinds_tracking_ref() {
         "stderr: {stderr}"
     );
     // The warning must come WITH the rewind, not instead of it.
-    let after = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let after = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
     assert_ne!(after, before, "tracking ref rewound to the new history");
@@ -316,14 +318,15 @@ fn reimport_is_noop_and_fresh_state_is_deterministic() {
     let f = Fixture::new();
     let fork = f.import();
     let mkit_dir = fork.join(".mkit");
-    let head1 = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let layout = RepoLayout::single(&fork);
+    let head1 = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
 
     // No upstream change: fetch is a no-op on the tracking ref.
     f.mkit_ok(&fork, &["git", "fetch"]);
     assert_eq!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .unwrap(),
         head1
@@ -337,7 +340,7 @@ fn reimport_is_noop_and_fresh_state_is_deterministic() {
     let up = f.upstream();
     f.mkit_ok(&fork, &["git", "import", up.to_str().unwrap()]);
     assert_eq!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .unwrap(),
         head1,
@@ -353,8 +356,9 @@ fn crash_marker_discards_map_and_recovers() {
     let f = Fixture::new();
     let fork = f.import();
     let mkit_dir = fork.join(".mkit");
+    let layout = RepoLayout::single(&fork);
     let state = mkit_dir.join("git/upstream");
-    let head1 = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let head1 = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
 
@@ -370,7 +374,7 @@ fn crash_marker_discards_map_and_recovers() {
     );
     assert!(!state.join("importing").exists(), "marker cleared");
     assert_eq!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .unwrap(),
         head1,
@@ -911,9 +915,9 @@ fn upstream_branch_deletion_prunes_tracking_ref() {
     let up = f.upstream();
     git_ok(&up, &["branch", "feature"]);
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
+    let layout = RepoLayout::single(&fork);
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "feature")
+        refs::read_remote_ref(&layout, "upstream", "feature")
             .unwrap()
             .is_some(),
         "feature tracked after import"
@@ -927,7 +931,7 @@ fn upstream_branch_deletion_prunes_tracking_ref() {
         "{stderr}"
     );
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "feature")
+        refs::read_remote_ref(&layout, "upstream", "feature")
             .unwrap()
             .is_none(),
         "tracking ref pruned"
@@ -996,16 +1000,16 @@ fn lightweight_tag_imports_as_bare_ref() {
     let up = f.upstream();
     git_ok(&up, &["tag", "lw"]); // lightweight: points straight at the commit
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
-    let lw = refs::read_tag(&mkit_dir, "lw").unwrap().unwrap();
+    let layout = RepoLayout::single(&fork);
+    let lw = refs::read_tag(&layout, "lw").unwrap().unwrap();
     // Lightweight tag = bare ref at the commit twin: identical to the
     // branch head, with no tag object in between.
-    let head = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let head = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
     assert_eq!(lw, head, "bare ref, no synthesized tag object");
     // The annotated fixture tag still points at a tag object instead.
-    let v1 = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+    let v1 = refs::read_tag(&layout, "v1").unwrap().unwrap();
     assert_ne!(v1, head);
 }
 
@@ -1043,15 +1047,15 @@ fn mixed_import_skips_refused_ref_and_keeps_the_rest() {
         stderr.contains("skipping refs/heads/with-submodule") && stderr.contains("submodule"),
         "{stderr}"
     );
-    let mkit_dir = f.fork().join(".mkit");
+    let layout = RepoLayout::single(f.fork());
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .is_some(),
         "healthy ref imported despite the refusal"
     );
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "with-submodule")
+        refs::read_remote_ref(&layout, "upstream", "with-submodule")
             .unwrap()
             .is_none(),
         "refused ref left untracked"
@@ -1112,7 +1116,9 @@ fn upstream_tag_deletion_keeps_local_tag() {
     git_ok(&up, &["tag", "-d", "v1"]);
     f.mkit_ok(&fork, &["git", "fetch"]);
     assert!(
-        refs::read_tag(&fork.join(".mkit"), "v1").unwrap().is_some(),
+        refs::read_tag(&RepoLayout::single(&fork), "v1")
+            .unwrap()
+            .is_some(),
         "tags are kept on upstream deletion (no --prune-tags)"
     );
 }
@@ -1125,13 +1131,13 @@ fn locally_moved_tag_is_not_clobbered_by_fetch() {
     let f = Fixture::new();
     let fork = f.import();
     f.mkit_ok(&fork, &["keygen"]);
-    let mkit_dir = fork.join(".mkit");
-    let imported_v1 = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+    let layout = RepoLayout::single(&fork);
+    let imported_v1 = refs::read_tag(&layout, "v1").unwrap().unwrap();
 
     // Move v1 locally to the branch head (delete + recreate).
     f.mkit_ok(&fork, &["tag", "-d", "v1"]);
     f.mkit_ok(&fork, &["tag", "v1", "HEAD"]);
-    let moved = refs::read_tag(&mkit_dir, "v1").unwrap().unwrap();
+    let moved = refs::read_tag(&layout, "v1").unwrap().unwrap();
     assert_ne!(moved, imported_v1);
 
     let out = f.mkit_ok(&fork, &["git", "fetch"]);
@@ -1141,7 +1147,7 @@ fn locally_moved_tag_is_not_clobbered_by_fetch() {
         "warn on skipped tag: {stderr}"
     );
     assert_eq!(
-        refs::read_tag(&mkit_dir, "v1").unwrap().unwrap(),
+        refs::read_tag(&layout, "v1").unwrap().unwrap(),
         moved,
         "locally-moved tag survives fetch"
     );
@@ -1391,11 +1397,11 @@ fn import_attestation_predicate_pins_locator_and_source() {
     }
     let f = Fixture::new();
     let fork = f.import();
-    let mkit_dir = fork.join(".mkit");
-    let head = refs::read_remote_ref(&mkit_dir, "upstream", "main")
+    let layout = RepoLayout::single(&fork);
+    let head = refs::read_remote_ref(&layout, "upstream", "main")
         .unwrap()
         .unwrap();
-    let paths = mkit_attest::store::list(&mkit_dir, &head).unwrap();
+    let paths = mkit_attest::store::list(&layout, &head).unwrap();
     assert!(
         !paths.is_empty(),
         "git-import/v1 attestation minted per head"
@@ -1616,13 +1622,13 @@ fn oversized_tag_name_skips_per_ref() {
         "per-ref skip, not whole-run abort: {stderr}"
     );
     // Healthy refs imported fine.
-    let mkit_dir = f.fork().join(".mkit");
+    let layout = RepoLayout::single(f.fork());
     assert!(
-        refs::read_remote_ref(&mkit_dir, "upstream", "main")
+        refs::read_remote_ref(&layout, "upstream", "main")
             .unwrap()
             .is_some()
     );
-    assert!(refs::read_tag(&mkit_dir, "v1").unwrap().is_some());
+    assert!(refs::read_tag(&layout, "v1").unwrap().is_some());
 }
 
 #[test]

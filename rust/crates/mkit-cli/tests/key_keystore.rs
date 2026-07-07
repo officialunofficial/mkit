@@ -920,7 +920,8 @@ fn resolve_head(root: &std::path::Path) -> String {
 fn head_commit_signer(root: &std::path::Path) -> Vec<u8> {
     let head = resolve_head(root);
     let hash = mkit_core::hash::from_hex(&head).expect("head hash");
-    let store = mkit_core::ObjectStore::open(root).expect("object store");
+    let store = mkit_core::ObjectStore::open(&mkit_core::layout::RepoLayout::single(root))
+        .expect("object store");
     match store.read_object(&hash).expect("head object") {
         Object::Commit(commit) => commit.signer.to_vec(),
         other => panic!("expected commit, got {other:?}"),

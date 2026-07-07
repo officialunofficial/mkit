@@ -45,11 +45,11 @@
 //! On success, prints the att-id (64 hex chars) and exits 0.
 
 use std::io::Write;
-use std::path::Path;
 
 use clap::Parser;
 use mkit_attest::{Algorithm, Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement, store};
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::{hash as hash_mod, refs};
 
 use crate::clap_shim;
@@ -218,12 +218,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    if !mkit_dir.is_dir() {
+    let layout = super::resolve_layout(&cwd);
+    if !layout.common_dir().is_dir() {
         return emit_err("not a mkit repo", exit::GENERAL_ERROR);
     }
 
-    let mut cfg = match crate::config::read_or_default(&cwd) {
+    let mut cfg = match crate::config::read_or_default(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -237,7 +237,7 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     // --- Resolve commit. --------------------------------------------
-    let commit_hash = match resolve_commit(&mkit_dir, parsed.commit.as_deref()) {
+    let commit_hash = match resolve_commit(&layout, parsed.commit.as_deref()) {
         Ok(h) => h,
         Err((msg, code)) => return emit_err(&msg, code),
     };
@@ -262,7 +262,8 @@ pub fn run(args: &[String]) -> u8 {
         .clone()
         .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
 
-    let primary_signer = match attest_factory::build_signer(&cwd, algorithm, &signer_kind, &cfg) {
+    let primary_signer = match attest_factory::build_signer(&layout, algorithm, &signer_kind, &cfg)
+    {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
     };
@@ -281,7 +282,7 @@ pub fn run(args: &[String]) -> u8 {
     let mut signers: Vec<Box<dyn Signer>> = Vec::with_capacity(1 + additional_specs.len());
     signers.push(primary_signer);
     for spec in &additional_specs {
-        let signer = match build_additional_signer(&cwd, spec, &cfg) {
+        let signer = match build_additional_signer(&layout, spec, &cfg) {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("{e}"), factory_error_code(&e)),
         };
@@ -359,10 +360,10 @@ pub fn run(args: &[String]) -> u8 {
     // `gc --grace-secs 0` can't compute its live set (which treats
     // attestation subjects as roots) before this attestation lands and then
     // prune the just-attested commit (#267). The repo was validated above
-    // (`mkit_dir.is_dir()`), so a non-repo reported cleanly. Held tightly,
-    // after signing (which may shell out to an external signer), around the
-    // write only.
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    // (`layout.common_dir().is_dir()`), so a non-repo reported cleanly. Held
+    // tightly, after signing (which may shell out to an external signer),
+    // around the write only.
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -371,7 +372,7 @@ pub fn run(args: &[String]) -> u8 {
     // attestation whose subject a concurrent `gc --grace-secs 0` pruned
     // between resolution and this save (#267). (`obj_store` avoids shadowing
     // the `mkit_attest::store` module used for `store::save`.)
-    let obj_store = match mkit_core::store::ObjectStore::open(&cwd) {
+    let obj_store = match mkit_core::store::ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
@@ -384,7 +385,7 @@ pub fn run(args: &[String]) -> u8 {
             exit::CANTCREAT,
         );
     }
-    let (att_id, path) = match store::save(&mkit_dir, &commit_hash, encoded.as_bytes()) {
+    let (att_id, path) = match store::save(&layout, &commit_hash, encoded.as_bytes()) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("store: {e}"), exit::CANTCREAT),
     };
@@ -405,7 +406,7 @@ pub fn run(args: &[String]) -> u8 {
 /// external-signer binary path (external); if unset we fall through to
 /// the same `[attest]` config the primary signer uses.
 fn build_additional_signer(
-    root: &Path,
+    layout: &RepoLayout,
     spec: &SignerSpec,
     base: &Config,
 ) -> Result<Box<dyn Signer>, FactoryError> {
@@ -439,7 +440,7 @@ fn build_additional_signer(
                     }
                 }
             }
-            attest_factory::build_signer(root, spec.algorithm, "repo-key", &cfg)
+            attest_factory::build_signer(layout, spec.algorithm, "repo-key", &cfg)
         }
         "external" => {
             let mut cfg = base.clone();
@@ -453,7 +454,7 @@ fn build_additional_signer(
             if let Some(argv) = spec.args.as_ref() {
                 cfg.attest.external_signer_args.clone_from(argv);
             }
-            attest_factory::build_signer(root, spec.algorithm, "external", &cfg)
+            attest_factory::build_signer(layout, spec.algorithm, "external", &cfg)
         }
         other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
     }
@@ -499,12 +500,12 @@ fn read_predicate_file(path: &str) -> Result<Vec<u8>, (String, u8)> {
 }
 
 /// Parse `--commit` value or fall back to HEAD.
-fn resolve_commit(mkit_dir: &Path, flag: Option<&str>) -> Result<Hash, (String, u8)> {
+fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
     if let Some(hex) = flag {
         return hash_mod::from_hex(hex)
             .map_err(|e| (format!("bad --commit hash: {e}"), exit::DATAERR));
     }
-    match refs::resolve_head(mkit_dir) {
+    match refs::resolve_head(layout) {
         Ok(Some(h)) => Ok(h),
         Ok(None) => Err(("HEAD has no commit yet".to_owned(), exit::GENERAL_ERROR)),
         Err(e) => Err((format!("read HEAD: {e}"), exit::GENERAL_ERROR)),

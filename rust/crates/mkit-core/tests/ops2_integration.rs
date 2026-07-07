@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mkit_core::hash::{self, Hash};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use mkit_core::ops::bisect::{self, BisectState, BisectStep};
 use mkit_core::ops::blame;
@@ -20,7 +21,7 @@ use mkit_core::store::ObjectStore;
 use tempfile::TempDir;
 
 fn fresh_store_in(dir: &Path) -> ObjectStore {
-    ObjectStore::init(dir).unwrap()
+    ObjectStore::init(&RepoLayout::single(dir)).unwrap()
 }
 
 fn put_blob(store: &ObjectStore, data: &[u8]) -> Hash {
@@ -87,8 +88,8 @@ fn put_file_commit(
 fn rebase_state_persists_and_reloads_after_simulated_crash() {
     // Mid-rebase crash leaves a recoverable state on disk.
     let tmp = TempDir::new().unwrap();
-    let mkit = tmp.path().join(".mkit");
-    fs::create_dir_all(&mkit).unwrap();
+    let mkit = RepoLayout::single(tmp.path());
+    fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
 
     let state = RebaseState {
         head_name: "feature/foo".to_string(),
@@ -180,8 +181,8 @@ fn bisect_runs_to_completion_finds_first_bad_commit() {
 #[test]
 fn bisect_state_persists_to_disk() {
     let tmp = TempDir::new().unwrap();
-    let mkit = tmp.path().join(".mkit");
-    fs::create_dir_all(&mkit).unwrap();
+    let mkit = RepoLayout::single(tmp.path());
+    fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
     let state = BisectState {
         orig_head: hash::hash(b"orig"),
         orig_branch: Some("main".to_string()),
@@ -269,9 +270,9 @@ fn read_golden(name: &str) -> Vec<u8> {
 fn stash_save_pop_roundtrip_restores_dirty_changes() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
-    let mkit_dir = repo.join(".mkit");
-    fs::create_dir_all(&mkit_dir).unwrap();
-    refs::init(&mkit_dir).unwrap();
+    let layout = RepoLayout::single(repo);
+    fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+    refs::init(&layout).unwrap();
 
     // Use a separate store directory so its `.mkit/objects/` does not
     // get treated as part of the worktree.
@@ -282,25 +283,25 @@ fn stash_save_pop_roundtrip_restores_dirty_changes() {
     fs::write(repo.join("hello.txt"), b"original").unwrap();
     let initial_tree = mkit_core::worktree::build_tree(&store, repo).unwrap();
     let initial_commit = put_commit(&store, initial_tree, vec![], 1000);
-    refs::update_head(&mkit_dir, &initial_commit).unwrap();
+    refs::update_head(&layout, &initial_commit).unwrap();
 
     // Modify the file; stash; verify worktree restored to "original".
     fs::write(repo.join("hello.txt"), b"modified content").unwrap();
-    stash::save(&store, repo, "WIP changes").unwrap();
+    stash::save(&store, &layout, "WIP changes").unwrap();
     assert_eq!(fs::read(repo.join("hello.txt")).unwrap(), b"original");
 
     // List should contain one entry.
-    let list = stash::list(repo).unwrap();
+    let list = stash::list(&layout).unwrap();
     assert_eq!(list.entries.len(), 1);
     assert_eq!(list.entries[0].message, "WIP changes");
 
     // Pop restores the modification.
-    stash::pop(&store, repo, 0).unwrap();
+    stash::pop(&store, &layout, 0).unwrap();
     assert_eq!(
         fs::read(repo.join("hello.txt")).unwrap(),
         b"modified content"
     );
-    let list_after = stash::list(repo).unwrap();
+    let list_after = stash::list(&layout).unwrap();
     assert!(list_after.entries.is_empty());
 }
 
@@ -308,22 +309,22 @@ fn stash_save_pop_roundtrip_restores_dirty_changes() {
 fn stash_drop_removes_without_applying() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
-    let mkit_dir = repo.join(".mkit");
-    fs::create_dir_all(&mkit_dir).unwrap();
-    refs::init(&mkit_dir).unwrap();
+    let layout = RepoLayout::single(repo);
+    fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+    refs::init(&layout).unwrap();
     let store_dir = TempDir::new().unwrap();
     let store = fresh_store_in(store_dir.path());
 
     fs::write(repo.join("hello.txt"), b"original").unwrap();
     let tree = mkit_core::worktree::build_tree(&store, repo).unwrap();
     let commit = put_commit(&store, tree, vec![], 1000);
-    refs::update_head(&mkit_dir, &commit).unwrap();
+    refs::update_head(&layout, &commit).unwrap();
 
     fs::write(repo.join("hello.txt"), b"modified").unwrap();
-    stash::save(&store, repo, "WIP").unwrap();
+    stash::save(&store, &layout, "WIP").unwrap();
 
-    stash::drop(repo, 0).unwrap();
-    let list = stash::list(repo).unwrap();
+    stash::drop(&layout, 0).unwrap();
+    let list = stash::list(&layout).unwrap();
     assert!(list.entries.is_empty());
     // Worktree is at HEAD's tree (the save reset it before drop ran).
     assert_eq!(fs::read(repo.join("hello.txt")).unwrap(), b"original");
@@ -333,17 +334,17 @@ fn stash_drop_removes_without_applying() {
 fn stash_index_out_of_range_errors() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
-    let mkit_dir = repo.join(".mkit");
-    fs::create_dir_all(&mkit_dir).unwrap();
-    refs::init(&mkit_dir).unwrap();
+    let layout = RepoLayout::single(repo);
+    fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+    refs::init(&layout).unwrap();
     let store_dir = TempDir::new().unwrap();
     let store = fresh_store_in(store_dir.path());
-    let err1 = stash::pop(&store, repo, 0).unwrap_err();
+    let err1 = stash::pop(&store, &layout, 0).unwrap_err();
     assert!(matches!(
         err1,
         mkit_core::ops::stash::StashError::IndexOutOfRange(0)
     ));
-    let err2 = stash::drop(repo, 5).unwrap_err();
+    let err2 = stash::drop(&layout, 5).unwrap_err();
     assert!(matches!(
         err2,
         mkit_core::ops::stash::StashError::IndexOutOfRange(5)
@@ -359,9 +360,9 @@ fn stash_show_golden_one_added_one_modified() {
     // Stash commit:  existing.txt = "modified content" + new.txt = "brand new file"
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
-    let mkit_dir = repo.join(".mkit");
-    fs::create_dir_all(&mkit_dir).unwrap();
-    refs::init(&mkit_dir).unwrap();
+    let layout = RepoLayout::single(repo);
+    fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+    refs::init(&layout).unwrap();
 
     let store_dir = TempDir::new().unwrap();
     let store = fresh_store_in(store_dir.path());
@@ -415,9 +416,9 @@ fn stash_show_golden_one_added_one_modified() {
             message: "WIP: stash message".to_string(),
         }],
     };
-    mkit_core::ops::stash::write_list_test_only(repo, &list);
+    mkit_core::ops::stash::write_list_test_only(&layout, &list);
 
-    let output = stash::render_stash_show(&store, repo, 0).unwrap();
+    let output = stash::render_stash_show(&store, &layout, 0).unwrap();
     let golden = read_golden("stash_show_simple.txt");
     assert_eq!(
         output,

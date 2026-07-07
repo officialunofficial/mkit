@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mkit_core::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Object};
 use mkit_core::store::ObjectStore;
 use mkit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_hex};
@@ -69,9 +70,9 @@ pub(super) struct FormatPatchArgs {
 
 // ─── shared state-dir resolution ────────────────────────────────────
 
-fn state_names(mkit_dir: &Path) -> Vec<String> {
+fn state_names(layout: &RepoLayout) -> Vec<String> {
     let mut names = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(mkit_dir.join("git")) {
+    if let Ok(rd) = std::fs::read_dir(layout.git_state_dir()) {
         for e in rd.flatten() {
             if e.path().is_dir()
                 && let Some(name) = e.file_name().to_str()
@@ -84,21 +85,21 @@ fn state_names(mkit_dir: &Path) -> Vec<String> {
     names
 }
 
-fn resolve_state(mkit_dir: &Path, remote_name: Option<&str>) -> CmdResult<(String, PathBuf)> {
+fn resolve_state(layout: &RepoLayout, remote_name: Option<&str>) -> CmdResult<(String, PathBuf)> {
     if let Some(name) = remote_name {
-        let state = map::state_dir(mkit_dir, name).map_err(|e| (e.to_string(), exit::USAGE))?;
+        let state = map::state_dir(layout, name).map_err(|e| (e.to_string(), exit::USAGE))?;
         if !state.is_dir() {
             return Err((format!("no bridge state for '{name}'"), exit::NOINPUT));
         }
         return Ok((name.to_owned(), state));
     }
-    let names = state_names(mkit_dir);
+    let names = state_names(layout);
     match names.as_slice() {
         [] => Err((
             "no git bridge state (run `mkit git import` or `mkit git export` first)".into(),
             exit::NOINPUT,
         )),
-        [one] => Ok((one.clone(), mkit_dir.join("git").join(one))),
+        [one] => Ok((one.clone(), layout.git_state_dir().join(one))),
         many => Err((
             format!(
                 "multiple bridge states ({}); pick one with --remote-name",
@@ -109,13 +110,14 @@ fn resolve_state(mkit_dir: &Path, remote_name: Option<&str>) -> CmdResult<(Strin
     }
 }
 
-fn open_repo(cwd: &Path) -> CmdResult<(PathBuf, ObjectStore)> {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    if !mkit_dir.is_dir() {
+fn open_repo(cwd: &Path) -> CmdResult<(RepoLayout, ObjectStore)> {
+    let layout = super::resolve_layout(cwd);
+    if !layout.common_dir().is_dir() {
         return Err(("not a mkit repository".into(), exit::USAGE));
     }
-    let store = ObjectStore::open(cwd).map_err(|e| (format!("open store: {e}"), exit::NOINPUT))?;
-    Ok((mkit_dir, store))
+    let store =
+        ObjectStore::open(&layout).map_err(|e| (format!("open store: {e}"), exit::NOINPUT))?;
+    Ok((layout, store))
 }
 
 // ─── mkit git verify ────────────────────────────────────────────────
@@ -358,8 +360,8 @@ impl Audit<'_> {
 
 pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
     let cwd = std::env::current_dir().map_err(|e| (format!("cwd: {e}"), exit::NOINPUT))?;
-    let (mkit_dir, store) = open_repo(&cwd)?;
-    let (name, state) = resolve_state(&mkit_dir, args.remote_name.as_deref())?;
+    let (layout, store) = open_repo(&cwd)?;
+    let (name, state) = resolve_state(&layout, args.remote_name.as_deref())?;
     let staging = state.join("repo.git");
     if !staging.join("objects").is_dir() {
         return Err((
@@ -424,7 +426,7 @@ pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
             && audit.raw_path(tip).exists()
             && let Some(twin) = audit.inv.get(tip).copied()
         {
-            let attested = mkit_attest::store::list(&mkit_dir, &twin).is_ok_and(|v| !v.is_empty());
+            let attested = mkit_attest::store::list(&layout, &twin).is_ok_and(|v| !v.is_empty());
             if !attested {
                 audit.failures.push(format!(
                     "{} imported head has no git-import/v1 attestation recorded",
@@ -472,8 +474,8 @@ pub(super) fn verify(args: &VerifyArgs) -> CmdResult<()> {
 
 pub(super) fn status(_args: &StatusArgs) -> CmdResult<()> {
     let cwd = std::env::current_dir().map_err(|e| (format!("cwd: {e}"), exit::NOINPUT))?;
-    let (mkit_dir, _store) = open_repo(&cwd)?;
-    let names = state_names(&mkit_dir);
+    let (layout, _store) = open_repo(&cwd)?;
+    let names = state_names(&layout);
     let mut out = std::io::stdout().lock();
     if names.is_empty() {
         let _ = writeln!(
@@ -483,7 +485,7 @@ pub(super) fn status(_args: &StatusArgs) -> CmdResult<()> {
         return Ok(());
     }
     for name in &names {
-        let state = mkit_dir.join("git").join(name);
+        let state = layout.git_state_dir().join(name);
         let direction = map::read_direction(&state)
             .ok()
             .flatten()
@@ -539,7 +541,7 @@ type Series = (Vec<Hash>, HashMap<Hash, Commit>, String, String);
 /// Resolve `A..B` (or `<rev>` = `<rev>..HEAD`) to the commit set and
 /// its oldest-first topological order (parents before children,
 /// timestamp as the tiebreak).
-fn range_commits(store: &ObjectStore, mkit_dir: &Path, range: &str) -> CmdResult<Series> {
+fn range_commits(store: &ObjectStore, layout: &RepoLayout, range: &str) -> CmdResult<Series> {
     let (a, b) = match range.split_once("..") {
         Some((a, b)) => (
             a.to_owned(),
@@ -552,7 +554,7 @@ fn range_commits(store: &ObjectStore, mkit_dir: &Path, range: &str) -> CmdResult
         None => (range.to_owned(), "HEAD".to_owned()),
     };
     let resolve = |spec: &str| -> CmdResult<Hash> {
-        revspec::resolve_revision(store, mkit_dir, spec)
+        revspec::resolve_revision(store, layout, spec)
             .map_err(|e| (format!("{spec}: {e}"), exit::DATAERR))
     };
     let exclude_tip = peel(store, resolve(&a)?);
@@ -627,8 +629,8 @@ fn range_commits(store: &ObjectStore, mkit_dir: &Path, range: &str) -> CmdResult
 
 pub(super) fn format_patch(args: &FormatPatchArgs) -> CmdResult<()> {
     let cwd = std::env::current_dir().map_err(|e| (format!("cwd: {e}"), exit::NOINPUT))?;
-    let (mkit_dir, store) = open_repo(&cwd)?;
-    let (ordered, commits, a, b) = range_commits(&store, &mkit_dir, &args.range)?;
+    let (layout, store) = open_repo(&cwd)?;
+    let (ordered, commits, a, b) = range_commits(&store, &layout, &args.range)?;
 
     let mut skipped_merges = 0usize;
     let series: Vec<&Hash> = ordered

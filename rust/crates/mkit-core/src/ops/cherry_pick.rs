@@ -145,7 +145,7 @@ mod tests {
 
     fn store() -> (TempDir, ObjectStore) {
         let d = TempDir::new().unwrap();
-        let s = ObjectStore::init(d.path()).unwrap();
+        let s = ObjectStore::init(&crate::layout::RepoLayout::single(d.path())).unwrap();
         (d, s)
     }
     fn put_blob(s: &ObjectStore, data: &[u8]) -> Hash {

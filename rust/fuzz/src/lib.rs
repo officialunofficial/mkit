@@ -142,7 +142,8 @@ pub fn pack_one_iteration(input: &[u8]) {
         Ok(d) => d,
         Err(_) => return,
     };
-    let store = match mkit_core::store::ObjectStore::init(dir.path()) {
+    let layout = mkit_core::layout::RepoLayout::single(dir.path());
+    let store = match mkit_core::store::ObjectStore::init(&layout) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -510,7 +511,9 @@ mod tests {
         // libfuzzer runs isn't needed by this deterministic PRNG-driven
         // loop, which only cares whether the reader panics/UB's.
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let store = mkit_core::store::ObjectStore::init(dir.path()).expect("store init");
+        let store =
+            mkit_core::store::ObjectStore::init(&mkit_core::layout::RepoLayout::single(dir.path()))
+                .expect("store init");
         run_iterated_unit_with(&store, pack_one_iteration_with_store).expect("guardrails held");
     }
 

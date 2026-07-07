@@ -65,11 +65,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     // Hold the worktree lock for the whole run. This serializes gc
     // against worktree/index-mutating commands and other gc runs. It does
@@ -77,7 +77,7 @@ pub fn run(args: &[String]) -> u8 {
     // `fetch`, `attest`) — those don't take this lock yet (#267), so the
     // grace window is what protects their in-flight objects from a
     // concurrent prune.
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -102,18 +102,18 @@ pub fn run(args: &[String]) -> u8 {
     // soon-to-expire commits are still pinned during the preview).
     let policy = RetentionPolicy::default();
     let expired = if opts.dry_run {
-        match recovery::would_expire(&mkit_dir, now, &policy) {
+        match recovery::would_expire(&layout, now, &policy) {
             Ok(n) => n,
             Err(e) => return emit_err(&format!("recovery log: {e}"), exit::GENERAL_ERROR),
         }
     } else {
-        match recovery::expire(&mkit_dir, now, &policy) {
+        match recovery::expire(&layout, now, &policy) {
             Ok(n) => n,
             Err(e) => return emit_err(&format!("expire recovery log: {e}"), exit::CANTCREAT),
         }
     };
 
-    let report = match run_gc(&store, &mkit_dir, now, opts.grace_secs, opts.dry_run) {
+    let report = match run_gc(&store, &layout, now, opts.grace_secs, opts.dry_run) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR),
     };

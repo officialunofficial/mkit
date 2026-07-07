@@ -11,6 +11,7 @@
 #![allow(clippy::similar_names)] // `add_b` / `add_b_tree` is the natural pairing
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::{
     Blob, Commit, ConflictKind, EntryMode, Identity, Object, ObjectStore, Tree, TreeEntry,
     cherry_pick, diff_trees, find_merge_base, is_ancestor, merge_trees, serialize,
@@ -21,7 +22,7 @@ type Hash = [u8; 32];
 
 fn fresh() -> (TempDir, ObjectStore) {
     let d = TempDir::new().unwrap();
-    let s = ObjectStore::init(d.path()).unwrap();
+    let s = ObjectStore::init(&RepoLayout::single(d.path())).unwrap();
     (d, s)
 }
 

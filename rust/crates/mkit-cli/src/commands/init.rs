@@ -26,7 +26,8 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cannot read cwd: {e}"), exit::NOINPUT),
     };
-    match ObjectStore::init(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    match ObjectStore::init(&layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => {
             return emit_err("already a mkit repository", exit::GENERAL_ERROR);
@@ -34,7 +35,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("init failed: {e}"), exit::CANTCREAT),
     }
     // Initialize refs + HEAD — HEAD points at refs/heads/main.
-    if let Err(e) = refs::init(&cwd.join(mkit_core::MKIT_DIR)) {
+    if let Err(e) = refs::init(&layout) {
         return emit_err(&format!("refs init failed: {e}"), exit::CANTCREAT);
     }
     let mut stderr = std::io::stderr().lock();

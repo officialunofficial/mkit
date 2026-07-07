@@ -35,11 +35,12 @@ use std::path::Path;
 
 use crate::hash::{self, Hash};
 use crate::index;
+use crate::layout::RepoLayout;
 use crate::store::{ObjectStore, StoreError};
 
-use super::conflict_state::{self, ORIG_HEAD};
+use super::conflict_state;
 use super::graph::reachable_closure_checked;
-use super::rebase::{self, REBASE_DIR};
+use super::rebase;
 use super::recovery;
 use super::stash;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
@@ -97,7 +98,7 @@ pub enum GcRootsError {
 }
 
 /// Collect the complete set of GC retention roots for the repo at
-/// `mkit_dir` (the `.mkit` directory). The returned hashes are roots,
+/// the repository described by `layout`. The returned hashes are roots,
 /// not the closure — feed them to `reachable_closure` (or use
 /// [`live_objects`]) to get the full keep-set.
 ///
@@ -107,7 +108,7 @@ pub enum GcRootsError {
 ///
 /// [`GcRootsError`] if any source (refs, stash, op state, attestation
 /// dir) cannot be read — the caller must then abort, never prune.
-pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
+pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError> {
     let mut roots: BTreeSet<Hash> = BTreeSet::new();
     let add = |h: Hash, set: &mut BTreeSet<Hash>| {
         if h != hash::ZERO {
@@ -116,7 +117,7 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     };
 
     // HEAD (covers a detached HEAD not present under refs/heads).
-    if let Some(h) = refs::resolve_head(mkit_dir)? {
+    if let Some(h) = refs::resolve_head(layout)? {
         add(h, &mut roots);
     }
 
@@ -129,12 +130,11 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     // strict walk below errors on any unreadable / undecodable / too-deep
     // ref instead.
     for ns in [HEADS_DIR, TAGS_DIR, REMOTES_DIR] {
-        walk_ref_roots_strict(&mkit_dir.join(ns), ns, 0, &mut roots)?;
+        walk_ref_roots_strict(&layout.common_dir().join(ns), ns, 0, &mut roots)?;
     }
 
     // Stash: each stashed commit and the HEAD it was based on.
-    let repo_root = mkit_dir.parent().unwrap_or(mkit_dir);
-    for entry in stash::list(repo_root)?.entries {
+    for entry in stash::list(layout)?.entries {
         add(entry.commit_hash, &mut roots);
         add(entry.parent_hash, &mut roots);
     }
@@ -145,33 +145,33 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     // (or immediately under `--grace-secs 0`). `read_index` is strict
     // (errors on corrupt/oversized index), so a damaged index aborts
     // gc instead of silently dropping roots.
-    for entry in index::read_index(repo_root)?.entries {
+    for entry in index::read_index(layout)?.entries {
         add(entry.object_hash, &mut roots);
     }
 
     // ORIG_HEAD (written by reset and by the in-progress ops below).
-    if let Some(h) = read_optional_hash(&mkit_dir.join(ORIG_HEAD))? {
+    if let Some(h) = read_optional_hash(&layout.orig_head_file())? {
         add(h, &mut roots);
     }
 
     // In-progress merge / cherry-pick.
-    if let Some(m) = conflict_state::read_merge_state(mkit_dir)? {
+    if let Some(m) = conflict_state::read_merge_state(layout)? {
         add(m.merge_head, &mut roots);
         add(m.orig_head, &mut roots);
     }
-    if let Some(c) = conflict_state::read_cherry_pick_state(mkit_dir)? {
+    if let Some(c) = conflict_state::read_cherry_pick_state(layout)? {
         add(c.cherry_pick_head, &mut roots);
         add(c.orig_head, &mut roots);
     }
-    if let Some(r) = conflict_state::read_revert_state(mkit_dir)? {
+    if let Some(r) = conflict_state::read_revert_state(layout)? {
         add(r.revert_head, &mut roots);
         add(r.orig_head, &mut roots);
     }
 
     // In-progress rebase: target + every commit still to replay or
     // already replayed onto the new base.
-    if rebase::is_rebase_in_progress(mkit_dir) {
-        let st = rebase::read_state(mkit_dir)?;
+    if rebase::is_rebase_in_progress(layout) {
+        let st = rebase::read_state(layout)?;
         add(st.orig_head, &mut roots);
         add(st.onto, &mut roots);
         for h in st.todo.into_iter().chain(st.done) {
@@ -183,7 +183,10 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     // in-progress conflict. Merge/cherry-pick write `.mkit/mkit-conflicts`;
     // rebase writes its sidecar inside `.mkit/rebase-apply/`. Both are
     // empty/absent when no conflict is recorded.
-    for dir in [mkit_dir.to_path_buf(), mkit_dir.join(REBASE_DIR)] {
+    for dir in [
+        layout.worktree_state_dir().to_path_buf(),
+        layout.rebase_dir(),
+    ] {
         for c in conflict_state::read_conflicts(&dir)? {
             for h in [c.base_hash, c.ours_hash, c.theirs_hash]
                 .into_iter()
@@ -195,7 +198,7 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     }
 
     // Attested commits — pinned so an attestation never dangles.
-    for h in attested_commits(mkit_dir)? {
+    for h in attested_commits(layout.common_dir())? {
         add(h, &mut roots);
     }
 
@@ -203,7 +206,7 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
     // so they stay recoverable. Clock-free here: `recovery::expire` (a
     // gc maintenance step) drops entries past the retention window so
     // they stop pinning objects.
-    for h in recovery::roots(mkit_dir)? {
+    for h in recovery::roots(layout)? {
         add(h, &mut roots);
     }
 
@@ -217,8 +220,11 @@ pub fn collect_roots(mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
 ///
 /// [`GcRootsError`] if roots cannot be collected, or a [`StoreError`]
 /// (e.g. a root or referenced object missing) during the walk.
-pub fn live_objects(store: &ObjectStore, mkit_dir: &Path) -> Result<BTreeSet<Hash>, GcRootsError> {
-    let roots = collect_roots(mkit_dir)?;
+pub fn live_objects(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+) -> Result<BTreeSet<Hash>, GcRootsError> {
+    let roots = collect_roots(layout)?;
     let (live, truncated) = reachable_closure_checked(store, roots.iter())?;
     if truncated {
         return Err(GcRootsError::Truncated);
@@ -260,7 +266,7 @@ pub struct GcReport {
 /// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
 pub fn run_gc(
     store: &ObjectStore,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     now_secs: u64,
     grace_secs: u64,
     dry_run: bool,
@@ -269,11 +275,11 @@ pub fn run_gc(
     // `.mkit/objects` is a symlink, `remove_object` would unlink the
     // link target's files — potentially outside the repo. (Dry runs are
     // safe but we reject uniformly so a preview matches the real run.)
-    reject_symlink(mkit_dir)?;
+    reject_symlink(layout.common_dir())?;
     reject_symlink(store.objects_root())?;
 
     // Compute the keep-set FIRST; if this fails we delete nothing.
-    let live = live_objects(store, mkit_dir)?;
+    let live = live_objects(store, layout)?;
     let all = store.iter_object_hashes()?;
 
     let mut report = GcReport {
@@ -362,8 +368,8 @@ fn walk_ref_roots_strict(
 /// Commit hashes that have at least one attestation envelope, taken from
 /// the `attestations/<commit-hex>/` directory names. Non-hex directory
 /// names are ignored (defensive); a missing dir yields an empty set.
-fn attested_commits(mkit_dir: &Path) -> Result<Vec<Hash>, io::Error> {
-    let dir = mkit_dir.join(ATTESTATIONS_DIR);
+fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
+    let dir = common_dir.join(ATTESTATIONS_DIR);
     let mut out = Vec::new();
     let rd = match fs::read_dir(&dir) {
         Ok(rd) => rd,
@@ -428,19 +434,19 @@ mod tests {
     /// A repo with an initialized `.mkit` dir + object store.
     fn repo() -> (TempDir, ObjectStore) {
         let d = TempDir::new().unwrap();
-        let store = ObjectStore::init(d.path()).unwrap();
-        refs::init(&d.path().join(crate::MKIT_DIR)).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(d.path())).unwrap();
+        refs::init(&RepoLayout::single(d.path())).unwrap();
         (d, store)
     }
 
-    fn mkit_dir(d: &TempDir) -> std::path::PathBuf {
-        d.path().join(crate::MKIT_DIR)
+    fn layout(d: &TempDir) -> RepoLayout {
+        RepoLayout::single(d.path())
     }
 
     /// Write a loose ref file (e.g. `refs/heads/main`) — the on-disk
     /// form `list_refs`/`list_tags` read.
-    fn write_ref(md: &Path, rel: &str, h: &Hash) {
-        let path = md.join(rel);
+    fn write_ref(md: &RepoLayout, rel: &str, h: &Hash) {
+        let path = md.common_dir().join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, format!("{}\n", hash::to_hex(h))).unwrap();
     }
@@ -493,7 +499,7 @@ mod tests {
     #[test]
     fn collect_roots_includes_branches_and_tags() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (c1, _) = commit_one(&s, b"a", b"a", vec![]);
         let (c2, _) = commit_one(&s, b"b", b"b", vec![]);
         write_ref(&md, "refs/heads/main", &c1);
@@ -507,11 +513,11 @@ mod tests {
     #[test]
     fn collect_roots_includes_orig_head_and_attested_commit() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (orig, _) = commit_one(&s, b"o", b"o", vec![]);
         let (att, _) = commit_one(&s, b"x", b"x", vec![]);
-        fs::write(md.join(ORIG_HEAD), format!("{}\n", hash::to_hex(&orig))).unwrap();
-        fs::create_dir_all(md.join(ATTESTATIONS_DIR).join(hash::to_hex(&att))).unwrap();
+        fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&orig))).unwrap();
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&att))).unwrap();
 
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&orig), "ORIG_HEAD must be a root");
@@ -521,7 +527,7 @@ mod tests {
     #[test]
     fn live_objects_keeps_only_reachable_closure() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (kept, kept_blob) = commit_one(&s, b"keep", b"keep", vec![]);
         // An unreferenced commit + blob: reachable from no root.
         let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
@@ -544,10 +550,10 @@ mod tests {
     /// million) objects.
     fn live_objects_with_cap(
         store: &ObjectStore,
-        mkit_dir: &Path,
+        layout: &RepoLayout,
         cap: usize,
     ) -> Result<BTreeSet<Hash>, GcRootsError> {
-        let roots = collect_roots(mkit_dir)?;
+        let roots = collect_roots(layout)?;
         let (live, truncated) =
             super::super::graph::reachable_closure_checked_with_cap(store, roots.iter(), cap)?;
         if truncated {
@@ -565,7 +571,7 @@ mod tests {
         // (commit + tree + blob); two commits give 6 reachable objects,
         // comfortably over an injected cap of 2.
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (c1, _) = commit_one(&s, b"a", b"a", vec![]);
         let (c2, _) = commit_one(&s, b"b", b"b", vec![c1]);
         write_ref(&md, "refs/heads/main", &c2);
@@ -595,7 +601,7 @@ mod tests {
     #[test]
     fn strict_walk_picks_up_nested_remote_ref() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (c, _) = commit_one(&s, b"r", b"r", vec![]);
         write_ref(&md, "refs/remotes/origin/main", &c);
         assert!(
@@ -607,7 +613,7 @@ mod tests {
     #[test]
     fn run_gc_prunes_orphans_but_never_a_live_object() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         // Live: a branch commit + its tree + blob.
         let (kept, kept_blob) = commit_one(&s, b"keep", b"keep", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
@@ -639,7 +645,7 @@ mod tests {
     #[test]
     fn run_gc_keeps_staged_but_uncommitted_blobs() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         // A committed branch so the repo has a normal ref-side root.
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
@@ -657,7 +663,7 @@ mod tests {
                 ctime_ns: 0,
             }],
         };
-        index::write_index(d.path(), &idx).unwrap();
+        index::write_index(&md, &idx).unwrap();
 
         assert!(
             collect_roots(&md).unwrap().contains(&staged),
@@ -674,7 +680,7 @@ mod tests {
     #[test]
     fn run_gc_grace_window_keeps_recent_orphans() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
         let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
@@ -692,14 +698,14 @@ mod tests {
     fn run_gc_refuses_symlinked_objects_dir() {
         use std::os::unix::fs::symlink;
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
 
         // Replace `.mkit/objects` with a symlink to an external dir. A
         // deletion-capable gc must refuse rather than prune through it.
         let external = d.path().join("external-objects");
-        let real_objects = md.join("objects");
+        let real_objects = md.objects_dir();
         fs::create_dir_all(&external).unwrap();
         // Move existing shards out so the symlink target holds them.
         for entry in fs::read_dir(&real_objects).unwrap() {
@@ -719,7 +725,7 @@ mod tests {
     #[test]
     fn run_gc_dry_run_deletes_nothing() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
         let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
@@ -732,7 +738,7 @@ mod tests {
     #[test]
     fn run_gc_keeps_recovery_logged_orphan() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
         write_ref(&md, "refs/heads/main", &kept);
         // An orphan that is recorded in the recovery log must survive gc.
@@ -758,7 +764,7 @@ mod tests {
     #[test]
     fn collect_roots_includes_recovery_log_entries() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (superseded, _) = commit_one(&s, b"old", b"old", vec![]);
         super::super::recovery::record(
             &md,
@@ -779,10 +785,10 @@ mod tests {
     #[test]
     fn collect_roots_fails_closed_on_malformed_ref() {
         let (d, _s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         // A corrupt ref file (not 64-hex) must error, never be silently
         // dropped — else gc could prune the object it should pin.
-        let bad = md.join("refs/heads/corrupt");
+        let bad = md.heads_dir().join("corrupt");
         fs::create_dir_all(bad.parent().unwrap()).unwrap();
         fs::write(&bad, b"not-a-valid-object-id\n").unwrap();
         assert!(
@@ -794,12 +800,12 @@ mod tests {
     #[test]
     fn strict_walk_skips_lock_and_dotfile_cruft() {
         let (d, s) = repo();
-        let md = mkit_dir(&d);
+        let md = layout(&d);
         let (c, _) = commit_one(&s, b"m", b"m", vec![]);
         write_ref(&md, "refs/heads/main", &c);
         // Atomic-write temp files are dotfiles; a stale one must not
         // break collection.
-        fs::write(md.join("refs/heads").join(".main.tmp.123.4"), b"garbage").unwrap();
+        fs::write(md.heads_dir().join(".main.tmp.123.4"), b"garbage").unwrap();
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&c), "real ref still collected past cruft");
     }

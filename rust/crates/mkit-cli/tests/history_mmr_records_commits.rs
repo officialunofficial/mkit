@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use mkit_core::hash::Hash;
 use mkit_core::history::{CommitHistory, TokioExecutor};
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs;
 
 fn mkit_bin() -> &'static str {
@@ -71,9 +72,9 @@ fn mkit_dir(root: &Path) -> PathBuf {
 fn branch_commit_chain(root: &Path, branch: &str) -> Vec<Hash> {
     use mkit_core::object::Object;
     use mkit_core::store::ObjectStore;
-    let mkit_dir = mkit_dir(root);
-    let store = ObjectStore::open(root).expect("open store");
-    let tip = refs::read_ref(&mkit_dir, branch)
+    let layout = RepoLayout::single(root);
+    let store = ObjectStore::open(&layout).expect("open store");
+    let tip = refs::read_ref(&layout, branch)
         .expect("read ref")
         .expect("ref present");
     let mut chain = Vec::new();
@@ -120,7 +121,8 @@ fn two_commits_land_in_branch_history_journal() {
     // Reopen the on-disk history journal and assert it carries
     // exactly two leaves, in the same order the CLI wrote the commits.
     let exec = Arc::new(TokioExecutor::new().expect("tokio runtime"));
-    let live = CommitHistory::open_at(exec.clone(), &mkit, "main").expect("reopen live history");
+    let live = CommitHistory::open_at(exec.clone(), &RepoLayout::single(root), "main")
+        .expect("reopen live history");
     assert_eq!(
         live.len(),
         2,

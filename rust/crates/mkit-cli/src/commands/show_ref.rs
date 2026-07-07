@@ -32,7 +32,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = super::resolve_layout(&cwd);
 
     // Neither flag → show both heads and tags; either flag selects only
     // that namespace (both flags → the union, matching git).
@@ -41,13 +41,13 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut lines: Vec<(String, String)> = Vec::new(); // (full refname, hash hex)
     if want_heads {
-        match refs::list_refs(&mkit_dir) {
+        match refs::list_refs(&layout) {
             Ok(rs) => collect(&mut lines, &rs, "refs/heads/"),
             Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
         }
     }
     if want_tags {
-        match refs::list_tags(&mkit_dir) {
+        match refs::list_tags(&layout) {
             Ok(rs) => collect(&mut lines, &rs, "refs/tags/"),
             Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
         }
@@ -55,10 +55,10 @@ pub fn run(args: &[String]) -> u8 {
     // Remote-tracking refs are listed in the unfiltered view (like
     // git show-ref); --heads/--tags keep their narrow meaning.
     if !opts.heads && !opts.tags {
-        match refs::list_remote_names(&mkit_dir) {
+        match refs::list_remote_names(&layout) {
             Ok(remotes) => {
                 for remote in remotes {
-                    match refs::list_remote_refs(&mkit_dir, &remote) {
+                    match refs::list_remote_refs(&layout, &remote) {
                         Ok(rs) => {
                             collect(&mut lines, &rs, &format!("refs/remotes/{remote}/"));
                         }

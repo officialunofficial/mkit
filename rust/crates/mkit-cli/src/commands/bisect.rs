@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::bisect::{
     BisectState, BisectStep, cleanup_bisect, is_bisect_in_progress, next_step, read_state,
     write_state,
@@ -63,35 +64,35 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     match opts.sub {
-        BisectCmd::Start => start(&mkit_dir),
-        BisectCmd::Good { commit } => mark(&store, &mkit_dir, commit.as_deref(), true),
-        BisectCmd::Bad { commit } => mark(&store, &mkit_dir, commit.as_deref(), false),
-        BisectCmd::Skip => skip(&store, &mkit_dir),
-        BisectCmd::Reset => reset(&mkit_dir),
-        BisectCmd::Run { argv } => run_automated(&store, &cwd, &mkit_dir, &argv),
+        BisectCmd::Start => start(&layout),
+        BisectCmd::Good { commit } => mark(&store, &layout, commit.as_deref(), true),
+        BisectCmd::Bad { commit } => mark(&store, &layout, commit.as_deref(), false),
+        BisectCmd::Skip => skip(&store, &layout),
+        BisectCmd::Reset => reset(&layout),
+        BisectCmd::Run { argv } => run_automated(&store, &cwd, &layout, &argv),
     }
 }
 
-fn start(mkit_dir: &std::path::Path) -> u8 {
-    if is_bisect_in_progress(mkit_dir) {
+fn start(layout: &RepoLayout) -> u8 {
+    if is_bisect_in_progress(layout) {
         return emit_err(
             "a bisect is already in progress (use `mkit bisect reset` first)",
             exit::GENERAL_ERROR,
         );
     }
-    let orig_head = match refs::resolve_head(mkit_dir) {
+    let orig_head = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let orig_branch = match refs::read_head(mkit_dir) {
+    let orig_branch = match refs::read_head(layout) {
         Ok(Head::Branch(name)) => Some(name),
         _ => None,
     };
@@ -102,7 +103,7 @@ fn start(mkit_dir: &std::path::Path) -> u8 {
         good_hashes: Vec::new(),
         skipped: BTreeSet::default(),
     };
-    if let Err(e) = write_state(mkit_dir, &state) {
+    if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("write state: {e}"), exit::CANTCREAT);
     }
     let mut stderr = std::io::stderr().lock();
@@ -113,20 +114,20 @@ fn start(mkit_dir: &std::path::Path) -> u8 {
     exit::OK
 }
 
-fn mark(store: &ObjectStore, mkit_dir: &std::path::Path, arg: Option<&str>, good: bool) -> u8 {
-    if !is_bisect_in_progress(mkit_dir) {
+fn mark(store: &ObjectStore, layout: &RepoLayout, arg: Option<&str>, good: bool) -> u8 {
+    if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
-    let mut state = match read_state(mkit_dir) {
+    let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
     let hash_: Hash = match arg {
-        Some(s) => match super::revspec::resolve_revision(store, mkit_dir, s) {
+        Some(s) => match super::revspec::resolve_revision(store, layout, s) {
             Ok(h) => h,
             Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
         },
-        None => match refs::resolve_head(mkit_dir) {
+        None => match refs::resolve_head(layout) {
             Ok(Some(h)) => h,
             _ => return emit_err("no HEAD; provide an explicit hash", exit::GENERAL_ERROR),
         },
@@ -136,17 +137,17 @@ fn mark(store: &ObjectStore, mkit_dir: &std::path::Path, arg: Option<&str>, good
     } else {
         state.bad_hash = Some(hash_);
     }
-    if let Err(e) = write_state(mkit_dir, &state) {
+    if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
     }
     report_step(store, &state)
 }
 
-fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
-    if !is_bisect_in_progress(mkit_dir) {
+fn skip(store: &ObjectStore, layout: &RepoLayout) -> u8 {
+    if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
-    let mut state = match read_state(mkit_dir) {
+    let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
@@ -164,7 +165,7 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
     };
     // Add the current midpoint to the exclusion set, then advance.
     state.skipped.insert(current_mid);
-    if let Err(e) = write_state(mkit_dir, &state) {
+    if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
     }
     let mut stderr = std::io::stderr().lock();
@@ -177,20 +178,20 @@ fn skip(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
     report_step(store, &state)
 }
 
-fn reset(mkit_dir: &std::path::Path) -> u8 {
-    if !is_bisect_in_progress(mkit_dir) {
+fn reset(layout: &RepoLayout) -> u8 {
+    if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
-    let state = match read_state(mkit_dir) {
+    let state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
     if let Some(branch) = state.orig_branch.as_deref() {
-        let _ = refs::write_head_branch(mkit_dir, branch);
+        let _ = refs::write_head_branch(layout, branch);
     } else {
-        let _ = refs::write_head_detached(mkit_dir, &state.orig_head);
+        let _ = refs::write_head_detached(layout, &state.orig_head);
     }
-    let _ = cleanup_bisect(mkit_dir);
+    let _ = cleanup_bisect(layout);
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "bisect reset");
     exit::OK
@@ -227,15 +228,15 @@ fn classify(code: Option<i32>) -> Verdict {
 /// divergence that keeps bisect's overall model print-candidate). The
 /// candidate is also exported as `MKIT_BISECT_COMMIT` for commands that
 /// prefer it over the worktree.
-fn run_automated(store: &ObjectStore, cwd: &Path, mkit_dir: &Path, argv: &[String]) -> u8 {
-    if !is_bisect_in_progress(mkit_dir) {
+fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[String]) -> u8 {
+    if !is_bisect_in_progress(layout) {
         return emit_err("no bisect in progress", exit::GENERAL_ERROR);
     }
     // clap's `required = true` guarantees at least the program name.
     let Some((program, cmd_args)) = argv.split_first() else {
         return emit_err("bisect run: missing command", exit::USAGE);
     };
-    let mut state = match read_state(mkit_dir) {
+    let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
@@ -327,7 +328,7 @@ fn run_automated(store: &ObjectStore, cwd: &Path, mkit_dir: &Path, argv: &[Strin
                 );
             }
         }
-        if let Err(e) = write_state(mkit_dir, &state) {
+        if let Err(e) = write_state(layout, &state) {
             let _ = restore_head(cwd, &state);
             return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
         }

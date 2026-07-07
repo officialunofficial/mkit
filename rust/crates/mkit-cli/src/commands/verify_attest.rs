@@ -34,6 +34,7 @@ use mkit_attest::envelope;
 use mkit_attest::verify::{extract_primary_commit_hash, verify};
 use mkit_attest::{Algorithm, Registry, TrustRoot, store};
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::{hash as hash_mod, refs};
 
 use crate::clap_shim;
@@ -67,13 +68,13 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    if !mkit_dir.is_dir() {
+    let layout = super::resolve_layout(&cwd);
+    if !layout.common_dir().is_dir() {
         return emit_err("not a mkit repo", exit::GENERAL_ERROR);
     }
 
     // --- Resolve commit. --------------------------------------------
-    let commit_hash = match resolve_commit(&mkit_dir, parsed.commit.as_deref()) {
+    let commit_hash = match resolve_commit(&layout, parsed.commit.as_deref()) {
         Ok(h) => h,
         Err((msg, code)) => return emit_err(&msg, code),
     };
@@ -91,9 +92,11 @@ pub fn run(args: &[String]) -> u8 {
         .trust_roots
         .as_deref()
         .map_or_else(default_trust_roots_path, PathBuf::from);
-    if let Err(code) =
-        warn_if_unsafe_trust_roots(&trust_path, &mkit_dir, parsed.trust_roots.is_some())
-    {
+    if let Err(code) = warn_if_unsafe_trust_roots(
+        &trust_path,
+        layout.common_dir(),
+        parsed.trust_roots.is_some(),
+    ) {
         return code;
     }
     let registry = match load_trust_roots(&trust_path) {
@@ -113,7 +116,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // --- Enumerate envelopes. ---------------------------------------
-    let envelopes = match store::list(&mkit_dir, &commit_hash) {
+    let envelopes = match store::list(&layout, &commit_hash) {
         Ok(v) => v,
         Err(e) => return emit_err(&format!("list attestations: {e}"), exit::NOINPUT),
     };
@@ -293,12 +296,12 @@ fn short_keyid(keyid: &str) -> String {
     }
 }
 
-fn resolve_commit(mkit_dir: &Path, flag: Option<&str>) -> Result<Hash, (String, u8)> {
+fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
     if let Some(hex) = flag {
         return hash_mod::from_hex(hex)
             .map_err(|e| (format!("bad --commit hash: {e}"), exit::DATAERR));
     }
-    match refs::resolve_head(mkit_dir) {
+    match refs::resolve_head(layout) {
         Ok(Some(h)) => Ok(h),
         Ok(None) => Err(("HEAD has no commit yet".to_owned(), exit::GENERAL_ERROR)),
         Err(e) => Err((format!("read HEAD: {e}"), exit::GENERAL_ERROR)),

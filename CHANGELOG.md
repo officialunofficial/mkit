@@ -180,6 +180,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`RepoLayout` path-resolution seam (#493 Phase 0).** `mkit-core` gains
+  `layout::RepoLayout`, the single authority for resolving repository
+  state under `.mkit/`, classifying every path as **common-dir** state
+  (objects, format marker, refs, shallow, config, keys, history MMR,
+  recovery log, attestations, applied-packs, git-bridge state, sparse
+  bitmap cache, pack-shard output) or **per-worktree** state (`HEAD`,
+  index, `ORIG_HEAD`, merge/cherry-pick/revert files, conflict sidecar,
+  `rebase-apply/`, bisect, stash, sparse-checkout filter, worktree lock)
+  in preparation for linked working trees (`mkit worktree`, later
+  phases). Repo-state APIs now take `&RepoLayout` instead of a bare
+  `&Path` root: `ObjectStore::{open,init}`, all of `refs`,
+  `index::{read_index,write_index,index_path}`, `ops::{conflict_state,
+  rebase, bisect, stash, gc, recovery}`, `ops::restore::{load,write}_
+  sparse_checkout`, `CommitHistory::open_at` (and
+  `CommitHistory::common_dir()` replaces `CommitHistory::mkit_dir()`),
+  `mkit_attest::store`, and `mkit_git_bridge::map::state_dir`. In the
+  classic single-worktree layout every resolved path is byte-identical
+  to before — zero behavior or on-disk change; goldens unchanged. The
+  CLI resolves its layout once per command through
+  `commands::resolve_layout`, the future discovery seam.
+
 - **buffa 0.8.1 + connectrpc 0.8.0 everywhere.** The main workspace and
   `contrib/signers` move buffa 0.8.0 → 0.8.1 (runtime-only patch; vendored
   codegen verified byte-identical). The ConnectRPC pair

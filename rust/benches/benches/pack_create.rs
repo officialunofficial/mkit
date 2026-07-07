@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit, time_one};
+use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, usize, &str)] = &[
@@ -36,7 +37,7 @@ fn bench_pack(c: &mut Criterion) {
         // Apples-to-apples with git2's odb.write below: real on-disk
         // writes, not just hashing.
         let mkit_dir = tempfile::tempdir().unwrap();
-        let store = ObjectStore::init(mkit_dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(mkit_dir.path())).unwrap();
         c.bench_function(&format!("pack/{axis}/mkit"), |b| {
             b.iter(|| pack_via_mkit(&store, &blobs));
         });

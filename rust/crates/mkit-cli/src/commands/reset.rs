@@ -28,6 +28,7 @@ use std::io::Write;
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
 use mkit_core::refs::{self, Head, RefWriteCondition};
@@ -84,12 +85,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -99,7 +100,7 @@ pub fn run(args: &[String]) -> u8 {
     let reset_index = !opts.soft;
 
     let spec = opts.target.as_deref().unwrap_or("HEAD");
-    let target = match super::revspec::resolve_revision(&store, &mkit_dir, spec) {
+    let target = match super::revspec::resolve_revision(&store, &layout, spec) {
         Ok(h) => h,
         Err(e) => {
             return emit_err(
@@ -141,7 +142,7 @@ pub fn run(args: &[String]) -> u8 {
     // them ourselves; the hashes let the guard below detect local edits to
     // ignored-but-tracked files that the shared guard cannot see.
     let hard_removed: Vec<(String, EntryStatus, Hash)> = if opts.hard {
-        match super::dropped_tracked_paths(&cwd, &store, tree_hash) {
+        match super::dropped_tracked_paths(&layout, &store, tree_hash) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         }
@@ -159,7 +160,7 @@ pub fn run(args: &[String]) -> u8 {
     // locally-modified ignored-but-tracked file is never discarded silently.
     if opts.hard && !opts.force {
         if let Err(e) =
-            super::ensure_restore_safe_with_options(&cwd, &store, tree_hash, &restore_opts)
+            super::ensure_restore_safe_with_options(&layout, &store, tree_hash, &restore_opts)
         {
             return emit_err(
                 &format!("{e}\nhint: use `mkit reset --hard -f` to discard these changes"),
@@ -188,11 +189,10 @@ pub fn run(args: &[String]) -> u8 {
     // (`resolve_head` Err) aborts rather than letting `move_head` clobber
     // it unlogged. `Ok(None)` is an unborn branch (nothing to supersede);
     // a no-op move (old == target) records nothing.
-    match refs::resolve_head(&mkit_dir) {
+    match refs::resolve_head(&layout) {
         Ok(Some(old_head)) if old_head != target => {
-            let branch = super::head_branch_name(&mkit_dir);
-            if let Err((msg, code)) =
-                super::record_superseded(&mkit_dir, "reset", &branch, old_head)
+            let branch = super::head_branch_name(&layout);
+            if let Err((msg, code)) = super::record_superseded(&layout, "reset", &branch, old_head)
             {
                 return emit_err(&msg, code);
             }
@@ -205,11 +205,11 @@ pub fn run(args: &[String]) -> u8 {
     // the ref before the index keeps the failure modes benign: a later
     // index-write failure leaves HEAD on the target with a stale index,
     // which `mkit status` surfaces and a re-run repairs.
-    if let Err((msg, code)) = move_head(&mkit_dir, &target) {
+    if let Err((msg, code)) = move_head(&layout, &target) {
         return emit_err(&msg, code);
     }
 
-    if reset_index && let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+    if reset_index && let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
 
@@ -255,14 +255,14 @@ pub fn run(args: &[String]) -> u8 {
 /// Point the current branch (or detached HEAD) at `target`. Routes branch
 /// moves through the history-recording ref helper so a `history-mmr`
 /// build journals the move; detached HEAD is rewritten directly.
-fn move_head(mkit_dir: &std::path::Path, target: &Hash) -> Result<(), (String, u8)> {
-    let head = refs::read_head(mkit_dir).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
+fn move_head(layout: &RepoLayout, target: &Hash) -> Result<(), (String, u8)> {
+    let head = refs::read_head(layout).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
         Head::Branch(name) => {
-            super::write_ref_recording_history(mkit_dir, &name, RefWriteCondition::Any, target)
+            super::write_ref_recording_history(layout, &name, RefWriteCondition::Any, target)
                 .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT))
         }
-        Head::Detached(_) => refs::write_head_detached(mkit_dir, target)
+        Head::Detached(_) => refs::write_head_detached(layout, target)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
     }
 }

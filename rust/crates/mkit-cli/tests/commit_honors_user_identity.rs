@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{IdentityKind, Object};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -98,9 +99,9 @@ fn commit_uses_config_user_identity_when_set() {
     let out = run_in_with_xdg(td.path(), xdg.path(), &["commit", "-m", "with-identity"]);
     assert!(out.status.success(), "commit failed: {out:?}");
 
-    let mkit_dir = td.path().join(".mkit");
-    let tip = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    let store = ObjectStore::open(td.path()).unwrap();
+    let layout = RepoLayout::single(td.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let obj = store.read_object(&tip).unwrap();
     let Object::Commit(c) = obj else {
         panic!("tip is not a commit");
@@ -142,9 +143,9 @@ fn commit_ignores_repo_scoped_user_identity() {
     let out = run_in(td.path(), &["commit", "-m", "repo-cfg-must-be-dropped"]);
     assert!(out.status.success(), "commit failed: {out:?}");
 
-    let mkit_dir = td.path().join(".mkit");
-    let tip = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    let store = ObjectStore::open(td.path()).unwrap();
+    let layout = RepoLayout::single(td.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(c) = store.read_object(&tip).unwrap() else {
         panic!("tip is not a commit");
     };
@@ -208,9 +209,9 @@ fn commit_author_flag_overrides_config_and_default() {
     );
     assert!(out.status.success(), "commit failed: {out:?}");
 
-    let mkit_dir = td.path().join(".mkit");
-    let tip = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    let store = ObjectStore::open(td.path()).unwrap();
+    let layout = RepoLayout::single(td.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(c) = store.read_object(&tip).unwrap() else {
         panic!("tip is not a commit");
     };
@@ -233,9 +234,9 @@ fn commit_falls_back_to_pubkey_when_no_identity_set() {
     let out = run_in(td.path(), &["commit", "-m", "pubkey-default"]);
     assert!(out.status.success(), "commit failed: {out:?}");
 
-    let mkit_dir = td.path().join(".mkit");
-    let tip = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    let store = ObjectStore::open(td.path()).unwrap();
+    let layout = RepoLayout::single(td.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(c) = store.read_object(&tip).unwrap() else {
         panic!("tip is not a commit");
     };

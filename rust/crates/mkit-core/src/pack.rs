@@ -493,7 +493,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 

@@ -19,18 +19,19 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::atomic;
 use crate::hash::{Hash, ZERO};
 use crate::index::{self, Index};
+use crate::layout::RepoLayout;
 use crate::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use crate::ops::diff::{DiffKind, DiffResult, diff_trees};
 use crate::ops::restore::{self, RestoreOptions};
 use crate::refs;
 use crate::serialize;
-use crate::store::{MKIT_DIR, ObjectStore};
+use crate::store::ObjectStore;
 use crate::worktree;
 
 /// Magic bytes for the stash manifest: `MKST` ("`MKit` `STash`").
@@ -109,18 +110,17 @@ pub type StashResult<T> = Result<T, StashError>;
 /// 4. Prepend a new [`StashEntry`] to the manifest.
 /// 5. Restore the worktree to HEAD's tree.
 /// 6. Truncate the index.
-pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult<()> {
+pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashResult<()> {
     if message.len() > MAX_MESSAGE_LEN {
         return Err(StashError::MessageTooLong);
     }
-    let mkit_dir = repo_root.join(MKIT_DIR);
 
     // One durability batch over the worktree snapshot, the staged-index
     // snapshot, and both commits — committed before the manifest write
     // that references them.
     let batch = store.batch();
-    let tree_hash = worktree::build_tree(&batch, repo_root)?;
-    let head_hash = refs::resolve_head(&mkit_dir)?;
+    let tree_hash = worktree::build_tree(&batch, layout.worktree_root())?;
+    let head_hash = refs::resolve_head(layout)?;
 
     let timestamp_u64 = unix_seconds_now();
     let zero_pk = [0u8; 32];
@@ -145,7 +145,7 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     //
     // A missing or empty index already reads as `Ok(Index::new())`, so the
     // `?` only surfaces a genuine error (corrupt/locked/oversized index).
-    let staged = index::read_index(repo_root)?;
+    let staged = index::read_index(layout)?;
     let staged_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
     let index_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
         data: staged.serialize(),
@@ -196,7 +196,7 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     batch.commit()?;
 
     // Prepend the new entry.
-    let mut list = read_list(repo_root)?;
+    let mut list = read_list(layout)?;
     let ts_u32: u32 = timestamp_u64.try_into().unwrap_or(u32::MAX);
     let new_entry = StashEntry {
         commit_hash: stash_hash,
@@ -205,7 +205,7 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
         message: message.to_string(),
     };
     list.entries.insert(0, new_entry);
-    write_list(repo_root, &list)?;
+    write_list(layout, &list)?;
 
     // Restore the worktree to HEAD's tree. In an UNBORN repo there is no HEAD,
     // so clear EVERY path captured in the worktree snapshot (tracked AND
@@ -216,12 +216,17 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     if let Some(hh) = head_hash {
         let head_obj = store.read_object(&hh)?;
         if let Object::Commit(c) = head_obj {
-            restore::restore_tree(store, c.tree_hash, repo_root, &RestoreOptions::default())?;
+            restore::restore_tree(
+                store,
+                c.tree_hash,
+                layout.worktree_root(),
+                &RestoreOptions::default(),
+            )?;
         }
     } else {
         let snapshot = index::from_tree(store, tree_hash)?;
         for e in &snapshot.entries {
-            let abs = repo_root.join(&e.path);
+            let abs = layout.worktree_root().join(&e.path);
             if let Err(err) = std::fs::remove_file(&abs)
                 && err.kind() != std::io::ErrorKind::NotFound
             {
@@ -232,7 +237,7 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
             // overwrite untracked directory" guard.
             let mut parent = abs.parent();
             while let Some(dir) = parent {
-                if dir == repo_root || std::fs::remove_dir(dir).is_err() {
+                if dir == layout.worktree_root() || std::fs::remove_dir(dir).is_err() {
                     break;
                 }
                 parent = dir.parent();
@@ -241,7 +246,7 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
     }
 
     // Clear the index.
-    let _ = index::write_index(repo_root, &Index::new());
+    let _ = index::write_index(layout, &Index::new());
     Ok(())
 }
 
@@ -250,8 +255,8 @@ pub fn save(store: &ObjectStore, repo_root: &Path, message: &str) -> StashResult
 /// # Errors
 /// - [`StashError::ManifestTooLarge`] / [`StashError::InvalidFormat`]
 ///   for a corrupt or oversized manifest.
-pub fn list(repo_root: &Path) -> StashResult<StashList> {
-    read_list(repo_root)
+pub fn list(layout: &RepoLayout) -> StashResult<StashList> {
+    read_list(layout)
 }
 
 /// Resolve the tree hash recorded by stash entry `idx` (newest = 0)
@@ -261,8 +266,8 @@ pub fn list(repo_root: &Path) -> StashResult<StashList> {
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
 /// - [`StashError::NotACommit`] if the stored object is not a Commit.
-pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<Hash> {
-    let list = read_list(repo_root)?;
+pub fn entry_tree_hash(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<Hash> {
+    let list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -291,10 +296,10 @@ pub fn entry_tree_hash(store: &ObjectStore, repo_root: &Path, idx: usize) -> Sta
 /// - [`StashError::Index`] if the serialized index blob is malformed.
 pub fn entry_index(
     store: &ObjectStore,
-    repo_root: &Path,
+    layout: &RepoLayout,
     idx: usize,
 ) -> StashResult<Option<Index>> {
-    let list = read_list(repo_root)?;
+    let list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -363,8 +368,8 @@ pub fn entry_index(
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `index` is past the end.
-pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()> {
-    let mut list = read_list(repo_root)?;
+pub fn pop(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<()> {
+    let mut list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -383,7 +388,7 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     // recoverable until the grace window expires.
     let ts = unix_seconds_now();
     crate::ops::recovery::record(
-        &repo_root.join(MKIT_DIR),
+        layout,
         &crate::ops::recovery::RecoveryEntry {
             timestamp: ts,
             op: "stash-pop".to_string(),
@@ -395,11 +400,11 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
     restore::restore_tree(
         store,
         commit.tree_hash,
-        repo_root,
+        layout.worktree_root(),
         &RestoreOptions::default(),
     )?;
     list.entries.remove(idx);
-    write_list(repo_root, &list)?;
+    write_list(layout, &list)?;
     Ok(())
 }
 
@@ -414,15 +419,15 @@ pub fn pop(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()>
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
-pub fn pop_finalize(repo_root: &Path, idx: usize) -> StashResult<()> {
-    let mut list = read_list(repo_root)?;
+pub fn pop_finalize(layout: &RepoLayout, idx: usize) -> StashResult<()> {
+    let mut list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
     let entry = list.entries[idx].clone();
     let ts = unix_seconds_now();
     crate::ops::recovery::record(
-        &repo_root.join(MKIT_DIR),
+        layout,
         &crate::ops::recovery::RecoveryEntry {
             timestamp: ts,
             op: "stash-pop".to_string(),
@@ -432,7 +437,7 @@ pub fn pop_finalize(repo_root: &Path, idx: usize) -> StashResult<()> {
     )
     .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
     list.entries.remove(idx);
-    write_list(repo_root, &list)?;
+    write_list(layout, &list)?;
     Ok(())
 }
 
@@ -451,8 +456,8 @@ pub fn pop_finalize(repo_root: &Path, idx: usize) -> StashResult<()> {
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
 /// - [`StashError::NotACommit`] if the stored object is not a Commit.
-pub fn apply(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<()> {
-    let list = read_list(repo_root)?;
+pub fn apply(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<()> {
+    let list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -464,7 +469,7 @@ pub fn apply(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<(
     restore::restore_tree(
         store,
         commit.tree_hash,
-        repo_root,
+        layout.worktree_root(),
         &RestoreOptions::default(),
     )?;
     Ok(())
@@ -475,8 +480,8 @@ pub fn apply(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<(
 ///
 /// # Errors
 /// - [`StashError::Io`] if the manifest cannot be written.
-pub fn clear(repo_root: &Path) -> StashResult<()> {
-    write_list(repo_root, &StashList::default())
+pub fn clear(layout: &RepoLayout) -> StashResult<()> {
+    write_list(layout, &StashList::default())
 }
 
 /// Render `stash show [<stash>]` output: header + unified-diff-style listing.
@@ -494,8 +499,12 @@ pub fn clear(repo_root: &Path) -> StashResult<()> {
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
 /// - [`StashError::NotACommit`] if the stored object is not a Commit.
 /// - Store/object errors if objects cannot be read.
-pub fn render_stash_show(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<String> {
-    let list = read_list(repo_root)?;
+pub fn render_stash_show(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    idx: usize,
+) -> StashResult<String> {
+    let list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -541,8 +550,8 @@ pub fn render_stash_show(store: &ObjectStore, repo_root: &Path, idx: usize) -> S
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `idx` is past the end.
 /// - [`StashError::NotACommit`] if the stash commit object is not a Commit.
-pub fn show_diff(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResult<DiffResult> {
-    let list = read_list(repo_root)?;
+pub fn show_diff(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<DiffResult> {
+    let list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
@@ -573,24 +582,24 @@ pub fn show_diff(store: &ObjectStore, repo_root: &Path, idx: usize) -> StashResu
 ///
 /// # Errors
 /// - [`StashError::IndexOutOfRange`] if `index` is past the end.
-pub fn drop(repo_root: &Path, idx: usize) -> StashResult<()> {
-    let mut list = read_list(repo_root)?;
+pub fn drop(layout: &RepoLayout, idx: usize) -> StashResult<()> {
+    let mut list = read_list(layout)?;
     if idx >= list.entries.len() {
         return Err(StashError::IndexOutOfRange(idx));
     }
     list.entries.remove(idx);
-    write_list(repo_root, &list)?;
+    write_list(layout, &list)?;
     Ok(())
 }
 
 // -- Manifest IO -------------------------------------------------------------
 
-fn stash_path(repo_root: &Path) -> PathBuf {
-    repo_root.join(STASH_FILE)
+fn stash_path(layout: &RepoLayout) -> PathBuf {
+    layout.stash_file()
 }
 
-fn read_list(repo_root: &Path) -> StashResult<StashList> {
-    let path = stash_path(repo_root);
+fn read_list(layout: &RepoLayout) -> StashResult<StashList> {
+    let path = stash_path(layout);
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(StashList::default()),
@@ -606,9 +615,9 @@ fn read_list(repo_root: &Path) -> StashResult<StashList> {
     deserialize_list(&data)
 }
 
-fn write_list(repo_root: &Path, list: &StashList) -> StashResult<()> {
+fn write_list(layout: &RepoLayout, list: &StashList) -> StashResult<()> {
     let bytes = serialize_list(list)?;
-    let path = stash_path(repo_root);
+    let path = stash_path(layout);
     atomic::write_atomic(&path, &bytes, true)?;
     Ok(())
 }
@@ -617,8 +626,8 @@ fn write_list(repo_root: &Path, list: &StashList) -> StashResult<()> {
 ///
 /// # Panics
 /// Panics if serialization or the write fails (test-only helper).
-pub fn write_list_test_only(repo_root: &Path, list: &StashList) {
-    write_list(repo_root, list).expect("write_list_test_only failed");
+pub fn write_list_test_only(layout: &RepoLayout, list: &StashList) {
+    write_list(layout, list).expect("write_list_test_only failed");
 }
 
 /// Encode a [`StashList`] as the on-disk manifest. Public for goldens.
@@ -732,7 +741,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 
@@ -765,7 +774,7 @@ mod tests {
 
     /// Build a deterministic stash fixture: parent commit has `existing.txt`,
     /// stash commit adds `new.txt` and modifies `existing.txt`.
-    fn build_stash_fixture(store: &ObjectStore, repo_root: &std::path::Path) {
+    fn build_stash_fixture(store: &ObjectStore, layout: &RepoLayout) {
         // Parent tree: one file "existing.txt"
         let blob_v1 = put_blob_data(store, b"original content");
         let parent_tree = put_tree_entries(
@@ -806,15 +815,16 @@ mod tests {
                 message: "WIP: stash message".to_string(),
             }],
         };
-        write_list(repo_root, &list).unwrap();
+        write_list(layout, &list).unwrap();
     }
 
     #[test]
     fn show_diff_returns_correct_entries() {
         let (tmp, store) = fresh_store();
-        build_stash_fixture(&store, tmp.path());
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
 
-        let diff = show_diff(&store, tmp.path(), 0).unwrap();
+        let diff = show_diff(&store, &layout, 0).unwrap();
         assert_eq!(diff.entries.len(), 2, "expected 2 diff entries");
 
         let existing = diff.entries.iter().find(|e| e.path == "existing.txt");
@@ -828,9 +838,10 @@ mod tests {
     #[test]
     fn render_stash_show_header_and_entries() {
         let (tmp, store) = fresh_store();
-        build_stash_fixture(&store, tmp.path());
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
 
-        let output = render_stash_show(&store, tmp.path(), 0).unwrap();
+        let output = render_stash_show(&store, &layout, 0).unwrap();
         assert!(
             output.contains("stash@{0}:"),
             "missing stash header: {output}"
@@ -853,10 +864,11 @@ mod tests {
     #[test]
     fn apply_restores_tree_and_keeps_entry() {
         let (tmp, store) = fresh_store();
-        build_stash_fixture(&store, tmp.path());
-        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
+        assert_eq!(read_list(&layout).unwrap().entries.len(), 1);
 
-        apply(&store, tmp.path(), 0).unwrap();
+        apply(&store, &layout, 0).unwrap();
 
         // The stash tree was materialised into the worktree.
         assert_eq!(
@@ -869,7 +881,7 @@ mod tests {
         );
         // ...and the entry is still on the stack (apply, not pop).
         assert_eq!(
-            read_list(tmp.path()).unwrap().entries.len(),
+            read_list(&layout).unwrap().entries.len(),
             1,
             "apply must not drop the entry"
         );
@@ -881,7 +893,8 @@ mod tests {
         // staged deletion (`Removed` entry) — which a tree cannot encode —
         // survives `entry_index`.
         let dir = tempfile::TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
         let blob_a = put_blob_data(&store, b"a");
         let tree = put_tree_entries(
             &store,
@@ -892,9 +905,8 @@ mod tests {
             }],
         );
         let head = put_commit_obj(&store, tree, vec![], 5);
-        let mkit_dir = dir.path().join(MKIT_DIR);
-        refs::write_head_branch(&mkit_dir, "main").unwrap();
-        refs::write_ref(&mkit_dir, "main", &head).unwrap();
+        refs::write_head_branch(&layout, "main").unwrap();
+        refs::write_ref(&layout, "main", &head).unwrap();
         std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
 
         // Stage `a.txt` (present) and a deletion of `b.txt` (Removed).
@@ -920,11 +932,11 @@ mod tests {
                 },
             ],
         };
-        index::write_index(dir.path(), &staged).unwrap();
+        index::write_index(&layout, &staged).unwrap();
 
-        save(&store, dir.path(), "wip").unwrap();
+        save(&store, &layout, "wip").unwrap();
 
-        let restored = entry_index(&store, dir.path(), 0)
+        let restored = entry_index(&store, &layout, 0)
             .unwrap()
             .expect("save must record an index snapshot");
         let b = restored
@@ -951,8 +963,9 @@ mod tests {
         // Historical single-parent (`[HEAD]`) entries carry no index
         // snapshot, so `--index` is a no-op for them.
         let (tmp, store) = fresh_store();
-        build_stash_fixture(&store, tmp.path());
-        assert!(entry_index(&store, tmp.path(), 0).unwrap().is_none());
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
+        assert!(entry_index(&store, &layout, 0).unwrap().is_none());
     }
 
     #[test]
@@ -963,7 +976,7 @@ mod tests {
         // rather than silently return None, which would let `pop --index` drop
         // the only staged-state copy.
         let (tmp, store) = fresh_store();
-        let root = tmp.path();
+        let root = &RepoLayout::single(tmp.path());
         let head_tree = put_tree_entries(&store, vec![]);
         let head_commit = put_commit_obj(&store, head_tree, vec![], 1);
         // A bogus "index" commit whose tree lacks the i/t wrapper markers.
@@ -1002,7 +1015,7 @@ mod tests {
         // wrapper is corrupt must ALSO fail closed — disambiguated by
         // parent_hash, not parent count.
         let (tmp, store) = fresh_store();
-        let root = tmp.path();
+        let root = &RepoLayout::single(tmp.path());
         let bogus_tree = put_tree_entries(
             &store,
             vec![TreeEntry {
@@ -1038,7 +1051,7 @@ mod tests {
         // treated as no-index (parent_hash short-circuit), NOT misread as a
         // wrapper.
         let (tmp, store) = fresh_store();
-        let root = tmp.path();
+        let root = &RepoLayout::single(tmp.path());
         let head_tree = put_tree_entries(
             &store,
             vec![
@@ -1077,30 +1090,33 @@ mod tests {
     #[test]
     fn apply_out_of_range_returns_error() {
         let (tmp, _store) = fresh_store();
-        let store = ObjectStore::open(tmp.path()).unwrap();
-        let err = apply(&store, tmp.path(), 0).unwrap_err();
+        let layout = RepoLayout::single(tmp.path());
+        let store = ObjectStore::open(&layout).unwrap();
+        let err = apply(&store, &layout, 0).unwrap_err();
         assert!(matches!(err, StashError::IndexOutOfRange(0)));
     }
 
     #[test]
     fn clear_empties_the_stack() {
         let (tmp, store) = fresh_store();
-        build_stash_fixture(&store, tmp.path());
-        assert_eq!(read_list(tmp.path()).unwrap().entries.len(), 1);
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
+        assert_eq!(read_list(&layout).unwrap().entries.len(), 1);
 
-        clear(tmp.path()).unwrap();
-        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
+        clear(&layout).unwrap();
+        assert!(read_list(&layout).unwrap().entries.is_empty());
 
         // Idempotent: clearing an already-empty stack is fine.
-        clear(tmp.path()).unwrap();
-        assert!(read_list(tmp.path()).unwrap().entries.is_empty());
+        clear(&layout).unwrap();
+        assert!(read_list(&layout).unwrap().entries.is_empty());
     }
 
     #[test]
     fn show_diff_out_of_range_returns_error() {
         let (tmp, _store) = fresh_store();
-        let store = ObjectStore::open(tmp.path()).unwrap();
-        let err = show_diff(&store, tmp.path(), 0).unwrap_err();
+        let layout = RepoLayout::single(tmp.path());
+        let store = ObjectStore::open(&layout).unwrap();
+        let err = show_diff(&store, &layout, 0).unwrap_err();
         assert!(matches!(err, StashError::IndexOutOfRange(0)));
     }
 
@@ -1165,19 +1181,20 @@ mod tests {
     #[test]
     fn pop_records_recovery_entry_for_popped_commit() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
         std::fs::write(dir.path().join("file.txt"), b"stash me").unwrap();
-        save(&store, dir.path(), "wip").unwrap();
-        let entry_hash = read_list(dir.path()).unwrap().entries[0].commit_hash;
+        save(&store, &layout, "wip").unwrap();
+        let entry_hash = read_list(&layout).unwrap().entries[0].commit_hash;
 
-        pop(&store, dir.path(), 0).unwrap();
+        pop(&store, &layout, 0).unwrap();
 
-        let log = crate::ops::recovery::read_all(&dir.path().join(MKIT_DIR)).unwrap();
+        let log = crate::ops::recovery::read_all(&layout).unwrap();
         assert!(
             log.iter()
                 .any(|e| e.op == "stash-pop" && e.superseded == entry_hash),
             "popped stash commit must be recorded as recoverable; log: {log:?}"
         );
-        assert!(read_list(dir.path()).unwrap().entries.is_empty());
+        assert!(read_list(&layout).unwrap().entries.is_empty());
     }
 }

@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use mkit_core::hash::{from_hex, hash, to_hex};
+use mkit_core::layout::RepoLayout;
 use mkit_core::{ObjectStore, deserialize};
 
 fn golden_dir() -> PathBuf {
@@ -51,7 +52,7 @@ fn write_blob_golden_into_store() {
     let expected_hash = from_hex(&expected_hex).expect("sidecar hex parses");
 
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
 
     let written = store.write(&bytes).unwrap();
     assert_eq!(
@@ -97,7 +98,7 @@ fn write_blob_golden_into_store() {
 #[test]
 fn commit_makes_objects_readable_across_handles() {
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
 
     let batch = store.batch();
     let hashes: Vec<_> = (0u32..20)
@@ -105,7 +106,7 @@ fn commit_makes_objects_readable_across_handles() {
         .collect();
     batch.commit().unwrap();
 
-    let other = ObjectStore::open(dir.path()).unwrap();
+    let other = ObjectStore::open(&RepoLayout::single(dir.path())).unwrap();
     for (i, h) in hashes.iter().enumerate() {
         assert_eq!(other.read(h).unwrap(), format!("object {i}").as_bytes());
     }
@@ -114,12 +115,12 @@ fn commit_makes_objects_readable_across_handles() {
 #[test]
 fn uncommitted_batch_objects_unreadable() {
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
 
     let batch = store.batch();
     let h = batch.write(b"never committed").unwrap();
 
-    let other = ObjectStore::open(dir.path()).unwrap();
+    let other = ObjectStore::open(&RepoLayout::single(dir.path())).unwrap();
     assert!(!other.contains(&h));
     assert!(other.read(&h).is_err());
     drop(batch);
@@ -136,7 +137,7 @@ fn uncommitted_batch_objects_unreadable() {
 #[test]
 fn interleaved_batches_do_not_corrupt() {
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
 
     // Two batches stage an overlapping set of objects, then both
     // commit. Content-addressing must make this race benign: every

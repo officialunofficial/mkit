@@ -32,6 +32,7 @@
 use std::io::Write;
 
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Identity, Object};
 use mkit_core::ops::cherry_pick::cherry_pick;
 use mkit_core::ops::conflict_state::{self, in_progress_op_name};
@@ -86,37 +87,31 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
 
     if opts.abort {
-        abort(&cwd, &mkit_dir, &store)
+        abort(&layout, &store)
     } else if opts.cont {
-        resume(&cwd, &mkit_dir, &store, false)
+        resume(&layout, &store, false)
     } else if opts.skip {
-        resume(&cwd, &mkit_dir, &store, true)
+        resume(&layout, &store, true)
     } else if let Some(branch) = opts.branch.as_deref() {
-        start(&cwd, &mkit_dir, &store, branch, opts.interactive)
+        start(&layout, &store, branch, opts.interactive)
     } else {
         super::usage_error("usage: mkit rebase [-i] <revspec> | --continue | --abort | --skip")
     }
 }
 
-fn start(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
-    store: &ObjectStore,
-    branch: &str,
-    interactive: bool,
-) -> u8 {
-    if let Some(op) = in_progress_op_name(mkit_dir) {
+fn start(layout: &RepoLayout, store: &ObjectStore, branch: &str, interactive: bool) -> u8 {
+    if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
             exit::GENERAL_ERROR,
@@ -127,7 +122,7 @@ fn start(
     // names all work — the same grammar `reset`/`restore`/`cherry-pick`
     // accept. The current branch name recorded in the rebase state
     // (`head_name`) comes from HEAD below, not from this argument.
-    let onto = match super::revspec::resolve_revision(store, mkit_dir, branch) {
+    let onto = match super::revspec::resolve_revision(store, layout, branch) {
         Ok(h) => h,
         Err(e) => {
             return emit_err(
@@ -136,12 +131,12 @@ fn start(
             );
         }
     };
-    let orig_head = match refs::resolve_head(mkit_dir) {
+    let orig_head = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => return emit_err("no commits on current branch", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
-    let head_name = match refs::read_head(mkit_dir) {
+    let head_name = match refs::read_head(layout) {
         Ok(Head::Branch(name)) => name,
         Ok(Head::Detached(_)) => {
             return emit_err("cannot rebase with detached HEAD", exit::GENERAL_ERROR);
@@ -186,7 +181,7 @@ fn start(
         actions,
         done: Vec::new(),
     };
-    let signing = match load_rebase_signing(cwd) {
+    let signing = match load_rebase_signing(layout) {
         Ok(signing) => signing,
         Err(code) => return code,
     };
@@ -194,36 +189,31 @@ fn start(
         Ok(t) => t,
         Err(c) => return c,
     };
-    if let Err(e) = super::ensure_restore_safe(cwd, store, onto_tree) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, onto_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = write_state(mkit_dir, &state) {
+    if let Err(e) = write_state(layout, &state) {
         return emit_err(&format!("write rebase state: {e}"), exit::CANTCREAT);
     }
     // Start HEAD at `onto` and drive the replay.
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, onto_tree) {
+    if let Err(e) = super::restore_worktree_and_index(layout, store, onto_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = refs::write_head_detached(mkit_dir, &onto) {
+    if let Err(e) = refs::write_head_detached(layout, &onto) {
         return emit_err(&format!("detach HEAD: {e}"), exit::CANTCREAT);
     }
-    replay(cwd, mkit_dir, store, Some(signing))
+    replay(layout, store, Some(signing))
 }
 
 /// Resume after a pause. When `skip` is set, drop the paused `todo[0]`
 /// with no replacement commit; otherwise create the rewritten commit
 /// for `todo[0]` from the resolved index, then keep replaying.
-fn resume(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
-    store: &ObjectStore,
-    skip: bool,
-) -> u8 {
-    if !is_rebase_in_progress(mkit_dir) {
+fn resume(layout: &RepoLayout, store: &ObjectStore, skip: bool) -> u8 {
+    if !is_rebase_in_progress(layout) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
-    let rebase_dir = rebase_dir_path(mkit_dir);
-    let mut state = match read_state(mkit_dir) {
+    let rebase_dir = rebase_dir_path(layout);
+    let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
@@ -233,27 +223,23 @@ fn resume(
     };
 
     if skip {
-        if let Err(code) =
-            skip_paused_commit(cwd, mkit_dir, store, &rebase_dir, &mut state, &records)
-        {
+        if let Err(code) = skip_paused_commit(layout, store, &rebase_dir, &mut state, &records) {
             return code;
         }
     } else if !records.is_empty()
-        && let Err(code) =
-            commit_resolved_commit(cwd, mkit_dir, store, &rebase_dir, &mut state, &records)
+        && let Err(code) = commit_resolved_commit(layout, store, &rebase_dir, &mut state, &records)
     {
         return code;
     }
     // Either nothing was paused (plain resume) or we just consumed the
     // paused commit; keep replaying the remaining todo.
-    replay(cwd, mkit_dir, store, None)
+    replay(layout, store, None)
 }
 
 /// `--skip`: drop the paused `todo[0]` with no replacement, discarding
 /// its conflict material from the worktree/index.
 fn skip_paused_commit(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     rebase_dir: &std::path::Path,
     state: &mut RebaseState,
@@ -265,7 +251,7 @@ fn skip_paused_commit(
             exit::GENERAL_ERROR,
         ));
     }
-    let head_hash = match refs::resolve_head(mkit_dir) {
+    let head_hash = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         _ => state.onto,
     };
@@ -275,29 +261,30 @@ fn skip_paused_commit(
     // Pre-flight before any mutation: refuse if discarding the step would
     // destroy genuine user work — an edit to a cleanly-applied path, or
     // unrelated staged/worktree changes — exactly as `--abort` does.
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, head_tree, op_result) {
+    if let Err(e) = super::conflict::ensure_abort_safe(layout, store, records, head_tree, op_result)
+    {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::conflict::reset_conflict_paths(cwd, store, records, head_tree, op_result)
+    if let Err(e) =
+        super::conflict::reset_conflict_paths(layout, store, records, head_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     state.consume_front();
-    persist_after_consume(mkit_dir, rebase_dir, state)
+    persist_after_consume(layout, rebase_dir, state)
 }
 
 /// `--continue` on a paused commit: refuse if markers remain, build the
 /// rewritten commit's tree from the RESOLVED index (not the
 /// conflict-time tree), create the commit, and move `todo[0]` → `done`.
 fn commit_resolved_commit(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     rebase_dir: &std::path::Path,
     state: &mut RebaseState,
     records: &[conflict_state::ConflictRecord],
 ) -> Result<(), u8> {
-    match super::conflict::first_unresolved_marker(cwd, records) {
+    match super::conflict::first_unresolved_marker(layout.worktree_root(), records) {
         Ok(Some(path)) => {
             return Err(emit_err(
                 &format!(
@@ -309,7 +296,7 @@ fn commit_resolved_commit(
         Ok(None) => {}
         Err(e) => return Err(emit_err(&e, exit::GENERAL_ERROR)),
     }
-    if let Err(e) = super::conflict::ensure_conflict_paths_staged(cwd, store, records) {
+    if let Err(e) = super::conflict::ensure_conflict_paths_staged(layout, store, records) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if state.todo.is_empty() {
@@ -319,15 +306,15 @@ fn commit_resolved_commit(
         ));
     }
     let target = state.todo[0];
-    let head_hash = match refs::resolve_head(mkit_dir) {
+    let head_hash = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         _ => state.onto,
     };
-    let idx = super::read_or_seed_index_from_head(cwd, store)
+    let idx = super::read_or_seed_index_from_head(layout, store)
         .map_err(|e| emit_err(&e, exit::GENERAL_ERROR))?;
     let tree_hash = worktree::build_tree_from_index(store, &idx)
         .map_err(|e| emit_err(&format!("build tree from index: {e}"), exit::GENERAL_ERROR))?;
-    let mut signing = load_rebase_signing(cwd)?;
+    let mut signing = load_rebase_signing(layout)?;
     // Same parent/message policy as the no-conflict path: pick/reword make a
     // child of HEAD, squash/fixup fold into it (parent = HEAD's parent). The
     // reword/squash editor opens now that the tree is resolved.
@@ -345,20 +332,20 @@ fn commit_resolved_commit(
     // the tree was built from the index, so the worktree already holds the
     // resolved content; restoring it would clobber unstaged edits made on a
     // cleanly-replayed path before `--continue`.
-    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree(layout, store, tree_hash) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = refs::write_head_detached(mkit_dir, &new_hash) {
+    if let Err(e) = refs::write_head_detached(layout, &new_hash) {
         return Err(emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT));
     }
     state.done.push(target);
     state.consume_front();
-    persist_after_consume(mkit_dir, rebase_dir, state)
+    persist_after_consume(layout, rebase_dir, state)
 }
 
 /// Clear the conflict sidecar and persist the updated rebase state.
 fn persist_after_consume(
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     rebase_dir: &std::path::Path,
     state: &RebaseState,
 ) -> Result<(), u8> {
@@ -368,17 +355,17 @@ fn persist_after_consume(
             exit::GENERAL_ERROR,
         ));
     }
-    if let Err(e) = write_state(mkit_dir, state) {
+    if let Err(e) = write_state(layout, state) {
         return Err(emit_err(&format!("persist state: {e}"), exit::CANTCREAT));
     }
     Ok(())
 }
 
-fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
-    if !is_rebase_in_progress(mkit_dir) {
+fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+    if !is_rebase_in_progress(layout) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
-    let state = match read_state(mkit_dir) {
+    let state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
@@ -391,7 +378,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     // recorded conflict paths to the CURRENT detached-HEAD tree so the
     // worktree/index match HEAD (no spurious staged/local changes); the
     // guarded restore below then moves cleanly back to orig_head.
-    let rebase_dir = rebase_dir_path(mkit_dir);
+    let rebase_dir = rebase_dir_path(layout);
     let records = match conflict_state::read_conflicts(&rebase_dir) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
@@ -404,11 +391,13 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     // destructive, so it must not run if the abort is going to be refused by
     // the guarded restore. The final restore target is `orig_tree`, so the
     // safety of non-discardable paths is judged against it.
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, &records, orig_tree, op_result) {
+    if let Err(e) =
+        super::conflict::ensure_abort_safe(layout, store, &records, orig_tree, op_result)
+    {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if !records.is_empty() || op_result.is_some() {
-        let head_hash = match refs::resolve_head(mkit_dir) {
+        let head_hash = match refs::resolve_head(layout) {
             Ok(Some(h)) => h,
             _ => state.onto,
         };
@@ -417,15 +406,15 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
             Err(c) => return c,
         };
         if let Err(e) =
-            super::conflict::reset_conflict_paths(cwd, store, &records, head_tree, op_result)
+            super::conflict::reset_conflict_paths(layout, store, &records, head_tree, op_result)
         {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
     }
-    if let Err(e) = super::ensure_restore_safe(cwd, store, orig_tree) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, orig_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, orig_tree) {
+    if let Err(e) = super::restore_worktree_and_index(layout, store, orig_tree) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     // Rebase abort rolls the branch tip back to `orig_head`. Route
@@ -433,17 +422,17 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
     // is recorded under the repo lock; the MMR is append-only, so
     // "rollback" surfaces as another leaf, not a rewind.
     if let Err(e) = super::write_ref_recording_history(
-        mkit_dir,
+        layout,
         &state.head_name,
         refs::RefWriteCondition::Any,
         &state.orig_head,
     ) {
         return emit_err(&format!("restore ref: {e}"), exit::CANTCREAT);
     }
-    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
+    if let Err(e) = refs::write_head_branch(layout, &state.head_name) {
         return emit_err(&format!("restore HEAD: {e}"), exit::CANTCREAT);
     }
-    let _ = cleanup_rebase(mkit_dir);
+    let _ = cleanup_rebase(layout);
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
@@ -454,24 +443,19 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
 }
 
 #[allow(clippy::too_many_lines)]
-fn replay(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
-    store: &ObjectStore,
-    signing: Option<RebaseSigning>,
-) -> u8 {
-    let mut state = match read_state(mkit_dir) {
+fn replay(layout: &RepoLayout, store: &ObjectStore, signing: Option<RebaseSigning>) -> u8 {
+    let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
     };
     let mut signing = match signing {
         Some(signing) => signing,
-        None => match load_rebase_signing(cwd) {
+        None => match load_rebase_signing(layout) {
             Ok(signing) => signing,
             Err(code) => return code,
         },
     };
-    let rebase_dir = rebase_dir_path(mkit_dir);
+    let rebase_dir = rebase_dir_path(layout);
 
     while !state.todo.is_empty() {
         // Clear any result tree left by a prior (now-resolved) conflict step
@@ -496,7 +480,7 @@ fn replay(
             );
         }
         let target = state.todo[0];
-        let head_hash = match refs::resolve_head(mkit_dir) {
+        let head_hash = match refs::resolve_head(layout) {
             Ok(Some(h)) => h,
             _ => state.onto,
         };
@@ -522,12 +506,12 @@ fn replay(
             // the worktree + index, and write the sidecar so
             // `--continue` consumes the resolved tree (not re-running
             // cherry-pick).
-            let _ = write_state(mkit_dir, &state);
-            if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+            let _ = write_state(layout, &state);
+            if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
                 return emit_err(&e, exit::GENERAL_ERROR);
             }
             let records = match super::conflict::materialize_conflicts(
-                cwd,
+                layout,
                 store,
                 result.tree_hash,
                 &result.conflicts,
@@ -560,7 +544,7 @@ fn replay(
             );
             return exit::GENERAL_ERROR;
         }
-        if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+        if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         // Compute the new commit's parent + message for this action (pick/
@@ -583,15 +567,15 @@ fn replay(
             Ok(h) => h,
             Err(c) => return c,
         };
-        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+        if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        if let Err(e) = refs::write_head_detached(mkit_dir, &new_hash) {
+        if let Err(e) = refs::write_head_detached(layout, &new_hash) {
             return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
         }
         state.done.push(target);
         state.consume_front();
-        if let Err(e) = write_state(mkit_dir, &state) {
+        if let Err(e) = write_state(layout, &state) {
             return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
         }
     }
@@ -603,7 +587,7 @@ fn replay(
     // therefore means HEAD was lost or corrupted mid-rebase: fail closed
     // rather than silently move the branch to `onto` and drop the
     // replayed tip.
-    let final_head = match refs::resolve_head(mkit_dir) {
+    let final_head = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => {
             return emit_err(
@@ -619,22 +603,22 @@ fn replay(
     // pins it — is cleaned up below. Abort if the log can't be written.
     if state.orig_head != final_head
         && let Err((m, c)) =
-            super::record_superseded(mkit_dir, "rebase", &state.head_name, state.orig_head)
+            super::record_superseded(layout, "rebase", &state.head_name, state.orig_head)
     {
         return emit_err(&m, c);
     }
     if let Err(e) = super::write_ref_recording_history(
-        mkit_dir,
+        layout,
         &state.head_name,
         refs::RefWriteCondition::Any,
         &final_head,
     ) {
         return emit_err(&format!("write ref: {e}"), exit::CANTCREAT);
     }
-    if let Err(e) = refs::write_head_branch(mkit_dir, &state.head_name) {
+    if let Err(e) = refs::write_head_branch(layout, &state.head_name) {
         return emit_err(&format!("reattach HEAD: {e}"), exit::CANTCREAT);
     }
-    let _ = cleanup_rebase(mkit_dir);
+    let _ = cleanup_rebase(layout);
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
@@ -648,11 +632,11 @@ struct RebaseSigning {
     signer: super::commit::CommitSigner,
 }
 
-fn load_rebase_signing(cwd: &std::path::Path) -> Result<RebaseSigning, u8> {
-    let cfg = config::read_or_default(cwd)
+fn load_rebase_signing(layout: &RepoLayout) -> Result<RebaseSigning, u8> {
+    let cfg = config::read_or_default(layout)
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
-    let signer =
-        super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
+    let signer = super::commit::load_commit_signer(layout, &cfg)
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
     Ok(RebaseSigning { signer })
 }
 

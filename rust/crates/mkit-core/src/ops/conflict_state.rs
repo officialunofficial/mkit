@@ -42,6 +42,7 @@ use std::path::Path;
 
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
+use crate::layout::RepoLayout;
 use crate::ops::merge::{Conflict, ConflictKind};
 
 /// File name: other parent of an in-progress merge.
@@ -227,10 +228,10 @@ pub fn clear_result_tree(dir: &Path) {
     let _ = fs::remove_file(dir.join(RESULT_TREE));
 }
 
-fn write_hex_file(mkit_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult<()> {
+fn write_hex_file(state_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult<()> {
     let mut buf = hash::to_hex(h);
     buf.push('\n');
-    fs::write(mkit_dir.join(name), buf.as_bytes())?;
+    fs::write(state_dir.join(name), buf.as_bytes())?;
     Ok(())
 }
 
@@ -299,18 +300,15 @@ pub struct RevertState {
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures.
 pub fn write_revert_state(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     state: &RevertState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(mkit_dir)?;
-    write_hex_file(mkit_dir, REVERT_HEAD, &state.revert_head)?;
-    write_hex_file(mkit_dir, ORIG_HEAD, &state.orig_head)?;
-    fs::write(mkit_dir.join(REVERT_MSG), &state.message)?;
-    fs::write(
-        mkit_dir.join(CONFLICTS_FILE),
-        serialize_conflicts(conflicts),
-    )?;
+    fs::create_dir_all(layout.worktree_state_dir())?;
+    write_hex_file(layout.worktree_state_dir(), REVERT_HEAD, &state.revert_head)?;
+    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
+    fs::write(layout.revert_msg_file(), &state.message)?;
+    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
     Ok(())
 }
 
@@ -318,12 +316,12 @@ pub fn write_revert_state(
 ///
 /// # Errors
 /// [`ConflictStateError::Invalid`] on malformed state.
-pub fn read_revert_state(mkit_dir: &Path) -> ConflictStateResult<Option<RevertState>> {
-    let Some(revert_head) = read_hex_file(&mkit_dir.join(REVERT_HEAD))? else {
+pub fn read_revert_state(layout: &RepoLayout) -> ConflictStateResult<Option<RevertState>> {
+    let Some(revert_head) = read_hex_file(&layout.revert_head_file())? else {
         return Ok(None);
     };
-    let orig_head = read_hex_file(&mkit_dir.join(ORIG_HEAD))?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(mkit_dir.join(REVERT_MSG)) {
+    let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
+    let message = match fs::read(layout.revert_msg_file()) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(ConflictStateError::Io(e)),
@@ -339,19 +337,19 @@ pub fn read_revert_state(mkit_dir: &Path) -> ConflictStateResult<Option<RevertSt
 ///
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures other than absence.
-pub fn clear_revert_state(mkit_dir: &Path) -> ConflictStateResult<()> {
-    remove_if_present(&mkit_dir.join(REVERT_HEAD))?;
-    remove_if_present(&mkit_dir.join(REVERT_MSG))?;
-    remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
-    remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
-    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
+pub fn clear_revert_state(layout: &RepoLayout) -> ConflictStateResult<()> {
+    remove_if_present(&layout.revert_head_file())?;
+    remove_if_present(&layout.revert_msg_file())?;
+    remove_if_present(&layout.orig_head_file())?;
+    remove_if_present(&layout.conflicts_file())?;
+    remove_if_present(&layout.result_tree_file())?;
     Ok(())
 }
 
 /// `true` when a revert is in progress (`REVERT_HEAD` present).
 #[must_use]
-pub fn is_revert_in_progress(mkit_dir: &Path) -> bool {
-    mkit_dir.join(REVERT_HEAD).exists()
+pub fn is_revert_in_progress(layout: &RepoLayout) -> bool {
+    layout.revert_head_file().exists()
 }
 
 /// Write merge state + the conflict sidecar.
@@ -359,18 +357,15 @@ pub fn is_revert_in_progress(mkit_dir: &Path) -> bool {
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures.
 pub fn write_merge_state(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     state: &MergeState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(mkit_dir)?;
-    write_hex_file(mkit_dir, MERGE_HEAD, &state.merge_head)?;
-    write_hex_file(mkit_dir, ORIG_HEAD, &state.orig_head)?;
-    fs::write(mkit_dir.join(MERGE_MSG), &state.message)?;
-    fs::write(
-        mkit_dir.join(CONFLICTS_FILE),
-        serialize_conflicts(conflicts),
-    )?;
+    fs::create_dir_all(layout.worktree_state_dir())?;
+    write_hex_file(layout.worktree_state_dir(), MERGE_HEAD, &state.merge_head)?;
+    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
+    fs::write(layout.merge_msg_file(), &state.message)?;
+    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
     Ok(())
 }
 
@@ -378,12 +373,12 @@ pub fn write_merge_state(
 ///
 /// # Errors
 /// [`ConflictStateError::Invalid`] on malformed state.
-pub fn read_merge_state(mkit_dir: &Path) -> ConflictStateResult<Option<MergeState>> {
-    let Some(merge_head) = read_hex_file(&mkit_dir.join(MERGE_HEAD))? else {
+pub fn read_merge_state(layout: &RepoLayout) -> ConflictStateResult<Option<MergeState>> {
+    let Some(merge_head) = read_hex_file(&layout.merge_head_file())? else {
         return Ok(None);
     };
-    let orig_head = read_hex_file(&mkit_dir.join(ORIG_HEAD))?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(mkit_dir.join(MERGE_MSG)) {
+    let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
+    let message = match fs::read(layout.merge_msg_file()) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(ConflictStateError::Io(e)),
@@ -400,18 +395,19 @@ pub fn read_merge_state(mkit_dir: &Path) -> ConflictStateResult<Option<MergeStat
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures.
 pub fn write_cherry_pick_state(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     state: &CherryPickState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(mkit_dir)?;
-    write_hex_file(mkit_dir, CHERRY_PICK_HEAD, &state.cherry_pick_head)?;
-    write_hex_file(mkit_dir, ORIG_HEAD, &state.orig_head)?;
-    fs::write(mkit_dir.join(CHERRY_PICK_MSG), &state.message)?;
-    fs::write(
-        mkit_dir.join(CONFLICTS_FILE),
-        serialize_conflicts(conflicts),
+    fs::create_dir_all(layout.worktree_state_dir())?;
+    write_hex_file(
+        layout.worktree_state_dir(),
+        CHERRY_PICK_HEAD,
+        &state.cherry_pick_head,
     )?;
+    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
+    fs::write(layout.cherry_pick_msg_file(), &state.message)?;
+    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
     Ok(())
 }
 
@@ -419,12 +415,12 @@ pub fn write_cherry_pick_state(
 ///
 /// # Errors
 /// [`ConflictStateError::Invalid`] on malformed state.
-pub fn read_cherry_pick_state(mkit_dir: &Path) -> ConflictStateResult<Option<CherryPickState>> {
-    let Some(cherry_pick_head) = read_hex_file(&mkit_dir.join(CHERRY_PICK_HEAD))? else {
+pub fn read_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<Option<CherryPickState>> {
+    let Some(cherry_pick_head) = read_hex_file(&layout.cherry_pick_head_file())? else {
         return Ok(None);
     };
-    let orig_head = read_hex_file(&mkit_dir.join(ORIG_HEAD))?.ok_or(ConflictStateError::Invalid)?;
-    let message = match fs::read(mkit_dir.join(CHERRY_PICK_MSG)) {
+    let orig_head = read_hex_file(&layout.orig_head_file())?.ok_or(ConflictStateError::Invalid)?;
+    let message = match fs::read(layout.cherry_pick_msg_file()) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(ConflictStateError::Io(e)),
@@ -474,12 +470,12 @@ fn remove_if_present(path: &Path) -> ConflictStateResult<()> {
 ///
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures other than absence.
-pub fn clear_merge_state(mkit_dir: &Path) -> ConflictStateResult<()> {
-    remove_if_present(&mkit_dir.join(MERGE_HEAD))?;
-    remove_if_present(&mkit_dir.join(MERGE_MSG))?;
-    remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
-    remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
-    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
+pub fn clear_merge_state(layout: &RepoLayout) -> ConflictStateResult<()> {
+    remove_if_present(&layout.merge_head_file())?;
+    remove_if_present(&layout.merge_msg_file())?;
+    remove_if_present(&layout.orig_head_file())?;
+    remove_if_present(&layout.conflicts_file())?;
+    remove_if_present(&layout.result_tree_file())?;
     Ok(())
 }
 
@@ -487,47 +483,47 @@ pub fn clear_merge_state(mkit_dir: &Path) -> ConflictStateResult<()> {
 ///
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures other than absence.
-pub fn clear_cherry_pick_state(mkit_dir: &Path) -> ConflictStateResult<()> {
-    remove_if_present(&mkit_dir.join(CHERRY_PICK_HEAD))?;
-    remove_if_present(&mkit_dir.join(CHERRY_PICK_MSG))?;
-    remove_if_present(&mkit_dir.join(ORIG_HEAD))?;
-    remove_if_present(&mkit_dir.join(CONFLICTS_FILE))?;
-    remove_if_present(&mkit_dir.join(RESULT_TREE))?;
+pub fn clear_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<()> {
+    remove_if_present(&layout.cherry_pick_head_file())?;
+    remove_if_present(&layout.cherry_pick_msg_file())?;
+    remove_if_present(&layout.orig_head_file())?;
+    remove_if_present(&layout.conflicts_file())?;
+    remove_if_present(&layout.result_tree_file())?;
     Ok(())
 }
 
 /// `true` when a merge is in progress (`MERGE_HEAD` present).
 #[must_use]
-pub fn is_merge_in_progress(mkit_dir: &Path) -> bool {
-    mkit_dir.join(MERGE_HEAD).exists()
+pub fn is_merge_in_progress(layout: &RepoLayout) -> bool {
+    layout.merge_head_file().exists()
 }
 
 /// `true` when a cherry-pick is in progress (`CHERRY_PICK_HEAD` present).
 #[must_use]
-pub fn is_cherry_pick_in_progress(mkit_dir: &Path) -> bool {
-    mkit_dir.join(CHERRY_PICK_HEAD).exists()
+pub fn is_cherry_pick_in_progress(layout: &RepoLayout) -> bool {
+    layout.cherry_pick_head_file().exists()
 }
 
 /// `true` when any merge / cherry-pick / rebase is in progress. Used to
 /// refuse starting a second such operation while one is unfinished.
 #[must_use]
-pub fn any_op_in_progress(mkit_dir: &Path) -> bool {
-    is_merge_in_progress(mkit_dir)
-        || is_cherry_pick_in_progress(mkit_dir)
-        || is_revert_in_progress(mkit_dir)
-        || crate::ops::rebase::is_rebase_in_progress(mkit_dir)
+pub fn any_op_in_progress(layout: &RepoLayout) -> bool {
+    is_merge_in_progress(layout)
+        || is_cherry_pick_in_progress(layout)
+        || is_revert_in_progress(layout)
+        || crate::ops::rebase::is_rebase_in_progress(layout)
 }
 
 /// Human-readable name of whichever op is in progress, for error text.
 #[must_use]
-pub fn in_progress_op_name(mkit_dir: &Path) -> Option<&'static str> {
-    if is_merge_in_progress(mkit_dir) {
+pub fn in_progress_op_name(layout: &RepoLayout) -> Option<&'static str> {
+    if is_merge_in_progress(layout) {
         Some("merge")
-    } else if is_cherry_pick_in_progress(mkit_dir) {
+    } else if is_cherry_pick_in_progress(layout) {
         Some("cherry-pick")
-    } else if is_revert_in_progress(mkit_dir) {
+    } else if is_revert_in_progress(layout) {
         Some("revert")
-    } else if crate::ops::rebase::is_rebase_in_progress(mkit_dir) {
+    } else if crate::ops::rebase::is_rebase_in_progress(layout) {
         Some("rebase")
     } else {
         None
@@ -600,8 +596,8 @@ mod tests {
     #[test]
     fn merge_state_round_trip() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let state = MergeState {
             merge_head: h("theirs"),
             orig_head: h("orig"),
@@ -619,7 +615,10 @@ mod tests {
         assert!(any_op_in_progress(&mkit));
         let read = read_merge_state(&mkit).unwrap().unwrap();
         assert_eq!(read, state);
-        assert_eq!(read_conflicts(&mkit).unwrap(), conflicts);
+        assert_eq!(
+            read_conflicts(mkit.worktree_state_dir()).unwrap(),
+            conflicts
+        );
         clear_merge_state(&mkit).unwrap();
         assert!(!is_merge_in_progress(&mkit));
         assert!(read_merge_state(&mkit).unwrap().is_none());
@@ -628,8 +627,8 @@ mod tests {
     #[test]
     fn cherry_pick_state_round_trip() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let state = CherryPickState {
             cherry_pick_head: h("pick"),
             orig_head: h("orig"),
@@ -646,8 +645,8 @@ mod tests {
     #[test]
     fn clear_is_idempotent() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         clear_merge_state(&mkit).unwrap();
         clear_cherry_pick_state(&mkit).unwrap();
     }

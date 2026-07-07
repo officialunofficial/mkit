@@ -22,11 +22,11 @@
 //! HEAD/ref/index/worktree to `ORIG_HEAD` and clears all state.
 
 use std::io::Write;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::conflict_state::{self, MergeState, in_progress_op_name, is_merge_in_progress};
 use mkit_core::ops::merge::{find_merge_base, merge_trees};
@@ -74,24 +74,23 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
 
     if opts.abort {
-        abort(&cwd, &mkit_dir, &store)
+        abort(&layout, &store)
     } else if opts.cont {
-        cont(&cwd, &mkit_dir, &store)
+        cont(&layout, &store)
     } else if let Some(branch) = opts.branch.as_deref() {
         start(
-            &cwd,
-            &mkit_dir,
+            &layout,
             &store,
             branch,
             opts.no_commit,
@@ -104,21 +103,20 @@ pub fn run(args: &[String]) -> u8 {
 
 #[allow(clippy::too_many_lines)]
 fn start(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     branch: &str,
     no_commit: bool,
     message: Option<&str>,
 ) -> u8 {
-    if let Some(op) = in_progress_op_name(mkit_dir) {
+    if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
             exit::GENERAL_ERROR,
         );
     }
 
-    let ours = match refs::resolve_head(mkit_dir) {
+    let ours = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => return emit_err("no commits on current branch", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
@@ -127,7 +125,7 @@ fn start(
     // (`<remote>/<branch>`), hashes — peeling annotated tags to the
     // commit. Branch names keep their historical precedence because
     // resolve_revision checks refs/heads first.
-    let theirs = match super::revspec::resolve_revision(store, mkit_dir, branch) {
+    let theirs = match super::revspec::resolve_revision(store, layout, branch) {
         Ok(h) => super::log::peel_tags(store, h),
         Err(e) => return emit_err(&format!("merge target: {e}"), exit::GENERAL_ERROR),
     };
@@ -151,13 +149,13 @@ fn start(
             Ok(t) => t,
             Err(code) => return code,
         };
-        if let Err(e) = super::ensure_restore_safe(cwd, store, theirs_tree) {
+        if let Err(e) = super::ensure_restore_safe(layout, store, theirs_tree) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        if let Err(e) = super::restore_worktree_and_index(cwd, store, theirs_tree) {
+        if let Err(e) = super::restore_worktree_and_index(layout, store, theirs_tree) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        if let Err(e) = advance_head(mkit_dir, &theirs) {
+        if let Err(e) = advance_head(layout, &theirs) {
             return emit_err(&e, exit::CANTCREAT);
         }
         // git-shaped fast-forward report: `Updating <old>..<new>` +
@@ -200,7 +198,7 @@ fn start(
     // overrides it outright.
     let msg = match message {
         Some(m) => m.to_string(),
-        None if merge_source_is_remote_tracking(mkit_dir, branch) => {
+        None if merge_source_is_remote_tracking(layout, branch) => {
             let short = branch.strip_prefix("refs/remotes/").unwrap_or(branch);
             format!("Merge remote-tracking branch '{short}'")
         }
@@ -209,11 +207,11 @@ fn start(
 
     if result.has_conflicts() {
         // Guard: never clobber dirty tracked / untracked collisions.
-        if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+        if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         let records = match super::conflict::materialize_conflicts(
-            cwd,
+            layout,
             store,
             result.tree_hash,
             &result.conflicts,
@@ -226,12 +224,14 @@ fn start(
             orig_head: ours,
             message: msg.into_bytes(),
         };
-        if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &records) {
+        if let Err(e) = conflict_state::write_merge_state(layout, &state, &records) {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         // Record the merge result tree so `--abort` treats the operation's
         // clean hunks (not just conflict paths) as discardable.
-        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+        if let Err(e) =
+            conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
+        {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
@@ -252,7 +252,7 @@ fn start(
         return exit::GENERAL_ERROR;
     }
 
-    if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
@@ -261,7 +261,7 @@ fn start(
     // merge commit (it consumes `MERGE_HEAD`); `mkit merge --continue`
     // does the same.
     if no_commit {
-        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+        if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         // A tree can't encode deletions, so staging the result tree drops
@@ -271,7 +271,7 @@ fn start(
         // seed an empty index from HEAD) would build/judge against the OLD
         // tree, dropping the deletions.
         if let Err(e) =
-            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+            super::stage_removed_tombstones(layout, store, Some(ours_tree), result.tree_hash)
         {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -280,12 +280,14 @@ fn start(
             orig_head: ours,
             message: msg.into_bytes(),
         };
-        if let Err(e) = conflict_state::write_merge_state(mkit_dir, &state, &[]) {
+        if let Err(e) = conflict_state::write_merge_state(layout, &state, &[]) {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         // Record the merge result tree so `--abort` can tell the staged merge
         // (discardable) from genuine user work staged on top of it.
-        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+        if let Err(e) =
+            conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
+        {
             return emit_err(&format!("write merge state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
@@ -298,15 +300,21 @@ fn start(
     }
 
     // Clean merge — build a merge commit with two parents.
-    let commit_hash =
-        match create_merge_commit(cwd, store, result.tree_hash, ours, theirs, msg.as_bytes()) {
-            Ok(h) => h,
-            Err(code) => return code,
-        };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+    let commit_hash = match create_merge_commit(
+        layout,
+        store,
+        result.tree_hash,
+        ours,
+        theirs,
+        msg.as_bytes(),
+    ) {
+        Ok(h) => h,
+        Err(code) => return code,
+    };
+    if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = advance_head(mkit_dir, &commit_hash) {
+    if let Err(e) = advance_head(layout, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
     // git-shaped true-merge report: `Merge made by the 'ort' strategy.` +
@@ -335,20 +343,20 @@ fn print_merge_stat_trees(store: &ObjectStore, old_tree: Option<Hash>, new_tree:
     }
 }
 
-fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
-    if !is_merge_in_progress(mkit_dir) {
+fn cont(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+    if !is_merge_in_progress(layout) {
         return emit_err("no merge in progress", exit::GENERAL_ERROR);
     }
-    let state = match conflict_state::read_merge_state(mkit_dir) {
+    let state = match conflict_state::read_merge_state(layout) {
         Ok(Some(s)) => s,
         Ok(None) => return emit_err("no merge in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read merge state: {e}"), exit::GENERAL_ERROR),
     };
-    let records = match conflict_state::read_conflicts(mkit_dir) {
+    let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    match super::conflict::first_unresolved_marker(cwd, &records) {
+    match super::conflict::first_unresolved_marker(layout.worktree_root(), &records) {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
@@ -360,13 +368,13 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(None) => {}
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     }
-    if let Err(e) = super::conflict::ensure_conflict_paths_staged(cwd, store, &records) {
+    if let Err(e) = super::conflict::ensure_conflict_paths_staged(layout, store, &records) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // Build the final tree from the resolved index — NOT the
     // conflict-time ours-wins tree.
-    let idx = match super::read_or_seed_index_from_head(cwd, store) {
+    let idx = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -376,7 +384,7 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
     };
 
     let commit_hash = match create_merge_commit(
-        cwd,
+        layout,
         store,
         tree_hash,
         state.orig_head,
@@ -391,13 +399,13 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
     // resolved content; restoring it would clobber any unstaged edits the
     // user made after staging — `git commit` (and `mkit commit`) leave the
     // worktree untouched here.
-    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree(layout, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = advance_head(mkit_dir, &commit_hash) {
+    if let Err(e) = advance_head(layout, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    if let Err(e) = conflict_state::clear_merge_state(mkit_dir) {
+    if let Err(e) = conflict_state::clear_merge_state(layout) {
         return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
     }
     let mut stderr = std::io::stderr().lock();
@@ -410,23 +418,23 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
     exit::OK
 }
 
-fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
-    if !is_merge_in_progress(mkit_dir) {
+fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+    if !is_merge_in_progress(layout) {
         return emit_err("no merge in progress", exit::GENERAL_ERROR);
     }
-    let state = match conflict_state::read_merge_state(mkit_dir) {
+    let state = match conflict_state::read_merge_state(layout) {
         Ok(Some(s)) => s,
         Ok(None) => return emit_err("no merge in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read merge state: {e}"), exit::GENERAL_ERROR),
     };
-    let records = match conflict_state::read_conflicts(mkit_dir) {
+    let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(code) = restore_to(cwd, mkit_dir, store, state.orig_head, &records) {
+    if let Err(code) = restore_to(layout, store, state.orig_head, &records) {
         return code;
     }
-    if let Err(e) = conflict_state::clear_merge_state(mkit_dir) {
+    if let Err(e) = conflict_state::clear_merge_state(layout) {
         return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
     }
     let mut stderr = std::io::stderr().lock();
@@ -437,8 +445,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
 /// Restore worktree + index + HEAD/ref to `target` (the pre-op HEAD).
 /// Routes the branch advance through the history-MMR helper.
 fn restore_to(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     target: Hash,
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
@@ -449,11 +456,14 @@ fn restore_to(
     // user-untouched output as discardable while protecting genuine work the
     // user staged or edited on top of it (a conflict resolution, an unrelated
     // `mkit add`, or an edit to a cleanly-merged file).
-    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
+    let op_result = conflict_state::read_result_tree(layout.worktree_state_dir())
+        .ok()
+        .flatten();
     // Pre-flight: refuse *before* any mutation when restoring would clobber
     // genuine user work on a non-discardable path (the reset below discards
     // the operation material).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    if let Err(e) =
+        super::conflict::ensure_abort_safe(layout, store, records, target_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
@@ -461,31 +471,31 @@ fn restore_to(
     // restore doesn't see it as user "local changes" (it still protects
     // unrelated dirty/untracked work).
     if let Err(e) =
-        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+        super::conflict::reset_conflict_paths(layout, store, records, target_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
+    if let Err(e) = super::restore_worktree_and_index(layout, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    super::restore_head_ref(mkit_dir, &target)
+    super::restore_head_ref(layout, &target)
 }
 
 fn create_merge_commit(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
     parent_ours: Hash,
     parent_theirs: Hash,
     message: &[u8],
 ) -> Result<Hash, u8> {
-    let cfg = config::read_or_default(cwd)
+    let cfg = config::read_or_default(layout)
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
-    let mut signer =
-        super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
+    let mut signer = super::commit::load_commit_signer(layout, &cfg)
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;
@@ -516,15 +526,15 @@ fn create_merge_commit(
 
 /// Whether `spec` names a remote-tracking ref under revspec
 /// precedence (local branches and tags win over `<remote>/<branch>`).
-fn merge_source_is_remote_tracking(mkit_dir: &Path, spec: &str) -> bool {
+fn merge_source_is_remote_tracking(layout: &RepoLayout, spec: &str) -> bool {
     let rel = spec.strip_prefix("refs/remotes/").map_or(spec, |r| r);
     let Some((remote, branch)) = rel.split_once('/') else {
         return false;
     };
-    if refs::read_ref(mkit_dir, spec).is_ok_and(|r| r.is_some())
-        || refs::read_tag(mkit_dir, spec).is_ok_and(|r| r.is_some())
+    if refs::read_ref(layout, spec).is_ok_and(|r| r.is_some())
+        || refs::read_tag(layout, spec).is_ok_and(|r| r.is_some())
     {
         return false; // a local ref of the same spelling shadows it
     }
-    refs::read_remote_ref(mkit_dir, remote, branch).is_ok_and(|r| r.is_some())
+    refs::read_remote_ref(layout, remote, branch).is_ok_and(|r| r.is_some())
 }

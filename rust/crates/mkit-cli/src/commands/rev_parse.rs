@@ -17,6 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs::{self, Head};
 use mkit_core::store::ObjectStore;
 
@@ -69,11 +70,11 @@ pub fn run(args: &[String]) -> u8 {
         return exit::OK;
     }
 
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     if opts.args.is_empty() {
         return super::usage_error("usage: mkit rev-parse [opts] <rev>...");
@@ -81,7 +82,7 @@ pub fn run(args: &[String]) -> u8 {
 
     for spec in &opts.args {
         if opts.abbrev_ref {
-            match abbrev_ref(&mkit_dir, spec) {
+            match abbrev_ref(&layout, spec) {
                 Ok(name) => {
                     let _ = writeln!(stdout, "{name}");
                 }
@@ -89,7 +90,7 @@ pub fn run(args: &[String]) -> u8 {
             }
             continue;
         }
-        let hash = match revspec::resolve_revision(&store, &mkit_dir, spec) {
+        let hash = match revspec::resolve_revision(&store, &layout, spec) {
             Ok(h) => h,
             Err(e) => {
                 // `--verify` or not, a bad revision is an error (matching
@@ -109,9 +110,9 @@ pub fn run(args: &[String]) -> u8 {
 
 /// `--abbrev-ref` rendering: `HEAD` → the current branch (or `HEAD` when
 /// detached); any other token is echoed as the already-short name.
-fn abbrev_ref(mkit_dir: &Path, spec: &str) -> Result<String, u8> {
+fn abbrev_ref(layout: &RepoLayout, spec: &str) -> Result<String, u8> {
     if spec == "HEAD" {
-        return match refs::read_head(mkit_dir) {
+        return match refs::read_head(layout) {
             Ok(Head::Branch(name)) => Ok(name),
             Ok(Head::Detached(_)) => Ok("HEAD".to_string()),
             Err(e) => Err(emit_err(&format!("read HEAD: {e}"), exit::DATAERR)),

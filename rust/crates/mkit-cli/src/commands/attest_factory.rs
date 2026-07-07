@@ -24,9 +24,8 @@
 //! subprocess binary; the algorithm is recorded so verification can
 //! dispatch the right crypto path without reparsing the keyid.
 
-use std::path::Path;
-
 use mkit_attest::{Algorithm, ExternalSigner, Signer};
+use mkit_core::layout::RepoLayout;
 use mkit_keystore::{KeyRef, KeySelector, open_backend};
 use zeroize::Zeroizing;
 
@@ -105,20 +104,21 @@ pub fn parse_algorithm(s: &str) -> Result<Algorithm, FactoryError> {
 
 /// Build a signer.
 ///
-/// * `root` — the repo root (the `.mkit/` directory lives directly under it).
+/// * `layout` — the resolved repository layout (keys live under its
+///   common dir).
 /// * `algorithm` — resolved [`Algorithm`].
 /// * `signer_kind` — `"repo-key"`, `"external"`, or `"keystore"`.
 /// * `cfg` — the merged config (defaults + user-scoped + repo-scoped).
 ///
 /// The returned signer is ready to be called with PAE bytes.
 pub fn build_signer(
-    root: &Path,
+    layout: &RepoLayout,
     algorithm: Algorithm,
     signer_kind: &str,
     cfg: &Config,
 ) -> Result<Box<dyn Signer>, FactoryError> {
     match signer_kind {
-        "repo-key" => build_repo_key_signer(root, algorithm, cfg),
+        "repo-key" => build_repo_key_signer(layout, algorithm, cfg),
         "external" => build_external_signer(algorithm, &cfg.attest),
         "keystore" => build_keystore_signer(algorithm, cfg),
         other => Err(FactoryError::UnknownSignerKind(other.to_owned())),
@@ -213,7 +213,7 @@ impl Signer for KeystoreAttestSigner {
 }
 
 fn build_repo_key_signer(
-    root: &Path,
+    layout: &RepoLayout,
     algorithm: Algorithm,
     cfg: &Config,
 ) -> Result<Box<dyn Signer>, FactoryError> {
@@ -227,7 +227,7 @@ fn build_repo_key_signer(
             // they get the same `MissingKeyFile` error as
             // `mkit keygen` would point them to.
             let rel = cfg.signing_key.as_str();
-            let path = crate::config::resolve_key_path(root, rel).map_err(|e| {
+            let path = crate::config::resolve_key_path(layout, rel).map_err(|e| {
                 FactoryError::InvalidKeyFile {
                     path: rel.to_owned(),
                     reason: e.to_string(),
@@ -248,7 +248,7 @@ fn build_repo_key_signer(
         }
         Algorithm::Secp256k1 => {
             let rel = cfg.attest.secp256k1_key_path_or_default();
-            let secret = load_raw_secret(root, rel, algorithm)?;
+            let secret = load_raw_secret(layout, rel, algorithm)?;
             // Borrow through `from_seed_zeroizing` so no plain
             // `[u8; 32]` is materialised on this frame.
             let signer = mkit_attest::signer_k256::Secp256k1Signer::from_seed_zeroizing(&secret)
@@ -257,7 +257,7 @@ fn build_repo_key_signer(
         }
         Algorithm::P256 => {
             let rel = cfg.attest.p256_key_path_or_default();
-            let secret = load_raw_secret(root, rel, algorithm)?;
+            let secret = load_raw_secret(layout, rel, algorithm)?;
             // Borrow through `from_seed_zeroizing`; see secp256k1 arm.
             let signer = mkit_attest::signer_p256::P256Signer::from_seed_zeroizing(&secret)
                 .map_err(|e| FactoryError::Signer(e.to_string()))?;
@@ -295,11 +295,11 @@ fn build_external_signer(
 }
 
 fn load_raw_secret(
-    root: &Path,
+    layout: &RepoLayout,
     rel_path: &str,
     algorithm: Algorithm,
 ) -> Result<Zeroizing<[u8; 32]>, FactoryError> {
-    let path = crate::config::resolve_key_path(root, rel_path).map_err(|e| {
+    let path = crate::config::resolve_key_path(layout, rel_path).map_err(|e| {
         FactoryError::InvalidKeyFile {
             path: rel_path.to_owned(),
             reason: e.to_string(),
@@ -324,6 +324,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     /// Helper: write a 32-byte raw key file with mode 0600 and parent
     /// dir 0700 so `mkit_core::sign::load_key` accepts it.
@@ -360,7 +361,12 @@ mod tests {
     fn unknown_signer_kind_errors() {
         let td = tempfile::tempdir().unwrap();
         let cfg = Config::with_defaults();
-        match build_signer(td.path(), Algorithm::Ed25519, "sigstore", &cfg) {
+        match build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Ed25519,
+            "sigstore",
+            &cfg,
+        ) {
             Err(FactoryError::UnknownSignerKind(s)) => assert_eq!(s, "sigstore"),
             Err(other) => panic!("unexpected error: {other}"),
             Ok(_) => panic!("unexpected success"),
@@ -374,7 +380,12 @@ mod tests {
     fn repo_key_ed25519_missing_key_errors_with_keygen_hint() {
         let td = tempfile::tempdir().unwrap();
         let cfg = Config::with_defaults();
-        match build_signer(td.path(), Algorithm::Ed25519, "repo-key", &cfg) {
+        match build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Ed25519,
+            "repo-key",
+            &cfg,
+        ) {
             Err(FactoryError::MissingKeyFile { algorithm, path }) => {
                 assert_eq!(algorithm, Algorithm::Ed25519);
                 assert!(path.contains("default.key"), "{path}");
@@ -394,8 +405,13 @@ mod tests {
         let key_path = td.path().join(".mkit/keys/default.key");
         write_ed25519_key(&key_path, &[0xCDu8; 32]);
         let cfg = Config::with_defaults();
-        let signer = build_signer(td.path(), Algorithm::Ed25519, "repo-key", &cfg)
-            .expect("ed25519 repo-key should load existing key");
+        let signer = build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Ed25519,
+            "repo-key",
+            &cfg,
+        )
+        .expect("ed25519 repo-key should load existing key");
         assert_eq!(signer.algorithm(), Algorithm::Ed25519);
     }
 
@@ -408,8 +424,13 @@ mod tests {
         write_ed25519_key(&key_path, &[0xEFu8; 32]);
         let mut cfg = Config::with_defaults();
         cfg.signing_key = ".mkit/keys/custom-global.key".into();
-        let signer = build_signer(td.path(), Algorithm::Ed25519, "repo-key", &cfg)
-            .expect("custom signing_key path should load");
+        let signer = build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Ed25519,
+            "repo-key",
+            &cfg,
+        )
+        .expect("custom signing_key path should load");
         assert_eq!(signer.algorithm(), Algorithm::Ed25519);
     }
 
@@ -417,7 +438,12 @@ mod tests {
     fn repo_key_secp256k1_missing_key_errors_with_keygen_hint() {
         let td = tempfile::tempdir().unwrap();
         let cfg = Config::with_defaults();
-        match build_signer(td.path(), Algorithm::Secp256k1, "repo-key", &cfg) {
+        match build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Secp256k1,
+            "repo-key",
+            &cfg,
+        ) {
             Err(FactoryError::MissingKeyFile { algorithm, path }) => {
                 assert_eq!(algorithm, Algorithm::Secp256k1);
                 assert!(path.contains("secp256k1"));
@@ -446,8 +472,13 @@ mod tests {
         fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
 
         let cfg = Config::with_defaults();
-        let signer = build_signer(td.path(), Algorithm::P256, "repo-key", &cfg)
-            .expect("p256 repo-key should load raw secret");
+        let signer = build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::P256,
+            "repo-key",
+            &cfg,
+        )
+        .expect("p256 repo-key should load raw secret");
         assert_eq!(signer.algorithm(), Algorithm::P256);
     }
 
@@ -468,7 +499,12 @@ mod tests {
         fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
 
         let cfg = Config::with_defaults();
-        match build_signer(td.path(), Algorithm::Secp256k1, "repo-key", &cfg) {
+        match build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Secp256k1,
+            "repo-key",
+            &cfg,
+        ) {
             Err(FactoryError::InvalidKeyFile { reason, .. }) => {
                 assert!(reason.contains("32 bytes"), "{reason}");
             }
@@ -481,7 +517,12 @@ mod tests {
     fn external_signer_requires_path() {
         let td = tempfile::tempdir().unwrap();
         let cfg = Config::with_defaults();
-        match build_signer(td.path(), Algorithm::Ed25519, "external", &cfg) {
+        match build_signer(
+            &RepoLayout::single(td.path()),
+            Algorithm::Ed25519,
+            "external",
+            &cfg,
+        ) {
             Err(FactoryError::ExternalSignerPath(_)) => {}
             Err(other) => panic!("unexpected error: {other}"),
             Ok(_) => panic!("unexpected success"),

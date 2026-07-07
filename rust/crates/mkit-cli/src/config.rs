@@ -24,6 +24,7 @@
 //! warning and otherwise ignored. See `docs/THREAT-MODEL.md` for the
 //! threat model that motivates the split.
 
+use mkit_core::layout::RepoLayout;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -407,7 +408,7 @@ pub fn validate_key_path(value: &str) -> Result<(), ConfigError> {
 ///   process's effective uid (looked up via `getpwuid_r(geteuid())`,
 ///   not `$HOME`, so a hostile parent can't set `HOME=/` and admit
 ///   every absolute path).
-pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError> {
+pub fn resolve_key_path(layout: &RepoLayout, value: &str) -> Result<PathBuf, ConfigError> {
     validate_key_path(value)?;
     let path = Path::new(value);
     if path.is_absolute() {
@@ -421,8 +422,8 @@ pub fn resolve_key_path(root: &Path, value: &str) -> Result<PathBuf, ConfigError
         };
     }
 
-    let joined = root.join(path);
-    let repo_keys = root.join(".mkit/keys");
+    let joined = layout.worktree_root().join(path);
+    let repo_keys = layout.keys_dir();
     if !joined.starts_with(&repo_keys) {
         return Err(ConfigError::InvalidKeyPath(value.to_owned()));
     }
@@ -532,10 +533,10 @@ pub fn user_config_path() -> PathBuf {
 ///
 /// If the repo file sets a key listed in [`REPO_FORBIDDEN_KEYS`], a
 /// warning is printed to stderr and the value is dropped.
-pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
+pub fn read_or_default(layout: &RepoLayout) -> Result<Config, ConfigError> {
     let mut cfg = Config::with_defaults();
     apply_file(&mut cfg, &user_config_path(), ConfigScope::User)?;
-    apply_file(&mut cfg, &root.join(CONFIG_FILE), ConfigScope::Repo)?;
+    apply_file(&mut cfg, &layout.config_file(), ConfigScope::Repo)?;
     // `-c <key>=<val>` one-shot overrides apply to BOTH the layered and the
     // flat read path, so `mkit -c … <any-command>` is honored uniformly
     // (commit/merge/etc. read through here). Same forbidden-key enforcement.
@@ -544,10 +545,10 @@ pub fn read_or_default(root: &Path) -> Result<Config, ConfigError> {
 }
 
 /// Read both raw layers plus the merged config.
-pub fn read_layered(root: &Path) -> Result<LayeredConfig, ConfigError> {
+pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
     let mut merged = Config::with_defaults();
     let user_path = user_config_path();
-    let repo_path = root.join(CONFIG_FILE);
+    let repo_path = layout.config_file();
     apply_file_inner(&mut merged, &user_path, ConfigScope::User, true)?;
     apply_file_inner(&mut merged, &repo_path, ConfigScope::Repo, true)?;
     // `-c <key>=<val>` one-shot overrides (git parity) are applied LAST, on
@@ -862,8 +863,8 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
 /// user-scoped value would be materialized into the clone-traveling
 /// `.mkit/config` (a privacy/scope leak). Callers that need the effective
 /// (merged) value for *reads* should use it only for reads.
-pub fn write(root: &Path, cfg: &Config) -> Result<(), ConfigError> {
-    let path = root.join(CONFIG_FILE);
+pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
+    let path = layout.config_file();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1286,6 +1287,7 @@ pub fn xdg_config_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkit_core::layout::RepoLayout;
     use tempfile::TempDir;
 
     #[test]
@@ -1332,7 +1334,7 @@ mod tests {
             "remote.Origin.url = mkit+file:///tmp/x\nremote.Origin.type = file\n",
         )
         .unwrap();
-        let cfg = read_or_default(dir.path()).unwrap();
+        let cfg = read_or_default(&RepoLayout::single(dir.path())).unwrap();
         assert!(
             cfg.remotes.contains_key("Origin"),
             "subsection case lost on reload: {:?}",
@@ -1358,7 +1360,7 @@ mod tests {
         );
         // Round-trips through the repo-config writer.
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), &cfg).unwrap();
+        write(&RepoLayout::single(dir.path()), &cfg).unwrap();
         let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
         assert!(text.contains("durability.objects = per-object"));
         apply_kv(&mut cfg, "durability.objects", "bogus");
@@ -1418,7 +1420,7 @@ mod tests {
         assert!(cfg.remote_endpoint.is_empty());
         // Sanity: read_or_default on a fresh empty repo dir never
         // panics or errors.
-        let _ = read_or_default(td.path()).unwrap();
+        let _ = read_or_default(&RepoLayout::single(td.path())).unwrap();
     }
 
     #[test]
@@ -1443,7 +1445,7 @@ mod tests {
         cfg.key.default_ref = "software:attacker".into();
         cfg.ssh_strict_host_key_checking = "no".into();
         cfg.attest.external_signer_path = "/usr/local/bin/evil".into();
-        write(td.path(), &cfg).unwrap();
+        write(&RepoLayout::single(td.path()), &cfg).unwrap();
         let on_disk = fs::read_to_string(td.path().join(CONFIG_FILE)).unwrap();
         assert!(!on_disk.contains("user.identity"));
         assert!(!on_disk.contains("signing_key"));
@@ -1896,13 +1898,19 @@ mod tests {
     #[test]
     fn resolve_key_path_rejects_relative_path_outside_repo_keys() {
         let td = TempDir::new().unwrap();
-        assert!(resolve_key_path(td.path(), ".mkit/custom/global.key").is_err());
+        assert!(
+            resolve_key_path(&RepoLayout::single(td.path()), ".mkit/custom/global.key").is_err()
+        );
     }
 
     #[test]
     fn resolve_key_path_accepts_relative_path_under_repo_keys() {
         let td = TempDir::new().unwrap();
-        let out = resolve_key_path(td.path(), ".mkit/keys/custom/global.key").unwrap();
+        let out = resolve_key_path(
+            &RepoLayout::single(td.path()),
+            ".mkit/keys/custom/global.key",
+        )
+        .unwrap();
         assert_eq!(out, td.path().join(".mkit/keys/custom/global.key"));
     }
 
@@ -1926,10 +1934,16 @@ mod tests {
         // it is rejected.
         let td = TempDir::new().unwrap();
         let inside = from_passwd.join(".mkit/test-inside.key");
-        assert!(resolve_key_path(td.path(), inside.to_str().unwrap()).is_ok());
+        assert!(resolve_key_path(&RepoLayout::single(td.path()), inside.to_str().unwrap()).is_ok());
         // `/__definitely_not_a_home_dir__` cannot be under any real
         // passwd `pw_dir` on a sane system.
-        assert!(resolve_key_path(td.path(), "/__definitely_not_a_home_dir__/x.key").is_err());
+        assert!(
+            resolve_key_path(
+                &RepoLayout::single(td.path()),
+                "/__definitely_not_a_home_dir__/x.key"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2052,8 +2066,8 @@ mod tests {
                 branch: "main".into(),
             },
         );
-        write(td.path(), &cfg).unwrap();
-        let reloaded = read_or_default(td.path()).unwrap();
+        write(&RepoLayout::single(td.path()), &cfg).unwrap();
+        let reloaded = read_or_default(&RepoLayout::single(td.path())).unwrap();
         assert_eq!(
             reloaded.remotes.get("origin").unwrap().url,
             "mkit+https://h/r"

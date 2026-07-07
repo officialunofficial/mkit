@@ -18,6 +18,7 @@
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs::{self, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 
@@ -59,11 +60,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     let Some((ns, name)) = parse_ref(&opts.name) else {
         return emit_err(
@@ -81,7 +82,7 @@ pub fn run(args: &[String]) -> u8 {
     // unreachable) target between resolving it and writing the ref (#267).
     // Acquired after repo validation (store open) so a non-repo reported
     // cleanly above; covers the delete path too for consistency.
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -90,13 +91,13 @@ pub fn run(args: &[String]) -> u8 {
         if opts.old_value.is_some() {
             return super::usage_error("usage: mkit update-ref -d <ref> [<oldvalue>]");
         }
-        return run_delete(&store, &mkit_dir, &ns, name, opts.value.as_deref());
+        return run_delete(&store, &layout, &ns, name, opts.value.as_deref());
     }
 
     let Some(newspec) = opts.value.as_deref() else {
         return super::usage_error("usage: mkit update-ref <ref> <newvalue> [<oldvalue>]");
     };
-    let newhash = match resolve(&store, &mkit_dir, newspec) {
+    let newhash = match resolve(&store, &layout, newspec) {
         Ok(h) => h,
         Err(msg) => return emit_err(&msg, exit::DATAERR),
     };
@@ -111,7 +112,7 @@ pub fn run(args: &[String]) -> u8 {
     let condition = match opts.old_value.as_deref() {
         None => RefWriteCondition::Any,
         Some(s) if is_zero(s) => RefWriteCondition::Missing,
-        Some(s) => match resolve(&store, &mkit_dir, s) {
+        Some(s) => match resolve(&store, &layout, s) {
             Ok(h) => RefWriteCondition::Match(h),
             Err(msg) => return emit_err(&msg, exit::DATAERR),
         },
@@ -121,8 +122,8 @@ pub fn run(args: &[String]) -> u8 {
         // `--features history-mmr` build advances the ref and its journal
         // together under lock (the CLI ref-write invariant). Tags are not
         // history-tracked (the journal is keyed per branch).
-        Namespace::Head => super::write_ref_recording_history(&mkit_dir, name, condition, &newhash),
-        Namespace::Tag => refs::update_tag(&mkit_dir, name, condition, &newhash),
+        Namespace::Head => super::write_ref_recording_history(&layout, name, condition, &newhash),
+        Namespace::Tag => refs::update_tag(&layout, name, condition, &newhash),
     };
     match res {
         Ok(()) => exit::OK,
@@ -136,7 +137,7 @@ pub fn run(args: &[String]) -> u8 {
 /// `-d`: delete the ref, optionally verifying its current value first.
 fn run_delete(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     ns: &Namespace,
     name: &str,
     old_value: Option<&str>,
@@ -148,13 +149,13 @@ fn run_delete(
                 exit::USAGE,
             );
         }
-        let expected = match resolve(store, mkit_dir, spec) {
+        let expected = match resolve(store, layout, spec) {
             Ok(h) => h,
             Err(msg) => return emit_err(&msg, exit::DATAERR),
         };
         let current = match ns {
-            Namespace::Head => refs::read_ref(mkit_dir, name),
-            Namespace::Tag => refs::read_tag(mkit_dir, name),
+            Namespace::Head => refs::read_ref(layout, name),
+            Namespace::Tag => refs::read_tag(layout, name),
         };
         match current {
             Ok(Some(h)) if h == expected => {}
@@ -169,8 +170,8 @@ fn run_delete(
     }
     let res = match ns {
         // Branch delete uses the safe path — refuses the current branch.
-        Namespace::Head => refs::delete_ref_safe(mkit_dir, name),
-        Namespace::Tag => refs::delete_tag(mkit_dir, name),
+        Namespace::Head => refs::delete_ref_safe(layout, name),
+        Namespace::Tag => refs::delete_tag(layout, name),
     };
     match res {
         Ok(()) => exit::OK,
@@ -191,8 +192,8 @@ fn parse_ref(full: &str) -> Option<(Namespace, &str)> {
 }
 
 /// Resolve a revision spec to a concrete object hash.
-fn resolve(store: &ObjectStore, mkit_dir: &std::path::Path, spec: &str) -> Result<Hash, String> {
-    revspec::resolve_revision(store, mkit_dir, spec)
+fn resolve(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, String> {
+    revspec::resolve_revision(store, layout, spec)
         .map_err(|e| format!("bad revision '{spec}': {e}"))
 }
 

@@ -58,11 +58,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     let specs: Vec<String> = if opts.objects.is_empty() {
         vec!["HEAD".to_string()]
@@ -72,7 +72,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     for spec in &specs {
-        let h = match revspec::resolve_revision(&store, &mkit_dir, spec) {
+        let h = match revspec::resolve_revision(&store, &layout, spec) {
             Ok(h) => h,
             Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
         };

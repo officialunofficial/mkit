@@ -98,19 +98,19 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
 
     // Resolve the target branch: explicit arg, else HEAD's branch.
-    let branch = match resolve_branch(&mkit_dir, opts.reference.as_deref()) {
+    let branch = match resolve_branch(&layout, opts.reference.as_deref()) {
         Ok(b) => b,
         Err((m, c)) => return emit_err(&m, c),
     };
 
-    let tip = match refs::read_ref(&mkit_dir, &branch) {
+    let tip = match refs::read_ref(&layout, &branch) {
         Ok(Some(h)) => h,
         Ok(None) => {
             if matches!(fmt, Format::Default) {
@@ -134,7 +134,7 @@ pub fn run(args: &[String]) -> u8 {
     // Optional journal cross-check (only meaningful on history-mmr
     // builds). `journal` carries `(recorded_advances, root)` and a
     // verifier closure that confirms a commit's inclusion at a position.
-    let journal = open_journal(&mkit_dir, &branch);
+    let journal = open_journal(&layout, &branch);
 
     let mut stdout = std::io::stdout().lock();
     if let Format::Default = fmt
@@ -246,13 +246,13 @@ fn emit_json_entry(
 
 /// Resolve the branch whose history to show.
 fn resolve_branch(
-    mkit_dir: &std::path::Path,
+    layout: &mkit_core::layout::RepoLayout,
     explicit: Option<&str>,
 ) -> Result<String, (String, u8)> {
     if let Some(name) = explicit {
         return Ok(name.to_owned());
     }
-    match refs::read_head(mkit_dir) {
+    match refs::read_head(layout) {
         Ok(Head::Branch(name)) => Ok(name),
         Ok(Head::Detached(_)) => Err((
             "HEAD is detached; pass an explicit <ref> (the ref-history journal is per-branch)"
@@ -355,9 +355,9 @@ impl Journal {
 /// build has the `history-mmr` feature and the journal opens cleanly.
 /// Read-only: opening does not append.
 #[cfg(feature = "history-mmr")]
-fn open_journal(mkit_dir: &std::path::Path, branch: &str) -> Option<Journal> {
+fn open_journal(layout: &mkit_core::layout::RepoLayout, branch: &str) -> Option<Journal> {
     let exec = super::history_executor();
-    let history = mkit_core::history::CommitHistory::open_at(exec, mkit_dir, branch).ok()?;
+    let history = mkit_core::history::CommitHistory::open_at(exec, layout, branch).ok()?;
     Some(Journal {
         recorded_advances: history.len(),
         root: history.root(),
@@ -383,7 +383,7 @@ impl Journal {
 }
 
 #[cfg(not(feature = "history-mmr"))]
-fn open_journal(_mkit_dir: &std::path::Path, _branch: &str) -> Option<Journal> {
+fn open_journal(_layout: &mkit_core::layout::RepoLayout, _branch: &str) -> Option<Journal> {
     None
 }
 

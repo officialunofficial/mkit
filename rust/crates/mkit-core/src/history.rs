@@ -189,7 +189,7 @@ pub enum HistoryError {
 /// branch names go through `sanitize_branch` — a `_xx`-hex encoding
 /// of every byte outside `[A-Za-z0-9-]`. Empty branches and invalid
 /// ref names are rejected up front by [`CommitHistory::open_at`].
-pub const HISTORY_DIR: &str = "history";
+pub const HISTORY_DIR: &str = crate::layout::HISTORY_DIR_NAME;
 
 /// Suffix appended to the branch's partition name for the node-digest
 /// journal.
@@ -247,8 +247,9 @@ struct JournaledBackend<X: Executor> {
     // executor `Arc`) alive for the whole CommitHistory lifetime.
     _ctx: commonware_runtime::tokio::Context,
     // Held so update_ref_with_history can take a fresh RepoLock for
-    // every append. None for the mem-only flavour.
-    mkit_dir: PathBuf,
+    // every append. None for the mem-only flavour. This is the COMMON
+    // dir: history is shared state across worktrees (#493).
+    common_dir: PathBuf,
     branch: String,
 }
 
@@ -287,7 +288,7 @@ impl CommitHistory<TokioExecutor> {
 }
 
 impl<X: Executor + 'static> CommitHistory<X> {
-    /// Open a persisted history under `<mkit_dir>/history/<branch>/`.
+    /// Open a persisted history under `<common dir>/history/<branch>/`.
     ///
     /// The on-disk layout is commonware-storage's native journaled MMR
     /// shape — see [`HISTORY_DIR`] and SPEC-HISTORY-PROOF §4. If the
@@ -310,12 +311,27 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// - [`HistoryError::Corrupted`] — commonware refused to recover
     ///   the journal (a deeper-than-trailing-leaf corruption).
     /// - [`HistoryError::Io`] — failed to create the history dir.
-    pub fn open_at(executor: Arc<X>, mkit_dir: &Path, branch: &str) -> Result<Self, HistoryError> {
+    pub fn open_at(
+        executor: Arc<X>,
+        layout: &crate::layout::RepoLayout,
+        branch: &str,
+    ) -> Result<Self, HistoryError> {
+        Self::open_at_common_dir(executor, layout.common_dir(), branch)
+    }
+
+    /// [`Self::open_at`] on a bare common dir — the internal seam
+    /// [`Self::reopen`] uses to reconstruct itself from the stored
+    /// `common_dir` without re-materializing a full layout.
+    fn open_at_common_dir(
+        executor: Arc<X>,
+        common_dir: &Path,
+        branch: &str,
+    ) -> Result<Self, HistoryError> {
         if !validate_ref_name(branch) {
             return Err(HistoryError::InvalidBranch(branch.to_string()));
         }
 
-        let history_dir = mkit_dir.join(HISTORY_DIR);
+        let history_dir = common_dir.join(HISTORY_DIR);
         std::fs::create_dir_all(&history_dir)?;
 
         // Bootstrap a commonware tokio Context rooted at
@@ -363,22 +379,22 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 mmr,
                 executor,
                 _ctx: ctx,
-                mkit_dir: mkit_dir.to_path_buf(),
+                common_dir: common_dir.to_path_buf(),
                 branch: branch.to_string(),
             })),
             hasher,
         })
     }
 
-    /// Borrow the `mkit_dir` this history was opened against. `None`
+    /// Borrow the common dir this history was opened against. `None`
     /// for the mem-only flavour. Used by
     /// [`crate::refs::update_ref_with_history`] to take a `RepoLock`
     /// around the ref-write + MMR-append critical section.
     #[must_use]
-    pub fn mkit_dir(&self) -> Option<&Path> {
+    pub fn common_dir(&self) -> Option<&Path> {
         match &self.backend {
             Backend::Mem { .. } => None,
-            Backend::Journaled(b) => Some(b.mkit_dir.as_path()),
+            Backend::Journaled(b) => Some(b.common_dir.as_path()),
         }
     }
 
@@ -418,7 +434,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
         let Backend::Journaled(b) = &self.backend else {
             return Ok(());
         };
-        let fresh = Self::open_at(b.executor.clone(), &b.mkit_dir, &b.branch)?;
+        let fresh = Self::open_at_common_dir(b.executor.clone(), &b.common_dir, &b.branch)?;
         *self = fresh;
         Ok(())
     }
@@ -705,10 +721,10 @@ mod tests {
         crate::hash::hash(&i.to_be_bytes())
     }
 
-    fn fresh_mkit_dir() -> (TempDir, PathBuf) {
+    fn fresh_mkit_dir() -> (TempDir, crate::layout::RepoLayout) {
         let tmp = TempDir::new().unwrap();
-        let mkit_dir = tmp.path().join(".mkit");
-        std::fs::create_dir_all(&mkit_dir).unwrap();
+        let mkit_dir = crate::layout::RepoLayout::single(tmp.path());
+        std::fs::create_dir_all(mkit_dir.common_dir()).unwrap();
         (tmp, mkit_dir)
     }
 
@@ -1072,7 +1088,7 @@ mod tests {
         // subdirectory named `<partition>-blobs`; the journal metadata
         // sidecar sits at `<partition>-metadata`. The truncation
         // target is whichever blob holds actual digest data.
-        let journal_root = mkit_dir.join(HISTORY_DIR).join("main__journal-blobs");
+        let journal_root = mkit_dir.history_dir().join("main__journal-blobs");
         assert!(
             journal_root.exists(),
             "journal blob dir must exist after appends"

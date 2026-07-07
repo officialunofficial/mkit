@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use mkit_core::hash;
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs::{
     self, Head, REFS_DIR, Ref, RefError, RefWriteCondition, decode_ref_wire, validate_ref_name,
 };
@@ -161,9 +162,9 @@ fn golden_head_symbolic_parses() {
     assert!(s.ends_with('\n'));
     // Use the actual reader to confirm parse semantics.
     let dir = tempfile::TempDir::new().unwrap();
-    let mkit = dir.path().join(".mkit");
-    fs::create_dir_all(&mkit).unwrap();
-    fs::write(mkit.join("HEAD"), &bytes).unwrap();
+    let mkit = RepoLayout::single(dir.path());
+    fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
+    fs::write(mkit.head_file(), &bytes).unwrap();
     let head = refs::read_head(&mkit).unwrap();
     assert_eq!(head, Head::Branch("main".to_string()));
 }
@@ -173,8 +174,8 @@ fn cas_any_works_against_object_store_repo() {
     // Repo built atop the ObjectStore (which owns .mkit/objects/);
     // the refs subsystem co-tenants that .mkit/ root.
     let dir = tempfile::TempDir::new().unwrap();
-    let _store = ObjectStore::init(dir.path()).expect("init store");
-    let mkit = dir.path().join(".mkit");
+    let mkit = RepoLayout::single(dir.path());
+    let _store = ObjectStore::init(&mkit).expect("init store");
     refs::init(&mkit).unwrap();
 
     let h1 = hash::hash(b"any-1");
@@ -189,8 +190,8 @@ fn cas_any_works_against_object_store_repo() {
 #[test]
 fn cas_missing_then_match_then_conflict() {
     let dir = tempfile::TempDir::new().unwrap();
-    let _store = ObjectStore::init(dir.path()).expect("init store");
-    let mkit = dir.path().join(".mkit");
+    let mkit = RepoLayout::single(dir.path());
+    let _store = ObjectStore::init(&mkit).expect("init store");
     refs::init(&mkit).unwrap();
 
     let v1 = hash::hash(b"v1");
@@ -217,8 +218,8 @@ fn cas_missing_then_match_then_conflict() {
 #[test]
 fn list_refs_returns_sorted_unique_entries() {
     let dir = tempfile::TempDir::new().unwrap();
-    let _store = ObjectStore::init(dir.path()).expect("init store");
-    let mkit = dir.path().join(".mkit");
+    let mkit = RepoLayout::single(dir.path());
+    let _store = ObjectStore::init(&mkit).expect("init store");
     refs::init(&mkit).unwrap();
     refs::write_ref(&mkit, "main", &hash::hash(b"m")).unwrap();
     refs::write_ref(&mkit, "feature/topic", &hash::hash(b"ft")).unwrap();
@@ -236,13 +237,14 @@ fn list_refs_returns_sorted_unique_entries() {
 #[test]
 fn refs_init_creates_layout() {
     let dir = tempfile::TempDir::new().unwrap();
+    let layout = RepoLayout::single(dir.path());
     let mkit = dir.path().join(".mkit");
     fs::create_dir_all(&mkit).unwrap();
-    refs::init(&mkit).unwrap();
+    refs::init(&layout).unwrap();
     assert!(mkit.join(REFS_DIR).is_dir());
     assert!(mkit.join("refs/heads").is_dir());
     assert!(mkit.join("refs/tags").is_dir());
-    let head = refs::read_head(&mkit).unwrap();
+    let head = refs::read_head(&layout).unwrap();
     assert_eq!(head, Head::Branch("main".to_string()));
 }
 
@@ -297,15 +299,16 @@ fn index_round_trip_via_disk() {
         ino: 0,
         ctime_ns: 0,
     });
-    index::write_index(dir.path(), &idx).unwrap();
-    let read = index::read_index(dir.path()).unwrap();
+    let layout = RepoLayout::single(dir.path());
+    index::write_index(&layout, &idx).unwrap();
+    let read = index::read_index(&layout).unwrap();
     assert_eq!(read, idx);
 }
 
 #[test]
 fn worktree_build_tree_against_object_store() {
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
     let work = tempfile::TempDir::new().unwrap();
     fs::write(work.path().join("a.txt"), b"a").unwrap();
     fs::write(work.path().join("b.txt"), b"b").unwrap();

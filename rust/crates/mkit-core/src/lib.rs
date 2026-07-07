@@ -45,6 +45,11 @@ pub mod sign;
 pub mod store;
 pub mod transfer;
 
+// Repository path layout (issue #493 Phase 0): the single authority
+// for resolving state under `.mkit/`, splitting shared (common-dir)
+// from per-worktree state.
+pub mod layout;
+
 // Refs, index, worktree, ignore, and repo_lock.
 pub(crate) mod atomic;
 pub mod ignore;
@@ -121,6 +126,7 @@ pub use index::{
     EntryStatus, INDEX_FILE, Index, IndexEntry, IndexError, IndexResult, MAGIC as INDEX_MAGIC,
     MAX_INDEX_BYTES, MAX_PATH_LEN, validate_index_path,
 };
+pub use layout::RepoLayout;
 pub use refs::{
     HEAD_FILE, HEADS_DIR, Head, REFS_DIR, Ref, RefError, RefResult, RefWriteCondition,
     SHALLOW_FILE, TAGS_DIR, decode_ref_wire, encode_ref_wire, validate_ref_name,

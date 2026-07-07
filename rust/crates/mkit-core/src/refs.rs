@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use crate::atomic::{write_atomic, write_create_new};
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
+use crate::layout::RepoLayout;
 
 /// Subdirectory holding all refs (`.mkit/refs`).
 pub const REFS_DIR: &str = "refs";
@@ -248,16 +249,16 @@ fn lowercase_nibble(b: u8) -> Option<u8> {
     }
 }
 
-/// Initialise the ref directory layout under `mkit_dir` (the
-/// `.mkit/` directory). Creates the `refs/`, `refs/heads/`,
-/// `refs/tags/`, `refs/remotes/` subdirectories and writes a default
-/// `HEAD = ref: refs/heads/main\n` if `HEAD` does not already exist.
-pub fn init(mkit_dir: &Path) -> RefResult<()> {
-    fs::create_dir_all(mkit_dir.join(REFS_DIR))?;
-    fs::create_dir_all(mkit_dir.join(HEADS_DIR))?;
-    fs::create_dir_all(mkit_dir.join(TAGS_DIR))?;
-    fs::create_dir_all(mkit_dir.join(REMOTES_DIR))?;
-    let head_path = mkit_dir.join(HEAD_FILE);
+/// Initialise the ref layout: creates `refs/`, `refs/heads/`,
+/// `refs/tags/`, `refs/remotes/` under the common dir and writes a
+/// default `HEAD = ref: refs/heads/main\n` into the worktree state
+/// dir if `HEAD` does not already exist.
+pub fn init(layout: &RepoLayout) -> RefResult<()> {
+    fs::create_dir_all(layout.refs_dir())?;
+    fs::create_dir_all(layout.heads_dir())?;
+    fs::create_dir_all(layout.tags_dir())?;
+    fs::create_dir_all(layout.remotes_dir())?;
+    let head_path = layout.head_file();
     if !head_path.exists() {
         let body = format!("{HEAD_REF_PREFIX}main\n");
         write_atomic(&head_path, body.as_bytes(), false)?;
@@ -269,13 +270,13 @@ pub fn init(mkit_dir: &Path) -> RefResult<()> {
 // HEAD
 // -----------------------------------------------------------------------------
 
-/// Read `HEAD` from `<mkit_dir>/HEAD`.
+/// Read this worktree's `HEAD`.
 ///
 /// # Errors
 /// - [`RefError::NoHead`] if the file is missing.
 /// - [`RefError::InvalidHead`] for malformed content.
-pub fn read_head(mkit_dir: &Path) -> RefResult<Head> {
-    let path = mkit_dir.join(HEAD_FILE);
+pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
+    let path = layout.head_file();
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RefError::NoHead),
@@ -306,12 +307,12 @@ pub fn read_head(mkit_dir: &Path) -> RefResult<Head> {
 /// - [`RefError::InvalidRefName`] if `branch` does not satisfy
 ///   [`validate_ref_name`].
 /// - [`RefError::Io`] for filesystem failures.
-pub fn write_head_branch(mkit_dir: &Path, branch: &str) -> RefResult<()> {
+pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     if !validate_ref_name(branch) {
         return Err(RefError::InvalidRefName(branch.to_string()));
     }
     let body = format!("{HEAD_REF_PREFIX}{branch}\n");
-    write_atomic(&mkit_dir.join(HEAD_FILE), body.as_bytes(), false)?;
+    write_atomic(&layout.head_file(), body.as_bytes(), false)?;
     Ok(())
 }
 
@@ -319,33 +320,33 @@ pub fn write_head_branch(mkit_dir: &Path, branch: &str) -> RefResult<()> {
 ///
 /// # Errors
 /// - [`RefError::Io`] for filesystem failures.
-pub fn write_head_detached(mkit_dir: &Path, h: &Hash) -> RefResult<()> {
+pub fn write_head_detached(layout: &RepoLayout, h: &Hash) -> RefResult<()> {
     let wire = encode_ref_wire(h);
-    write_atomic(&mkit_dir.join(HEAD_FILE), &wire, false)?;
+    write_atomic(&layout.head_file(), &wire, false)?;
     Ok(())
 }
 
 /// Resolve `HEAD` to a commit hash. Returns `Ok(None)` when HEAD points
 /// at a branch that has no commit yet.
-pub fn resolve_head(mkit_dir: &Path) -> RefResult<Option<Hash>> {
-    let head = match read_head(mkit_dir) {
+pub fn resolve_head(layout: &RepoLayout) -> RefResult<Option<Hash>> {
+    let head = match read_head(layout) {
         Ok(h) => h,
         Err(RefError::NoHead) => return Ok(None),
         Err(e) => return Err(e),
     };
     match head {
-        Head::Branch(name) => read_ref(mkit_dir, &name),
+        Head::Branch(name) => read_ref(layout, &name),
         Head::Detached(h) => Ok(Some(h)),
     }
 }
 
 /// Update the ref HEAD currently points at (or HEAD itself, if
 /// detached) to `commit_hash`.
-pub fn update_head(mkit_dir: &Path, commit_hash: &Hash) -> RefResult<()> {
-    let head = read_head(mkit_dir)?;
+pub fn update_head(layout: &RepoLayout, commit_hash: &Hash) -> RefResult<()> {
+    let head = read_head(layout)?;
     match head {
-        Head::Branch(name) => write_ref(mkit_dir, &name, commit_hash),
-        Head::Detached(_) => write_head_detached(mkit_dir, commit_hash),
+        Head::Branch(name) => write_ref(layout, &name, commit_hash),
+        Head::Detached(_) => write_head_detached(layout, commit_hash),
     }
 }
 
@@ -359,17 +360,17 @@ pub fn update_head(mkit_dir: &Path, commit_hash: &Hash) -> RefResult<()> {
 /// # Errors
 /// - [`RefError::InvalidRefName`] if `branch` does not validate.
 /// - [`RefError::InvalidRef`] if the on-disk bytes are not a valid wire.
-pub fn read_ref(mkit_dir: &Path, branch: &str) -> RefResult<Option<Hash>> {
+pub fn read_ref(layout: &RepoLayout, branch: &str) -> RefResult<Option<Hash>> {
     if !validate_ref_name(branch) {
         return Err(RefError::InvalidRefName(branch.to_string()));
     }
-    read_ref_under(mkit_dir, HEADS_DIR, branch)
+    read_ref_under(layout.common_dir(), HEADS_DIR, branch)
 }
 
 /// Write a branch ref (unconditional — equivalent to
 /// `update_ref(branch, RefWriteCondition::Any, h)`).
-pub fn write_ref(mkit_dir: &Path, branch: &str, h: &Hash) -> RefResult<()> {
-    update_ref(mkit_dir, branch, RefWriteCondition::Any, h)
+pub fn write_ref(layout: &RepoLayout, branch: &str, h: &Hash) -> RefResult<()> {
+    update_ref(layout, branch, RefWriteCondition::Any, h)
 }
 
 /// CAS-aware ref write per SPEC-REFS §5.
@@ -379,7 +380,7 @@ pub fn write_ref(mkit_dir: &Path, branch: &str, h: &Hash) -> RefResult<()> {
 /// - [`RefError::Conflict`] if `condition` is not satisfied.
 /// - [`RefError::Io`] for filesystem failures.
 pub fn update_ref(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     condition: RefWriteCondition,
     h: &Hash,
@@ -387,7 +388,7 @@ pub fn update_ref(
     if !validate_ref_name(branch) {
         return Err(RefError::InvalidRefName(branch.to_string()));
     }
-    let path = ref_path(mkit_dir, HEADS_DIR, branch);
+    let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     let wire = encode_ref_wire(h);
     cas_write(&path, &wire, branch, condition)
 }
@@ -463,7 +464,7 @@ pub fn update_ref(
 ///   [`crate::history::CommitHistory::append`].
 #[cfg(feature = "history-mmr")]
 pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     condition: RefWriteCondition,
     hash: &Hash,
@@ -472,14 +473,14 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     // Defence-in-depth: history must be a journaled flavour;
     // a mem-only flavour would silently drop the appended leaf on
     // process exit, defeating the whole point of this coupling.
-    let Some(history_dir) = history.mkit_dir() else {
+    let Some(history_dir) = history.common_dir() else {
         return Err(RefError::InvalidRef(format!(
             "{branch}: update_ref_with_history requires a journaled CommitHistory (open_at)"
         )));
     };
-    if history_dir != mkit_dir {
+    if history_dir != layout.common_dir() {
         return Err(RefError::InvalidRef(format!(
-            "{branch}: CommitHistory's mkit_dir does not match the ref's mkit_dir"
+            "{branch}: CommitHistory's common dir does not match the ref's common dir"
         )));
     }
     if history.branch() != Some(branch) {
@@ -492,8 +493,8 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     // Single repo-level lock around the ref-write + MMR-append
     // critical section. Cross-process interleaving is impossible
     // while any holder owns this lock.
-    let _lock =
-        crate::repo_lock::acquire_default(mkit_dir, "refs-history.lock").map_err(|e| match e {
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
+        .map_err(|e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
         })?;
@@ -515,12 +516,12 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     // know exactly which hash is missing without walking any parent
     // chain, because it's precisely the value already sitting in the
     // ref file.
-    if let Some(current) = read_ref(mkit_dir, branch)? {
+    if let Some(current) = read_ref(layout, branch)? {
         heal_one_ahead_gap(history, &current)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
     }
 
-    update_ref(mkit_dir, branch, condition, hash)?;
+    update_ref(layout, branch, condition, hash)?;
     history
         .append(hash)
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history append: {e}")))?;
@@ -575,11 +576,11 @@ fn heal_one_ahead_gap<X: crate::protocol::async_shim::Executor + 'static>(
 }
 
 /// Delete a branch ref. Errors with [`RefError::NotFound`] if absent.
-pub fn delete_ref(mkit_dir: &Path, branch: &str) -> RefResult<()> {
+pub fn delete_ref(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     if !validate_ref_name(branch) {
         return Err(RefError::InvalidRefName(branch.to_string()));
     }
-    let path = ref_path(mkit_dir, HEADS_DIR, branch);
+    let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -590,18 +591,18 @@ pub fn delete_ref(mkit_dir: &Path, branch: &str) -> RefResult<()> {
 }
 
 /// Delete a branch ref unless it is the currently checked-out branch.
-pub fn delete_ref_safe(mkit_dir: &Path, branch: &str) -> RefResult<()> {
-    match read_head(mkit_dir) {
+pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
+    match read_head(layout) {
         Ok(Head::Branch(current)) if current == branch => {
             Err(RefError::CurrentBranch(branch.to_string()))
         }
-        _ => delete_ref(mkit_dir, branch),
+        _ => delete_ref(layout, branch),
     }
 }
 
 /// List all branch refs, sorted lexicographically by name.
-pub fn list_refs(mkit_dir: &Path) -> RefResult<Vec<Ref>> {
-    list_refs_under(mkit_dir, HEADS_DIR)
+pub fn list_refs(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
+    list_refs_under(layout.common_dir(), HEADS_DIR)
 }
 
 // -----------------------------------------------------------------------------
@@ -609,24 +610,29 @@ pub fn list_refs(mkit_dir: &Path) -> RefResult<Vec<Ref>> {
 // -----------------------------------------------------------------------------
 
 /// Read a remote-tracking branch ref.
-pub fn read_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResult<Option<Hash>> {
+pub fn read_remote_ref(layout: &RepoLayout, remote: &str, branch: &str) -> RefResult<Option<Hash>> {
     validate_remote_and_branch(remote, branch)?;
-    read_ref_under(mkit_dir, &remote_ref_dir(remote), branch)
+    read_ref_under(layout.common_dir(), &remote_ref_dir(remote), branch)
 }
 
 /// Write a remote-tracking branch ref unconditionally.
-pub fn write_remote_ref(mkit_dir: &Path, remote: &str, branch: &str, h: &Hash) -> RefResult<()> {
+pub fn write_remote_ref(
+    layout: &RepoLayout,
+    remote: &str,
+    branch: &str,
+    h: &Hash,
+) -> RefResult<()> {
     validate_remote_and_branch(remote, branch)?;
-    let path = ref_path(mkit_dir, &remote_ref_dir(remote), branch);
+    let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     let wire = encode_ref_wire(h);
     cas_write(&path, &wire, branch, RefWriteCondition::Any)
 }
 
 /// Delete a remote-tracking branch ref (e.g. after the upstream
 /// deleted the branch). Errors with [`RefError::NotFound`] if absent.
-pub fn delete_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResult<()> {
+pub fn delete_remote_ref(layout: &RepoLayout, remote: &str, branch: &str) -> RefResult<()> {
     validate_remote_and_branch(remote, branch)?;
-    let path = ref_path(mkit_dir, &remote_ref_dir(remote), branch);
+    let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -637,11 +643,11 @@ pub fn delete_remote_ref(mkit_dir: &Path, remote: &str, branch: &str) -> RefResu
 }
 
 /// List all remote-tracking refs for one remote.
-pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
+pub fn list_remote_refs(layout: &RepoLayout, remote: &str) -> RefResult<Vec<Ref>> {
     if !validate_ref_name(remote) {
         return Err(RefError::InvalidRefName(remote.to_string()));
     }
-    list_refs_under(mkit_dir, &remote_ref_dir(remote))
+    list_refs_under(layout.common_dir(), &remote_ref_dir(remote))
 }
 
 /// List the remote names that have at least one tracking ref on disk
@@ -649,8 +655,8 @@ pub fn list_remote_refs(mkit_dir: &Path, remote: &str) -> RefResult<Vec<Ref>> {
 /// missing `refs/remotes/` yields an empty list. Entries whose names
 /// fail the ref grammar are skipped (consistent with how malformed
 /// ref files are skipped by [`list_refs`]).
-pub fn list_remote_names(mkit_dir: &Path) -> RefResult<Vec<String>> {
-    let dir = mkit_dir.join(REMOTES_DIR);
+pub fn list_remote_names(layout: &RepoLayout) -> RefResult<Vec<String>> {
+    let dir = layout.remotes_dir();
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -677,22 +683,22 @@ pub fn list_remote_names(mkit_dir: &Path) -> RefResult<Vec<String>> {
 // -----------------------------------------------------------------------------
 
 /// Read the hash a tag points to.
-pub fn read_tag(mkit_dir: &Path, name: &str) -> RefResult<Option<Hash>> {
+pub fn read_tag(layout: &RepoLayout, name: &str) -> RefResult<Option<Hash>> {
     if !validate_ref_name(name) {
         return Err(RefError::InvalidRefName(name.to_string()));
     }
-    read_ref_under(mkit_dir, TAGS_DIR, name)
+    read_ref_under(layout.common_dir(), TAGS_DIR, name)
 }
 
 /// Write a tag ref (unconditional).
-pub fn write_tag(mkit_dir: &Path, name: &str, h: &Hash) -> RefResult<()> {
-    update_tag(mkit_dir, name, RefWriteCondition::Any, h)
+pub fn write_tag(layout: &RepoLayout, name: &str, h: &Hash) -> RefResult<()> {
+    update_tag(layout, name, RefWriteCondition::Any, h)
 }
 
 /// CAS-aware tag write — same semantics as [`update_ref`] but for
 /// `refs/tags/`.
 pub fn update_tag(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     name: &str,
     condition: RefWriteCondition,
     h: &Hash,
@@ -700,17 +706,17 @@ pub fn update_tag(
     if !validate_ref_name(name) {
         return Err(RefError::InvalidRefName(name.to_string()));
     }
-    let path = ref_path(mkit_dir, TAGS_DIR, name);
+    let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     let wire = encode_ref_wire(h);
     cas_write(&path, &wire, name, condition)
 }
 
 /// Delete a tag ref.
-pub fn delete_tag(mkit_dir: &Path, name: &str) -> RefResult<()> {
+pub fn delete_tag(layout: &RepoLayout, name: &str) -> RefResult<()> {
     if !validate_ref_name(name) {
         return Err(RefError::InvalidRefName(name.to_string()));
     }
-    let path = ref_path(mkit_dir, TAGS_DIR, name);
+    let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(RefError::NotFound(name.to_string())),
@@ -719,8 +725,8 @@ pub fn delete_tag(mkit_dir: &Path, name: &str) -> RefResult<()> {
 }
 
 /// List all tag refs, sorted lexicographically by name.
-pub fn list_tags(mkit_dir: &Path) -> RefResult<Vec<Ref>> {
-    list_refs_under(mkit_dir, TAGS_DIR)
+pub fn list_tags(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
+    list_refs_under(layout.common_dir(), TAGS_DIR)
 }
 
 // -----------------------------------------------------------------------------
@@ -729,8 +735,8 @@ pub fn list_tags(mkit_dir: &Path) -> RefResult<Vec<Ref>> {
 
 /// Load shallow-boundary hashes from `.mkit/shallow`. Returns `Ok(None)`
 /// if the file does not exist or is empty.
-pub fn load_shallow_boundaries(mkit_dir: &Path) -> RefResult<Option<Vec<Hash>>> {
-    let path = mkit_dir.join(SHALLOW_FILE);
+pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash>>> {
+    let path = layout.shallow_file();
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -762,8 +768,8 @@ pub fn load_shallow_boundaries(mkit_dir: &Path) -> RefResult<Option<Vec<Hash>>> 
 
 /// Write shallow-boundary hashes to `.mkit/shallow`. Passing an empty
 /// slice removes the file.
-pub fn write_shallow_boundaries(mkit_dir: &Path, boundaries: &[Hash]) -> RefResult<()> {
-    let path = mkit_dir.join(SHALLOW_FILE);
+pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> RefResult<()> {
+    let path = layout.shallow_file();
     if boundaries.is_empty() {
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -784,8 +790,8 @@ pub fn write_shallow_boundaries(mkit_dir: &Path, boundaries: &[Hash]) -> RefResu
 // Internals
 // -----------------------------------------------------------------------------
 
-fn ref_path(mkit_dir: &Path, sub_dir: &str, name: &str) -> PathBuf {
-    let mut path = mkit_dir.join(sub_dir);
+fn ref_path(common_dir: &Path, sub_dir: &str, name: &str) -> PathBuf {
+    let mut path = common_dir.join(sub_dir);
     for segment in name.split('/') {
         path.push(segment);
     }
@@ -806,8 +812,8 @@ fn validate_remote_and_branch(remote: &str, branch: &str) -> RefResult<()> {
     Ok(())
 }
 
-fn read_ref_under(mkit_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Option<Hash>> {
-    let path = ref_path(mkit_dir, sub_dir, name);
+fn read_ref_under(common_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Option<Hash>> {
+    let path = ref_path(common_dir, sub_dir, name);
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -863,8 +869,8 @@ fn cas_write(
     }
 }
 
-fn list_refs_under(mkit_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
-    let root = mkit_dir.join(sub_dir);
+fn list_refs_under(common_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
+    let root = common_dir.join(sub_dir);
     let mut out = Vec::new();
     if !root.is_dir() {
         return Ok(out);
@@ -951,12 +957,12 @@ mod tests {
     use crate::hash;
     use tempfile::TempDir;
 
-    fn fresh_repo() -> (TempDir, PathBuf) {
+    fn fresh_repo() -> (TempDir, RepoLayout) {
         let dir = TempDir::new().unwrap();
-        let mkit_dir = dir.path().join(".mkit");
-        fs::create_dir_all(&mkit_dir).unwrap();
-        init(&mkit_dir).unwrap();
-        (dir, mkit_dir)
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.common_dir()).unwrap();
+        init(&layout).unwrap();
+        (dir, layout)
     }
 
     fn h(seed: &str) -> Hash {
@@ -1138,8 +1144,8 @@ mod tests {
     #[test]
     fn detached_head_round_trip() {
         let dir = TempDir::new().unwrap();
-        let mkit = dir.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(dir.path());
+        fs::create_dir_all(mkit.common_dir()).unwrap();
         let commit = h("detached");
         write_head_detached(&mkit, &commit).unwrap();
         match read_head(&mkit).unwrap() {
@@ -1153,10 +1159,10 @@ mod tests {
     fn read_head_rejects_oversize_file() {
         // SPEC-REFS §6: HEAD content is capped at 4 KiB.
         let dir = TempDir::new().unwrap();
-        let mkit = dir.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(dir.path());
+        fs::create_dir_all(mkit.common_dir()).unwrap();
         fs::write(
-            mkit.join(HEAD_FILE),
+            mkit.head_file(),
             vec![b'a'; usize::try_from(HEAD_MAX_BYTES).unwrap() + 1],
         )
         .unwrap();
@@ -1174,7 +1180,7 @@ mod tests {
     fn read_ref_rejects_oversize_file() {
         // SPEC-REFS §6: a single ref file is capped at 128 bytes.
         let (_dir, mkit) = fresh_repo();
-        let path = ref_path(&mkit, HEADS_DIR, "main");
+        let path = ref_path(mkit.common_dir(), HEADS_DIR, "main");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -1398,7 +1404,7 @@ mod tests {
     fn load_shallow_rejects_oversize_file() {
         // SPEC-REFS §6: the shallow file is capped at 1 MiB.
         let (_dir, mkit) = fresh_repo();
-        let path = mkit.join(SHALLOW_FILE);
+        let path = mkit.shallow_file();
         fs::write(
             &path,
             vec![b'a'; usize::try_from(SHALLOW_MAX_BYTES).unwrap() + 1],
@@ -1411,7 +1417,7 @@ mod tests {
     #[test]
     fn load_shallow_skips_invalid_lines() {
         let (_dir, mkit) = fresh_repo();
-        let path = mkit.join(SHALLOW_FILE);
+        let path = mkit.shallow_file();
         let valid = h("ok");
         let valid_hex = to_hex(&valid);
         let mut content = String::new();

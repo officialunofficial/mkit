@@ -46,13 +46,13 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
-    let tree_hash = match resolve_tree(&store, &mkit_dir, spec) {
+    let tree_hash = match resolve_tree(&store, &layout, spec) {
         Ok(h) => h,
         Err(msg) => return emit_err(&msg, exit::GENERAL_ERROR),
     };
@@ -172,10 +172,10 @@ fn git_mode_and_type(mode: EntryMode) -> (&'static str, &'static str) {
 /// its target's tree, a tree → itself.
 fn resolve_tree(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &mkit_core::layout::RepoLayout,
     spec: &str,
 ) -> Result<Hash, String> {
-    let h = revspec::resolve_revision(store, mkit_dir, spec)
+    let h = revspec::resolve_revision(store, layout, spec)
         .map_err(|e| format!("bad revision '{spec}': {e}"))?;
     object_to_tree(store, &h)
 }

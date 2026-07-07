@@ -40,6 +40,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::reachable_objects;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -203,8 +204,7 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
     // --- Source repo with real content, pushed to a served remote -------
     let remote = build_and_push_source(root, xdg.path());
     let source = root.join("source");
-    let source_mkit = source.join(".mkit");
-    let source_tip = refs::read_ref(&source_mkit, "main")
+    let source_tip = refs::read_ref(&RepoLayout::single(&source), "main")
         .unwrap()
         .expect("source has refs/heads/main");
 
@@ -268,8 +268,7 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
     );
 
     // --- (b) HEAD ref + object closure MATCH the source -----------------
-    let dest_mkit = dest.join(".mkit");
-    let dest_tip = refs::read_ref(&dest_mkit, "main")
+    let dest_tip = refs::read_ref(&RepoLayout::single(&dest), "main")
         .unwrap()
         .expect("cloned repo has refs/heads/main");
     assert_eq!(
@@ -277,8 +276,8 @@ fn ssh_clone_moves_data_and_delivers_pinned_options() {
         "cloned HEAD must equal source HEAD (real ref negotiation)"
     );
 
-    let source_store = ObjectStore::open(&source).unwrap();
-    let dest_store = ObjectStore::open(&dest).unwrap();
+    let source_store = ObjectStore::open(&RepoLayout::single(&source)).unwrap();
+    let dest_store = ObjectStore::open(&RepoLayout::single(&dest)).unwrap();
     let source_set: HashSet<_> = reachable_objects(&source_store, &source_tip)
         .unwrap()
         .into_iter()

@@ -16,6 +16,7 @@ use std::path::Path;
 
 use mkit_core::hash::Hash;
 use mkit_core::index::{self, EntryStatus, IndexEntry};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::conflict_state::ConflictRecord;
 use mkit_core::ops::merge::{Conflict, ConflictKind};
@@ -152,21 +153,21 @@ pub fn classify(store: &ObjectStore, c: &Conflict) -> Result<ConflictClass, Stri
 /// # Errors
 /// Propagates store / filesystem failures as a message string.
 pub fn materialize_conflicts(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     merged_tree: Hash,
     conflicts: &[Conflict],
 ) -> Result<Vec<ConflictRecord>, String> {
     // Apply the merged result (clean changes + "ours" at conflict paths)
     // to the index and worktree, then overlay markers below.
-    super::restore_worktree_and_index(root, store, merged_tree)?;
-    let mut idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    super::restore_worktree_and_index(layout, store, merged_tree)?;
+    let mut idx = index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     let mut records = Vec::with_capacity(conflicts.len());
     let mut stderr = std::io::stderr().lock();
 
     for c in conflicts {
         let class = classify(store, c)?;
-        let abs = root.join(&c.path);
+        let abs = layout.worktree_root().join(&c.path);
         match class {
             ConflictClass::TextMarkers => {
                 let ours = match c.ours_hash {
@@ -214,7 +215,7 @@ pub fn materialize_conflicts(
         records.push(ConflictRecord::from(c));
     }
 
-    index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))?;
+    index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))?;
     Ok(records)
 }
 
@@ -428,7 +429,7 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), String> {
 /// be unsafe, or propagates store / filesystem failures.
 #[allow(clippy::too_many_lines)] // a sequence of independent pre-mutation safety checks
 pub fn ensure_abort_safe(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
@@ -436,8 +437,9 @@ pub fn ensure_abort_safe(
 ) -> Result<(), String> {
     use std::collections::HashSet;
 
-    let current_tree = super::current_head_tree(root, store)?;
-    let idx = super::read_or_seed_index_from_head(root, store)?;
+    let root = layout.worktree_root();
+    let current_tree = super::current_head_tree(layout, store)?;
+    let idx = super::read_or_seed_index_from_head(layout, store)?;
     // Safety-check snapshot trees are ephemeral — in-memory overlay.
     let snapshot = mkit_core::store::EphemeralSink::new(store);
     let index_tree = mkit_core::worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
@@ -595,13 +597,15 @@ pub fn ensure_abort_safe(
 /// Propagates store / filesystem failures.
 #[allow(clippy::too_many_lines)] // a pre-flight pass + the mutation pass, kept together
 pub fn reset_conflict_paths(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     records: &[ConflictRecord],
     target_tree: Hash,
     op_result_tree: Option<Hash>,
 ) -> Result<(), String> {
     use std::collections::{BTreeSet, HashMap};
+
+    let root = layout.worktree_root();
 
     // Flatten the target tree into path → (mode, hash).
     let target_idx =
@@ -681,7 +685,7 @@ pub fn reset_conflict_paths(
         }
     }
 
-    let mut idx = super::read_or_seed_index_from_head(root, store)?;
+    let mut idx = super::read_or_seed_index_from_head(layout, store)?;
 
     for path in &paths {
         let abs = root.join(path);
@@ -744,7 +748,7 @@ pub fn reset_conflict_paths(
             }
         }
     }
-    index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))?;
+    index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))?;
     Ok(())
 }
 
@@ -823,13 +827,13 @@ fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatu
 /// # Errors
 /// Returns a message naming the first unstaged-resolution path.
 pub fn ensure_conflict_paths_staged(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     records: &[ConflictRecord],
 ) -> Result<(), String> {
-    let idx = index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    let idx = index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     for r in records {
-        let wt = worktree_object(store, &root.join(&r.path))?;
+        let wt = worktree_object(store, &layout.worktree_root().join(&r.path))?;
         // The staged entry for this path (if any). A `Removed` entry means
         // "ours deleted it"; absence means no staged content.
         let staged = idx.entries.iter().find(|e| e.path == r.path);

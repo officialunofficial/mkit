@@ -25,6 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::hash::{self, HEX_LEN, Hash};
+use crate::layout::RepoLayout;
 use crate::object::Object;
 use crate::store::ObjectStore;
 
@@ -160,8 +161,8 @@ impl RebaseState {
 
 /// Returns `true` when `<mkit_dir>/rebase-apply/` exists.
 #[must_use]
-pub fn is_rebase_in_progress(mkit_dir: &Path) -> bool {
-    mkit_dir.join(REBASE_DIR).is_dir()
+pub fn is_rebase_in_progress(layout: &RepoLayout) -> bool {
+    layout.rebase_dir().is_dir()
 }
 
 /// Read rebase state from `<mkit_dir>/rebase-apply/`.
@@ -169,8 +170,8 @@ pub fn is_rebase_in_progress(mkit_dir: &Path) -> bool {
 /// # Errors
 /// - [`RebaseError::NoRebaseInProgress`] if the directory does not exist.
 /// - [`RebaseError::InvalidRebaseState`] if any file is malformed.
-pub fn read_state(mkit_dir: &Path) -> RebaseResult<RebaseState> {
-    let dir = mkit_dir.join(REBASE_DIR);
+pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
+    let dir = layout.rebase_dir();
     if !dir.is_dir() {
         return Err(RebaseError::NoRebaseInProgress);
     }
@@ -203,8 +204,8 @@ pub fn read_state(mkit_dir: &Path) -> RebaseResult<RebaseState> {
 ///
 /// # Errors
 /// - [`RebaseError::Io`] for filesystem failures.
-pub fn write_state(mkit_dir: &Path, state: &RebaseState) -> RebaseResult<()> {
-    let dir = mkit_dir.join(REBASE_DIR);
+pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()> {
+    let dir = layout.rebase_dir();
     fs::create_dir_all(&dir)?;
 
     write_with_newline(&dir.join(HEAD_NAME_FILE), state.head_name.as_bytes())?;
@@ -223,8 +224,8 @@ pub fn write_state(mkit_dir: &Path, state: &RebaseState) -> RebaseResult<()> {
 ///
 /// # Errors
 /// - [`RebaseError::Io`] for filesystem failures other than "not found".
-pub fn cleanup_rebase(mkit_dir: &Path) -> RebaseResult<()> {
-    let dir = mkit_dir.join(REBASE_DIR);
+pub fn cleanup_rebase(layout: &RepoLayout) -> RebaseResult<()> {
+    let dir = layout.rebase_dir();
     match fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -411,8 +412,8 @@ fn trim_trailing(s: &str) -> &str {
 
 /// Convenience: full path to the rebase-apply directory under `mkit_dir`.
 #[must_use]
-pub fn rebase_dir_path(mkit_dir: &Path) -> PathBuf {
-    mkit_dir.join(REBASE_DIR)
+pub fn rebase_dir_path(layout: &RepoLayout) -> PathBuf {
+    layout.rebase_dir()
 }
 
 #[cfg(test)]
@@ -424,7 +425,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 
@@ -465,8 +466,8 @@ mod tests {
     #[test]
     fn state_roundtrip_writes_recoverable_files() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
 
         let state = RebaseState {
             head_name: "feature-branch".to_string(),
@@ -480,7 +481,7 @@ mod tests {
 
         // Files should exist on disk — this models the "mid-rebase crash
         // leaves recoverable state" invariant.
-        let dir = mkit.join(REBASE_DIR);
+        let dir = mkit.rebase_dir();
         assert!(dir.join("head-name").is_file());
         assert!(dir.join("orig-head").is_file());
         assert!(dir.join("onto").is_file());
@@ -495,8 +496,8 @@ mod tests {
     #[test]
     fn missing_actions_file_defaults_to_all_pick() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let state = RebaseState {
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
@@ -508,7 +509,7 @@ mod tests {
         write_state(&mkit, &state).unwrap();
         // Simulate a rebase started before interactive support: delete the
         // actions sidecar. Reading must still yield one Pick per todo commit.
-        fs::remove_file(mkit.join(REBASE_DIR).join("actions")).unwrap();
+        fs::remove_file(mkit.rebase_dir().join("actions")).unwrap();
         let read = read_state(&mkit).unwrap();
         assert_eq!(read.actions, vec![RebaseAction::Pick, RebaseAction::Pick]);
     }
@@ -550,8 +551,8 @@ mod tests {
     #[test]
     fn state_roundtrip_with_empty_todo_and_done() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
 
         let state = RebaseState {
             head_name: "main".to_string(),
@@ -569,20 +570,20 @@ mod tests {
     #[test]
     fn is_rebase_in_progress_detection() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         assert!(!is_rebase_in_progress(&mkit));
-        fs::create_dir_all(mkit.join(REBASE_DIR)).unwrap();
+        fs::create_dir_all(mkit.rebase_dir()).unwrap();
         assert!(is_rebase_in_progress(&mkit));
     }
 
     #[test]
     fn cleanup_removes_state_dir() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
-        fs::create_dir_all(mkit.join(REBASE_DIR)).unwrap();
-        fs::write(mkit.join(REBASE_DIR).join("head-name"), b"main\n").unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
+        fs::create_dir_all(mkit.rebase_dir()).unwrap();
+        fs::write(mkit.rebase_dir().join("head-name"), b"main\n").unwrap();
         assert!(is_rebase_in_progress(&mkit));
         cleanup_rebase(&mkit).unwrap();
         assert!(!is_rebase_in_progress(&mkit));
@@ -591,16 +592,16 @@ mod tests {
     #[test]
     fn cleanup_on_missing_dir_is_noop() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         cleanup_rebase(&mkit).unwrap();
     }
 
     #[test]
     fn read_state_when_no_rebase_returns_error() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let err = read_state(&mkit).unwrap_err();
         assert!(matches!(err, RebaseError::NoRebaseInProgress));
     }

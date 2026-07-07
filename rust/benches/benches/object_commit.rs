@@ -11,6 +11,7 @@ use std::process::Command;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit, time_one};
+use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
 const SIZES: &[(usize, &str)] = &[
@@ -39,7 +40,7 @@ fn bench_object_commit(c: &mut Criterion) {
         // three perform a real on-disk write, not just a hash.
         {
             let dir = tempfile::tempdir().unwrap();
-            let store = ObjectStore::init(dir.path()).unwrap();
+            let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
             c.bench_function(&format!("commit/{axis}/mkit"), |b| {
                 b.iter(|| commit_via_mkit(&store, &payloads));
             });

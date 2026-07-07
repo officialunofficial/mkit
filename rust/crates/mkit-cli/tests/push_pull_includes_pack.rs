@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use mkit_cli::remote_dispatch::{DispatchError, fetch_all, pull_all, push_all};
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::reachable_objects;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -62,14 +63,16 @@ fn push_pull_transfers_full_object_closure_via_memory_transport() {
 
     // Alice and Bob now hold exactly the same object set reachable
     // from their shared `refs/heads/main` tip.
-    let alice_mkit = alice.path().join(".mkit");
-    let bob_mkit = bob.path().join(".mkit");
-    let alice_tip = refs::read_ref(&alice_mkit, "main").unwrap().unwrap();
-    let bob_tip = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
+        .unwrap()
+        .unwrap();
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
+        .unwrap()
+        .unwrap();
     assert_eq!(alice_tip, bob_tip);
 
-    let alice_store = ObjectStore::open(alice.path()).unwrap();
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let alice_store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
     let alice_set: HashSet<_> = reachable_objects(&alice_store, &alice_tip)
         .unwrap()
         .into_iter()
@@ -150,14 +153,14 @@ fn fetch_all_does_not_overwrite_local_branch() {
 
     let tx: Arc<MemoryTransport> = Arc::new(MemoryTransport::new());
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
-    let bob_mkit = bob.path().join(".mkit");
-    let bob_before = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
+    let bob_layout = RepoLayout::single(bob.path());
+    let bob_before = refs::read_ref(&bob_layout, "main").unwrap().unwrap();
 
     let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
     assert!(n >= 1);
 
-    let bob_after = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
-    let remote_main = refs::read_remote_ref(&bob_mkit, "default", "main")
+    let bob_after = refs::read_ref(&bob_layout, "main").unwrap().unwrap();
+    let remote_main = refs::read_remote_ref(&bob_layout, "default", "main")
         .unwrap()
         .unwrap();
     assert_eq!(bob_before, bob_after, "fetch must not move local main");
@@ -197,10 +200,10 @@ fn pull_all_fast_forwards_current_branch() {
 
     pull_all(bob.path(), tx.as_ref(), "default").expect("fast-forward pull");
 
-    let alice_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
         .unwrap()
         .unwrap();
     assert_eq!(alice_tip, bob_tip);
@@ -245,14 +248,14 @@ fn pull_all_refuses_divergent_current_branch() {
             .status
             .success()
     );
-    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
         .unwrap()
         .unwrap();
 
     let err = pull_all(bob.path(), tx.as_ref(), "default").unwrap_err();
     assert!(matches!(err, DispatchError::NonFastForwardPull { .. }));
     assert_eq!(
-        refs::read_ref(&bob.path().join(".mkit"), "main")
+        refs::read_ref(&RepoLayout::single(bob.path()), "main")
             .unwrap()
             .unwrap(),
         bob_tip
@@ -291,7 +294,7 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
     fs::write(bob.path().join("a.txt"), b"local dirty").unwrap();
-    let bob_tip = refs::read_ref(&bob.path().join(".mkit"), "main")
+    let bob_tip = refs::read_ref(&RepoLayout::single(bob.path()), "main")
         .unwrap()
         .unwrap();
 
@@ -299,7 +302,7 @@ fn pull_all_refuses_dirty_worktree_before_fast_forward() {
     assert!(matches!(err, DispatchError::RestoreSafety(_)));
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"local dirty");
     assert_eq!(
-        refs::read_ref(&bob.path().join(".mkit"), "main")
+        refs::read_ref(&RepoLayout::single(bob.path()), "main")
             .unwrap()
             .unwrap(),
         bob_tip
@@ -354,7 +357,8 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
     let _ = push_all(alice.path(), tx.as_ref()).unwrap();
 
     let bob_mkit = bob.path().join(".mkit");
-    let bob_tip = refs::read_ref(&bob_mkit, "main").unwrap().unwrap();
+    let bob_layout = RepoLayout::single(bob.path());
+    let bob_tip = refs::read_ref(&bob_layout, "main").unwrap().unwrap();
     let heads_dir = bob_mkit.join("refs/heads");
     let original_perms = fs::metadata(&heads_dir).unwrap().permissions();
     let mut readonly = original_perms.clone();
@@ -370,7 +374,10 @@ fn pull_all_ref_update_failure_does_not_restore_worktree() {
         "unexpected error: {err}"
     );
     assert_eq!(fs::read(bob.path().join("a.txt")).unwrap(), b"v1");
-    assert_eq!(refs::read_ref(&bob_mkit, "main").unwrap().unwrap(), bob_tip);
+    assert_eq!(
+        refs::read_ref(&bob_layout, "main").unwrap().unwrap(),
+        bob_tip
+    );
 }
 
 #[test]

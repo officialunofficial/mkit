@@ -156,7 +156,11 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
     let index = if let Some(i) = index {
         i
     } else {
-        loaded = index::read_index(dir).unwrap_or_default();
+        // Single-layout assumption: `dir` is treated as a classic
+        // single-worktree root. Linked-worktree callers (#493 Phase 1+)
+        // must pass `Some(index)` or this fallback reads the wrong
+        // index; the CLI always passes the discovered layout's index.
+        loaded = index::read_index(&crate::layout::RepoLayout::single(dir)).unwrap_or_default();
         &loaded
     };
     // O(1) per-file entry lookups; `Index::find_entry` is a linear scan
@@ -874,7 +878,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 
