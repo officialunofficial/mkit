@@ -103,6 +103,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "config",
     "self",
     "version",
+    "worktree",
 ];
 
 #[test]

@@ -48,6 +48,7 @@ _mkit() {
         'pull:Pull changes from remote'
         'fetch:Download from remote without merging'
         'stash:Stash working-dir changes'
+        'worktree:Manage linked working trees'
         'clone:Clone a repository'
         'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
@@ -400,6 +401,13 @@ _mkit() {
                         '(-n --dry-run)'{-n,--dry-run}'[preview without deleting]' \
                         '--grace-secs[keep unreachable objects younger than SECS]:secs:' \
                         '--help[show help]'
+                    ;;
+                worktree)
+                    _values 'worktree subcommand' \
+                        'add[create a linked working tree]' \
+                        'list[list working trees]' \
+                        'remove[remove a linked working tree]' \
+                        'prune[delete dead registry entries]'
                     ;;
                 stash)
                     _values 'stash subcommand' \

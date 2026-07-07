@@ -42,7 +42,6 @@ creeping; revisit post-v1 if demand warrants.
 
 - Submodules / subtrees
 - Hooks (`.git/hooks`, `core.hooksPath`)
-- Multiple working trees (`git worktree`)
 - Full refspec grammar (`+a:b`, wildcard push/fetch maps beyond current remotes)
 - Wire protocol v2 / smart-HTTP negotiation flags
 - `git notes`
@@ -59,6 +58,18 @@ creeping; revisit post-v1 if demand warrants.
   linear/DAG case is an optional post-v1 follow-up, not a v1 blocker.
 
 ---
+
+**Scope amendment (worktrees, #493):** multiple working trees left the
+non-goals list — `mkit worktree add/list/remove/prune` ships with git's
+core semantics (linked trees share one object store and the shared
+refs; each tree has its own `HEAD`/index/op-state; a branch can be
+checked out in at most one tree; gc never prunes objects reachable
+from a sibling tree's state). Documented divergences: the **stash is
+per-worktree** (git shares `refs/stash` across trees) — a deliberate
+consequence of mkit's worktree-state stash manifest; and
+`worktree move`/`lock`/`repair` remain follow-ups outside the minimal
+set. On-disk format and discovery are specified in
+[`SPEC-WORKTREE.md`](specs/SPEC-WORKTREE.md).
 
 ## Per-command status matrix
 
@@ -84,6 +95,9 @@ mkit deliberately refuses Git's silent data-loss defaults. These are
   locally-modified or untracked content without an explicit `-f`/`--force`.
 - `mv` — refuses to overwrite an existing destination without `-f` (matches
   git's `mv` clobber guard).
+- `worktree remove` — refuses to delete a tree holding local changes,
+  untracked files, or an in-progress operation without `--force`, and never
+  removes the main tree or the tree the caller stands in.
 - `checkout` — refuses to clobber dirty tracked files or colliding untracked
   files; non-colliding untracked files are preserved (git semantics).
 - Repo-local config — `user.identity` and other security-sensitive keys are in

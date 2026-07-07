@@ -180,6 +180,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SPEC-WORKTREE.md + worktree parity docs (#493 Phase 4).** New
+  normative spec covering the common-dir/per-worktree state split, the
+  `mkitdir:` pointer-file format, the `worktrees/` registry, discovery
+  (and its fail-closed matrix), the lock model, and cross-tree gc
+  semantics. `git worktree` leaves PARITY.md's v1 non-goals list with
+  a scope amendment recording the deliberate divergences (per-tree
+  stash; `move`/`lock`/`repair` remain follow-ups); SKILL.md, the man
+  page, and the bash/zsh/fish completions gain the `worktree` command.
 - **Cross-worktree gc + the lock split (#493 Phase 3).** `mkit gc` is
   worktree-aware: root collection unions HEAD, staging index,
   `ORIG_HEAD`, in-progress merge/cherry-pick/revert/rebase state,
