@@ -204,7 +204,10 @@ impl AppliedPacks {
     /// A missing source record is Ok — the normal state for a never-fetched
     /// remote. A record already on disk under `new` can only be a stale
     /// orphan (the command handler has already established `new` is not a
-    /// configured remote), so it is overwritten by the rename.
+    /// configured remote); it is overwritten by the rename when `old` has a
+    /// record, but survives when `old` has none (`fs::rename` is a no-op on a
+    /// missing source). A surviving orphan is harmless: the fetch-side
+    /// self-heal discards any record that disagrees with the packmap.
     ///
     /// # Errors
     ///
