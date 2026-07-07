@@ -558,6 +558,28 @@ pub fn push_branch(
     tip: Hash,
     condition: refs::RefWriteCondition,
 ) -> Result<(), DispatchError> {
+    push_branch_with_depth(tx, store, branch, tip, condition, rebaseline_depth())
+}
+
+/// [`push_branch`] with an explicit re-baseline threshold in place of the
+/// configured one (`packmap::rebaseline_depth`: the
+/// `MKIT_PACK_REBASELINE_DEPTH` env var, default 64). `0` disables
+/// re-baselining. Semantics are otherwise identical — see [`push_branch`].
+///
+/// This is the depth-policy seam (#547): integration tests inject a small
+/// threshold (e.g. 3) to exercise the re-baseline path in-process with a
+/// handful of pushes, where reaching the default threshold would take ~64
+/// real pushes and the env-var override cannot be set on the test's own
+/// process (`std::env::set_var` is banned by `clippy::disallowed_methods` —
+/// it races other threads on POSIX).
+pub fn push_branch_with_depth(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+) -> Result<(), DispatchError> {
     // Diff against the remote's CURRENT tip so we send only what it lacks
     // and can delta against bases it already holds. Planning is an
     // optimization; the head CAS below remains authoritative.
@@ -599,15 +621,14 @@ pub fn push_branch(
     //     ordered two-PUT path (`Any` is not expressible on the atomic
     //     endpoint — see `HttpTransport::supports_atomic_advance`), so a
     //     force push MUST take the safe append path instead of resetting.
-    let threshold = rebaseline_depth();
     let mut rebaseline = false;
     let mut resolved_chain = None;
-    if threshold > 0
+    if rebaseline_threshold > 0
         && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
     {
         match probe_chain(tx, branch, pm) {
             Ok(chain)
-                if chain.depth + 1 > threshold
+                if chain.depth + 1 > rebaseline_threshold
                     && tx.supports_atomic_advance()
                     && !matches!(condition, refs::RefWriteCondition::Any) =>
             {
