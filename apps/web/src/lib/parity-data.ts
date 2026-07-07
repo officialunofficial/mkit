@@ -108,15 +108,34 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Cleanup and maintenance',
+    name: 'Workspace',
+    blurb: 'Managing the working copy itself — extra trees, partial checkouts, and shelved changes.',
     items: [
-      { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
-      { cmd: 'stash', status: 'parity', note: 'save, list, pop, apply, drop, clear, show.' },
-      { cmd: 'gc', status: 'parity', note: 'Mark-and-sweep, recovery-aware, and fail-closed.' },
+      {
+        cmd: 'worktree',
+        status: 'divergent',
+        note: 'add, list, remove, and prune linked working trees. Every tree shares the one object store and refs; each keeps its own HEAD, index, in-progress-op state, and stash, and a branch can be checked out in at most one tree. Two documented differences from git: the stash is per-worktree (git shares one stash across trees), and move / lock / repair are not yet implemented.',
+      },
       {
         cmd: 'sparse-checkout',
         status: 'parity',
         note: 'set, list, disable, reapply over pattern sets (stored in .mkit/sparse-checkout). The sparse clone/fetch that transfers only matching paths is feature-gated.',
+      },
+      {
+        cmd: 'stash',
+        status: 'parity',
+        note: 'save, list, pop, apply, drop, clear, show. Per-worktree (git shares one stash across trees).',
+      },
+    ],
+  },
+  {
+    name: 'Cleanup and maintenance',
+    items: [
+      { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
+      {
+        cmd: 'gc',
+        status: 'parity',
+        note: 'Mark-and-sweep, recovery-aware, and fail-closed. Unions retention roots across every linked worktree.',
       },
     ],
   },
@@ -217,7 +236,7 @@ export const inherentDivergences: ParityNote[] = [
 export const safetyDivergences: ParityNote[] = [
   {
     label: 'No silent data loss',
-    body: 'rm, restore, reset --hard, clean, stash pop, mv, and checkout refuse to destroy modified or untracked content without an explicit -f / --force.',
+    body: 'rm, restore, reset --hard, clean, stash pop, mv, checkout, and worktree remove refuse to destroy modified or untracked content without an explicit -f / --force.',
   },
   {
     label: "A hostile clone can't spoof you",
@@ -233,7 +252,6 @@ export const safetyDivergences: ParityNote[] = [
 export const nonGoals: string[] = [
   'Submodules and subtrees',
   'Hooks (core.hooksPath)',
-  'Multiple working trees (git worktree)',
   'The full refspec grammar and wildcard push/fetch maps',
   'Wire protocol v2 and smart-HTTP negotiation',
   'git notes',
