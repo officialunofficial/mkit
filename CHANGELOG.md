@@ -180,6 +180,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`mkit worktree add/list/remove/prune` (#493 Phase 2).** Linked
+  working trees with git's semantics: `add <path> [<commit-ish>]`
+  creates a tree sharing the one object store and the shared refs
+  (default: a new branch named after the path's basename; a branch
+  argument checks it out; any other revision detaches), `list`
+  (`--porcelain` for scripts) shows every tree with its HEAD, `remove`
+  deletes a tree but refuses to destroy local changes, untracked
+  files, or an in-progress operation without `--force`, and `prune`
+  reaps registry entries whose tree vanished (`--dry-run` previews).
+  A branch may be checked out in at most one tree: `worktree add`,
+  `checkout`/`switch`, `branch -d`, and `branch -m` all refuse with
+  `already checked out at '<path>'` (branch moves are single-writer
+  through the history-MMR ref path). Registry mutations serialise on a
+  new common-dir `worktrees.lock`; `add` orders its writes so a crash
+  leaves at worst a prunable orphan, never a live tree pointing at
+  half-built state. Interim fail-closed limit: `mkit gc` refuses to
+  run while linked worktrees exist, until Phase 3 teaches root
+  collection to union every tree's HEAD/index/op-state.
 - **Linked-worktree on-disk model + discovery (#493 Phase 1).**
   `mkit_core::layout` gains the linked-worktree groundwork: a linked
   tree's `.mkit` is a pointer FILE (`mkitdir: <path>`, the analog of

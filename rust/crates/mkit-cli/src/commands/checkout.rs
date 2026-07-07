@@ -148,6 +148,28 @@ pub fn run(args: &[String]) -> u8 {
         Ok(mkit_core::refs::Head::Branch(ref cur)) if cur == name
     );
 
+    // Single-writer-per-branch across worktrees (#493): if this
+    // checkout would END on a branch (existing or being created),
+    // refuse when a sibling tree already has it checked out — branch
+    // moves flow through the history-MMR ref path, which assumes one
+    // writer per branch. Applies to `--force` too, like git.
+    let ends_on_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
+    if ends_on_branch {
+        match super::branch_checked_out_elsewhere(&layout, name) {
+            Ok(Some(at)) => {
+                return emit_err(
+                    &format!(
+                        "branch '{name}' is already checked out at '{}'",
+                        at.display()
+                    ),
+                    exit::DATAERR,
+                );
+            }
+            Ok(None) => {}
+            Err(e) => return emit_err(&e, exit::DATAERR),
+        }
+    }
+
     // The target commit: for `-b`/`-B` it is the (resolved) start-point;
     // otherwise resolve `<name>` via the shared revspec resolver.
     let commit_hash: Hash = match &create_plan {

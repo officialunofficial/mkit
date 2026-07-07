@@ -69,6 +69,7 @@ pub mod tree;
 pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
+pub mod worktree;
 
 use crate::exit;
 use mkit_core::hash::Hash;
@@ -80,7 +81,7 @@ use mkit_core::ops::recovery::{self, RecoveryEntry};
 use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree};
 use mkit_core::refs::{self, Head, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
-use mkit_core::worktree;
+use mkit_core::worktree as core_worktree;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -259,6 +260,99 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
     })
 }
 
+/// Basename of the common-dir lock serialising linked-worktree
+/// registry mutations (`worktree add`/`remove`/`prune`). Distinct from
+/// [`WORKTREE_LOCK`], which guards ONE tree's worktree/index state;
+/// this one guards the shared `worktrees/` registry itself.
+pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
+
+/// Acquire the shared worktree-registry lock (common dir).
+///
+/// # Errors
+/// [`exit::TEMPFAIL`] when the lock cannot be taken (message already
+/// printed), mirroring [`acquire_worktree_lock`].
+pub fn acquire_worktrees_registry_lock(
+    layout: &RepoLayout,
+) -> Result<mkit_core::repo_lock::RepoLock, u8> {
+    mkit_core::repo_lock::acquire_default(layout.common_dir(), WORKTREES_REGISTRY_LOCK).map_err(
+        |e| {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "error: worktree registry lock: {e}");
+            exit::TEMPFAIL
+        },
+    )
+}
+
+/// Every worktree of `layout`'s repository as `(tree root, layout)`
+/// pairs: the main tree first, then each healthy linked tree from the
+/// registry. Broken (prunable) registry entries are skipped — they
+/// have no live HEAD to consult; `worktree prune` reaps them.
+///
+/// # Errors
+/// A human-readable message when the registry cannot be enumerated
+/// (fail closed: a caller consulting sibling HEADs must not treat an
+/// unreadable registry as "no siblings").
+pub(crate) fn all_worktree_layouts(
+    layout: &RepoLayout,
+) -> Result<Vec<(std::path::PathBuf, RepoLayout)>, String> {
+    let mut out = Vec::new();
+    if let Some(main_root) = layout.common_dir().parent() {
+        out.push((main_root.to_path_buf(), RepoLayout::single(main_root)));
+    }
+    for wt in mkit_core::layout::worktrees(layout).map_err(|e| format!("worktree registry: {e}"))? {
+        if wt.prunable.is_some() {
+            continue;
+        }
+        let Some(tree_root) = wt.tree_root else {
+            continue;
+        };
+        out.push((
+            tree_root.clone(),
+            RepoLayout::linked(tree_root, wt.state_dir, layout.common_dir()),
+        ));
+    }
+    Ok(out)
+}
+
+/// The tree (other than the invoking one) that has `branch` checked
+/// out, if any. Branch moves are single-writer-per-branch (the
+/// history-MMR journal assumes it), so `checkout`/`switch`/`worktree
+/// add` refuse to put one branch on two trees, and `branch -d`/`-m`
+/// refuse to pull a branch out from under a sibling tree.
+///
+/// # Errors
+/// Propagates registry/HEAD read failures as a message — fail closed.
+pub(crate) fn branch_checked_out_elsewhere(
+    layout: &RepoLayout,
+    branch: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let self_state = layout
+        .worktree_state_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| layout.worktree_state_dir().to_path_buf());
+    for (tree_root, candidate) in all_worktree_layouts(layout)? {
+        let candidate_state = candidate
+            .worktree_state_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.worktree_state_dir().to_path_buf());
+        if candidate_state == self_state {
+            continue; // the invoking tree itself
+        }
+        match refs::read_head(&candidate) {
+            Ok(Head::Branch(name)) if name == branch => return Ok(Some(tree_root)),
+            // A sibling with no HEAD yet (mid-add) holds no branch.
+            Ok(_) | Err(RefError::NoHead) => {}
+            Err(e) => {
+                return Err(format!(
+                    "read HEAD of worktree at {}: {e}",
+                    tree_root.display()
+                ));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// C-style-quote `path` the way Git does for porcelain / `--name-*`
 /// output when a path contains bytes that need escaping. Returns `None`
 /// when the path is "plain" (all printable ASCII except `"`/`\`) and can
@@ -414,9 +508,10 @@ pub(crate) fn worktree_entry_state(
         Err(e) => return Err(format!("metadata {}: {e}", abs.display())),
     };
     if meta.file_type().is_file() {
-        let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
+        let (opened_meta, bytes) = core_worktree::read_regular_file_bounded(&abs)
             .map_err(|e| format!("read {}: {e}", abs.display()))?;
-        let h = worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
+        let h =
+            core_worktree::store_file_object(store, &bytes).map_err(|e| format!("store: {e}"))?;
         Ok(Some((file_exec_status(&opened_meta), h)))
     } else if meta.file_type().is_symlink() {
         let target =
@@ -424,7 +519,7 @@ pub(crate) fn worktree_entry_state(
         let target_str = target
             .to_str()
             .ok_or_else(|| "symlink target is not valid UTF-8".to_string())?;
-        if !worktree::validate_symlink_target(target_str) {
+        if !core_worktree::validate_symlink_target(target_str) {
             return Err(format!("invalid symlink target: {target_str}"));
         }
         let blob = Object::Blob(mkit_core::object::Blob {
@@ -754,7 +849,7 @@ pub fn ensure_restore_safe_with_options(
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
     let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
+    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("check index state: {e}"))?;
 
     let staged = diff_trees(&snapshot, current_tree, Some(index_tree))
@@ -770,7 +865,7 @@ pub fn ensure_restore_safe_with_options(
         ));
     }
 
-    let worktree_tree = worktree::build_tree_filtered(&snapshot, root, Some(&idx))
+    let worktree_tree = core_worktree::build_tree_filtered(&snapshot, root, Some(&idx))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
@@ -849,7 +944,7 @@ pub(crate) fn dropped_tracked_paths(
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
     let idx = read_or_seed_index_from_head(layout, store)?;
     let snapshot = mkit_core::store::EphemeralSink::new(store);
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
+    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("index tree: {e}"))?;
     let mut out = Vec::new();
     for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))
@@ -936,7 +1031,7 @@ pub(crate) fn current_head_tree(
     }
 }
 
-fn collect_worktree_paths(
+pub(crate) fn collect_worktree_paths(
     root: &Path,
     dir: &Path,
     prefix: &str,

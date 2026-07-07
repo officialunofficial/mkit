@@ -69,6 +69,23 @@ pub fn run(args: &[String]) -> u8 {
         Ok(layout) => layout,
         Err(code) => return code,
     };
+
+    // #493 interim fail-closed: gc's root collection reads only the
+    // INVOKING tree's per-tree state. Until Phase 3 unions roots
+    // across every worktree, running gc with linked worktrees present
+    // could prune a sibling's staged-but-uncommitted objects — so
+    // refuse outright.
+    match mkit_core::layout::worktrees(&layout) {
+        Ok(entries) if !entries.is_empty() => {
+            return super::error(
+                "gc with linked worktrees is not yet supported (#493 Phase 3); \
+                 `mkit worktree remove`/`prune` them first",
+                exit::TEMPFAIL,
+            );
+        }
+        Ok(_) => {}
+        Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),
+    }
     let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),

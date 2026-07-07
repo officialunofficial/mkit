@@ -162,6 +162,12 @@ commands:
                     <a>..<b>`/`Fast-forward`/diffstat, or `Already up to date.`)
   fetch             Download from remote without merging (prints `From <url>`
                     + per-ref summary; silent when nothing changed)
+  worktree add <path> [<commit-ish>]  Create a linked working tree (shares the
+                    object store and refs; own HEAD/index/stash). With no
+                    commit-ish, creates a branch named after the path
+  worktree list [--porcelain]  List the main and every linked working tree
+  worktree remove [--force] <path>     Remove a linked working tree
+  worktree prune [--dry-run]   Delete registry entries whose tree is gone
   stash             Stash working dir changes (save WIP; -m for a message)
   stash save -m <msg>  Stash with a message
   stash list        List stash entries (printed as stash@{N})
