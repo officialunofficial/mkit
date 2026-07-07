@@ -95,6 +95,11 @@ pub enum GcRootsError {
     /// outside the repo.
     #[error("refusing to gc: {0} is a symlink (objects may live outside the repo)")]
     SymlinkedStore(String),
+    /// The linked-worktree registry could not be enumerated. Root
+    /// collection must union EVERY tree's per-tree state (#493 Phase
+    /// 3); a partial view would let a sibling's staged work be pruned.
+    #[error("worktree registry: {0}")]
+    Worktrees(#[from] crate::layout::DiscoverError),
 }
 
 /// Collect the complete set of GC retention roots for the repo at
@@ -116,11 +121,6 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
         }
     };
 
-    // HEAD (covers a detached HEAD not present under refs/heads).
-    if let Some(h) = refs::resolve_head(layout)? {
-        add(h, &mut roots);
-    }
-
     // Branches, tags, and remote-tracking refs. We deliberately do NOT
     // use `refs::list_refs`/`list_tags`/`list_remote_refs` here: those
     // are lenient (they yield `hash: None` for malformed content, skip
@@ -133,68 +133,14 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
         walk_ref_roots_strict(&layout.common_dir().join(ns), ns, 0, &mut roots)?;
     }
 
-    // Stash: each stashed commit and the HEAD it was based on.
-    for entry in stash::list(layout)?.entries {
-        add(entry.commit_hash, &mut roots);
-        add(entry.parent_hash, &mut roots);
-    }
-
-    // Staging index — blobs recorded by `mkit add` but not yet
-    // committed. They are reachable from no ref, so without this root
-    // staged work would be pruned once it ages past the grace window
-    // (or immediately under `--grace-secs 0`). `read_index` is strict
-    // (errors on corrupt/oversized index), so a damaged index aborts
-    // gc instead of silently dropping roots.
-    for entry in index::read_index(layout)?.entries {
-        add(entry.object_hash, &mut roots);
-    }
-
-    // ORIG_HEAD (written by reset and by the in-progress ops below).
-    if let Some(h) = read_optional_hash(&layout.orig_head_file())? {
-        add(h, &mut roots);
-    }
-
-    // In-progress merge / cherry-pick.
-    if let Some(m) = conflict_state::read_merge_state(layout)? {
-        add(m.merge_head, &mut roots);
-        add(m.orig_head, &mut roots);
-    }
-    if let Some(c) = conflict_state::read_cherry_pick_state(layout)? {
-        add(c.cherry_pick_head, &mut roots);
-        add(c.orig_head, &mut roots);
-    }
-    if let Some(r) = conflict_state::read_revert_state(layout)? {
-        add(r.revert_head, &mut roots);
-        add(r.orig_head, &mut roots);
-    }
-
-    // In-progress rebase: target + every commit still to replay or
-    // already replayed onto the new base.
-    if rebase::is_rebase_in_progress(layout) {
-        let st = rebase::read_state(layout)?;
-        add(st.orig_head, &mut roots);
-        add(st.onto, &mut roots);
-        for h in st.todo.into_iter().chain(st.done) {
-            add(h, &mut roots);
-        }
-    }
-
-    // Conflict sidecar: base/ours/theirs blobs needed to resolve an
-    // in-progress conflict. Merge/cherry-pick write `.mkit/mkit-conflicts`;
-    // rebase writes its sidecar inside `.mkit/rebase-apply/`. Both are
-    // empty/absent when no conflict is recorded.
-    for dir in [
-        layout.worktree_state_dir().to_path_buf(),
-        layout.rebase_dir(),
-    ] {
-        for c in conflict_state::read_conflicts(&dir)? {
-            for h in [c.base_hash, c.ours_hash, c.theirs_hash]
-                .into_iter()
-                .flatten()
-            {
-                add(h, &mut roots);
-            }
-        }
+    // Per-tree sources, unioned over EVERY worktree of the repository
+    // (#493 Phase 3): the main tree plus each registered state dir —
+    // including prunable-but-unpruned ones, whose staged work stays
+    // pinned until `worktree prune` explicitly reaps it. Fail closed:
+    // a registry error or an unreadable sibling state aborts
+    // collection entirely.
+    for tree in crate::layout::all_state_layouts(layout)? {
+        collect_tree_roots(&tree, &add, &mut roots)?;
     }
 
     // Attested commits — pinned so an attestation never dangles.
@@ -211,6 +157,83 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
     }
 
     Ok(roots)
+}
+
+/// One worktree's per-tree retention roots: HEAD, staging index,
+/// `ORIG_HEAD`, in-progress merge/cherry-pick/revert/rebase state,
+/// conflict sidecars, and the tree-local stash.
+fn collect_tree_roots(
+    tree: &crate::layout::RepoLayout,
+    add: &impl Fn(Hash, &mut BTreeSet<Hash>),
+    roots: &mut BTreeSet<Hash>,
+) -> Result<(), GcRootsError> {
+    // HEAD (covers a detached HEAD not present under refs/heads).
+    if let Some(h) = refs::resolve_head(tree)? {
+        add(h, roots);
+    }
+
+    // Stash: each stashed commit and the HEAD it was based on.
+    for entry in stash::list(tree)?.entries {
+        add(entry.commit_hash, roots);
+        add(entry.parent_hash, roots);
+    }
+
+    // Staging index — blobs recorded by `mkit add` but not yet
+    // committed. They are reachable from no ref, so without this root
+    // staged work would be pruned once it ages past the grace window
+    // (or immediately under `--grace-secs 0`). `read_index` is strict
+    // (errors on corrupt/oversized index), so a damaged index aborts
+    // gc instead of silently dropping roots.
+    for entry in index::read_index(tree)?.entries {
+        add(entry.object_hash, roots);
+    }
+
+    // ORIG_HEAD (written by reset and by the in-progress ops below).
+    if let Some(h) = read_optional_hash(&tree.orig_head_file())? {
+        add(h, roots);
+    }
+
+    // In-progress merge / cherry-pick / revert.
+    if let Some(m) = conflict_state::read_merge_state(tree)? {
+        add(m.merge_head, roots);
+        add(m.orig_head, roots);
+    }
+    if let Some(c) = conflict_state::read_cherry_pick_state(tree)? {
+        add(c.cherry_pick_head, roots);
+        add(c.orig_head, roots);
+    }
+    if let Some(r) = conflict_state::read_revert_state(tree)? {
+        add(r.revert_head, roots);
+        add(r.orig_head, roots);
+    }
+
+    // In-progress rebase: target + every commit still to replay or
+    // already replayed onto the new base.
+    if rebase::is_rebase_in_progress(tree) {
+        let st = rebase::read_state(tree)?;
+        add(st.orig_head, roots);
+        add(st.onto, roots);
+        for h in st.todo.into_iter().chain(st.done) {
+            add(h, roots);
+        }
+    }
+
+    // Conflict sidecar: base/ours/theirs blobs needed to resolve an
+    // in-progress conflict. Merge/cherry-pick write `mkit-conflicts`
+    // in the state dir; rebase writes its sidecar inside
+    // `rebase-apply/`. Both are empty/absent when no conflict is
+    // recorded.
+    for dir in [tree.worktree_state_dir().to_path_buf(), tree.rebase_dir()] {
+        for c in conflict_state::read_conflicts(&dir)? {
+            for h in [c.base_hash, c.ours_hash, c.theirs_hash]
+                .into_iter()
+                .flatten()
+            {
+                add(h, roots);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The full live-object keep-set for `mkit gc`: the reachable closure

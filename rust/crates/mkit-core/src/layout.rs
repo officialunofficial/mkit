@@ -454,6 +454,11 @@ pub enum DiscoverError {
     #[error("worktree pointer {0} exceeds {MAX_POINTER_FILE_BYTES} bytes — refusing to parse")]
     PointerTooLarge(PathBuf),
     #[error(
+        "worktree pointer {0} is a symlink — pointer, commondir, and back-pointer files \
+         must be regular files"
+    )]
+    PointerSymlink(PathBuf),
+    #[error(
         "worktree state dir {0} is missing or not a directory — was this worktree pruned? \
          run `mkit worktree` maintenance from the main repository"
     )]
@@ -490,6 +495,14 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(DiscoverError::PointerUnreadable(path.to_path_buf(), e)),
     };
+    // Reject symlinks outright: `symlink_metadata` sizes the LINK
+    // itself, so a hostile `.mkit -> /dev/zero` in an untarred tree
+    // would sail past the byte cap while `fs::read` follows the link
+    // into an unbounded read. Pointer-style files are plain regular
+    // files by spec (SPEC-WORKTREE §2).
+    if meta.file_type().is_symlink() {
+        return Err(DiscoverError::PointerSymlink(path.to_path_buf()));
+    }
     if meta.len() > MAX_POINTER_FILE_BYTES {
         return Err(DiscoverError::PointerTooLarge(path.to_path_buf()));
     }
@@ -679,6 +692,45 @@ pub fn worktrees(layout: &RepoLayout) -> Result<Vec<WorktreeEntry>, DiscoverErro
         out.push(wt);
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// Every per-tree STATE layout of the repository, for cross-worktree
+/// root collection (#493 Phase 3): the main tree first, then one
+/// layout per `worktrees/<id>` state dir that exists on disk — in
+/// deterministic order (main, then ids ascending), so multi-lock
+/// acquisition over the result cannot deadlock against itself.
+///
+/// Deliberately INCLUDES prunable registry entries whose state dir is
+/// still present: until `worktree prune` reaps a state dir, whatever
+/// its HEAD/index/op-state pin stays pinned — gc must never treat "the
+/// tree wandered off" as "its staged objects are garbage".
+///
+/// For entries whose linked tree root is unknown (broken back-pointer)
+/// the layout's `worktree_root` falls back to the state dir itself;
+/// root collection never touches worktree files, only state.
+///
+/// # Errors
+/// Propagates registry enumeration failures — callers (gc) must abort,
+/// never prune on a partial view.
+pub fn all_state_layouts(layout: &RepoLayout) -> Result<Vec<RepoLayout>, DiscoverError> {
+    let mut out = Vec::new();
+    let main_root = layout
+        .common_dir()
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+    out.push(RepoLayout::linked(
+        main_root,
+        layout.common_dir(),
+        layout.common_dir(),
+    ));
+    for wt in worktrees(layout)? {
+        if !wt.state_dir.is_dir() {
+            continue;
+        }
+        let root = wt.tree_root.clone().unwrap_or_else(|| wt.state_dir.clone());
+        out.push(RepoLayout::linked(root, wt.state_dir, layout.common_dir()));
+    }
     Ok(out)
 }
 
@@ -1105,6 +1157,21 @@ mod tests {
             discover(&tree),
             Err(DiscoverError::PointerTooLarge(_))
         ));
+        // Symlinked pointer: the byte cap sizes the LINK, so a link to
+        // a huge (or unbounded, e.g. /dev/zero) target must be
+        // rejected outright, never followed.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&pointer).unwrap();
+            let huge = tmp.path().join("huge");
+            std::fs::write(&huge, format!("mkitdir: /{}\n", "x".repeat(8192))).unwrap();
+            std::os::unix::fs::symlink(&huge, &pointer).unwrap();
+            assert!(matches!(
+                discover(&tree),
+                Err(DiscoverError::PointerSymlink(_))
+            ));
+        }
+
         // Dangling target (state dir removed — a pruned worktree).
         write_pointer_file(&tree, &state).unwrap();
         std::fs::remove_dir_all(&state).unwrap();

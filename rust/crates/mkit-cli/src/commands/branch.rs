@@ -199,6 +199,12 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
     let was = refs::read_ref(layout, name).ok().flatten();
     // Refuse to delete a branch a SIBLING worktree has checked out
     // (#493) — delete_ref_safe below only knows about this tree's HEAD.
+    // Registry lock: atomic vs a concurrent checkout/worktree-add
+    // grabbing the branch between this check and the delete.
+    let _registry_lock = match super::acquire_worktrees_registry_lock(layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     match super::branch_checked_out_elsewhere(layout, name) {
         Ok(Some(at)) => {
             return super::error(
@@ -271,6 +277,11 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
     // Refuse to rename a branch a SIBLING worktree has checked out
     // (#493): its HEAD would dangle on the old name. (Renaming the
     // branch checked out HERE is fine — HEAD is moved below.)
+    // Registry lock: atomic vs a concurrent checkout/worktree-add.
+    let _registry_lock = match super::acquire_worktrees_registry_lock(layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     match super::branch_checked_out_elsewhere(layout, &old) {
         Ok(Some(at)) => {
             return emit_err(

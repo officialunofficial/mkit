@@ -180,6 +180,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Cross-worktree gc + the lock split (#493 Phase 3).** `mkit gc` is
+  worktree-aware: root collection unions HEAD, staging index,
+  `ORIG_HEAD`, in-progress merge/cherry-pick/revert/rebase state,
+  conflict sidecars, and the tree-local stash across the main tree AND
+  every registered linked tree (including prunable-but-unpruned
+  entries — until `worktree prune` reaps a state dir, whatever it pins
+  stays pinned), and fails closed if the registry or any sibling's
+  state cannot be read. gc's "shared lock spanning trees" is the union
+  of all per-tree worktree locks, acquired in deterministic order
+  (main first, then registry ids ascending), so gc serializes against
+  worktree/index mutations in every tree — a gc run blocks (then
+  TEMPFAILs) while any sibling is mid-mutation. The Phase 2 interim
+  refusal of gc-with-linked-worktrees is lifted. Tree-locality of
+  `status`/`reset --hard`/`clean`/`rm`/`stash` across trees is pinned
+  by tests.
 - **`mkit worktree add/list/remove/prune` (#493 Phase 2).** Linked
   working trees with git's semantics: `add <path> [<commit-ish>]`
   creates a tree sharing the one object store and the shared refs
@@ -195,9 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the history-MMR ref path). Registry mutations serialise on a
   new common-dir `worktrees.lock`; `add` orders its writes so a crash
   leaves at worst a prunable orphan, never a live tree pointing at
-  half-built state. Interim fail-closed limit: `mkit gc` refuses to
-  run while linked worktrees exist, until Phase 3 teaches root
-  collection to union every tree's HEAD/index/op-state.
+  half-built state.
 - **Linked-worktree on-disk model + discovery (#493 Phase 1).**
   `mkit_core::layout` gains the linked-worktree groundwork: a linked
   tree's `.mkit` is a pointer FILE (`mkitdir: <path>`, the analog of

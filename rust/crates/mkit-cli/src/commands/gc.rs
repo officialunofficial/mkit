@@ -70,37 +70,43 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
-    // #493 interim fail-closed: gc's root collection reads only the
-    // INVOKING tree's per-tree state. Until Phase 3 unions roots
-    // across every worktree, running gc with linked worktrees present
-    // could prune a sibling's staged-but-uncommitted objects — so
-    // refuse outright.
-    match mkit_core::layout::worktrees(&layout) {
-        Ok(entries) if !entries.is_empty() => {
-            return super::error(
-                "gc with linked worktrees is not yet supported (#493 Phase 3); \
-                 `mkit worktree remove`/`prune` them first",
-                exit::TEMPFAIL,
-            );
-        }
-        Ok(_) => {}
-        Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),
-    }
     let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
 
-    // Hold the worktree lock for the whole run. This serializes gc
-    // against worktree/index-mutating commands and other gc runs. It does
-    // NOT serialize against the non-worktree root publishers (`tag`,
-    // `fetch`, `attest`) — those don't take this lock yet (#267), so the
-    // grace window is what protects their in-flight objects from a
-    // concurrent prune.
-    let _lock = match super::acquire_worktree_lock(&layout) {
+    // Hold EVERY worktree's lock for the whole run (#493 Phase 3) —
+    // the shared lock spanning trees. Root collection unions each
+    // tree's HEAD/index/op-state, so gc must serialize against
+    // worktree/index-mutating commands in ALL trees, not just the
+    // invoking one, plus other gc runs. Acquisition order is
+    // deterministic (main first, then registry ids ascending, from
+    // `all_state_layouts`) so concurrent multi-lock takers cannot
+    // deadlock. It still does NOT serialize against the non-worktree
+    // root publishers (`tag`, `fetch`, `attest`) — those don't take
+    // this lock (#267); the grace window protects their in-flight
+    // objects, exactly as in the single-tree case.
+    // Registry lock FIRST (global lock order: worktrees.lock before
+    // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
+    // worktree set for the whole run, so a `worktree add` cannot
+    // register a fresh tree — and start staging into it — between
+    // enumeration and the sweep.
+    let _registry_lock = match super::acquire_worktrees_registry_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
+    let state_layouts = match mkit_core::layout::all_state_layouts(&layout) {
+        Ok(l) => l,
+        Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),
+    };
+    let mut locks = Vec::with_capacity(state_layouts.len());
+    for tree in &state_layouts {
+        match super::acquire_worktree_lock(tree) {
+            Ok(l) => locks.push(l),
+            Err(code) => return code,
+        }
+    }
+    let _locks = locks;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

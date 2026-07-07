@@ -82,6 +82,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
+    // Registry lock first (global order, SPEC-WORKTREE §4.3): the
+    // branch-checked-out-elsewhere guard below and the HEAD write must
+    // be one atomic step against sibling checkouts and `worktree add`,
+    // or two racing processes could land one branch on two trees.
+    let _registry_lock = match super::acquire_worktrees_registry_lock(&layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
