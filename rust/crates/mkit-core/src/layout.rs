@@ -454,6 +454,11 @@ pub enum DiscoverError {
     #[error("worktree pointer {0} exceeds {MAX_POINTER_FILE_BYTES} bytes — refusing to parse")]
     PointerTooLarge(PathBuf),
     #[error(
+        "worktree pointer {0} is a symlink — pointer, commondir, and back-pointer files \
+         must be regular files"
+    )]
+    PointerSymlink(PathBuf),
+    #[error(
         "worktree state dir {0} is missing or not a directory — was this worktree pruned? \
          run `mkit worktree` maintenance from the main repository"
     )]
@@ -490,6 +495,14 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(DiscoverError::PointerUnreadable(path.to_path_buf(), e)),
     };
+    // Reject symlinks outright: `symlink_metadata` sizes the LINK
+    // itself, so a hostile `.mkit -> /dev/zero` in an untarred tree
+    // would sail past the byte cap while `fs::read` follows the link
+    // into an unbounded read. Pointer-style files are plain regular
+    // files by spec (SPEC-WORKTREE §2).
+    if meta.file_type().is_symlink() {
+        return Err(DiscoverError::PointerSymlink(path.to_path_buf()));
+    }
     if meta.len() > MAX_POINTER_FILE_BYTES {
         return Err(DiscoverError::PointerTooLarge(path.to_path_buf()));
     }
@@ -1144,6 +1157,21 @@ mod tests {
             discover(&tree),
             Err(DiscoverError::PointerTooLarge(_))
         ));
+        // Symlinked pointer: the byte cap sizes the LINK, so a link to
+        // a huge (or unbounded, e.g. /dev/zero) target must be
+        // rejected outright, never followed.
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&pointer).unwrap();
+            let huge = tmp.path().join("huge");
+            std::fs::write(&huge, format!("mkitdir: /{}\n", "x".repeat(8192))).unwrap();
+            std::os::unix::fs::symlink(&huge, &pointer).unwrap();
+            assert!(matches!(
+                discover(&tree),
+                Err(DiscoverError::PointerSymlink(_))
+            ));
+        }
+
         // Dangling target (state dir removed — a pruned worktree).
         write_pointer_file(&tree, &state).unwrap();
         std::fs::remove_dir_all(&state).unwrap();

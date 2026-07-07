@@ -309,9 +309,29 @@ fn create_worktree(
     tree_hash: Hash,
 ) -> Result<(), u8> {
     // Registry mutation begins: serialise against sibling add/remove/
-    // prune. (Ref creation below additionally serialises on the
-    // refs-history lock, as every branch write does.)
+    // prune, and against `checkout` (which holds this lock across its
+    // own guard + HEAD write). (Ref creation below additionally
+    // serialises on the refs-history lock, as every branch write does.)
     let _lock = super::acquire_worktrees_registry_lock(layout)?;
+
+    // Re-verify single-writer-per-branch now that the registry is
+    // frozen: the pre-lock check in `plan_head` raced sibling
+    // checkouts/adds; this one cannot.
+    if let HeadPlan::ExistingBranch { branch, .. } | HeadPlan::NewBranch { branch, .. } = plan {
+        match super::branch_checked_out_elsewhere(layout, branch) {
+            Ok(None) => {}
+            Ok(Some(at)) => {
+                return Err(super::error(
+                    &format!(
+                        "branch '{branch}' is already checked out at '{}'",
+                        at.display()
+                    ),
+                    exit::DATAERR,
+                ));
+            }
+            Err(e) => return Err(super::error(&e, exit::DATAERR)),
+        }
+    }
 
     let Some(id) = free_worktree_id(layout, target) else {
         return Err(super::error(
@@ -521,6 +541,19 @@ fn remove(layout: &RepoLayout, cwd: &Path, path: &str, force: bool) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
+    // Hold the CONDEMNED tree's own worktree lock too (registry lock
+    // first — global order): another process cwd'ed inside it could be
+    // mid-commit; deleting its state dir under it would corrupt the
+    // shared refs-history step or strand half-written state.
+    let _target_lock = if wt.state_dir.is_dir() {
+        let target_layout = RepoLayout::linked(&target, &wt.state_dir, layout.common_dir());
+        match super::acquire_worktree_lock(&target_layout) {
+            Ok(l) => Some(l),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
     // Tree first, then registry: a crash in between leaves a prunable
     // orphaned state dir, never a live tree without state.
     if target.exists()
@@ -582,10 +615,11 @@ fn worktree_is_dirty(linked: &RepoLayout) -> Result<Option<String>, String> {
 // ─── prune ──────────────────────────────────────────────────────────
 
 fn prune(layout: &RepoLayout, dry_run: bool) -> u8 {
-    let entries = match layout::worktrees(layout) {
-        Ok(e) => e,
-        Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),
-    };
+    // Lock FIRST (non-dry-run), snapshot second: a registry scan taken
+    // before the lock can classify a mid-`add` entry (state dir
+    // written, pointer file not yet) as "linked tree is gone", then
+    // delete the fully live tree's state after `add` releases the
+    // lock. Dry runs stay lock-free — they only report.
     let _lock = if dry_run {
         None
     } else {
@@ -593,6 +627,10 @@ fn prune(layout: &RepoLayout, dry_run: bool) -> u8 {
             Ok(l) => Some(l),
             Err(code) => return code,
         }
+    };
+    let entries = match layout::worktrees(layout) {
+        Ok(e) => e,
+        Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),
     };
     let mut stdout = std::io::stdout().lock();
     for wt in entries {

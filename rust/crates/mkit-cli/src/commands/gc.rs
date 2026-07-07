@@ -86,6 +86,15 @@ pub fn run(args: &[String]) -> u8 {
     // root publishers (`tag`, `fetch`, `attest`) — those don't take
     // this lock (#267); the grace window protects their in-flight
     // objects, exactly as in the single-tree case.
+    // Registry lock FIRST (global lock order: worktrees.lock before
+    // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
+    // worktree set for the whole run, so a `worktree add` cannot
+    // register a fresh tree — and start staging into it — between
+    // enumeration and the sweep.
+    let _registry_lock = match super::acquire_worktrees_registry_lock(&layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
     let state_layouts = match mkit_core::layout::all_state_layouts(&layout) {
         Ok(l) => l,
         Err(e) => return super::error(&format!("worktree registry: {e}"), exit::DATAERR),

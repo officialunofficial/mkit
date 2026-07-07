@@ -261,9 +261,17 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
 }
 
 /// Basename of the common-dir lock serialising linked-worktree
-/// registry mutations (`worktree add`/`remove`/`prune`). Distinct from
-/// [`WORKTREE_LOCK`], which guards ONE tree's worktree/index state;
-/// this one guards the shared `worktrees/` registry itself.
+/// registry mutations (`worktree add`/`remove`/`prune`), the
+/// branch-checkout guard + HEAD-write critical sections
+/// (`checkout`/`switch`, `branch -d`/`-m`), and gc's freeze of the
+/// worktree set. Distinct from [`WORKTREE_LOCK`], which guards ONE
+/// tree's worktree/index state.
+///
+/// GLOBAL LOCK ORDER (SPEC-WORKTREE §4.3): a process that takes more
+/// than one of these MUST acquire in this order —
+/// `worktrees.lock` ≺ per-tree `worktree.lock`(s) ≺
+/// `refs-history.lock` — or two multi-lock takers can stall each
+/// other until the 5s timeout.
 pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
 
 /// Acquire the shared worktree-registry lock (common dir).
