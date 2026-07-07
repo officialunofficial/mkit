@@ -36,7 +36,7 @@ export const legend: { status: ParityStatus; symbol: string; label: string; mean
 export const categories: ParityCategory[] = [
   {
     name: 'Everyday',
-    blurb: 'The daily stage-commit loop and the file operations around it.',
+    blurb: 'Stage, commit, and undo your everyday changes.',
     items: [
       { cmd: 'init', status: 'parity', note: 'Create a repo. The marker is .mkit/, not .git/.' },
       { cmd: 'add', status: 'parity', note: 'Pathspecs, -A, -u, and -p interactive hunk staging.' },
@@ -67,7 +67,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Branches, tags, and merging',
-    blurb: 'Creating refs and weaving separate lines of history together.',
+    blurb: 'Create branches and tags, then merge history back together.',
     items: [
       { cmd: 'branch', status: 'parity', note: 'Create, list, -v, -d/-D, -m.' },
       { cmd: 'tag', status: 'parity', note: 'Lightweight, -a, -s, -m, -d.' },
@@ -85,7 +85,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'History and inspection',
-    blurb: 'Reading what happened, and pinning down when it changed.',
+    blurb: 'Read what happened, and find when it changed.',
     items: [
       { cmd: 'log', status: 'parity', note: 'Ranges, -n, --oneline, --format=json. --graph is accepted as a no-op.' },
       {
@@ -112,7 +112,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Workspace',
-    blurb: 'Managing the working copy itself — extra trees, partial checkouts, and shelved changes.',
+    blurb: 'Manage the working copy itself — extra trees, partial checkouts, and shelved changes.',
     items: [
       {
         cmd: 'worktree',
@@ -133,7 +133,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Cleanup and maintenance',
-    blurb: 'Clearing untracked junk and reclaiming object storage.',
+    blurb: 'Clear out untracked junk and reclaim object storage.',
     items: [
       { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
       {
@@ -145,7 +145,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Plumbing',
-    blurb: 'Low-level, scriptable commands that the porcelain builds on.',
+    blurb: 'Low-level commands your scripts and tools build on.',
     items: [
       { cmd: 'rev-parse', status: 'parity', note: '--verify, --short, --abbrev-ref, --show-toplevel.' },
       { cmd: 'cat-file', status: 'parity', note: '-t, -s, -p, --batch. Byte-exact for blobs.' },
@@ -174,7 +174,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Remotes and git interop',
-    blurb: "Syncing over mkit's own transports, with one-way bridges to and from git.",
+    blurb: "Sync over mkit's own transports, with one-way bridges to and from git.",
     items: [
       {
         cmd: 'remote',
@@ -205,7 +205,7 @@ export const categories: ParityCategory[] = [
   },
   {
     name: 'Config and conventions',
-    blurb: 'Settings and ignore rules — git-shaped, but never authoritative over identity.',
+    blurb: 'Git-shaped settings and ignore rules that never set your signed identity.',
     items: [
       {
         cmd: 'config user.name / user.email',
