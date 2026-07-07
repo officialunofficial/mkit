@@ -18,7 +18,9 @@
 //!   checking, known-hosts path, identity file) are wired through via
 //!   `SshTransport::connect_with_options` when config is loaded.
 
-mod applied_packs;
+// `pub(crate)` so the `remote remove`/`rename` command handlers can drive
+// the record's lifecycle ops (#545); everything else stays module-private.
+pub(crate) mod applied_packs;
 mod packmap;
 
 use mkit_core::layout::RepoLayout;
