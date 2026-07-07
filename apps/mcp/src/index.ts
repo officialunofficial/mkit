@@ -455,8 +455,28 @@ export class MkitMCP extends McpAgent<Env, {}, {}> {
 
 const mcpHandler = MkitMCP.serve("/", { binding: "MCP" });
 
+// The McpAgent SDK throws uncaught when a request reaches a Durable Object
+// session that isn't in a state to service it (e.g. a stale sessionId whose
+// DO was evicted/hibernated and never re-ran its handshake) -- that shows up
+// as scriptThrewException in Workers Observability instead of a normal error
+// response to the caller.
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return mcpHandler.fetch(request, env, ctx);
+    try {
+      return await mcpHandler.fetch(request, env, ctx);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          type: "unhandled_fetch_error",
+          method: request.method,
+          url: request.url,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32000, message: "Internal server error" } }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
   },
 };
