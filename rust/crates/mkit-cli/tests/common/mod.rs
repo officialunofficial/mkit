@@ -359,7 +359,7 @@ impl Repo {
     }
 
     pub(crate) fn run(&self, args: &[&str]) -> Output {
-        mkit(self.path(), self.xdg(), args)
+        self.run_env(args, &[])
     }
 
     /// [`Repo::run`] with extra environment variables on the child (see
@@ -370,14 +370,7 @@ impl Repo {
 
     /// Run and assert success.
     pub(crate) fn ok(&self, args: &[&str]) -> Output {
-        let out = self.run(args);
-        assert!(
-            out.status.success(),
-            "expected `mkit {}` to succeed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out
+        self.ok_env(args, &[])
     }
 
     /// [`Repo::ok`] with extra environment variables on the child.
