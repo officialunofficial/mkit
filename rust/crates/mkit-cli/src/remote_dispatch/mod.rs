@@ -839,32 +839,23 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 ///
 /// # Applied-packs record: load once, persist once (mkit #546)
 ///
-/// The applied-pack record (`<common dir>/applied-packs/<remote>`, #409) is keyed by
-/// remote, not by branch, so this function — not [`packmap::fetch_pack_chain`]
-/// — owns its lifecycle for the WHOLE fetch: it is loaded exactly once before
-/// the branch loop and persisted exactly once after, regardless of how many
-/// branches are fetched. `fetch_pack_chain` only mutates the passed-in record
-/// in memory (inserting newly-applied digests, or clearing it on self-heal);
-/// it never touches disk. The final persist is unconditional and best-effort:
-/// it runs on every outcome (success, error, or early return) so a fetch that
-/// applied packs before failing never loses that progress, and the record is
-/// a pure performance cache whose own I/O must never fail a fetch whose
-/// objects durably landed.
+/// The applied-pack record (`<common dir>/applied-packs/<remote>`, #409) is
+/// keyed by remote, not by branch, so this function — not
+/// [`packmap::fetch_pack_chain`] — owns its lifecycle for the WHOLE fetch:
+/// loaded once before the branch loop, persisted once after, however many
+/// branches are fetched. `fetch_pack_chain` only mutates the record in memory
+/// (inserting applied digests, or clearing on self-heal); it never touches
+/// disk. The final persist is unconditional and best-effort — it runs on
+/// every outcome so a fetch that applied packs before failing never loses
+/// that progress, and the record is a pure performance cache whose own I/O
+/// must never fail a fetch whose objects durably landed.
 fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
 ) -> Result<usize, DispatchError> {
-    // The record is a pure performance cache: a read failure must never fail
-    // a fetch whose objects land, so a load error is non-fatal — warn and
-    // continue with an empty record (every pack re-downloads, always correct).
-    let mut applied = AppliedPacks::load(layout, remote).unwrap_or_else(|e| {
-        eprintln!(
-            "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
-        );
-        AppliedPacks::empty(layout, remote)
-    });
+    let mut applied = AppliedPacks::load_or_empty(layout, remote);
     let result = fetch_objects_inner(store, layout, tx, remote, &mut applied);
     persist_record(&mut applied, remote);
     result

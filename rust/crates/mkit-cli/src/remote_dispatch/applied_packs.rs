@@ -102,9 +102,9 @@ impl AppliedPacks {
     ///
     /// [`DispatchError::InvalidRemoteName`] if `remote` is not a legal ref
     /// name (per [`mkit_core::refs::validate_ref_name`]). Any other I/O
-    /// failure reading the file propagates as [`DispatchError::Io`]. Callers
-    /// treat both as non-fatal — the record is a pure cache — see
-    /// [`super::packmap::fetch_pack_chain`].
+    /// failure reading the file propagates as [`DispatchError::Io`]. The
+    /// fetch path treats both as non-fatal — the record is a pure cache — via
+    /// [`Self::load_or_empty`].
     pub(crate) fn load(layout: &RepoLayout, remote: &str) -> Result<Self, DispatchError> {
         validate_remote_name(remote)?;
         let path = record_path(layout, remote);
@@ -120,17 +120,23 @@ impl AppliedPacks {
         })
     }
 
-    /// An empty, in-memory record for `remote`, used as the non-fatal
-    /// fallback when [`Self::load`] fails: the applied-pack record is purely
-    /// a performance cache (#409), so a fetch whose objects durably land must
-    /// never fail because the cache couldn't be read. Persisting is still
-    /// attempted best-effort through the normal path.
-    pub(crate) fn empty(layout: &RepoLayout, remote: &str) -> Self {
-        Self {
-            set: HashSet::new(),
-            path: record_path(layout, remote),
-            dirty: false,
-        }
+    /// [`Self::load`], with the fetch path's non-fatal policy folded in: the
+    /// applied-pack record is purely a performance cache (#409), so a fetch
+    /// whose objects durably land must never fail because the cache couldn't
+    /// be read. On any load error this warns and falls back to an empty
+    /// in-memory record (every pack re-downloads, always correct); persisting
+    /// is still attempted best-effort through the normal path.
+    pub(crate) fn load_or_empty(layout: &RepoLayout, remote: &str) -> Self {
+        Self::load(layout, remote).unwrap_or_else(|e| {
+            eprintln!(
+                "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
+            );
+            Self {
+                set: HashSet::new(),
+                path: record_path(layout, remote),
+                dirty: false,
+            }
+        })
     }
 
     /// True iff `key`'s digest is already recorded as applied.
