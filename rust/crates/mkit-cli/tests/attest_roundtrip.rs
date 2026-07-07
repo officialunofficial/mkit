@@ -192,8 +192,12 @@ fn save_test_envelope_payload(cwd: &Path, payload: &[u8]) {
         }],
     };
     let bytes = env.encode().expect("test envelope encodes");
-    mkit_attest::store::save(&cwd.join(".mkit"), &head_commit_hash(cwd), bytes.as_bytes())
-        .expect("save test envelope");
+    mkit_attest::store::save(
+        &mkit_core::layout::RepoLayout::single(cwd),
+        &head_commit_hash(cwd),
+        bytes.as_bytes(),
+    )
+    .expect("save test envelope");
 }
 
 // -- Per-algorithm helpers. The CLI will load raw 32-byte key files,

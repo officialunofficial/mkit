@@ -26,6 +26,7 @@ use std::sync::Mutex;
 
 use mkit_cli::remote_dispatch::{DispatchError, fetch_all, pull_all, push_all, push_branch};
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::pack::delta_base_hashes;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
@@ -69,7 +70,9 @@ fn commit_file(dir: &Path, name: &str, content: &[u8], msg: &str) {
 }
 
 fn head_hash(dir: &Path) -> Hash {
-    refs::read_ref(&dir.join(".mkit"), "main").unwrap().unwrap()
+    refs::read_ref(&RepoLayout::single(dir), "main")
+        .unwrap()
+        .unwrap()
 }
 
 fn file_url(dir: &Path) -> String {
@@ -203,7 +206,7 @@ fn four_pushes_at_depth_3_over_a_non_atomic_transport_never_reset() {
     assert!(out.status.success(), "clone failed: {out:?}");
     let bob = dest.path().join("bob");
     assert_eq!(head_hash(&bob), final_tip);
-    let bob_store = ObjectStore::open(&bob).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(&bob)).unwrap();
     let ancestry = all_ancestor_commit_hashes(&bob_store, final_tip);
     for tip in &tips {
         assert!(
@@ -450,7 +453,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
             .success()
     );
     let bob_tip = head_hash(bob.path());
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
 
     let err = push_branch(
         &tx,
@@ -492,7 +495,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
             .success()
     );
     let bob_retry_tip = head_hash(bob.path());
-    let bob_store2 = ObjectStore::open(bob.path()).unwrap();
+    let bob_store2 = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
     push_branch(
         &tx,
         &bob_store2,
@@ -516,7 +519,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     assert_eq!(fs::read(dave.path().join("f.txt")).unwrap(), b"bob-retry");
     let dave_tip = head_hash(dave.path());
     assert_eq!(dave_tip, bob_retry_tip);
-    let dave_store = ObjectStore::open(dave.path()).unwrap();
+    let dave_store = ObjectStore::open(&RepoLayout::single(dave.path())).unwrap();
     let ancestry = all_ancestor_commit_hashes(&dave_store, dave_tip);
     assert_eq!(
         ancestry.len(),
@@ -607,7 +610,7 @@ fn force_push_at_threshold_appends_and_never_resets() {
             .success()
     );
     let forced_tip = head_hash(alice.path());
-    let store = ObjectStore::open(alice.path()).unwrap();
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
     push_branch(&tx, &store, "main", forced_tip, RefWriteCondition::Any)
         .expect("force push at threshold should append, not reset");
 
@@ -633,7 +636,7 @@ fn force_push_at_threshold_appends_and_never_resets() {
     pull_all(bob.path(), &tx, "default").expect("clone after the force-push append");
     assert_eq!(fs::read(bob.path().join("f.txt")).unwrap(), b"forced");
     assert_eq!(head_hash(bob.path()), forced_tip);
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
+    let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();
     let ancestry = all_ancestor_commit_hashes(&bob_store, forced_tip);
     assert_eq!(
         ancestry.len(),

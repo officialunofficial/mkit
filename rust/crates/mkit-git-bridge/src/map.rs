@@ -14,14 +14,16 @@ use crate::error::BridgeError;
 use crate::gitobj::{Sha1Id, sha1_from_hex, sha1_hex};
 use mkit_core::Hash;
 use mkit_core::hash::{from_hex, to_hex};
+use mkit_core::layout::RepoLayout;
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-/// `.mkit/git/<remote>/` — the per-remote bridge state directory.
+/// `<common dir>/git/<remote>/` — the per-remote bridge state
+/// directory (shared across worktrees, see `mkit_core::layout`).
 /// Remote names are restricted to the mkit ref-segment charset so the
 /// directory name is always safe.
-pub fn state_dir(mkit_dir: &Path, remote: &str) -> Result<PathBuf, BridgeError> {
+pub fn state_dir(layout: &RepoLayout, remote: &str) -> Result<PathBuf, BridgeError> {
     if remote.is_empty()
         || !remote
             .bytes()
@@ -33,7 +35,7 @@ pub fn state_dir(mkit_dir: &Path, remote: &str) -> Result<PathBuf, BridgeError> 
             "remote name {remote:?} is not a valid bridge state name"
         )));
     }
-    Ok(mkit_dir.join("git").join(remote))
+    Ok(layout.git_state_dir().join(remote))
 }
 
 const MAP_FILE: &str = "map";
@@ -463,7 +465,8 @@ mod tests {
 
     #[test]
     fn state_dir_rejects_traversal() {
-        let mkit = Path::new("/tmp/.mkit");
+        let layout = RepoLayout::single("/tmp");
+        let mkit = &layout;
         assert!(state_dir(mkit, "origin").is_ok());
         assert!(state_dir(mkit, "..").is_err());
         assert!(state_dir(mkit, "a/b").is_err());

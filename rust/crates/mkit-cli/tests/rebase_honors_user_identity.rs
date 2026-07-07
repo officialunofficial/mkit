@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{IdentityKind, Object};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -117,8 +118,9 @@ fn rebase_preserves_original_author_despite_user_identity() {
     );
     // Capture the original authorship before the replay.
     let mkit_dir = td.path().join(".mkit");
-    let store = ObjectStore::open(td.path()).unwrap();
-    let orig_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let layout = RepoLayout::single(td.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let orig_tip = refs::read_ref(&layout, "feature").unwrap().unwrap();
     let Object::Commit(orig) = store.read_object(&orig_tip).unwrap() else {
         panic!("original tip is not a commit");
     };
@@ -126,7 +128,7 @@ fn rebase_preserves_original_author_despite_user_identity() {
     let out = run_in_with_xdg(td.path(), xdg.path(), &["rebase", "main"]);
     assert!(out.status.success(), "rebase failed: {out:?}");
 
-    let tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let tip = refs::read_ref(&layout, "feature").unwrap().unwrap();
     assert_ne!(tip, orig_tip, "rebase must produce a new commit");
     let Object::Commit(c) = store.read_object(&tip).unwrap() else {
         panic!("tip is not a commit");
@@ -211,9 +213,9 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
 
     // Capture the original feature-tip authorship before the replay so
     // we can prove the malformed user.identity did not re-attribute it.
-    let mkit_dir = td.path().join(".mkit");
-    let store = ObjectStore::open(td.path()).unwrap();
-    let orig_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let layout = RepoLayout::single(td.path());
+    let store = ObjectStore::open(&layout).unwrap();
+    let orig_tip = refs::read_ref(&layout, "feature").unwrap().unwrap();
     let Object::Commit(orig) = store.read_object(&orig_tip).unwrap() else {
         panic!("original tip is not a commit");
     };
@@ -245,7 +247,7 @@ fn rebase_ignores_invalid_user_identity_on_replay() {
     );
     // The replayed tip keeps the ORIGINAL author + timestamp — the
     // malformed user.identity was ignored, not applied and not fatal.
-    let new_tip = refs::read_ref(&mkit_dir, "feature").unwrap().unwrap();
+    let new_tip = refs::read_ref(&layout, "feature").unwrap().unwrap();
     assert_ne!(new_tip, orig_tip, "rebase must rewrite the feature tip");
     let Object::Commit(replayed) = store.read_object(&new_tip).unwrap() else {
         panic!("replayed tip is not a commit");

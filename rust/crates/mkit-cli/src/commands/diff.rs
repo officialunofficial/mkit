@@ -34,6 +34,7 @@ use std::io::Write;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
 use mkit_core::ops::{
@@ -153,11 +154,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     // Worktree/index snapshot trees are ephemeral: they live in this
     // in-memory overlay, never in the durable store — no flush cost,
@@ -167,8 +168,7 @@ pub fn run(args: &[String]) -> u8 {
     let (old_tree, new_tree, pathspecs) = match resolve_diff_endpoints(
         &store,
         &snapshot,
-        &mkit_dir,
-        &cwd,
+        &layout,
         opts.staged,
         opts.merge_base,
         &opts.args,
@@ -608,8 +608,7 @@ type DiffEndpoints = (Option<Hash>, Option<Hash>, Vec<String>);
 fn resolve_merge_base_endpoints(
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
-    mkit_dir: &std::path::Path,
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     args: &[String],
 ) -> Result<DiffEndpoints, (String, u8)> {
     let first = args.first().ok_or_else(|| {
@@ -620,7 +619,7 @@ fn resolve_merge_base_endpoints(
     })?;
     let a = peel_tags(
         store,
-        revspec::resolve_revision(store, mkit_dir, first)
+        revspec::resolve_revision(store, layout, first)
             .map_err(|e| (format!("bad revision '{first}': {e}"), exit::DATAERR))?,
     );
 
@@ -629,7 +628,7 @@ fn resolve_merge_base_endpoints(
     // resolve is a hard error (#207); anything else is a pathspec, leaving
     // the single-revision (vs worktree) form.
     if let Some(second) = args.get(1) {
-        match revspec::resolve_revision(store, mkit_dir, second) {
+        match revspec::resolve_revision(store, layout, second) {
             Ok(h) => {
                 let b = peel_tags(store, h);
                 let base = merge_base_of(store, a, b)?;
@@ -645,13 +644,13 @@ fn resolve_merge_base_endpoints(
             // emitting an empty diff (matching git's "ambiguous argument").
             Err(e)
                 if matches!(e, revspec::RevError::Unknown(_))
-                    && looks_like_pathspec(cwd, second) => {}
+                    && looks_like_pathspec(layout, second) => {}
             Err(e) => return Err((format!("bad revision '{second}': {e}"), exit::DATAERR)),
         }
     }
 
     // Single revision: merge-base(rev, HEAD) vs the worktree.
-    let head = refs::resolve_head(mkit_dir)
+    let head = refs::resolve_head(layout)
         .map_err(|e| (format!("resolve HEAD: {e}"), exit::GENERAL_ERROR))?
         .ok_or_else(|| {
             (
@@ -662,7 +661,7 @@ fn resolve_merge_base_endpoints(
     let head = peel_tags(store, head);
     let base = merge_base_of(store, a, head)?;
     let old = object_to_tree(store, &base).map_err(|e| (e, exit::GENERAL_ERROR))?;
-    let new = worktree_tree_filtered(store, snapshot, cwd)?;
+    let new = worktree_tree_filtered(store, snapshot, layout)?;
     Ok((Some(old), Some(new), args[1..].to_vec()))
 }
 
@@ -683,8 +682,7 @@ fn merge_base_of(store: &ObjectStore, a: Hash, b: Hash) -> Result<Hash, (String,
 fn resolve_diff_endpoints(
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
-    mkit_dir: &std::path::Path,
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     staged: bool,
     merge_base: bool,
     args: &[String],
@@ -693,7 +691,7 @@ fn resolve_diff_endpoints(
     // revision(s) rather than the revisions themselves. Resolved before
     // any other form (clap already rejects `--merge-base --staged`).
     if merge_base {
-        return resolve_merge_base_endpoints(store, snapshot, mkit_dir, cwd, args);
+        return resolve_merge_base_endpoints(store, snapshot, layout, args);
     }
 
     // #223: `--staged` with explicit revisions is contradictory —
@@ -709,7 +707,7 @@ fn resolve_diff_endpoints(
         if let Some(first) = args.first()
             && looks_like_rev_request(first)
         {
-            if revspec::resolve_revision(store, mkit_dir, strip_range_end(first).0).is_ok() {
+            if revspec::resolve_revision(store, layout, strip_range_end(first).0).is_ok() {
                 return Err((
                     "`--staged` diffs HEAD vs the index; it cannot take an explicit revision"
                         .to_string(),
@@ -722,8 +720,8 @@ fn resolve_diff_endpoints(
             ));
         }
         // No leading revision: HEAD vs index, all positionals = pathspecs.
-        let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
-        let idx = index_tree(cwd, store, snapshot).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let head = head_tree(store, layout).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        let idx = index_tree(layout, store, snapshot).map_err(|e| (e, exit::GENERAL_ERROR))?;
         return Ok((head, idx, args.to_vec()));
     }
 
@@ -736,12 +734,12 @@ fn resolve_diff_endpoints(
         // resolution, like git (and like `log` does for its range bases).
         let commit_a = peel_tags(
             store,
-            revspec::resolve_revision(store, mkit_dir, a)
+            revspec::resolve_revision(store, layout, a)
                 .map_err(|e| (format!("bad revision '{a}': {e}"), exit::DATAERR))?,
         );
         let commit_b = peel_tags(
             store,
-            revspec::resolve_revision(store, mkit_dir, b)
+            revspec::resolve_revision(store, layout, b)
                 .map_err(|e| (format!("bad revision '{b}': {e}"), exit::DATAERR))?,
         );
         let mb = find_merge_base(store, commit_a, commit_b)
@@ -761,15 +759,13 @@ fn resolve_diff_endpoints(
     if let Some(first) = args.first()
         && let Some((a, b)) = split_range(first)
     {
-        let old = rev_to_tree(store, mkit_dir, a)?;
-        let new = rev_to_tree(store, mkit_dir, b)?;
+        let old = rev_to_tree(store, layout, a)?;
+        let new = rev_to_tree(store, layout, b)?;
         return Ok((Some(old), Some(new), args[1..].to_vec()));
     }
 
     // Try to peel one or two leading revisions.
-    let first_rev = args
-        .first()
-        .and_then(|a| try_rev_to_tree(store, mkit_dir, a));
+    let first_rev = args.first().and_then(|a| try_rev_to_tree(store, layout, a));
     match first_rev {
         None => {
             // No leading revision → default HEAD vs worktree; all
@@ -784,22 +780,20 @@ fn resolve_diff_endpoints(
                     exit::DATAERR,
                 ));
             }
-            let head = head_tree(store, mkit_dir).map_err(|e| (e, exit::GENERAL_ERROR))?;
-            let new = Some(worktree_tree_filtered(store, snapshot, cwd)?);
+            let head = head_tree(store, layout).map_err(|e| (e, exit::GENERAL_ERROR))?;
+            let new = Some(worktree_tree_filtered(store, snapshot, layout)?);
             Ok((head, new, args.to_vec()))
         }
         Some(Err(e)) => Err(e),
         Some(Ok(old)) => {
             // One revision resolved. Is the second positional also a
             // revision? If so, two-rev mode; otherwise rev-vs-worktree.
-            let second_rev = args
-                .get(1)
-                .and_then(|a| try_rev_to_tree(store, mkit_dir, a));
+            let second_rev = args.get(1).and_then(|a| try_rev_to_tree(store, layout, a));
             match second_rev {
                 Some(Ok(new)) => Ok((Some(old), Some(new), args[2..].to_vec())),
                 Some(Err(e)) => Err(e),
                 None => {
-                    let new = Some(worktree_tree_filtered(store, snapshot, cwd)?);
+                    let new = Some(worktree_tree_filtered(store, snapshot, layout)?);
                     Ok((Some(old), new, args[1..].to_vec()))
                 }
             }
@@ -816,20 +810,16 @@ fn resolve_diff_endpoints(
 fn worktree_tree_filtered(
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
 ) -> Result<Hash, (String, u8)> {
     let idx =
-        super::read_or_seed_index_from_head(cwd, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
-    worktree::build_tree_filtered(snapshot, cwd, Some(&idx))
+        super::read_or_seed_index_from_head(layout, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    worktree::build_tree_filtered(snapshot, layout.worktree_root(), Some(&idx))
         .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
 }
 
-fn rev_to_tree(
-    store: &ObjectStore,
-    mkit_dir: &std::path::Path,
-    spec: &str,
-) -> Result<Hash, (String, u8)> {
-    let h = revspec::resolve_revision(store, mkit_dir, spec)
+fn rev_to_tree(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, (String, u8)> {
+    let h = revspec::resolve_revision(store, layout, spec)
         .map_err(|e| (format!("bad revision '{spec}': {e}"), exit::DATAERR))?;
     object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))
 }
@@ -838,10 +828,10 @@ fn rev_to_tree(
 /// from "looks like a revision but is broken" (`Some(Err(..))`).
 fn try_rev_to_tree(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     spec: &str,
 ) -> Option<Result<Hash, (String, u8)>> {
-    match revspec::resolve_revision(store, mkit_dir, spec) {
+    match revspec::resolve_revision(store, layout, spec) {
         Ok(h) => Some(object_to_tree(store, &h).map_err(|e| (e, exit::GENERAL_ERROR))),
         Err(revspec::RevError::Unknown(_)) => {
             // Not a known ref/object. If it still *looks* like a
@@ -937,15 +927,15 @@ fn looks_like_rev_request(s: &str) -> bool {
 /// git). A bare `/` is NOT enough — branch names routinely contain `/` (e.g.
 /// `feature/x`), so a typo'd branch like `feature/typo` must surface as a bad
 /// revision rather than silently degrade into an empty-output pathspec filter.
-fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
-    if cwd.join(arg).symlink_metadata().is_ok() {
+fn looks_like_pathspec(layout: &RepoLayout, arg: &str) -> bool {
+    if layout.worktree_root().join(arg).symlink_metadata().is_ok() {
         return true;
     }
     // Normalize the spec the same way the path filter will (e.g. `./a.txt` ->
     // `a.txt`) before matching the index, so a tracked-but-deleted file passed
     // as `./a.txt` isn't misread as a bad revision.
     let spec = normalize_pathspec(arg);
-    let Ok(idx) = mkit_core::index::read_index(cwd) else {
+    let Ok(idx) = mkit_core::index::read_index(layout) else {
         return false;
     };
     let prefix = format!("{spec}/");
@@ -954,8 +944,8 @@ fn looks_like_pathspec(cwd: &std::path::Path, arg: &str) -> bool {
         .any(|e| e.path == spec || e.path.starts_with(&prefix))
 }
 
-fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<Hash>, String> {
-    let head = refs::resolve_head(mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?;
+fn head_tree(store: &ObjectStore, layout: &RepoLayout) -> Result<Option<Hash>, String> {
+    let head = refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?;
     match head {
         None => Ok(None),
         Some(h) => match store.read_object(&h) {
@@ -968,11 +958,11 @@ fn head_tree(store: &ObjectStore, mkit_dir: &std::path::Path) -> Result<Option<H
 }
 
 fn index_tree(
-    root: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     snapshot: &EphemeralSink<'_>,
 ) -> Result<Option<Hash>, String> {
-    let idx = super::read_or_seed_index_from_head(root, store)?;
+    let idx = super::read_or_seed_index_from_head(layout, store)?;
     // Ephemeral diff snapshot — nothing durable is published, so skip the
     // re-hash; the read path verifies any object actually touched.
     let tree = worktree::build_tree_from_index_with(store, snapshot, &idx, false)

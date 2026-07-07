@@ -60,17 +60,17 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     if opts.batch {
         if opts.object.is_some() {
             return super::usage_error("mkit cat-file --batch takes no object argument");
         }
-        return run_batch(&store, &mkit_dir);
+        return run_batch(&store, &layout);
     }
     if !(opts.type_ || opts.size || opts.pretty) {
         return super::usage_error("usage: mkit cat-file (-t | -s | -p) <object>  |  --batch");
@@ -79,7 +79,7 @@ pub fn run(args: &[String]) -> u8 {
         return super::usage_error("usage: mkit cat-file (-t | -s | -p) <object>");
     };
 
-    let h = match revspec::resolve_revision(&store, &mkit_dir, object) {
+    let h = match revspec::resolve_revision(&store, &layout, object) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("bad object '{object}': {e}"), exit::DATAERR),
     };
@@ -114,7 +114,7 @@ pub fn run(args: &[String]) -> u8 {
 /// `git cat-file --batch`. `<size>` is the byte length of the content that
 /// follows, so blobs are byte-exact with git; commit/tree/tag content is
 /// mkit-shaped (and so is its size), as with `-p`.
-fn run_batch(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
+fn run_batch(store: &ObjectStore, layout: &mkit_core::layout::RepoLayout) -> u8 {
     use std::io::BufRead;
 
     let stdin = std::io::stdin();
@@ -128,7 +128,7 @@ fn run_batch(store: &ObjectStore, mkit_dir: &std::path::Path) -> u8 {
             Ok(l) => l,
             Err(e) => return emit_err(&format!("read stdin: {e}"), exit::NOINPUT),
         };
-        let Ok(h) = revspec::resolve_revision(store, mkit_dir, &name) else {
+        let Ok(h) = revspec::resolve_revision(store, layout, &name) else {
             let _ = writeln!(stdout, "{name} missing");
             continue;
         };

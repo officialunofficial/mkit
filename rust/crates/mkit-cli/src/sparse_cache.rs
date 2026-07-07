@@ -18,16 +18,16 @@
 
 #![cfg(feature = "sparse-checkout")]
 
+use mkit_core::layout::RepoLayout;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::object::Tree;
 use mkit_core::sparse::{
-    SPARSE_CACHE_DIR, SparseError, SparseManifest, SparseProof, SparseWireError, build_sparse,
-    decode_sparse_cache, encode_sparse_cache, hash_filter, tree_hash as compute_tree_hash,
-    verify_sparse,
+    SparseError, SparseManifest, SparseProof, SparseWireError, build_sparse, decode_sparse_cache,
+    encode_sparse_cache, hash_filter, tree_hash as compute_tree_hash, verify_sparse,
 };
 
 /// Errors raised by the cache I/O helpers. Wrapping the `io::Error`
@@ -47,13 +47,13 @@ pub enum CacheError {
     FilterMismatch,
 }
 
-/// Compute `<root>/.mkit/sparse/<tree-hex>.bitmap`. The directory may
-/// not exist yet; [`store`] creates it on demand.
+/// Compute `<common dir>/sparse/<tree-hex>.bitmap`. The directory may
+/// not exist yet; [`store`] creates it on demand. Common-dir state:
+/// the cache is keyed by tree hash, so it is shared across worktrees.
 #[must_use]
-pub fn cache_path(repo_root: &Path, tree_hash: &Hash) -> PathBuf {
-    repo_root
-        .join(mkit_core::MKIT_DIR)
-        .join(SPARSE_CACHE_DIR)
+pub fn cache_path(layout: &RepoLayout, tree_hash: &Hash) -> PathBuf {
+    layout
+        .sparse_cache_dir()
         .join(format!("{}.bitmap", to_hex(tree_hash)))
 }
 
@@ -67,12 +67,12 @@ pub fn cache_path(repo_root: &Path, tree_hash: &Hash) -> PathBuf {
 /// missing parent directory is created first; if that or the write
 /// fails (typically permissions / disk full) the error is propagated.
 pub fn store(
-    repo_root: &Path,
+    layout: &RepoLayout,
     tree_hash: &Hash,
     manifest: &SparseManifest,
     proof: &SparseProof,
 ) -> Result<(), CacheError> {
-    let path = cache_path(repo_root, tree_hash);
+    let path = cache_path(layout, tree_hash);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -100,11 +100,11 @@ pub fn store(
 /// - [`CacheError::FilterMismatch`] — cache exists for the tree but
 ///   for a different filter.
 pub fn load(
-    repo_root: &Path,
+    layout: &RepoLayout,
     tree_hash: &Hash,
     expected_filter_hash: &Hash,
 ) -> Result<Option<(SparseManifest, SparseProof)>, CacheError> {
-    let path = cache_path(repo_root, tree_hash);
+    let path = cache_path(layout, tree_hash);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -178,13 +178,13 @@ pub enum SparseOutcome {
 /// failure (`SparseBuildError::VerifyFailed`). Never returned on a
 /// cache hit.
 pub fn load_or_build(
-    repo_root: &Path,
+    layout: &RepoLayout,
     tree: &Tree,
     filter: &[PathBuf],
 ) -> Result<SparseOutcome, SparseBuildError> {
     let th = compute_tree_hash(tree);
     let fh = hash_filter(filter);
-    if let Ok(Some(_)) = load(repo_root, &th, &fh) {
+    if let Ok(Some(_)) = load(layout, &th, &fh) {
         return Ok(SparseOutcome::CacheHit);
     }
 
@@ -197,7 +197,7 @@ pub fn load_or_build(
     // ability to skip re-deriving it — surfaced to the caller as
     // `store_error` rather than swallowed, so it can warn on stderr as
     // before.
-    let store_error = store(repo_root, &manifest.tree_hash, &manifest, &proof).err();
+    let store_error = store(layout, &manifest.tree_hash, &manifest, &proof).err();
     Ok(SparseOutcome::Built { store_error })
 }
 
@@ -217,6 +217,7 @@ mod tests {
     #[test]
     fn round_trip_load_returns_stored_payload() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         // Need a .mkit directory shape so cache_path's parent is
         // creatable from the helper.
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
@@ -226,9 +227,9 @@ mod tests {
         let filter = vec![PathBuf::from("aa")];
         let (_, manifest, proof) = build_sparse(&tree, &filter).unwrap();
 
-        store(td.path(), &manifest.tree_hash, &manifest, &proof).unwrap();
+        store(&layout, &manifest.tree_hash, &manifest, &proof).unwrap();
 
-        let loaded = load(td.path(), &manifest.tree_hash, &manifest.filter_hash)
+        let loaded = load(&layout, &manifest.tree_hash, &manifest.filter_hash)
             .unwrap()
             .expect("just stored");
         assert_eq!(loaded.0.bitmap_root, manifest.bitmap_root);
@@ -240,43 +241,46 @@ mod tests {
     #[test]
     fn load_returns_none_for_missing_tree() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         let h = [0u8; 32];
-        let res = load(td.path(), &h, &hash_filter(&[])).unwrap();
+        let res = load(&layout, &h, &hash_filter(&[])).unwrap();
         assert!(res.is_none());
     }
 
     #[test]
     fn load_rejects_mismatched_filter_hash() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
         let tree = Tree {
             entries: vec![entry(b"aa"), entry(b"ab")],
         };
         let (_, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
-        store(td.path(), &manifest.tree_hash, &manifest, &proof).unwrap();
+        store(&layout, &manifest.tree_hash, &manifest, &proof).unwrap();
 
         // Lookup with a *different* filter hash → should fail loudly.
         let other_filter_hash = hash_filter(&[PathBuf::from("zz")]);
-        let err = load(td.path(), &manifest.tree_hash, &other_filter_hash).unwrap_err();
+        let err = load(&layout, &manifest.tree_hash, &other_filter_hash).unwrap_err();
         assert!(matches!(err, CacheError::FilterMismatch));
     }
 
     #[test]
     fn load_or_build_hits_cache_on_repeat_call() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
         let tree = Tree {
             entries: vec![entry(b"aa"), entry(b"ab"), entry(b"ac")],
         };
         let filter = vec![PathBuf::from("aa")];
 
-        let first = load_or_build(td.path(), &tree, &filter).unwrap();
+        let first = load_or_build(&layout, &tree, &filter).unwrap();
         assert!(
             matches!(first, SparseOutcome::Built { store_error: None }),
             "first call for a never-seen (tree, filter) must build fresh, got {first:?}"
         );
 
-        let second = load_or_build(td.path(), &tree, &filter).unwrap();
+        let second = load_or_build(&layout, &tree, &filter).unwrap();
         assert!(
             matches!(second, SparseOutcome::CacheHit),
             "repeat call with an unchanged filter must hit the cache instead of rebuilding, got {second:?}"
@@ -286,6 +290,7 @@ mod tests {
     #[test]
     fn load_or_build_treats_filter_change_as_a_miss_and_rewrites_cache() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
         let tree = Tree {
             entries: vec![entry(b"aa"), entry(b"ab"), entry(b"ac")],
@@ -293,8 +298,8 @@ mod tests {
         let th = mkit_core::sparse::tree_hash(&tree);
 
         let first_filter = vec![PathBuf::from("aa")];
-        load_or_build(td.path(), &tree, &first_filter).unwrap();
-        let cached_after_first = load(td.path(), &th, &hash_filter(&first_filter))
+        load_or_build(&layout, &tree, &first_filter).unwrap();
+        let cached_after_first = load(&layout, &th, &hash_filter(&first_filter))
             .unwrap()
             .expect("first build cached its own filter");
 
@@ -302,7 +307,7 @@ mod tests {
         // tree_hash) exists but commits to the OLD filter — this must
         // be treated as a miss, never silently returned.
         let second_filter = vec![PathBuf::from("ab")];
-        let outcome = load_or_build(td.path(), &tree, &second_filter).unwrap();
+        let outcome = load_or_build(&layout, &tree, &second_filter).unwrap();
         assert!(
             matches!(outcome, SparseOutcome::Built { store_error: None }),
             "a filter change for the same tree must miss and rebuild, got {outcome:?}"
@@ -310,7 +315,7 @@ mod tests {
 
         // The miss must have rewritten the cache to the NEW filter, no
         // error surfaced.
-        let cached_after_second = load(td.path(), &th, &hash_filter(&second_filter))
+        let cached_after_second = load(&layout, &th, &hash_filter(&second_filter))
             .unwrap()
             .expect("miss must rewrite the cache under the new filter");
         assert_ne!(
@@ -326,6 +331,7 @@ mod tests {
     #[test]
     fn load_or_build_treats_corrupt_cache_entry_as_a_miss_and_repairs_it() {
         let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
         fs::create_dir_all(td.path().join(mkit_core::MKIT_DIR)).unwrap();
         let tree = Tree {
             entries: vec![entry(b"aa"), entry(b"ab"), entry(b"ac")],
@@ -333,27 +339,25 @@ mod tests {
         let filter = vec![PathBuf::from("aa")];
         let th = mkit_core::sparse::tree_hash(&tree);
 
-        load_or_build(td.path(), &tree, &filter).unwrap();
+        load_or_build(&layout, &tree, &filter).unwrap();
 
         // Corrupt the on-disk cache entry directly.
-        let path = cache_path(td.path(), &th);
+        let path = cache_path(&layout, &th);
         fs::write(&path, b"not a valid sparse cache body").unwrap();
         assert!(matches!(
-            load(td.path(), &th, &hash_filter(&filter)),
+            load(&layout, &th, &hash_filter(&filter)),
             Err(CacheError::Wire(_))
         ));
 
         // A corrupt entry must be treated as a miss — fresh build, no
         // error surfaced — and must repair the cache for next time.
-        let outcome = load_or_build(td.path(), &tree, &filter).unwrap();
+        let outcome = load_or_build(&layout, &tree, &filter).unwrap();
         assert!(
             matches!(outcome, SparseOutcome::Built { store_error: None }),
             "a corrupt cache entry must miss and rebuild, got {outcome:?}"
         );
         assert!(
-            load(td.path(), &th, &hash_filter(&filter))
-                .unwrap()
-                .is_some(),
+            load(&layout, &th, &hash_filter(&filter)).unwrap().is_some(),
             "the miss must have repaired the cache entry"
         );
     }

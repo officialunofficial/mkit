@@ -13,6 +13,7 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use mkit_core::index::{self, IndexError};
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::restore::{self, RestoreError, RestoreOptions};
 use mkit_core::{
     Blob, EntryMode, MAX_TREE_DEPTH, Object, ObjectStore, StoreError, Tree, TreeEntry, diff_trees,
@@ -24,7 +25,7 @@ type Hash = [u8; 32];
 
 fn fresh() -> (TempDir, ObjectStore) {
     let d = TempDir::new().unwrap();
-    let s = ObjectStore::init(d.path()).unwrap();
+    let s = ObjectStore::init(&RepoLayout::single(d.path())).unwrap();
     (d, s)
 }
 

@@ -73,7 +73,8 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
@@ -97,9 +98,7 @@ pub fn run(args: &[String]) -> u8 {
         );
     }
 
-    let out_root = opts
-        .out
-        .unwrap_or_else(|| cwd.join(".mkit").join("pack-shards"));
+    let out_root = opts.out.unwrap_or_else(|| layout.pack_shards_dir());
 
     let (shards, manifest) =
         match encode_pack_to_shards(&pack, mkit_core::pack_shard::default_config()) {

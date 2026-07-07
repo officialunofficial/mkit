@@ -6,6 +6,7 @@
 use std::io::Write;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use mkit_core::layout::RepoLayout;
 
 use crate::clap_shim;
 use crate::config::{self, Config, RemoteEntry};
@@ -89,7 +90,8 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let layered = match config::read_layered(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let layered = match config::read_layered(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -150,7 +152,7 @@ pub fn run(args: &[String]) -> u8 {
                 cfg.remote_endpoint = url;
                 scheme.clone_into(&mut cfg.remote_type);
             }
-            match config::write(&cwd, &cfg) {
+            match config::write(&layout, &cfg) {
                 Ok(()) => exit::OK,
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
@@ -173,12 +175,12 @@ pub fn run(args: &[String]) -> u8 {
             } else if cfg.remotes.remove(&name).is_none() {
                 return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
             }
-            match config::write(&cwd, &cfg) {
+            match config::write(&layout, &cfg) {
                 Ok(()) => {
                     // Stale tracking refs would shadow a future remote
                     // reusing the name; objects stay (gc owns them).
-                    remove_tracking_refs(&cwd, &name);
-                    warn_orphaned_bridge_state(&cwd, &name);
+                    remove_tracking_refs(&layout, &name);
+                    warn_orphaned_bridge_state(&layout, &name);
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
@@ -209,10 +211,10 @@ pub fn run(args: &[String]) -> u8 {
                     up.remote.clone_from(&new);
                 }
             }
-            match config::write(&cwd, &cfg) {
+            match config::write(&layout, &cfg) {
                 Ok(()) => {
-                    move_tracking_refs(&cwd, &old, &new);
-                    move_bridge_state(&cwd, &old, &new);
+                    move_tracking_refs(&layout, &old, &new);
+                    move_bridge_state(&layout, &old, &new);
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
@@ -262,7 +264,7 @@ pub fn run(args: &[String]) -> u8 {
                 entry.url = url;
                 scheme.clone_into(&mut entry.remote_type);
             }
-            match config::write(&cwd, &cfg) {
+            match config::write(&layout, &cfg) {
                 Ok(()) => exit::OK,
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
             }
@@ -273,10 +275,8 @@ pub fn run(args: &[String]) -> u8 {
 /// Best-effort move of `refs/remotes/<old>/` to `refs/remotes/<new>/`
 /// after a rename. Failure is reported but non-fatal: the config
 /// rename already happened, and a follow-up fetch repopulates.
-fn move_tracking_refs(cwd: &std::path::Path, old: &str, new: &str) {
-    let remotes = cwd
-        .join(mkit_core::MKIT_DIR)
-        .join(mkit_core::refs::REMOTES_DIR);
+fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str) {
+    let remotes = layout.remotes_dir();
     let (src, dst) = (remotes.join(old), remotes.join(new));
     if src.is_dir()
         && let Err(e) = std::fs::rename(&src, &dst)
@@ -292,8 +292,8 @@ fn move_tracking_refs(cwd: &std::path::Path, old: &str, new: &str) {
 
 /// Bridge state under `.mkit/git/<name>/` follows a rename so leases,
 /// maps, and the staging mirror stay bound to the same remote name.
-fn move_bridge_state(cwd: &std::path::Path, old: &str, new: &str) {
-    let base = cwd.join(mkit_core::MKIT_DIR).join("git");
+fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str) {
+    let base = layout.git_state_dir();
     let (src, dst) = (base.join(old), base.join(new));
     if src.is_dir()
         && let Err(e) = std::fs::rename(&src, &dst)
@@ -309,8 +309,8 @@ fn move_bridge_state(cwd: &std::path::Path, old: &str, new: &str) {
 /// Removing a remote leaves its bridge state in place (it holds the
 /// staging mirror + retained provenance, which are durable artifacts,
 /// not caches) — but say so.
-fn warn_orphaned_bridge_state(cwd: &std::path::Path, name: &str) {
-    let dir = cwd.join(mkit_core::MKIT_DIR).join("git").join(name);
+fn warn_orphaned_bridge_state(layout: &RepoLayout, name: &str) {
+    let dir = layout.git_state_dir().join(name);
     if dir.is_dir() {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
@@ -322,11 +322,8 @@ fn warn_orphaned_bridge_state(cwd: &std::path::Path, name: &str) {
 }
 
 /// Best-effort removal of `refs/remotes/<name>/` after a remove.
-fn remove_tracking_refs(cwd: &std::path::Path, name: &str) {
-    let dir = cwd
-        .join(mkit_core::MKIT_DIR)
-        .join(mkit_core::refs::REMOTES_DIR)
-        .join(name);
+fn remove_tracking_refs(layout: &RepoLayout, name: &str) {
+    let dir = layout.remotes_dir().join(name);
     if dir.is_dir()
         && let Err(e) = std::fs::remove_dir_all(&dir)
     {

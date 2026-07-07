@@ -24,6 +24,7 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 use mkit_cli::{dispatch, exit};
 use mkit_core::hash::{Hash, hash, to_hex};
+use mkit_core::layout::RepoLayout;
 use mkit_core::pack_shard::{Shard, decode_manifest, decode_pack_from_shards};
 use mkit_core::store::ObjectStore;
 
@@ -66,7 +67,7 @@ fn pack_shard_produces_decodable_shards() {
     let dir = tempfile::tempdir().unwrap();
     with_cwd(dir.path(), || {
         // Initialise a repo and write a 2 MiB synthetic blob.
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         let blob = synthetic_blob(2 * 1024 * 1024);
         let h: Hash = store.write(&blob).unwrap();
         assert_eq!(h, hash(&blob));
@@ -104,7 +105,7 @@ fn pack_shard_produces_decodable_shards() {
 fn pack_shard_rejects_packs_below_threshold_without_force() {
     let dir = tempfile::tempdir().unwrap();
     with_cwd(dir.path(), || {
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         let blob = synthetic_blob(512 * 1024);
         let h = store.write(&blob).unwrap();
 

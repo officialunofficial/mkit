@@ -15,6 +15,7 @@
 use clap::Parser;
 use mkit_attest::Signer as _;
 use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store as attest_store};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Object, ObjectType};
 use mkit_core::sign::{KeyPair, sign_commit, sign_tag};
 use mkit_core::store::BulkWriter;
@@ -88,7 +89,7 @@ pub fn run_import(opts: &ImportArgs) -> u8 {
         Some(dir) => fresh_clone(opts, dir),
         None => std::env::current_dir()
             .map_err(|e| (format!("cwd: {e}"), exit::CONFIG_ERROR))
-            .and_then(|cwd| import_into(&cwd, opts, true)),
+            .and_then(|cwd| import_into(&super::resolve_layout(&cwd), opts, true)),
     };
     finish(outcome, opts.json)
 }
@@ -97,7 +98,7 @@ pub fn run_import(opts: &ImportArgs) -> u8 {
 pub fn run_fetch(opts: &FetchArgs, pull: bool) -> u8 {
     let outcome = std::env::current_dir()
         .map_err(|e| (format!("cwd: {e}"), exit::CONFIG_ERROR))
-        .and_then(|cwd| fetch_and_maybe_pull(&cwd, opts, pull));
+        .and_then(|cwd| fetch_and_maybe_pull(&super::resolve_layout(&cwd), opts, pull));
     finish(outcome, opts.json)
 }
 
@@ -153,10 +154,10 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
     }
     let created = !target.exists();
     std::fs::create_dir_all(&target).map_err(|e| (format!("mkdir: {e}"), exit::CANTCREAT))?;
-    ObjectStore::init(&target).map_err(|e| (format!("init: {e}"), exit::CANTCREAT))?;
-    refs::init(&target.join(mkit_core::MKIT_DIR))
-        .map_err(|e| (format!("refs init: {e}"), exit::CANTCREAT))?;
-    let mut summary = match import_into(&target, opts, false) {
+    let layout = super::resolve_layout(&target);
+    ObjectStore::init(&layout).map_err(|e| (format!("init: {e}"), exit::CANTCREAT))?;
+    refs::init(&layout).map_err(|e| (format!("refs init: {e}"), exit::CANTCREAT))?;
+    let mut summary = match import_into(&layout, opts, false) {
         Ok(s) => s,
         Err(e) => {
             // Undo this run's work so a corrected retry is not refused
@@ -180,26 +181,25 @@ fn fresh_clone(opts: &ImportArgs, dir: &str) -> CmdResult<Summary> {
     };
 
     // Check out the upstream default branch.
-    let mkit_dir = target.join(mkit_core::MKIT_DIR);
-    let staging = map::state_dir(&mkit_dir, &opts.remote_name)
+    let staging = map::state_dir(&layout, &opts.remote_name)
         .map_err(|e| (e.to_string(), exit::USAGE))?
         .join("repo.git");
     let default = gitsrc::default_branch(&staging)
         .map_err(|e| (format!("default branch: {e}"), exit::GENERAL_ERROR))?
         .and_then(|r| r.strip_prefix("refs/heads/").map(str::to_owned));
     if let Some(branch) = default
-        && let Some(head) = refs::read_remote_ref(&mkit_dir, &opts.remote_name, &branch)
+        && let Some(head) = refs::read_remote_ref(&layout, &opts.remote_name, &branch)
             .map_err(|e| (format!("read tracking ref: {e}"), exit::GENERAL_ERROR))?
     {
-        checkout_initial(&target, &mkit_dir, &branch, &head)?;
+        checkout_initial(&layout, &branch, &head)?;
         summary.checked_out = Some(branch);
     }
     Ok(summary)
 }
 
-fn checkout_initial(root: &Path, mkit_dir: &Path, branch: &str, head: &Hash) -> CmdResult<()> {
+fn checkout_initial(layout: &RepoLayout, branch: &str, head: &Hash) -> CmdResult<()> {
     let store =
-        ObjectStore::open(root).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
+        ObjectStore::open(layout).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
     let tree = match store.read_object(head) {
         Ok(Object::Commit(c)) => c.tree_hash,
         Ok(Object::Tag(_) | _) | Err(_) => {
@@ -207,51 +207,52 @@ fn checkout_initial(root: &Path, mkit_dir: &Path, branch: &str, head: &Hash) -> 
         }
     };
     super::write_ref_recording_history(
-        mkit_dir,
+        layout,
         branch,
         mkit_core::refs::RefWriteCondition::Missing,
         head,
     )
     .map_err(|e| (format!("write branch: {e}"), exit::CANTCREAT))?;
-    refs::write_head_branch(mkit_dir, branch)
+    refs::write_head_branch(layout, branch)
         .map_err(|e| (format!("write HEAD: {e}"), exit::CANTCREAT))?;
-    super::restore_worktree_and_index(root, &store, tree)
+    super::restore_worktree_and_index(layout, &store, tree)
         .map_err(|e| (format!("checkout: {e}"), exit::GENERAL_ERROR))?;
     Ok(())
 }
 
 /// Import/refresh into an existing repo: tracking refs + tags only.
-fn import_into(root: &Path, opts: &ImportArgs, require_repo: bool) -> CmdResult<Summary> {
+fn import_into(layout: &RepoLayout, opts: &ImportArgs, require_repo: bool) -> CmdResult<Summary> {
     if require_repo {
-        ObjectStore::open(root)
+        ObjectStore::open(layout)
             .map_err(|e| (format!("open repository: {e}"), exit::GENERAL_ERROR))?;
     }
-    let mkit_dir = root.join(mkit_core::MKIT_DIR);
     super::git::git_version().map_err(|e| (e, exit::UNAVAILABLE))?;
 
     validate_url(&opts.url)?;
 
     let state =
-        map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
+        map::state_dir(layout, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
     // One bridge operation per state dir at a time: concurrent runs
     // would race the crash marker / map discard / bulk session.
-    let _state_lock =
-        mkit_core::repo_lock::acquire_default(&mkit_dir, &format!("git-{}.lock", opts.remote_name))
-            .map_err(|e| {
-                (
-                    format!(
-                        "bridge state '{}' is busy (another mkit git operation?): {e}",
-                        opts.remote_name
-                    ),
-                    exit::TEMPFAIL,
-                )
-            })?;
+    let _state_lock = mkit_core::repo_lock::acquire_default(
+        layout.common_dir(),
+        &format!("git-{}.lock", opts.remote_name),
+    )
+    .map_err(|e| {
+        (
+            format!(
+                "bridge state '{}' is busy (another mkit git operation?): {e}",
+                opts.remote_name
+            ),
+            exit::TEMPFAIL,
+        )
+    })?;
     // VALIDATE existing bindings before any network/disk work, but
     // RECORD new ones only after the clone + sha256 check succeed: a
     // typo'd URL must not permanently burn the state name (there is
     // no CLI command to unbind it).
-    validate_import_bindings(&mkit_dir, &state, &opts.url)?;
-    let kp = load_or_create_import_key(&mkit_dir, opts.key.as_deref())?;
+    validate_import_bindings(layout, &state, &opts.url)?;
+    let kp = load_or_create_import_key(layout, opts.key.as_deref())?;
     if let Some(pinned) =
         map::read_signer(&state).map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?
         && pinned != kp.public.0
@@ -304,14 +305,14 @@ fn import_into(root: &Path, opts: &ImportArgs, require_repo: bool) -> CmdResult<
         ));
     }
     // Clone validated — NOW record the bindings.
-    bind_import_state(&mkit_dir, &state, &opts.url)?;
+    bind_import_state(layout, &state, &opts.url)?;
     map::bind_signer(&state, &kp.public.0).map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?;
-    translate_upstream(root, &mkit_dir, &state, &staging, opts, &kp)
+    translate_upstream(layout, &state, &staging, opts, &kp)
 }
 
 /// Read-only twin of [`bind_import_state`]: refuse direction/source
 /// mismatches without writing anything.
-fn validate_import_bindings(mkit_dir: &Path, state: &Path, url: &str) -> CmdResult<()> {
+fn validate_import_bindings(layout: &RepoLayout, state: &Path, url: &str) -> CmdResult<()> {
     match map::read_direction(state).map_err(|e| (e.to_string(), exit::GENERAL_ERROR))? {
         None | Some(Direction::Import | Direction::Fork) => {}
         Some(other) => {
@@ -336,7 +337,7 @@ fn validate_import_bindings(mkit_dir: &Path, state: &Path, url: &str) -> CmdResu
         )),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(other) = other_state_with_source(mkit_dir, state, &identity) {
+            if let Some(other) = other_state_with_source(layout, state, &identity) {
                 return Err((
                     format!(
                         "{url} is already imported as state '{other}'; use \
@@ -353,7 +354,7 @@ fn validate_import_bindings(mkit_dir: &Path, state: &Path, url: &str) -> CmdResu
 }
 
 /// `mkit git fetch` / `pull`.
-fn fetch_and_maybe_pull(cwd: &Path, opts: &FetchArgs, pull: bool) -> CmdResult<Summary> {
+fn fetch_and_maybe_pull(layout: &RepoLayout, opts: &FetchArgs, pull: bool) -> CmdResult<Summary> {
     let import_opts = ImportArgs {
         url: String::new(), // resolved from the recorded source below
         dir: None,
@@ -361,9 +362,8 @@ fn fetch_and_maybe_pull(cwd: &Path, opts: &FetchArgs, pull: bool) -> CmdResult<S
         key: opts.key.clone(),
         json: opts.json,
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
     let state =
-        map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
+        map::state_dir(layout, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
     if read_source(&state)?.is_none() {
         return Err((
             format!(
@@ -385,27 +385,27 @@ fn fetch_and_maybe_pull(cwd: &Path, opts: &FetchArgs, pull: bool) -> CmdResult<S
         url: origin,
         ..import_opts
     };
-    let mut summary = import_into(cwd, &import_opts, true)?;
+    let mut summary = import_into(layout, &import_opts, true)?;
 
     if pull {
-        summary.pulled = fast_forward_current(cwd, &mkit_dir, &opts.remote_name)?;
+        summary.pulled = fast_forward_current(layout, &opts.remote_name)?;
     }
     Ok(summary)
 }
 
 /// FF the current branch from its tracking ref (native machinery).
-fn fast_forward_current(root: &Path, mkit_dir: &Path, remote: &str) -> CmdResult<Option<String>> {
+fn fast_forward_current(layout: &RepoLayout, remote: &str) -> CmdResult<Option<String>> {
     let store =
-        ObjectStore::open(root).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
-    let Ok(refs::Head::Branch(branch)) = refs::read_head(mkit_dir) else {
+        ObjectStore::open(layout).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
+    let Ok(refs::Head::Branch(branch)) = refs::read_head(layout) else {
         return Ok(None); // detached/unborn: fetch-only semantics
     };
-    let Some(target) = refs::read_remote_ref(mkit_dir, remote, &branch)
+    let Some(target) = refs::read_remote_ref(layout, remote, &branch)
         .map_err(|e| (format!("read tracking ref: {e}"), exit::GENERAL_ERROR))?
     else {
         return Ok(None);
     };
-    let Some(current) = refs::read_ref(mkit_dir, &branch)
+    let Some(current) = refs::read_ref(layout, &branch)
         .map_err(|e| (format!("read branch: {e}"), exit::GENERAL_ERROR))?
     else {
         return Ok(None);
@@ -433,19 +433,19 @@ fn fast_forward_current(root: &Path, mkit_dir: &Path, remote: &str) -> CmdResult
     // concurrent commit/checkout cannot interleave after the safety
     // check; a failed restore rolls the branch ref back instead of
     // leaving it advanced over a stale worktree.
-    let _wt_lock = super::acquire_worktree_lock(root)
+    let _wt_lock = super::acquire_worktree_lock(layout)
         .map_err(|code| ("worktree is busy (another mkit command?)".to_owned(), code))?;
-    super::ensure_restore_safe(root, &store, tree).map_err(|e| (e, exit::GENERAL_ERROR))?;
+    super::ensure_restore_safe(layout, &store, tree).map_err(|e| (e, exit::GENERAL_ERROR))?;
     super::write_ref_recording_history(
-        mkit_dir,
+        layout,
         &branch,
         mkit_core::refs::RefWriteCondition::Match(current),
         &target,
     )
     .map_err(|e| (format!("advance branch: {e}"), exit::CANTCREAT))?;
-    if let Err(e) = super::restore_worktree_and_index(root, &store, tree) {
+    if let Err(e) = super::restore_worktree_and_index(layout, &store, tree) {
         let rollback = super::write_ref_recording_history(
-            mkit_dir,
+            layout,
             &branch,
             mkit_core::refs::RefWriteCondition::Match(target),
             &current,
@@ -555,15 +555,14 @@ impl ObjectSink for BulkSink<'_> {
 
 #[allow(clippy::too_many_lines)] // linear pipeline; stages are commented
 fn translate_upstream(
-    root: &Path,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     state: &Path,
     staging: &Path,
     opts: &ImportArgs,
     kp: &KeyPair,
 ) -> CmdResult<Summary> {
     let store =
-        ObjectStore::open(root).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
+        ObjectStore::open(layout).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
 
     // Crash marker: a leftover marker means torn objects may exist
     // that the (durably-fsynced) map still vouches for — discard the
@@ -789,13 +788,13 @@ fn translate_upstream(
                      (rebase local branches that built on the old history)"
                 );
             }
-            refs::write_remote_ref(mkit_dir, &opts.remote_name, branch, mkit_hash)
+            refs::write_remote_ref(layout, &opts.remote_name, branch, mkit_hash)
                 .map_err(|e| (format!("tracking ref {name}: {e}"), exit::CANTCREAT))?;
         } else if let Some(tag) = name.strip_prefix("refs/tags/") {
             // Never clobber a locally-moved tag: only write when the
             // tag is absent or still where THIS import last put it
             // (mirrors git fetch's would-clobber refusal).
-            let existing = refs::read_tag(mkit_dir, tag)
+            let existing = refs::read_tag(layout, tag)
                 .map_err(|e| (format!("tag ref {name}: {e}"), exit::GENERAL_ERROR))?;
             let ours_before = prior_by_ref.get(name.as_str()).map(|p| p.mkit_hash);
             match existing {
@@ -808,7 +807,7 @@ fn translate_upstream(
                 Some(cur) if cur == *mkit_hash => {}
                 _ => {
                     refs::update_tag(
-                        mkit_dir,
+                        layout,
                         tag,
                         mkit_core::refs::RefWriteCondition::Any,
                         mkit_hash,
@@ -832,7 +831,7 @@ fn translate_upstream(
         if let Some(branch) = prev.ref_name.strip_prefix("refs/heads/")
             && !current.contains(prev.ref_name.as_str())
         {
-            match refs::delete_remote_ref(mkit_dir, &opts.remote_name, branch) {
+            match refs::delete_remote_ref(layout, &opts.remote_name, branch) {
                 Ok(()) => eprintln!(
                     "warning: upstream deleted {}; tracking ref {}/{branch} removed",
                     prev.ref_name, opts.remote_name
@@ -858,7 +857,7 @@ fn translate_upstream(
     // a crash between persist and mint would skip those heads
     // forever on re-run.
     mint_attestations(
-        mkit_dir,
+        layout,
         &opts.url,
         &opts.remote_name,
         &imported,
@@ -899,7 +898,7 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// SPEC-GIT-IMPORT §5: subject = mkit head, predicate carries the git
 /// locator + canonical remote identity, signed with the import key.
 fn mint_attestations(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     url: &str,
     remote_name: &str,
     imported: &[(String, Sha1Id, Hash)],
@@ -953,7 +952,7 @@ fn mint_attestations(
         let encoded = envelope
             .encode()
             .map_err(|e| (format!("encode envelope: {e}"), exit::GENERAL_ERROR))?;
-        attest_store::save(mkit_dir, mkit_hash, encoded.as_bytes())
+        attest_store::save(layout, mkit_hash, encoded.as_bytes())
             .map_err(|e| (format!("save attestation: {e}"), exit::CANTCREAT))?;
     }
     Ok(())
@@ -963,7 +962,7 @@ fn mint_attestations(
 
 /// Bind direction=import (or accept fork) + record the canonical
 /// source identity; refuse a different source for this state name.
-fn bind_import_state(mkit_dir: &Path, state: &Path, url: &str) -> CmdResult<()> {
+fn bind_import_state(layout: &RepoLayout, state: &Path, url: &str) -> CmdResult<()> {
     map::bind_direction(state, Direction::Import)
         .or_else(|_| {
             // fork is the allowed superset (import + passthrough).
@@ -993,7 +992,7 @@ fn bind_import_state(mkit_dir: &Path, state: &Path, url: &str) -> CmdResult<()> 
             // dir. A second state for the same canonical source would
             // duplicate the whole history under (possibly) another
             // key — almost always a mistake.
-            if let Some(other) = other_state_with_source(mkit_dir, state, &identity) {
+            if let Some(other) = other_state_with_source(layout, state, &identity) {
                 return Err((
                     format!(
                         "{url} is already imported as state '{other}'; use \
@@ -1036,9 +1035,12 @@ fn read_source(state: &Path) -> CmdResult<Option<String>> {
 }
 
 /// The name of another state dir already bound to `identity`, if any.
-fn other_state_with_source(mkit_dir: &Path, this_state: &Path, identity: &str) -> Option<String> {
-    let root = mkit_dir.join("git");
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
+fn other_state_with_source(
+    layout: &RepoLayout,
+    this_state: &Path,
+    identity: &str,
+) -> Option<String> {
+    for entry in std::fs::read_dir(layout.git_state_dir()).ok()?.flatten() {
         if entry.path() == this_state {
             continue;
         }
@@ -1053,8 +1055,8 @@ fn other_state_with_source(mkit_dir: &Path, this_state: &Path, identity: &str) -
 
 /// SPEC-GIT-IMPORT §4: a dedicated import key by default, generated
 /// on first use with a loud notice.
-fn load_or_create_import_key(mkit_dir: &Path, flag: Option<&str>) -> CmdResult<KeyPair> {
-    let path = flag.map_or_else(|| mkit_dir.join(IMPORT_KEY_FILE), PathBuf::from);
+fn load_or_create_import_key(layout: &RepoLayout, flag: Option<&str>) -> CmdResult<KeyPair> {
+    let path = flag.map_or_else(|| layout.common_dir().join(IMPORT_KEY_FILE), PathBuf::from);
     match mkit_core::sign::load_key(&path) {
         Ok(kp) => {
             // §4: say which key signs this import (operators juggling
@@ -1081,8 +1083,9 @@ fn load_or_create_import_key(mkit_dir: &Path, flag: Option<&str>) -> CmdResult<K
             // rename-replacing save would orphan one pinned signer
             // forever. Serialize generation and re-check under the
             // lock.
-            let _key_lock = mkit_core::repo_lock::acquire_default(mkit_dir, "git-import-key.lock")
-                .map_err(|e| (format!("import key generation busy: {e}"), exit::TEMPFAIL))?;
+            let _key_lock =
+                mkit_core::repo_lock::acquire_default(layout.common_dir(), "git-import-key.lock")
+                    .map_err(|e| (format!("import key generation busy: {e}"), exit::TEMPFAIL))?;
             if let Ok(kp) = mkit_core::sign::load_key(&path) {
                 return Ok(kp);
             }

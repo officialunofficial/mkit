@@ -14,6 +14,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::refs::{self, Head};
@@ -103,12 +104,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = super::resolve_layout(&cwd);
 
     // `--show-current`: print the checked-out branch (nothing when
     // detached), then exit — like `git branch --show-current`.
     if opts.show_current {
-        if let Ok(refs::Head::Branch(name)) = refs::read_head(&mkit_dir) {
+        if let Ok(refs::Head::Branch(name)) = refs::read_head(&layout) {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{name}");
         }
@@ -137,9 +138,9 @@ pub fn run(args: &[String]) -> u8 {
             );
         }
         if opts.rename {
-            return rename(&mkit_dir, &opts.names);
+            return rename(&layout, &opts.names);
         }
-        return delete(&mkit_dir, &opts.names, opts.force_delete);
+        return delete(&layout, &opts.names, opts.force_delete);
     }
 
     let json = matches!(opts.format, BranchFormat::Json);
@@ -148,18 +149,18 @@ pub fn run(args: &[String]) -> u8 {
     // are glob patterns that filter the listing, like `git branch --list
     // <pattern>`. Otherwise the positional is a branch name to create.
     if has_filter {
-        return list(&cwd, &mkit_dir, json, opts.verbose, &specs, &opts.names);
+        return list(&layout, json, opts.verbose, &specs, &opts.names);
     }
     match opts.names.as_slice() {
-        [] => list(&cwd, &mkit_dir, json, opts.verbose, &specs, &[]),
-        [name] => create(&mkit_dir, name),
+        [] => list(&layout, json, opts.verbose, &specs, &[]),
+        [name] => create(&layout, name),
         _ => super::usage_error("usage: mkit branch <name>  (create takes one name)"),
     }
 }
 
 /// `mkit branch <name>` — create a new branch at HEAD.
-fn create(mkit_dir: &std::path::Path, name: &str) -> u8 {
-    let Ok(Some(h)) = refs::resolve_head(mkit_dir) else {
+fn create(layout: &RepoLayout, name: &str) -> u8 {
+    let Ok(Some(h)) = refs::resolve_head(layout) else {
         return emit_err("no HEAD commit to branch from", exit::GENERAL_ERROR);
     };
     // `MustNotExist` (issue #206) refuses to silently clobber an
@@ -167,7 +168,7 @@ fn create(mkit_dir: &std::path::Path, name: &str) -> u8 {
     // `write_ref_recording_history` so the new branch picks up a
     // fresh history-MMR journal (the empty pre-leaf root + this
     // first append) on builds with `--features history-mmr`.
-    match super::write_ref_recording_history(mkit_dir, name, refs::RefWriteCondition::Missing, &h) {
+    match super::write_ref_recording_history(layout, name, refs::RefWriteCondition::Missing, &h) {
         Ok(()) => exit::OK,
         Err(refs::RefError::Conflict(_)) => {
             emit_err(&format!("branch '{name}' already exists"), exit::CANTCREAT)
@@ -185,15 +186,15 @@ fn create(mkit_dir: &std::path::Path, name: &str) -> u8 {
 /// and `-D` behave identically here. Like git, **both** error on a
 /// missing branch (`error: branch '<name>' not found`); `-D` does not
 /// silently no-op, so a typo'd name is surfaced rather than swallowed.
-fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
+fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
     let [name] = names else {
         let flag = if force { "-D" } else { "-d" };
         return super::usage_error(&format!("usage: mkit branch {flag} <name>"));
     };
     // Capture the tip before deletion for git's `Deleted branch <name>
     // (was <hash>).` confirmation.
-    let was = refs::read_ref(mkit_dir, name).ok().flatten();
-    match refs::delete_ref_safe(mkit_dir, name) {
+    let was = refs::read_ref(layout, name).ok().flatten();
+    match refs::delete_ref_safe(layout, name) {
         Ok(()) => {
             let mut stderr = std::io::stderr().lock();
             match was {
@@ -227,10 +228,10 @@ fn delete(mkit_dir: &std::path::Path, names: &[String], force: bool) -> u8 {
 /// `write_ref_recording_history` so the renamed branch seeds a fresh
 /// history-MMR journal on `--features history-mmr` builds, exactly as a
 /// freshly created branch would.
-fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
+fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
     let (old, new) = match names {
         [new] => {
-            let Ok(refs::Head::Branch(cur)) = refs::read_head(mkit_dir) else {
+            let Ok(refs::Head::Branch(cur)) = refs::read_head(layout) else {
                 return emit_err(
                     "cannot rename: HEAD is detached (specify <old> <new>)",
                     exit::GENERAL_ERROR,
@@ -246,7 +247,7 @@ fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
         return exit::OK;
     }
 
-    let hash = match refs::read_ref(mkit_dir, &old) {
+    let hash = match refs::read_ref(layout, &old) {
         Ok(Some(h)) => h,
         Ok(None) => return emit_err(&format!("branch '{old}' not found"), exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read {old}: {e}"), exit::GENERAL_ERROR),
@@ -255,12 +256,8 @@ fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
     // Create the destination first under a CAS that refuses to clobber an
     // existing branch. Only after it lands do we drop the source, so a
     // mid-operation failure never loses the branch tip.
-    match super::write_ref_recording_history(
-        mkit_dir,
-        &new,
-        refs::RefWriteCondition::Missing,
-        &hash,
-    ) {
+    match super::write_ref_recording_history(layout, &new, refs::RefWriteCondition::Missing, &hash)
+    {
         Ok(()) => {}
         Err(refs::RefError::Conflict(_)) => {
             return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
@@ -268,14 +265,14 @@ fn rename(mkit_dir: &std::path::Path, names: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("write {new}: {e}"), exit::CANTCREAT),
     }
 
-    if let Err(e) = refs::delete_ref(mkit_dir, &old) {
+    if let Err(e) = refs::delete_ref(layout, &old) {
         return emit_err(&format!("delete {old}: {e}"), exit::GENERAL_ERROR);
     }
 
     // Move HEAD if we renamed the checked-out branch.
-    if let Ok(refs::Head::Branch(cur)) = refs::read_head(mkit_dir)
+    if let Ok(refs::Head::Branch(cur)) = refs::read_head(layout)
         && cur == old
-        && let Err(e) = refs::write_head_branch(mkit_dir, &new)
+        && let Err(e) = refs::write_head_branch(layout, &new)
     {
         return emit_err(&format!("update HEAD to {new}: {e}"), exit::GENERAL_ERROR);
     }
@@ -312,14 +309,14 @@ struct BranchFilter {
 /// git. Returns `Err(message)` if a spec does not resolve.
 fn resolve_filter(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     specs: &FilterSpecs<'_>,
 ) -> Result<BranchFilter, String> {
     let resolve = |spec: Option<&str>| -> Result<Option<Hash>, String> {
         match spec {
             None => Ok(None),
             Some(s) => {
-                let h = revspec::resolve_revision(store, mkit_dir, s)
+                let h = revspec::resolve_revision(store, layout, s)
                     .map_err(|e| format!("bad revision '{s}': {e}"))?;
                 let h = super::log::peel_tags(store, h);
                 // The ancestry filters compare COMMITS; a tree/blob id would
@@ -490,18 +487,17 @@ fn match_class(p: &[char], start: usize, ch: char) -> Option<(bool, usize)> {
 }
 
 fn list(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     json: bool,
     verbose: bool,
     specs: &FilterSpecs<'_>,
     patterns: &[String],
 ) -> u8 {
-    let current = match refs::read_head(mkit_dir) {
+    let current = match refs::read_head(layout) {
         Ok(Head::Branch(n)) => Some(n),
         _ => None,
     };
-    let mut refs = match refs::list_refs(mkit_dir) {
+    let mut refs = match refs::list_refs(layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
@@ -515,7 +511,7 @@ fn list(
 
     // A filter or `-v` both need the object store; open it once.
     let store = if verbose || specs.any() {
-        match ObjectStore::open(cwd) {
+        match ObjectStore::open(layout) {
             Ok(s) => Some(s),
             Err(e) => return emit_err(&format!("open store: {e}"), exit::GENERAL_ERROR),
         }
@@ -527,7 +523,7 @@ fn list(
     // three output modes share the same filtered set.
     if specs.any() {
         let store = store.as_ref().expect("store opened when filtering");
-        let filter = match resolve_filter(store, mkit_dir, specs) {
+        let filter = match resolve_filter(store, layout, specs) {
             Ok(f) => f,
             Err(e) => return emit_err(&e, exit::DATAERR),
         };
@@ -579,7 +575,7 @@ fn list(
     // Verbose: `<marker> <name> <short> <subject>`, name column padded to
     // the longest branch name (like `git branch -v`). The tip subject is
     // the first line of the commit/remix message.
-    let store = match ObjectStore::open(cwd) {
+    let store = match ObjectStore::open(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("open store: {e}"), exit::GENERAL_ERROR),
     };

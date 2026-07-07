@@ -31,6 +31,7 @@ use std::path::{Component, Path, PathBuf};
 use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::restore::{RestoreOptions, SparsePattern, restore_tree_to_worktree};
 use mkit_core::store::ObjectStore;
@@ -85,12 +86,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -101,14 +102,14 @@ pub fn run(args: &[String]) -> u8 {
     let do_staged = opts.staged;
     let do_worktree = opts.worktree || !opts.staged;
 
-    let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
+    let mut idx = match super::read_or_seed_index_from_head(&layout, &store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
 
     // HEAD's tree (None on an unborn branch) — the source for `--staged`
     // unstaging, and the worktree source when a path is not in the index.
-    let head_tree = match super::current_head_tree(&cwd, &store) {
+    let head_tree = match super::current_head_tree(&layout, &store) {
         Ok(t) => t,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -116,7 +117,7 @@ pub fn run(args: &[String]) -> u8 {
     // Resolve an explicit `--source <rev>` to its tree once. When set it
     // overrides both the index (worktree restore) and HEAD (unstage).
     let source_tree: Option<Hash> = match &opts.source {
-        Some(spec) => match resolve_source_tree(&store, &mkit_dir, spec) {
+        Some(spec) => match resolve_source_tree(&store, &layout, spec) {
             Ok(t) => Some(t),
             Err((msg, code)) => return emit_err(&msg, code),
         },
@@ -141,7 +142,8 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
-    if do_staged && let Err(code) = restore_staged(&cwd, &mut idx, restore_index.as_ref(), &rels) {
+    if do_staged && let Err(code) = restore_staged(&layout, &mut idx, restore_index.as_ref(), &rels)
+    {
         return code;
     }
 
@@ -165,10 +167,10 @@ pub fn run(args: &[String]) -> u8 {
 /// Resolve `--source <rev>` to a tree hash via the shared resolver.
 fn resolve_source_tree(
     store: &ObjectStore,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     spec: &str,
 ) -> Result<Hash, (String, u8)> {
-    let commit = super::revspec::resolve_revision(store, mkit_dir, spec)
+    let commit = super::revspec::resolve_revision(store, layout, spec)
         .map_err(|e| (format!("bad --source '{spec}': {e}"), exit::GENERAL_ERROR))?;
     match store.read_object(&commit) {
         Ok(Object::Commit(c)) => Ok(c.tree_hash),
@@ -205,7 +207,7 @@ fn resolve_restore_index(
 /// entry; a path absent from the source is dropped from the index
 /// (it was newly staged, so unstaging removes it entirely).
 fn restore_staged(
-    cwd: &Path,
+    layout: &RepoLayout,
     idx: &mut Index,
     restore_index: Option<&Index>,
     rels: &[String],
@@ -243,7 +245,7 @@ fn restore_staged(
     if !matched_any {
         return Ok(());
     }
-    index::write_index(cwd, idx)
+    index::write_index(layout, idx)
         .map_err(|e| emit_err(&format!("write index: {e}"), exit::CANTCREAT))
 }
 

@@ -190,7 +190,7 @@ impl RefLock {
     /// creating the lock file (and its parent directories) on first
     /// use. Blocks until the lock can be taken.
     fn acquire(root: &Path) -> io::Result<Self> {
-        let lock_dir = root.join(".mkit").join("refs");
+        let lock_dir = mkit_core::layout::RepoLayout::single(root).refs_dir();
         fs::create_dir_all(&lock_dir)?;
         #[cfg(unix)]
         {

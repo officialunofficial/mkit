@@ -17,6 +17,7 @@ use std::process::{Command, Output, Stdio};
 
 use mkit_core::Hash;
 use mkit_core::index::read_index;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::live_objects;
 use mkit_core::refs;
@@ -133,8 +134,8 @@ pub(crate) fn check_exit(out: &Output, label: &str) -> Result<(), String> {
 /// `collect_roots()` reads those sidecar files and errors on malformed roots,
 /// which is expected for a garbled state, not a sign of repo corruption.
 pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String> {
-    let mkit_dir = root.join(".mkit");
-    let store = ObjectStore::open(root).map_err(|e| format!("[{label}] open store: {e}"))?;
+    let layout = RepoLayout::single(root);
+    let store = ObjectStore::open(&layout).map_err(|e| format!("[{label}] open store: {e}"))?;
 
     // Content-addressing integrity: every loose object's bytes re-hash to its
     // path. `read` recomputes BLAKE3 and rejects on mismatch.
@@ -148,10 +149,10 @@ pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String>
     }
 
     // HEAD is well-formed (symbolic-to-branch or a 64-hex detached hash).
-    refs::read_head(&mkit_dir).map_err(|e| format!("[{label}] HEAD malformed: {e}"))?;
+    refs::read_head(&layout).map_err(|e| format!("[{label}] HEAD malformed: {e}"))?;
 
     // Index parses.
-    read_index(root).map_err(|e| format!("[{label}] index unparseable: {e}"))?;
+    read_index(&layout).map_err(|e| format!("[{label}] index unparseable: {e}"))?;
     Ok(())
 }
 
@@ -161,18 +162,19 @@ pub(crate) fn check_store_intact(root: &Path, label: &str) -> Result<(), String>
 /// repo state (post-recovery / non-garbled).
 pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
     check_store_intact(root, label)?;
-    let mkit_dir = root.join(".mkit");
-    let store = ObjectStore::open(root).map_err(|e| format!("[{label}] open store: {e}"))?;
+    let layout = RepoLayout::single(root);
+    let mkit_dir = layout.common_dir().to_path_buf();
+    let store = ObjectStore::open(&layout).map_err(|e| format!("[{label}] open store: {e}"))?;
 
     // Collect *signed* roots: HEAD, every head ref, every tag ref. A listed ref
     // whose on-disk bytes are malformed (hash == None) is corruption.
     let mut roots: Vec<Hash> = Vec::new();
     if let Some(h) =
-        refs::resolve_head(&mkit_dir).map_err(|e| format!("[{label}] resolve HEAD: {e}"))?
+        refs::resolve_head(&layout).map_err(|e| format!("[{label}] resolve HEAD: {e}"))?
     {
         roots.push(h);
     }
-    for r in refs::list_refs(&mkit_dir).map_err(|e| format!("[{label}] list heads: {e}"))? {
+    for r in refs::list_refs(&layout).map_err(|e| format!("[{label}] list heads: {e}"))? {
         match r.hash {
             Some(h) => roots.push(h),
             None => {
@@ -183,7 +185,7 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
             }
         }
     }
-    for r in refs::list_tags(&mkit_dir).map_err(|e| format!("[{label}] list tags: {e}"))? {
+    for r in refs::list_tags(&layout).map_err(|e| format!("[{label}] list tags: {e}"))? {
         match r.hash {
             Some(h) => roots.push(h),
             None => {
@@ -241,8 +243,8 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
     // gc-safety: every object mkit would retain (its own live-set — refs, stash,
     // ORIG_HEAD, in-progress state, conflict sidecars, attestations, recovery
     // roots, and their closure incl. chunked-blob chunks) must be present.
-    let live = live_objects(&store, &mkit_dir)
-        .map_err(|e| format!("[{label}] collect gc live-set: {e}"))?;
+    let live =
+        live_objects(&store, &layout).map_err(|e| format!("[{label}] collect gc live-set: {e}"))?;
     for h in &live {
         store
             .read(h)

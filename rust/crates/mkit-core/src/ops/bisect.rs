@@ -29,9 +29,10 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::hash::{self, HEX_LEN, Hash, ZERO};
+use crate::layout::RepoLayout;
 use crate::object::Object;
 use crate::store::ObjectStore;
 
@@ -101,8 +102,8 @@ pub enum BisectStep {
 
 /// Returns `true` when `<mkit_dir>/bisect` exists.
 #[must_use]
-pub fn is_bisect_in_progress(mkit_dir: &Path) -> bool {
-    mkit_dir.join(BISECT_FILE).is_file()
+pub fn is_bisect_in_progress(layout: &RepoLayout) -> bool {
+    layout.bisect_file().is_file()
 }
 
 /// Read bisect state from `<mkit_dir>/bisect`.
@@ -110,8 +111,8 @@ pub fn is_bisect_in_progress(mkit_dir: &Path) -> bool {
 /// # Errors
 /// - [`BisectError::NoBisectInProgress`] if the file does not exist.
 /// - [`BisectError::InvalidBisectState`] for any malformed line.
-pub fn read_state(mkit_dir: &Path) -> BisectResult<BisectState> {
-    let path = mkit_dir.join(BISECT_FILE);
+pub fn read_state(layout: &RepoLayout) -> BisectResult<BisectState> {
+    let path = layout.bisect_file();
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -189,7 +190,7 @@ pub fn read_state(mkit_dir: &Path) -> BisectResult<BisectState> {
 ///
 /// # Errors
 /// - [`BisectError::Io`] for filesystem failures.
-pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
+pub fn write_state(layout: &RepoLayout, state: &BisectState) -> BisectResult<()> {
     let mut buf = String::new();
     buf.push_str(&hash::to_hex(&state.orig_head));
     buf.push('\n');
@@ -214,7 +215,7 @@ pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
     // dir) so a crash mid-write cannot leave a truncated bisect state file
     // that `read_state` would reject as InvalidBisectState. Matches the
     // rest of the ops state writers (stash/recovery/restore).
-    crate::atomic::write_atomic(&mkit_dir.join(BISECT_FILE), buf.as_bytes(), true)?;
+    crate::atomic::write_atomic(&layout.bisect_file(), buf.as_bytes(), true)?;
     Ok(())
 }
 
@@ -222,8 +223,8 @@ pub fn write_state(mkit_dir: &Path, state: &BisectState) -> BisectResult<()> {
 ///
 /// # Errors
 /// - [`BisectError::Io`] for filesystem failures other than "not found".
-pub fn cleanup_bisect(mkit_dir: &Path) -> BisectResult<()> {
-    let path = mkit_dir.join(BISECT_FILE);
+pub fn cleanup_bisect(layout: &RepoLayout) -> BisectResult<()> {
+    let path = layout.bisect_file();
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -233,8 +234,8 @@ pub fn cleanup_bisect(mkit_dir: &Path) -> BisectResult<()> {
 
 /// Convenience: full path to the bisect state file under `mkit_dir`.
 #[must_use]
-pub fn bisect_file_path(mkit_dir: &Path) -> PathBuf {
-    mkit_dir.join(BISECT_FILE)
+pub fn bisect_file_path(layout: &RepoLayout) -> PathBuf {
+    layout.bisect_file()
 }
 
 /// Walk ancestors of `bad`, stopping at any commit that is `good` or an
@@ -424,7 +425,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 
@@ -465,8 +466,8 @@ mod tests {
     #[test]
     fn state_roundtrip_with_branch_and_bad() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let state = BisectState {
             orig_head: hash::hash(b"orig-head"),
             orig_branch: Some("main".to_string()),
@@ -482,8 +483,8 @@ mod tests {
     #[test]
     fn state_roundtrip_with_no_branch_no_bad() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let state = BisectState {
             orig_head: hash::hash(b"head"),
             orig_branch: None,
@@ -499,8 +500,8 @@ mod tests {
     #[test]
     fn state_roundtrip_with_skipped_hashes() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let s1 = hash::hash(b"skip1");
         let s2 = hash::hash(b"skip2");
         let mut skipped = BTreeSet::new();
@@ -529,7 +530,7 @@ mod tests {
         // existing state file, and (c) leaves no `.bisect.tmp.*` sibling
         // behind after the rename.
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
+        let mkit = RepoLayout::single(tmp.path());
         // Note: directory intentionally NOT pre-created.
         let first = BisectState {
             orig_head: hash::hash(b"head"),
@@ -552,7 +553,7 @@ mod tests {
         assert_eq!(read_state(&mkit).unwrap(), second);
 
         // No temp artefact left in the directory: only the bisect file.
-        let stray: Vec<_> = fs::read_dir(&mkit)
+        let stray: Vec<_> = fs::read_dir(mkit.worktree_state_dir())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n != BISECT_FILE)
@@ -564,8 +565,8 @@ mod tests {
     fn old_state_file_without_skip_deserializes_with_empty_skipped() {
         // Simulate a state file written by an old parser (no `skip:` lines).
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let orig_head = hash::hash(b"orig");
         let bad = hash::hash(b"bad");
         let good = hash::hash(b"good");
@@ -576,7 +577,7 @@ mod tests {
             hash::to_hex(&bad),
             hash::to_hex(&good)
         );
-        fs::write(mkit.join(BISECT_FILE), content.as_bytes()).unwrap();
+        fs::write(mkit.bisect_file(), content.as_bytes()).unwrap();
         let read = read_state(&mkit).unwrap();
         assert_eq!(read.orig_head, orig_head);
         assert_eq!(read.bad_hash, Some(bad));
@@ -590,8 +591,8 @@ mod tests {
     #[test]
     fn read_state_when_no_bisect_returns_error() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         let err = read_state(&mkit).unwrap_err();
         assert!(matches!(err, BisectError::NoBisectInProgress));
     }
@@ -599,9 +600,9 @@ mod tests {
     #[test]
     fn read_state_rejects_empty_file() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
-        fs::write(mkit.join(BISECT_FILE), b"").unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
+        fs::write(mkit.bisect_file(), b"").unwrap();
         let err = read_state(&mkit).unwrap_err();
         assert!(matches!(err, BisectError::InvalidBisectState));
     }
@@ -609,19 +610,19 @@ mod tests {
     #[test]
     fn is_bisect_in_progress_detection() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         assert!(!is_bisect_in_progress(&mkit));
-        fs::write(mkit.join(BISECT_FILE), b"placeholder").unwrap();
+        fs::write(mkit.bisect_file(), b"placeholder").unwrap();
         assert!(is_bisect_in_progress(&mkit));
     }
 
     #[test]
     fn cleanup_removes_state_file() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
-        fs::write(mkit.join(BISECT_FILE), b"x\n").unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
+        fs::write(mkit.bisect_file(), b"x\n").unwrap();
         cleanup_bisect(&mkit).unwrap();
         assert!(!is_bisect_in_progress(&mkit));
     }
@@ -629,8 +630,8 @@ mod tests {
     #[test]
     fn cleanup_on_missing_file_is_noop() {
         let tmp = TempDir::new().unwrap();
-        let mkit = tmp.path().join(".mkit");
-        fs::create_dir_all(&mkit).unwrap();
+        let mkit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(mkit.worktree_state_dir()).unwrap();
         cleanup_bisect(&mkit).unwrap();
     }
 

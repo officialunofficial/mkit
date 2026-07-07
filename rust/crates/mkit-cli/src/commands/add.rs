@@ -10,6 +10,7 @@ use clap::Parser;
 use mkit_core::hash::ZERO;
 use mkit_core::ignore::{self, IgnoreList};
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Blob, Object};
 use mkit_core::ops::{HunkLineKind, PatchHunk, apply_hunks_subset, enumerate_hunks};
 use mkit_core::serialize;
@@ -64,8 +65,12 @@ struct AddOpts {
 /// This backs `mkit commit -a`: it mirrors Git's tracked-only shortcut
 /// by updating modified tracked files and staging tracked deletions,
 /// without adding untracked paths.
-pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<(), String> {
-    let mut idx = super::read_or_seed_index_from_head(root, store)?;
+pub(super) fn stage_tracked_changes(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+) -> Result<(), String> {
+    let root = layout.worktree_root();
+    let mut idx = super::read_or_seed_index_from_head(layout, store)?;
 
     // One durability batch for every restaged object; committed below,
     // before the index write that references them.
@@ -147,7 +152,7 @@ pub(super) fn stage_tracked_changes(root: &Path, store: &ObjectStore) -> Result<
     // Durability ordering: objects first, then the index that
     // references them.
     batch.commit().map_err(|e| format!("store: {e}"))?;
-    index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+    index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
 #[cfg(unix)]
@@ -180,11 +185,12 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match super::open_store_configured(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match super::open_store_configured(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -201,7 +207,7 @@ pub fn run(args: &[String]) -> u8 {
         if opts.paths.is_empty() {
             return emit_err("-p/--patch requires one or more file paths", exit::USAGE);
         }
-        return run_patch(&cwd, &store, &opts.paths, opts.force);
+        return run_patch(&layout, &store, &opts.paths, opts.force);
     }
 
     // Mode selection. `-A` and `-u` are mutually exclusive with each
@@ -219,13 +225,13 @@ pub fn run(args: &[String]) -> u8 {
     if opts.update {
         // Tracked-only restage, reusing the shared helper that backs
         // `commit -a`.
-        return match stage_tracked_changes(&cwd, &store) {
+        return match stage_tracked_changes(&layout, &store) {
             Ok(()) => exit::OK,
             Err(e) => emit_err(&e, exit::GENERAL_ERROR),
         };
     }
 
-    let mut idx = match super::read_or_seed_index_from_head(&cwd, &store) {
+    let mut idx = match super::read_or_seed_index_from_head(&layout, &store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -283,7 +289,7 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = batch.commit() {
         return emit_err(&format!("store: {e}"), exit::CANTCREAT);
     }
-    match index::write_index(&cwd, &idx) {
+    match index::write_index(&layout, &idx) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write index: {e}"), exit::CANTCREAT),
     }
@@ -502,8 +508,9 @@ struct PatchOutcome {
 /// seeded from HEAD (so a base exists for already-committed files) and only
 /// written back if at least one hunk was staged — selecting nothing leaves
 /// the index untouched, matching `git add -p`.
-fn run_patch(root: &Path, store: &ObjectStore, paths: &[String], force: bool) -> u8 {
-    let mut idx = match super::read_or_seed_index_from_head(root, store) {
+fn run_patch(layout: &RepoLayout, store: &ObjectStore, paths: &[String], force: bool) -> u8 {
+    let root = layout.worktree_root();
+    let mut idx = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -533,7 +540,7 @@ fn run_patch(root: &Path, store: &ObjectStore, paths: &[String], force: bool) ->
             Err(code) => return code,
         }
     }
-    if any_staged && let Err(e) = index::write_index(root, &idx) {
+    if any_staged && let Err(e) = index::write_index(layout, &idx) {
         return emit_err(&format!("write index: {e}"), exit::CANTCREAT);
     }
     exit::OK

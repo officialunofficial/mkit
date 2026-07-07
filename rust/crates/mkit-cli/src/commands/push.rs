@@ -13,6 +13,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use mkit_core::layout::RepoLayout;
 
 use crate::clap_shim;
 use crate::config;
@@ -63,23 +64,23 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let cfg = match config::read_layered(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let cfg = match config::read_layered(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
     if opts.all {
-        push_all(&cwd, &cfg, &opts)
+        push_all(&layout, &cfg, &opts)
     } else {
-        push_current(&cwd, &cfg, &opts)
+        push_current(&layout, &cfg, &opts)
     }
 }
 
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
-fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let branch = match mkit_core::refs::read_head(&mkit_dir) {
+fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+    let branch = match mkit_core::refs::read_head(layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => b,
         Ok(mkit_core::refs::Head::Detached(_)) => {
             return emit_err(
@@ -120,8 +121,8 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
 
     // Snapshot the local tip and the last-seen remote-tracking ref so we
     // can render git's ref-update summary block and detect a no-op push.
-    let local_tip = mkit_core::refs::read_ref(&mkit_dir, &branch).ok().flatten();
-    let old_tracked = mkit_core::refs::read_remote_ref(&mkit_dir, &resolved.name, &remote_branch)
+    let local_tip = mkit_core::refs::read_ref(layout, &branch).ok().flatten();
+    let old_tracked = mkit_core::refs::read_remote_ref(layout, &resolved.name, &remote_branch)
         .ok()
         .flatten();
     // Nothing to do when the remote-tracking ref already matches the local
@@ -152,7 +153,7 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
     };
 
     match remote_dispatch::push_branch_tracked(
-        cwd,
+        layout.worktree_root(),
         tx.as_ref(),
         &resolved.name,
         &branch,
@@ -165,7 +166,7 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
             // when not already set, and never for a detached/forced
             // overwrite of an unrelated branch.
             record_upstream(
-                cwd,
+                layout,
                 cfg,
                 &branch,
                 &resolved.name,
@@ -177,7 +178,8 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
             // On a store error during the ancestry check, assume a
             // fast-forward (don't mislabel an ordinary push as forced).
             let forced =
-                !remote_dispatch::is_fast_forward(cwd, old_tracked, new_tip).unwrap_or(true);
+                !remote_dispatch::is_fast_forward(layout.worktree_root(), old_tracked, new_tip)
+                    .unwrap_or(true);
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
@@ -217,7 +219,7 @@ fn push_current(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushO
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
-fn push_all(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let remote_name = opts
         .remote
         .clone()
@@ -244,7 +246,12 @@ fn push_all(cwd: &std::path::Path, cfg: &config::LayeredConfig, opts: &PushOpts)
         }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
-    match remote_dispatch::push_all_with(cwd, tx.as_ref(), Some(&resolved.name), opts.force) {
+    match remote_dispatch::push_all_with(
+        layout.worktree_root(),
+        tx.as_ref(),
+        Some(&resolved.name),
+        opts.force,
+    ) {
         Ok(n) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
@@ -282,7 +289,7 @@ fn lease_for(opts: &PushOpts) -> PushLease {
 /// a subsequent bare `mkit push` resolves the upstream. Best-effort: a
 /// write failure is non-fatal (the push already succeeded).
 fn record_upstream(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     cfg: &config::LayeredConfig,
     branch: &str,
     remote: &str,
@@ -304,7 +311,7 @@ fn record_upstream(
     // upstream entry without disturbing the existing remotes / flat
     // fields. Using the repo layer ensures user-scoped values (e.g. a
     // private `user.email`) are never materialized into `.mkit/config`.
-    let Ok(layered) = config::read_layered(cwd) else {
+    let Ok(layered) = config::read_layered(layout) else {
         return;
     };
     let mut on_disk = layered.repo;
@@ -315,7 +322,7 @@ fn record_upstream(
             branch: remote_branch.to_owned(),
         },
     );
-    let _ = config::write(cwd, &on_disk);
+    let _ = config::write(layout, &on_disk);
 }
 
 use super::error as emit_err;

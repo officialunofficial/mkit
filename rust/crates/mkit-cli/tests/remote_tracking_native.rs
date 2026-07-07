@@ -7,6 +7,7 @@
 mod common;
 
 use common::Repo;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Identity, Object};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -15,14 +16,14 @@ use mkit_core::store::ObjectStore;
 fn plant_tracking_ref(r: &Repo, remote: &str, branch: &str) -> mkit_core::Hash {
     // Advance main, record the tip as the "remote" position, then move
     // main back so the tracking ref is strictly ahead.
-    let mkit_dir = r.mkit_dir();
-    let before = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
+    let layout = RepoLayout::single(r.path());
+    let before = refs::read_ref(&layout, "main").unwrap().unwrap();
     r.commit_file("ahead.txt", b"ahead\n", "remote is ahead");
-    let ahead = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    refs::write_remote_ref(&mkit_dir, remote, branch, &ahead).unwrap();
+    let ahead = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, remote, branch, &ahead).unwrap();
     // Rewind main (guarded reset path not needed for test setup).
-    refs::write_ref(&mkit_dir, "main", &before).unwrap();
-    let store = ObjectStore::open(r.path()).unwrap();
+    refs::write_ref(&layout, "main", &before).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(c) = store.read_object(&before).unwrap() else {
         panic!("not a commit")
     };
@@ -49,7 +50,9 @@ fn merge_fast_forwards_from_tracking_ref() {
         "stderr: {stderr}"
     );
     assert_eq!(
-        refs::read_ref(&r.mkit_dir(), "main").unwrap().unwrap(),
+        refs::read_ref(&RepoLayout::single(r.path()), "main")
+            .unwrap()
+            .unwrap(),
         ahead
     );
 }
@@ -134,9 +137,9 @@ fn cherry_pick_preserves_author_and_timestamp() {
         "--author",
         "opaque:Original Author <orig@example.com>",
     ]);
-    let mkit_dir = r.mkit_dir();
-    let picked = refs::read_ref(&mkit_dir, "side").unwrap().unwrap();
-    let store = ObjectStore::open(r.path()).unwrap();
+    let layout = RepoLayout::single(r.path());
+    let picked = refs::read_ref(&layout, "side").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(orig) = store.read_object(&picked).unwrap() else {
         panic!("not a commit")
     };
@@ -148,7 +151,7 @@ fn cherry_pick_preserves_author_and_timestamp() {
     r.commit_file("main2.txt", b"m\n", "main advances");
     r.ok(&["cherry-pick", &mkit_core::to_hex(&picked)]);
 
-    let tip = refs::resolve_head(&mkit_dir).unwrap().unwrap();
+    let tip = refs::resolve_head(&layout).unwrap().unwrap();
     let Object::Commit(replayed) = store.read_object(&tip).unwrap() else {
         panic!("not a commit")
     };
@@ -164,28 +167,28 @@ fn cherry_pick_preserves_author_and_timestamp() {
 fn remote_rename_moves_and_remove_deletes_tracking_refs() {
     let r = Repo::new();
     r.commit_file("a.txt", b"a\n", "base");
-    let mkit_dir = r.mkit_dir();
-    let tip = refs::read_ref(&mkit_dir, "main").unwrap().unwrap();
-    refs::write_remote_ref(&mkit_dir, "old", "main", &tip).unwrap();
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "old", "main", &tip).unwrap();
 
     // Named remote in config so rename/remove operate on it.
     r.ok(&["remote", "add", "old", "mkit+file:///tmp/nowhere"]);
     r.ok(&["remote", "rename", "old", "new"]);
     assert!(
-        refs::read_remote_ref(&mkit_dir, "new", "main")
+        refs::read_remote_ref(&layout, "new", "main")
             .unwrap()
             .is_some(),
         "rename must move tracking refs"
     );
     assert!(
-        refs::read_remote_ref(&mkit_dir, "old", "main")
+        refs::read_remote_ref(&layout, "old", "main")
             .unwrap()
             .is_none()
     );
 
     r.ok(&["remote", "remove", "new"]);
     assert!(
-        refs::read_remote_ref(&mkit_dir, "new", "main")
+        refs::read_remote_ref(&layout, "new", "main")
             .unwrap()
             .is_none(),
         "remove must delete tracking refs"
@@ -213,7 +216,7 @@ fn named_remote_fetch_and_pull_use_their_namespace() {
     assert!(stderr.contains("From "), "fetch: {stderr}");
     assert!(stderr.contains("origin/main"), "fetch summary: {stderr}");
     assert!(
-        refs::read_remote_ref(&consumer.mkit_dir(), "origin", "main")
+        refs::read_remote_ref(&RepoLayout::single(consumer.path()), "origin", "main")
             .unwrap()
             .is_some(),
         "named fetch must write refs/remotes/origin/*"

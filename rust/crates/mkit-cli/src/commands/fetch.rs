@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 
 use crate::clap_shim;
 use crate::config;
@@ -35,7 +35,8 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let cfg = match config::read_layered(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let cfg = match config::read_layered(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -51,12 +52,11 @@ pub fn run(args: &[String]) -> u8 {
     let endpoint = resolved.endpoint.as_str();
     // Snapshot the remote-tracking refs so we can report exactly which
     // ones moved (git prints nothing when nothing changed).
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let before = tracking_snapshot(&mkit_dir, &resolved.name);
+    let before = tracking_snapshot(&layout, &resolved.name);
     match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
         Ok(tx) => match remote_dispatch::fetch_all(&cwd, tx.as_ref(), &resolved.name) {
             Ok(_) => {
-                let after = tracking_snapshot(&mkit_dir, &resolved.name);
+                let after = tracking_snapshot(&layout, &resolved.name);
                 report_fetch(endpoint, &resolved.name, &before, &after);
                 exit::OK
             }
@@ -74,8 +74,8 @@ pub fn run(args: &[String]) -> u8 {
 
 /// Map of `refs/remotes/<remote>/<branch>` → tip, used to diff the
 /// tracking-ref state across a fetch.
-fn tracking_snapshot(mkit_dir: &Path, remote: &str) -> HashMap<String, Hash> {
-    mkit_core::refs::list_remote_refs(mkit_dir, remote)
+fn tracking_snapshot(layout: &RepoLayout, remote: &str) -> HashMap<String, Hash> {
+    mkit_core::refs::list_remote_refs(layout, remote)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|r| r.hash.map(|h| (r.name, h)))

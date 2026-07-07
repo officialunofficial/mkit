@@ -35,11 +35,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
+use crate::layout::RepoLayout;
 use crate::object::{self, EntryMode, Object, TreeEntry};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
-const SPARSE_FILE: &str = ".mkit/sparse-checkout";
 const MAX_SPARSE_BYTES: u64 = 1024 * 1024;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -178,8 +178,8 @@ pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> b
 ///
 /// # Errors
 /// - [`RestoreError::Io`] for filesystem failures other than "not found".
-pub fn load_sparse_checkout(repo_root: &Path) -> RestoreResult<Option<Vec<SparsePattern>>> {
-    let path = repo_root.join(SPARSE_FILE);
+pub fn load_sparse_checkout(layout: &RepoLayout) -> RestoreResult<Option<Vec<SparsePattern>>> {
+    let path = layout.sparse_checkout_file();
     let meta = match fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -204,15 +204,15 @@ pub fn load_sparse_checkout(repo_root: &Path) -> RestoreResult<Option<Vec<Sparse
 ///
 /// # Errors
 /// - [`RestoreError::Io`] for filesystem failures.
-pub fn write_sparse_checkout(repo_root: &Path, lines: &[&str]) -> RestoreResult<()> {
-    let mkit_dir = repo_root.join(".mkit");
+pub fn write_sparse_checkout(layout: &RepoLayout, lines: &[&str]) -> RestoreResult<()> {
+    let mkit_dir = layout.worktree_state_dir().to_path_buf();
     fs::create_dir_all(&mkit_dir)?;
     let mut buf = String::new();
     for l in lines {
         buf.push_str(l);
         buf.push('\n');
     }
-    let path = repo_root.join(SPARSE_FILE);
+    let path = layout.sparse_checkout_file();
     crate::atomic::write_atomic(&path, buf.as_bytes(), true)?;
     Ok(())
 }
@@ -739,7 +739,7 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         (dir, store)
     }
 
@@ -1262,8 +1262,9 @@ mod tests {
     #[test]
     fn sparse_checkout_roundtrip() {
         let target = TempDir::new().unwrap();
-        write_sparse_checkout(target.path(), &["src", "!src/secret", "docs/"]).unwrap();
-        let p = load_sparse_checkout(target.path()).unwrap().unwrap();
+        let layout = RepoLayout::single(target.path());
+        write_sparse_checkout(&layout, &["src", "!src/secret", "docs/"]).unwrap();
+        let p = load_sparse_checkout(&layout).unwrap().unwrap();
         assert_eq!(p.len(), 3);
         assert_eq!(p[0].pattern, "src");
         assert!(p[1].negated);
@@ -1274,7 +1275,7 @@ mod tests {
     fn load_sparse_checkout_returns_none_when_missing() {
         let target = TempDir::new().unwrap();
         fs::create_dir_all(target.path().join(".mkit")).unwrap();
-        let p = load_sparse_checkout(target.path()).unwrap();
+        let p = load_sparse_checkout(&RepoLayout::single(target.path())).unwrap();
         assert!(p.is_none());
     }
 

@@ -57,6 +57,7 @@
 //! safe to delete — a missing record just means the next fetch re-downloads
 //! the whole chain once, per the self-heal behaviour above.
 
+use mkit_core::layout::RepoLayout;
 use std::collections::HashSet;
 use std::fs;
 #[cfg(unix)]
@@ -69,10 +70,6 @@ use mkit_core::protocol::PackKey;
 use tempfile::NamedTempFile;
 
 use super::DispatchError;
-
-/// Subdirectory (under `.mkit/`) holding one applied-pack record file per
-/// remote.
-const APPLIED_PACKS_DIR: &str = "applied-packs";
 
 /// A local record of pack digests already unpacked into this repo's object
 /// store for one remote. See the module docs for the on-disk format and the
@@ -96,9 +93,9 @@ impl AppliedPacks {
     /// failure reading the file propagates as [`DispatchError::Io`]. Callers
     /// treat both as non-fatal — the record is a pure cache — see
     /// [`super::packmap::fetch_pack_chain`].
-    pub(crate) fn load(mkit_dir: &Path, remote: &str) -> Result<Self, DispatchError> {
+    pub(crate) fn load(layout: &RepoLayout, remote: &str) -> Result<Self, DispatchError> {
         validate_remote_name(remote)?;
-        let path = record_path(mkit_dir, remote);
+        let path = record_path(layout, remote);
         let set = match fs::read(&path) {
             Ok(bytes) => parse(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
@@ -116,10 +113,10 @@ impl AppliedPacks {
     /// a performance cache (#409), so a fetch whose objects durably land must
     /// never fail because the cache couldn't be read. Persisting is still
     /// attempted best-effort through the normal path.
-    pub(crate) fn empty(mkit_dir: &Path, remote: &str) -> Self {
+    pub(crate) fn empty(layout: &RepoLayout, remote: &str) -> Self {
         Self {
             set: HashSet::new(),
-            path: record_path(mkit_dir, remote),
+            path: record_path(layout, remote),
             dirty: false,
         }
     }
@@ -188,12 +185,10 @@ fn record_file_name(remote: &str) -> String {
     remote.replace('/', "%2F")
 }
 
-/// The full record path for `remote` under `mkit_dir` (the `.mkit/`
-/// directory): `applied-packs/<record_file_name(remote)>`.
-fn record_path(mkit_dir: &Path, remote: &str) -> PathBuf {
-    mkit_dir
-        .join(APPLIED_PACKS_DIR)
-        .join(record_file_name(remote))
+/// The full record path for `remote`:
+/// `<common dir>/applied-packs/<record_file_name(remote)>`.
+fn record_path(layout: &RepoLayout, remote: &str) -> PathBuf {
+    layout.applied_packs_dir().join(record_file_name(remote))
 }
 
 /// Parse the on-disk record format: one lowercase 64-hex digest per LF
@@ -288,10 +283,10 @@ mod tests {
         PackKey::from_hash(h(seed))
     }
 
-    fn fresh_mkit_dir() -> (TempDir, PathBuf) {
+    fn fresh_mkit_dir() -> (TempDir, RepoLayout) {
         let dir = TempDir::new().unwrap();
-        let mkit_dir = dir.path().join(".mkit");
-        fs::create_dir_all(&mkit_dir).unwrap();
+        let mkit_dir = RepoLayout::single(dir.path());
+        fs::create_dir_all(mkit_dir.common_dir()).unwrap();
         (dir, mkit_dir)
     }
 
@@ -337,7 +332,7 @@ mod tests {
     #[test]
     fn malformed_lines_are_ignored_on_load() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
-        let path = mkit_dir.join(APPLIED_PACKS_DIR).join("origin");
+        let path = mkit_dir.applied_packs_dir().join("origin");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let valid = h("valid");
         let mut content = String::new();
@@ -362,7 +357,7 @@ mod tests {
         applied.insert(&pk("pack-1"));
         applied.persist().unwrap();
 
-        let dir = mkit_dir.join(APPLIED_PACKS_DIR);
+        let dir = mkit_dir.applied_packs_dir();
         let leftover: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -381,7 +376,7 @@ mod tests {
         // Never inserted anything, so persist() must not create the file
         // (or the applied-packs/ directory) at all.
         applied.persist().unwrap();
-        assert!(!mkit_dir.join(APPLIED_PACKS_DIR).exists());
+        assert!(!mkit_dir.applied_packs_dir().exists());
     }
 
     #[test]
@@ -413,7 +408,7 @@ mod tests {
             applied.persist().unwrap();
         }
 
-        let dir = mkit_dir.join(APPLIED_PACKS_DIR);
+        let dir = mkit_dir.applied_packs_dir();
         let entries: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).collect();
         assert_eq!(entries.len(), 1, "exactly one flat record file per remote");
         assert!(

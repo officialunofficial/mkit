@@ -4,6 +4,7 @@
 use std::io::Write;
 
 use clap::{Parser, Subcommand};
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::stash;
 use mkit_core::store::ObjectStore;
 
@@ -104,7 +105,8 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match super::open_store_configured(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match super::open_store_configured(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
@@ -118,7 +120,7 @@ pub fn run(args: &[String]) -> u8 {
         | StashCmd::Pop { .. }
         | StashCmd::Apply { .. }
         | StashCmd::Drop { .. }
-        | StashCmd::Clear => match super::acquire_worktree_lock(&cwd) {
+        | StashCmd::Clear => match super::acquire_worktree_lock(&layout) {
             Ok(l) => Some(l),
             Err(code) => return code,
         },
@@ -127,7 +129,7 @@ pub fn run(args: &[String]) -> u8 {
 
     // `lock` is held until this binding drops at the end of `run`, so the
     // worktree stays serialised across the whole `dispatch` call.
-    let code = dispatch(opts.sub, &store, &cwd);
+    let code = dispatch(opts.sub, &store, &layout);
     drop(lock);
     code
 }
@@ -135,24 +137,23 @@ pub fn run(args: &[String]) -> u8 {
 /// Run a parsed stash subcommand. Split out of [`run`] so the worktree
 /// lock acquisition / mode dispatch stays small enough for clippy's
 /// `too_many_lines`.
-fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
+fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
     match sub {
         StashCmd::Save(save) => {
             // git stores the descriptor in the stash message itself, so a
             // no-message save records the auto `WIP on <branch>: <hash>
             // <subject>` line and `stash list` shows it verbatim. An
             // explicit message records `On <branch>: <message>`.
-            let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-            let branch = super::head_branch_name(&mkit_dir);
+            let branch = super::head_branch_name(layout);
             let effective = if save.message.is_empty() {
-                match head_descriptor(store, &mkit_dir) {
+                match head_descriptor(store, layout) {
                     Some((short, subject)) => format!("WIP on {branch}: {short} {subject}"),
                     None => format!("WIP on {branch}"),
                 }
             } else {
                 format!("On {branch}: {}", save.message)
             };
-            match stash::save(store, cwd, &effective) {
+            match stash::save(store, layout, &effective) {
                 Ok(()) => {
                     let mut stderr = std::io::stderr().lock();
                     let _ = writeln!(
@@ -164,7 +165,7 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
                 Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
             }
         }
-        StashCmd::List => match stash::list(cwd) {
+        StashCmd::List => match stash::list(layout) {
             Ok(list) => {
                 // git prints nothing for an empty stash; one
                 // `stash@{N}: <message>` line per entry otherwise (no hash
@@ -185,17 +186,17 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             index,
             restore_index,
         } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, cwd, i, true, restore_index),
+            Ok(i) => restore_entry(store, layout, i, true, restore_index),
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Apply {
             index,
             restore_index,
         } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, cwd, i, false, restore_index),
+            Ok(i) => restore_entry(store, layout, i, false, restore_index),
             Err(e) => emit_err(&e, exit::USAGE),
         },
-        StashCmd::Clear => match stash::clear(cwd) {
+        StashCmd::Clear => match stash::clear(layout) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "cleared all stash entries");
@@ -207,10 +208,10 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             Ok(i) => {
                 // Capture the entry id before removal for git's
                 // `Dropped stash@{N} (<id>)` confirmation.
-                let was = stash::list(cwd)
+                let was = stash::list(layout)
                     .ok()
                     .and_then(|l| l.entries.get(i).map(|e| e.commit_hash));
-                match stash::drop(cwd, i) {
+                match stash::drop(layout, i) {
                     Ok(()) => {
                         let mut stderr = std::io::stderr().lock();
                         match was {
@@ -233,7 +234,7 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Show { index } => match parse_stash_index(&index) {
-            Ok(i) => match stash::render_stash_show(store, cwd, i) {
+            Ok(i) => match stash::render_stash_show(store, layout, i) {
                 Ok(output) => {
                     let mut stdout = std::io::stdout().lock();
                     let _ = stdout.write_all(output.as_bytes());
@@ -252,14 +253,14 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, cwd: &std::path::Path) -> u8 {
 /// guard up-front so a refusal leaves the stash and worktree untouched.
 fn restore_entry(
     store: &ObjectStore,
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     index: usize,
     drop_entry: bool,
     restore_index: bool,
 ) -> u8 {
     let verb = if drop_entry { "pop" } else { "apply" };
     // Empty stash → git's `No stash entries found.` (exit 1).
-    let entries = stash::list(cwd).map(|l| l.entries).unwrap_or_default();
+    let entries = stash::list(layout).map(|l| l.entries).unwrap_or_default();
     if entries.is_empty() {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "No stash entries found.");
@@ -268,11 +269,11 @@ fn restore_entry(
     let entry_short = entries
         .get(index)
         .map(|e| format::short_hash(&e.commit_hash, format::SUMMARY_ABBREV));
-    let tree_hash = match stash::entry_tree_hash(store, cwd, index) {
+    let tree_hash = match stash::entry_tree_hash(store, layout, index) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(e) = super::ensure_restore_safe(cwd, store, tree_hash) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, tree_hash) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
 
@@ -281,9 +282,9 @@ fn restore_entry(
     // keeps it.
     if !restore_index {
         let result = if drop_entry {
-            stash::pop(store, cwd, index)
+            stash::pop(store, layout, index)
         } else {
-            stash::apply(store, cwd, index)
+            stash::apply(store, layout, index)
         };
         return match result {
             Ok(()) => {
@@ -299,17 +300,17 @@ fn restore_entry(
     // the entry removal last means a failure in the index rewrite leaves the
     // stash in place for a normal retry, rather than dropping it with the
     // index half-restored.
-    let snapshot_index = match stash::entry_index(store, cwd, index) {
+    let snapshot_index = match stash::entry_index(store, layout, index) {
         Ok(i) => i,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(e) = stash::apply(store, cwd, index) {
+    if let Err(e) = stash::apply(store, layout, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
     if let Some(restored) = snapshot_index {
         // Write the exact recorded index — preserving staged deletions, which
         // a tree round-trip would drop.
-        if let Err(e) = mkit_core::index::write_index(cwd, &restored) {
+        if let Err(e) = mkit_core::index::write_index(layout, &restored) {
             return emit_err(
                 &format!("stash {verb}: restore index: {e}"),
                 exit::GENERAL_ERROR,
@@ -322,7 +323,7 @@ fn restore_entry(
             "note: this stash has no recorded index state; --index had no effect"
         );
     }
-    if drop_entry && let Err(e) = stash::pop_finalize(cwd, index) {
+    if drop_entry && let Err(e) = stash::pop_finalize(layout, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
     report_restore(drop_entry, index, entry_short.as_deref());
@@ -349,8 +350,8 @@ fn report_restore(drop_entry: bool, index: usize, entry_short: Option<&str>) {
 
 /// `(short-hash, subject)` of the current HEAD commit, for git's auto
 /// stash message. `None` when HEAD is unborn or unreadable.
-fn head_descriptor(store: &ObjectStore, mkit_dir: &std::path::Path) -> Option<(String, String)> {
-    let head = mkit_core::refs::resolve_head(mkit_dir).ok().flatten()?;
+fn head_descriptor(store: &ObjectStore, layout: &RepoLayout) -> Option<(String, String)> {
+    let head = mkit_core::refs::resolve_head(layout).ok().flatten()?;
     let subject = match store.read_object(&head).ok()? {
         mkit_core::object::Object::Commit(c) => String::from_utf8_lossy(&c.message)
             .lines()

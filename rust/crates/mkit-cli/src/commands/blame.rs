@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::{self, Hash};
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::blame::{
     BlameOptions, BlameResult, CopyDetection, MoveDetection, blame_file_reverse, blame_file_with,
     format_blame_text,
@@ -202,11 +203,11 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     // Uses the *effective* move/copy state (`find_moves`/`find_copies`),
     // which folds in the inline `-M<num>`/`-C<num>` forms, so a combination
@@ -241,7 +242,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     // Build the `--ignore-rev` / `--ignore-revs-file` skip set. Each
     // failure is already git-faithful text paired with an exit code.
-    let ignore_revs = match collect_ignore_revs(&store, &mkit_dir, &opts) {
+    let ignore_revs = match collect_ignore_revs(&store, &layout, &opts) {
         Ok(set) => Arc::new(set),
         Err((msg, code)) => return emit_err(&msg, code),
     };
@@ -258,7 +259,7 @@ pub fn run(args: &[String]) -> u8 {
     // `--reverse` walks forward over a `<start>..<end>` range; plain blame
     // walks backward from a single `<rev>` (or HEAD).
     let result = if opts.reverse {
-        let (start, end) = match resolve_reverse_range(&store, &mkit_dir, rev_spec, file) {
+        let (start, end) = match resolve_reverse_range(&store, &layout, rev_spec, file) {
             Ok(pair) => pair,
             Err((msg, code)) => return emit_err(&msg, code),
         };
@@ -270,12 +271,12 @@ pub fn run(args: &[String]) -> u8 {
         // Resolve the commit to blame against: an explicit <rev> via the
         // shared revspec grammar, otherwise HEAD.
         let head = if let Some(spec) = rev_spec {
-            match revspec::resolve_revision(&store, &mkit_dir, spec) {
+            match revspec::resolve_revision(&store, &layout, spec) {
                 Ok(h) => h,
                 Err(e) => return emit_err(&format!("{e}"), exit::NOINPUT),
             }
         } else {
-            match refs::resolve_head(&mkit_dir) {
+            match refs::resolve_head(&layout) {
                 Ok(Some(h)) => h,
                 Ok(None) => return emit_err("no commits yet", exit::GENERAL_ERROR),
                 Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
@@ -454,13 +455,13 @@ fn parse_threshold(val: &str) -> Option<usize> {
 /// codes rather than git's blanket `128`.
 fn collect_ignore_revs(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     opts: &BlameOpts,
 ) -> Result<HashSet<Hash>, (String, u8)> {
     let mut set = HashSet::new();
 
     for spec in &opts.ignore_rev {
-        match revspec::resolve_revision(store, mkit_dir, spec) {
+        match revspec::resolve_revision(store, layout, spec) {
             Ok(h) => {
                 set.insert(h);
             }
@@ -511,7 +512,7 @@ fn collect_ignore_revs(
 /// `-L` messages. On error returns `(message, exit_code)`.
 fn resolve_reverse_range(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     rev_spec: Option<&String>,
     file: &str,
 ) -> Result<(Hash, Hash), (String, u8)> {
@@ -552,17 +553,17 @@ fn resolve_reverse_range(
             exit::USAGE,
         ));
     }
-    let start = revspec::resolve_revision(store, mkit_dir, start_str)
+    let start = revspec::resolve_revision(store, layout, start_str)
         .map_err(|e| (format!("{e}"), exit::NOINPUT))?;
     // `<start>..` (empty end) defaults to HEAD, matching git.
     let end = if end_str.is_empty() {
-        match refs::resolve_head(mkit_dir) {
+        match refs::resolve_head(layout) {
             Ok(Some(h)) => h,
             Ok(None) => return Err(("no commits yet".to_string(), exit::GENERAL_ERROR)),
             Err(e) => return Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
         }
     } else {
-        revspec::resolve_revision(store, mkit_dir, end_str)
+        revspec::resolve_revision(store, layout, end_str)
             .map_err(|e| (format!("{e}"), exit::NOINPUT))?
     };
     // An empty range (`start == end`) has nothing to walk; git rejects it.

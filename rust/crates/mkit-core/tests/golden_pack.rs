@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use mkit_core::chunker::{ChunkIterator, FastCdc, chunk_boundaries};
 use mkit_core::delta;
 use mkit_core::hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::pack::{PackReader, PackWriter, pack_key};
 use mkit_core::store::ObjectStore;
 
@@ -199,7 +200,7 @@ fn pack_basic_pin_bytes_roundtrip() {
 
     // Roundtrip through reader.
     let dir = tempfile::TempDir::new().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
     let report = PackReader::read(&pack, &store).unwrap();
     assert_eq!(report.raw_count, 1);
     assert_eq!(report.delta_count, 0);

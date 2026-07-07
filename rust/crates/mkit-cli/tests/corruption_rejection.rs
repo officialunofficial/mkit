@@ -21,6 +21,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::{Repo, check_exit};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::serialize::serialize;
 use mkit_core::store::ObjectStore;
@@ -73,7 +74,11 @@ fn assert_accepted(repo: &Repo, args: &[&str], case: &str) {
 #[test]
 fn flipped_object_byte_is_rejected() {
     let repo = committed_repo();
-    let head = to_hex(&refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap());
+    let head = to_hex(
+        &refs::resolve_head(&RepoLayout::single(repo.path()))
+            .unwrap()
+            .unwrap(),
+    );
     let path = object_file(&repo, &head);
     let mut bytes = fs::read(&path).unwrap();
     bytes[0] ^= 0xff;
@@ -84,7 +89,11 @@ fn flipped_object_byte_is_rejected() {
 #[test]
 fn truncated_object_is_rejected() {
     let repo = committed_repo();
-    let head = to_hex(&refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap());
+    let head = to_hex(
+        &refs::resolve_head(&RepoLayout::single(repo.path()))
+            .unwrap()
+            .unwrap(),
+    );
     let path = object_file(&repo, &head);
     fs::write(&path, b"\x03MK").unwrap(); // 3 bytes — shorter than the prologue
     assert_rejected(&repo, &["cat-file", &head], "truncated object");
@@ -188,8 +197,9 @@ fn malformed_head_is_rejected() {
 #[test]
 fn tampered_commit_signature_is_rejected_by_verify() {
     let repo = committed_repo();
-    let head = refs::resolve_head(&repo.mkit_dir()).unwrap().unwrap();
-    let store = ObjectStore::open(repo.path()).unwrap();
+    let layout = RepoLayout::single(repo.path());
+    let head = refs::resolve_head(&layout).unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Commit(mut c) = store.read_object(&head).unwrap() else {
         panic!("HEAD is not a commit");
     };
@@ -203,10 +213,11 @@ fn tampered_commit_signature_is_rejected_by_verify() {
 #[test]
 fn tampered_tag_signature_is_rejected_by_verify() {
     let repo = committed_repo();
-    let tag_hash = refs::read_tag(&repo.mkit_dir(), "v1")
+    let layout = RepoLayout::single(repo.path());
+    let tag_hash = refs::read_tag(&layout, "v1")
         .unwrap()
         .expect("annotated tag v1 ref");
-    let store = ObjectStore::open(repo.path()).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
     let Object::Tag(mut t) = store.read_object(&tag_hash).unwrap() else {
         panic!("v1 is not an annotated tag object");
     };

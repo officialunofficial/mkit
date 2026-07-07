@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use mkit_core::index;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
 use mkit_core::ops::conflict_state;
 use mkit_core::refs::{self, Head};
@@ -122,17 +123,17 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match super::open_store_configured(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match super::open_store_configured(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
 
-    let cfg = match crate::config::read_or_default(&cwd) {
+    let cfg = match crate::config::read_or_default(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -142,8 +143,8 @@ pub fn run(args: &[String]) -> u8 {
     // has since resolved and staged. `mkit commit` then records a
     // two-parent commit and clears the merge state, mirroring how
     // `git commit` concludes a merge.
-    let merge_state = if conflict_state::is_merge_in_progress(&mkit_dir) {
-        match conflict_state::read_merge_state(&mkit_dir) {
+    let merge_state = if conflict_state::is_merge_in_progress(&layout) {
+        match conflict_state::read_merge_state(&layout) {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("read merge state: {e}"), exit::GENERAL_ERROR),
         }
@@ -163,7 +164,7 @@ pub fn run(args: &[String]) -> u8 {
     // (so it supersedes HEAD rather than stacking on it) and, when no
     // `-m` is given, reuses HEAD's message verbatim.
     let amend_target = if opts.amend {
-        match resolve_amend_target(&mkit_dir, &store) {
+        match resolve_amend_target(&layout, &store) {
             Ok(commit) => Some(commit),
             Err((m, c)) => return emit_err(&m, c),
         }
@@ -202,7 +203,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // ---- Load signer. ----------------------------------------------
-    let mut signer = match load_commit_signer(&cwd, &cfg) {
+    let mut signer = match load_commit_signer(&layout, &cfg) {
         Ok(signer) => signer,
         Err((msg, code)) => return emit_err(&msg, code),
     };
@@ -223,7 +224,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if opts.all
-        && let Err(e) = super::add::stage_tracked_changes(&cwd, &store)
+        && let Err(e) = super::add::stage_tracked_changes(&layout, &store)
     {
         return emit_err(&format!("stage tracked changes: {e}"), exit::GENERAL_ERROR);
     }
@@ -233,7 +234,7 @@ pub fn run(args: &[String]) -> u8 {
     // (and `git commit` after a merge). For a clean `merge --no-commit`
     // the record set is empty, so both checks are no-ops.
     if merge_state.is_some() {
-        let records = match conflict_state::read_conflicts(&mkit_dir) {
+        let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
             Ok(r) => r,
             Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
         };
@@ -250,7 +251,7 @@ pub fn run(args: &[String]) -> u8 {
             Ok(None) => {}
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         }
-        if let Err(e) = super::conflict::ensure_conflict_paths_staged(&cwd, &store, &records) {
+        if let Err(e) = super::conflict::ensure_conflict_paths_staged(&layout, &store, &records) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
     }
@@ -261,7 +262,7 @@ pub fn run(args: &[String]) -> u8 {
     // changeset (the user is committing deletions) and produces an
     // empty-tree commit, so we DON'T gate on `staged_count()` (which
     // excludes Removed entries by design).
-    let idx = match index::read_index(&cwd) {
+    let idx = match index::read_index(&layout) {
         Ok(idx) => idx,
         Err(e) => return emit_err(&format!("read index: {e}"), exit::GENERAL_ERROR),
     };
@@ -297,7 +298,7 @@ pub fn run(args: &[String]) -> u8 {
     if let Some(state) = &merge_state
         && let Ok(Object::Commit(orig)) = store.read_object(&state.orig_head)
         && orig.tree_hash == tree_hash
-        && conflict_state::read_result_tree(&mkit_dir)
+        && conflict_state::read_result_tree(layout.worktree_state_dir())
             .ok()
             .flatten()
             .is_some_and(|result| result != orig.tree_hash)
@@ -322,7 +323,7 @@ pub fn run(args: &[String]) -> u8 {
         // depend on a HEAD read that could silently drop a parent.
         vec![state.orig_head, state.merge_head]
     } else {
-        match refs::resolve_head(&mkit_dir) {
+        match refs::resolve_head(&layout) {
             Ok(Some(h)) => vec![h],
             _ => vec![],
         }
@@ -366,11 +367,10 @@ pub fn run(args: &[String]) -> u8 {
     // (under the worktree lock) so the superseded commit stays
     // recoverable; abort if the recovery log can't be written.
     if amend_target.is_some() {
-        match refs::resolve_head(&mkit_dir) {
+        match refs::resolve_head(&layout) {
             Ok(Some(old_head)) => {
-                let branch = super::head_branch_name(&mkit_dir);
-                if let Err((m, c)) = super::record_superseded(&mkit_dir, "amend", &branch, old_head)
-                {
+                let branch = super::head_branch_name(&layout);
+                if let Err((m, c)) = super::record_superseded(&layout, "amend", &branch, old_head) {
                     return emit_err(&m, c);
                 }
             }
@@ -378,16 +378,16 @@ pub fn run(args: &[String]) -> u8 {
             Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
         }
     }
-    if let Err((m, c)) = advance_head(&mkit_dir, &commit_hash) {
+    if let Err((m, c)) = advance_head(&layout, &commit_hash) {
         return emit_err(&m, c);
     }
-    if let Err(e) = super::sync_index_to_tree(&cwd, &store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
     // The merge is now recorded; clear MERGE_HEAD/MERGE_MSG/conflicts so the
     // repo is no longer "merging".
     if merge_state.is_some()
-        && let Err(e) = conflict_state::clear_merge_state(&mkit_dir)
+        && let Err(e) = conflict_state::clear_merge_state(&layout)
     {
         return emit_err(&format!("clear merge state: {e}"), exit::GENERAL_ERROR);
     }
@@ -399,7 +399,7 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         first_parent.and_then(|p| commit_tree(&store, &p))
     };
-    let branch_name = match refs::read_head(&mkit_dir) {
+    let branch_name = match refs::read_head(&layout) {
         Ok(Head::Branch(b)) => Some(b),
         _ => None,
     };
@@ -505,10 +505,10 @@ mod expand_dash_am_tests {
 /// path-misconfigurations and tooling errors. Users run `mkit keygen`
 /// once, explicitly, and a missing key on `mkit commit` is now an error.
 fn load_signing_key(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     rel_signing_key_path: &str,
 ) -> Result<KeyPair, (String, u8)> {
-    let key_path = match crate::config::resolve_key_path(cwd, rel_signing_key_path) {
+    let key_path = match crate::config::resolve_key_path(layout, rel_signing_key_path) {
         Ok(p) => p,
         Err(e) => return Err((format!("{e}"), exit::CONFIG_ERROR)),
     };
@@ -603,11 +603,11 @@ impl CommitSigner {
 }
 
 pub(super) fn load_commit_signer(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     cfg: &Config,
 ) -> Result<CommitSigner, (String, u8)> {
     match cfg.signer.as_str() {
-        "" | "legacy" => load_signing_key(cwd, &cfg.signing_key).map(CommitSigner::Legacy),
+        "" | "legacy" => load_signing_key(layout, &cfg.signing_key).map(CommitSigner::Legacy),
         "keystore" => load_keystore_commit_signer(cfg),
         other => Err((
             format!("unknown signer `{other}` — expected `legacy` or `keystore`"),
@@ -660,11 +660,8 @@ fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8
 /// this commit's parents and (absent `-m`) its message. Errors when
 /// HEAD has no commit yet (nothing to amend) or when HEAD does not
 /// resolve to a `Commit` object.
-fn resolve_amend_target(
-    mkit_dir: &std::path::Path,
-    store: &ObjectStore,
-) -> Result<Commit, (String, u8)> {
-    let head = refs::resolve_head(mkit_dir)
+fn resolve_amend_target(layout: &RepoLayout, store: &ObjectStore) -> Result<Commit, (String, u8)> {
+    let head = refs::resolve_head(layout)
         .map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?
         .ok_or_else(|| {
             (
@@ -697,19 +694,19 @@ fn resolve_amend_target(
 /// advances bypass the journal: per-branch history is keyed on a
 /// branch name and a detached HEAD has none.
 fn advance_head(
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     commit_hash: &mkit_core::hash::Hash,
 ) -> Result<(), (String, u8)> {
-    let head = refs::read_head(mkit_dir).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
+    let head = refs::read_head(layout).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
         Head::Branch(name) => super::write_ref_recording_history(
-            mkit_dir,
+            layout,
             &name,
             refs::RefWriteCondition::Any,
             commit_hash,
         )
         .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
-        Head::Detached(_) => refs::write_head_detached(mkit_dir, commit_hash)
+        Head::Detached(_) => refs::write_head_detached(layout, commit_hash)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
     }
 }

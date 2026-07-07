@@ -12,6 +12,7 @@
 use std::io::Write;
 
 use clap::Parser;
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs::{self, Head};
 
 use crate::clap_shim;
@@ -49,17 +50,17 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = super::resolve_layout(&cwd);
 
     match opts.target {
-        Some(target) => write_head(&mkit_dir, &target),
-        None => read_head(&mkit_dir, opts.short),
+        Some(target) => write_head(&layout, &target),
+        None => read_head(&layout, opts.short),
     }
 }
 
 /// Read mode: print HEAD's target (full ref, or short branch name).
-fn read_head(mkit_dir: &std::path::Path, short: bool) -> u8 {
-    match refs::read_head(mkit_dir) {
+fn read_head(layout: &RepoLayout, short: bool) -> u8 {
+    match refs::read_head(layout) {
         Ok(Head::Branch(name)) => {
             let mut stdout = std::io::stdout().lock();
             if short {
@@ -77,7 +78,7 @@ fn read_head(mkit_dir: &std::path::Path, short: bool) -> u8 {
 
 /// Write mode: repoint HEAD at `<target>` (must be `refs/heads/<branch>`).
 /// Like git, the branch need not exist yet, and the worktree is untouched.
-fn write_head(mkit_dir: &std::path::Path, target: &str) -> u8 {
+fn write_head(layout: &RepoLayout, target: &str) -> u8 {
     let Some(branch) = target.strip_prefix("refs/heads/") else {
         return emit_err(
             &format!("HEAD can only point at a branch under refs/heads/ (got '{target}')"),
@@ -87,7 +88,7 @@ fn write_head(mkit_dir: &std::path::Path, target: &str) -> u8 {
     if !refs::validate_ref_name(branch) {
         return emit_err(&format!("invalid branch name '{branch}'"), exit::USAGE);
     }
-    match refs::write_head_branch(mkit_dir, branch) {
+    match refs::write_head_branch(layout, branch) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write HEAD: {e}"), exit::CANTCREAT),
     }

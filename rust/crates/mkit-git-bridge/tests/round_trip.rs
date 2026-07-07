@@ -21,7 +21,7 @@ const TS: u64 = 1_700_000_000;
 
 fn store() -> (tempfile::TempDir, ObjectStore) {
     let dir = tempfile::tempdir().unwrap();
-    let store = ObjectStore::init(dir.path()).unwrap();
+    let store = ObjectStore::init(&mkit_core::layout::RepoLayout::single(dir.path())).unwrap();
     (dir, store)
 }
 

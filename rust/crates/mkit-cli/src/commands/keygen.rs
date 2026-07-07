@@ -82,7 +82,8 @@ pub fn run(args: &[String]) -> u8 {
     // `mkit attest` agree on where the key lives — a user with
     // `signing_key = /home/u/.mkit/global.key` in their user-scoped
     // config gets that path written/read consistently.
-    let cfg = match crate::config::read_or_default(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let cfg = match crate::config::read_or_default(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
@@ -104,7 +105,7 @@ pub fn run(args: &[String]) -> u8 {
             );
         }
     };
-    let key_path = match crate::config::resolve_key_path(&cwd, rel_path) {
+    let key_path = match crate::config::resolve_key_path(&layout, rel_path) {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("{e}"), exit::CONFIG_ERROR),
     };

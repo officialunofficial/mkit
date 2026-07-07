@@ -615,7 +615,8 @@ mod tests {
 
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().expect("tempdir");
-        let store = ObjectStore::init(dir.path()).expect("init");
+        let store =
+            ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).expect("init");
         (dir, store)
     }
 
@@ -660,7 +661,7 @@ mod tests {
         let h = batch.write(b"staged bytes").unwrap();
 
         // A second, independent handle must not see the object yet.
-        let other = ObjectStore::open(dir.path()).unwrap();
+        let other = ObjectStore::open(&crate::layout::RepoLayout::single(dir.path())).unwrap();
         assert!(
             !other.contains(&h),
             "staged object must be invisible before commit"

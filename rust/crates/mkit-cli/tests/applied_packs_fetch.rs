@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mkit_cli::remote_dispatch::{fetch_all, push_all};
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::ops::reachable_objects;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
 use mkit_core::refs::{self, Ref};
@@ -177,12 +178,13 @@ fn steady_state_fetch_skips_already_applied_packs() {
     // Sanity: bob's remote-tracking ref actually landed on alice's latest
     // tip (fetch never checks out the working tree, so we assert via the
     // ref rather than reading a working-tree file).
-    let alice_tip = refs::read_ref(&alice.path().join(".mkit"), "main")
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
         .unwrap();
-    let bob_tracking_tip = refs::read_remote_ref(&bob.path().join(".mkit"), "default", "main")
-        .unwrap()
-        .unwrap();
+    let bob_tracking_tip =
+        refs::read_remote_ref(&RepoLayout::single(bob.path()), "default", "main")
+            .unwrap()
+            .unwrap();
     assert_eq!(alice_tip, bob_tracking_tip);
 }
 
@@ -229,8 +231,9 @@ fn self_heal_recovers_when_object_store_is_wiped_but_record_survives() {
     );
 
     // Every object reachable from bob's remote-tracking tip must be back.
-    let bob_store = ObjectStore::open(bob.path()).unwrap();
-    let remote_tip = refs::read_remote_ref(&bob_mkit, "default", "main")
+    let bob_layout = RepoLayout::single(bob.path());
+    let bob_store = ObjectStore::open(&bob_layout).unwrap();
+    let remote_tip = refs::read_remote_ref(&bob_layout, "default", "main")
         .unwrap()
         .unwrap();
     let closure: HashSet<_> = reachable_objects(&bob_store, &remote_tip)

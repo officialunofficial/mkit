@@ -17,6 +17,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Object, ObjectType, Tag};
 use mkit_core::refs;
 use mkit_core::serialize;
@@ -69,7 +70,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
+    let layout = super::resolve_layout(&cwd);
 
     // -s implies -a (a signed tag is an annotated tag with a signature).
     let annotated = opts.annotate || opts.sign;
@@ -81,13 +82,13 @@ pub fn run(args: &[String]) -> u8 {
         if opts.delete {
             return super::usage_error("mkit tag: -l and -d are mutually exclusive");
         }
-        return list(&mkit_dir, opts.name.as_deref());
+        return list(&layout, opts.name.as_deref());
     }
 
     match (opts.delete, opts.name.as_deref()) {
         (true, Some(name)) => {
-            let was = refs::read_tag(&mkit_dir, name).ok().flatten();
-            match refs::delete_tag(&mkit_dir, name) {
+            let was = refs::read_tag(&layout, name).ok().flatten();
+            match refs::delete_tag(&layout, name) {
                 Ok(()) => {
                     let mut stderr = std::io::stderr().lock();
                     match was {
@@ -112,36 +113,34 @@ pub fn run(args: &[String]) -> u8 {
             if annotated || opts.message.is_some() {
                 return super::usage_error("usage: mkit tag -a|-s <name> [-m <msg>] [<commit>]");
             }
-            list(&mkit_dir, None)
+            list(&layout, None)
         }
         (false, Some(name)) => {
             if annotated {
-                create_annotated(&cwd, &mkit_dir, &opts, name)
+                create_annotated(&layout, &opts, name)
             } else {
                 if opts.message.is_some() {
                     return super::usage_error(
                         "the -m flag requires -a or -s (annotated/signed tag)",
                     );
                 }
-                create_lightweight(&cwd, &mkit_dir, name, opts.target.as_deref())
+                create_lightweight(&layout, name, opts.target.as_deref())
             }
         }
     }
 }
 
-fn list(mkit_dir: &std::path::Path, pattern: Option<&str>) -> u8 {
-    let mut tags = match refs::list_tags(mkit_dir) {
+fn list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
+    let mut tags = match refs::list_tags(layout) {
         Ok(t) => t,
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     };
     if let Some(pat) = pattern {
         tags.retain(|t| super::branch::glob_match(pat, &t.name));
     }
-    // Open the store from the repo root (parent of `.mkit`) so we can
-    // peek at annotated-tag objects. Listing still works if this fails.
-    let store = mkit_dir
-        .parent()
-        .and_then(|root| ObjectStore::open(root).ok());
+    // Open the store so we can peek at annotated-tag objects. Listing
+    // still works if this fails.
+    let store = ObjectStore::open(layout).ok();
     let mut stdout = std::io::stdout().lock();
     for t in tags {
         let short = t
@@ -174,30 +173,25 @@ fn list(mkit_dir: &std::path::Path, pattern: Option<&str>) -> u8 {
 /// Resolve the target hash for `target_spec` (or HEAD when `None`).
 fn resolve_target(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     target_spec: Option<&str>,
 ) -> Result<mkit_core::hash::Hash, (String, u8)> {
     match target_spec {
-        Some(spec) => super::revspec::resolve_revision(store, mkit_dir, spec)
+        Some(spec) => super::revspec::resolve_revision(store, layout, spec)
             .map_err(|e| (format!("{e}"), exit::DATAERR)),
-        None => match refs::resolve_head(mkit_dir) {
+        None => match refs::resolve_head(layout) {
             Ok(Some(h)) => Ok(h),
             _ => Err(("no HEAD commit to tag".to_string(), exit::GENERAL_ERROR)),
         },
     }
 }
 
-fn create_lightweight(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
-    name: &str,
-    target_spec: Option<&str>,
-) -> u8 {
-    let store = match ObjectStore::open(cwd) {
+fn create_lightweight(layout: &RepoLayout, name: &str, target_spec: Option<&str>) -> u8 {
+    let store = match ObjectStore::open(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let h = match resolve_target(&store, mkit_dir, target_spec) {
+    let h = match resolve_target(&store, layout, target_spec) {
         Ok(h) => h,
         Err((m, c)) => return emit_err(&m, c),
     };
@@ -206,7 +200,7 @@ fn create_lightweight(
     // it before writing the ref, so a concurrent `gc --grace-secs 0` can't
     // prune the (possibly unreachable) target between resolve and publish
     // (#267).
-    let _lock = match super::acquire_worktree_lock(cwd) {
+    let _lock = match super::acquire_worktree_lock(layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -221,7 +215,7 @@ fn create_lightweight(
     }
     // `Missing` (issue #206) refuses to silently overwrite an existing
     // tag of the same name.
-    match refs::update_tag(mkit_dir, name, refs::RefWriteCondition::Missing, &h) {
+    match refs::update_tag(layout, name, refs::RefWriteCondition::Missing, &h) {
         Ok(()) => exit::OK,
         Err(refs::RefError::Conflict(_)) => {
             emit_err(&format!("tag '{name}' already exists"), exit::CANTCREAT)
@@ -230,23 +224,18 @@ fn create_lightweight(
     }
 }
 
-fn create_annotated(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
-    opts: &TagOpts,
-    name: &str,
-) -> u8 {
-    let store = match ObjectStore::open(cwd) {
+fn create_annotated(layout: &RepoLayout, opts: &TagOpts, name: &str) -> u8 {
+    let store = match ObjectStore::open(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let cfg = match crate::config::read_or_default(cwd) {
+    let cfg = match crate::config::read_or_default(layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
     // Resolve the target object and remember its type for the tag.
-    let target = match resolve_target(&store, mkit_dir, opts.target.as_deref()) {
+    let target = match resolve_target(&store, layout, opts.target.as_deref()) {
         Ok(h) => h,
         Err((m, c)) => return emit_err(&m, c),
     };
@@ -266,7 +255,7 @@ fn create_annotated(
     };
 
     // ---- Load signer (also used to derive the tagger fallback). ----
-    let mut signer = match super::commit::load_commit_signer(cwd, &cfg) {
+    let mut signer = match super::commit::load_commit_signer(layout, &cfg) {
         Ok(s) => s,
         Err((m, c)) => return emit_err(&m, c),
     };
@@ -311,7 +300,7 @@ fn create_annotated(
     // before its ref makes it reachable (#267). The repo was validated above
     // (store open), so a non-repo already reported cleanly — not as a lock
     // error. Acquired here (after the editor/signing) to keep the hold tight.
-    let _lock = match super::acquire_worktree_lock(cwd) {
+    let _lock = match super::acquire_worktree_lock(layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
@@ -336,7 +325,7 @@ fn create_annotated(
         Ok(h) => h,
         Err(e) => return emit_err(&format!("store tag: {e}"), exit::CANTCREAT),
     };
-    match refs::update_tag(mkit_dir, name, refs::RefWriteCondition::Missing, &tag_hash) {
+    match refs::update_tag(layout, name, refs::RefWriteCondition::Missing, &tag_hash) {
         Ok(()) => {}
         Err(refs::RefError::Conflict(_)) => {
             return emit_err(&format!("tag '{name}' already exists"), exit::CANTCREAT);

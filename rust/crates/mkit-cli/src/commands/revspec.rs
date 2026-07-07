@@ -28,10 +28,10 @@
 //! are split by the caller (`diff`) before each end reaches here.
 
 use mkit_core::hash::{self, HEX_LEN, Hash};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
-use std::path::Path;
 
 /// Minimum length of an accepted short-hash prefix. Shorter prefixes are
 /// rejected as too-ambiguous-by-construction rather than scanned, so a
@@ -73,7 +73,7 @@ pub enum RevError {
 /// suffix navigation is invalid.
 pub fn resolve_revision(
     store: &ObjectStore,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     spec: &str,
 ) -> Result<Hash, RevError> {
     // Split the base from any trailing `~`/`^` navigation. The base is
@@ -84,7 +84,7 @@ pub fn resolve_revision(
         return Err(RevError::Unknown(spec.to_string()));
     }
 
-    let mut current = resolve_base(store, mkit_dir, base)?;
+    let mut current = resolve_base(store, layout, base)?;
 
     // Walk the suffix steps left-to-right.
     let mut rest = suffix;
@@ -114,10 +114,10 @@ pub fn resolve_revision(
 
 /// Resolve the base token (no `~`/`^` suffix) to a hash: ref, then
 /// full/short hash.
-fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash, RevError> {
+fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, RevError> {
     // 1. HEAD.
     if base == "HEAD" {
-        return match refs::resolve_head(mkit_dir) {
+        return match refs::resolve_head(layout) {
             Ok(Some(h)) => Ok(h),
             Ok(None) => Err(RevError::Unknown("HEAD".to_string())),
             Err(e) => Err(RevError::Backend(format!("resolve HEAD: {e}"))),
@@ -128,20 +128,20 @@ fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash
     //    refs/remotes/<r>/<b>. These are unambiguous and checked
     //    before any short-form guessing.
     if let Some(short) = base.strip_prefix("refs/heads/") {
-        if let Ok(Some(h)) = refs::read_ref(mkit_dir, short) {
+        if let Ok(Some(h)) = refs::read_ref(layout, short) {
             return Ok(h);
         }
         return Err(RevError::Unknown(base.to_string()));
     }
     if let Some(short) = base.strip_prefix("refs/tags/") {
-        if let Ok(Some(h)) = refs::read_tag(mkit_dir, short) {
+        if let Ok(Some(h)) = refs::read_tag(layout, short) {
             return Ok(h);
         }
         return Err(RevError::Unknown(base.to_string()));
     }
     if let Some(rest) = base.strip_prefix("refs/remotes/") {
         if let Some((remote, branch)) = rest.split_once('/')
-            && let Ok(Some(h)) = refs::read_remote_ref(mkit_dir, remote, branch)
+            && let Ok(Some(h)) = refs::read_remote_ref(layout, remote, branch)
         {
             return Ok(h);
         }
@@ -153,16 +153,16 @@ fn resolve_base(store: &ObjectStore, mkit_dir: &Path, base: &str) -> Result<Hash
     //    bad ref name — which we treat as "not a ref" and fall through
     //    to hash parsing (a bare hash is not a valid ref name anyway).
     if refs::validate_ref_name(base) {
-        if let Ok(Some(h)) = refs::read_ref(mkit_dir, base) {
+        if let Ok(Some(h)) = refs::read_ref(layout, base) {
             return Ok(h);
         }
-        if let Ok(Some(h)) = refs::read_tag(mkit_dir, base) {
+        if let Ok(Some(h)) = refs::read_tag(layout, base) {
             return Ok(h);
         }
         // 3b. Remote-tracking short form `<remote>/<branch>` (git's
         //     resolution order also places this after heads/tags).
         if let Some((remote, branch)) = base.split_once('/')
-            && let Ok(Some(h)) = refs::read_remote_ref(mkit_dir, remote, branch)
+            && let Ok(Some(h)) = refs::read_remote_ref(layout, remote, branch)
         {
             return Ok(h);
         }
@@ -305,8 +305,8 @@ fn is_hex(s: &str) -> bool {
 mod tests {
     use super::*;
     use mkit_core::object::{Commit, Identity, Object};
+    use mkit_core::refs;
     use mkit_core::serialize;
-    use mkit_core::{MKIT_DIR, refs};
     use tempfile::TempDir;
 
     fn author() -> Identity {
@@ -314,12 +314,12 @@ mod tests {
     }
 
     /// Build a throwaway repo with an object store + ref dir.
-    fn fresh_repo() -> (TempDir, ObjectStore, std::path::PathBuf) {
+    fn fresh_repo() -> (TempDir, ObjectStore, RepoLayout) {
         let dir = TempDir::new().unwrap();
-        let store = ObjectStore::init(dir.path()).unwrap();
-        let mkit_dir = dir.path().join(MKIT_DIR);
-        refs::init(&mkit_dir).unwrap();
-        (dir, store, mkit_dir)
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        refs::init(&layout).unwrap();
+        (dir, store, layout)
     }
 
     /// Write a commit object with the given parents and return its hash.

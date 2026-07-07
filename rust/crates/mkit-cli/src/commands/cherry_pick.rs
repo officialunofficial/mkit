@@ -17,6 +17,7 @@ use std::io::Write;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::cherry_pick::{CherryPickError, cherry_pick};
 use mkit_core::ops::conflict_state::{
@@ -66,22 +67,22 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let _lock = match super::acquire_worktree_lock(&cwd) {
+    let _lock = match super::acquire_worktree_lock(&layout) {
         Ok(l) => l,
         Err(code) => return code,
     };
 
     if opts.abort {
-        abort(&cwd, &mkit_dir, &store)
+        abort(&layout, &store)
     } else if opts.cont {
-        cont(&cwd, &mkit_dir, &store)
+        cont(&layout, &store)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&cwd, &mkit_dir, &store, hex, opts.no_commit, opts.mainline)
+        start(&layout, &store, hex, opts.no_commit, opts.mainline)
     } else {
         super::usage_error("usage: mkit cherry-pick <commit> | --continue | --abort")
     }
@@ -89,20 +90,19 @@ pub fn run(args: &[String]) -> u8 {
 
 #[allow(clippy::too_many_lines)]
 fn start(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     hex: &str,
     no_commit: bool,
     mainline: Option<usize>,
 ) -> u8 {
-    if let Some(op) = in_progress_op_name(mkit_dir) {
+    if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
             exit::GENERAL_ERROR,
         );
     }
-    let target: Hash = match super::revspec::resolve_revision(store, mkit_dir, hex) {
+    let target: Hash = match super::revspec::resolve_revision(store, layout, hex) {
         // Peel annotated/signed tags to their target commit so
         // `mkit cherry-pick <annotated-tag>` works like git (a tag is a
         // ref, which the doc comment advertises as acceptable). Mirrors
@@ -111,7 +111,7 @@ fn start(
         Err(e) => return emit_err(&format!("bad commit: {e}"), exit::DATAERR),
     };
 
-    let ours = match refs::resolve_head(mkit_dir) {
+    let ours = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => return emit_err("no commits on current branch", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
@@ -153,11 +153,11 @@ fn start(
                 exit::GENERAL_ERROR,
             );
         }
-        if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+        if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         let records = match super::conflict::materialize_conflicts(
-            cwd,
+            layout,
             store,
             result.tree_hash,
             &result.conflicts,
@@ -170,12 +170,14 @@ fn start(
             orig_head: ours,
             message: result.original_message.clone(),
         };
-        if let Err(e) = conflict_state::write_cherry_pick_state(mkit_dir, &state, &records) {
+        if let Err(e) = conflict_state::write_cherry_pick_state(layout, &state, &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         // Record the result tree so `--abort` treats the operation's clean
         // hunks (not just conflict paths) as discardable.
-        if let Err(e) = conflict_state::write_result_tree(mkit_dir, &result.tree_hash) {
+        if let Err(e) =
+            conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
+        {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
@@ -192,7 +194,7 @@ fn start(
         return exit::GENERAL_ERROR;
     }
 
-    if let Err(e) = super::ensure_restore_safe(cwd, store, result.tree_hash) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
@@ -200,14 +202,14 @@ fn start(
     // not commit or move HEAD. The next `mkit commit` records it as an
     // ordinary single-parent commit on the current branch.
     if no_commit {
-        if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+        if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         // Restoring from a tree drops staged DELETIONS; re-stage them as
         // tombstones so a deletion-bearing pick (or an all-deletions pick)
         // stays staged and `mkit commit` records it.
         if let Err(e) =
-            super::stage_removed_tombstones(cwd, store, Some(ours_tree), result.tree_hash)
+            super::stage_removed_tombstones(layout, store, Some(ours_tree), result.tree_hash)
         {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
@@ -221,7 +223,7 @@ fn start(
     }
 
     let commit_hash = match create_commit(
-        cwd,
+        layout,
         store,
         result.tree_hash,
         ours,
@@ -231,10 +233,10 @@ fn start(
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, result.tree_hash) {
+    if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = advance_head(mkit_dir, &commit_hash) {
+    if let Err(e) = advance_head(layout, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
     // git-shaped summary: `[<branch> <hash>] <subject>` + diffstat.
@@ -243,7 +245,7 @@ fn start(
         .next()
         .unwrap_or("")
         .to_owned();
-    let branch_name = match refs::read_head(mkit_dir) {
+    let branch_name = match refs::read_head(layout) {
         Ok(Head::Branch(b)) => Some(b),
         _ => None,
     };
@@ -265,20 +267,20 @@ fn start(
     exit::OK
 }
 
-fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
-    if !is_cherry_pick_in_progress(mkit_dir) {
+fn cont(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+    if !is_cherry_pick_in_progress(layout) {
         return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR);
     }
-    let state = match conflict_state::read_cherry_pick_state(mkit_dir) {
+    let state = match conflict_state::read_cherry_pick_state(layout) {
         Ok(Some(s)) => s,
         Ok(None) => return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read cherry-pick state: {e}"), exit::GENERAL_ERROR),
     };
-    let records = match conflict_state::read_conflicts(mkit_dir) {
+    let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    match super::conflict::first_unresolved_marker(cwd, &records) {
+    match super::conflict::first_unresolved_marker(layout.worktree_root(), &records) {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
@@ -290,13 +292,13 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Ok(None) => {}
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     }
-    if let Err(e) = super::conflict::ensure_conflict_paths_staged(cwd, store, &records) {
+    if let Err(e) = super::conflict::ensure_conflict_paths_staged(layout, store, &records) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // Single parent = current HEAD (== orig_head). Build tree from the
     // resolved index, NOT the conflict-time tree.
-    let idx = match super::read_or_seed_index_from_head(cwd, store) {
+    let idx = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
@@ -305,13 +307,13 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
         Err(e) => return emit_err(&format!("build tree from index: {e}"), exit::GENERAL_ERROR),
     };
 
-    let parent = match refs::resolve_head(mkit_dir) {
+    let parent = match refs::resolve_head(layout) {
         Ok(Some(h)) => h,
         Ok(None) => state.orig_head,
         Err(e) => return emit_err(&format!("resolve HEAD: {e}"), exit::GENERAL_ERROR),
     };
     let commit_hash = match create_commit(
-        cwd,
+        layout,
         store,
         tree_hash,
         parent,
@@ -325,13 +327,13 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
     // the tree was built from the index, so the worktree already holds the
     // resolved content; restoring it would clobber any unstaged edits the
     // user made (e.g. on a cleanly-merged path) before `--continue`.
-    if let Err(e) = super::sync_index_to_tree(cwd, store, tree_hash) {
+    if let Err(e) = super::sync_index_to_tree(layout, store, tree_hash) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
-    if let Err(e) = advance_head(mkit_dir, &commit_hash) {
+    if let Err(e) = advance_head(layout, &commit_hash) {
         return emit_err(&e, exit::CANTCREAT);
     }
-    if let Err(e) = conflict_state::clear_cherry_pick_state(mkit_dir) {
+    if let Err(e) = conflict_state::clear_cherry_pick_state(layout) {
         return emit_err(
             &format!("clear cherry-pick state: {e}"),
             exit::GENERAL_ERROR,
@@ -347,23 +349,23 @@ fn cont(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) 
     exit::OK
 }
 
-fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore) -> u8 {
-    if !is_cherry_pick_in_progress(mkit_dir) {
+fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+    if !is_cherry_pick_in_progress(layout) {
         return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR);
     }
-    let state = match conflict_state::read_cherry_pick_state(mkit_dir) {
+    let state = match conflict_state::read_cherry_pick_state(layout) {
         Ok(Some(s)) => s,
         Ok(None) => return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read cherry-pick state: {e}"), exit::GENERAL_ERROR),
     };
-    let records = match conflict_state::read_conflicts(mkit_dir) {
+    let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(code) = restore_to(cwd, mkit_dir, store, state.orig_head, &records) {
+    if let Err(code) = restore_to(layout, store, state.orig_head, &records) {
         return code;
     }
-    if let Err(e) = conflict_state::clear_cherry_pick_state(mkit_dir) {
+    if let Err(e) = conflict_state::clear_cherry_pick_state(layout) {
         return emit_err(
             &format!("clear cherry-pick state: {e}"),
             exit::GENERAL_ERROR,
@@ -375,8 +377,7 @@ fn abort(cwd: &std::path::Path, mkit_dir: &std::path::Path, store: &ObjectStore)
 }
 
 fn restore_to(
-    cwd: &std::path::Path,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     target: Hash,
     records: &[mkit_core::ops::conflict_state::ConflictRecord],
@@ -384,41 +385,44 @@ fn restore_to(
     let target_tree = load_tree_hash(store, target)?;
     // The operation's result tree lets the guards treat its clean hunks (not
     // just conflict paths) as discardable.
-    let op_result = conflict_state::read_result_tree(mkit_dir).ok().flatten();
+    let op_result = conflict_state::read_result_tree(layout.worktree_state_dir())
+        .ok()
+        .flatten();
     // Pre-flight: refuse before any mutation when the abort would clobber
     // genuine user work on a non-discardable path (the reset below discards
     // the user's in-progress conflict resolution, so it must not run if
     // the abort is going to fail).
-    if let Err(e) = super::conflict::ensure_abort_safe(cwd, store, records, target_tree, op_result)
+    if let Err(e) =
+        super::conflict::ensure_abort_safe(layout, store, records, target_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
     if let Err(e) =
-        super::conflict::reset_conflict_paths(cwd, store, records, target_tree, op_result)
+        super::conflict::reset_conflict_paths(layout, store, records, target_tree, op_result)
     {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::ensure_restore_safe(cwd, store, target_tree) {
+    if let Err(e) = super::ensure_restore_safe(layout, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    if let Err(e) = super::restore_worktree_and_index(cwd, store, target_tree) {
+    if let Err(e) = super::restore_worktree_and_index(layout, store, target_tree) {
         return Err(emit_err(&e, exit::GENERAL_ERROR));
     }
-    super::restore_head_ref(mkit_dir, &target)
+    super::restore_head_ref(layout, &target)
 }
 
 fn create_commit(
-    cwd: &std::path::Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
     parent: Hash,
     message: &[u8],
     picked: Hash,
 ) -> Result<Hash, u8> {
-    let cfg = config::read_or_default(cwd)
+    let cfg = config::read_or_default(layout)
         .map_err(|e| emit_err(&format!("config: {e}"), exit::CONFIG_ERROR))?;
-    let mut signer =
-        super::commit::load_commit_signer(cwd, &cfg).map_err(|(msg, code)| emit_err(&msg, code))?;
+    let mut signer = super::commit::load_commit_signer(layout, &cfg)
+        .map_err(|(msg, code)| emit_err(&msg, code))?;
     let signer_public = signer
         .public_key()
         .map_err(|(msg, code)| emit_err(&msg, code))?;

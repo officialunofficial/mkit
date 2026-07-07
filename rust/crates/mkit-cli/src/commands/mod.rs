@@ -73,6 +73,7 @@ pub mod verify_attest;
 use crate::exit;
 use mkit_core::hash::Hash;
 use mkit_core::index::{EntryStatus, Index};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
 use mkit_core::ops::recovery::{self, RecoveryEntry};
@@ -105,12 +106,25 @@ pub(crate) fn commit_subject(store: &ObjectStore, commit: &Hash) -> String {
 /// batched default when the config cannot be read — a broken config
 /// must not change write semantics silently, and Batch is the default
 /// contract.
-pub fn open_store_configured(root: &Path) -> Result<ObjectStore, mkit_core::store::StoreError> {
-    let mut store = ObjectStore::open(root)?;
-    if let Ok(cfg) = crate::config::read_or_default(root) {
+pub fn open_store_configured(
+    layout: &RepoLayout,
+) -> Result<ObjectStore, mkit_core::store::StoreError> {
+    let mut store = ObjectStore::open(layout)?;
+    if let Ok(cfg) = crate::config::read_or_default(layout) {
         store.set_sync_policy(cfg.object_sync_policy());
     }
     Ok(store)
+}
+
+/// Resolve the [`RepoLayout`] a command operates on. Phase 0 of #493:
+/// the invoking directory is the worktree root of a classic
+/// single-worktree repository, so this is a pure constructor. Phase 1
+/// replaces this body with pointer-following discovery for linked
+/// worktrees; command code must obtain its layout HERE and never
+/// construct one ad hoc.
+#[must_use]
+pub fn resolve_layout(cwd: &Path) -> RepoLayout {
+    RepoLayout::single(cwd)
 }
 
 /// Shared helper: emit a "not yet wired" notice and return the
@@ -172,15 +186,15 @@ pub(crate) fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<H
 /// # Errors
 /// Returns a human-readable message if HEAD cannot be read or the ref
 /// write fails.
-pub(crate) fn advance_head(mkit_dir: &Path, new_head: &Hash) -> Result<(), String> {
-    let head = refs::read_head(mkit_dir).map_err(|e| format!("read HEAD: {e}"))?;
+pub(crate) fn advance_head(layout: &RepoLayout, new_head: &Hash) -> Result<(), String> {
+    let head = refs::read_head(layout).map_err(|e| format!("read HEAD: {e}"))?;
     match head {
         Head::Branch(name) => {
-            write_ref_recording_history(mkit_dir, &name, RefWriteCondition::Any, new_head)
+            write_ref_recording_history(layout, &name, RefWriteCondition::Any, new_head)
                 .map_err(|e| format!("write ref: {e}"))
         }
         Head::Detached(_) => {
-            refs::write_head_detached(mkit_dir, new_head).map_err(|e| format!("update HEAD: {e}"))
+            refs::write_head_detached(layout, new_head).map_err(|e| format!("update HEAD: {e}"))
         }
     }
 }
@@ -195,15 +209,15 @@ pub(crate) fn advance_head(mkit_dir: &Path, new_head: &Hash) -> Result<(), Strin
 ///
 /// # Errors
 /// Returns a CLI exit code (already printed via [`error`]) on failure.
-pub(crate) fn restore_head_ref(mkit_dir: &Path, target: &Hash) -> Result<(), u8> {
+pub(crate) fn restore_head_ref(layout: &RepoLayout, target: &Hash) -> Result<(), u8> {
     let head =
-        refs::read_head(mkit_dir).map_err(|e| error(&format!("read HEAD: {e}"), exit::DATAERR))?;
+        refs::read_head(layout).map_err(|e| error(&format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
         Head::Branch(name) => {
-            write_ref_recording_history(mkit_dir, &name, RefWriteCondition::Any, target)
+            write_ref_recording_history(layout, &name, RefWriteCondition::Any, target)
                 .map_err(|e| error(&format!("restore ref: {e}"), exit::CANTCREAT))
         }
-        Head::Detached(_) => refs::write_head_detached(mkit_dir, target)
+        Head::Detached(_) => refs::write_head_detached(layout, target)
             .map_err(|e| error(&format!("restore HEAD: {e}"), exit::CANTCREAT)),
     }
 }
@@ -216,7 +230,7 @@ pub(crate) fn restore_head_ref(mkit_dir: &Path, target: &Hash) -> Result<(), u8>
 /// take this lock — they rely on ref-CAS / atomic-config writes instead.
 pub const WORKTREE_LOCK: &str = "worktree.lock";
 
-/// Acquire the shared worktree/index lock for the repo rooted at `root`.
+/// Acquire the shared worktree/index lock for this worktree.
 ///
 /// Hold the returned guard across the whole read-modify-write so a
 /// second mutating `mkit` blocks (then times out) instead of racing on
@@ -232,9 +246,11 @@ pub const WORKTREE_LOCK: &str = "worktree.lock";
 /// Returns [`exit::TEMPFAIL`] when the lock cannot be taken within the
 /// default timeout (another `mkit` holds it, or a stale lockfile is
 /// present).
-pub fn acquire_worktree_lock(root: &Path) -> Result<mkit_core::repo_lock::RepoLock, u8> {
-    let mkit_dir = root.join(mkit_core::MKIT_DIR);
-    mkit_core::repo_lock::acquire_default(&mkit_dir, WORKTREE_LOCK).map_err(|e| {
+pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock::RepoLock, u8> {
+    // Per-worktree state: the lock serialises THIS tree's worktree/
+    // index mutations (#493 Phase 3 adds a separate shared lock for
+    // store/refs/gc mutation).
+    mkit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).map_err(|e| {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "error: repo lock: {e}");
         exit::TEMPFAIL
@@ -513,7 +529,7 @@ pub(crate) fn history_executor() -> std::sync::Arc<mkit_core::history::TokioExec
 /// not history-tracked: the per-branch journal is keyed on the branch
 /// name, and detached HEADs have none.
 pub fn write_ref_recording_history(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     condition: RefWriteCondition,
     new_hash: &Hash,
@@ -521,27 +537,27 @@ pub fn write_ref_recording_history(
     #[cfg(feature = "history-mmr")]
     {
         let exec = history_executor();
-        let mut history = mkit_core::history::CommitHistory::open_at(exec, mkit_dir, branch)
+        let mut history = mkit_core::history::CommitHistory::open_at(exec, layout, branch)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
 
         if history.is_empty()
-            && let Ok(Some(current)) = refs::read_ref(mkit_dir, branch)
+            && let Ok(Some(current)) = refs::read_ref(layout, branch)
         {
-            backfill_history_from_object_store(mkit_dir, branch, &mut history, current)?;
+            backfill_history_from_object_store(layout, branch, &mut history, current)?;
         }
 
-        refs::update_ref_with_history(mkit_dir, branch, condition, new_hash, &mut history)
+        refs::update_ref_with_history(layout, branch, condition, new_hash, &mut history)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
-        refs::update_ref(mkit_dir, branch, condition, new_hash)
+        refs::update_ref(layout, branch, condition, new_hash)
     }
 }
 
 /// Backfill an empty history journal from `current`'s on-disk
 /// first-parent chain (SPEC-HISTORY-PROOF §4.5 v0.1.x rebuild shim).
 ///
-/// Opens an [`ObjectStore`] rooted at `mkit_dir`'s parent and walks
+/// Opens the layout's [`ObjectStore`] and walks
 /// `current`'s parent chain via [`mkit_core::history::rebuild_from_chain`].
 /// Degenerates safely to a single append when `current` is a root
 /// commit (nothing to migrate, just the missed first write).
@@ -555,13 +571,12 @@ pub fn write_ref_recording_history(
 /// journal's proof state permanently incomplete for this branch.
 #[cfg(feature = "history-mmr")]
 fn backfill_history_from_object_store<X: mkit_core::protocol::async_shim::Executor + 'static>(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     branch: &str,
     history: &mut mkit_core::history::CommitHistory<X>,
     current: Hash,
 ) -> Result<(), RefError> {
-    let repo_root = mkit_dir.parent().unwrap_or(mkit_dir);
-    let store = ObjectStore::open(repo_root)
+    let store = ObjectStore::open(layout)
         .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
 
     mkit_core::history::rebuild_from_chain(history, current, |h| match store.read_object(h) {
@@ -580,8 +595,8 @@ fn backfill_history_from_object_store<X: mkit_core::protocol::async_shim::Execut
 /// Current branch name for recovery logging — empty for a detached HEAD
 /// or an unreadable/symbolic-only HEAD.
 #[must_use]
-pub fn head_branch_name(mkit_dir: &Path) -> String {
-    match refs::read_head(mkit_dir) {
+pub fn head_branch_name(layout: &RepoLayout) -> String {
+    match refs::read_head(layout) {
         Ok(Head::Branch(name)) => name,
         _ => String::new(),
     }
@@ -599,7 +614,7 @@ pub fn head_branch_name(mkit_dir: &Path) -> String {
 /// error) rather than orphan an unrecoverable commit. The zero hash is a
 /// no-op inside [`recovery::record`].
 pub fn record_superseded(
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     op: &str,
     branch: &str,
     superseded: Hash,
@@ -613,7 +628,7 @@ pub fn record_superseded(
         superseded,
         branch: branch.to_owned(),
     };
-    recovery::record(mkit_dir, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
+    recovery::record(layout, &entry).map_err(|e| (format!("recovery log: {e}"), exit::CANTCREAT))
 }
 
 /// Rewrite `.mkit/index` so it exactly mirrors `tree_hash`.
@@ -621,14 +636,18 @@ pub fn record_superseded(
 /// `mkit commit` now signs the index, so commands that move HEAD and
 /// materialize a committed tree must keep the index aligned with that
 /// snapshot.
-pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> Result<(), String> {
+pub fn sync_index_to_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<(), String> {
     let mut idx =
         mkit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     // Tree-derived entries carry no stat cache. Carry it over from the
     // outgoing index wherever path AND object hash agree: a later stat
     // match against the old observation still proves the same bytes,
     // so commit/checkout don't wipe the O(stat) fast path.
-    if let Ok(old) = mkit_core::index::read_index(root) {
+    if let Ok(old) = mkit_core::index::read_index(layout) {
         // O(1) lookups: find_entry is a linear scan and this loop runs
         // once per tree entry (was O(n²) per commit/checkout).
         let by_path: std::collections::HashMap<&str, &mkit_core::index::IndexEntry> =
@@ -645,7 +664,7 @@ pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> 
             }
         }
     }
-    mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+    mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
 /// After staging a `result_tree` (which, being a tree, omits removed paths),
@@ -658,7 +677,7 @@ pub fn sync_index_to_tree(root: &Path, store: &ObjectStore, tree_hash: Hash) -> 
 /// use this so the deletion stays staged — otherwise an all-deletions result
 /// leaves an empty index and `mkit commit` rejects it as "nothing staged".
 pub fn stage_removed_tombstones(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     base_tree: Option<Hash>,
     result_tree: Hash,
@@ -674,7 +693,7 @@ pub fn stage_removed_tombstones(
     if removed.is_empty() {
         return Ok(());
     }
-    let mut idx = mkit_core::index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    let mut idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     for path in removed {
         match idx.entries.iter().position(|x| x.path == path) {
             Some(j) => {
@@ -692,38 +711,44 @@ pub fn stage_removed_tombstones(
             }),
         }
     }
-    mkit_core::index::write_index(root, &idx).map_err(|e| format!("write index: {e}"))
+    mkit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
 /// Materialise `tree_hash` and align the index while preserving `.mkitignore` entries.
 pub fn restore_worktree_and_index(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
 ) -> Result<(), String> {
-    restore_tree_to_worktree(store, &tree_hash, root, &RestoreOptions::default())
-        .map_err(|e| format!("restore worktree: {e}"))?;
-    sync_index_to_tree(root, store, tree_hash)
+    restore_tree_to_worktree(
+        store,
+        &tree_hash,
+        layout.worktree_root(),
+        &RestoreOptions::default(),
+    )
+    .map_err(|e| format!("restore worktree: {e}"))?;
+    sync_index_to_tree(layout, store, tree_hash)
 }
 
 /// Refuse a destructive restore when the index/worktree contains user work.
 pub fn ensure_restore_safe(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     target_tree: Hash,
 ) -> Result<(), String> {
-    ensure_restore_safe_with_options(root, store, target_tree, &RestoreOptions::default())
+    ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
 }
 
 /// Refuse a destructive restore when affected index/worktree paths contain user work.
 pub fn ensure_restore_safe_with_options(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     target_tree: Hash,
     options: &RestoreOptions,
 ) -> Result<(), String> {
-    let current_tree = current_head_tree(root, store)?;
-    let idx = read_or_seed_index_from_head(root, store)?;
+    let root = layout.worktree_root();
+    let current_tree = current_head_tree(layout, store)?;
+    let idx = read_or_seed_index_from_head(layout, store)?;
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
     let snapshot = mkit_core::store::EphemeralSink::new(store);
@@ -816,11 +841,11 @@ pub(crate) fn restore_affects_path(options: &RestoreOptions, path: &str) -> bool
 /// false` writes/overwrites but never deletes). The `(status, hash)`
 /// lets the caller detect local edits by content AND mode/type.
 pub(crate) fn dropped_tracked_paths(
-    cwd: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     target_tree: Hash,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
-    let idx = read_or_seed_index_from_head(cwd, store)?;
+    let idx = read_or_seed_index_from_head(layout, store)?;
     let snapshot = mkit_core::store::EphemeralSink::new(store);
     let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
         .map_err(|e| format!("index tree: {e}"))?;
@@ -891,10 +916,11 @@ fn is_ignored_worktree_path(
     ignore.is_ignored_with_ancestors(path, meta.is_dir())
 }
 
-pub(crate) fn current_head_tree(root: &Path, store: &ObjectStore) -> Result<Option<Hash>, String> {
-    let mkit_dir = root.join(mkit_core::MKIT_DIR);
-    let Some(head_hash) =
-        refs::resolve_head(&mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?
+pub(crate) fn current_head_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+) -> Result<Option<Hash>, String> {
+    let Some(head_hash) = refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
     else {
         return Ok(None);
     };
@@ -961,17 +987,16 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 /// current commit snapshot instead of making the next commit forget all
 /// unchanged tracked files.
 pub fn read_or_seed_index_from_head(
-    root: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
 ) -> Result<mkit_core::index::Index, String> {
-    let idx = mkit_core::index::read_index(root).map_err(|e| format!("read index: {e}"))?;
+    let idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     if !idx.entries.is_empty() {
         return Ok(idx);
     }
 
-    let mkit_dir = root.join(mkit_core::MKIT_DIR);
     let Some(head_hash) =
-        mkit_core::refs::resolve_head(&mkit_dir).map_err(|e| format!("resolve HEAD: {e}"))?
+        mkit_core::refs::resolve_head(layout).map_err(|e| format!("resolve HEAD: {e}"))?
     else {
         return Ok(idx);
     };
@@ -1020,8 +1045,8 @@ mod tests {
 
         let td = tempfile::tempdir().unwrap();
         let repo_root = td.path();
-        let store = ObjectStore::init(repo_root).unwrap();
-        let mkit_dir = repo_root.join(mkit_core::MKIT_DIR);
+        let layout = mkit_core::layout::RepoLayout::single(repo_root);
+        let store = ObjectStore::init(&layout).unwrap();
 
         // Build a 3-commit chain entirely via the object store and point
         // `refs/heads/main` at the tip directly — simulating a repo
@@ -1030,19 +1055,19 @@ mod tests {
         let c0 = write_commit(&store, vec![], 1);
         let c1 = write_commit(&store, vec![c0], 2);
         let c2 = write_commit(&store, vec![c1], 3);
-        refs::write_ref(&mkit_dir, "main", &c2).unwrap();
+        refs::write_ref(&layout, "main", &c2).unwrap();
 
         // The first history-mmr-enabled write for this branch: a new
         // commit c3 on top of the pre-existing tip c2.
         let c3 = write_commit(&store, vec![c2], 4);
-        write_ref_recording_history(&mkit_dir, "main", RefWriteCondition::Match(c2), &c3).unwrap();
+        write_ref_recording_history(&layout, "main", RefWriteCondition::Match(c2), &c3).unwrap();
 
-        assert_eq!(refs::read_ref(&mkit_dir, "main").unwrap(), Some(c3));
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c3));
 
         // The journal must now hold the full backfilled chain (c0, c1,
         // c2) PLUS the new c3 — not just c3 alone.
         let exec = Arc::new(TokioExecutor::new().unwrap());
-        let hist = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
         assert_eq!(hist.len(), 4);
         let root = hist.root();
         for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
@@ -1066,16 +1091,16 @@ mod tests {
 
         let td = tempfile::tempdir().unwrap();
         let repo_root = td.path();
-        let store = ObjectStore::init(repo_root).unwrap();
-        let mkit_dir = repo_root.join(mkit_core::MKIT_DIR);
+        let layout = mkit_core::layout::RepoLayout::single(repo_root);
+        let store = ObjectStore::init(&layout).unwrap();
 
         // No pre-existing ref: this is a brand new branch's first ever
         // commit, not a v0.1.x migration. There is nothing to backfill.
         let c0 = write_commit(&store, vec![], 1);
-        write_ref_recording_history(&mkit_dir, "main", RefWriteCondition::Missing, &c0).unwrap();
+        write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
 
         let exec = Arc::new(TokioExecutor::new().unwrap());
-        let hist = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
         assert_eq!(
             hist.len(),
             1,
@@ -1122,14 +1147,14 @@ mod tests {
     #[test]
     fn advance_head_errors_when_head_missing_instead_of_writing_main() {
         let td = tempfile::tempdir().unwrap();
-        let mkit_dir = td.path();
+        let layout = mkit_core::layout::RepoLayout::single(td.path());
         // No HEAD file exists → refs::read_head returns NoHead.
         let new_head: Hash = [0x11; 32];
-        let err = advance_head(mkit_dir, &new_head).expect_err("missing HEAD must error");
+        let err = advance_head(&layout, &new_head).expect_err("missing HEAD must error");
         assert!(err.contains("read HEAD"), "unexpected error: {err}");
         // Crucially, no `main` ref was fabricated.
         assert!(
-            !mkit_dir.join("refs/heads/main").exists(),
+            !layout.heads_dir().join("main").exists(),
             "advance_head must not write refs/heads/main when HEAD is unreadable"
         );
     }
@@ -1137,12 +1162,12 @@ mod tests {
     #[test]
     fn restore_head_ref_errors_when_head_missing_instead_of_writing_main() {
         let td = tempfile::tempdir().unwrap();
-        let mkit_dir = td.path();
+        let layout = mkit_core::layout::RepoLayout::single(td.path());
         let target: Hash = [0x22; 32];
-        let code = restore_head_ref(mkit_dir, &target).expect_err("missing HEAD must error");
+        let code = restore_head_ref(&layout, &target).expect_err("missing HEAD must error");
         assert_eq!(code, crate::exit::DATAERR);
         assert!(
-            !mkit_dir.join("refs/heads/main").exists(),
+            !layout.heads_dir().join("main").exists(),
             "restore_head_ref must not write refs/heads/main when HEAD is unreadable"
         );
     }

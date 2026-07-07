@@ -51,27 +51,27 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
 
     let mut rows: Vec<RefRow> = Vec::new();
-    let heads = match refs::list_refs(&mkit_dir) {
+    let heads = match refs::list_refs(&layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
-    let tags = match refs::list_tags(&mkit_dir) {
+    let tags = match refs::list_tags(&layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     };
     push_rows(&store, &mut rows, &heads, "refs/heads/");
     push_rows(&store, &mut rows, &tags, "refs/tags/");
-    match refs::list_remote_names(&mkit_dir) {
+    match refs::list_remote_names(&layout) {
         Ok(remotes) => {
             for remote in remotes {
-                match refs::list_remote_refs(&mkit_dir, &remote) {
+                match refs::list_remote_refs(&layout, &remote) {
                     Ok(rs) => {
                         push_rows(&store, &mut rows, &rs, &format!("refs/remotes/{remote}/"));
                     }

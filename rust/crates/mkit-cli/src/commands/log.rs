@@ -38,6 +38,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::Hash;
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Object};
 use mkit_core::ops::graph::collect_ancestor_set;
 use mkit_core::ops::merge::find_merge_base;
@@ -144,15 +145,15 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     // Resolve the revision selection: default HEAD, a single `<rev>`, a
     // `A..B` range, or an `A...B` symmetric range (empty side = HEAD).
     let selection = parse_rev_arg(opts.start.as_deref());
-    let (tips, excluded) = match resolve_selection(&store, &mkit_dir, &selection) {
+    let (tips, excluded) = match resolve_selection(&store, &layout, &selection) {
         Ok(Some(v)) => v,
         Ok(None) => {
             // No HEAD yet and no explicit revision → nothing to show.
@@ -231,32 +232,32 @@ fn parse_rev_arg(arg: Option<&str>) -> RevSelection {
 /// HEAD-less repo with no explicit revision).
 fn resolve_selection(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     sel: &RevSelection,
 ) -> Result<Option<WalkSet>, String> {
     let mut excluded: HashSet<Hash> = HashSet::new();
     let tips: Vec<Hash> = match sel {
-        RevSelection::Default => match resolve_tip(store, mkit_dir, None)? {
+        RevSelection::Default => match resolve_tip(store, layout, None)? {
             Some(h) => vec![h],
             None => return Ok(None),
         },
-        RevSelection::Single(spec) => match resolve_tip(store, mkit_dir, Some(spec))? {
+        RevSelection::Single(spec) => match resolve_tip(store, layout, Some(spec))? {
             Some(h) => vec![h],
             None => return Ok(None),
         },
         RevSelection::Range { exclude, include } => {
-            let Some(inc) = resolve_tip(store, mkit_dir, Some(include))? else {
+            let Some(inc) = resolve_tip(store, layout, Some(include))? else {
                 return Ok(None);
             };
-            if let Some(a) = resolve_tip(store, mkit_dir, Some(exclude))? {
+            if let Some(a) = resolve_tip(store, layout, Some(exclude))? {
                 collect_ancestor_set(store, a, &mut excluded)
                     .map_err(|e| format!("walk range base: {e}"))?;
             }
             vec![inc]
         }
         RevSelection::Symmetric { a, b } => {
-            let ra = resolve_tip(store, mkit_dir, Some(a))?;
-            let rb = resolve_tip(store, mkit_dir, Some(b))?;
+            let ra = resolve_tip(store, layout, Some(a))?;
+            let rb = resolve_tip(store, layout, Some(b))?;
             // Exclude the common ancestors (ancestors of the merge base).
             if let (Some(x), Some(y)) = (ra, rb)
                 && let Some(mb) =
@@ -281,13 +282,13 @@ fn resolve_selection(
 /// `log <tag>` / `<tag>..HEAD` walk the tagged commit, like git.
 fn resolve_tip(
     store: &ObjectStore,
-    mkit_dir: &std::path::Path,
+    layout: &RepoLayout,
     spec: Option<&str>,
 ) -> Result<Option<Hash>, String> {
     let raw = match spec {
-        None | Some("HEAD") => refs::resolve_head(mkit_dir).ok().flatten(),
+        None | Some("HEAD") => refs::resolve_head(layout).ok().flatten(),
         Some(s) => Some(
-            revspec::resolve_revision(store, mkit_dir, s)
+            revspec::resolve_revision(store, layout, s)
                 .map_err(|e| format!("bad revision '{s}': {e}"))?,
         ),
     };

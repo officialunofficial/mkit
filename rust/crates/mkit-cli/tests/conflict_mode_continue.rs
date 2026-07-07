@@ -16,6 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -91,13 +92,11 @@ impl Repo {
         self.add(rel);
         self.commit(msg);
     }
-    fn mkit_dir(&self) -> std::path::PathBuf {
-        self.path().join(".mkit")
-    }
     /// Read the committed `EntryMode` for a top-level path in HEAD's tree.
     fn head_tree_mode(&self, name: &str) -> EntryMode {
-        let store = ObjectStore::open(self.path()).unwrap();
-        let head = refs::resolve_head(&self.mkit_dir()).unwrap().unwrap();
+        let layout = RepoLayout::single(self.path());
+        let store = ObjectStore::open(&layout).unwrap();
+        let head = refs::resolve_head(&layout).unwrap().unwrap();
         let Object::Commit(c) = store.read_object(&head).unwrap() else {
             panic!("HEAD not a commit");
         };

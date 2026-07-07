@@ -34,6 +34,7 @@ use crate::Error;
 use crate::envelope as env_mod;
 use mkit_core::Hash;
 use mkit_core::hash::{self as hash_mod, HEX_LEN};
+use mkit_core::layout::RepoLayout;
 
 /// Directory under `<root>` that owns every envelope on disk.
 pub const SUBDIR: &str = "attestations";
@@ -51,8 +52,9 @@ pub const MAX_ENVELOPE_SIZE: usize = 1024 * 1024;
 /// `root` is the `.mkit/` directory (the `attestations/` subdir is
 /// appended internally).
 #[must_use]
-pub fn envelope_path(root: &Path, commit: &Hash, att_id: &Hash) -> PathBuf {
-    root.join(SUBDIR)
+pub fn envelope_path(layout: &RepoLayout, commit: &Hash, att_id: &Hash) -> PathBuf {
+    layout
+        .attestations_dir()
         .join(hash_mod::to_hex(commit))
         .join(format!("{}{}", hash_mod::to_hex(att_id), FILE_EXT))
 }
@@ -71,7 +73,7 @@ pub fn envelope_path(root: &Path, commit: &Hash, att_id: &Hash) -> PathBuf {
 /// Panics if `envelope_path` (an internal helper) returns a path with
 /// no parent or no file name. Both invariants are upheld by the path
 /// builder, so this only fires on programmer error.
-pub fn save(root: &Path, commit: &Hash, bytes: &[u8]) -> Result<(Hash, PathBuf), Error> {
+pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, PathBuf), Error> {
     if bytes.len() > MAX_ENVELOPE_SIZE {
         return Err(Error::EnvelopeTooLarge {
             len: bytes.len(),
@@ -79,7 +81,7 @@ pub fn save(root: &Path, commit: &Hash, bytes: &[u8]) -> Result<(Hash, PathBuf),
         });
     }
     let att_id = env_mod::attestation_id(bytes);
-    let final_path = envelope_path(root, commit, &att_id);
+    let final_path = envelope_path(layout, commit, &att_id);
 
     // Idempotency: filename IS the BLAKE3 of the bytes, so presence
     // implies equality. One stat beats a full read+compare.
@@ -123,8 +125,8 @@ pub fn load(path: &Path) -> Result<env_mod::Envelope, Error> {
 ///
 /// # Errors
 /// * [`Error::Io`] on directory read failure other than not-found.
-pub fn list(root: &Path, commit: &Hash) -> Result<Vec<PathBuf>, Error> {
-    let commit_dir = root.join(SUBDIR).join(hash_mod::to_hex(commit));
+pub fn list(layout: &RepoLayout, commit: &Hash) -> Result<Vec<PathBuf>, Error> {
+    let commit_dir = layout.attestations_dir().join(hash_mod::to_hex(commit));
     let read_dir = match fs::read_dir(&commit_dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -160,15 +162,15 @@ pub fn list(root: &Path, commit: &Hash) -> Result<Vec<PathBuf>, Error> {
 /// # Errors
 /// * [`Error::Io`] on filesystem failures other than not-found / dir-
 ///   not-empty during cleanup.
-pub fn remove(root: &Path, commit: &Hash, att_id: &Hash) -> Result<(), Error> {
-    let final_path = envelope_path(root, commit, att_id);
+pub fn remove(layout: &RepoLayout, commit: &Hash, att_id: &Hash) -> Result<(), Error> {
+    let final_path = envelope_path(layout, commit, att_id);
     match fs::remove_file(&final_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(Error::Io(format!("rm {}: {e}", final_path.display()))),
     }
     // Try to GC the now-possibly-empty commit dir.
-    let commit_dir = root.join(SUBDIR).join(hash_mod::to_hex(commit));
+    let commit_dir = layout.attestations_dir().join(hash_mod::to_hex(commit));
     match fs::remove_dir(&commit_dir) {
         Ok(()) => {}
         Err(e)
@@ -264,10 +266,11 @@ mod tests {
     #[test]
     fn write_read_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x11);
         let (bytes, expected_id) = small_envelope(b"{\"k\":1}");
 
-        let (att_id, path) = save(dir.path(), &commit, &bytes).unwrap();
+        let (att_id, path) = save(&layout, &commit, &bytes).unwrap();
         assert_eq!(att_id, expected_id);
         assert!(path.exists());
 
@@ -278,31 +281,33 @@ mod tests {
     #[test]
     fn write_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x22);
         let (bytes, _) = small_envelope(b"hello");
 
-        let (a, _) = save(dir.path(), &commit, &bytes).unwrap();
-        let (b, _) = save(dir.path(), &commit, &bytes).unwrap();
+        let (a, _) = save(&layout, &commit, &bytes).unwrap();
+        let (b, _) = save(&layout, &commit, &bytes).unwrap();
         assert_eq!(a, b);
 
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert_eq!(listed.len(), 1);
     }
 
     #[test]
     fn list_returns_sorted_ids() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x33);
 
         let mut written: Vec<Hash> = Vec::new();
         for i in 0..5 {
             let (bytes, id) = small_envelope(format!("env-{i}").as_bytes());
-            let (got, _) = save(dir.path(), &commit, &bytes).unwrap();
+            let (got, _) = save(&layout, &commit, &bytes).unwrap();
             assert_eq!(got, id);
             written.push(id);
         }
 
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert_eq!(listed.len(), 5);
 
         // Sorted ascending byte-wise on filename stem.
@@ -323,51 +328,55 @@ mod tests {
     #[test]
     fn list_on_unattested_commit_is_empty() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x44);
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert!(listed.is_empty());
     }
 
     #[test]
     fn remove_is_idempotent_on_missing() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x66);
         let missing = fake_hash(0x77);
         // No attestations dir at all.
-        remove(dir.path(), &commit, &missing).unwrap();
+        remove(&layout, &commit, &missing).unwrap();
 
         // Commit dir exists but specific id doesn't.
         let (bytes, _) = small_envelope(b"present");
-        let _ = save(dir.path(), &commit, &bytes).unwrap();
-        remove(dir.path(), &commit, &missing).unwrap();
+        let _ = save(&layout, &commit, &bytes).unwrap();
+        remove(&layout, &commit, &missing).unwrap();
 
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert_eq!(listed.len(), 1);
     }
 
     #[test]
     fn remove_cleans_up_empty_commit_dir() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0x99);
         let (bytes, _) = small_envelope(b"only one");
-        let (att_id, _) = save(dir.path(), &commit, &bytes).unwrap();
-        remove(dir.path(), &commit, &att_id).unwrap();
+        let (att_id, _) = save(&layout, &commit, &bytes).unwrap();
+        remove(&layout, &commit, &att_id).unwrap();
 
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert!(listed.is_empty());
 
-        let commit_dir = dir.path().join(SUBDIR).join(hash_mod::to_hex(&commit));
+        let commit_dir = layout.attestations_dir().join(hash_mod::to_hex(&commit));
         assert!(!commit_dir.exists());
     }
 
     #[test]
     fn list_ignores_non_dsse_and_non_hex_stems() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
         let commit = fake_hash(0xAA);
         let (bytes, good_id) = small_envelope(b"legit");
-        let _ = save(dir.path(), &commit, &bytes).unwrap();
+        let _ = save(&layout, &commit, &bytes).unwrap();
 
-        let commit_dir = dir.path().join(SUBDIR).join(hash_mod::to_hex(&commit));
+        let commit_dir = layout.attestations_dir().join(hash_mod::to_hex(&commit));
         // Wrong extension.
         fs::write(commit_dir.join("notes.txt"), b"x").unwrap();
         // Right extension, wrong-shaped stem.
@@ -376,7 +385,7 @@ mod tests {
         let bad = format!("{}{FILE_EXT}", "g".to_string() + &"0".repeat(63));
         fs::write(commit_dir.join(bad), b"x").unwrap();
 
-        let listed = list(dir.path(), &commit).unwrap();
+        let listed = list(&layout, &commit).unwrap();
         assert_eq!(listed.len(), 1);
         let want = format!("{}{FILE_EXT}", hash_mod::to_hex(&good_id));
         assert_eq!(listed[0].file_name().unwrap(), want.as_str());

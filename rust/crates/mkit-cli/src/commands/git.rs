@@ -11,6 +11,7 @@
 
 use clap::Parser;
 use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store as attest_store};
+use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::{Hash, ObjectStore, refs};
 use mkit_git_bridge::gitobj::{GitObject, GitType, Sha1Id, sha1_from_hex, sha1_hex};
@@ -100,7 +101,8 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(c) => c,
                 Err(e) => return emit_err(&format!("cwd: {e}"), exit::CONFIG_ERROR),
             };
-            match export(&cwd, &opts) {
+            let layout = super::resolve_layout(&cwd);
+            match export(&layout, &opts) {
                 Ok(code) => code,
                 Err((msg, code)) => emit_err(&msg, code),
             }
@@ -165,10 +167,9 @@ struct Exported {
 type CmdResult<T> = Result<T, (String, u8)>;
 
 #[allow(clippy::too_many_lines)] // linear pipeline; stages are commented
-fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
-    let store = ObjectStore::open(cwd)
+fn export(layout: &RepoLayout, opts: &ExportArgs) -> CmdResult<u8> {
+    let store = ObjectStore::open(layout)
         .map_err(|e| (format!("open repository: {e}"), exit::GENERAL_ERROR))?;
-    let mkit_dir = cwd.join(mkit_core::store::MKIT_DIR);
     git_version().map_err(|e| (e, exit::UNAVAILABLE))?;
 
     // An option-shaped dest must never reach a git argv, and an empty
@@ -185,21 +186,23 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
 
     // ── per-remote bridge state + bare staging repo ────────────────
     let state =
-        map::state_dir(&mkit_dir, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
+        map::state_dir(layout, &opts.remote_name).map_err(|e| (e.to_string(), exit::USAGE))?;
     // One bridge operation per state dir at a time (shared with the
     // import side: fetch + passthrough export on a fork dir race the
     // staging mirror and the map).
-    let _state_lock =
-        mkit_core::repo_lock::acquire_default(&mkit_dir, &format!("git-{}.lock", opts.remote_name))
-            .map_err(|e| {
-                (
-                    format!(
-                        "bridge state '{}' is busy (another mkit git operation?): {e}",
-                        opts.remote_name
-                    ),
-                    exit::TEMPFAIL,
-                )
-            })?;
+    let _state_lock = mkit_core::repo_lock::acquire_default(
+        layout.common_dir(),
+        &format!("git-{}.lock", opts.remote_name),
+    )
+    .map_err(|e| {
+        (
+            format!(
+                "bridge state '{}' is busy (another mkit git operation?): {e}",
+                opts.remote_name
+            ),
+            exit::TEMPFAIL,
+        )
+    })?;
 
     // ORIGIN GUARD (SPEC-GIT-BRIDGE §14.2), FIRST — before any state
     // is stamped or the dest is initialized, so a refusal has no side
@@ -211,7 +214,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     // through a DIFFERENT state is just as disconnected as a plain
     // export.
     let dest_identity = mkit_git_bridge::remoteid::remote_identity(&opts.dest);
-    if let Some(import_state) = recorded_import_source(&mkit_dir, &dest_identity)
+    if let Some(import_state) = recorded_import_source(layout, &dest_identity)
         && !(opts.passthrough && import_state == opts.remote_name)
     {
         return Err((
@@ -357,7 +360,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
     }
 
     // ── ref selection (§12.1) ──────────────────────────────────────
-    let requested = collect_refs(&mkit_dir, &opts.refs)?;
+    let requested = collect_refs(layout, &opts.refs)?;
     if requested.is_empty() {
         return Err(("nothing to export: no branches or tags".into(), exit::USAGE));
     }
@@ -451,8 +454,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
         None
     } else {
         Some(publish_attestations(
-            cwd,
-            &mkit_dir,
+            layout,
             &store,
             &staging,
             &opts.dest,
@@ -650,7 +652,7 @@ fn export(cwd: &Path, opts: &ExportArgs) -> CmdResult<u8> {
 }
 
 /// Default export set: every branch and tag, as full ref names.
-fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, Hash)>> {
+fn collect_refs(layout: &RepoLayout, explicit: &[String]) -> CmdResult<Vec<(String, Hash)>> {
     if !explicit.is_empty() {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -669,9 +671,9 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
             };
             // read_ref/read_tag take namespace-relative short names.
             let hash = if name.starts_with("refs/heads/") {
-                refs::read_ref(mkit_dir, short)
+                refs::read_ref(layout, short)
             } else {
-                refs::read_tag(mkit_dir, short)
+                refs::read_tag(layout, short)
             }
             .map_err(|e| (format!("read {name}: {e}"), exit::GENERAL_ERROR))?
             .ok_or_else(|| (format!("--ref {name}: not found"), exit::DATAERR))?;
@@ -680,7 +682,7 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
         return Ok(out);
     }
     let mut out = Vec::new();
-    let branches = refs::list_refs(mkit_dir)
+    let branches = refs::list_refs(layout)
         .map_err(|e| (format!("list branches: {e}"), exit::GENERAL_ERROR))?;
     for r in branches {
         if let Some(h) = r.hash {
@@ -688,7 +690,7 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
         }
     }
     let tags =
-        refs::list_tags(mkit_dir).map_err(|e| (format!("list tags: {e}"), exit::GENERAL_ERROR))?;
+        refs::list_tags(layout).map_err(|e| (format!("list tags: {e}"), exit::GENERAL_ERROR))?;
     for r in tags {
         if let Some(h) = r.hash {
             out.push((format!("refs/tags/{}", r.name), h));
@@ -706,8 +708,7 @@ fn collect_refs(mkit_dir: &Path, explicit: &[String]) -> CmdResult<Vec<(String, 
 /// silently dropping the attestations ref.
 #[allow(clippy::too_many_lines)] // mint loop + tree/commit assembly; splitting would scatter §11
 fn publish_attestations(
-    cwd: &Path,
-    mkit_dir: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     staging: &Path,
     dest: &str,
@@ -717,7 +718,7 @@ fn publish_attestations(
 ) -> CmdResult<Sha1Id> {
     // Same signer resolution as `mkit attest` (SPEC-GIT-BRIDGE §11:
     // "the exporter's configured signer"): flag, else config default.
-    let cfg = crate::config::read_or_default(cwd)
+    let cfg = crate::config::read_or_default(layout)
         .map_err(|e| (format!("read config: {e}"), exit::CONFIG_ERROR))?;
     let alg_str = opts
         .algorithm
@@ -730,7 +731,7 @@ fn publish_attestations(
         .clone()
         .unwrap_or_else(|| cfg.attest.signer_or_fallback().to_owned());
     let mut signer =
-        attest_factory::build_signer(cwd, algorithm, &signer_kind, &cfg).map_err(|e| {
+        attest_factory::build_signer(layout, algorithm, &signer_kind, &cfg).map_err(|e| {
             (
                 format!("build bridge signer: {e}"),
                 crate::commands::attest::factory_error_code(&e),
@@ -795,7 +796,7 @@ fn publish_attestations(
         let encoded = envelope
             .encode()
             .map_err(|e| (format!("encode envelope: {e}"), exit::GENERAL_ERROR))?;
-        attest_store::save(mkit_dir, &e.mkit_hash, encoded.as_bytes())
+        attest_store::save(layout, &e.mkit_hash, encoded.as_bytes())
             .map_err(|e| (format!("save attestation: {e}"), exit::CANTCREAT))?;
 
         let blob = GitObject {
@@ -1044,9 +1045,8 @@ fn ls_remote(staging: &Path, dest: &str) -> CmdResult<HashMap<String, Sha1Id>> {
 
 /// The state-dir name whose recorded import `source` matches the
 /// given canonical identity, if any.
-fn recorded_import_source(mkit_dir: &Path, identity: &str) -> Option<String> {
-    let git_dir = mkit_dir.join("git");
-    let entries = std::fs::read_dir(git_dir).ok()?;
+fn recorded_import_source(layout: &RepoLayout, identity: &str) -> Option<String> {
+    let entries = std::fs::read_dir(layout.git_state_dir()).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let src = entry.path().join("source");

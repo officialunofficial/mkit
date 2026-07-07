@@ -38,14 +38,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
     };
-    let mkit_dir = cwd.join(mkit_core::MKIT_DIR);
-    let store = match ObjectStore::open(&cwd) {
+    let layout = super::resolve_layout(&cwd);
+    let store = match ObjectStore::open(&layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
     // Peel annotated/signed tags to the commit they point at, like the
     // sibling history commands (resolve_revision returns the tag object).
-    let a = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.a) {
+    let a = match super::revspec::resolve_revision(&store, &layout, &opts.a) {
         Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => {
             return emit_err(
@@ -54,7 +54,7 @@ pub fn run(args: &[String]) -> u8 {
             );
         }
     };
-    let b = match super::revspec::resolve_revision(&store, &mkit_dir, &opts.b) {
+    let b = match super::revspec::resolve_revision(&store, &layout, &opts.b) {
         Ok(h) => super::log::peel_tags(&store, h),
         Err(e) => {
             return emit_err(

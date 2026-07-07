@@ -93,20 +93,21 @@ pub fn run(args: &[String]) -> u8 {
             exit::CANTCREAT,
         );
     }
-    match ObjectStore::init(&target) {
+    let target_layout = crate::commands::resolve_layout(&target);
+    match ObjectStore::init(&target_layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => {
             return emit_err("already a mkit repository", exit::GENERAL_ERROR);
         }
         Err(e) => return emit_err(&format!("init: {e}"), exit::CANTCREAT),
     }
-    if let Err(e) = refs::init(&target.join(mkit_core::MKIT_DIR)) {
+    if let Err(e) = refs::init(&target_layout) {
         return emit_err(&format!("refs init: {e}"), exit::CANTCREAT);
     }
     let mut cfg = Config::with_defaults();
     url.clone_into(&mut cfg.remote_endpoint);
     cfg.remote_type = scheme_of(url).unwrap_or_default().to_string();
-    if let Err(e) = config::write(&target, &cfg) {
+    if let Err(e) = config::write(&target_layout, &cfg) {
         return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
     }
 
@@ -117,7 +118,7 @@ pub fn run(args: &[String]) -> u8 {
     // shared chokepoint instead of re-deriving it here. The keys are
     // user-scoped (REPO_FORBIDDEN_KEYS), so `read_or_default` against the
     // freshly-initialised destination still picks them up.
-    let merged = match config::read_or_default(&target) {
+    let merged = match config::read_or_default(&target_layout) {
         Ok(merged) => merged,
         Err(e) => return emit_err(&format!("read config: {e}"), exit::CONFIG_ERROR),
     };
@@ -169,16 +170,17 @@ fn apply_sparse_after_clone(
     use mkit_core::store::ObjectStore;
     use std::path::PathBuf as StdPathBuf;
 
+    let layout = crate::commands::resolve_layout(target);
+
     // Persist patterns to .mkit/sparse-checkout for follow-up commands.
     let pat_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
-    write_sparse_checkout(target, &pat_refs)
+    write_sparse_checkout(&layout, &pat_refs)
         .map_err(|e| (format!("write sparse-checkout: {e}"), exit::CANTCREAT))?;
 
     // Open store, resolve HEAD → tree.
-    let store =
-        ObjectStore::open(target).map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
-    let mkit_dir = target.join(mkit_core::MKIT_DIR);
-    let head = match mkit_core::refs::resolve_head(&mkit_dir) {
+    let store = ObjectStore::open(&layout)
+        .map_err(|e| (format!("open store: {e}"), exit::GENERAL_ERROR))?;
+    let head = match mkit_core::refs::resolve_head(&layout) {
         Ok(Some(h)) => h,
         Ok(None) => return Ok(()), // fresh, no HEAD → nothing to materialise
         Err(e) => return Err((format!("resolve HEAD: {e}"), exit::GENERAL_ERROR)),
@@ -210,7 +212,7 @@ fn apply_sparse_after_clone(
     // reconstruction entirely (SPEC-SPARSE-CHECKOUT §8). A miss
     // (including a stale filter or a corrupt cache entry) falls
     // through to a fresh build and rewrites the cache.
-    match load_or_build(target, &tree, &filter) {
+    match load_or_build(&layout, &tree, &filter) {
         Ok(SparseOutcome::CacheHit) => {}
         Ok(SparseOutcome::Built { store_error }) => {
             if let Some(e) = store_error {

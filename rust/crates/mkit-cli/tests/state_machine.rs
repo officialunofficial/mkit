@@ -39,6 +39,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Output;
 
+use mkit_core::layout::RepoLayout;
 use mkit_core::refs;
 
 use proptest::prelude::*;
@@ -268,8 +269,8 @@ fn tag_name(a: u8) -> String {
 }
 
 /// Names of head refs that currently exist (have valid on-disk bytes).
-fn existing_branches(mkit_dir: &Path) -> Vec<String> {
-    refs::list_refs(mkit_dir)
+fn existing_branches(layout: &RepoLayout) -> Vec<String> {
+    refs::list_refs(layout)
         .unwrap_or_default()
         .into_iter()
         .filter(|r| r.hash.is_some())
@@ -279,8 +280,8 @@ fn existing_branches(mkit_dir: &Path) -> Vec<String> {
 
 /// Resolve a selector to an existing branch name, or `main` when none exist
 /// yet (so e.g. `checkout`/`merge` exercise the unborn-branch path cleanly).
-fn pick_branch(mkit_dir: &Path, a: u8) -> String {
-    let names = existing_branches(mkit_dir);
+fn pick_branch(layout: &RepoLayout, a: u8) -> String {
+    let names = existing_branches(layout);
     if names.is_empty() {
         "main".to_owned()
     } else {
@@ -293,6 +294,7 @@ fn pick_branch(mkit_dir: &Path, a: u8) -> String {
 /// Pure-filesystem ops return an empty vec.
 fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
     let mkit_dir = root.join(".mkit");
+    let layout = RepoLayout::single(root);
     match op {
         Op::Write(a, b) => {
             let byte = b'A' + (b % 26);
@@ -313,7 +315,7 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
         }
         Op::Branch(a) => vec![mkit(root, xdg, &["branch", &branch_name(*a)])],
         Op::DelBranch(a) => vec![mkit(root, xdg, &["branch", "-d", &branch_name(*a)])],
-        Op::Checkout(a) => vec![mkit(root, xdg, &["checkout", &pick_branch(&mkit_dir, *a)])],
+        Op::Checkout(a) => vec![mkit(root, xdg, &["checkout", &pick_branch(&layout, *a)])],
         Op::CheckoutNew(a) => {
             // mkit has no `checkout -b`: compose branch-create then switch. Both
             // invocations are returned so neither escapes exit hygiene.
@@ -325,10 +327,10 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
         }
         Op::Tag(a) => vec![mkit(root, xdg, &["tag", &tag_name(*a)])],
         Op::DelTag(a) => vec![mkit(root, xdg, &["tag", "-d", &tag_name(*a)])],
-        Op::Merge(a) => vec![mkit(root, xdg, &["merge", &pick_branch(&mkit_dir, *a)])],
+        Op::Merge(a) => vec![mkit(root, xdg, &["merge", &pick_branch(&layout, *a)])],
         Op::Reset(m) => vec![mkit(root, xdg, &["reset", m.flag()])],
         Op::CherryPick(a) => {
-            let names = existing_branches(&mkit_dir);
+            let names = existing_branches(&layout);
             if names.is_empty() {
                 vec![]
             } else {
@@ -337,7 +339,7 @@ fn apply(op: &Op, root: &Path, xdg: &Path, ctr: &mut u32) -> Vec<Output> {
             }
         }
         Op::Revert => vec![mkit(root, xdg, &["revert", "HEAD"])],
-        Op::Rebase(a) => vec![mkit(root, xdg, &["rebase", &pick_branch(&mkit_dir, *a)])],
+        Op::Rebase(a) => vec![mkit(root, xdg, &["rebase", &pick_branch(&layout, *a)])],
         // Continuations dispatch to whatever op is in progress; when none is,
         // we still fire the representative verb so the "nothing in progress ->
         // clean error" path is exercised (and validated by exit hygiene).
