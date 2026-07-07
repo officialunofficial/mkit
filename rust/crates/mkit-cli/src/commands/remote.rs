@@ -12,6 +12,7 @@ use crate::clap_shim;
 use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::format;
+use crate::remote_dispatch::applied_packs::AppliedPacks;
 
 const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
     ("mkit+file://", "file"),
@@ -183,6 +184,7 @@ pub fn run(args: &[String]) -> u8 {
                     // Stale tracking refs would shadow a future remote
                     // reusing the name; objects stay (gc owns them).
                     remove_tracking_refs(&layout, &name);
+                    remove_applied_packs_record(&layout, &name);
                     warn_orphaned_bridge_state(&layout, &name);
                     exit::OK
                 }
@@ -218,6 +220,7 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(()) => {
                     move_tracking_refs(&layout, &old, &new);
                     move_bridge_state(&layout, &old, &new);
+                    move_applied_packs_record(&layout, &old, &new);
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("write: {e}"), exit::CANTCREAT),
@@ -305,6 +308,38 @@ fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str) {
         let _ = writeln!(
             stderr,
             "warning: could not move git-bridge state {old} -> {new}: {e}"
+        );
+    }
+}
+
+/// The applied-packs record (`<common dir>/applied-packs/<name>`, #409) is a
+/// pure per-remote cache whose lifecycle follows the remote's (#545): drop it
+/// on remove so a later re-add of the same name starts from an empty record
+/// instead of inheriting a stale one (which would trip the fetch-side
+/// self-heal's spurious full re-download once the store has been gc'd).
+/// Best-effort and non-fatal, like the tracking-ref cleanup: on failure the
+/// self-heal still recovers, at the cost of that one re-download.
+fn remove_applied_packs_record(layout: &RepoLayout, name: &str) {
+    if let Err(e) = AppliedPacks::remove_record(layout, name) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not remove applied-packs record for '{name}': {e}"
+        );
+    }
+}
+
+/// The applied-packs record follows a rename (#545), so the renamed remote's
+/// next fetch reuses its redownload-avoidance cache instead of pulling the
+/// full pack chain again, and no orphan record is left under the old name.
+/// Best-effort and non-fatal, like `move_tracking_refs`: on failure the next
+/// `mkit fetch <new>` rebuilds the record with one full download.
+fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
+    if let Err(e) = AppliedPacks::rename_record(layout, old, new) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "warning: could not move applied-packs record {old} -> {new}: {e}"
         );
     }
 }

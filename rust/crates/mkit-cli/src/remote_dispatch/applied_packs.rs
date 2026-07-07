@@ -56,6 +56,18 @@
 //! pinning an object, and the file (and its containing directory) is always
 //! safe to delete — a missing record just means the next fetch re-downloads
 //! the whole chain once, per the self-heal behaviour above.
+//!
+//! # Lifecycle (#545)
+//!
+//! The record's lifecycle follows its remote's: `mkit remote remove` calls
+//! [`AppliedPacks::remove_record`] and `mkit remote rename` calls
+//! [`AppliedPacks::rename_record`], so a removed name never leaves a stale
+//! record behind (which a later re-add would inherit, tripping the self-heal
+//! full re-download once the store has been gc'd) and a renamed remote keeps
+//! its cache instead of re-downloading its full closure. Both are idempotent:
+//! a missing record is the normal state for a never-fetched remote, not an
+//! error. Every path derivation — fetch-side loads and lifecycle ops alike —
+//! routes through [`record_path`], so the two cannot drift.
 
 use mkit_core::layout::RepoLayout;
 use std::collections::HashSet;
@@ -157,6 +169,62 @@ impl AppliedPacks {
         self.dirty = false;
         Ok(())
     }
+
+    /// Delete the on-disk record for `remote`, if any. The record's
+    /// lifecycle follows the remote's (#545): `mkit remote remove` calls
+    /// this so a later re-add of the same name starts from an empty record
+    /// instead of inheriting a stale one — which would skip packs a since
+    /// gc'd store no longer holds and trip the self-heal's spurious full
+    /// re-download on the first fetch.
+    ///
+    /// A missing record (or a missing `applied-packs/` directory) is Ok,
+    /// not an error: removal is idempotent, and most removed remotes were
+    /// never fetched.
+    ///
+    /// # Errors
+    ///
+    /// [`DispatchError::InvalidRemoteName`] for an illegal name (same check
+    /// as [`Self::load`]); any other deletion failure as
+    /// [`DispatchError::Io`]. Callers treat both as non-fatal — the record
+    /// is a pure cache and the fetch-side self-heal still recovers.
+    pub(crate) fn remove_record(layout: &RepoLayout, remote: &str) -> Result<(), DispatchError> {
+        validate_remote_name(remote)?;
+        match fs::remove_file(record_path(layout, remote)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(DispatchError::Io(e)),
+        }
+    }
+
+    /// Move the on-disk record from `old` to `new`. The record's lifecycle
+    /// follows the remote's (#545): `mkit remote rename` calls this so the
+    /// renamed remote's next fetch reuses the cache instead of re-downloading
+    /// its full pack chain, and no orphan record is left under the old name.
+    ///
+    /// A missing source record is Ok — the normal state for a never-fetched
+    /// remote. A record already on disk under `new` can only be a stale
+    /// orphan (the command handler has already established `new` is not a
+    /// configured remote), so it is overwritten by the rename.
+    ///
+    /// # Errors
+    ///
+    /// [`DispatchError::InvalidRemoteName`] if either name is illegal; any
+    /// other rename failure as [`DispatchError::Io`]. Callers treat both as
+    /// non-fatal — the worst case is one full re-download on the renamed
+    /// remote's next fetch.
+    pub(crate) fn rename_record(
+        layout: &RepoLayout,
+        old: &str,
+        new: &str,
+    ) -> Result<(), DispatchError> {
+        validate_remote_name(old)?;
+        validate_remote_name(new)?;
+        match fs::rename(record_path(layout, old), record_path(layout, new)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(DispatchError::Io(e)),
+        }
+    }
 }
 
 /// Reject any remote name that isn't a legal ref name. A remote name *is* a
@@ -186,7 +254,12 @@ fn record_file_name(remote: &str) -> String {
 }
 
 /// The full record path for `remote`:
-/// `<common dir>/applied-packs/<record_file_name(remote)>`.
+/// `<common dir>/applied-packs/<record_file_name(remote)>`. The single
+/// source of truth for the derivation — [`AppliedPacks::load`]/
+/// [`AppliedPacks::empty`] on the fetch path and
+/// [`AppliedPacks::remove_record`]/[`AppliedPacks::rename_record`] on the
+/// `remote remove`/`rename` path all route through it, so the command
+/// handlers and the fetch path cannot drift (#545).
 fn record_path(layout: &RepoLayout, remote: &str) -> PathBuf {
     layout.applied_packs_dir().join(record_file_name(remote))
 }
@@ -427,6 +500,93 @@ mod tests {
         // separate.
         let other = AppliedPacks::load(&mkit_dir, "teamupstream").unwrap();
         assert!(!other.contains(&k1), "encoded names must not collide");
+    }
+
+    #[test]
+    fn remove_record_deletes_and_is_idempotent_when_missing() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        // Missing record — and even a missing applied-packs/ directory — is
+        // Ok, not an error (never-fetched remotes have no record).
+        AppliedPacks::remove_record(&mkit_dir, "origin").unwrap();
+
+        let k1 = pk("pack-1");
+        let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        applied.insert(&k1);
+        applied.persist().unwrap();
+        let path = mkit_dir.applied_packs_dir().join("origin");
+        assert!(path.is_file(), "precondition: record persisted");
+
+        AppliedPacks::remove_record(&mkit_dir, "origin").unwrap();
+        assert!(!path.exists(), "remove_record must delete the record file");
+        // A reload starts empty — no stale digests survive the removal.
+        let reloaded = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        assert!(!reloaded.contains(&k1));
+        // And removing again is still Ok.
+        AppliedPacks::remove_record(&mkit_dir, "origin").unwrap();
+    }
+
+    #[test]
+    fn rename_record_moves_the_record_and_leaves_no_orphan() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let k1 = pk("pack-1");
+        let mut applied = AppliedPacks::load(&mkit_dir, "old").unwrap();
+        applied.insert(&k1);
+        applied.persist().unwrap();
+
+        AppliedPacks::rename_record(&mkit_dir, "old", "new").unwrap();
+        assert!(
+            !mkit_dir.applied_packs_dir().join("old").exists(),
+            "no orphan record may remain under the old name"
+        );
+        let renamed = AppliedPacks::load(&mkit_dir, "new").unwrap();
+        assert!(renamed.contains(&k1), "the record must move, not clear");
+        let old = AppliedPacks::load(&mkit_dir, "old").unwrap();
+        assert!(!old.contains(&k1));
+    }
+
+    #[test]
+    fn rename_record_missing_source_is_ok() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        // Neither a record nor the applied-packs/ directory exists yet.
+        AppliedPacks::rename_record(&mkit_dir, "old", "new").unwrap();
+        assert!(!mkit_dir.applied_packs_dir().exists());
+    }
+
+    #[test]
+    fn rename_record_handles_multi_segment_names() {
+        // The lifecycle ops must share the fetch path's percent-encoding:
+        // `team/upstream` lives (and moves) as one flat `team%2Fupstream`
+        // file, never as a nested path.
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let k1 = pk("pack-1");
+        let mut applied = AppliedPacks::load(&mkit_dir, "team/upstream").unwrap();
+        applied.insert(&k1);
+        applied.persist().unwrap();
+
+        AppliedPacks::rename_record(&mkit_dir, "team/upstream", "archive/upstream").unwrap();
+        let dir = mkit_dir.applied_packs_dir();
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["archive%2Fupstream".to_owned()]);
+        let renamed = AppliedPacks::load(&mkit_dir, "archive/upstream").unwrap();
+        assert!(renamed.contains(&k1));
+
+        AppliedPacks::remove_record(&mkit_dir, "archive/upstream").unwrap();
+        assert!(!dir.join("archive%2Fupstream").exists());
+    }
+
+    #[test]
+    fn lifecycle_ops_reject_invalid_names() {
+        let (_dir, mkit_dir) = fresh_mkit_dir();
+        let err = AppliedPacks::remove_record(&mkit_dir, "..").unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        let err = AppliedPacks::rename_record(&mkit_dir, "..", "new").unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
+        let err = AppliedPacks::rename_record(&mkit_dir, "old", "../escape").unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidRemoteName(_)));
     }
 
     #[test]
