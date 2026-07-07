@@ -102,9 +102,9 @@ impl AppliedPacks {
     ///
     /// [`DispatchError::InvalidRemoteName`] if `remote` is not a legal ref
     /// name (per [`mkit_core::refs::validate_ref_name`]). Any other I/O
-    /// failure reading the file propagates as [`DispatchError::Io`]. Callers
-    /// treat both as non-fatal — the record is a pure cache — see
-    /// [`super::packmap::fetch_pack_chain`].
+    /// failure reading the file propagates as [`DispatchError::Io`]. The
+    /// fetch path treats both as non-fatal — the record is a pure cache — via
+    /// [`Self::load_or_empty`].
     pub(crate) fn load(layout: &RepoLayout, remote: &str) -> Result<Self, DispatchError> {
         validate_remote_name(remote)?;
         let path = record_path(layout, remote);
@@ -120,17 +120,23 @@ impl AppliedPacks {
         })
     }
 
-    /// An empty, in-memory record for `remote`, used as the non-fatal
-    /// fallback when [`Self::load`] fails: the applied-pack record is purely
-    /// a performance cache (#409), so a fetch whose objects durably land must
-    /// never fail because the cache couldn't be read. Persisting is still
-    /// attempted best-effort through the normal path.
-    pub(crate) fn empty(layout: &RepoLayout, remote: &str) -> Self {
-        Self {
-            set: HashSet::new(),
-            path: record_path(layout, remote),
-            dirty: false,
-        }
+    /// [`Self::load`], with the fetch path's non-fatal policy folded in: the
+    /// applied-pack record is purely a performance cache (#409), so a fetch
+    /// whose objects durably land must never fail because the cache couldn't
+    /// be read. On any load error this warns and falls back to an empty
+    /// in-memory record (every pack re-downloads, always correct); persisting
+    /// is still attempted best-effort through the normal path.
+    pub(crate) fn load_or_empty(layout: &RepoLayout, remote: &str) -> Self {
+        Self::load(layout, remote).unwrap_or_else(|e| {
+            eprintln!(
+                "warning: could not read applied-packs record for remote '{remote}' ({e}); continuing without redownload-avoidance for this fetch"
+            );
+            Self {
+                set: HashSet::new(),
+                path: record_path(layout, remote),
+                dirty: false,
+            }
+        })
     }
 
     /// True iff `key`'s digest is already recorded as applied.
@@ -159,15 +165,14 @@ impl AppliedPacks {
         Ok(())
     }
 
-    /// Discard every recorded digest and persist the now-empty set
-    /// unconditionally. Used by the fetch-side self-heal path when the
-    /// local record is suspected stale relative to the object store (e.g.
-    /// the store was wiped but `applied-packs/` survived).
-    pub(crate) fn clear_and_persist(&mut self) -> Result<(), DispatchError> {
+    /// Discard every recorded digest, in memory only, and mark the record
+    /// dirty. Used by the fetch-side self-heal path when the local record is
+    /// suspected stale relative to the object store (e.g. the store was
+    /// wiped but `applied-packs/` survived) — the caller persists once at
+    /// the end of the fetch, so this does not touch disk itself.
+    pub(crate) fn clear(&mut self) {
         self.set.clear();
-        write(&self.path, &self.set)?;
-        self.dirty = false;
-        Ok(())
+        self.dirty = true;
     }
 
     /// Delete the on-disk record for `remote`, if any. The record's
@@ -456,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_and_persist_empties_the_record() {
+    fn clear_empties_the_record_in_memory_and_marks_it_dirty() {
         let (_dir, mkit_dir) = fresh_mkit_dir();
         let k1 = pk("pack-1");
         let mut applied = AppliedPacks::load(&mkit_dir, "origin").unwrap();
@@ -464,11 +469,17 @@ mod tests {
         applied.persist().unwrap();
         assert!(applied.contains(&k1));
 
-        applied.clear_and_persist().unwrap();
+        applied.clear();
         assert!(!applied.contains(&k1));
 
+        // `clear` is in-memory only — the on-disk record is untouched until
+        // the caller persists.
         let reloaded = AppliedPacks::load(&mkit_dir, "origin").unwrap();
-        assert!(!reloaded.contains(&k1));
+        assert!(reloaded.contains(&k1));
+
+        applied.persist().unwrap();
+        let reloaded_after_persist = AppliedPacks::load(&mkit_dir, "origin").unwrap();
+        assert!(!reloaded_after_persist.contains(&k1));
     }
 
     #[test]
