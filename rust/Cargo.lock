@@ -3195,6 +3195,9 @@ dependencies = [
 [[package]]
 name = "mkit-test-util"
 version = "0.3.0"
+dependencies = [
+ "mkit-core",
+]
 
 [[package]]
 name = "mkit-transport-enc"

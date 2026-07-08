@@ -9,22 +9,62 @@
 //!    with every object hash verifying (acceptance #2).
 //! 3. Re-pushing identical content transfers nothing — identical-object
 //!    dedup is preferred over delta (acceptance #3).
+//!
+//! The push/fetch byte counts double as the tier-1 wire-delta perf guard
+//! (#611, parent #609): both directions are asserted against hard byte
+//! budgets derived from the delta breakdown documented in
+//! `apps/web/src/lib/perf-data.ts` (see [`SECOND_PUSH_BYTE_BUDGET`] /
+//! [`INCREMENTAL_FETCH_BYTE_BUDGET`]) — fully deterministic, no timing.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use mkit_cli::remote_dispatch::{DispatchError, pull_all, push_all, push_branch};
+use mkit_cli::remote_dispatch::{DispatchError, fetch_all, pull_all, push_all, push_branch};
 use mkit_core::hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::ops::reachable_objects;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
 use mkit_core::refs::{self, Ref};
 use mkit_core::store::ObjectStore;
+use mkit_test_util::CountingTransport;
 use mkit_transport_memory::MemoryTransport;
+
+/// Hard ceiling on the second push's total wire bytes (packfile + packmap
+/// node, everything [`CountingTransport::take_uploaded`] counts).
+///
+/// Derived from the documented delta breakdown in
+/// `apps/web/src/lib/perf-data.ts`'s `push-small-edit` benchmark — NOT from
+/// running this test and pasting its output back:
+///
+///   chunk delta (~93 B) + fresh `ChunkedBlob` manifest + `Tree` + signed
+///   `Commit` + packmap `PackListNode` ≈ 1536 B (`deltaBytes`, ~1.5 KiB).
+///
+/// The budget is 4× that documented total — headroom for encoding/format
+/// growth (e.g. a future signature scheme, a deeper manifest) while staying
+/// far below the ~71 KiB a single re-cut `FastCDC` chunk costs raw
+/// (`wholeChunkBytes` in the same file) and light-years below the whole
+/// 2 MiB source file, so an accidental full resend still fails loudly.
+const SECOND_PUSH_BYTE_BUDGET: u64 = 4 * 1536;
+
+/// Hard ceiling on the incremental fetch's total wire bytes after the
+/// delta push above — everything [`CountingTransport::take_downloaded`]
+/// counts: the ONE new pack plus the packmap chain-node walk.
+///
+/// Derived independently of the code under test:
+///
+/// * the new pack is the same wire payload the second push uploaded, so it
+///   shares `SECOND_PUSH_BYTE_BUDGET`'s documented ~1536 B breakdown;
+/// * the chain walk re-downloads every `PackListNode` each fetch by design
+///   (#409 keeps node reads unconditional): a node is a 5-byte
+///   `MKPL`+version header + `Option<Hash>` prev + a one-pack `Vec<Hash>`
+///   (`mkit_core::transfer::encode_packlist`) ≈ 71 B, ×2 nodes here, so
+///   1024 B of chain-node headroom is generous.
+///
+/// An applied-pack-skip regression (#409/#520) re-downloads the ~2 MiB v1
+/// pack and blows this budget by ~300×, failing loudly.
+const INCREMENTAL_FETCH_BYTE_BUDGET: u64 = SECOND_PUSH_BYTE_BUDGET + 1024;
 
 fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
@@ -45,54 +85,6 @@ fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
         String::from_utf8_lossy(&out.stderr)
     );
     out
-}
-
-/// A transport that counts the bytes handed to `upload_pack`, so a test can
-/// measure exactly how much a push transferred. Everything else delegates
-/// to an inner [`MemoryTransport`].
-struct CountingTransport {
-    inner: Arc<MemoryTransport>,
-    uploaded: AtomicU64,
-}
-
-impl CountingTransport {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(MemoryTransport::new()),
-            uploaded: AtomicU64::new(0),
-        }
-    }
-    fn take_uploaded(&self) -> u64 {
-        self.uploaded.swap(0, Ordering::SeqCst)
-    }
-}
-
-impl Transport for CountingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.uploaded
-            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
-        self.inner.upload_pack(bytes, key)
-    }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
-    }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
-    }
-    fn update_ref(
-        &self,
-        name: &str,
-        condition: RefWriteCondition,
-        hash: &hash::Hash,
-    ) -> TransportResult<()> {
-        self.inner.update_ref(name, condition, hash)
-    }
-    fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
-        self.inner.read_ref(name)
-    }
-    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
-        self.inner.list_refs(prefix)
-    }
 }
 
 /// Deterministic >1 MiB buffer that `FastCDC` splits into many chunks.
@@ -133,7 +125,7 @@ fn small_edit_to_large_file_pushes_delta_sized_bytes() {
     fs::write(alice.path().join("big.bin"), &v1).unwrap();
     commit_all(alice.path(), "v1");
 
-    let tx = CountingTransport::new();
+    let tx = CountingTransport::new(MemoryTransport::new());
     push_all(alice.path(), &tx).expect("push v1");
     let first = tx.take_uploaded();
     assert!(
@@ -154,18 +146,83 @@ fn small_edit_to_large_file_pushes_delta_sized_bytes() {
     push_all(alice.path(), &tx).expect("push v2");
     let second = tx.take_uploaded();
 
-    // The whole point: the second push must NOT re-upload whole chunks. A
-    // single FastCDC chunk is >= 16 KiB (MIN_SIZE); the delta + small
-    // manifest/tree/commit objects must come in well under that.
+    // The whole point: the second push must NOT re-upload whole chunks. Budget
+    // comes from the documented delta breakdown (see `SECOND_PUSH_BYTE_BUDGET`),
+    // not from this run's own measurement — a full re-cut FastCDC chunk alone
+    // is ~71 KiB (perf-data.ts `wholeChunkBytes`), which blows this budget by
+    // over an order of magnitude, so an accidental full resend fails loudly.
     assert!(
-        second < 16 * 1024,
-        "second push should be delta-sized (< 16 KiB), got {second} bytes \
-         (first push was {first})"
+        second <= SECOND_PUSH_BYTE_BUDGET,
+        "second push should be delta-sized (<= {SECOND_PUSH_BYTE_BUDGET} B \
+         budget, derived from perf-data.ts's ~1536 B documented breakdown), \
+         got {second} bytes (first push was {first})"
     );
     assert!(
         second * 20 < first,
         "second push ({second}) should be a tiny fraction of the first ({first})"
     );
+}
+
+#[test]
+fn incremental_fetch_downloads_only_the_new_delta_pack_bytes() {
+    // The fetch direction of the wire-delta guard (#611): a fetcher that
+    // already holds v1 must pay only for the new delta-sized pack (plus the
+    // small unconditional chain-node walk) when v2 lands — asserted as a
+    // byte budget so an applied-pack-skip regression (#409/#520), which
+    // re-downloads the ~2 MiB v1 pack, fails loudly.
+    let alice = tempfile::tempdir().unwrap();
+    let bob = tempfile::tempdir().unwrap();
+    init_repo(alice.path());
+    init_repo(bob.path());
+
+    let v1 = big_buffer();
+    fs::write(alice.path().join("big.bin"), &v1).unwrap();
+    commit_all(alice.path(), "v1");
+
+    let tx = CountingTransport::new(MemoryTransport::new());
+    push_all(alice.path(), &tx).expect("push v1");
+
+    // Bob's first fetch pays for the whole closure — that's the baseline,
+    // not what this test budgets. Reset the counter.
+    fetch_all(bob.path(), &tx, "default").expect("initial fetch");
+    let initial = tx.take_downloaded();
+    assert!(
+        initial > v1.len() as u64,
+        "initial fetch must download at least the whole file ({} bytes), got {initial}",
+        v1.len()
+    );
+
+    // The same 16-byte mid-file edit as the push-side test.
+    let mut v2 = v1.clone();
+    for k in 0..16 {
+        v2[1_000_000 + k] ^= 0xFF;
+    }
+    fs::write(alice.path().join("big.bin"), &v2).unwrap();
+    commit_all(alice.path(), "v2");
+    push_all(alice.path(), &tx).expect("push v2");
+    // The push side also reads chain nodes (its re-baseline probe); those
+    // are alice's wire cost, not bob's — reset before the fetch under test.
+    tx.take_downloaded();
+
+    fetch_all(bob.path(), &tx, "default").expect("incremental fetch");
+    let incremental = tx.take_downloaded();
+    assert!(
+        incremental <= INCREMENTAL_FETCH_BYTE_BUDGET,
+        "an incremental fetch after a small edit should download only the \
+         new delta pack + chain nodes (<= {INCREMENTAL_FETCH_BYTE_BUDGET} B \
+         budget), got {incremental} bytes (initial fetch was {initial}) — a \
+         blown budget means delta encoding or applied-pack skipping regressed"
+    );
+
+    // Sanity: the budget-sized fetch really delivered v2 — bob's tracking
+    // ref landed on alice's tip.
+    let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
+        .unwrap()
+        .unwrap();
+    let bob_tracking = refs::read_remote_ref(&RepoLayout::single(bob.path()), "default", "main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(alice_tip, bob_tracking, "fetch must land on alice's tip");
 }
 
 #[test]
@@ -178,7 +235,7 @@ fn clone_after_delta_push_reconstructs_byte_identical() {
     fs::write(alice.path().join("README.md"), b"hello\n").unwrap();
     commit_all(alice.path(), "v1");
 
-    let tx = CountingTransport::new();
+    let tx = CountingTransport::new(MemoryTransport::new());
     push_all(alice.path(), &tx).expect("push v1");
 
     // Edit and push again so the remote holds a delta chain.
@@ -237,7 +294,7 @@ fn clone_reconstructs_multi_commit_delta_chain() {
     // is already present — and land byte-for-byte on the latest version.
     let alice = tempfile::tempdir().unwrap();
     init_repo(alice.path());
-    let tx = CountingTransport::new();
+    let tx = CountingTransport::new(MemoryTransport::new());
 
     let mut data = big_buffer();
     let mut latest = data.clone();
@@ -286,7 +343,7 @@ fn identical_repush_transfers_nothing() {
     fs::write(alice.path().join("big.bin"), &v1).unwrap();
     commit_all(alice.path(), "v1");
 
-    let tx = CountingTransport::new();
+    let tx = CountingTransport::new(MemoryTransport::new());
     push_all(alice.path(), &tx).expect("push v1");
     assert!(tx.take_uploaded() > 0, "first push transfers the closure");
 
@@ -387,7 +444,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     fs::write(alice.path().join("big.bin"), &base).unwrap();
     commit_all(alice.path(), "v0");
 
-    let tx = CountingTransport::new();
+    let tx = CountingTransport::new(MemoryTransport::new());
     push_all(alice.path(), &tx).expect("alice base push");
     pull_all(bob.path(), &tx, "default").expect("bob clones base");
 

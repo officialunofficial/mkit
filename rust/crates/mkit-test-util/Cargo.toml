@@ -18,3 +18,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# Path-only (no `version = ...`): this crate is `publish = false` and is
+# never uploaded to a registry, so it never needs the version pin that
+# `cargo publish` requires of path deps in published crates.
+mkit-core = { path = "../mkit-core" }
