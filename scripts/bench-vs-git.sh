@@ -14,6 +14,22 @@
 # - Both tools through their CLI end to end, stock configuration.
 # - hyperfine --warmup with per-command --prepare resetting a temp repo
 #   to a clean state between runs; sizes via du -k.
+#
+# Provenance (#607 — keep in sync with perf-data.ts's `methodology.commit`):
+# `mkit --version` is a byte-exact Homebrew/Scoop contract (`mkit
+# <X.Y.Z>\n`, see rust/crates/mkit-cli/tests/version_snapshot.rs) and does
+# NOT carry a commit hash, so this script derives the measured binary's
+# provenance itself: `mkit --version` plus `git -C "$REPO_ROOT" rev-parse
+# HEAD`, with a dirty flag if rust/ has uncommitted changes at bench time.
+# This assumes the binary was built from this same checkout (the normal
+# `cargo build --release -p mkit-cli` workflow the error below points at);
+# it fails loudly rather than emit unattributed numbers if $REPO_ROOT
+# isn't a git checkout. Provenance is written to `$OUT/provenance.txt` and
+# echoed in the summary.
+#
+# Set MKIT_BENCH_PROVENANCE_ONLY=1 to capture and print provenance, then
+# exit before touching fixtures or running hyperfine — a fast smoke test
+# for this code path that skips the ~3 GiB benchmark run.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,8 +39,35 @@ MKIT="$(cd "$(dirname "$MKIT")" && pwd)/$(basename "$MKIT")"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
-command -v hyperfine >/dev/null || { echo "hyperfine not found" >&2; exit 1; }
 [ -x "$MKIT" ] || { echo "mkit binary not found at $MKIT (cargo build --release -p mkit-cli)" >&2; exit 1; }
+
+capture_provenance() { # writes $OUT/provenance.txt, fails loudly if the commit can't be determined
+  local version commit dirty
+  version="$("$MKIT" --version 2>&1)" || { echo "'$MKIT --version' failed" >&2; exit 1; }
+  commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" || {
+    echo "cannot determine the measured mkit commit: $REPO_ROOT is not a git checkout." >&2
+    echo "refusing to emit unattributed benchmark numbers (see #607) — run this script" >&2
+    echo "from a git clone of mkit, or record provenance manually in \$OUT/provenance.txt." >&2
+    exit 1
+  }
+  dirty="clean"
+  [ -n "$(git -C "$REPO_ROOT" status --porcelain -- rust 2>/dev/null)" ] && dirty="dirty"
+  {
+    echo "mkit binary: $MKIT"
+    echo "mkit version: $version"
+    echo "mkit commit: $commit ($dirty)"
+    echo "measured: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } | tee "$OUT/provenance.txt"
+}
+
+echo "== provenance =="
+capture_provenance
+if [ "${MKIT_BENCH_PROVENANCE_ONLY:-}" = "1" ]; then
+  echo "MKIT_BENCH_PROVENANCE_ONLY=1 set — skipping fixtures and hyperfine runs"
+  exit 0
+fi
+
+command -v hyperfine >/dev/null || { echo "hyperfine not found" >&2; exit 1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/mkit-bench.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -148,6 +191,9 @@ echo "size-big-v2 git packed KiB total: $(size_of .git)" | tee -a "$OUT/sizes.tx
 echo "size-big-v2 git packed growth KiB: $(( $(size_of .git) - V1P ))" | tee -a "$OUT/sizes.txt"
 
 echo
+echo "== provenance =="
+cat "$OUT/provenance.txt"
+echo
 echo "== summary (mean seconds) =="
 python3 - "$OUT" <<'PY'
 import json, sys, glob, os
@@ -162,4 +208,4 @@ for path in sorted(glob.glob(os.path.join(out, "*.json"))):
         row.append(f'{tool} {r["mean"]:.4f}s ±{r["stddev"] if r["stddev"] is not None else 0:.4f}')
     print(f'{name:18} {"  vs  ".join(row)}')
 PY
-echo "JSON + sizes in $OUT"
+echo "JSON + sizes + provenance in $OUT"

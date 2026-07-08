@@ -4,6 +4,9 @@
  * data — nothing on this page is estimated or extrapolated. Where git wins, the data says so.
  *
  * Means and standard deviations are in seconds, copied verbatim from hyperfine's `--export-json` output.
+ *
+ * `methodology.commit` records the mkit commit SHA the benchmarked binary was built from — keep it in sync with
+ * `scripts/bench-vs-git.sh`, which emits the same provenance (commit + dirty flag) for every re-measure (#607).
  */
 
 export type Measurement = {
@@ -183,6 +186,13 @@ export const transferBenchmarks: TransferBenchmark[] = [
 
 export const methodology = {
   date: '2026-06-12',
+  /**
+   * Full SHA of the mkit commit the benchmarked binary was built from — not merely the date, which is easy to
+   * mis-anchor (see #607: two investigations chased the wrong baseline because "measured 2026-06-12" undershot PR #341,
+   * which merged two days later and changed every timing on this page). `scripts/bench-vs-git.sh` emits the same field
+   * for future re-measures; keep this in sync with whatever it records.
+   */
+  commit: 'ee197638b30bac764a95cc5543b103bbc122417d',
   machine: 'Apple M4 Max, 16 cores, 128 GB RAM, APFS SSD, macOS 26.5.1',
   versions: 'mkit (development build, cargo build --release) · git 2.50.1 (Apple Git-155) · hyperfine 1.20.0',
   harness:
