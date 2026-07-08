@@ -21,6 +21,12 @@ doc_lazy_continuation = "allow"
 name = "render-charts"
 path = "src/bin/render-charts.rs"
 
+# Nightly regression gate — see the file's module doc and
+# .github/workflows/bench-nightly.yml.
+[[bin]]
+name = "check-regressions"
+path = "src/bin/check-regressions.rs"
+
 # Each `[[bench]]` entry is a discrete criterion suite.
 [[bench]]
 name = "hashing"
