@@ -1,7 +1,8 @@
 import * as Collapsible from '@radix-ui/react-collapsible'
+import type { ReactNode } from 'react'
 import { labelColor } from '../lib/hash-color'
 import { methodology, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
-import type { SizeBenchmark, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
+import type { SizeBenchmark, Theme, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
 
 /** `13.4628 → "13.5 s"`, `0.3108 → "311 ms"`, `0.0134 → "13.4 ms"`. Sub-second values read better in ms. */
 function fmtSeconds(s: number): string {
@@ -69,7 +70,7 @@ function TimingBlock({ b }: { b: TimingBenchmark }) {
   return (
     <div className='space-y-3 py-6'>
       <div className='flex items-baseline justify-between gap-4'>
-        <h3 className='text-sm font-semibold'>{b.name}</h3>
+        <h4 className='text-sm font-semibold'>{b.name}</h4>
         <span className='shrink-0 text-xs text-muted'>{speedupLabel(b.mkit.mean, b.git.mean)}</span>
       </div>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
@@ -83,17 +84,14 @@ function TimingBlock({ b }: { b: TimingBenchmark }) {
 }
 
 function SizeBlock({ b }: { b: SizeBenchmark }) {
-  const max = Math.max(b.mkitKiB, b.gitKiB, b.gitPackedKiB ?? 0)
+  const max = Math.max(b.mkitKiB, b.gitKiB)
   return (
     <div className='space-y-3 py-6'>
-      <h3 className='text-sm font-semibold'>{b.name}</h3>
+      <h4 className='text-sm font-semibold'>{b.name}</h4>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
       <div className='space-y-1.5'>
         <Bar label='mkit' value={b.mkitKiB} max={max} display={fmtKiB(b.mkitKiB)} color={labelColor(b.id)} />
         <Bar label='git' value={b.gitKiB} max={max} display={fmtKiB(b.gitKiB)} />
-        {b.gitPackedKiB != null ? (
-          <Bar label='git*' value={b.gitPackedKiB} max={max} display={fmtKiB(b.gitPackedKiB)} />
-        ) : null}
       </div>
       {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
     </div>
@@ -106,7 +104,7 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
   return (
     <div className='space-y-3 py-6'>
       <div className='flex items-baseline justify-between gap-4'>
-        <h3 className='text-sm font-semibold'>{b.name}</h3>
+        <h4 className='text-sm font-semibold'>{b.name}</h4>
         <span className='shrink-0 text-xs text-muted'>{ratio.toFixed(0)}× smaller push</span>
       </div>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
@@ -120,52 +118,102 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
 }
 
 /**
+ * A labelled cluster of benchmark rows within a workload section — keeps the "lower is better" unit note attached to
+ * the rows it applies to, since a single workload section mixes seconds, KiB, and wire bytes.
+ */
+function MeasureGroup({ heading, hint, children }: { heading: string; hint: ReactNode; children: ReactNode }) {
+  return (
+    <div className='space-y-1'>
+      <h3 className='text-xs font-semibold uppercase tracking-wide text-muted'>{heading}</h3>
+      <p className='max-w-prose text-sm text-subtle'>{hint}</p>
+      <div className='divide-y divide-hairline border-y border-hairline'>{children}</div>
+    </div>
+  )
+}
+
+/**
+ * The workload sections, keyed by `Theme` so the compiler forces an entry for every union member — add a variant and
+ * this stops compiling until it has a title and blurb, rather than the row silently dropping off the page. Iteration
+ * order is the insertion order below. Copy states each section's thesis honestly.
+ */
+const THEMES: Record<Theme, { title: string; blurb: string }> = {
+  'large-files': {
+    title: 'Large files & media',
+    blurb:
+      'The workload mkit is built for: big, incompressible files and small edits to them. Content-defined chunking ' +
+      'means a small edit costs the changed chunk, not the whole file — on disk, on the wire, and in wall-clock time.',
+  },
+  everyday: {
+    title: 'Everyday operations',
+    blurb:
+      'The routine git operations on ordinary trees, where the honest verdict is roughly even. mkit keeps pace while ' +
+      'signing every commit and flushing every object to disk, neither of which git does by default.',
+  },
+}
+
+/**
  * Static benchmark comparison: every number was measured once on a real machine (see `perf-data.ts` for the exact
  * commands) and baked in at build time. Bars are plain divs — lower is better everywhere, and git's wins are shown as
- * plainly as mkit's.
+ * plainly as mkit's. Rows are grouped by workload theme, then by what they measure (time / disk / wire).
  */
 export function PerfSection() {
   return (
     <div className='space-y-10'>
-      <section className='space-y-1'>
-        <h2 className='text-sm font-semibold'>Time, end to end</h2>
-        <p className='max-w-prose text-sm text-subtle'>
-          Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.
-        </p>
-        <div className='divide-y divide-hairline border-y border-hairline'>
-          {timingBenchmarks.map((b) => (
-            <TimingBlock key={b.id} b={b} />
-          ))}
-        </div>
-      </section>
-
-      <section className='space-y-1'>
-        <h2 className='text-sm font-semibold'>Bytes on disk</h2>
-        <p className='max-w-prose text-sm text-subtle'>
-          Repository directory size (<code className='font-mono text-xs'>du -k .mkit</code> vs{' '}
-          <code className='font-mono text-xs'>.git</code>) after the same operations. Lower is better. Rows marked{' '}
-          <span className='font-mono text-xs'>git*</span> are after <code className='font-mono text-xs'>git gc</code>.
-        </p>
-        <div className='divide-y divide-hairline border-y border-hairline'>
-          {sizeBenchmarks.map((b) => (
-            <SizeBlock key={b.id} b={b} />
-          ))}
-        </div>
-      </section>
-
-      <section className='space-y-1'>
-        <h2 className='text-sm font-semibold'>Bytes on the wire</h2>
-        <p className='max-w-prose text-sm text-subtle'>
-          What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the remote
-          already holds. Delta-on-the-wire encodes the changed chunk against the version the remote has, instead of
-          re-uploading it whole. Lower is better.
-        </p>
-        <div className='divide-y divide-hairline border-y border-hairline'>
-          {transferBenchmarks.map((b) => (
-            <TransferBlock key={b.id} b={b} />
-          ))}
-        </div>
-      </section>
+      {(Object.keys(THEMES) as Theme[]).map((key) => {
+        const { title, blurb } = THEMES[key]
+        const timings = timingBenchmarks.filter((b) => b.theme === key)
+        const sizes = sizeBenchmarks.filter((b) => b.theme === key)
+        const transfers = transferBenchmarks.filter((b) => b.theme === key)
+        return (
+          <section key={key} className='space-y-4'>
+            <div className='space-y-1'>
+              <h2 className='text-base font-semibold'>{title}</h2>
+              <p className='max-w-prose text-sm text-subtle'>{blurb}</p>
+            </div>
+            {timings.length > 0 ? (
+              <MeasureGroup
+                heading='Time, end to end'
+                hint='Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.'
+              >
+                {timings.map((b) => (
+                  <TimingBlock key={b.id} b={b} />
+                ))}
+              </MeasureGroup>
+            ) : null}
+            {sizes.length > 0 ? (
+              <MeasureGroup
+                heading='Bytes on disk'
+                hint={
+                  <>
+                    Repository directory size (<code className='font-mono text-xs'>du -k .mkit</code> vs{' '}
+                    <code className='font-mono text-xs'>.git</code>) after the same operations. Lower is better.
+                  </>
+                }
+              >
+                {sizes.map((b) => (
+                  <SizeBlock key={b.id} b={b} />
+                ))}
+              </MeasureGroup>
+            ) : null}
+            {transfers.length > 0 ? (
+              <MeasureGroup
+                heading='Bytes on the wire'
+                hint={
+                  <>
+                    What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the
+                    remote already holds. Delta-on-the-wire encodes the changed chunk against the version the remote
+                    has, instead of re-uploading it whole. Lower is better.
+                  </>
+                }
+              >
+                {transfers.map((b) => (
+                  <TransferBlock key={b.id} b={b} />
+                ))}
+              </MeasureGroup>
+            ) : null}
+          </section>
+        )
+      })}
 
       <section className='space-y-3'>
         <h2 className='text-sm font-semibold'>Methodology &amp; caveats</h2>

@@ -313,17 +313,29 @@ POSIX conventions documented in [`docs/CLI.md`](docs/CLI.md):
 
 ## Performance
 
-mkit uses **BLAKE3** as its content-address primitive (Git uses SHA-1
-or SHA-256). On an Apple Silicon laptop, single-core in-process:
+mkit names every object by a **BLAKE3** hash and splits large files
+into content-defined chunks, so a small edit to a large file costs the
+edit — not the file — on disk, on the wire, and in wall-clock time.
 
-![Hash throughput, 16 MiB](benchmarks/charts/hashing-16_mib.svg)
+The comparison that matters is end to end: real `add`, `commit`, and
+`push` operations measured head to head against Git with `hyperfine`.
+Those results, with full methodology, live on the
+[performance page](https://mkit.sh/performance). mkit pulls clearly
+ahead on large files and their edits, and runs roughly even with Git
+on everyday operations.
 
-Full benchmark set — hashing across input sizes, signature throughput
-by algorithm, object commit vs `git2` / `git CLI`, pack creation —
-lives in [`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
-hardware, kernel, filesystem, and cache warmth; reproduce locally
-with `cargo bench --workspace -- --quick` plus
-`cargo run -p mkit-benches --bin render-charts`.
+Component microbenchmarks — signature throughput by algorithm, and
+object-commit/pack-create against `git2` and the `git` CLI — live in
+[`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
+hardware, kernel, filesystem, and cache warmth; reproduce locally with:
+
+```sh
+# Name the bench targets explicitly. The `--workspace -- --quick`
+# form fails: --quick is not a valid option for the lib unittest target.
+cargo bench -p mkit-benches --bench hashing --bench sign_verify \
+  --bench object_commit --bench pack_create -- --quick
+cargo run -p mkit-benches --bin render-charts
+```
 
 ## Documentation
 
