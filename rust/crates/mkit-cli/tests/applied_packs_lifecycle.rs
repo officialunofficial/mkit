@@ -11,6 +11,10 @@
 //!   no orphan record under the old name.
 //!
 //! Both operations must be non-fatal when the record is missing.
+//!
+//! A positive control (ported from PR #573) re-plants the record into the
+//! remove → gc → re-add sequence and asserts the self-heal note DOES fire,
+//! so the no-self-heal assertion can never go vacuously green.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -163,6 +167,70 @@ fn remove_deletes_record_and_readd_fetch_has_no_self_heal() {
     assert!(
         record.is_file() && !fs::read(&record).unwrap().is_empty(),
         "the re-fetch must rebuild a fresh record"
+    );
+}
+
+/// Positive control for the test above, ported from PR #573: restore the
+/// pre-remove record into the same remove → gc → re-add sequence, simulating
+/// pre-#545 behavior where `remote remove` left the file behind. The stale
+/// record claims packs are applied whose objects the gc'd store no longer
+/// holds, so the fetch MUST emit the "looks stale" self-heal note — and
+/// still succeed via the full re-download retry. Without this control, a
+/// rewording of the note would turn the negative assertion above vacuously
+/// green forever.
+#[test]
+fn stale_record_surviving_remove_trips_self_heal_note() {
+    let origin = Repo::new();
+    let store_dir = origin.path().join("store");
+    fs::create_dir_all(&store_dir).unwrap();
+    let url = format!("mkit+file://{}", store_dir.display());
+    origin.ok(&["remote", "add", &url]);
+    origin.commit_file("a.txt", b"v1\n", "c1");
+    origin.ok(&["push", "--all"]);
+    origin.commit_file("a.txt", b"v2\n", "c2");
+    origin.ok(&["push", "--all"]);
+    let origin_tip = refs::read_ref(&RepoLayout::single(origin.path()), "main")
+        .unwrap()
+        .unwrap();
+
+    let consumer = Repo::new();
+    consumer.commit_file("local.txt", b"l\n", "local base");
+    consumer.ok(&["remote", "add", "up", &url]);
+    consumer.ok(&["fetch", "up"]);
+    let record = consumer.mkit_dir().join("applied-packs").join("up");
+    let record_bytes = fs::read(&record).unwrap();
+    assert!(
+        !record_bytes.is_empty(),
+        "precondition: record must list applied packs"
+    );
+
+    consumer.ok(&["remote", "remove", "up"]);
+    consumer.ok(&["gc", "--grace-secs", "0"]);
+    let consumer_layout = RepoLayout::single(consumer.path());
+    let consumer_store = ObjectStore::open(&consumer_layout).unwrap();
+    assert!(
+        consumer_store.read(&origin_tip).is_err(),
+        "precondition: gc must have pruned the removed remote's objects, \
+         or the self-heal assertion below is vacuous"
+    );
+    consumer.ok(&["remote", "add", "up", &url]);
+
+    // Simulate pre-#545 behavior: the record survives the remove.
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, &record_bytes).unwrap();
+
+    let out = consumer.ok(&["fetch", "up"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("looks stale"),
+        "a stale record over a pruned store must trip the self-heal note: {stderr}"
+    );
+    let tracked = refs::read_remote_ref(&consumer_layout, "up", "main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tracked, origin_tip,
+        "self-heal must recover the fetch to origin's tip"
     );
 }
 
