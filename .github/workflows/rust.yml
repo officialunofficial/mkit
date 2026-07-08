@@ -182,6 +182,23 @@ jobs:
             exit 1
           fi
 
+      # #608: fast, dependency-free write-path perf regression guard —
+      # would have caught #606 (36b9808d, ~1.6-2.1x ratio observed in
+      # dev; post-fix #613 sits well under the bound). A tier-2 (#609)
+      # timing-ratio assertion, so it belongs in this serial/slow lane
+      # alongside the ignored-lane tests above, not the fast per-PR unit
+      # suite. Reuses the release binary the "Version contract" step
+      # above just built. macOS-only (not also wired into
+      # cloudbuild/ci.yaml's Linux lane): that lane runs inside the
+      # baked, versioned Dockerfile.ci image, which doesn't carry
+      # python3 — adding it means an out-of-band image rebuild before CI
+      # would pass. macOS GitHub runners ship python3 already, and the
+      # regression this guards is pure Rust/CLI behavior, not
+      # OS-specific, so one platform is sufficient coverage.
+      - name: Write-path perf guard (append-1m ratio, #608)
+        shell: bash
+        run: python3 scripts/perf-write-path-guard.py rust/target/release/mkit
+
       # Issue #156: build the CLI with the dedicated
       # `enc-transport` cargo feature and run the encrypted-transport
       # e2e test. The above `--all-features` test pass already covers

@@ -1,10 +1,14 @@
 # Profiling
 
-mkit's performance work has two complementary tools:
+mkit's performance work has three complementary tools:
 
 - **Benchmarks** (`rust/benches/`, criterion) answer *how fast* a path is
   and guard against regressions. See [`scripts/bench-vs-git.sh`](../scripts/bench-vs-git.sh)
   for the end-to-end-vs-git suite behind the performance page.
+- **The write-path CI guard** ([`scripts/perf-write-path-guard.py`](../scripts/perf-write-path-guard.py),
+  see below) answers *did this PR regress the write path* — a fast,
+  machine-independent check that actually runs in CI, unlike the two
+  tools above.
 - **Sampling profiles** (this document) answer *where the time goes*
   inside a real run — which functions and source lines the CPU actually
   spends time in, with inline stacks.
@@ -144,6 +148,54 @@ samply record ./target/profiling/deps/pack_create-<hash> --bench
 ## Why not in CI
 
 Sampling profiles are interactive artifacts for investigation, not a
-pass/fail gate — the criterion benches and `scripts/bench-vs-git.sh` cover
-regression tracking. Capture a profile when a bench moves and you want to
-know *why*.
+pass/fail gate. Capture a profile when a bench moves and you want to know
+*why*.
+
+The criterion benches under `rust/benches/` and `scripts/bench-vs-git.sh`
+also don't run in CI: the former are run by hand and (as of this
+writing) produce numbers that don't hold up to scrutiny, and the latter
+needs hyperfine, ~3 GiB of fixtures, and minutes of wall clock — nobody
+runs it per PR. That gap is exactly how [#606](https://github.com/officialunofficial/mkit/issues/606)
+(a 55%+ write-path regression) shipped unnoticed for three weeks.
+
+## The write-path CI guard (#608)
+
+[`scripts/perf-write-path-guard.py`](../scripts/perf-write-path-guard.py)
+closes that gap for the write path specifically, and *does* run in CI —
+on the macOS `build-and-test` job's serial/slow lane (see
+[`.github/workflows/rust.yml`](../.github/workflows/rust.yml), right
+after the "Version contract" step that builds the release binary it
+reuses). It needs nothing beyond a release `mkit` binary and python3: no
+hyperfine, no git comparison, no checked-in fixtures (a ~100 MiB blob and
+a 1 MiB append are generated fresh into a temp dir per run).
+
+Instead of an absolute wall-clock threshold (flaky across CI machines),
+it asserts a **ratio**: on the append-1m scenario (add + commit a 100 MiB
+blob, append 1 MiB, add + commit again), default `mkit commit` must
+finish within a bounded factor of `mkit commit -q` on the same scenario.
+`-q` suppresses the post-commit diffstat summary; before #613 that
+summary reassembled the *entire* chunked blob to compute the diff,
+making default `commit` ~1.6-2x slower than `-q` — exactly the #606
+regression. Since both commands run on the same machine in the same
+invocation, machine speed cancels out of the ratio.
+
+```sh
+cargo build --release -p mkit-cli
+scripts/perf-write-path-guard.py rust/target/release/mkit
+```
+
+### Bisecting a future write-path regression
+
+The pattern that found #606 in the first place:
+
+```sh
+git bisect start
+git bisect bad <commit-that-feels-slow>
+git bisect good <commit-that-felt-fine>
+git bisect run python3 scripts/perf-write-path-guard.py --bisect
+```
+
+`--bisect` builds `mkit-cli --release` at each visited commit (exit 125
+— skip — on a build failure, so bisect keeps searching past commits that
+don't build) and re-runs the ratio check, exiting 0/1 for git-bisect-run
+to consume directly.
