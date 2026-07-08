@@ -1708,6 +1708,117 @@ mod tests {
         );
     }
 
+    /// Records the byte length of every `put`/`put_parts` call without
+    /// storing anything. Dual of `RecordingSource` in mkit-cli's
+    /// `commands/diff.rs` tests (#613), which counts *reads* off an
+    /// `ObjectSource`: a warm stat cache's contract is "never open and
+    /// hash the worktree file," which shows up as bytes fed to the
+    /// *sink*, not as reads off the store (dedup means a cache-miss
+    /// re-hash that lands back on the same content never has to touch
+    /// the store either — see [`status_warm_stat_cache_skips_file_content`]).
+    #[derive(Default)]
+    struct CountingSink {
+        put_lens: std::cell::RefCell<Vec<usize>>,
+    }
+
+    impl crate::store::ObjectSink for CountingSink {
+        fn put(&self, bytes: &[u8]) -> crate::store::StoreResult<Hash> {
+            self.put_lens.borrow_mut().push(bytes.len());
+            Ok(crate::object::object_id_from_bytes(bytes))
+        }
+
+        fn put_parts(&self, parts: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            let total: usize = parts.iter().map(|p| p.len()).sum();
+            self.put_lens.borrow_mut().push(total);
+            Ok(crate::object::object_id_from_parts(parts))
+        }
+
+        fn has(&self, _h: &Hash) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn status_warm_stat_cache_skips_file_content() {
+        // #610: the stat cache exists so `status` costs O(stat) instead
+        // of O(content) for an unchanged file (see the `build_tree_inner`
+        // comment in worktree.rs and `stat_matches`'s doc comment) — the
+        // exact machinery that makes mkit's status/add competitive with
+        // git, and whose silent disablement was the #606 regression.
+        // Prove it directly: a warm-cache worktree walk over a large
+        // unchanged tracked file must never pass its content to the
+        // sink, not just "must reuse the cached hash."
+        use crate::index::{EntryStatus, IndexEntry};
+
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        let big_path = work.path().join("big.bin");
+        // Larger than any tree object this single-file worktree could
+        // ever serialize to — the size margin the assertion below relies
+        // on, not a stand-in for the 100 MiB fixture on the /performance
+        // page (unit tests must stay fast; the property is size-independent
+        // once the cache is warm).
+        let large_data = vec![b'x'; 2 * 1024 * 1024];
+        std::fs::write(&big_path, &large_data).unwrap();
+
+        // Commit the file for real (through the actual store) so this
+        // test also proves the scenario is functionally a clean status,
+        // not just a hollow read-count assertion.
+        let head_hash = worktree::build_tree(&store, work.path()).unwrap();
+
+        // A hand-built index whose stat cache matches the file exactly —
+        // what `add` would have written a moment after hashing it.
+        let meta = std::fs::symlink_metadata(&big_path).unwrap();
+        let (mtime_ns, size, ino, ctime_ns) = worktree::stat_cache_fields(&meta);
+        let content_hash = worktree::hash_file_object(&large_data).unwrap();
+        let mut index = Index::default();
+        index.entries.push(IndexEntry {
+            path: "big.bin".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: content_hash,
+            mtime_ns,
+            size,
+            ino,
+            ctime_ns,
+        });
+
+        // Full `status_diff` reports clean — confirms the fixture models
+        // "unchanged file", the scenario the /performance page measures.
+        let result = status_diff(&store, Some(&head_hash), work.path(), Some(&index)).unwrap();
+        assert!(result.is_empty(), "expected clean status, got {result:?}");
+
+        // The deterministic proxy: re-run the same worktree walk
+        // `status_diff` performs internally, through a sink that records
+        // what it was asked to store instead of the real store, and
+        // assert the 2 MiB file's content never reached it.
+        let counting = CountingSink::default();
+        let mut observations = Vec::new();
+        let snapshot_hash = worktree::build_tree_filtered_observed(
+            &counting,
+            work.path(),
+            Some(&index),
+            &mut observations,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot_hash, head_hash,
+            "warm-cache walk should reuse the cached hash and match HEAD's tree"
+        );
+        assert!(
+            observations.is_empty(),
+            "a cache hit must not produce a heal observation: {observations:?}"
+        );
+
+        let put_lens = counting.put_lens.borrow();
+        let max_put = put_lens.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_put < 4096,
+            "warm-cache status fed {max_put} content bytes to the sink for a {}-byte \
+             file — the stat cache should skip opening/hashing it entirely: {put_lens:?}",
+            large_data.len(),
+        );
+    }
+
     #[test]
     fn status_empty_worktree_no_head() {
         // Empty worktree, no HEAD → nothing to report.

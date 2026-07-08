@@ -75,7 +75,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # fail regardless of MKIT_TEST_STRICT. Naming exactly the tests this
 # PR quarantined keeps the lane green regardless of what other
 # `#[ignore]`d tests exist.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child/)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|listen_enc_rejected_upload_does_not_overwrite_existing_pack|open_accepts_syntactically_valid_mkit_ssh_url|second_mutating_command_blocks_on_worktree_lock|list_refs_round_trip_over_real_tcp|post_handshake_idle_timeout_drops_silent_peer|wait_child_timeout_kills_stalled_child|add_unchanged_rehash_after_touch_is_cheaper_than_first_add/)'
 # Run serially so the quarantined tests' real timers/sockets don't
 # contend with each other; only localhost networking is needed, which
 # every CI runner (Linux + macOS) provides.
