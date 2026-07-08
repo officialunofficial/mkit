@@ -4,6 +4,7 @@
 //! schemes: `file`, `https`, `s3`, `ssh`, `memory`.
 
 use std::io::Write;
+use std::path::Path;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mkit_core::layout::RepoLayout;
@@ -282,11 +283,7 @@ pub fn run(args: &[String]) -> u8 {
 /// after a rename. Failure is reported but non-fatal: the config
 /// rename already happened, and a follow-up fetch repopulates.
 fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str) {
-    let remotes = layout.remotes_dir();
-    let (src, dst) = (remotes.join(old), remotes.join(new));
-    if src.is_dir()
-        && let Err(e) = std::fs::rename(&src, &dst)
-    {
+    if let Err(e) = rename_state_dir(&layout.remotes_dir(), old, new) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -299,11 +296,7 @@ fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str) {
 /// Bridge state under `.mkit/git/<name>/` follows a rename so leases,
 /// maps, and the staging mirror stay bound to the same remote name.
 fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str) {
-    let base = layout.git_state_dir();
-    let (src, dst) = (base.join(old), base.join(new));
-    if src.is_dir()
-        && let Err(e) = std::fs::rename(&src, &dst)
-    {
+    if let Err(e) = rename_state_dir(&layout.git_state_dir(), old, new) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -341,6 +334,46 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
             stderr,
             "warning: could not move applied-packs record {old} -> {new}: {e}"
         );
+    }
+}
+
+/// Move the per-remote state directory for `old` to `new` under `root`,
+/// tolerating multi-segment remote names (which map to nested
+/// subdirectories) on both sides: the destination's parent is created
+/// first since `fs::rename` won't do it, and once the move succeeds any
+/// now-empty parent directories left behind under the source are pruned
+/// so a rename away from a multi-segment name doesn't strand empty
+/// directories. Both sides are derived from `root` here so the prune
+/// can never walk outside it. A missing source directory is a no-op
+/// (nothing to move). Both extra steps are best-effort — parent
+/// creation failures fall through to `rename` (which then fails and the
+/// caller's warning fires, possibly leaving the just-created empty
+/// destination parents behind — an accepted wart on this warn-only
+/// path), and prune failures are silent since they're just tidiness,
+/// not correctness.
+fn rename_state_dir(root: &Path, old: &str, new: &str) -> std::io::Result<()> {
+    let (src, dst) = (root.join(old), root.join(new));
+    if !src.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::rename(&src, &dst)?;
+    prune_empty_parents(&src, root);
+    Ok(())
+}
+
+/// Walk up from `dir`, removing empty directories, until `root` is
+/// reached or a removal fails (a non-empty directory is the natural
+/// terminator — no need to distinguish that from other errors).
+fn prune_empty_parents(dir: &Path, root: &Path) {
+    let mut dir = dir.parent();
+    while let Some(d) = dir {
+        if d == root || std::fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
     }
 }
 

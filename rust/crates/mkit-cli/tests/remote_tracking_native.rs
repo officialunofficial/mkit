@@ -195,6 +195,129 @@ fn remote_rename_moves_and_remove_deletes_tracking_refs() {
     );
 }
 
+/// Plant a marker file under `.mkit/git/<name>/` to stand in for
+/// bridge state (leases/maps/staging mirror) without needing a real
+/// git-bridge remote wired up.
+fn plant_bridge_state(layout: &RepoLayout, name: &str) -> std::path::PathBuf {
+    let dir = layout.git_state_dir().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("marker.txt");
+    std::fs::write(&marker, b"bridge state\n").unwrap();
+    marker
+}
+
+#[test]
+fn remote_rename_single_to_multi_segment_moves_refs_and_bridge_state() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "a");
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    let out = r.ok(&["remote", "rename", "a", "team/upstream"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "single->multi-segment rename must not degrade: {stderr}"
+    );
+
+    assert!(
+        refs::read_remote_ref(&layout, "team/upstream", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs into the nested destination"
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "a", "main")
+            .unwrap()
+            .is_none()
+    );
+
+    let moved_marker = layout.git_state_dir().join("team/upstream/marker.txt");
+    assert!(
+        moved_marker.exists(),
+        "bridge state must move into the nested destination"
+    );
+    assert_eq!(
+        std::fs::read(&moved_marker).unwrap(),
+        b"bridge state\n",
+        "marker contents must survive the move"
+    );
+    assert!(!layout.git_state_dir().join("a").exists());
+}
+
+#[test]
+fn remote_rename_multi_to_single_segment_moves_refs_and_prunes_empty_parent() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "team/upstream");
+
+    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "rename", "team/upstream", "b"]);
+
+    assert!(
+        refs::read_remote_ref(&layout, "b", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs to the flat destination"
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "team/upstream", "main")
+            .unwrap()
+            .is_none()
+    );
+    // No orphaned content left behind under the old multi-segment path.
+    assert!(!layout.remotes_dir().join("team").exists());
+
+    let moved_marker = layout.git_state_dir().join("b/marker.txt");
+    assert!(moved_marker.exists(), "bridge state must move to 'b'");
+    // The now-empty `team/` parent under git state must be pruned too.
+    assert!(!layout.git_state_dir().join("team").exists());
+}
+
+#[test]
+fn remote_rename_multi_to_multi_segment_moves_refs_and_bridge_state() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "team/upstream");
+
+    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+    let out = r.ok(&["remote", "rename", "team/upstream", "archive/upstream"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "multi->multi-segment rename must not degrade: {stderr}"
+    );
+
+    assert!(
+        refs::read_remote_ref(&layout, "archive/upstream", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs to the new nested destination"
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "team/upstream", "main")
+            .unwrap()
+            .is_none()
+    );
+
+    let moved_marker = layout.git_state_dir().join("archive/upstream/marker.txt");
+    assert!(
+        moved_marker.exists(),
+        "bridge state must move to archive/upstream"
+    );
+    assert!(!layout.remotes_dir().join("team").exists());
+    assert!(!layout.git_state_dir().join("team").exists());
+}
+
 #[test]
 fn named_remote_fetch_and_pull_use_their_namespace() {
     // Origin repo with one commit, exposed over mkit+file://.
