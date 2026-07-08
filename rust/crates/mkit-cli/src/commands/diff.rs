@@ -38,7 +38,8 @@ use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
 use mkit_core::ops::{
-    DiffEntry, DiffKind, detect_exact_renames, diff_line_counts, diff_trees, unified_hunks,
+    BINARY_SNIFF_LEN, DiffEntry, DiffKind, detect_exact_renames, diff_line_counts, diff_trees,
+    is_binary, unified_hunks,
 };
 use mkit_core::refs;
 use mkit_core::store::{EphemeralSink, ObjectSource, ObjectStore};
@@ -311,7 +312,72 @@ enum StatChange {
     /// Text change: added / deleted line counts.
     Text { added: usize, deleted: usize },
     /// Binary change: old / new byte sizes (rendered as `Bin … bytes`).
-    Binary { old_len: usize, new_len: usize },
+    /// `u64` (not `usize`) because a chunked blob's size comes straight
+    /// from its manifest's `total_size`, with no reassembled `Vec` to take
+    /// a `usize` length from.
+    Binary { old_len: u64, new_len: u64 },
+}
+
+/// Classify one changed entry's shape for `--stat`: text (line counts) or
+/// binary (byte sizes).
+///
+/// Sniffs a bounded prefix of each side first — never a full reassembly of
+/// a chunked blob — to classify text vs binary exactly as `diff_line_counts`
+/// would (same NUL-in-first-8000 heuristic; a prefix classifies identically
+/// to the full blob, since the heuristic never looks further anyway). Full
+/// content is loaded only afterward, and only for a text entry that
+/// actually needs line counts; a binary entry's sizes come from blob
+/// metadata (a chunked blob's manifest `total_size`, or an inline blob's
+/// length) with no content read at all (#606).
+fn entry_stat_change<S: ObjectSource + ?Sized>(
+    store: &S,
+    e: &DiffEntry,
+) -> Result<StatChange, String> {
+    if e.kind == DiffKind::ModeChanged {
+        // Pure mode flip — no content delta. git shows `| 0`.
+        return Ok(StatChange::Text {
+            added: 0,
+            deleted: 0,
+        });
+    }
+    let old_prefix = match e.old_hash {
+        Some(h) => read_blob_prefix(store, &h, BINARY_SNIFF_LEN)?,
+        None => Vec::new(),
+    };
+    let new_prefix = match e.new_hash {
+        Some(h) => read_blob_prefix(store, &h, BINARY_SNIFF_LEN)?,
+        None => Vec::new(),
+    };
+    if is_binary(&old_prefix) || is_binary(&new_prefix) {
+        return Ok(StatChange::Binary {
+            old_len: match e.old_hash {
+                Some(h) => blob_len(store, &h)?,
+                None => 0,
+            },
+            new_len: match e.new_hash {
+                Some(h) => blob_len(store, &h)?,
+                None => 0,
+            },
+        });
+    }
+    let old_bytes = match e.old_hash {
+        Some(h) => read_blob(store, &h)?,
+        None => Vec::new(),
+    };
+    let new_bytes = match e.new_hash {
+        Some(h) => read_blob(store, &h)?,
+        None => Vec::new(),
+    };
+    Ok(match diff_line_counts(&old_bytes, &new_bytes) {
+        Some((added, deleted)) => StatChange::Text { added, deleted },
+        // Unreachable in practice (the prefix sniff already agreed both
+        // sides are text), but fall back to sizes rather than unwrap so a
+        // future divergence degrades safely instead of panicking.
+        None => StatChange::Binary {
+            old_len: old_bytes.len() as u64,
+            new_len: new_bytes.len() as u64,
+        },
+    })
 }
 
 /// Render `git diff --stat`-compatible output: one `<name> | <count>
@@ -331,29 +397,7 @@ pub(super) fn render_stat<'a, S: ObjectSource + ?Sized>(
     let mut rows: Vec<StatRow> = Vec::new();
     for e in entries {
         let name = c_quote_name(&e.path);
-        let change = if e.kind == DiffKind::ModeChanged {
-            // Pure mode flip — no content delta. git shows `| 0`.
-            StatChange::Text {
-                added: 0,
-                deleted: 0,
-            }
-        } else {
-            let old_bytes = match e.old_hash {
-                Some(h) => read_blob(store, &h)?,
-                None => Vec::new(),
-            };
-            let new_bytes = match e.new_hash {
-                Some(h) => read_blob(store, &h)?,
-                None => Vec::new(),
-            };
-            match diff_line_counts(&old_bytes, &new_bytes) {
-                Some((added, deleted)) => StatChange::Text { added, deleted },
-                None => StatChange::Binary {
-                    old_len: old_bytes.len(),
-                    new_len: new_bytes.len(),
-                },
-            }
-        };
+        let change = entry_stat_change(store, e)?;
         rows.push(StatRow { name, change });
     }
     if rows.is_empty() {
@@ -1121,6 +1165,24 @@ fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, S
     worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
 }
 
+/// Read up to `max_len` leading bytes of a blob, without reassembling a
+/// chunked blob's full content — the `render_stat` binary-classification
+/// sniff (#606).
+fn read_blob_prefix<S: ObjectSource + ?Sized>(
+    store: &S,
+    h: &Hash,
+    max_len: usize,
+) -> Result<Vec<u8>, String> {
+    worktree::read_blob_prefix(store, h, max_len).map_err(|e| format!("read object: {e}"))
+}
+
+/// A blob's byte length from metadata alone (a chunked blob's manifest
+/// `total_size`, no chunk reads) — the `render_stat` `Bin … bytes` sizing
+/// (#606).
+fn blob_len<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<u64, String> {
+    worktree::blob_len(store, h).map_err(|e| format!("read object: {e}"))
+}
+
 use super::error as emit_err;
 
 #[cfg(test)]
@@ -1227,6 +1289,216 @@ mod tests {
         assert_eq!(
             render(&de("del.txt", DiffKind::Removed), true, true),
             "D\0del.txt\0"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // render_stat over chunked blobs (#606): binary sizing must come from
+    // manifest metadata, never a full reassembly.
+    // -----------------------------------------------------------------
+
+    use mkit_core::object::{Blob, ChunkedBlob};
+    use mkit_core::store::{StoreError, StoreResult};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// A fake [`ObjectSource`] for unit tests: objects are arbitrary bytes
+    /// keyed by an arbitrary [`Hash`] (no content-hash re-verification,
+    /// unlike the real store — fixtures are built directly). Records every
+    /// hash passed to `read` so a test can assert exactly which objects
+    /// `render_stat` touched — in particular, that a chunked blob's
+    /// trailing chunks are never read just to size or classify it.
+    #[derive(Default)]
+    struct RecordingSource {
+        objects: HashMap<Hash, Vec<u8>>,
+        reads: RefCell<Vec<Hash>>,
+    }
+
+    impl RecordingSource {
+        fn put(&mut self, h: Hash, obj: &Object) {
+            self.objects
+                .insert(h, mkit_core::serialize::serialize(obj).unwrap());
+        }
+    }
+
+    impl ObjectSource for RecordingSource {
+        fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+            self.reads.borrow_mut().push(*h);
+            self.objects
+                .get(h)
+                .cloned()
+                .ok_or_else(|| StoreError::ObjectNotFound(mkit_core::hash::to_hex(h)))
+        }
+    }
+
+    /// Deterministic-enough fake hashes for test fixtures — content is
+    /// never re-verified by [`RecordingSource`], so any distinct 32-byte
+    /// pattern works as a key.
+    fn fake_hash(tag: u8) -> Hash {
+        [tag; 32]
+    }
+
+    /// A `len`-byte buffer of `fill`, with a NUL byte written at offset 10
+    /// so it sniffs as binary — well within `BINARY_SNIFF_LEN`.
+    fn binary_bytes(fill: u8, len: usize) -> Vec<u8> {
+        let mut data = vec![fill; len];
+        data[10] = 0;
+        data
+    }
+
+    fn modified_entry(path: &str, old_hash: Hash, new_hash: Hash) -> DiffEntry {
+        DiffEntry {
+            path: path.to_string(),
+            kind: DiffKind::Modified,
+            old_hash: Some(old_hash),
+            new_hash: Some(new_hash),
+            old_mode: None,
+            new_mode: None,
+            old_path: None,
+        }
+    }
+
+    #[test]
+    fn render_stat_binary_chunked_blob_reads_no_trailing_chunks() {
+        // Both sides are ChunkedBlob manifests whose first chunk alone
+        // exceeds BINARY_SNIFF_LEN and is binary. Only the manifest and the
+        // first chunk of each side are ever stored — if render_stat tried
+        // to reassemble the full content (reading every chunk) it would
+        // hit a missing object and this test would fail with an error
+        // instead of exercising the reads-list assertion below.
+        let mut store = RecordingSource::default();
+
+        let old_chunk0 = fake_hash(1);
+        let old_chunk1 = fake_hash(2); // deliberately never stored
+        let old_manifest_hash = fake_hash(3);
+        store.put(
+            old_chunk0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'a', BINARY_SNIFF_LEN + 1000),
+            }),
+        );
+        store.put(
+            old_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 3_000_000,
+                chunk_size: 0,
+                chunks: vec![old_chunk0, old_chunk1],
+            }),
+        );
+
+        let new_chunk0 = fake_hash(4);
+        let new_chunk1 = fake_hash(5); // deliberately never stored
+        let new_manifest_hash = fake_hash(6);
+        store.put(
+            new_chunk0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'b', BINARY_SNIFF_LEN + 500),
+            }),
+        );
+        store.put(
+            new_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 4_000_000,
+                chunk_size: 0,
+                chunks: vec![new_chunk0, new_chunk1],
+            }),
+        );
+
+        let entry = modified_entry("big.bin", old_manifest_hash, new_manifest_hash);
+        let mut out = Vec::new();
+        render_stat(&mut out, &store, std::iter::once(&entry)).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Bin 3000000 -> 4000000 bytes"),
+            "sizes should come from manifest total_size: {rendered}"
+        );
+
+        let reads = store.reads.borrow();
+        assert!(
+            !reads.contains(&old_chunk1),
+            "second chunk of the old side was read, but the sniff+size path \
+             never needs it: {reads:?}"
+        );
+        assert!(
+            !reads.contains(&new_chunk1),
+            "second chunk of the new side was read, but the sniff+size path \
+             never needs it: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn render_stat_binary_chunked_blob_sizes_match_manifest_total() {
+        // Here every chunk IS stored (so a full reassembly would also
+        // "work"), isolating the thing this test actually checks: the
+        // rendered Bin sizes are exactly each manifest's total_size, which
+        // in turn equals the true concatenated length of its chunks.
+        let mut store = RecordingSource::default();
+
+        let old_chunk_a = fake_hash(11);
+        let old_chunk_b = fake_hash(12);
+        let old_head_bytes = binary_bytes(b'x', BINARY_SNIFF_LEN + 1000); // 9000
+        let old_tail_bytes = vec![b'y'; 3000];
+        let old_total = (old_head_bytes.len() + old_tail_bytes.len()) as u64;
+        let old_manifest_hash = fake_hash(13);
+        store.put(
+            old_chunk_a,
+            &Object::Blob(Blob {
+                data: old_head_bytes,
+            }),
+        );
+        store.put(
+            old_chunk_b,
+            &Object::Blob(Blob {
+                data: old_tail_bytes,
+            }),
+        );
+        store.put(
+            old_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: old_total,
+                chunk_size: 0,
+                chunks: vec![old_chunk_a, old_chunk_b],
+            }),
+        );
+
+        let new_chunk_a = fake_hash(14);
+        let new_chunk_b = fake_hash(15);
+        let new_head_bytes = binary_bytes(b'z', BINARY_SNIFF_LEN + 1500); // 9500
+        let new_tail_bytes = vec![b'w'; 5500];
+        let new_total = (new_head_bytes.len() + new_tail_bytes.len()) as u64;
+        let new_manifest_hash = fake_hash(16);
+        store.put(
+            new_chunk_a,
+            &Object::Blob(Blob {
+                data: new_head_bytes,
+            }),
+        );
+        store.put(
+            new_chunk_b,
+            &Object::Blob(Blob {
+                data: new_tail_bytes,
+            }),
+        );
+        store.put(
+            new_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: new_total,
+                chunk_size: 0,
+                chunks: vec![new_chunk_a, new_chunk_b],
+            }),
+        );
+
+        assert_eq!(old_total, 12000);
+        assert_eq!(new_total, 15000);
+
+        let entry = modified_entry("big.bin", old_manifest_hash, new_manifest_hash);
+        let mut out = Vec::new();
+        render_stat(&mut out, &store, std::iter::once(&entry)).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert_eq!(
+            rendered,
+            " big.bin | Bin 12000 -> 15000 bytes\n \
+             1 file changed, 0 insertions(+), 0 deletions(-)\n"
         );
     }
 }

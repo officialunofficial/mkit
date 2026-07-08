@@ -829,6 +829,93 @@ pub fn read_blob<S: crate::store::ObjectSource + ?Sized>(
     }
 }
 
+/// Byte length of the content addressed by `hash`, without reassembling a
+/// [`ChunkedBlob`]'s content: a `Blob` reports its inline data length, a
+/// `ChunkedBlob` reports its manifest's `total_size` directly — no chunk
+/// reads at all. `total_size` is trustworthy without re-verifying against
+/// the chunks: every reassembly path ([`read_blob`]) enforces it via
+/// [`ChunkedBlob::check_reassembled_size`], so a manifest with a wrong
+/// `total_size` cannot have been durably written (#550).
+///
+/// This is the metadata-only counterpart to [`read_blob`], for callers
+/// (like `diff --stat`'s `Bin <old> -> <new> bytes` rows) that need a size,
+/// not content (mkit#606).
+///
+/// # Errors
+/// - [`WorktreeError::Store`] if `hash` is missing.
+/// - [`WorktreeError::Io`] if `hash` resolves to an object that is neither
+///   a `Blob` nor a `ChunkedBlob`.
+pub fn blob_len<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    hash: &Hash,
+) -> WorktreeResult<u64> {
+    match store.read_object(hash)? {
+        Object::Blob(b) => Ok(b.data.len() as u64),
+        Object::ChunkedBlob(manifest) => Ok(manifest.total_size),
+        other => Err(WorktreeError::Io(io::Error::other(format!(
+            "object {} is not a blob (got {})",
+            crate::hash::to_hex(hash),
+            other.object_type().name()
+        )))),
+    }
+}
+
+/// Read up to `max_len` bytes from the start of the content addressed by
+/// `hash`, without reassembling a [`ChunkedBlob`] past what is needed. A
+/// `Blob` returns its data truncated to `max_len`. A `ChunkedBlob` reads
+/// only as many leading chunks as it takes to cover `max_len` bytes, then
+/// stops — later chunks are never touched. In practice this is one chunk:
+/// every chunk but possibly the last is at least
+/// [`crate::chunker::MIN_SIZE`] bytes, well above the sniff windows callers
+/// use (e.g. [`crate::ops::diff::BINARY_SNIFF_LEN`]).
+///
+/// This is the bounded-read counterpart to [`read_blob`], for callers that
+/// only need a prefix — e.g. `diff --stat`'s text-vs-binary sniff — instead
+/// of paying to reassemble the full content (mkit#606).
+///
+/// # Errors
+/// Same as [`read_blob`].
+pub fn read_blob_prefix<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    hash: &Hash,
+    max_len: usize,
+) -> WorktreeResult<Vec<u8>> {
+    match store.read_object(hash)? {
+        Object::Blob(mut b) => {
+            b.data.truncate(max_len);
+            Ok(b.data)
+        }
+        Object::ChunkedBlob(manifest) => {
+            let cap = usize::try_from(manifest.total_size)
+                .unwrap_or(max_len)
+                .min(max_len);
+            let mut data = Vec::with_capacity(cap);
+            for chunk in &manifest.chunks {
+                if data.len() >= max_len {
+                    break;
+                }
+                match store.read_object(chunk)? {
+                    Object::Blob(b) => data.extend_from_slice(&b.data),
+                    other => {
+                        return Err(WorktreeError::Io(io::Error::other(format!(
+                            "chunk {} is not a blob (got {})",
+                            crate::hash::to_hex(chunk),
+                            other.object_type().name()
+                        ))));
+                    }
+                }
+            }
+            data.truncate(max_len);
+            Ok(data)
+        }
+        other => Err(WorktreeError::Io(io::Error::other(format!(
+            "object {} is not a blob (got {})",
+            crate::hash::to_hex(hash),
+            other.object_type().name()
+        )))),
+    }
+}
+
 #[cfg(unix)]
 fn open_regular_file(path: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
