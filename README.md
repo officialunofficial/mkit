@@ -321,9 +321,15 @@ or SHA-256). On an Apple Silicon laptop, single-core in-process:
 Full benchmark set — hashing across input sizes, signature throughput
 by algorithm, object commit vs `git2` / `git CLI`, pack creation —
 lives in [`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
-hardware, kernel, filesystem, and cache warmth; reproduce locally
-with `cargo bench --workspace -- --quick` plus
-`cargo run -p mkit-benches --bin render-charts`.
+hardware, kernel, filesystem, and cache warmth; reproduce locally with:
+
+```sh
+# Name the bench targets explicitly. The `--workspace -- --quick`
+# form fails: --quick is not a valid option for the lib unittest target.
+cargo bench -p mkit-benches --bench hashing --bench sign_verify \
+  --bench object_commit --bench pack_create -- --quick
+cargo run -p mkit-benches --bin render-charts
+```
 
 ## Documentation
 

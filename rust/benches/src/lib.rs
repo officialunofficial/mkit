@@ -28,6 +28,63 @@ pub fn time_one<F: FnMut()>(warmup: u32, iters: u32, mut f: F) -> f64 {
     t0.elapsed().as_secs_f64() / f64::from(iters)
 }
 
+/// Cold, per-repetition timing with fresh fixture state each rep.
+///
+/// `time_one` calls its closure repeatedly against whatever state the
+/// closure already captured. That is wrong for anything backed by a
+/// content-addressed store, a git ODB, or any other fixture with a
+/// dedup / "already exists" fast path: the first call does the real
+/// work, every call after it is measuring a no-op. PR #604 found
+/// exactly this — `object_commit` reported a 100-file commit as
+/// *cheaper* than a 10-file commit, because both the criterion
+/// `b.iter` loop and the hand-rolled `time_one` sample reused the same
+/// `ObjectStore` across every iteration, so only the very first
+/// iteration ever wrote real bytes.
+///
+/// `time_cold` runs `reps` independent repetitions. Each repetition
+/// calls `setup` to build brand-new fixture state (a fresh tempdir +
+/// store, typically), then times exactly one call to `routine` against
+/// that fresh state — so every repetition measures the same cold-start
+/// cost, and the average can't be short-circuited by a warm cache or a
+/// dedup hit. Returns the mean wall-clock seconds per call.
+///
+/// # Panics
+/// Panics if `reps` is zero.
+pub fn time_cold<S, F: FnMut() -> S, R: FnMut(S)>(reps: u32, mut setup: F, mut routine: R) -> f64 {
+    assert!(reps > 0, "time_cold requires at least one repetition");
+    let mut total = 0.0f64;
+    for _ in 0..reps {
+        let state = setup();
+        let t0 = Instant::now();
+        routine(state);
+        total += t0.elapsed().as_secs_f64();
+    }
+    total / f64::from(reps)
+}
+
+/// Assert that `later` (more/bigger real work) did not measure cheaper
+/// than `earlier` (less/smaller real work). Panics loudly, naming both
+/// samples, when the ordering is physically impossible — the class of
+/// bug PR #604 found in `object_commit` (100 files reported cheaper
+/// than 10). Call this from a bench's own summary-building code AND
+/// from a `#[test]` so the regression is caught both by `cargo test`
+/// and by a nightly `cargo bench` run.
+///
+/// # Panics
+/// Panics when `later.1 < earlier.1`.
+pub fn assert_monotonic(context: &str, earlier: (&str, f64), later: (&str, f64)) {
+    assert!(
+        later.1 >= earlier.1,
+        "{context}: {} ({:.6}) measured CHEAPER than {} ({:.6}) — physically \
+         impossible for strictly more work; the fixture is almost certainly \
+         contaminated across iterations (dedup/stat-cache short-circuit)",
+        later.0,
+        later.1,
+        earlier.0,
+        earlier.1,
+    );
+}
+
 /// One benchmark sample: which library / variant produced what
 /// throughput on what input. The renderer groups these by `category`
 /// + `axis` (x-axis label) and emits one SVG per (category, axis)
@@ -103,5 +160,96 @@ mod tests {
     #[should_panic(expected = "at least one timed iteration")]
     fn time_one_rejects_zero_iters() {
         let _ = time_one(2, 0, || {});
+    }
+
+    #[test]
+    fn time_cold_reruns_setup_every_repetition() {
+        // Each repetition must get a fresh `setup()` call — that's the
+        // whole point of the helper (no state leaks/accumulates
+        // between reps the way a shared closure over `time_one` would).
+        let mut setup_calls = 0u32;
+        let mut routine_calls = 0u32;
+        let _ = time_cold(
+            4,
+            || {
+                setup_calls += 1;
+                setup_calls
+            },
+            |state| {
+                routine_calls += 1;
+                assert_eq!(
+                    state, routine_calls,
+                    "setup must run before each routine call"
+                );
+            },
+        );
+        assert_eq!(setup_calls, 4);
+        assert_eq!(routine_calls, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one repetition")]
+    fn time_cold_rejects_zero_reps() {
+        let _ = time_cold(0, || (), |()| {});
+    }
+
+    #[test]
+    fn assert_monotonic_allows_nondecreasing() {
+        assert_monotonic("test", ("10 files", 1.0), ("100 files", 5.0));
+        assert_monotonic("test", ("10 files", 1.0), ("100 files", 1.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "physically impossible")]
+    fn assert_monotonic_rejects_cheaper_later_sample() {
+        // This is the exact shape of PR #604's bug: a 100-file commit
+        // (`later`) reporting less wall-clock than a 10-file commit
+        // (`earlier`).
+        assert_monotonic("object-commit/mkit", ("10 files", 5.0), ("100 files", 1.0));
+    }
+
+    /// Cheap, real end-to-end regression guard (not a mock): writes N
+    /// distinct blobs into a fresh on-disk [`mkit_core::store::ObjectStore`]
+    /// for N = 10 and N = 100, using [`time_cold`] so each repetition
+    /// gets its own tempdir/store and can't dedup-hit against a
+    /// previous repetition's objects. If a future edit reintroduces
+    /// PR #604's shared-fixture bug (e.g. someone "simplifies" a bench
+    /// back to a single `ObjectStore` reused across iterations), this
+    /// fails `cargo test -p mkit-benches` — not just the nightly bench
+    /// job — so the lie can't come back silently.
+    #[test]
+    fn object_store_write_cost_is_monotonic_in_object_count() {
+        use mkit_core::layout::RepoLayout;
+        use mkit_core::store::ObjectStore;
+
+        fn cold_write_cost(n: usize, reps: u32) -> f64 {
+            time_cold(
+                reps,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                    let payloads: Vec<Vec<u8>> = (0..n)
+                        .map(|i| format!("object-store-monotonic-test {i}\n").into_bytes())
+                        .collect();
+                    (dir, store, payloads)
+                },
+                |(_dir, store, payloads)| {
+                    for p in &payloads {
+                        store.write(p).unwrap();
+                    }
+                },
+            )
+        }
+
+        // 2 reps keeps this test fast (real fsyncs: 2 * (10 + 100) =
+        // 220 on-disk writes) while still averaging away one-off
+        // scheduler noise.
+        let ten = cold_write_cost(10, 2);
+        let hundred = cold_write_cost(100, 2);
+        assert_monotonic(
+            "object_store_write_cost_is_monotonic_in_object_count",
+            ("10 objects", ten),
+            ("100 objects", hundred),
+        );
     }
 }
