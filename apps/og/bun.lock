@@ -5,6 +5,7 @@
     "": {
       "name": "mkit-og",
       "dependencies": {
+        "@officialunofficial/og": "^0.3.1",
         "hono": "^4.12.25",
         "workers-og": "^0.0.27",
       },
@@ -143,6 +144,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.5.5", "", {}, "sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
+
+    "@officialunofficial/og": ["@officialunofficial/og@0.3.1", "", { "peerDependencies": { "workers-og": ">=0.0.27" } }, "sha512-EYACfJ5NoPWMQVbghnrSI8o5S7akuEMvmDY+hoaNVA34HycT5b06MP0L0MTt1lKILQFp3ApWFzxCIapLFdpOWQ=="],
 
     "@poppinss/colors": ["@poppinss/colors@4.1.6", "", { "dependencies": { "kleur": "^4.1.5" } }, "sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg=="],
 
