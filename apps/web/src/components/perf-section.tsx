@@ -171,6 +171,7 @@ export function PerfSection() {
         <h2 className='text-sm font-semibold'>Methodology &amp; caveats</h2>
         <dl className='space-y-1 font-mono text-xs text-muted'>
           <div>date: {methodology.date}</div>
+          <div>commit: {methodology.commit.slice(0, 8)}</div>
           <div>machine: {methodology.machine}</div>
           <div>versions: {methodology.versions}</div>
           <div>harness: {methodology.harness}</div>
