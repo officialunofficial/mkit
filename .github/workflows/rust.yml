@@ -17,9 +17,12 @@ on:
       - '.github/actions/setup-rust/**'
       - 'rust/**'
       - 'contrib/signers/**'
-  # The macOS build/test leg runs on EVERY PR into main so a green PR rollup
-  # reflects a real run on at least one OS (the Linux suite runs on Cloud Build,
-  # gated on a maintainer `/gcbrun`). See the `build-and-test` job's `if:` below.
+  # No `paths:` filter here: the workflow ALWAYS triggers on PRs so its
+  # required check (ci-gate) is never absent. The macOS build/test leg is
+  # gated on the in-workflow paths-filter below instead — this avoids the
+  # "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch Rust paths. See the
+  # `changes` job and the `build-and-test` job's `if:` below.
   pull_request:
     branches:
       - main
@@ -48,16 +51,55 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Detect whether this PR/review touches anything the Rust build depends on.
+  # `build-and-test` runs only when it does; `ci-gate` below always runs and
+  # is the stable required-check name. Explicit base/ref (rather than relying
+  # on paths-filter's event auto-detection) because this job also has to
+  # cover pull_request_review, which paths-filter doesn't natively recognize
+  # — `github.event.pull_request.{base,head}.sha` is populated identically for
+  # both event types, so passing them explicitly works for both.
+  changes:
+    name: Detect Rust-relevant changes
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+        id: filter
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          filters: |
+            rust:
+              - '.github/workflows/rust.yml'
+              - '.github/actions/setup-rust/**'
+              - 'rust/**'
+              - 'contrib/signers/**'
+
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).
-    # Runs on main pushes AND on every pull_request into main (so the PR rollup
-    # reflects a real run). On the pull_request_review event it still requires an
-    # approving review on a main-targeted PR.
+    # Runs on main pushes (push is path-filtered at the trigger already), and
+    # on pull_request / pull_request_review only when Rust-relevant paths
+    # changed (per the `changes` job above) — web/MCP/docs-only PRs no longer
+    # spin up a macOS runner. On pull_request_review it additionally requires
+    # an approving review on a main-targeted PR.
+    needs: changes
     if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
+      always() &&
+      (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true') ||
+        (github.event_name == 'pull_request_review' &&
+         github.event.review.state == 'approved' &&
+         github.event.pull_request.base.ref == 'main' &&
+         needs.changes.outputs.rust == 'true')
+      )
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -288,11 +330,16 @@ jobs:
         run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
 
   # Aggregator gate — the single stable check to mark "required" in branch
-  # protection for THIS workflow's legs. It `needs` the macOS build/test leg and
-  # the keystore matrix and runs with `if: always()`, so it reports a real
-  # success/failure even when a job is skipped, cancelled, or fails:
-  #   - build-and-test: MUST be 'success'. It runs on every pull_request, so a
-  #     skip means the macOS suite never ran — which must not pass the gate.
+  # protection for THIS workflow's legs. It `needs` the changes detector, the
+  # macOS build/test leg, and the keystore matrix, and runs with `if: always()`,
+  # so it reports a real success/failure even when a job is skipped, cancelled,
+  # or fails:
+  #   - build-and-test: path-gated like web.yml/mcp.yml (see the `changes` job)
+  #     — 'skipped' is only accepted when the PR genuinely touched no
+  #     Rust-relevant paths. On `push` (already path-filtered at the trigger)
+  #     or when `changes` marked the PR Rust-relevant, a skip means the macOS
+  #     suite should have run and didn't — that's still a gate failure (no
+  #     silent "green rollup but nothing ran" for changes that matter).
   #   - keystore-backends: approval-gated via each step's env.SHOULD_RUN (not
   #     a job-level `if:`, so the matrix still expands to real per-leg names
   #     instead of one unexpanded synthetic entry — see the job's comment).
@@ -304,27 +351,41 @@ jobs:
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends]
+    needs: [changes, build-and-test, keystore-backends]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the macOS suite ran and no critical job failed
+      - name: Verify the macOS suite ran (when relevant) and no critical job failed
         shell: bash
         env:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
+          RUST_RELEVANT: ${{ needs.changes.outputs.rust }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "build-and-test:    ${BUILD_AND_TEST}"
           echo "keystore-backends: ${KEYSTORE_BACKENDS}"
+          echo "rust-relevant:     ${RUST_RELEVANT} (event: ${EVENT_NAME})"
 
           fail=0
 
-          # Must-run: shares the core suite's trigger gating, so it has to have
-          # actually run and passed — a skip is a gate failure (no silent
-          # "green rollup but nothing ran").
-          if [ "${BUILD_AND_TEST}" != "success" ]; then
-            echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST}) — required job must run and pass"
-            fail=1
-          fi
+          case "${BUILD_AND_TEST}" in
+            success) ;;
+            skipped)
+              # A skip is only legitimate when the trigger itself required
+              # relevance (pull_request/pull_request_review) AND the changes
+              # job actually found nothing Rust-relevant. `push` never sets
+              # RUST_RELEVANT (the `changes` job doesn't run there), so a skip
+              # on push always fails the gate.
+              if [ "${EVENT_NAME}" = "push" ] || [ "${RUST_RELEVANT}" = "true" ]; then
+                echo "::error::build-and-test was skipped but Rust-relevant paths changed (or this was a push) — required job must run and pass"
+                fail=1
+              fi
+              ;;
+            *)
+              echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST}) — required job must run and pass"
+              fail=1
+              ;;
+          esac
 
           # Cost-gated: may be skipped on PR-only events, but must not have
           # failed or been cancelled when it did run.
