@@ -17,9 +17,13 @@ on:
       - '.github/actions/setup-rust/**'
       - 'rust/**'
       - 'contrib/signers/**'
-  # The macOS build/test leg runs on EVERY PR into main so a green PR rollup
-  # reflects a real run on at least one OS (the Linux suite runs on Cloud Build,
-  # gated on a maintainer `/gcbrun`). See the `build-and-test` job's `if:` below.
+  # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
+  # its required check (ci-gate) is never absent. The heavy `build-and-test`
+  # job is gated on the in-workflow paths-filter below instead — this avoids
+  # the "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch Rust paths. Mirrors
+  # the same pattern already used by web.yml/mcp.yml. See the `changes` and
+  # `build-and-test` jobs below.
   pull_request:
     branches:
       - main
@@ -48,16 +52,51 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # Detect whether this PR touches anything the Rust build depends on. The
+  # heavy `build-and-test` job runs only when it does; `ci-gate` always runs
+  # and is the stable required-check name. Mirrors the same pattern already
+  # used by web.yml/mcp.yml for their own required checks — see those files'
+  # `changes` jobs for the precedent.
+  changes:
+    name: Detect Rust-relevant changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # paths-filter reads the PR's changed-file list from the API.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '.github/workflows/rust.yml'
+              - '.github/actions/setup-rust/**'
+              - 'rust/**'
+              - 'contrib/signers/**'
+
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).
-    # Runs on main pushes AND on every pull_request into main (so the PR rollup
-    # reflects a real run). On the pull_request_review event it still requires an
-    # approving review on a main-targeted PR.
+    # Runs on main pushes (push is path-filtered at the trigger); on a plain
+    # pull_request only when `changes` found Rust-relevant paths; and on the
+    # pull_request_review event once an approving review lands on a
+    # main-targeted PR, regardless of paths (matching keystore-backends'
+    # approval gate, which also doesn't re-check paths).
+    needs: changes
     if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
+      always() &&
+      (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true') ||
+        (github.event_name == 'pull_request_review' &&
+         github.event.review.state == 'approved' &&
+         github.event.pull_request.base.ref == 'main')
+      )
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -291,8 +330,12 @@ jobs:
   # protection for THIS workflow's legs. It `needs` the macOS build/test leg and
   # the keystore matrix and runs with `if: always()`, so it reports a real
   # success/failure even when a job is skipped, cancelled, or fails:
-  #   - build-and-test: MUST be 'success'. It runs on every pull_request, so a
-  #     skip means the macOS suite never ran — which must not pass the gate.
+  #   - build-and-test: path-gated via the `changes` job (see its comment) on a
+  #     plain pull_request; unconditional on push and on an approved review.
+  #     'skipped' is accepted — that's the expected, legitimate outcome for a
+  #     PR that doesn't touch Rust paths, same trust model web-gate/mcp-gate
+  #     already use for their own heavy jobs. Only 'failure'/'cancelled' fail
+  #     it.
   #   - keystore-backends: approval-gated via each step's env.SHOULD_RUN (not
   #     a job-level `if:`, so the matrix still expands to real per-leg names
   #     instead of one unexpanded synthetic entry — see the job's comment).
@@ -307,7 +350,7 @@ jobs:
     needs: [build-and-test, keystore-backends]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the macOS suite ran and no critical job failed
+      - name: Verify no critical job failed
         shell: bash
         env:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
@@ -318,13 +361,15 @@ jobs:
 
           fail=0
 
-          # Must-run: shares the core suite's trigger gating, so it has to have
-          # actually run and passed — a skip is a gate failure (no silent
-          # "green rollup but nothing ran").
-          if [ "${BUILD_AND_TEST}" != "success" ]; then
-            echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST}) — required job must run and pass"
-            fail=1
-          fi
+          # Path-gated: may legitimately be skipped when a PR touches no Rust
+          # paths, but must not have failed or been cancelled when it did run.
+          case "${BUILD_AND_TEST}" in
+            success|skipped) ;;
+            *)
+              echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST})"
+              fail=1
+              ;;
+          esac
 
           # Cost-gated: may be skipped on PR-only events, but must not have
           # failed or been cancelled when it did run.
