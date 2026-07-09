@@ -10,6 +10,7 @@
     "typecheck": "wrangler types && tsc --noEmit"
   },
   "dependencies": {
+    "@officialunofficial/og": "^0.3.1",
     "hono": "^4.12.25",
     "workers-og": "^0.0.27"
   },
