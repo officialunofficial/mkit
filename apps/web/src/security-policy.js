@@ -20,8 +20,8 @@
  * Content-Security-Policy directives.
  *
  * Tuned for this app's actual resource use (validated while it shipped as Report-Only): WASM via `wasm-unsafe-eval` +
- * `worker-src blob:`, the inline no-flash theme script and React 19 RSC inline bootstrap via `'unsafe-inline'`, and
- * the Cloudflare Insights beacon. Geist + Geist Mono are self-hosted (see styles.css) so no Google Fonts allowance is
+ * `worker-src blob:`, the inline no-flash theme script and React 19 RSC inline bootstrap via `'unsafe-inline'`, and the
+ * Cloudflare Insights beacon. Geist + Geist Mono are self-hosted (see styles.css) so no Google Fonts allowance is
  * needed. Cross-origin references to github.com / og.mkit.sh / etc. are only `<a href>` navigations and `<meta>` OG
  * tags, neither of which a fetch-directive blocks, so they need no allowance here.
  */
