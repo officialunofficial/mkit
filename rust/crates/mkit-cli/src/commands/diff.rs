@@ -43,7 +43,7 @@ use mkit_core::ops::{
 };
 use mkit_core::refs;
 use mkit_core::store::{EphemeralSink, ObjectSource, ObjectStore};
-use mkit_core::worktree;
+use mkit_core::worktree::{self, LoadedBlob};
 
 use super::revspec;
 use crate::clap_shim;
@@ -321,14 +321,17 @@ enum StatChange {
 /// Classify one changed entry's shape for `--stat`: text (line counts) or
 /// binary (byte sizes).
 ///
-/// Sniffs a bounded prefix of each side first — never a full reassembly of
-/// a chunked blob — to classify text vs binary exactly as `diff_line_counts`
-/// would (same NUL-in-first-8000 heuristic; a prefix classifies identically
-/// to the full blob, since the heuristic never looks further anyway). Full
-/// content is loaded only afterward, and only for a text entry that
-/// actually needs line counts; a binary entry's sizes come from blob
-/// metadata (a chunked blob's manifest `total_size`, or an inline blob's
-/// length) with no content read at all (#606).
+/// Each side's top-level object is loaded exactly once (as a
+/// [`LoadedBlob`]); the sniff prefix, the binary byte sizes, and the text
+/// content all derive from that single load. The sniff reads a bounded
+/// prefix — never a full reassembly of a chunked blob — and classifies
+/// text vs binary exactly as `diff_line_counts` would (same
+/// NUL-in-first-8000 heuristic; a prefix classifies identically to the
+/// full blob, since the heuristic never looks further anyway). A binary
+/// entry's sizes come from blob metadata (a chunked blob's manifest
+/// `total_size`, or an inline blob's length) with no further read at all;
+/// full content is materialized only for a text entry that actually needs
+/// line counts (#606).
 fn entry_stat_change<S: ObjectSource + ?Sized>(
     store: &S,
     e: &DiffEntry,
@@ -340,34 +343,21 @@ fn entry_stat_change<S: ObjectSource + ?Sized>(
             deleted: 0,
         });
     }
-    let old_prefix = match e.old_hash {
-        Some(h) => read_blob_prefix(store, &h, BINARY_SNIFF_LEN)?,
-        None => Vec::new(),
+    let old = load_blob(store, e.old_hash)?;
+    let new = load_blob(store, e.new_hash)?;
+    let sniffs_binary = {
+        let old_prefix = old.prefix(store, BINARY_SNIFF_LEN).map_err(read_err)?;
+        let new_prefix = new.prefix(store, BINARY_SNIFF_LEN).map_err(read_err)?;
+        is_binary(&old_prefix) || is_binary(&new_prefix)
     };
-    let new_prefix = match e.new_hash {
-        Some(h) => read_blob_prefix(store, &h, BINARY_SNIFF_LEN)?,
-        None => Vec::new(),
-    };
-    if is_binary(&old_prefix) || is_binary(&new_prefix) {
+    if sniffs_binary {
         return Ok(StatChange::Binary {
-            old_len: match e.old_hash {
-                Some(h) => blob_len(store, &h)?,
-                None => 0,
-            },
-            new_len: match e.new_hash {
-                Some(h) => blob_len(store, &h)?,
-                None => 0,
-            },
+            old_len: old.len(),
+            new_len: new.len(),
         });
     }
-    let old_bytes = match e.old_hash {
-        Some(h) => read_blob(store, &h)?,
-        None => Vec::new(),
-    };
-    let new_bytes = match e.new_hash {
-        Some(h) => read_blob(store, &h)?,
-        None => Vec::new(),
-    };
+    let old_bytes = old.into_content(store).map_err(read_err)?;
+    let new_bytes = new.into_content(store).map_err(read_err)?;
     Ok(match diff_line_counts(&old_bytes, &new_bytes) {
         Some((added, deleted)) => StatChange::Text { added, deleted },
         // Unreachable in practice (the prefix sniff already agreed both
@@ -915,7 +905,7 @@ pub(super) fn object_to_tree(store: &ObjectStore, h: &Hash) -> Result<Hash, Stri
             "{} is not a commit, remix, or tree",
             mkit_core::hash::to_hex(h)
         )),
-        Err(e) => Err(format!("read object: {e}")),
+        Err(e) => Err(read_err(e)),
     }
 }
 
@@ -1162,25 +1152,22 @@ fn quoted_side(side: char, path: &str) -> String {
 /// Read a blob's bytes from the store, reassembling chunked blobs via
 /// the shared core helper so diff/cat/checkout agree (#203).
 fn read_blob<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<Vec<u8>, String> {
-    worktree::read_blob(store, h).map_err(|e| format!("read object: {e}"))
+    worktree::read_blob(store, h).map_err(read_err)
 }
 
-/// Read up to `max_len` leading bytes of a blob, without reassembling a
-/// chunked blob's full content — the `render_stat` binary-classification
-/// sniff (#606).
-fn read_blob_prefix<S: ObjectSource + ?Sized>(
-    store: &S,
-    h: &Hash,
-    max_len: usize,
-) -> Result<Vec<u8>, String> {
-    worktree::read_blob_prefix(store, h, max_len).map_err(|e| format!("read object: {e}"))
+/// Load a diff side's top-level object once — every view `render_stat`
+/// needs (sniff prefix, byte length, full content) derives from this
+/// single read. A side with no hash (add/delete) is the empty blob (#624).
+fn load_blob<S: ObjectSource + ?Sized>(store: &S, h: Option<Hash>) -> Result<LoadedBlob, String> {
+    match h {
+        Some(h) => LoadedBlob::load(store, &h).map_err(read_err),
+        None => Ok(LoadedBlob::empty()),
+    }
 }
 
-/// A blob's byte length from metadata alone (a chunked blob's manifest
-/// `total_size`, no chunk reads) — the `render_stat` `Bin … bytes` sizing
-/// (#606).
-fn blob_len<S: ObjectSource + ?Sized>(store: &S, h: &Hash) -> Result<u64, String> {
-    worktree::blob_len(store, h).map_err(|e| format!("read object: {e}"))
+/// The one place the CLI's "read object: …" error wording is defined.
+fn read_err<E: std::fmt::Display>(e: E) -> String {
+    format!("read object: {e}")
 }
 
 use super::error as emit_err;
@@ -1499,6 +1486,91 @@ mod tests {
             rendered,
             " big.bin | Bin 12000 -> 15000 bytes\n \
              1 file changed, 0 insertions(+), 0 deletions(-)\n"
+        );
+    }
+
+    /// How many times `render_stat` read each side's top-level object.
+    fn reads_per_side(store: &RecordingSource, old: &Hash, new: &Hash) -> (usize, usize) {
+        let reads = store.reads.borrow();
+        (
+            reads.iter().filter(|h| *h == old).count(),
+            reads.iter().filter(|h| *h == new).count(),
+        )
+    }
+
+    #[test]
+    fn render_stat_inline_binary_blob_reads_each_side_once() {
+        // An inline (non-chunked) binary entry: the sniff prefix and the
+        // Bin byte sizes must both come from ONE load of each side's
+        // object. Taking them through separate prefix + len store reads
+        // re-read (and in the real store, re-hash-verified) every small
+        // blob per changed file, which measurably slowed a
+        // many-small-files commit's diffstat (#624).
+        let mut store = RecordingSource::default();
+        let old_hash = fake_hash(21);
+        let new_hash = fake_hash(22);
+        store.put(
+            old_hash,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'a', 10_240),
+            }),
+        );
+        store.put(
+            new_hash,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'b', 12_288),
+            }),
+        );
+
+        let entry = modified_entry("f.bin", old_hash, new_hash);
+        let mut out = Vec::new();
+        render_stat(&mut out, &store, std::iter::once(&entry)).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Bin 10240 -> 12288 bytes"),
+            "sizes should come from the single loaded object: {rendered}"
+        );
+        assert_eq!(
+            reads_per_side(&store, &old_hash, &new_hash),
+            (1, 1),
+            "each side's object must be read exactly once: {:?}",
+            store.reads.borrow()
+        );
+    }
+
+    #[test]
+    fn render_stat_inline_text_blob_reads_each_side_once() {
+        // Same single-read guarantee for the text path: the sniff and the
+        // line counts share one load per side.
+        let mut store = RecordingSource::default();
+        let old_hash = fake_hash(23);
+        let new_hash = fake_hash(24);
+        store.put(
+            old_hash,
+            &Object::Blob(Blob {
+                data: b"one\ntwo\n".to_vec(),
+            }),
+        );
+        store.put(
+            new_hash,
+            &Object::Blob(Blob {
+                data: b"one\nthree\nfour\n".to_vec(),
+            }),
+        );
+
+        let entry = modified_entry("f.txt", old_hash, new_hash);
+        let mut out = Vec::new();
+        render_stat(&mut out, &store, std::iter::once(&entry)).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("1 file changed, 2 insertions(+), 1 deletion(-)"),
+            "line counts should match the text diff: {rendered}"
+        );
+        assert_eq!(
+            reads_per_side(&store, &old_hash, &new_hash),
+            (1, 1),
+            "each side's object must be read exactly once: {:?}",
+            store.reads.borrow()
         );
     }
 }
