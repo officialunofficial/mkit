@@ -60,7 +60,7 @@ function MultiplayerBody({
   // The passkey create/unlock ceremony — shared with the front-page lobby via
   // `useIdentityActions` so the ceremony + keys.mkit.sh registration live once.
   // The "what just happened" narration is emitted from inside that hook.
-  const { onCreate, onUnlock, busy, status } = useIdentityActions()
+  const { onCreate, onUnlock, busy, status, embeddedBrowserWarning } = useIdentityActions()
 
   // Repo-browser navigation state (no router change needed): which ref the
   // log/detail view follows, and which commit's detail is open (null = none).
@@ -82,6 +82,7 @@ function MultiplayerBody({
             busy={busy}
             status={status}
             hasPasskey={id.credentialId != null}
+            embeddedBrowserWarning={embeddedBrowserWarning}
           />
         )}
       </section>
