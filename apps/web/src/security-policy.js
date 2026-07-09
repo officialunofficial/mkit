@@ -20,9 +20,10 @@
  * Content-Security-Policy directives.
  *
  * Tuned for this app's actual resource use (validated while it shipped as Report-Only): WASM via `wasm-unsafe-eval` +
- * `worker-src blob:`, the inline no-flash theme script and React 19 RSC inline bootstrap via `'unsafe-inline'`, Google
- * Fonts, and the Cloudflare Insights beacon. Cross-origin references to github.com / og.mkit.sh / etc. are only `<a
- * href>` navigations and `<meta>` OG tags, neither of which a fetch-directive blocks, so they need no allowance here.
+ * `worker-src blob:`, the inline no-flash theme script and React 19 RSC inline bootstrap via `'unsafe-inline'`, and the
+ * Cloudflare Insights beacon. Geist + Geist Mono are self-hosted (see styles.css) so no Google Fonts allowance is
+ * needed. Cross-origin references to github.com / og.mkit.sh / etc. are only `<a href>` navigations and `<meta>` OG
+ * tags, neither of which a fetch-directive blocks, so they need no allowance here.
  */
 export const CSP_DIRECTIVES = [
   "default-src 'self'",
@@ -31,8 +32,8 @@ export const CSP_DIRECTIVES = [
   "frame-ancestors 'none'",
   "form-action 'self'",
   "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://static.cloudflareinsights.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com data:",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self' data:",
   "img-src 'self' data: blob:",
   // The multiplayer demo's wasm ConnectRPC client talks to the mkit repo Worker
   // (a SEPARATE origin) over fetch, and opens a `/watch/<room>` WebSocket — both

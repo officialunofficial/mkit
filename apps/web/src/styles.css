@@ -1,5 +1,18 @@
 @import 'tailwindcss';
 
+/* Self-hosted Geist + Geist Mono (latin subset only, matching the weights the
+   site actually uses). Previously loaded from fonts.googleapis.com with
+   `display=swap`, which meant a visible font swap after the stylesheet
+   round-tripped to Google's CDN on every cold load. Self-hosting serves the
+   woff2 files from the same origin (bundled + cached like any other static
+   asset), so the swap window collapses to effectively nothing. */
+@import '@fontsource/geist-sans/latin-400.css';
+@import '@fontsource/geist-sans/latin-500.css';
+@import '@fontsource/geist-sans/latin-600.css';
+@import '@fontsource/geist-sans/latin-700.css';
+@import '@fontsource/geist-mono/latin-400.css';
+@import '@fontsource/geist-mono/latin-500.css';
+
 /* Manual override drives dark mode: the no-flash script in _root.tsx resolves
    `system`/`light`/`dark` to an explicit `data-theme` attribute, so `dark:`
    utilities key off that attribute (no prefers-color-scheme needed in CSS —
@@ -42,7 +55,7 @@
      copy that should read as secondary without fully fading out. */
   --color-subtle: oklch(0.68 0 0);
   --color-hairline: oklch(0.945 0 0);
-  --font-sans: 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-sans: 'Geist Sans', 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Brand gradient lifted from the official-unofficial logo. Stops
