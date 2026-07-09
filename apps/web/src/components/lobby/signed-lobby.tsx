@@ -564,7 +564,12 @@ function Composer({ room }: { room: string }) {
   const [text, setText] = useState('')
 
   if (!unlocked) {
-    const hint = actions.status ?? (actions.hasPasskey ? null : 'Set up a passkey. No email, no passwords.')
+    // Priority: a live result from an actual attempt, then the proactive in-app-browser
+    // notice (shown before any tap), then the default first-time hint.
+    const hint =
+      actions.status ??
+      actions.embeddedBrowserWarning ??
+      (actions.hasPasskey ? null : 'Set up a passkey. No email, no passwords.')
     return (
       <div className='flex flex-wrap items-center gap-3 border-t border-hairline px-4 py-3'>
         <button
