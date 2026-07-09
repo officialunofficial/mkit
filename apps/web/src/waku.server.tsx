@@ -1,5 +1,6 @@
 import { fsRouter } from 'waku'
 import adapter from 'waku/adapters/cloudflare'
+import { cacheHeadersMiddleware } from './cache-headers'
 import { installerMiddleware } from './install-route'
 import { redirectMiddleware } from './redirects'
 import { securityHeadersMiddleware } from './security-headers'
@@ -18,8 +19,10 @@ import { securityHeadersMiddleware } from './security-headers'
 // `assets.run_worker_first: ["/"]` (patch-worker-config.mjs) so the Worker
 // actually receives `GET /`; the redirects need no such entry — the deleted
 // demo routes have no asset, so they already fall through to the Worker.
+// cacheHeaders is last → innermost, wrapping only the actual RSC render, so it
+// never overwrites the installer's `no-store` or a redirect's headers.
 const server = adapter(fsRouter(import.meta.glob('./pages/**/*.{tsx,ts}')), {
-  middlewareFns: [securityHeadersMiddleware, installerMiddleware, redirectMiddleware],
+  middlewareFns: [securityHeadersMiddleware, installerMiddleware, redirectMiddleware, cacheHeadersMiddleware],
 })
 
 export default server
