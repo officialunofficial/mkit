@@ -120,6 +120,24 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// [`StoreError::ObjectNotFound`] for a missing root or referenced
 /// object, so a caller (gc) fails closed rather than under-counting the
 /// live set.
+///
+/// # Content integrity of leaves (#636)
+///
+/// This walk classifies blob/delta leaves via a cheap type check
+/// ([`ObjectStore::object_type`]) instead of a full verified read, so a
+/// leaf's BLAKE3 content hash is **not** checked here — only its type.
+/// A blob whose stored bytes are corrupted but whose type prologue is
+/// intact is still counted as reachable (and, for `gc`, therefore
+/// survives). This is a deliberate scope change from the walk's
+/// pre-#636 behavior, where every leaf's content was verified
+/// incidentally as a side effect of the full read the old
+/// classification path did. Corruption is still caught — just later,
+/// the first time something actually reads the leaf's bytes (pack
+/// build, checkout, `cat-file`, ...) via `store.read`/`read_object`,
+/// both of which always verify. `gc`'s job is reachability, not
+/// content integrity, so this narrowing is intentional; it just means
+/// `gc`/push-planning are no longer an incidental corruption-detection
+/// pass the way they used to be.
 pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSet<Hash>, StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
