@@ -600,6 +600,97 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// History-coupled branch delete (feature: history-mmr) — issue #648
+// -----------------------------------------------------------------------------
+//
+// Deleting a branch ref alone leaves its `history/<branch>__*` journal
+// partition on disk. Since the partition is keyed on the branch NAME
+// (sanitized, not on any per-incarnation identifier), a later branch
+// created with the same name reopens the dead incarnation's non-empty
+// journal via `CommitHistory::open_at` and resumes appending on top of
+// its old leaves — the new branch's MMR root then spans two unrelated
+// incarnations, and the deleted incarnation's stale leaves keep
+// producing valid-looking inclusion proofs "on this branch". These
+// functions close that hole by destroying the journal as part of the
+// same delete, so a branch name and its journal are always retired
+// together.
+
+/// Delete a branch ref and permanently destroy its history-MMR journal
+/// partition, so a later branch created with the same name never
+/// resumes a deleted incarnation's leaves (issue #648).
+///
+/// Order: the journal is destroyed **before** the ref file is removed.
+/// That means once this call returns `Ok`, both are gone together with
+/// no window in between. If the process is interrupted between the two
+/// steps, the ref still exists (the caller sees this call never
+/// returned, so the delete visibly did not complete) but its journal is
+/// already gone; retrying re-creates a fresh empty journal via
+/// `CommitHistory::open_at`, destroys that (a cheap no-op — nothing was
+/// appended to it), and finishes the ref removal. There is no ordering
+/// under which `delete_ref` can report success while the old journal
+/// survives on disk, which is exactly the state that would let a
+/// same-named recreated branch inherit it.
+///
+/// Does not check whether `branch` is the currently checked-out branch
+/// — see [`delete_ref_safe_with_history`] for that guard. Used directly
+/// by `mkit branch -m` (rename), which intentionally deletes the OLD
+/// name's ref even when it is the checked-out branch (HEAD is moved to
+/// the new name by the caller).
+///
+/// # Errors
+///
+/// - [`RefError::NotFound`] — `branch` has no ref on disk. Checked
+///   before the journal is touched, so a typo'd/absent branch name
+///   never creates a journal partition just to destroy it.
+/// - [`RefError::InvalidRef`] — the history journal could not be opened
+///   or destroyed. The wrapped [`crate::history::HistoryError`] is
+///   exposed via a `String` payload, matching
+///   [`update_ref_with_history`]'s convention.
+/// - [`RefError::Io`] — filesystem failure removing the ref file
+///   itself.
+#[cfg(feature = "history-mmr")]
+pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
+    layout: &RepoLayout,
+    branch: &str,
+    executor: std::sync::Arc<X>,
+) -> RefResult<()> {
+    if read_ref(layout, branch)?.is_none() {
+        return Err(RefError::NotFound(branch.to_string()));
+    }
+
+    let history = crate::history::CommitHistory::open_at(executor, layout, branch)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
+    history
+        .destroy()
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: destroy history journal: {e}")))?;
+
+    delete_ref(layout, branch)
+}
+
+/// [`delete_ref_with_history`] guarded by the same current-branch check
+/// as [`delete_ref_safe`] — refuses to delete (and does not touch the
+/// journal of) the branch HEAD currently points at. This is the
+/// history-mmr counterpart `mkit branch -d`/`-D` route through.
+///
+/// # Errors
+///
+/// [`RefError::CurrentBranch`] if `branch` is the checked-out branch;
+/// otherwise the same errors as [`delete_ref_with_history`].
+#[cfg(feature = "history-mmr")]
+pub fn delete_ref_safe_with_history<X: crate::protocol::async_shim::Executor + 'static>(
+    layout: &RepoLayout,
+    branch: &str,
+    executor: std::sync::Arc<X>,
+) -> RefResult<()> {
+    match read_head(layout) {
+        Ok(Head::Branch(current)) if current == branch => {
+            Err(RefError::CurrentBranch(branch.to_string()))
+        }
+        _ => delete_ref_with_history(layout, branch, executor),
+    }
+}
+
 /// List all branch refs, sorted lexicographically by name.
 pub fn list_refs(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
     list_refs_under(layout.common_dir(), HEADS_DIR)
@@ -1598,6 +1689,173 @@ mod tests {
             assert!(verify_inclusion(&a1, Position(0), &proof0, &root));
             let proof1 = hist_b.prove(Position(1)).unwrap();
             assert!(verify_inclusion(&b1, Position(1), &proof1, &root));
+        }
+
+        // --- journal lifecycle on branch delete/rename (issue #648) ---
+
+        /// The core regression test: delete a branch, recreate one with
+        /// the SAME name, and advance it once. The new incarnation's
+        /// journal must start fresh (one leaf), not resume the deleted
+        /// incarnation's leaves — otherwise the new branch's MMR root
+        /// commits to a sequence spanning unrelated incarnations, and
+        /// stale leaves from the deleted branch keep producing
+        /// valid-looking inclusion proofs "on this branch".
+        #[test]
+        fn delete_ref_with_history_prevents_partition_reuse_on_recreate() {
+            use crate::history::{Position, verify_inclusion};
+
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+
+            // Branch A, advanced twice — journal gets two leaves.
+            let a1 = h("a1");
+            let a2 = h("a2");
+            let mut hist_a = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &a1, &mut hist_a)
+                .unwrap();
+            update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Match(a1),
+                &a2,
+                &mut hist_a,
+            )
+            .unwrap();
+            assert_eq!(hist_a.len(), 2);
+            drop(hist_a);
+
+            // Delete branch A through the history-aware path.
+            delete_ref_with_history(&mkit, "feature", exec.clone()).unwrap();
+            assert_eq!(read_ref(&mkit, "feature").unwrap(), None);
+
+            // Recreate a NEW branch also named "feature" and advance it
+            // once. Its journal must be fresh: one leaf, not three.
+            let b1 = h("b1");
+            let mut hist_b = CommitHistory::open_at(exec, &mkit, "feature").unwrap();
+            assert_eq!(
+                hist_b.len(),
+                0,
+                "recreated branch must not inherit the deleted incarnation's leaves"
+            );
+            update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Missing,
+                &b1,
+                &mut hist_b,
+            )
+            .unwrap();
+            assert_eq!(
+                hist_b.len(),
+                1,
+                "the new incarnation's journal must contain exactly its own one leaf"
+            );
+
+            // The old leaves (a1, a2) must not verify against the new
+            // incarnation's root at any position — no splicing of
+            // unrelated incarnations.
+            let root = hist_b.root();
+            for pos in 0..hist_b.len() {
+                let proof = hist_b.prove(Position(pos)).unwrap();
+                assert!(
+                    !verify_inclusion(&a1, Position(pos), &proof, &root),
+                    "deleted incarnation's leaf a1 must not verify against the new root"
+                );
+                assert!(
+                    !verify_inclusion(&a2, Position(pos), &proof, &root),
+                    "deleted incarnation's leaf a2 must not verify against the new root"
+                );
+            }
+        }
+
+        #[test]
+        fn delete_ref_with_history_removes_journal_partition_from_disk() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &h("a"), &mut hist)
+                .unwrap();
+            drop(hist);
+
+            let journal_blobs = mkit.history_dir().join("feature__journal-blobs");
+            assert!(journal_blobs.exists());
+
+            delete_ref_with_history(&mkit, "feature", exec).unwrap();
+            assert!(
+                !journal_blobs.exists(),
+                "delete_ref_with_history must remove the on-disk journal partition"
+            );
+        }
+
+        #[test]
+        fn delete_ref_with_history_errors_on_missing_branch_without_touching_journal() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let err = delete_ref_with_history(&mkit, "nope", exec).unwrap_err();
+            assert!(matches!(err, RefError::NotFound(_)));
+        }
+
+        #[test]
+        fn delete_ref_safe_with_history_refuses_current_branch() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m"), &mut hist)
+                .unwrap();
+            drop(hist);
+
+            let err = delete_ref_safe_with_history(&mkit, "main", exec).unwrap_err();
+            assert!(matches!(err, RefError::CurrentBranch(_)));
+            // Refusing the delete must leave the journal untouched.
+            assert!(mkit.history_dir().join("main__journal-blobs").exists());
+        }
+
+        /// Rename support: destroying the OLD name's journal after the
+        /// new name has already been seeded with a fresh journal (by
+        /// `write_ref_recording_history`, mkit-cli's create/rename path)
+        /// closes the same reuse hole for `branch -m`.
+        #[test]
+        fn delete_ref_with_history_supports_rename_by_destroying_the_old_name_only() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+
+            let mut hist_old = CommitHistory::open_at(exec.clone(), &mkit, "old").unwrap();
+            update_ref_with_history(
+                &mkit,
+                "old",
+                RefWriteCondition::Any,
+                &h("o1"),
+                &mut hist_old,
+            )
+            .unwrap();
+            drop(hist_old);
+
+            // Simulate the CLI rename: seed "new" with a fresh journal
+            // first (mirrors `write_ref_recording_history`'s Missing-CAS
+            // create), then drop "old" via the history-aware delete.
+            let mut hist_new = CommitHistory::open_at(exec.clone(), &mkit, "new").unwrap();
+            update_ref_with_history(
+                &mkit,
+                "new",
+                RefWriteCondition::Missing,
+                &h("o1"),
+                &mut hist_new,
+            )
+            .unwrap();
+            assert_eq!(hist_new.len(), 1);
+            drop(hist_new);
+
+            delete_ref_with_history(&mkit, "old", exec.clone()).unwrap();
+
+            assert_eq!(read_ref(&mkit, "old").unwrap(), None);
+            assert_eq!(read_ref(&mkit, "new").unwrap(), Some(h("o1")));
+            assert!(!mkit.history_dir().join("old__journal-blobs").exists());
+            assert!(mkit.history_dir().join("new__journal-blobs").exists());
+
+            // Recreating "old" afterward must not resume the destroyed
+            // incarnation's leaf.
+            let hist_old_reopened = CommitHistory::open_at(exec, &mkit, "old").unwrap();
+            assert_eq!(hist_old_reopened.len(), 0);
         }
     }
 }
