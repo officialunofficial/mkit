@@ -3,17 +3,20 @@
 //! Zero prior coverage before this file (issue #644): a grep for
 //! `repo_lock` across `rust/benches/` previously returned nothing.
 //!
-//! The `contended_handoff` series doubles as the regression guard for
-//! issue #635's fix to [`mkit_core::repo_lock::acquire`]'s poll loop:
-//! today a losing acquirer retries on a fixed-interval sleep
-//! ([`mkit_core::repo_lock::DEFAULT_SLEEP`], 50ms) rather than blocking
-//! on the holder's release, so a waiter that just missed the winning
-//! `create_new` can sit idle for up to a full poll quantum after the
-//! lock is actually free. This bench pins the holder's release to a
-//! few ms after the waiter starts contending, so the measured latency
-//! is dominated by that poll quantum, not by hold duration — once
-//! #635 lands (presumably a blocking wait rather than sleep-poll), this
-//! number should collapse from ~50ms towards low single-digit ms.
+//! The `contended_handoff` series is the regression guard for issue
+//! #635's fix to [`mkit_core::repo_lock::acquire`]'s wait path, which
+//! has since landed in this branch: a losing acquirer used to retry on
+//! a fixed-interval sleep (the now-removed `DEFAULT_SLEEP`, 50ms)
+//! rather than blocking on the holder's release, so a waiter that just
+//! missed the winning `create_new` could sit idle for up to a full
+//! poll quantum after the lock was actually free. `acquire` now blocks
+//! on the holder's kernel-level lock release directly (the
+//! never-unlinked-sentinel pattern ported from
+//! `mkit-transport-file::RefLock`). This bench pins the holder's
+//! release to a few ms after the waiter starts contending, so the
+//! measured latency reflects that release-to-wake gap — with the fix,
+//! it should sit at low single-digit ms rather than the ~50ms poll
+//! quantum a pre-#635 run would show.
 //!
 //! Numbers are wallclock ms; smaller is better. Both series involve
 //! real filesystem locking (and, for the contended series, real
