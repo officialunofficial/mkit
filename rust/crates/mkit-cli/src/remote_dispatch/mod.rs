@@ -961,37 +961,51 @@ fn fetch_objects_inner(
 
             // Phase 2 (#642): unpack + verify + publish this branch's ref,
             // under a repo lock acquired fresh for this branch and released
-            // (via `_lock`'s `Drop`) once this loop iteration ends — never
-            // held across another branch's download. See
-            // `packmap::apply_fetched_chain`'s doc comment for the safety
-            // contract (closing the #267 GC-prune race) this depends on.
-            let _lock = mkit_core::repo_lock::acquire_default(
+            // once this loop iteration ends — never held across another
+            // branch's download. See `packmap::apply_fetched_chain`'s doc
+            // comment for the safety contract (closing the #267 GC-prune
+            // race) this depends on.
+            let lock = mkit_core::repo_lock::acquire_default(
                 layout.worktree_state_dir(),
                 crate::commands::WORKTREE_LOCK,
             )?;
             // The tip we publish: normally the listed `h`, but if the chain fails
             // because a concurrent re-baseline moved the branch under us, the
-            // freshly re-read tip (see this fn's doc comment).
-            let published_tip =
+            // freshly re-read tip (see this fn's doc comment). The match also
+            // carries the lock guard out, so whichever branch runs, the
+            // correct (possibly re-acquired) guard is what's held at
+            // `tracking.write` below — see the retry branch's comment for why
+            // there are two guards, not one held across the whole match.
+            let (published_tip, _lock) =
                 match apply_fetched_chain(store, tx, remote, &r.name, fetched, h, applied) {
-                    Ok(()) => h,
+                    Ok(()) => (h, lock),
                     Err(e @ DispatchError::RemoteMissingObject(_)) => {
                         // Re-read the branch's CURRENT tip + packmap. If either
                         // is gone (branch deleted mid-fetch) the original error
                         // stands. Otherwise retry the chain ONCE with the fresh
-                        // pair; a second failure propagates via `?`. This retry
-                        // still runs under the lock acquired above — a rare
-                        // race-recovery path, so paying for its network
-                        // re-download while locked is an accepted trade (see
-                        // `apply_fetched_chain`'s doc comment).
+                        // pair; a second failure propagates via `?`.
                         let (Some(fresh_h), Some(fresh_head)) = (
                             tx.read_ref(&format!("refs/heads/{}", r.name))?,
                             tx.read_ref(&packmap_ref(&r.name))?,
                         ) else {
                             return Err(e);
                         };
+                        // Release the lock for the retry's network
+                        // re-download too — mirrors phase 1's unlocked
+                        // download exactly, rather than the previously
+                        // "accepted trade" of holding the lock across a
+                        // second network round-trip on this rare
+                        // race-recovery path. Re-acquire before the
+                        // retry's local unpack + publish, which still
+                        // needs the same #267 protection phase 2 always
+                        // has.
+                        drop(lock);
                         let fresh_fetched =
                             resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
+                        let lock = mkit_core::repo_lock::acquire_default(
+                            layout.worktree_state_dir(),
+                            crate::commands::WORKTREE_LOCK,
+                        )?;
                         apply_fetched_chain(
                             store,
                             tx,
@@ -1001,11 +1015,12 @@ fn fetch_objects_inner(
                             fresh_h,
                             applied,
                         )?;
-                        fresh_h
+                        (fresh_h, lock)
                     }
                     Err(e) => return Err(e),
                 };
-            // Still inside `_lock`'s scope — see the doc comment above.
+            // Still inside `_lock`'s scope (the original guard, or the
+            // retry's re-acquired one — see above).
             tracking.write(&r.name, &published_tip)?;
             n += 1;
         }
