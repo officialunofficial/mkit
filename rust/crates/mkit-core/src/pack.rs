@@ -409,17 +409,24 @@ impl PackReader {
                     let mut base_hash = [0u8; hash::HASH_LEN];
                     base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
                     let stream = &payload[hash::HASH_LEN..];
-                    // Resolve base: in-pack first, then on-disk.
-                    let base_bytes: std::borrow::Cow<'_, [u8]> =
-                        if let Some(b) = in_pack.get(&base_hash) {
-                            std::borrow::Cow::Borrowed(b.as_ref())
-                        } else if store.contains(&base_hash) {
-                            let bytes = store.read(&base_hash)?;
-                            validate_storable_object(&bytes)?;
-                            std::borrow::Cow::Owned(bytes)
-                        } else {
-                            return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
-                        };
+                    // Resolve base: in-pack first, then on-disk. A
+                    // store-resolved base is cached into `in_pack` under
+                    // its own hash so a later delta entry referencing the
+                    // same out-of-pack base hits memory instead of paying
+                    // another full read + verify + decode (#643). This is
+                    // safe because `store.read` already hash-verified the
+                    // bytes against `base_hash`.
+                    let base_bytes: Arc<[u8]> = if let Some(b) = in_pack.get(&base_hash) {
+                        Arc::clone(b)
+                    } else if store.contains(&base_hash) {
+                        let bytes = store.read(&base_hash)?;
+                        validate_storable_object(&bytes)?;
+                        let bytes: Arc<[u8]> = Arc::from(bytes);
+                        in_pack.insert(base_hash, Arc::clone(&bytes));
+                        bytes
+                    } else {
+                        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
+                    };
                     validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
                     let obj = validate_storable_object(&resolved)?;
@@ -970,5 +977,55 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.raw_count, 0);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn multiple_deltas_against_shared_external_base_read_store_once() {
+        // Regression for #643: N deltas in one pack all referencing the
+        // SAME out-of-pack (already-in-store) base object must resolve
+        // that base with exactly one physical store read, not N — the
+        // first store-resolved base should be cached into `in_pack` for
+        // subsequent deltas to hit in memory.
+        const N: usize = 5;
+
+        let (_dir, store) = fresh_store();
+
+        let mut content_base = vec![0u8; 512];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let base_obj = write_blob_via_serialize(&content_base);
+        let base_hash = store.write(&base_obj).unwrap();
+
+        // Five distinct deltas against the one shared external base.
+        let mut w = PackWriter::new();
+        let mut expected_targets = Vec::new();
+        for i in 0..N {
+            let mut content_target = content_base.clone();
+            content_target[100] = u8::try_from(i).unwrap();
+            let target_obj = write_blob_via_serialize(&content_target);
+            let target_hash = hash::hash(&target_obj);
+            let stream = delta::encode(&base_obj, &target_obj).unwrap();
+            w.push_delta(&base_hash, &stream).unwrap();
+            expected_targets.push((target_hash, target_obj));
+        }
+        let pack = w.finish().unwrap();
+
+        let reads_before = store.read_call_count();
+        let report = PackReader::read(&pack, &store).unwrap();
+        let reads_after_for_base = store.read_call_count() - reads_before;
+
+        assert_eq!(report.delta_count, u32::try_from(N).unwrap());
+        assert_eq!(
+            reads_after_for_base, 1,
+            "base object must be read from the store exactly once for {N} deltas sharing it, got {reads_after_for_base}"
+        );
+
+        // Correctness: caching the store-resolved base must not change
+        // the decoded result for any of the N deltas — every target
+        // still comes out byte-identical to the uncached decode.
+        for (target_hash, target_obj) in expected_targets {
+            assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+        }
     }
 }
