@@ -2,9 +2,14 @@
 //! (SPEC-GIT-BRIDGE §12.1).
 //!
 //! mkit ref names (SPEC-REFS §3) are already restricted to
-//! `[0-9A-Za-z._-]` segments, no empty segments, no exact `.`/`..`
-//! segments, no `.lock` suffix. The three residual git-illegal shapes
-//! are checked here. No escaping: illegal names are refused per-ref.
+//! `[0-9A-Za-z._-]` segments, no empty segments, no `.lock` suffix, and
+//! no segment starting with `.` (which also covers the exact `.`/`..`
+//! segments). That leaves two residual git-illegal-but-mkit-legal
+//! shapes, checked here: a segment ending in `.`, and a segment
+//! containing `..` anywhere. The leading-dot check below is kept as
+//! defense in depth for any future caller of `check_git_legal` on a
+//! string not already run through `validate_ref_name`. No escaping:
+//! illegal names are refused per-ref.
 
 use crate::error::Refusal;
 

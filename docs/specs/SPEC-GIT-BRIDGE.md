@@ -486,12 +486,13 @@ consumers MUST treat `gitCommit` as a locator, not a proof.
 
 ### 12.1 Ref-name mapping
 
-mkit ref names (SPEC-REFS §3 grammar: segments of `[0-9A-Za-z._-]`)
-are *mostly* but not entirely git-legal. The bridge MUST refuse
-(per-ref, same granularity as §8) any ref name where a segment:
+mkit ref names (SPEC-REFS §3 grammar: segments of `[0-9A-Za-z._-]`, no
+segment starting with `.`) are *mostly* but not entirely git-legal. The
+bridge MUST refuse (per-ref, same granularity as §8) any ref name where
+a segment:
 
-- begins or ends with `.` (git rejects both; mkit only rejects the
-  exact names `.` / `..`), or
+- ends with `.` (git rejects; mkit allows a trailing dot — only a
+  *leading* dot is mkit-illegal too, per SPEC-REFS §3), or
 - contains `..` anywhere (git rejects; mkit allows `a..b`).
 
 No escaping scheme is defined in v1: escaped names would collide with

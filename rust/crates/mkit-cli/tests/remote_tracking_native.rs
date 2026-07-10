@@ -457,12 +457,64 @@ fn failed_rename_restores_source_state() {
     assert_eq!(std::fs::read(&restored_marker).unwrap(), b"bridge state\n");
     // The pre-existing occupant at the destination is untouched.
     assert!(taken_state.join("occupied.txt").exists());
-    // No `.rename-*` temp dir left under the state root.
+    // No `.rename.tmp.*` temp dir left under the state root.
     let stray_temp = std::fs::read_dir(layout.git_state_dir())
         .unwrap()
         .filter_map(std::result::Result::ok)
-        .any(|e| e.file_name().to_string_lossy().starts_with(".rename-"));
+        .any(|e| e.file_name().to_string_lossy().starts_with(".rename.tmp."));
     assert!(!stray_temp, "no temp dir should remain after a failed move");
+}
+
+/// Plants a `.rename.tmp.<pid>.0`-shaped orphan directly under
+/// `refs/remotes/` — exactly the crash debris `rename_state_dir` can
+/// leave behind between its two renames — and confirms both native ref
+/// listing enumerators treat it as inert: `show-ref` and `for-each-ref`
+/// never surface a phantom `refs/remotes/.rename.tmp.../...` ref or
+/// remote. The companion bridge-side assertion (zero-arg bridge-state
+/// resolution via `state_names`/`resolve_state` ignoring the same
+/// shape planted under `.mkit/git/`) lives in
+/// `git_tools::tests::state_names_and_resolve_state_skip_dot_leading_orphans`
+/// (feature `git-bridge`), since those functions only exist under that
+/// feature. This is the test the PR #659 review's finding 1 called out
+/// as missing: before the dot-leading-segment rejection in
+/// `validate_ref_name`, this orphan was a fully populated, listable ref
+/// namespace, not the harmless empty-directory debris the old docs
+/// claimed.
+#[test]
+fn orphaned_rename_temp_dir_is_inert_in_listings() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    plant_tracking_ref(&r, "orig", "main");
+
+    // Crash debris under `refs/remotes/`: a dot-leading dir with a real
+    // ref file inside, just like a crash between `rename_state_dir`'s
+    // two renames would leave.
+    let ref_orphan = layout.remotes_dir().join(".rename.tmp.99999.0");
+    std::fs::create_dir_all(&ref_orphan).unwrap();
+    std::fs::write(ref_orphan.join("main"), b"not a real ref, never read\n").unwrap();
+
+    let out = r.ok(&["show-ref"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/remotes/orig/main"),
+        "show-ref must still list the legitimate tracking ref: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".rename.tmp"),
+        "show-ref must not surface the dot-leading orphan as a ref or remote: {stdout}"
+    );
+
+    let out = r.ok(&["for-each-ref"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/remotes/orig/main"),
+        "for-each-ref must still list the legitimate tracking ref: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".rename.tmp"),
+        "for-each-ref must not surface the dot-leading orphan: {stdout}"
+    );
 }
 
 #[test]

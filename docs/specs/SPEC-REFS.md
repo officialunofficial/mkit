@@ -100,7 +100,9 @@ Plus these rejections:
 
 - Empty string → invalid.
 - Leading `/` → invalid.
-- Any segment equal to `"."` or `".."` → invalid.
+- Any segment starting with `.` → invalid (this also rejects the exact
+  `"."` and `".."` segments; git's `check-ref-format` rule, kept for
+  parity).
 - Empty segment (i.e. `//`, trailing `/`, leading `/`) → invalid.
 - Any byte in `{0x00, '\\'}` → invalid.
 - Any byte outside the grammar → invalid.
@@ -352,7 +354,7 @@ base/ours/theirs material lives only in this sidecar.
    `mkit-core` `refs::cas_write` helper (not the file transport).
 6. **Ref name grammar**: valid — `main`, `feat/v1.0-beta`,
    `release/2024_09`. Invalid — `feat/..`, `/main`, `main@v1`,
-   `feat\branch`, `` (empty).
+   `feat\branch`, `.hidden`, `` (empty).
 7. **S3 MD5-of-wire ETag**: compute MD5 of the 65-byte wire for a
    known hash; compare against an S3 PUT's Content-MD5 on the same
    wire.

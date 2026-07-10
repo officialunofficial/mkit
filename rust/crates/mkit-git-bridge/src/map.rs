@@ -21,18 +21,23 @@ use std::path::{Path, PathBuf};
 
 /// `<common dir>/git/<remote>/` — the per-remote bridge state
 /// directory (shared across worktrees, see `mkit_core::layout`).
-/// Remote names are restricted to the mkit ref-segment charset so the
-/// directory name is always safe.
+/// Remote names are restricted to the mkit ref-segment charset, minus
+/// `.`, so the directory name is always safe: this matches
+/// `mkit-cli`'s `validate_remote_name` (dot-free, on top of
+/// `refs::validate_ref_name`) rather than the ref grammar alone, so a
+/// name accepted here can never collide with the dot-leading temp
+/// directory `remote rename` uses (`remote.rs::rename_state_dir`) and
+/// the two bridge-state entry points (`remote add`/`rename` and `mkit
+/// git import/export --remote-name`) agree on what a valid state-dir
+/// name looks like.
 pub fn state_dir(layout: &RepoLayout, remote: &str) -> Result<PathBuf, BridgeError> {
     if remote.is_empty()
         || !remote
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-        || remote == "."
-        || remote == ".."
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
         return Err(BridgeError::Source(format!(
-            "remote name {remote:?} is not a valid bridge state name"
+            "remote name {remote:?} is not a valid dot-free bridge state name"
         )));
     }
     Ok(layout.git_state_dir().join(remote))
@@ -471,5 +476,20 @@ mod tests {
         assert!(state_dir(mkit, "..").is_err());
         assert!(state_dir(mkit, "a/b").is_err());
         assert!(state_dir(mkit, "").is_err());
+    }
+
+    #[test]
+    fn state_dir_rejects_dots() {
+        // Aligned with `mkit-cli`'s `validate_remote_name`, which is
+        // dot-free on top of the mkit ref grammar: a dot anywhere in a
+        // bridge state name — not just the traversal shapes `.`/`..` —
+        // is rejected, so this entry point can't create a state dir
+        // that a `remote rename`-crash temp dir (`.rename.tmp.<pid>.0`)
+        // could ever collide with.
+        let layout = RepoLayout::single("/tmp");
+        let mkit = &layout;
+        assert!(state_dir(mkit, ".hidden").is_err());
+        assert!(state_dir(mkit, "a.b").is_err());
+        assert!(state_dir(mkit, "trailing.").is_err());
     }
 }

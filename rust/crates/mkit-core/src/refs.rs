@@ -131,8 +131,13 @@ pub struct Ref {
 /// Grammar:
 /// - Non-empty.
 /// - Segments split on `/`, each segment matches `[A-Za-z0-9._-]+`.
-/// - No `.` or `..` segments. No empty segments (no `//`, no leading
-///   `/`, no trailing `/`).
+/// - No segment may start with `.` (this also rejects the exact `.`
+///   and `..` segments) — git's `check-ref-format` rule, kept for
+///   parity: a dot-leading component is invalid in both grammars, so
+///   nothing on-disk under a dot-leading directory (e.g. crash debris
+///   from a temp-directory rename, or an in-flight `atomic::write_atomic`
+///   temp file) can ever surface as a ref in `collect_refs` / listings.
+///   No empty segments (no `//`, no leading `/`, no trailing `/`).
 /// - No `\\` or NUL bytes.
 /// - No segment may end in `.lock` (the canonical lock-file suffix).
 /// - The final segment may not be the literal `HEAD`, since that
@@ -150,7 +155,7 @@ pub fn validate_ref_name(name: &str) -> bool {
         if part.is_empty() {
             return false;
         }
-        if part == "." || part == ".." {
+        if part.starts_with('.') {
             return false;
         }
         // Reject the canonical lock-file suffix. Byte-level check so
@@ -993,6 +998,18 @@ mod tests {
         assert!(!validate_ref_name("feat/.."));
         assert!(!validate_ref_name("../escape"));
         assert!(!validate_ref_name("feat/./topic"));
+    }
+
+    #[test]
+    fn validate_rejects_dot_leading_segment() {
+        // git's check-ref-format rule: no slash-separated component may
+        // begin with '.'. This also inertifies crash debris parked at a
+        // dot-leading directory (e.g. a `.rename.tmp.<pid>.<seq>` orphan)
+        // as a ref name, not just the exact `.`/`..` shapes above.
+        assert!(!validate_ref_name(".hidden"));
+        assert!(!validate_ref_name("refs/.hidden/main"));
+        assert!(!validate_ref_name(".rename.tmp.12345.0"));
+        assert!(!validate_ref_name("refs/remotes/.rename.tmp.12345.0/main"));
     }
 
     #[test]
