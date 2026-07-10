@@ -13,8 +13,19 @@
 //!
 //! * push side: [`advance_packmap`] (chains a new pack on, gated by a CAS
 //!   on the packmap ref).
-//! * fetch side: [`resolve_pack_chain`] (walk + integrity check) and
-//!   [`fetch_pack_chain`] (download + unpack each pack in order).
+//! * fetch side: [`resolve_pack_chain`] (walk + integrity check),
+//!   [`resolve_and_download_chain`] (network-only: walk + download, no
+//!   local writes), and [`apply_fetched_chain`] (unpack + verify + publish
+//!   pre-check — must run under the repo lock).
+//!
+//! The fetch side is deliberately split into a network phase and a
+//! local-write phase (#642): a branch's packs are fully downloaded before
+//! the repo lock is taken, and the lock is held only from the first local
+//! write through the branch's ref publish (in
+//! [`super::fetch_objects_inner`]) — narrow enough that a slow transfer no
+//! longer serializes out unrelated commands for its whole duration, while
+//! still closing the #267 GC-prune race (a concurrent `gc` needs the same
+//! lock, so it can never observe a downloaded-but-unpublished object).
 //!
 //! All entry points keep `pub(crate)` visibility so the orchestration in
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
@@ -511,30 +522,84 @@ pub(crate) fn commit_head(
 ///   verification cap — a scale limit, not staleness.
 /// * A [`DispatchError::Interrupted`] (user-requested shutdown) is never a
 ///   self-heal trigger.
-pub(crate) fn fetch_pack_chain(
+/// One branch's pack chain, resolved and downloaded over the network with
+/// **no repo lock held** — see [`resolve_and_download_chain`]. Consumed by
+/// [`apply_fetched_chain`], which the caller must run under the repo lock.
+pub(crate) struct FetchedChain {
+    /// Oldest-first flattened chain, as returned by [`resolve_pack_chain`].
+    /// Retained (not just `downloaded`) so a self-heal retry inside
+    /// [`apply_fetched_chain`] can re-download without re-walking the
+    /// packlist chain.
+    chain: Vec<Hash>,
+    /// Raw bytes of every chain pack NOT already recorded in the
+    /// `applied` snapshot passed to [`resolve_and_download_chain`], in
+    /// chain order.
+    downloaded: Vec<(PackKey, Vec<u8>)>,
+}
+
+/// Phase 1 of a branch fetch (#642): walk `branch`'s packmap chain from
+/// `head_key` and download every pack in it not already recorded in
+/// `applied`. Pure network I/O — resolving the chain shape reads small
+/// auxiliary blobs and downloading packs never touches the local object
+/// store — so the caller does **not** need the repo lock for this call.
+/// The repo lock is only required for [`apply_fetched_chain`], which
+/// unpacks the result.
+///
+/// # Errors
+/// Propagates chain-walk failures ([`DispatchError::PackChainInvalid`],
+/// [`DispatchError::Interrupted`]) and download failures
+/// ([`DispatchError::AdvertisedPackMissing`], transport errors) unchanged.
+pub(crate) fn resolve_and_download_chain(
+    tx: &dyn Transport,
+    branch: &str,
+    head_key: Hash,
+    applied: &AppliedPacks,
+) -> Result<FetchedChain, DispatchError> {
+    // Chain shape is always resolved fresh and in full — see the doc
+    // comment on `fetch_pack_chain`'s prior single-function form. Only the
+    // per-pack download loop below consults the applied-pack record (it
+    // does not mutate it; mutation happens once the pack is actually
+    // unpacked, in `unpack_downloaded_packs`).
+    let chain = resolve_pack_chain(tx, branch, head_key)?;
+    let downloaded = download_pack_chain(tx, branch, &chain, applied)?;
+    Ok(FetchedChain { chain, downloaded })
+}
+
+/// Phase 2 of a branch fetch (#642): unpack `fetched`'s downloaded packs
+/// into `store` and verify the closure at `tip` is complete, running the
+/// applied-pack self-heal retry on a stale-record failure.
+///
+/// **The caller MUST hold the repo lock across this call, through the
+/// branch's subsequent ref publish** — see [`super::fetch_objects_inner`]
+/// and the module docs on `#642`. Unpacking writes objects to the local
+/// store before this branch's ref makes them reachable; a concurrent `gc`
+/// must not be able to observe that store state, so the lock has to stay
+/// held continuously from the first write here through the ref write in
+/// the caller. Self-heal (rare: only on a stale `applied` record) is the
+/// one path that still does network I/O under that lock — an accepted
+/// trade, since it is a recovery path, not the routine one.
+///
+/// # Errors
+/// [`DispatchError::RemoteMissingObject`] if the closure is still
+/// incomplete after self-heal (or immediately, when self-heal doesn't
+/// apply); pack-decode / store errors from the unpack; download errors
+/// from the self-heal retry.
+pub(crate) fn apply_fetched_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
     remote: &str,
     branch: &str,
-    head_key: Hash,
+    fetched: FetchedChain,
     tip: Hash,
     applied: &mut AppliedPacks,
 ) -> Result<(), DispatchError> {
-    // Chain shape is always resolved fresh and in full — see the doc
-    // comment above. Only the per-pack download+unpack loop below
-    // consults / mutates the applied-pack record.
-    let chain = resolve_pack_chain(tx, branch, head_key)?;
+    let FetchedChain { chain, downloaded } = fetched;
+    let skipped = chain.len() - downloaded.len();
+    unpack_downloaded_packs(store, downloaded, applied)?;
 
-    // Phase 1: download + unpack. A failure here is a remote-side / network
-    // problem, never local staleness — propagate unchanged. Whatever was
-    // successfully applied stays recorded in `applied` for the caller's
-    // single end-of-fetch persist.
-    let (skipped, apply_result) = apply_pack_chain(store, tx, branch, &chain, applied);
-    apply_result?;
-
-    // Phase 2: closure completeness. With skips this is the sole guarantee the
-    // store is whole, and a `RemoteMissingObject` here is the ONLY self-heal
-    // trigger.
+    // Closure completeness. With skips this is the sole guarantee the
+    // store is whole, and a `RemoteMissingObject` here is the ONLY
+    // self-heal trigger.
     match super::verify_closure_present(store, &tip) {
         Ok(()) => Ok(()),
         Err(e @ DispatchError::RemoteMissingObject(_)) if skipped > 0 => {
@@ -548,32 +613,32 @@ pub(crate) fn fetch_pack_chain(
             // branches earlier in this same fetch: the store wipe that trips
             // self-heal makes those entries just as stale.
             applied.clear();
-            let (_, retry_apply) = apply_pack_chain(store, tx, branch, &chain, applied);
-            retry_apply.and_then(|()| super::verify_closure_present(store, &tip))
+            let downloaded = download_pack_chain(tx, branch, &chain, applied)?;
+            unpack_downloaded_packs(store, downloaded, applied)?;
+            super::verify_closure_present(store, &tip)
         }
         Err(e) => Err(e),
     }
 }
 
-/// Download + unpack every key in `chain` not already recorded in
-/// `applied`, inserting each newly-applied digest into `applied` as soon as
-/// its pack is successfully read. Returns the number of packs skipped
-/// (already recorded as applied) alongside the loop's result.
-fn apply_pack_chain(
-    store: &ObjectStore,
+/// Download every key in `chain` not already recorded in `applied`,
+/// returning each pack's key paired with its raw bytes, in chain order.
+/// Pure network I/O — never touches the local object store or `applied`
+/// (skipping is a read-only check; recording a pack as applied happens
+/// only once it is actually unpacked, in [`unpack_downloaded_packs`]).
+fn download_pack_chain(
     tx: &dyn Transport,
     branch: &str,
     chain: &[Hash],
-    applied: &mut AppliedPacks,
-) -> (usize, Result<(), DispatchError>) {
-    let mut skipped = 0usize;
+    applied: &AppliedPacks,
+) -> Result<Vec<(PackKey, Vec<u8>)>, DispatchError> {
+    let mut out = Vec::new();
     for &pk in chain {
         if crate::signal::is_shutdown() {
-            return (skipped, Err(DispatchError::Interrupted));
+            return Err(DispatchError::Interrupted);
         }
         let key = PackKey::from_hash(pk);
         if applied.contains(&key) {
-            skipped += 1;
             continue;
         }
         let pack = match tx.download_pack(&key) {
@@ -584,22 +649,35 @@ fn apply_pack_chain(
             // pack means a corrupt/incomplete remote — fail loudly rather
             // than publish a ref to a history we can't reconstruct.
             Err(TransportError::PackNotFound) => {
-                return (
-                    skipped,
-                    Err(DispatchError::AdvertisedPackMissing {
-                        branch: branch.to_owned(),
-                        pack: mkit_core::hash::to_hex(&pk),
-                    }),
-                );
+                return Err(DispatchError::AdvertisedPackMissing {
+                    branch: branch.to_owned(),
+                    pack: mkit_core::hash::to_hex(&pk),
+                });
             }
-            Err(e) => return (skipped, Err(e.into())),
+            Err(e) => return Err(e.into()),
         };
-        if let Err(e) = PackReader::read(&pack, store) {
-            return (skipped, Err(e.into()));
+        out.push((key, pack));
+    }
+    Ok(out)
+}
+
+/// Unpack previously-downloaded packs (see [`download_pack_chain`]) into
+/// `store`, in order, inserting each newly-applied digest into `applied`
+/// as soon as its pack is successfully read. Pure local disk I/O — see
+/// [`apply_fetched_chain`] for the repo-lock contract this must run under.
+fn unpack_downloaded_packs(
+    store: &ObjectStore,
+    downloaded: Vec<(PackKey, Vec<u8>)>,
+    applied: &mut AppliedPacks,
+) -> Result<(), DispatchError> {
+    for (key, pack) in downloaded {
+        if crate::signal::is_shutdown() {
+            return Err(DispatchError::Interrupted);
         }
+        PackReader::read(&pack, store)?;
         applied.insert(&key);
     }
-    (skipped, Ok(()))
+    Ok(())
 }
 
 #[cfg(test)]
