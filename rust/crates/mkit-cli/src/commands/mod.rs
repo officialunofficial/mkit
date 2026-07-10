@@ -623,10 +623,15 @@ pub(crate) fn history_executor() -> std::sync::Arc<mkit_core::history::TokioExec
 /// disk (a v0.1.x-era repo enabling `history-mmr` for the first time,
 /// or a crash on the branch's very first tracked write), this backfills
 /// the full known chain via [`mkit_core::history::rebuild_from_chain`]
-/// before proceeding — SPEC-HISTORY-PROOF §4.5. This is the shim's
-/// production call site; `update_ref_with_history` itself only heals
-/// the cheaper "journal missing exactly its last append" crash case,
-/// since it has no `ObjectStore` access to walk an unknown-depth chain.
+/// before proceeding — SPEC-HISTORY-PROOF §4.5. The empty-journal check
+/// AND the backfill loop run inside
+/// [`mkit_core::refs::update_ref_with_history_and_backfill`]'s
+/// `refs-history.lock` critical section (issue #638 / INV-18): running
+/// them before the lock (as this used to) let two ref-only writers on
+/// the same never-before-journaled branch — e.g. two concurrent
+/// `update-ref` calls, which deliberately skip the worktree lock — both
+/// observe an empty journal and both independently backfill, corrupting
+/// the journal's leaf positions.
 ///
 /// All CLI subcommands that move a branch ref MUST funnel through this
 /// helper rather than calling `refs::write_ref` or `refs::update_ref`
@@ -645,56 +650,35 @@ pub fn write_ref_recording_history(
         let mut history = mkit_core::history::CommitHistory::open_at(exec, layout, branch)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
 
-        if history.is_empty()
-            && let Ok(Some(current)) = refs::read_ref(layout, branch)
-        {
-            backfill_history_from_object_store(layout, branch, &mut history, current)?;
-        }
+        // Opening the object store is read-only and touches none of the
+        // history-journal state that's actually racy here, so it's fine
+        // to do before the lock — only the empty-check + backfill (run
+        // by `update_ref_with_history_and_backfill`, via this
+        // `parent_of` walker) needs to be inside it.
+        let store = ObjectStore::open(layout)
+            .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
 
-        refs::update_ref_with_history(layout, branch, condition, new_hash, &mut history)
+        refs::update_ref_with_history_and_backfill(
+            layout,
+            branch,
+            condition,
+            new_hash,
+            &mut history,
+            |h| match store.read_object(h) {
+                Ok(Object::Commit(c)) => Ok(c.parents.first().copied()),
+                Ok(Object::Remix(r)) => Ok(r.parents.first().copied()),
+                Ok(_) => Err(format!(
+                    "{}: object is not a commit or remix",
+                    mkit_core::hash::to_hex(h)
+                )),
+                Err(e) => Err(e.to_string()),
+            },
+        )
     }
     #[cfg(not(feature = "history-mmr"))]
     {
         refs::update_ref(layout, branch, condition, new_hash)
     }
-}
-
-/// Backfill an empty history journal from `current`'s on-disk
-/// first-parent chain (SPEC-HISTORY-PROOF §4.5 v0.1.x rebuild shim).
-///
-/// Opens the layout's [`ObjectStore`] and walks
-/// `current`'s parent chain via [`mkit_core::history::rebuild_from_chain`].
-/// Degenerates safely to a single append when `current` is a root
-/// commit (nothing to migrate, just the missed first write).
-///
-/// # Errors
-///
-/// [`RefError::InvalidRef`] if the store can't be opened, a commit in
-/// the chain can't be read or isn't a commit/remix, or the underlying
-/// `CommitHistory::append` fails. Fail-closed: a partial or corrupt
-/// backfill must not be silently accepted, since it would leave the
-/// journal's proof state permanently incomplete for this branch.
-#[cfg(feature = "history-mmr")]
-fn backfill_history_from_object_store<X: mkit_core::protocol::async_shim::Executor + 'static>(
-    layout: &RepoLayout,
-    branch: &str,
-    history: &mut mkit_core::history::CommitHistory<X>,
-    current: Hash,
-) -> Result<(), RefError> {
-    let store = ObjectStore::open(layout)
-        .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
-
-    mkit_core::history::rebuild_from_chain(history, current, |h| match store.read_object(h) {
-        Ok(Object::Commit(c)) => Ok(c.parents.first().copied()),
-        Ok(Object::Remix(r)) => Ok(r.parents.first().copied()),
-        Ok(_) => Err(format!(
-            "{}: object is not a commit or remix",
-            mkit_core::hash::to_hex(h)
-        )),
-        Err(e) => Err(e.to_string()),
-    })
-    .map_err(|e| RefError::InvalidRef(format!("{branch}: history backfill: {e}")))?;
-    Ok(())
 }
 
 /// Current branch name for recovery logging — empty for a detached HEAD
@@ -1210,6 +1194,87 @@ mod tests {
             hist.len(),
             1,
             "only the one real write, no phantom backfill entries"
+        );
+    }
+
+    /// A long v0.1.x-style chain (ref exists on disk, journal never
+    /// touched) — simulates an existing repo enabling `history-mmr` for
+    /// the first time.
+    #[cfg(feature = "history-mmr")]
+    const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
+
+    /// INV-18 regression (issue #638): the empty-journal check and the
+    /// entire backfill-from-object-store loop must run *inside*
+    /// `refs-history.lock`, not before it. `update-ref`/`branch` calls
+    /// deliberately skip the worktree lock, so two ref-only writers on
+    /// the same never-before-journaled branch can both call this
+    /// function concurrently. Pre-fix, both threads independently
+    /// observe an empty journal (the check happens before any lock is
+    /// taken) and both independently backfill the whole chain, landing
+    /// duplicate leaves. Post-fix, only one of them may see the empty
+    /// journal and perform the backfill; the other must see a
+    /// non-empty journal once it acquires the lock and skip straight to
+    /// its own append.
+    ///
+    /// The chain is long enough (500 commits) that the pre-fix unlocked
+    /// backfill loop — which, before the fsync-batching fix also lands,
+    /// syncs once per commit — takes long enough in wall-clock terms
+    /// for both threads (released simultaneously via a barrier) to
+    /// almost certainly overlap.
+    #[cfg(feature = "history-mmr")]
+    #[test]
+    fn write_ref_recording_history_concurrent_backfill_does_not_duplicate_journal_leaves() {
+        use super::write_ref_recording_history;
+        use mkit_core::history::{CommitHistory, TokioExecutor};
+        use mkit_core::refs::{self, RefWriteCondition};
+        use mkit_core::store::ObjectStore;
+        use std::sync::{Arc, Barrier};
+
+        let td = tempfile::tempdir().unwrap();
+        let repo_root = td.path();
+        let layout = Arc::new(mkit_core::layout::RepoLayout::single(repo_root));
+        let store = ObjectStore::init(&layout).unwrap();
+
+        let mut tip: Option<Hash> = None;
+        for seed in 0..CONCURRENT_BACKFILL_CHAIN_LEN {
+            let seed = u8::try_from(seed % 256).expect("seed % 256 fits in u8");
+            tip = Some(write_commit(&store, tip.into_iter().collect(), seed));
+        }
+        let tip = tip.unwrap();
+        refs::write_ref(&layout, "main", &tip).unwrap();
+
+        // Two independent new commits, each racing to be the first
+        // history-mmr-enabled write for this branch.
+        let c_a = write_commit(&store, vec![tip], 250);
+        let c_b = write_commit(&store, vec![tip], 251);
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        let (layout_a, barrier_a) = (Arc::clone(&layout), Arc::clone(&barrier));
+        let t_a = std::thread::spawn(move || {
+            barrier_a.wait();
+            write_ref_recording_history(&layout_a, "main", RefWriteCondition::Any, &c_a)
+        });
+        let (layout_b, barrier_b) = (Arc::clone(&layout), Arc::clone(&barrier));
+        let t_b = std::thread::spawn(move || {
+            barrier_b.wait();
+            write_ref_recording_history(&layout_b, "main", RefWriteCondition::Any, &c_b)
+        });
+
+        let res_a = t_a.join().expect("thread a must not panic");
+        let res_b = t_b.join().expect("thread b must not panic");
+        res_a.expect("writer a must succeed");
+        res_b.expect("writer b must succeed");
+
+        let exec = Arc::new(TokioExecutor::new().unwrap());
+        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
+        assert_eq!(
+            hist.len(),
+            CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 2,
+            "two concurrent first-writers on a never-journaled branch \
+             must backfill the shared chain exactly once between them \
+             (plus their own two real appends) — a leaf count above \
+             this means the backfill ran twice and duplicated leaves"
         );
     }
 

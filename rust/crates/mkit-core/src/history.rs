@@ -106,6 +106,36 @@ pub use tokio_executor::TokioExecutor;
 /// without an on-disk format-version bump and a migration.
 const HISTORY_BAGGING: Bagging = Bagging::ForwardFold;
 
+// Test-only instrumentation: counts calls to the journaled flavour's
+// `journal.sync()` (fsync), thread-local so parallel `cargo test`
+// threads never interfere with each other's count. Exists purely to
+// let tests assert "backfilling N commits does one fsync, not N"
+// without depending on wall-clock timing. No production overhead —
+// compiled out entirely on non-test builds.
+#[cfg(test)]
+thread_local! {
+    static SYNC_CALL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_sync_call() {
+    SYNC_CALL_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// Reset this thread's fsync counter to 0. Call before the operation
+/// under test.
+#[cfg(test)]
+pub(crate) fn reset_sync_call_count() {
+    SYNC_CALL_COUNT.with(|c| c.set(0));
+}
+
+/// Number of `journal.sync()` (fsync) calls on this thread since the
+/// last [`reset_sync_call_count`].
+#[cfg(test)]
+pub(crate) fn sync_call_count() -> u64 {
+    SYNC_CALL_COUNT.with(std::cell::Cell::get)
+}
+
 /// The canonical hasher for the commit-history MMR — the single source of
 /// truth for [`HISTORY_BAGGING`], so the producer and verifier sides can
 /// never drift on the bagging policy.
@@ -444,7 +474,34 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// Positions are dense: the *n*-th append returns `Position(n)`.
     /// For the journaled flavour, the underlying MMR is `sync`'d to
     /// disk before returning — survives a `SIGKILL` immediately after.
+    ///
+    /// A thin wrapper over [`Self::append_no_sync`] + [`Self::sync`] —
+    /// see those for the split. Callers appending many leaves in one
+    /// critical section (e.g. [`rebuild_from_chain`]'s backfill) should
+    /// call the two halves directly instead, batching the fsync.
     pub fn append(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
+        let pos = self.append_no_sync(commit_hash)?;
+        self.sync()?;
+        Ok(pos)
+    }
+
+    /// Append a commit hash WITHOUT flushing to disk.
+    ///
+    /// Identical to [`Self::append`] except the journaled flavour skips
+    /// the trailing `journal.sync()` (fsync). Unlike `append`, a leaf
+    /// written this way is only guaranteed durable once a subsequent
+    /// [`Self::sync`] call returns — a `SIGKILL` before that sync loses
+    /// it. Exists so a caller appending many leaves in one critical
+    /// section (e.g. [`rebuild_from_chain`]'s backfill) can defer the
+    /// fsync to once for the whole batch instead of once per leaf: at
+    /// roughly 1-10ms per fsync, one-per-commit made backfilling a
+    /// branch with tens of thousands of commits take minutes instead of
+    /// the single-digit milliseconds SPEC-HISTORY-PROOF promises.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::append`].
+    fn append_no_sync(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
         let leaf = digest_from_hash(commit_hash);
         match &mut self.backend {
             Backend::Mem { mmr } => {
@@ -464,16 +521,30 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 b.mmr
                     .apply_batch(&batch)
                     .map_err(|e| HistoryError::Mmr(e.to_string()))?;
-                // Flush to disk synchronously so a SIGKILL between
-                // append and the caller's next ref-write does not lose
-                // the leaf we just promised to persist.
-                let sync_fut = b.mmr.sync();
-                b.executor
-                    .block_on(sync_fut)
-                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
                 Ok(Position(u64::from(leaf_loc)))
             }
         }
+    }
+
+    /// Flush any leaves appended via [`Self::append_no_sync`] to disk.
+    /// No-op for the mem-only flavour (nothing to flush).
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Mmr`] if the underlying journal sync fails.
+    fn sync(&mut self) -> Result<(), HistoryError> {
+        if let Backend::Journaled(b) = &mut self.backend {
+            #[cfg(test)]
+            record_sync_call();
+            // Flush to disk synchronously so a SIGKILL between this
+            // call and the caller's next ref-write does not lose any
+            // leaf appended (via `append_no_sync`) since the last sync.
+            let sync_fut = b.mmr.sync();
+            b.executor
+                .block_on(sync_fut)
+                .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Current MMR root digest. 32-byte BLAKE3 (mkit `Hash` shape).
@@ -590,10 +661,16 @@ pub fn verify_inclusion(
 /// `ObjectStore` dependency — the rebuild shim is a tool the caller
 /// (typically `mkit-cli`) drives.
 ///
+/// Batches all backfilled leaves into a single `journal.sync()` (fsync)
+/// for the whole chain, rather than one per commit — see
+/// [`CommitHistory::append_no_sync`]. Git adopted the same pattern
+/// (`core.fsyncMethod=batch`) for the same reason: fsync latency, not
+/// the MMR math, is what dominates a large backfill.
+///
 /// # Errors
 ///
 /// - Propagates any error from `parent_of`.
-/// - Propagates any [`HistoryError`] from `history.append`.
+/// - Propagates any [`HistoryError`] from the underlying append/sync.
 pub fn rebuild_from_chain<X, F, E>(
     history: &mut CommitHistory<X>,
     tip: Hash,
@@ -614,7 +691,11 @@ where
     chain.reverse();
     let count = chain.len() as u64;
     for h in &chain {
-        history.append(h).map_err(RebuildError::History)?;
+        history.append_no_sync(h).map_err(RebuildError::History)?;
+    }
+    // One fsync for the entire batch instead of one per commit.
+    if count > 0 {
+        history.sync().map_err(RebuildError::History)?;
     }
     Ok(count)
 }
@@ -1199,6 +1280,68 @@ mod tests {
             h.root(),
             reference_root,
             "rebuilt root must match live-append root"
+        );
+    }
+
+    /// SPEC-HISTORY-PROOF's backfill cost claim ("single-digit
+    /// milliseconds for branches up to a few hundred thousand commits")
+    /// only holds if the backfill fsyncs once for the whole chain, not
+    /// once per commit. `journal.sync()` is fsync-latency-bound (~1-10ms
+    /// each), so 500 unbatched syncs alone would blow well past the
+    /// spec's budget. Instrumentation-based rather than wall-clock-based
+    /// so it can't flake under CI load.
+    #[test]
+    fn rebuild_from_chain_batches_backfill_into_a_single_sync() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..500u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        reset_sync_call_count();
+
+        let tip = commits[commits.len() - 1];
+        let count = rebuild_from_chain::<TokioExecutor, _, std::io::Error>(&mut h, tip, |hash| {
+            let idx = commits
+                .iter()
+                .position(|c| c == hash)
+                .expect("walker called with unknown hash");
+            if idx == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(commits[idx - 1]))
+            }
+        })
+        .unwrap();
+
+        assert_eq!(count, 500, "sanity: all 500 commits were backfilled");
+        assert_eq!(h.len(), 500, "sanity: all 500 leaves landed in the MMR");
+        assert_eq!(
+            sync_call_count(),
+            1,
+            "backfilling 500 commits must fsync exactly once for the \
+             whole batch, not once per commit"
+        );
+    }
+
+    /// A single live `append` (the non-backfill path) must still fsync
+    /// — batching must not silently drop the per-append durability
+    /// guarantee for ordinary commit-time writes.
+    #[test]
+    fn append_still_syncs_once_per_call() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        reset_sync_call_count();
+
+        h.append(&synth(0)).unwrap();
+        h.append(&synth(1)).unwrap();
+        h.append(&synth(2)).unwrap();
+
+        assert_eq!(
+            sync_call_count(),
+            3,
+            "each live `append` must still fsync on its own — only the \
+             backfill path batches"
         );
     }
 

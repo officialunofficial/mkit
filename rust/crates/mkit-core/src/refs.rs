@@ -422,12 +422,18 @@ pub fn update_ref(
 ///
 /// On any failure between steps 4 and 5 the ref will be ahead of the
 /// history journal by one commit; the next call's step 3 heals it as
-/// above. If the journal was empty going into step 3, healing instead
-/// falls to `mkit-cli`'s `write_ref_recording_history`, which has the
-/// `ObjectStore` access needed to invoke
-/// [`crate::history::rebuild_from_chain`] (SPEC-HISTORY-PROOF §4.5) —
-/// this function alone can't tell a fresh branch's first write apart
-/// from a v0.1.x-era repo's deep, un-migrated history.
+/// above. If the journal was empty going into step 3, this function
+/// alone can't tell a fresh branch's first write apart from a
+/// v0.1.x-era repo's deep, un-migrated history — that needs
+/// `ObjectStore` access this module doesn't have. See
+/// [`update_ref_with_history_and_backfill`], which threads a
+/// `parent_of` walker through so the empty-journal check AND the
+/// backfill itself (SPEC-HISTORY-PROOF §4.5) also run inside this same
+/// locked critical section (issue #638 / INV-18): without that, two
+/// ref-only writers on the same never-before-journaled branch (e.g.
+/// two `update-ref` calls, which deliberately skip the worktree lock)
+/// could both observe an empty journal and both independently
+/// backfill, corrupting the journal's leaf positions.
 ///
 /// # Design note (Option B vs Option A)
 ///
@@ -470,6 +476,94 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     hash: &Hash,
     history: &mut crate::history::CommitHistory<X>,
 ) -> RefResult<()> {
+    // No backfill walker: an empty journal here is left untouched (the
+    // ambiguous case documented on `heal_one_ahead_gap`), exactly the
+    // pre-#638 behaviour for callers that don't need the v0.1.x
+    // migration shim.
+    update_ref_with_history_locked(layout, branch, condition, hash, history, |_, _| Ok(()))
+}
+
+/// [`update_ref_with_history`], additionally backfilling an empty
+/// journal from `parent_of` before the CAS-write + append — all inside
+/// the SAME `refs-history.lock` acquisition (issue #638 / INV-18).
+///
+/// `parent_of` is the same walker shape [`crate::history::rebuild_from_chain`]
+/// takes: given a commit hash, `Ok(Some(parent))`, `Ok(None)` at the
+/// root, or `Err(_)` on lookup failure. `mkit-cli`'s
+/// `write_ref_recording_history` is the production caller — it has the
+/// `ObjectStore` access this module deliberately doesn't depend on.
+///
+/// Moving the empty-journal check and the backfill loop inside the
+/// lock (rather than running them before it, as `write_ref_recording_history`
+/// used to) closes the race this function's sibling could not: two
+/// ref-only writers on the same never-before-journaled branch (e.g.
+/// two concurrent `update-ref` calls, which deliberately skip the
+/// worktree lock) used to both observe an empty journal and both
+/// independently backfill + append, writing to overlapping journal
+/// positions from two disagreeing in-memory MMR states. Now only the
+/// first to acquire the lock backfills; the second reopens onto an
+/// already-nonempty journal and proceeds straight to its own append.
+///
+/// # Errors
+///
+/// Same as [`update_ref_with_history`], plus: the backfill's
+/// [`crate::history::RebuildError`] (propagated from `parent_of` or
+/// the underlying append) is surfaced via a `String` payload on
+/// [`RefError::InvalidRef`], for the same signature-stability reason
+/// documented on [`update_ref_with_history`].
+#[cfg(feature = "history-mmr")]
+pub fn update_ref_with_history_and_backfill<X, F, E>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+    mut parent_of: F,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    F: FnMut(&Hash) -> Result<Option<Hash>, E>,
+    E: core::fmt::Display,
+{
+    update_ref_with_history_locked(
+        layout,
+        branch,
+        condition,
+        hash,
+        history,
+        |history, current| {
+            crate::history::rebuild_from_chain(history, current, &mut parent_of)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )
+}
+
+/// Shared critical section for [`update_ref_with_history`] and
+/// [`update_ref_with_history_and_backfill`].
+///
+/// `on_empty_journal` is called, still under the lock and after
+/// `history` has been [`crate::history::CommitHistory::reopen`]'d, iff
+/// the journal is empty AND `branch` already has a ref value on disk
+/// (`current`). It is the ONLY difference between the two public
+/// entry points: the no-backfill caller passes a no-op, the
+/// backfilling caller passes a [`crate::history::rebuild_from_chain`]
+/// invocation. Everything else — lock acquisition, reopen, the
+/// one-ahead-gap heal, the CAS-write, the final append — is identical
+/// and runs exactly once, inside the same lock.
+#[cfg(feature = "history-mmr")]
+fn update_ref_with_history_locked<X, G>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+    mut on_empty_journal: G,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    G: FnMut(&mut crate::history::CommitHistory<X>, Hash) -> Result<(), String>,
+{
     // Defence-in-depth: history must be a journaled flavour;
     // a mem-only flavour would silently drop the appended leaf on
     // process exit, defeating the whole point of this coupling.
@@ -490,9 +584,10 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
         )));
     }
 
-    // Single repo-level lock around the ref-write + MMR-append
-    // critical section. Cross-process interleaving is impossible
-    // while any holder owns this lock.
+    // Single repo-level lock around the ref-write + MMR-append (and,
+    // for the backfilling entry point, the empty-journal check and the
+    // backfill loop itself) critical section. Cross-process
+    // interleaving is impossible while any holder owns this lock.
     let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
         .map_err(|e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
@@ -508,17 +603,28 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
         .reopen()
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history reopen: {e}")))?;
 
-    // Crash recovery (§4.5): if a prior `update_ref_with_history` call
-    // CAS-wrote the ref but crashed before its own append + sync, the
-    // ref is one commit ahead of the journal. Detect that by checking
-    // whether the journal's last leaf already covers the ref's CURRENT
-    // (pre-this-write) value, and heal by appending it directly — we
-    // know exactly which hash is missing without walking any parent
-    // chain, because it's precisely the value already sitting in the
-    // ref file.
     if let Some(current) = read_ref(layout, branch)? {
-        heal_one_ahead_gap(history, &current)
-            .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
+        if history.is_empty() {
+            // v0.1.x-style migration (or a crash on this branch's very
+            // first tracked write): the ref already has a value but the
+            // journal has never been touched. Backfill (a no-op for the
+            // non-backfilling entry point) before proceeding, all still
+            // under the lock so no concurrent writer can also observe
+            // "empty" and race this same backfill.
+            on_empty_journal(history, current)
+                .map_err(|e| RefError::InvalidRef(format!("{branch}: history backfill: {e}")))?;
+        } else {
+            // Crash recovery (§4.5): if a prior `update_ref_with_history`
+            // call CAS-wrote the ref but crashed before its own append +
+            // sync, the ref is one commit ahead of the journal. Detect
+            // that by checking whether the journal's last leaf already
+            // covers the ref's CURRENT (pre-this-write) value, and heal
+            // by appending it directly — we know exactly which hash is
+            // missing without walking any parent chain, because it's
+            // precisely the value already sitting in the ref file.
+            heal_one_ahead_gap(history, &current)
+                .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
+        }
     }
 
     update_ref(layout, branch, condition, hash)?;
