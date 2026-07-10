@@ -342,6 +342,7 @@ fn print_merge_stat(store: &ObjectStore, old: Hash, new: Hash) {
 fn print_merge_stat_trees(store: &ObjectStore, old_tree: Option<Hash>, new_tree: Option<Hash>) {
     if let Ok(result) = mkit_core::ops::diff_trees(store, old_tree, new_tree) {
         let mut stderr = std::io::stderr().lock();
+        // `render_stat` hoists its own `DisplaySource` wrapping (#625).
         let _ = super::diff::render_stat(&mut stderr, store, result.entries.iter());
     }
 }

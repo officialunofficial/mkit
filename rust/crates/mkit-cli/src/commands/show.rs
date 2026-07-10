@@ -21,7 +21,7 @@ use clap::Parser;
 use mkit_core::hash::Hash;
 use mkit_core::object::{Identity, Object, Tag};
 use mkit_core::ops::diff_trees;
-use mkit_core::store::ObjectStore;
+use mkit_core::store::{DisplaySource, ObjectStore};
 use mkit_core::worktree;
 
 use super::revspec;
@@ -184,13 +184,18 @@ fn show_commit_like(
     let result = diff_trees(store, parent_tree, Some(tree))
         .map_err(|e| (format!("diff: {e}"), exit::GENERAL_ERROR))?;
     // `--stat` renders the diffstat instead of the full patch (like
-    // `git show --stat`), reusing `diff`'s byte-exact stat renderer.
+    // `git show --stat`), reusing `diff`'s byte-exact stat renderer;
+    // `render_stat` hoists its own `DisplaySource` wrapping (#625).
     if stat {
         return super::diff::render_stat(out, store, result.entries.iter())
             .map_err(|e| (e, exit::GENERAL_ERROR));
     }
+    // The patch loop below only ever prints what it renders here — nothing
+    // durable is published from this path — so skip the BLAKE3 re-verify
+    // on every changed blob (#625).
+    let display = DisplaySource::new(store);
     for e in &result.entries {
-        super::diff::emit_entry_patch(out, store, e).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        super::diff::emit_entry_patch(out, &display, e).map_err(|e| (e, exit::GENERAL_ERROR))?;
     }
     Ok(())
 }
