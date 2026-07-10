@@ -5,41 +5,40 @@ name: "CI: Rust"
 # Build — see cloudbuild/README.md. This workflow keeps only the legs Cloud
 # Build's Linux containers CAN'T run: the macOS build/test leg and the
 # cross-platform keystore-backends matrix (macOS/Windows native keystores).
+#
+# Cost note: macOS runners bill at 10x Linux minutes (Windows at 2x). Both
+# heavy jobs below (build-and-test, keystore-backends) are therefore MANUAL
+# ONLY — gated to `workflow_dispatch` and nothing else. They do not run
+# automatically on any PR push, review approval, or push to main. Trigger
+# them explicitly (Actions tab, or `gh workflow run rust.yml --ref <branch>`)
+# when you specifically need macOS/Windows/keystore coverage. Fast per-push
+# feedback comes from the Linux gate on Cloud Build (cloudbuild/ci.yaml)
+# instead. See both jobs' `SHOULD_RUN` gates below — they're intentionally
+# identical expressions.
 
 on:
-  push:
-    branches:
-      - main
-    # Skip the matrix on main pushes that can't affect the Rust build
-    # (docs-only, MCP-only, web-only commits).
-    paths:
-      - '.github/workflows/rust.yml'
-      - '.github/actions/setup-rust/**'
-      - 'rust/**'
-      - 'contrib/signers/**'
-  # The macOS build/test leg runs on EVERY PR into main so a green PR rollup
-  # reflects a real run on at least one OS (the Linux suite runs on Cloud Build,
-  # gated on a maintainer `/gcbrun`). See the `build-and-test` job's `if:` below.
+  # No `paths:` filter: the workflow ALWAYS triggers on PRs so its required
+  # check (ci-gate) is never absent. Both heavy jobs (build-and-test,
+  # keystore-backends) are gated on the SHOULD_RUN env below instead — this
+  # avoids the "required-but-skipped" trap where a path-filtered trigger
+  # leaves a required status stuck pending. Mirrors the same pattern already
+  # used by web.yml/mcp.yml. Neither job does any real work on this trigger;
+  # they're manual-only (see the Cost note above).
   pull_request:
     branches:
       - main
-  # Expensive CI (keystore-backends): on PRs these run only once a review is
-  # approved, to avoid burning multi-OS runner minutes on every push. The
-  # pull_request_review event can't filter by branch/path, so the job guards on
-  # the approval state + base ref below.
-  pull_request_review:
-    types: [submitted]
+  # The only way to actually run build-and-test / keystore-backends: manual
+  # dispatch, on demand, against any branch/ref.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# One run per PR (or per branch on push); newer events cancel older ones.
+# One run per PR (or per branch on manual dispatch); newer PR events cancel
+# older ones. Manual dispatch runs are never auto-cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Cancel superseded PR + approval runs; pushes to main are never cancelled.
-  # (On pull_request_review github.ref is the default branch, so we can't key
-  # the guard off github.ref — gate on the event name instead.)
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_review' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -51,25 +50,33 @@ jobs:
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).
-    # Runs on main pushes AND on every pull_request into main (so the PR rollup
-    # reflects a real run). On the pull_request_review event it still requires an
-    # approving review on a main-targeted PR.
-    if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' &&
-       github.event.pull_request.base.ref == 'main')
+    #
+    # Manual-only (matches keystore-backends' pattern exactly, incl. the
+    # rationale for gating per-step instead of at job level): runs ONLY on
+    # `workflow_dispatch` — never automatically on a pull_request push, a
+    # review approval, or a push to main. A job-level `if: false` would
+    # short-circuit before the matrix expands, so GitHub would show one
+    # synthetic entry named literally "Build & Test (${{ matrix.os }})"
+    # (unexpanded) instead of the real per-leg name — confusing in the PR
+    # checks list even though nothing is misconfigured. Gating per-step below
+    # (via env.SHOULD_RUN) keeps the matrix expanding normally (real name,
+    # real "skipped" steps) at effectively the same cost: the trivial steps
+    # below.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest]
+    env:
+      SHOULD_RUN: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
+        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          # On approval (pull_request_review) the default ref is the base
-          # branch — check out the PR head so we test the PR's code. On
-          # push, github.sha is already the right commit.
+          # workflow_dispatch has no github.event.pull_request, so this
+          # always falls through to github.sha — the tip of whatever ref the
+          # dispatch was run against.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Toolchain (rustfmt + clippy) + lockfile-keyed cargo cache. No protoc:
@@ -82,6 +89,7 @@ jobs:
       # cannot poison a key a privileged workflow (release.yml) later reads —
       # see .github/actions/setup-rust and docs/RELEASE.md.
       - name: Set up Rust and cache
+        if: env.SHOULD_RUN == 'true'
         uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -93,6 +101,7 @@ jobs:
       # `cargo test`. Pinned via taiki-e/install-action which fetches a
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
+        if: env.SHOULD_RUN == 'true'
         uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3  # v2
         with:
           tool: cargo-nextest
@@ -102,14 +111,17 @@ jobs:
       # Cloud Build), where cloudbuild/Dockerfile.ci bakes them in.
 
       - name: Check formatting
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: cargo fmt --check
 
       - name: Clippy
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: cargo clippy --all-targets --all-features --workspace -- -D warnings
 
       - name: Build
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: cargo build --locked --workspace
 
@@ -124,6 +136,7 @@ jobs:
       # `cargo test --doc` hard-errors with "no library targets found"
       # when a workspace has no lib targets (doctests only exist in libs).
       - name: Contrib signers (separate workspace)
+        if: env.SHOULD_RUN == 'true'
         working-directory: contrib/signers
         run: |
           cargo fmt --check
@@ -138,6 +151,7 @@ jobs:
       # deliberately left unset for the contrib/signers step below — those
       # stay ordinary (quiet, `#[ignore]`d) skips here.
       - name: Test (nextest)
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         env:
           MKIT_TEST_STRICT: "1"
@@ -153,22 +167,26 @@ jobs:
       # workflow and cloudbuild/ci.yaml invoke the same profile instead
       # of duplicating the test-name filter inline).
       - name: Test (nextest, ignored lane)
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: >-
           cargo nextest run --locked --workspace --all-features
           --profile ignored-lane --run-ignored ignored-only
 
       - name: Fuzz unit tests
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: cargo test --manifest-path fuzz/Cargo.toml
 
       # Doctests are not run by `cargo nextest`. Run them separately so
       # docstring examples still get exercised.
       - name: Doctests
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: cargo test --locked --doc --workspace
 
       - name: Version contract
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         shell: bash
         run: |
@@ -189,6 +207,7 @@ jobs:
       # gate so a future refactor can't silently break the
       # opt-in-only build path.
       - name: Encrypted-transport feature build
+        if: env.SHOULD_RUN == 'true'
         working-directory: rust
         run: |
           cargo build --locked -p mkit-cli --features enc-transport
@@ -196,8 +215,8 @@ jobs:
 
   keystore-backends:
     name: Keystore backends (${{ matrix.name }})
-    # Heavier (3-OS matrix): stays cost-gated. Runs on main pushes and on an
-    # approving review of a main-targeted PR — NOT on every pull_request.
+    # Heavier (3-OS matrix): manual-only, same as build-and-test. Runs ONLY on
+    # `workflow_dispatch` — NOT on any pull_request, review approval, or push.
     #
     # The gate lives on each STEP below (via env.SHOULD_RUN), not on the job
     # itself. A job-level `if: false` short-circuits before the matrix is ever
@@ -222,19 +241,15 @@ jobs:
             os: ubuntu-latest
             features: backend-linux-secret-service backend-systemd-creds backend-yubikey
     env:
-      SHOULD_RUN: >-
-        ${{ github.event_name == 'push' ||
-            (github.event_name == 'pull_request_review' &&
-             github.event.review.state == 'approved' &&
-             github.event.pull_request.base.ref == 'main') }}
+      SHOULD_RUN: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
         if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          # On approval (pull_request_review) the default ref is the base
-          # branch — check out the PR head so we test the PR's code. On
-          # push, github.sha is already the right commit.
+          # workflow_dispatch has no github.event.pull_request, so this
+          # always falls through to github.sha — the tip of whatever ref the
+          # dispatch was run against.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Keystore backends never compile mkit-rpc, so protoc is skipped here.
@@ -291,14 +306,18 @@ jobs:
   # protection for THIS workflow's legs. It `needs` the macOS build/test leg and
   # the keystore matrix and runs with `if: always()`, so it reports a real
   # success/failure even when a job is skipped, cancelled, or fails:
-  #   - build-and-test: MUST be 'success'. It runs on every pull_request, so a
-  #     skip means the macOS suite never ran — which must not pass the gate.
-  #   - keystore-backends: approval-gated via each step's env.SHOULD_RUN (not
-  #     a job-level `if:`, so the matrix still expands to real per-leg names
-  #     instead of one unexpanded synthetic entry — see the job's comment).
-  #     On PR-only events every step no-ops, so the job reports 'success'
-  #     trivially; 'skipped' remains accepted too in case that ever changes.
-  #     Only 'failure'/'cancelled' fail it.
+  #   - build-and-test: manual-only via each step's env.SHOULD_RUN, identical
+  #     pattern and expression to keystore-backends (see that job's comment).
+  #     On every non-workflow_dispatch trigger every step no-ops, so the job
+  #     reports 'success' trivially; 'skipped' remains accepted too in case
+  #     that ever changes. Only 'failure'/'cancelled' fail it.
+  #   - keystore-backends: same manual-only gating via each step's
+  #     env.SHOULD_RUN (not a job-level `if:`, so the matrix still expands to
+  #     real per-leg names instead of one unexpanded synthetic entry — see the
+  #     job's comment). On every non-workflow_dispatch trigger every step
+  #     no-ops, so the job reports 'success' trivially; 'skipped' remains
+  #     accepted too in case that ever changes. Only 'failure'/'cancelled'
+  #     fail it.
   # The Linux Rust gate lives on Cloud Build (cloudbuild/ci.yaml) and posts its
   # own commit status — mark that "required" alongside this one.
   ci-gate:
@@ -307,7 +326,7 @@ jobs:
     needs: [build-and-test, keystore-backends]
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the macOS suite ran and no critical job failed
+      - name: Verify no critical job failed
         shell: bash
         env:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
@@ -318,16 +337,18 @@ jobs:
 
           fail=0
 
-          # Must-run: shares the core suite's trigger gating, so it has to have
-          # actually run and passed — a skip is a gate failure (no silent
-          # "green rollup but nothing ran").
-          if [ "${BUILD_AND_TEST}" != "success" ]; then
-            echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST}) — required job must run and pass"
-            fail=1
-          fi
+          # Manual-only: may be skipped on non-workflow_dispatch triggers, but
+          # must not have failed or been cancelled when it did run.
+          case "${BUILD_AND_TEST}" in
+            success|skipped) ;;
+            *)
+              echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST})"
+              fail=1
+              ;;
+          esac
 
-          # Cost-gated: may be skipped on PR-only events, but must not have
-          # failed or been cancelled when it did run.
+          # Manual-only: may be skipped on non-workflow_dispatch triggers, but
+          # must not have failed or been cancelled when it did run.
           case "${KEYSTORE_BACKENDS}" in
             success|skipped) ;;
             *)

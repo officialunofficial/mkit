@@ -776,11 +776,21 @@ pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, us
     Some((added, deleted))
 }
 
+/// Sniff window for git's binary heuristic: content is classified from at
+/// most this many leading bytes. Exposed so a caller that only needs the
+/// classification — not a diff — can read just this much of a blob (e.g.
+/// [`crate::worktree::LoadedBlob::prefix`]) instead of paying for full
+/// content, which matters for a chunked blob (mkit#606).
+pub const BINARY_SNIFF_LEN: usize = 8000;
+
 /// Git's binary heuristic (`buffer_is_binary`): a NUL byte within the
-/// first 8000 bytes marks the blob binary, regardless of UTF-8 validity.
-fn is_binary(bytes: &[u8]) -> bool {
-    const FIRST_FEW_BYTES: usize = 8000;
-    bytes.iter().take(FIRST_FEW_BYTES).any(|&b| b == 0)
+/// first [`BINARY_SNIFF_LEN`] bytes marks the blob binary, regardless of
+/// UTF-8 validity. `bytes` may be a full blob or just its leading
+/// [`BINARY_SNIFF_LEN`]-byte prefix — since this never looks past that
+/// many bytes, the result is identical either way.
+#[must_use]
+pub fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
 }
 
 /// A single line (raw bytes) plus whether the source had a trailing newline

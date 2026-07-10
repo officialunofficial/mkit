@@ -27,7 +27,11 @@
 //!
 //! Reads always verify integrity by recomputing BLAKE3 over the bytes
 //! and comparing against the requested hash; mismatch returns
-//! [`StoreError::HashMismatch`].
+//! [`StoreError::HashMismatch`]. The one opt-in exception is
+//! [`ObjectStore::read_unverified`] (and the [`DisplaySource`] adapter
+//! built on it), reserved for display-only rendering where a corrupt
+//! object should surface as a bad render, never as durable state — see
+//! its doc for the full policy (#625).
 //!
 //! See `docs/specs/SPEC-OBJECTS.md` §10 for the path-layout rule.
 
@@ -388,11 +392,11 @@ impl ObjectStore {
         }
     }
 
-    /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
-    /// bytes equals `h` and returns [`StoreError::HashMismatch`] on
-    /// failure (the bytes are still discarded so callers cannot
-    /// accidentally use corrupt data).
-    pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+    /// Open `h`'s on-disk file, cap its size at [`MAX_RAW_OBJECT_SIZE`],
+    /// and read it fully into a pre-sized buffer — the shared body of
+    /// [`Self::read`] and [`Self::read_unverified`]; neither hashes nor
+    /// verifies, that's each caller's job.
+    fn read_raw(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         let path = self.path_for(h);
         let mut file = File::open(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
@@ -410,6 +414,15 @@ impl ObjectStore {
         let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
         let mut bytes = Vec::with_capacity(cap);
         file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
+    /// bytes equals `h` and returns [`StoreError::HashMismatch`] on
+    /// failure (the bytes are still discarded so callers cannot
+    /// accidentally use corrupt data).
+    pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        let bytes = self.read_raw(h)?;
         let actual = object_id_from_bytes(&bytes);
         if actual != *h {
             return Err(StoreError::HashMismatch {
@@ -418,6 +431,38 @@ impl ObjectStore {
             });
         }
         Ok(bytes)
+    }
+
+    /// Read raw bytes for `h` WITHOUT the BLAKE3 integrity check that
+    /// [`Self::read`] performs — a [`StoreError::HashMismatch`] can
+    /// therefore never come out of this path.
+    ///
+    /// # Policy — display-only paths ONLY (#625)
+    /// This exists for hot read-only rendering (`diff`/`show`/commit
+    /// summaries formatting a diffstat or patch preview). It is the same
+    /// "cheap read" tradeoff [`Self::object_type`] already makes for shape
+    /// checks (see its doc and [`Self::verify_object_type`], which is the
+    /// *verifying* twin used by tree-publication paths) — extended here to
+    /// the full object body.
+    ///
+    /// NEVER use this for publication (commit/merge/rebase tree writes),
+    /// dedup, fetch/apply, or any path whose output is consumed as data
+    /// rather than displayed and discarded. mkit never feeds unverified
+    /// bytes into state that mkit itself writes, or into output that
+    /// mkit's own tooling round-trips (e.g. `format-patch` piped into
+    /// `git am`). On corruption, callers of `read` get a loud, typed error
+    /// before anything downstream can act on bad bytes; callers of
+    /// `read_unverified` get whatever a decoder makes of the corrupt bytes
+    /// — a decode error, or in the worst case garbage in the *rendered
+    /// output* — but never durable state, because display paths write
+    /// nothing back to the store.
+    ///
+    /// Prefer wrapping the source with [`DisplaySource`] at the render
+    /// call site over calling this directly; that keeps the verify/
+    /// no-verify choice at the boundary instead of threading a flag
+    /// through render code.
+    pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_raw(h)
     }
 
     /// The object's type tag, from its 6-byte prologue — without
@@ -614,11 +659,28 @@ pub trait ObjectSource {
     fn read_object(&self, h: &Hash) -> StoreResult<Object> {
         Ok(serialize::deserialize(&self.read(h)?)?)
     }
+
+    /// Read `h` without integrity verification, for display-only
+    /// rendering — see [`ObjectStore::read_unverified`] for the full
+    /// policy (#625). Defaults to the fully-verifying [`Self::read`], so
+    /// every existing and third-party [`ObjectSource`] stays verifying
+    /// unless it explicitly opts in by overriding this method.
+    ///
+    /// # Errors
+    /// As [`Self::read`] (an opting-in override may narrow this to never
+    /// return [`StoreError::HashMismatch`]).
+    fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read(h)
+    }
 }
 
 impl ObjectSource for ObjectStore {
     fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         ObjectStore::read(self, h)
+    }
+
+    fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        ObjectStore::read_unverified(self, h)
     }
 }
 
@@ -699,18 +761,85 @@ impl ObjectSink for EphemeralSink<'_> {
     }
 }
 
-impl ObjectSource for EphemeralSink<'_> {
-    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        if let Some(bytes) = self
-            .objects
+impl EphemeralSink<'_> {
+    /// The private-map half of a read: bytes this process already built
+    /// (via `put`/`put_parts`) and never persisted anywhere else to be
+    /// corrupted, shared by both [`ObjectSource::read`] and
+    /// [`ObjectSource::read_unverified`] below — the two differ only in
+    /// what they do on a miss.
+    fn overlay_get(&self, h: &Hash) -> Option<Vec<u8>> {
+        self.objects
             .lock()
             .expect("ephemeral sink mutex")
             .get(h)
             .cloned()
-        {
-            return Ok(bytes);
+    }
+}
+
+impl ObjectSource for EphemeralSink<'_> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        match self.overlay_get(h) {
+            Some(bytes) => Ok(bytes),
+            None => self.store.read(h),
         }
-        self.store.read(h)
+    }
+
+    fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        // Private-map hits are already trusted, same as the verifying
+        // `read` path above. Only the store fall-through actually skips a
+        // hash check.
+        match self.overlay_get(h) {
+            Some(bytes) => Ok(bytes),
+            None => self.store.read_unverified(h),
+        }
+    }
+}
+
+/// Adapter that makes any [`ObjectSource`] read without BLAKE3
+/// verification, for display-only rendering (`diff`, `show`, and the
+/// commit/merge/pull post-op summaries). Wrap the source once at the
+/// render call site — `DisplaySource::new(&store)` — and pass the
+/// wrapper wherever a generic `S: ObjectSource` render function expects
+/// its source. Every existing render function (`render_stat`,
+/// `emit_entry_patch`, `LoadedBlob::load`/`prefix`/`into_content`) works
+/// unchanged: the verify/no-verify policy lives entirely in which source
+/// gets passed in, never in a flag threaded through render code.
+///
+/// # When to use
+/// mkit never feeds unverified bytes into state that mkit itself writes,
+/// or into output that mkit's own tooling round-trips (format-patch →
+/// `git am`) — a diffstat or patch preview that only a human reads and
+/// discards is neither, so it's fair game. NEVER wrap a source feeding
+/// publication (commit/merge/rebase tree writes), dedup, fetch/apply, or
+/// any path whose output becomes durable state or gets applied elsewhere
+/// (e.g. the format-patch body in `git_tools.rs`, which is deliberately
+/// NOT wrapped because `git am` applies it into new commits). See
+/// [`ObjectStore::read_unverified`] for the full policy this wrapper
+/// exists to apply consistently (#625).
+pub struct DisplaySource<'a, S: ObjectSource + ?Sized> {
+    inner: &'a S,
+}
+
+impl<'a, S: ObjectSource + ?Sized> DisplaySource<'a, S> {
+    /// Wrap `inner` so reads through this adapter skip verification.
+    #[must_use]
+    pub fn new(inner: &'a S) -> Self {
+        Self { inner }
+    }
+}
+
+// Manual `Debug` (rather than `derive`) so this doesn't force an
+// unnecessary `S: Debug` bound on every generic render fn that only
+// needs `S: ObjectSource`.
+impl<S: ObjectSource + ?Sized> std::fmt::Debug for DisplaySource<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DisplaySource").finish_non_exhaustive()
+    }
+}
+
+impl<S: ObjectSource + ?Sized> ObjectSource for DisplaySource<'_, S> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.inner.read_unverified(h)
     }
 }
 
@@ -961,6 +1090,114 @@ mod tests {
             }
             other => panic!("expected HashMismatch, got {other:?}"),
         }
+    }
+
+    /// Flip the first byte of the on-disk object file for `h`, in place.
+    /// Shared by the `read_unverified`/`DisplaySource` corruption tests
+    /// below, which all need the same "the bytes on disk no longer match
+    /// `h`" setup that [`read_detects_corruption`] uses inline.
+    fn corrupt_first_byte(store: &ObjectStore, h: &Hash, first_byte: u8) {
+        let path = store.path_for(h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(io::SeekFrom::Start(0)).unwrap();
+        f.write_all(&[first_byte ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[test]
+    fn read_unverified_returns_bytes_read_rejects_corruption() {
+        // The core split this whole feature exists for: `read` must still
+        // fail loudly on a corrupted object, while `read_unverified`
+        // returns the (corrupt) bytes as-is — display paths only ever get
+        // a bad render, never silently-wrong durable state.
+        let (_dir, store) = fresh_store();
+        let bytes = b"trustworthy".to_vec();
+        let h = store.write(&bytes).unwrap();
+        corrupt_first_byte(&store, &h, bytes[0]);
+
+        assert!(matches!(
+            store.read(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+
+        let mut corrupted = bytes.clone();
+        corrupted[0] ^= 0xFF;
+        assert_eq!(store.read_unverified(&h).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn display_source_delegates_to_unverified() {
+        // `DisplaySource` is the intended call-site adapter: wrapping the
+        // store must make `ObjectSource::read` succeed on an object that
+        // `ObjectStore::read` itself would reject.
+        let (_dir, store) = fresh_store();
+        let bytes = b"trustworthy".to_vec();
+        let h = store.write(&bytes).unwrap();
+        corrupt_first_byte(&store, &h, bytes[0]);
+        assert!(matches!(
+            store.read(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+
+        let display = DisplaySource::new(&store);
+        let mut corrupted = bytes.clone();
+        corrupted[0] ^= 0xFF;
+        assert_eq!(
+            display.read(&h).unwrap(),
+            corrupted,
+            "DisplaySource::read must delegate to the store's unverified read"
+        );
+    }
+
+    #[test]
+    fn ephemeral_sink_unverified_falls_through() {
+        // Two shapes an `EphemeralSink` reader can hit: a private-map
+        // object built by this snapshot (never touches disk, so nothing to
+        // corrupt) and a store-backed object corrupted on disk. Both must
+        // read fine through `DisplaySource<EphemeralSink>`.
+        let (_dir, store) = fresh_store();
+        let durable_bytes = b"trustworthy".to_vec();
+        let durable_h = store.write(&durable_bytes).unwrap();
+        corrupt_first_byte(&store, &durable_h, durable_bytes[0]);
+
+        let sink = EphemeralSink::new(&store);
+        let private_h = sink.put(b"snapshot-only").unwrap();
+
+        let display = DisplaySource::new(&sink);
+        assert_eq!(display.read(&private_h).unwrap(), b"snapshot-only");
+
+        let mut corrupted = durable_bytes.clone();
+        corrupted[0] ^= 0xFF;
+        assert_eq!(display.read(&durable_h).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn read_unverified_default_is_verifying_read() {
+        // A minimal `ObjectSource` impl that only defines `read` must get
+        // fully-verifying behaviour from `read_unverified`'s default body
+        // — the whole safety net for third-party/future implementors that
+        // haven't opted in to the unverified path.
+        struct OnlyReadImpl<'s>(&'s ObjectStore);
+        impl ObjectSource for OnlyReadImpl<'_> {
+            fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+                self.0.read(h)
+            }
+        }
+
+        let (_dir, store) = fresh_store();
+        let bytes = b"trustworthy".to_vec();
+        let h = store.write(&bytes).unwrap();
+        corrupt_first_byte(&store, &h, bytes[0]);
+
+        let only_read = OnlyReadImpl(&store);
+        assert!(matches!(
+            only_read.read_unverified(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
     }
 
     #[test]

@@ -1,24 +1,24 @@
 # CODEOWNERS — see https://docs.github.com/articles/about-codeowners
 # Review routing for the officialunofficial GitHub org.
 #
-# Owners route to @officialunofficial/makechain, an existing provisioned
-# team, so required-review routing resolves to real reviewers. If/when
-# dedicated teams (@officialunofficial/mkit-maintainers,
+# Owners route to @officialunofficial/officialunofficial, an existing
+# provisioned team, so required-review routing resolves to real reviewers.
+# If/when dedicated teams (@officialunofficial/mkit-maintainers,
 # @officialunofficial/mkit-crypto) are provisioned with members, swap the
 # assignments below for those teams.
 
-*                                @officialunofficial/makechain
+*                                @officialunofficial/officialunofficial
 
 # Security-sensitive surfaces require crypto-aware review
-/rust/crates/mkit-attest/        @officialunofficial/makechain
-/rust/crates/mkit-keystore/      @officialunofficial/makechain
-/rust/crates/mkit-rpc/           @officialunofficial/makechain
+/rust/crates/mkit-attest/        @officialunofficial/officialunofficial
+/rust/crates/mkit-keystore/      @officialunofficial/officialunofficial
+/rust/crates/mkit-rpc/           @officialunofficial/officialunofficial
 
 # CI + release tooling
-/.github/                        @officialunofficial/makechain
-/install.sh                      @officialunofficial/makechain
-/scripts/                        @officialunofficial/makechain
+/.github/                        @officialunofficial/officialunofficial
+/install.sh                      @officialunofficial/officialunofficial
+/scripts/                        @officialunofficial/officialunofficial
 
 # On-disk + wire formats — changes need spec sign-off
-/docs/specs/SPEC-*.md                  @officialunofficial/makechain
-/rust/tests/golden/              @officialunofficial/makechain
+/docs/specs/SPEC-*.md                  @officialunofficial/officialunofficial
+/rust/tests/golden/              @officialunofficial/officialunofficial

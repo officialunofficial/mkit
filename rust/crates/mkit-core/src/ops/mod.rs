@@ -27,9 +27,10 @@ pub use conflict_state::{
     any_op_in_progress, in_progress_op_name,
 };
 pub use diff::{
-    DiffEntry, DiffError, DiffKind, DiffResult, HunkLine, HunkLineKind, PatchHunk, StatusEntry,
-    StatusStaging, apply_hunks_subset, detect_exact_renames, diff_line_counts, diff_trees,
-    enumerate_hunks, merge_blob_3way, status_diff, status_diff_observed, text_patch, unified_hunks,
+    BINARY_SNIFF_LEN, DiffEntry, DiffError, DiffKind, DiffResult, HunkLine, HunkLineKind,
+    PatchHunk, StatusEntry, StatusStaging, apply_hunks_subset, detect_exact_renames,
+    diff_line_counts, diff_trees, enumerate_hunks, is_binary, merge_blob_3way, status_diff,
+    status_diff_observed, text_patch, unified_hunks,
 };
 pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{

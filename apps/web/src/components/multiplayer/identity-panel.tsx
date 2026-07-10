@@ -104,15 +104,22 @@ export function LockedView({
   busy,
   status,
   hasPasskey,
+  embeddedBrowserWarning,
 }: {
   onCreate: () => void
   onUnlock: () => void
   busy: boolean
   status: string | null
   hasPasskey: boolean
+  embeddedBrowserWarning: string | null
 }) {
   return (
     <section className='space-y-3'>
+      {/* Shown proactively, before either button is tapped — independent of `status`,
+          which only appears after an actual create/unlock attempt. */}
+      {embeddedBrowserWarning ? (
+        <p className='text-sm text-amber-700 dark:text-amber-400'>{embeddedBrowserWarning}</p>
+      ) : null}
       {hasPasskey ? (
         <>
           <div className='flex flex-wrap items-center justify-between gap-2'>

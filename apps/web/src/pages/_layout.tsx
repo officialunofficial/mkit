@@ -21,14 +21,6 @@ export default async function RootLayout({ children }: RootLayoutProps) {
           as the header GridLogo's SSR fallback); GridLogo then randomizes it
           per load on the client. Previously this was the Waku ⛩️ default. */}
       <link rel='icon' type='image/svg+xml' href={data.icon} />
-      <link rel='preconnect' href='https://fonts.googleapis.com' />
-      <link rel='preconnect' href='https://fonts.gstatic.com' crossOrigin='' />
-      {/* Geist + Geist Mono. */}
-      <link
-        rel='stylesheet'
-        href='https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap'
-        precedence='font'
-      />
       {/* Header and footer span edge-to-edge; the middle column lives
           inside `<main>` so every page shares the same width. Pages
           don't re-apply `max-w-*` themselves. */}

@@ -9,6 +9,7 @@
 
 import { useState } from 'react'
 import { recordActivity } from '../lib/activity-log'
+import { embeddedBrowserWarning } from '../lib/embedded-browser'
 import { playerName, randomPetname } from '../lib/identity-name'
 import { useIdentityStore } from '../lib/identity-store'
 import { keysEnabled } from '../lib/keys-client'
@@ -26,6 +27,8 @@ export type IdentityActions = {
   /** True when a recoverable passkey is on file (drives Create vs Unlock). */
   hasPasskey: boolean
   unlocked: boolean
+  /** Proactive "open this in your browser" notice, or null — see lib/embedded-browser.ts. */
+  embeddedBrowserWarning: string | null
 }
 
 export function useIdentityActions(): IdentityActions {
@@ -34,6 +37,8 @@ export function useIdentityActions(): IdentityActions {
   const setNameMut = useSetName()
   const [status, setStatus] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // The UA doesn't change mid-session, so compute lazily once rather than on every render.
+  const [warning] = useState(embeddedBrowserWarning)
 
   // One ceremony: create the passkey AND derive the Ed25519 seed (PRF-on-create),
   // falling back to one get() or an ephemeral key inside `createIdentity`. Every
@@ -152,5 +157,6 @@ export function useIdentityActions(): IdentityActions {
     setStatus,
     hasPasskey: id.credentialId != null,
     unlocked: id.unlocked,
+    embeddedBrowserWarning: warning,
   }
 }

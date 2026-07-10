@@ -30,6 +30,15 @@ flags.add('nodejs_compat')
 config.compatibility_flags = [...flags]
 if (!hadNodejsCompat) changes.push('nodejs_compat')
 
+// Native Workers Cache (see wrangler.jsonc for the full rationale). Assert it here too in
+// case `waku build` ever regenerates dist/server/wrangler.json without carrying this field
+// forward from the source config.
+const existingCache = config.cache && typeof config.cache === 'object' ? config.cache : {}
+if (existingCache.enabled !== true) {
+  config.cache = { ...existingCache, enabled: true }
+  changes.push('cache.enabled=true')
+}
+
 const existing = config.observability && typeof config.observability === 'object' ? config.observability : {}
 const merged = { enabled: true, head_sampling_rate: 1, ...existing }
 const obsChanged = JSON.stringify(config.observability) !== JSON.stringify(merged)
