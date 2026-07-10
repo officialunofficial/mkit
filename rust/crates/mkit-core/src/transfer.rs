@@ -838,7 +838,7 @@ mod tests {
         let mut w = PackWriter::new();
         for h in &plan.raw {
             let bytes = src.read(h).unwrap();
-            w.push_raw(*h, bytes).unwrap();
+            w.push_raw(*h, &bytes).unwrap();
         }
         for d in &plan.deltas {
             w.push_delta(&d.base, &d.stream).unwrap();
