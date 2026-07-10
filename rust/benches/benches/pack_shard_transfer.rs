@@ -22,13 +22,16 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
+use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_core::pack_shard::{
-    Shard, decode_pack_from_shards, default_config, encode_pack_to_shards,
+    ParallelStrategy, SequentialStrategy, Shard, ShardSet, decode_pack_from_shards,
+    decode_pack_from_shards_with_strategy, default_config, encode_pack_to_shards,
+    encode_pack_to_shards_with_strategy,
 };
 
 const PACK_SIZE: usize = 100 * 1024 * 1024;
@@ -149,6 +152,67 @@ fn bench_sharded_worst_case(
     });
 }
 
+/// Builds a `Rayon` strategy over all available cores. Falls back to
+/// a single-thread pool (still technically the parallel strategy
+/// type, just not actually parallel) if the host can't report
+/// available parallelism, so the bench never panics on a constrained
+/// CI runner.
+fn full_parallelism_strategy() -> ParallelStrategy {
+    let threads = thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    ParallelStrategy::new(NonZeroUsize::new(threads).expect("threads >= 1"))
+        .expect("build rayon pool")
+}
+
+/// Issue #653 — isolates the `commonware-parallel` execution strategy
+/// as the *only* variable (no network jitter, no thread-spawn-per-shard
+/// harness) so a regression in the `Sequential` vs. `Rayon` win shows
+/// up directly, independent of the transfer-simulation benches above.
+fn bench_encode_strategy(c: &mut Criterion, pack: &[u8]) {
+    let config = default_config();
+    let parallel = full_parallelism_strategy();
+
+    c.bench_function("pack-shards/100MiB/encode-strategy-sequential", |b| {
+        b.iter(|| {
+            let encoded =
+                encode_pack_to_shards_with_strategy(pack, config, &SequentialStrategy).unwrap();
+            std::hint::black_box(encoded);
+        });
+    });
+
+    c.bench_function("pack-shards/100MiB/encode-strategy-parallel", |b| {
+        b.iter(|| {
+            let encoded = encode_pack_to_shards_with_strategy(pack, config, &parallel).unwrap();
+            std::hint::black_box(encoded);
+        });
+    });
+}
+
+/// Decode-side counterpart of [`bench_encode_strategy`]: reconstructs
+/// the same 100 MiB pack from the first 16 shards under each strategy.
+fn bench_decode_strategy(c: &mut Criterion, shards: &[Shard], manifest: &ShardSet) {
+    let subset: Vec<Shard> = shards.iter().take(16).cloned().collect();
+    let parallel = full_parallelism_strategy();
+
+    c.bench_function("pack-shards/100MiB/decode-strategy-sequential", |b| {
+        b.iter(|| {
+            let pack =
+                decode_pack_from_shards_with_strategy(&subset, manifest, &SequentialStrategy)
+                    .unwrap();
+            std::hint::black_box(pack);
+        });
+    });
+
+    c.bench_function("pack-shards/100MiB/decode-strategy-parallel", |b| {
+        b.iter(|| {
+            let pack = decode_pack_from_shards_with_strategy(&subset, manifest, &parallel).unwrap();
+            std::hint::black_box(pack);
+        });
+    });
+}
+
 fn bench_pack_shard_transfer(c: &mut Criterion) {
     let pack = synthetic_pack(PACK_SIZE);
     let (shards, manifest) =
@@ -157,6 +221,8 @@ fn bench_pack_shard_transfer(c: &mut Criterion) {
     bench_monolithic(c, &pack);
     bench_sharded_best_case(c, &shards, &manifest);
     bench_sharded_worst_case(c, &shards, &manifest);
+    bench_encode_strategy(c, &pack);
+    bench_decode_strategy(c, &shards, &manifest);
 }
 
 criterion_group!(name = pack_shard_transfer; config = Criterion::default().sample_size(10); targets = bench_pack_shard_transfer);
