@@ -230,9 +230,10 @@ mod tests {
     }
 
     /// Flip the first byte of the on-disk object file for `h`, in place.
-    /// Shared by the `read_unverified`/`DisplaySource` corruption tests
-    /// below, which all need the same "the bytes on disk no longer match
-    /// `h`" setup that `read_detects_corruption` uses inline.
+    /// Shared by the `DisplaySource` corruption tests below — the same
+    /// "the bytes on disk no longer match `h`" setup the corruption tests
+    /// in `store.rs` use (deliberately duplicated there rather than
+    /// exposing a test-support seam).
     fn corrupt_first_byte(store: &ObjectStore, h: &Hash, first_byte: u8) {
         let path = store.path_for(h);
         let mut f = OpenOptions::new()

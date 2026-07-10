@@ -20,7 +20,7 @@ use super::{WorktreeError, WorktreeResult};
 /// A plain [`Blob`](crate::object::Blob) returns its bytes directly. A
 /// [`ChunkedBlob`] manifest is reassembled
 /// by concatenating each referenced chunk (every chunk must itself be a
-/// `Blob`). This is the shared counterpart to [`store_file_object`] and
+/// `Blob`). This is the shared counterpart to [`store_file_object`](super::store_file_object) and
 /// backs `mkit cat`, `mkit diff`, conflict rendering, and blame so they
 /// all reconstruct large-file content the same way.
 ///
