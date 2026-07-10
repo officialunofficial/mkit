@@ -756,6 +756,11 @@ fn render_patch(
     let mut buf: Vec<u8> = Vec::new();
     for e in &diff.entries {
         let mut one: Vec<u8> = Vec::new();
+        // Deliberately NOT wrapped in `DisplaySource` (#625): this patch
+        // body is format-patch-style output that `git am` applies into new
+        // commits elsewhere, not a render a human just glances at.
+        // Corruption here must surface as a loud `HashMismatch`, not
+        // propagate into someone's history — keep this read verified.
         super::diff::emit_entry_patch(&mut one, store, e).map_err(|m| (m, exit::GENERAL_ERROR))?;
         // `git am` cannot apply the textual "Binary files differ"
         // notice (and we don't emit git's base85 binary literals), so
