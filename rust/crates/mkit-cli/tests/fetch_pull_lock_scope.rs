@@ -28,7 +28,6 @@
 mod common;
 
 use std::fs;
-use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -44,18 +43,17 @@ use mkit_core::store::ObjectStore;
 use mkit_transport_file::FileTransport;
 use mkit_transport_memory::MemoryTransport;
 
-fn mkit_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_mkit")
-}
-
+/// Delegates to [`common::mkit_env`] for the full isolation every other
+/// suite gets (`XDG_CONFIG_HOME` + `HOME` + `EDITOR`/`VISUAL`/`GIT_EDITOR`
+/// all pointed at a throwaway dir, stdin closed) — found missing here
+/// during the epic-#634 code review: this file previously hand-rolled its
+/// own `run_in` that set only `XDG_CONFIG_HOME`, leaving the developer's
+/// real `$EDITOR`/`$HOME` reachable by any code path in these tests that
+/// happens to need them (e.g. an uncommitted `commit` falling through to
+/// interactive message composition would have spawned the real editor).
 fn run_in(cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
     let xdg = tempfile::tempdir().expect("xdg tempdir");
-    let out = Command::new(mkit_bin())
-        .args(args)
-        .current_dir(cwd)
-        .env("XDG_CONFIG_HOME", xdg.path())
-        .output()
-        .expect("spawn mkit");
+    let out = common::mkit_env(cwd, xdg.path(), args, &[]);
     drop(xdg);
     out
 }
