@@ -26,6 +26,7 @@
 //! atomic across processes regardless of what other locks each caller
 //! holds — this closes the v1 gap previously documented here.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -634,6 +635,127 @@ pub fn write_remote_ref(
         branch,
         RefWriteCondition::Any,
     )
+}
+
+/// Batched writer for remote-tracking refs (#645): amortises the
+/// parent-directory fsync across every ref written into it, instead of
+/// paying one per ref like [`write_remote_ref`] in a loop.
+///
+/// `push`/`fetch` publish one tracking ref per branch
+/// (`refs/remotes/<remote>/<branch>`) in a loop; each individual
+/// [`write_remote_ref`] call goes through `write_atomic`'s
+/// temp+fsync+rename+**dirsync** pattern, so N branches cost N serial
+/// directory fsyncs even though every write lands under the same
+/// `refs/remotes/<remote>/` tree. `RemoteRefBatch` instead:
+///
+/// 1. [`Self::write`]s each ref durable-content-before-visible (fsyncs
+///    the wire bytes, then renames — same invariant
+///    [`crate::atomic::write_content_synced`] gives object writes: a
+///    reader can never observe a torn file), immediately, one call at a
+///    time, deferring only the directory fsync that makes the RENAME
+///    itself crash-durable;
+/// 2. [`Self::commit`] fsyncs every distinct directory touched, once
+///    each, deduplicated — O(distinct directories) instead of O(refs).
+///    For the common case (one remote, flat branch names) that is
+///    exactly one fsync for the whole batch.
+///
+/// This is deliberately scoped to `refs/remotes/*` ONLY — see
+/// `atomic.rs`'s module docs for why branch heads (`refs/heads/*`,
+/// [`write_ref`]/[`update_ref`]) keep the unbatched per-write contract:
+/// tracking refs are a locally-cached, recomputable-from-a-re-fetch
+/// view of another repository, not a pointer anything else orders
+/// against.
+///
+/// # Partial-failure semantics
+///
+/// Best-effort, fail-fast — the same contract
+/// [`crate::batch::WriteBatch::commit`] documents for the object store's
+/// batched writes. [`Self::write`] renames each ref as soon as it
+/// validates and its content is durable, so a ref that made it through
+/// `write` is visible to readers immediately, exactly as it would have
+/// been under the old per-ref loop. If a later `write` in the same
+/// batch fails (bad name or I/O error), earlier successful writes are
+/// **not** rolled back — content-addressed dedup isn't in play here,
+/// but the same reasoning applies: remote-tracking refs are
+/// recomputable, so a partially-applied batch is exactly as safe to
+/// retry as the old loop was after failing at the same point. Callers
+/// that want the successful prefix to be durable even when the batch as
+/// a whole errors out should call [`Self::commit`] regardless of
+/// whether the write loop returned early (see
+/// `remote_dispatch::push_all_with` / `fetch_objects_inner` for the
+/// pattern).
+#[derive(Debug)]
+pub struct RemoteRefBatch<'a> {
+    layout: &'a RepoLayout,
+    sub_dir: String,
+    touched_dirs: BTreeSet<PathBuf>,
+}
+
+impl<'a> RemoteRefBatch<'a> {
+    /// Start a batch for `remote`.
+    ///
+    /// # Errors
+    /// [`RefError::InvalidRefName`] if `remote` fails [`validate_ref_name`].
+    pub fn new(layout: &'a RepoLayout, remote: &str) -> RefResult<Self> {
+        if !validate_ref_name(remote) {
+            return Err(RefError::InvalidRefName(remote.to_string()));
+        }
+        Ok(Self {
+            layout,
+            sub_dir: remote_ref_dir(remote),
+            touched_dirs: BTreeSet::new(),
+        })
+    }
+
+    /// Write one remote-tracking ref: validates `branch`, fsyncs its
+    /// wire-encoded content, then renames it into place — visible
+    /// immediately, same as [`write_remote_ref`]. Only the directory
+    /// fsync (rename durability) is deferred to [`Self::commit`].
+    ///
+    /// # Errors
+    /// - [`RefError::InvalidRefName`] if `branch` fails
+    ///   [`validate_ref_name`] — no I/O is attempted for an invalid name.
+    /// - [`RefError::Io`] for filesystem failures.
+    ///
+    /// # Panics
+    /// Never in practice: `ref_path` always produces a path with a
+    /// parent (it is `self.layout.common_dir()` joined with at least the
+    /// remote's subdirectory and the branch name).
+    pub fn write(&mut self, branch: &str, h: &Hash) -> RefResult<()> {
+        if !validate_ref_name(branch) {
+            return Err(RefError::InvalidRefName(branch.to_string()));
+        }
+        let path = ref_path(self.layout.common_dir(), &self.sub_dir, branch);
+        let parent = path
+            .parent()
+            .expect("remote-tracking ref path always has a parent")
+            .to_path_buf();
+        fs::create_dir_all(&parent)?;
+        let wire = encode_ref_wire(h);
+        crate::atomic::write_content_synced(&path, &wire)?;
+        self.touched_dirs.insert(parent);
+        Ok(())
+    }
+
+    /// Fsync every directory touched by a completed [`Self::write`],
+    /// once each. Idempotent to call on a batch with nothing staged (a
+    /// no-op). MUST be called after the last `write` a caller intends to
+    /// make durable — refs written but never committed are visible but
+    /// not crash-durable (the rename may not have reached stable
+    /// storage), the same window [`crate::store::BulkWriter::commit`]
+    /// documents for bulk object writes.
+    ///
+    /// # Errors
+    /// [`RefError::Io`] on the first directory fsync failure. Directories
+    /// are synced in sorted order for determinism; a failure partway
+    /// through leaves the remaining directories un-synced (best-effort,
+    /// matching [`Self::write`]'s partial-failure contract).
+    pub fn commit(self) -> RefResult<()> {
+        for dir in &self.touched_dirs {
+            crate::atomic::sync_dir(dir)?;
+        }
+        Ok(())
+    }
 }
 
 /// Delete a remote-tracking branch ref (e.g. after the upstream
@@ -1561,6 +1683,159 @@ mod tests {
         let loaded = load_shallow_boundaries(&mkit).unwrap().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], valid);
+    }
+
+    // --- remote-ref batching (#645) --------------------------------------
+    //
+    // `push`/`fetch` publish one remote-tracking ref per branch in a loop
+    // (`mkit-cli`'s `remote_dispatch::push_all_with` /
+    // `fetch_objects_inner`). Each `write_remote_ref` call goes through
+    // `cas_write` → `write_atomic`, which pays a parent-directory fsync
+    // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N
+    // directory fsyncs, serially, even though they all land in the same
+    // `refs/remotes/<remote>/` directory. `RemoteRefBatch` amortises that
+    // into one fsync per distinct directory touched, however many refs
+    // were written into it.
+
+    /// Baseline (pre-#645): today's per-ref loop — exactly what
+    /// `push_all_with`/`fetch_objects_inner` do today — pays one
+    /// directory fsync per ref, even though every ref lands in the same
+    /// `refs/remotes/origin/` directory. This is the O(N) cost #645
+    /// exists to amortise; it must keep holding after the fix, since
+    /// `write_remote_ref` itself (used elsewhere for single-ref writes)
+    /// is intentionally left on the unbatched path.
+    #[test]
+    fn write_remote_ref_loop_pays_one_dir_sync_per_ref_today() {
+        let (_dir, mkit) = fresh_repo();
+        let n: u64 = 25;
+        crate::atomic::testing::reset_dir_sync_calls();
+        for i in 0..n {
+            write_remote_ref(
+                &mkit,
+                "origin",
+                &format!("branch-{i}"),
+                &h(&format!("c{i}")),
+            )
+            .unwrap();
+        }
+        let calls = crate::atomic::testing::dir_sync_calls();
+        assert_eq!(
+            calls, n,
+            "the current per-ref write path must cost exactly one directory \
+             fsync per ref (O(N)); got {calls} for {n} refs"
+        );
+    }
+
+    /// The #645 fix: staging N remote-tracking-ref writes into one
+    /// `RemoteRefBatch` and committing once must cost O(1) directory
+    /// fsyncs (one per distinct directory touched — here a single flat
+    /// `refs/remotes/origin/` namespace, so exactly one), not O(N).
+    #[test]
+    fn remote_ref_batch_pays_one_dir_sync_for_many_refs() {
+        let (_dir, mkit) = fresh_repo();
+        let n = 25;
+        let entries: Vec<(String, Hash)> = (0..n)
+            .map(|i| (format!("branch-{i}"), h(&format!("c{i}"))))
+            .collect();
+
+        crate::atomic::testing::reset_dir_sync_calls();
+        let mut batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        for (branch, hash) in &entries {
+            batch.write(branch, hash).unwrap();
+        }
+        batch.commit().unwrap();
+
+        let calls = crate::atomic::testing::dir_sync_calls();
+        assert_eq!(
+            calls, 1,
+            "batching {n} tracking-ref writes into one flat remote \
+             namespace must cost exactly one directory fsync (O(1)), got {calls}"
+        );
+    }
+
+    /// Correctness: batched writes must produce the exact same final ref
+    /// states as the old per-ref `write_remote_ref` loop — same hashes,
+    /// same readability, for every branch.
+    #[test]
+    fn remote_ref_batch_matches_per_ref_loop_final_state() {
+        let (_dir, old_path) = fresh_repo();
+        let (_dir2, new_path) = fresh_repo();
+        let n = 12;
+        let entries: Vec<(String, Hash)> = (0..n)
+            .map(|i| (format!("team/branch-{i}"), h(&format!("state{i}"))))
+            .collect();
+
+        for (branch, hash) in &entries {
+            write_remote_ref(&old_path, "origin", branch, hash).unwrap();
+        }
+
+        let mut batch = RemoteRefBatch::new(&new_path, "origin").unwrap();
+        for (branch, hash) in &entries {
+            batch.write(branch, hash).unwrap();
+        }
+        batch.commit().unwrap();
+
+        for (branch, hash) in &entries {
+            let old_val = read_remote_ref(&old_path, "origin", branch).unwrap();
+            let new_val = read_remote_ref(&new_path, "origin", branch).unwrap();
+            assert_eq!(old_val, Some(*hash));
+            assert_eq!(new_val, Some(*hash));
+            assert_eq!(old_val, new_val, "branch {branch} diverged");
+        }
+    }
+
+    /// Partial-failure semantics: best-effort / fail-fast, matching
+    /// `WriteBatch::commit`'s documented contract (already-renamed
+    /// entries stay visible; no rollback). An invalid branch name in the
+    /// middle of a batch aborts every write from that point on — the
+    /// refs staged before it stay visible and readable, exactly as they
+    /// would have under the old per-ref loop had it hit the same
+    /// mid-loop error (each earlier ref was already independently
+    /// visible before the loop reached the bad one).
+    #[test]
+    fn remote_ref_batch_partial_failure_keeps_already_written_refs_visible() {
+        let (_dir, mkit) = fresh_repo();
+        let mut batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        batch.write("good-1", &h("g1")).unwrap();
+        batch.write("good-2", &h("g2")).unwrap();
+        let err = batch.write("bad//name", &h("x")).unwrap_err();
+        assert!(matches!(err, RefError::InvalidRefName(_)));
+
+        // Committing what was staged before the bad write must still
+        // durably publish the good entries.
+        batch.commit().unwrap();
+        assert_eq!(
+            read_remote_ref(&mkit, "origin", "good-1").unwrap(),
+            Some(h("g1"))
+        );
+        assert_eq!(
+            read_remote_ref(&mkit, "origin", "good-2").unwrap(),
+            Some(h("g2"))
+        );
+        // "bad//name" was never a valid ref name in the first place —
+        // nothing was ever staged for it, on either the old or new path.
+        let never_written = read_remote_ref(&mkit, "origin", "bad//name").unwrap_err();
+        assert!(matches!(never_written, RefError::InvalidRefName(_)));
+    }
+
+    #[test]
+    fn remote_ref_batch_rejects_invalid_remote_name() {
+        let (_dir, mkit) = fresh_repo();
+        let err = RemoteRefBatch::new(&mkit, "../escape").unwrap_err();
+        assert!(matches!(err, RefError::InvalidRefName(_)));
+    }
+
+    #[test]
+    fn remote_ref_batch_of_zero_entries_is_a_noop_commit() {
+        let (_dir, mkit) = fresh_repo();
+        crate::atomic::testing::reset_dir_sync_calls();
+        let batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        batch.commit().unwrap();
+        assert_eq!(
+            crate::atomic::testing::dir_sync_calls(),
+            0,
+            "an empty batch must not touch any directory"
+        );
     }
 
     // --- history-coupled ref writes (history-mmr feature) -------------
