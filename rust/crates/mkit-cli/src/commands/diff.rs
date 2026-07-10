@@ -42,7 +42,7 @@ use mkit_core::ops::{
     is_binary, unified_hunks,
 };
 use mkit_core::refs;
-use mkit_core::store::{EphemeralSink, ObjectSource, ObjectStore};
+use mkit_core::store::{DisplaySource, EphemeralSink, ObjectSource, ObjectStore};
 use mkit_core::worktree::{self, LoadedBlob};
 
 use super::revspec;
@@ -221,11 +221,16 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut stdout = std::io::stdout().lock();
     if opts.stat {
+        // `render_stat` hoists its own `DisplaySource` wrapping (#625).
         return match render_stat(&mut stdout, &snapshot, selected.into_iter()) {
             Ok(()) => diff_status,
             Err(msg) => emit_err(&msg, exit::GENERAL_ERROR),
         };
     }
+    // The patch paths below print what they render here — nothing durable
+    // is published from this path — so skip the BLAKE3 re-verify on every
+    // changed blob (#625).
+    let display = DisplaySource::new(&snapshot);
     for e in selected {
         let res = if opts.name_only || opts.name_status {
             emit_entry_name(&mut stdout, e, opts.name_status, opts.z);
@@ -234,7 +239,7 @@ pub fn run(args: &[String]) -> u8 {
             // Render the entry to a buffer, then colorize line-by-line so
             // the byte-exact patch machinery stays color-agnostic.
             let mut buf: Vec<u8> = Vec::new();
-            match emit_entry_patch(&mut buf, &snapshot, e) {
+            match emit_entry_patch(&mut buf, &display, e) {
                 // Colorize on RAW BYTES (not via from_utf8_lossy) so a
                 // non-UTF-8 patch body round-trips byte-for-byte, matching
                 // the uncolored path.
@@ -244,7 +249,7 @@ pub fn run(args: &[String]) -> u8 {
                 Err(msg) => Err(msg),
             }
         } else {
-            emit_entry_patch(&mut stdout, &snapshot, e)
+            emit_entry_patch(&mut stdout, &display, e)
         };
         if let Err(msg) = res {
             return emit_err(&msg, exit::GENERAL_ERROR);
@@ -378,11 +383,18 @@ fn entry_stat_change<S: ObjectSource + ?Sized>(
 /// `+`/`-` graph is scaled to the terminal width when the largest change
 /// would overflow it. Width = `COLUMNS` (if a positive integer) else 80,
 /// exactly as git does even when stdout is not a tty.
+///
+/// A diffstat is display-only by definition — every row is a byte size or
+/// a line count a human reads and discards — so this reads every changed
+/// blob without BLAKE3 re-verification via [`DisplaySource`] (#625).
+/// Callers pass their source directly; the no-verify choice lives here,
+/// not at each call site.
 pub(super) fn render_stat<'a, S: ObjectSource + ?Sized>(
     out: &mut impl Write,
     store: &S,
     entries: impl Iterator<Item = &'a DiffEntry>,
 ) -> Result<(), String> {
+    let store = &DisplaySource::new(store);
     // Gather per-file change shapes (and the blob bytes we need to count).
     let mut rows: Vec<StatRow> = Vec::new();
     for e in entries {
@@ -1571,6 +1583,193 @@ mod tests {
             (1, 1),
             "each side's object must be read exactly once: {:?}",
             store.reads.borrow()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `DisplaySource` (#625): wrapping the source for display-only reads
+    // must be invisible to render output and to the #628 read-count
+    // guarantees above — the wrapper only changes verification.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_stat_through_display_source_matches_direct_output() {
+        // Golden-output guard: every row shape `render_stat` can produce —
+        // text, inline binary, and chunked binary — must render
+        // byte-identically whether the source is read directly or through
+        // `DisplaySource`.
+        let mut store = RecordingSource::default();
+
+        let text_old = fake_hash(31);
+        let text_new = fake_hash(32);
+        store.put(
+            text_old,
+            &Object::Blob(Blob {
+                data: b"one\ntwo\n".to_vec(),
+            }),
+        );
+        store.put(
+            text_new,
+            &Object::Blob(Blob {
+                data: b"one\nthree\nfour\n".to_vec(),
+            }),
+        );
+
+        let bin_old = fake_hash(33);
+        let bin_new = fake_hash(34);
+        store.put(
+            bin_old,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'a', 10_240),
+            }),
+        );
+        store.put(
+            bin_new,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'b', 12_288),
+            }),
+        );
+
+        let chunk_old0 = fake_hash(35);
+        let chunk_old_manifest = fake_hash(36);
+        store.put(
+            chunk_old0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'c', BINARY_SNIFF_LEN + 1000),
+            }),
+        );
+        store.put(
+            chunk_old_manifest,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 3_000_000,
+                chunk_size: 0,
+                chunks: vec![chunk_old0],
+            }),
+        );
+        let chunk_new0 = fake_hash(37);
+        let chunk_new_manifest = fake_hash(38);
+        store.put(
+            chunk_new0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'd', BINARY_SNIFF_LEN + 500),
+            }),
+        );
+        store.put(
+            chunk_new_manifest,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 4_000_000,
+                chunk_size: 0,
+                chunks: vec![chunk_new0],
+            }),
+        );
+
+        let entries = [
+            modified_entry("text.txt", text_old, text_new),
+            modified_entry("bin.dat", bin_old, bin_new),
+            modified_entry("big.bin", chunk_old_manifest, chunk_new_manifest),
+        ];
+
+        let mut direct = Vec::new();
+        render_stat(&mut direct, &store, entries.iter()).unwrap();
+
+        let display = DisplaySource::new(&store);
+        let mut wrapped = Vec::new();
+        render_stat(&mut wrapped, &display, entries.iter()).unwrap();
+
+        assert_eq!(
+            direct, wrapped,
+            "DisplaySource must not change render_stat's byte output"
+        );
+    }
+
+    #[test]
+    fn render_stat_through_display_source_preserves_single_read_per_side() {
+        // The #624 single-read guarantee (each side's top-level object
+        // read exactly once) must hold through `DisplaySource` too.
+        let mut store = RecordingSource::default();
+        let old_hash = fake_hash(51);
+        let new_hash = fake_hash(52);
+        store.put(
+            old_hash,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'a', 10_240),
+            }),
+        );
+        store.put(
+            new_hash,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'b', 12_288),
+            }),
+        );
+
+        let entry = modified_entry("f.bin", old_hash, new_hash);
+        let display = DisplaySource::new(&store);
+        let mut out = Vec::new();
+        render_stat(&mut out, &display, std::iter::once(&entry)).unwrap();
+
+        assert_eq!(
+            reads_per_side(&store, &old_hash, &new_hash),
+            (1, 1),
+            "DisplaySource must not add or remove reads: {:?}",
+            store.reads.borrow()
+        );
+    }
+
+    #[test]
+    fn render_stat_through_display_source_reads_no_trailing_chunks() {
+        // The #606 no-trailing-chunk-read guarantee for chunked binaries
+        // must hold through `DisplaySource` too.
+        let mut store = RecordingSource::default();
+
+        let old_chunk0 = fake_hash(53);
+        let old_chunk1 = fake_hash(54); // deliberately never stored
+        let old_manifest_hash = fake_hash(55);
+        store.put(
+            old_chunk0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'a', BINARY_SNIFF_LEN + 1000),
+            }),
+        );
+        store.put(
+            old_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 3_000_000,
+                chunk_size: 0,
+                chunks: vec![old_chunk0, old_chunk1],
+            }),
+        );
+
+        let new_chunk0 = fake_hash(56);
+        let new_chunk1 = fake_hash(57); // deliberately never stored
+        let new_manifest_hash = fake_hash(58);
+        store.put(
+            new_chunk0,
+            &Object::Blob(Blob {
+                data: binary_bytes(b'b', BINARY_SNIFF_LEN + 500),
+            }),
+        );
+        store.put(
+            new_manifest_hash,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 4_000_000,
+                chunk_size: 0,
+                chunks: vec![new_chunk0, new_chunk1],
+            }),
+        );
+
+        let entry = modified_entry("big.bin", old_manifest_hash, new_manifest_hash);
+        let display = DisplaySource::new(&store);
+        let mut out = Vec::new();
+        render_stat(&mut out, &display, std::iter::once(&entry)).unwrap();
+
+        let reads = store.reads.borrow();
+        assert!(
+            !reads.contains(&old_chunk1),
+            "DisplaySource must not cause the old side's trailing chunk to be read: {reads:?}"
+        );
+        assert!(
+            !reads.contains(&new_chunk1),
+            "DisplaySource must not cause the new side's trailing chunk to be read: {reads:?}"
         );
     }
 }
