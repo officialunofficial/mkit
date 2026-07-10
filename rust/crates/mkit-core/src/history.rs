@@ -236,7 +236,7 @@ enum Backend<X: Executor> {
 }
 
 struct JournaledBackend<X: Executor> {
-    // Order matters for Drop: `mmr` must drop before `_ctx` so
+    // Order matters for Drop: `mmr` must drop before `ctx` so
     // any pending async-resource shutdowns can still poll on the
     // surviving tokio runtime. In practice commonware's
     // `Journaled` only flushes synchronously in `sync`, but the
@@ -244,8 +244,10 @@ struct JournaledBackend<X: Executor> {
     mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest, Sequential>,
     executor: Arc<X>,
     // Held to keep the bootstrap tokio runtime (inside the Context's
-    // executor `Arc`) alive for the whole CommitHistory lifetime.
-    _ctx: commonware_runtime::tokio::Context,
+    // executor `Arc`) alive for the whole CommitHistory lifetime, AND
+    // read by `reopen` (issue #640) to derive a labelled child Context
+    // instead of paying for a second `bootstrap_commonware_context`.
+    ctx: commonware_runtime::tokio::Context,
     // Held so update_ref_with_history can take a fresh RepoLock for
     // every append. None for the mem-only flavour. This is the COMMON
     // dir: history is shared state across worktrees (#493).
@@ -338,8 +340,33 @@ impl<X: Executor + 'static> CommitHistory<X> {
         // `<mkit_dir>/history`. The Context survives the bootstrap
         // runner's drop because its inner `Arc<Executor>` (the
         // commonware Executor, not ours) holds the tokio runtime alive.
+        //
+        // This is the ONLY place a fresh Context gets bootstrapped.
+        // [`Self::reopen`] re-derives state via [`Self::init_journaled`]
+        // against its already-live Context instead of calling this
+        // again — see issue #640.
         let ctx = bootstrap_commonware_context(&history_dir)?;
 
+        Self::init_journaled(executor, ctx, common_dir, branch)
+    }
+
+    /// Open (or re-derive) the journaled backend against an
+    /// already-live commonware `Context`.
+    ///
+    /// This is the shared tail of [`Self::open_at_common_dir`] (which
+    /// bootstraps a fresh `Context` and hands it here) and
+    /// [`Self::reopen`] (which passes in the CURRENT handle's already
+    /// -bootstrapped `Context` instead of building a new one). Every
+    /// call re-runs `JournaledMmr::init`, so the returned handle always
+    /// reflects what's actually on disk right now — the expensive part
+    /// this function does NOT repeat is the OS-thread `Context`
+    /// bootstrap itself.
+    fn init_journaled(
+        executor: Arc<X>,
+        ctx: commonware_runtime::tokio::Context,
+        common_dir: &Path,
+        branch: &str,
+    ) -> Result<Self, HistoryError> {
         let sanitized = sanitize_branch(branch);
         let journal_partition = format!("{sanitized}{JOURNAL_PARTITION_SUFFIX}");
         let metadata_partition = format!("{sanitized}{METADATA_PARTITION_SUFFIX}");
@@ -378,7 +405,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
             backend: Backend::Journaled(Box::new(JournaledBackend {
                 mmr,
                 executor,
-                _ctx: ctx,
+                ctx,
                 common_dir: common_dir.to_path_buf(),
                 branch: branch.to_string(),
             })),
@@ -430,11 +457,28 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// if commonware cannot recover the journal,
     /// [`HistoryError::RuntimeBootstrap`] if the runtime bootstrap
     /// fails, [`HistoryError::Io`] for filesystem failures.
+    ///
+    /// # Bootstrap cost (issue #640)
+    ///
+    /// This does NOT spawn a second commonware `Context` bootstrap.
+    /// [`CommitHistory::open_at`]'s bootstrap thread already built a
+    /// full tokio runtime, metrics task, and buffer pools for this
+    /// handle; re-running that per call would double the cost of
+    /// every history-tracked ref write for no benefit, since the
+    /// bootstrapped Context is reusable — only the MMR's in-memory
+    /// view of the on-disk journal needs re-deriving. `reopen` takes a
+    /// labelled child of the handle's own already-live Context and
+    /// re-runs `JournaledMmr::init` against it, which is what actually
+    /// picks up a concurrent writer's append.
     pub fn reopen(&mut self) -> Result<(), HistoryError> {
         let Backend::Journaled(b) = &self.backend else {
             return Ok(());
         };
-        let fresh = Self::open_at_common_dir(b.executor.clone(), &b.common_dir, &b.branch)?;
+        // Reuse the already-bootstrapped Context — see the doc comment
+        // above and `bootstrap_commonware_context`'s doc comment for
+        // why a second bootstrap must not happen here.
+        let ctx = b.ctx.child("mmr_reopen");
+        let fresh = Self::init_journaled(b.executor.clone(), ctx, &b.common_dir, &b.branch)?;
         *self = fresh;
         Ok(())
     }
@@ -674,6 +718,51 @@ fn sanitize_branch(name: &str) -> String {
     out
 }
 
+/// Test-only instrumentation for observing how many times
+/// [`bootstrap_commonware_context`] actually spawns a bootstrap OS
+/// thread. Production builds pay zero cost for this (compiled out
+/// entirely under `#[cfg(test)]`).
+///
+/// The counter is installed per-thread rather than as one global
+/// static so that tests exercising this (like
+/// `reopen_reuses_the_bootstrapped_commonware_context_instead_of_rebootstrapping`)
+/// are not flaky under `cargo test`'s default multi-threaded runner —
+/// each test only observes bootstraps triggered by its own call
+/// chain. [`bootstrap_commonware_context`] reads the hook
+/// synchronously on the *calling* thread (before it spawns the
+/// bootstrap thread) and moves the resulting `Arc` into the spawned
+/// closure, so the count still lands correctly even though the
+/// bootstrap itself happens on a different OS thread.
+#[cfg(test)]
+mod bootstrap_probe {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    thread_local! {
+        static COUNTER: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+    }
+
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            COUNTER.with(|c| *c.borrow_mut() = None);
+        }
+    }
+
+    /// Install `counter` as the active probe for the current thread.
+    /// Returns a guard that clears the hook on drop.
+    #[must_use]
+    pub(super) fn track(counter: Arc<AtomicUsize>) -> impl Drop {
+        COUNTER.with(|c| *c.borrow_mut() = Some(counter));
+        Clear
+    }
+
+    pub(super) fn current() -> Option<Arc<AtomicUsize>> {
+        COUNTER.with(|c| c.borrow().clone())
+    }
+}
+
 /// Bootstrap a commonware tokio `Context` whose `storage_directory`
 /// is the supplied path.
 ///
@@ -686,11 +775,22 @@ fn sanitize_branch(name: &str) -> String {
 /// See `docs/specs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
 /// the trade-off with the alternative "share the caller's tokio
 /// runtime" approach.
+///
+/// Callers that already hold a live [`commonware_runtime::tokio::Context`]
+/// (e.g. [`CommitHistory::reopen`]) MUST NOT call this a second time —
+/// see [`CommitHistory::init_journaled`], which re-derives on-disk
+/// state against an existing Context instead.
 fn bootstrap_commonware_context(
     storage_directory: &Path,
 ) -> Result<commonware_runtime::tokio::Context, HistoryError> {
     let dir = storage_directory.to_path_buf();
+    #[cfg(test)]
+    let probe = bootstrap_probe::current();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        if let Some(counter) = &probe {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let cfg = commonware_runtime::tokio::Config::new().with_storage_directory(dir);
         let runner = commonware_runtime::tokio::Runner::new(cfg);
         // Return an owned, labelled child Context. `Context::clone` and
@@ -933,6 +1033,40 @@ mod tests {
         let target = Position(17);
         let proof = h.prove(target).unwrap();
         assert!(verify_inclusion(&commits[17], target, &proof, &root));
+    }
+
+    /// Issue #640: `write_ref_recording_history` does one `open_at`
+    /// before the repo lock, then `update_ref_with_history`'s
+    /// `reopen()` re-derives state under the lock. That sequence —
+    /// `open_at` followed by `reopen()` — must pay for exactly ONE
+    /// commonware Context bootstrap (one OS thread spawning a full
+    /// tokio runtime, metrics task, and buffer pools), not two. A
+    /// second bootstrap is pure waste: everything the first one built
+    /// is torn down milliseconds later.
+    #[test]
+    fn reopen_reuses_the_bootstrapped_commonware_context_instead_of_rebootstrapping() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = bootstrap_probe::track(counter.clone());
+
+        // Mirrors write_ref_recording_history's pre-lock open.
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "open_at must bootstrap the commonware Context exactly once"
+        );
+
+        // Mirrors update_ref_with_history's post-lock reopen().
+        h.reopen().unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "reopen() must reuse the already-bootstrapped Context rather than \
+             spawning a second bootstrap thread"
+        );
     }
 
     #[test]
