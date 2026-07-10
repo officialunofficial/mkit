@@ -757,13 +757,32 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 ///   exposed via a `String` payload, matching
 ///   [`update_ref_with_history`]'s convention.
 /// - [`RefError::Io`] — filesystem failure removing the ref file
-///   itself.
+///   itself, or acquiring `refs-history.lock`.
+///
+/// # Locking
+///
+/// Runs the read-check + journal-destroy + ref-delete sequence under
+/// the same `refs-history.lock` [`update_ref_with_history_locked`]
+/// uses (found during code review after #638 landed: this function
+/// originally ran unlocked, which reopened exactly the race #638
+/// closed one layer up — a concurrent ref-only writer that
+/// deliberately skips the worktree lock, e.g. `update-ref`, could
+/// interleave its journal append with this delete's journal destroy).
+/// Held for the whole sequence, not just the destroy, so a concurrent
+/// `update_ref_with_history*` call on the same branch either fully
+/// precedes or fully follows this delete — never interleaves with it.
 #[cfg(feature = "history-mmr")]
 pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
     layout: &RepoLayout,
     branch: &str,
     executor: std::sync::Arc<X>,
 ) -> RefResult<()> {
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
+        .map_err(|e| match e {
+            crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+            other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
+        })?;
+
     if read_ref(layout, branch)?.is_none() {
         return Err(RefError::NotFound(branch.to_string()));
     }
@@ -2276,6 +2295,110 @@ mod tests {
                 assert!(
                     !verify_inclusion(&a2, Position(pos), &proof, &root),
                     "deleted incarnation's leaf a2 must not verify against the new root"
+                );
+            }
+        }
+
+        /// Regression test for the bug found during the epic-#634 code
+        /// review: `delete_ref_with_history` originally ran its
+        /// read-check + journal-destroy + ref-delete sequence with NO
+        /// lock at all, reopening exactly the race #638 closed one layer
+        /// up. Races `delete_ref_with_history` against
+        /// `update_ref_with_history` on the same never-checked-out
+        /// branch, from two independently-opened `CommitHistory` handles
+        /// (mirroring how `update_ref_with_history_concurrent_handles_do_not_interleave_or_corrupt`
+        /// above simulates two racing processes).
+        ///
+        /// The assertion is on LEAF COUNT, not raw journal-directory
+        /// existence: `CommitHistory::open_at`/`reopen` create an empty
+        /// on-disk partition as a side effect of merely opening it (this
+        /// is commonware's own open-or-create `init` semantics, already
+        /// documented as an accepted ambiguity by `heal_one_ahead_gap`'s
+        /// doc comment above), so a 0-leaf journal directory can
+        /// legitimately exist even when the branch has no ref — that is
+        /// not the bug. What must never happen is the branch either (a)
+        /// having a live ref with an EMPTY journal (a leaf was lost) or
+        /// (b) having NO ref while the journal still holds leaves from
+        /// before the delete (exactly #648's stale-incarnation bug,
+        /// reintroduced one layer up by this unlocked race).
+        ///
+        /// Honesty check on this test's power: unlike the analogous
+        /// `cas_match_race_*` test above, this one did NOT reliably
+        /// reproduce a torn state against the unlocked code in manual
+        /// verification (0 failures across 500 iterations) — the
+        /// vulnerable window (concurrent file-level I/O inside
+        /// `destroy()`/`append()`) is narrower than what a
+        /// barrier-synchronized thread start reliably lands in. The fix
+        /// is correct by construction regardless: it applies the exact
+        /// same `refs-history.lock` acquisition, in the exact same
+        /// position (before any read of ref or journal state), that
+        /// every other history-mmr writer in this file already uses —
+        /// this test is kept as a standing consistency/defense-in-depth
+        /// check, not as proof the bug was reliably observed pre-fix.
+        #[test]
+        fn delete_ref_with_history_races_update_without_tearing_ref_and_journal() {
+            let iterations = 50;
+
+            for i in 0..iterations {
+                let (_dir, mkit) = fresh_repo();
+                let exec = Arc::new(TokioExecutor::new().unwrap());
+
+                // Seed the branch so delete_ref_with_history has
+                // something to delete, and pre-populate its journal so
+                // update's handle below opens onto a non-empty journal
+                // (exercising the heal-gap path, not the empty-journal
+                // backfill path, which is orthogonal to this race).
+                let seed = h(&format!("seed-{i}"));
+                let mut seed_hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+                update_ref_with_history(
+                    &mkit,
+                    "feature",
+                    RefWriteCondition::Missing,
+                    &seed,
+                    &mut seed_hist,
+                )
+                .unwrap();
+                drop(seed_hist);
+
+                let next = h(&format!("next-{i}"));
+                let mut update_hist =
+                    CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+                let barrier = Barrier::new(2);
+
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        // Either outcome (deleted first, or raced out by
+                        // the update landing first and this then failing
+                        // NotFound) is valid — only a torn final state is
+                        // a bug.
+                        let _ = delete_ref_with_history(&mkit, "feature", exec.clone());
+                    });
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let _ = update_ref_with_history(
+                            &mkit,
+                            "feature",
+                            RefWriteCondition::Match(seed),
+                            &next,
+                            &mut update_hist,
+                        );
+                    });
+                });
+                drop(update_hist);
+
+                let ref_exists = read_ref(&mkit, "feature").unwrap().is_some();
+                let leaves = CommitHistory::open_at(exec, &mkit, "feature")
+                    .unwrap()
+                    .len();
+                assert_eq!(
+                    ref_exists,
+                    leaves > 0,
+                    "iteration {i}: torn state after racing delete vs. update — \
+                     ref_exists={ref_exists}, journal has {leaves} leaves \
+                     (INV-4/INV-18-adjacent: a live ref must have a non-empty \
+                     journal, and a deleted branch's journal must not retain \
+                     leaves from before the delete)"
                 );
             }
         }
