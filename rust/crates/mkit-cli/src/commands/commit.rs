@@ -131,16 +131,26 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
     };
-    let _lock = match super::acquire_worktree_lock(&layout) {
-        Ok(l) => l,
-        Err(code) => return code,
-    };
 
     let cfg = match crate::config::read_or_default(&layout) {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
 
+    // ---- Everything up to the lock acquisition below is read-only and/or
+    // interactive (#641): it composes the commit message — possibly
+    // spawning `$EDITOR`, which can block for an arbitrary, user-paced
+    // amount of time — and loads the signer/key. None of it mutates the
+    // repo, so none of it needs `worktree.lock`. The lock is acquired
+    // just before the actual index/ref write, below, and every read here
+    // whose result is still load-bearing at write time (`merge_state` for
+    // `--amend` compat and for the merge-conclusion path; `pre_lock_head`
+    // for `--amend`) is re-validated immediately after the lock is taken,
+    // so a concurrent write landing during message composition is
+    // detected rather than silently clobbered. See the re-validation
+    // block below for the reasoning on each case, including why a plain
+    // (non-amend, non-merge) commit needs none of this.
+    //
     // ---- A merge left in progress turns this into a merge commit. --
     // Either a clean `merge --no-commit`, or a conflicted merge the user
     // has since resolved and staged. `mkit commit` then records a
@@ -170,6 +180,23 @@ pub fn run(args: &[String]) -> u8 {
         match resolve_amend_target(&layout, &store) {
             Ok(commit) => Some(commit),
             Err((m, c)) => return emit_err(&m, c),
+        }
+    } else {
+        None
+    };
+    // Snapshot of HEAD at the same moment `amend_target` was resolved.
+    // `--amend` reuses that commit's parents (and, absent `-m`, its
+    // message) below, both computed from THIS snapshot rather than a
+    // fresh read at write time — unlike a plain commit's parent, which
+    // is always read fresh under the lock (see `parents` further down).
+    // Message composition + signer loading can now take arbitrarily long
+    // before the lock is acquired, so re-validate after the lock that
+    // HEAD hasn't moved out from under this snapshot; see the
+    // re-validation block right after `acquire_worktree_lock`.
+    let pre_lock_head = if opts.amend {
+        match refs::resolve_head(&layout) {
+            Ok(h) => h,
+            Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
         }
     } else {
         None
@@ -225,6 +252,73 @@ pub fn run(args: &[String]) -> u8 {
         Ok(id) => id,
         Err(e) => return emit_err(&format!("author: {e}"), exit::CONFIG_ERROR),
     };
+
+    // ---- Acquire the write lock. ------------------------------------
+    // Everything above this point (message composition — including any
+    // `$EDITOR` spawn — and signer/key loading) is done. Everything
+    // below mutates the repo (or reads state that must not shift under a
+    // mutation), so it all happens under the lock, right up to the ref
+    // advance.
+    let _lock = match super::acquire_worktree_lock(&layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+
+    // ---- Re-validate preconditions captured before the lock. --------
+    // `merge_state` and (when `--amend`) `pre_lock_head` were read before
+    // the lock so message composition could use them; re-read them now
+    // and compare, since a concurrent mutator could have run to
+    // completion in the (potentially long, interactive) window between
+    // that read and this lock acquisition.
+    //
+    // `merge_state` unconditionally: it gates the merge-conclusion
+    // checks and the two-parent merge commit below regardless of
+    // `--amend`, so ANY change to it (a merge started, finished, or was
+    // aborted concurrently) must abort rather than act on stale sidecar
+    // state.
+    let fresh_merge_state = if conflict_state::is_merge_in_progress(&layout) {
+        match conflict_state::read_merge_state(&layout) {
+            Ok(s) => s,
+            Err(e) => return emit_err(&format!("read merge state: {e}"), exit::GENERAL_ERROR),
+        }
+    } else {
+        None
+    };
+    if fresh_merge_state != merge_state {
+        return emit_err(
+            "commit aborted: the in-progress merge changed while the commit message was \
+             being composed (concluded or aborted concurrently) — re-run `mkit commit`",
+            exit::TEMPFAIL,
+        );
+    }
+    // `--amend` only: the message-reuse (above) and the parent list
+    // (below) both derive from `amend_target`, which was resolved from
+    // `pre_lock_head`. If HEAD has since moved, that snapshot no longer
+    // describes "the commit being amended" and re-using it would amend
+    // against stale state (and silently orphan whatever now-superseded
+    // commit actually landed).
+    //
+    // A plain (non-amend, non-merge) commit needs NO staleness check: its
+    // parent is read fresh from HEAD below (`refs::resolve_head`, inside
+    // this same lock hold), and its tree is built fresh from the index
+    // read below — both entirely inside the critical section, so there is
+    // no pre-lock snapshot that could go stale. A concurrent commit
+    // landing during message composition just becomes this commit's
+    // parent, exactly as if the two `mkit commit` invocations had run
+    // sequentially.
+    if opts.amend {
+        let fresh_head = match refs::resolve_head(&layout) {
+            Ok(h) => h,
+            Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
+        };
+        if fresh_head != pre_lock_head {
+            return emit_err(
+                "commit aborted: HEAD changed while the commit message was being composed \
+                 (a concurrent commit landed) — re-run `mkit commit --amend`",
+                exit::TEMPFAIL,
+            );
+        }
+    }
 
     if opts.all
         && let Err(e) = super::add::stage_tracked_changes(&layout, &store)
