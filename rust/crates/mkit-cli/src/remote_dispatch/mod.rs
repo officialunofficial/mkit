@@ -669,7 +669,7 @@ pub fn push_branch_with_depth(
     let mut w = PackWriter::new();
     for h in &plan.raw {
         let bytes = store.read(h)?;
-        w.push_raw(*h, bytes)?;
+        w.push_raw(*h, &bytes)?;
     }
     for d in &plan.deltas {
         w.push_delta(&d.base, &d.stream)?;
