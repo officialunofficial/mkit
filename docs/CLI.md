@@ -500,6 +500,22 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   asserted absent has nothing to delete); deleting a branch refuses the
   currently checked-out one — an mkit safety divergence (git's plumbing would,
   leaving HEAD dangling).
+- `mkit ref list [--pattern <glob>]` — print every ref's full name and
+  resolved hash, one `<refname> <hash>` line per ref, sorted lexicographically
+  by name. Covers `refs/heads/*`, `refs/tags/*`, and `refs/remotes/*/*` — the
+  same read scope as `show-ref`/`for-each-ref`. An empty repo (no commits yet)
+  prints nothing and still exits 0. `--pattern` filters to full ref names
+  matching a shell glob (`*` spans `/`, `?` matches one char, `[...]` is a
+  character class — the same matcher as `branch --list`/`tag -l`). This is
+  the stable inspection surface for refs (#652): scripts should use it
+  instead of `ls`/`cat` on `.mkit/refs/`, which is not a supported interface.
+- `mkit ref cat <name>` — print the resolved hash for exactly one ref,
+  following `HEAD`'s symbolic indirection (`HEAD` is mkit's only symbolic
+  ref). `<name>` must be a fully-qualified ref name — `refs/heads/<b>`,
+  `refs/tags/<t>`, `refs/remotes/<r>/<b>` — or the literal `HEAD`; these are
+  exactly the names `ref list` prints, so the two commands round-trip.
+  Errors (exit 1) if the ref does not exist, or if HEAD is symbolic but its
+  target branch has no commit yet.
 
 Attestations:
 

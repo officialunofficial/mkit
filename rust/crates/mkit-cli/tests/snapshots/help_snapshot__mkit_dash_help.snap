@@ -62,6 +62,13 @@ commands:
                     Create/update/delete refs/heads/* or refs/tags/*
                     (<oldvalue> compare-and-swap; all-zero = must be absent,
                     update mode only; -d's <oldvalue> must be concrete)
+  ref list [--pattern <glob>]  List every ref's full name + resolved hash
+                    (`<refname> <hash>`, sorted; covers refs/heads/*,
+                    refs/tags/*, refs/remotes/*/*; --pattern is a shell glob
+                    on the full name, `*` spans `/`)
+  ref cat <name>    Print the resolved hash for one ref (HEAD,
+                    refs/heads/<b>, refs/tags/<t>, or refs/remotes/<r>/<b>),
+                    following HEAD's symbolic indirection
   commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
                     -F reads the message from <file> (`-` = stdin); --author
