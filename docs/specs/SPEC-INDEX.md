@@ -1,14 +1,15 @@
 ---
 spec: SPEC-INDEX
-version: 2
-status: draft
+version: 1
+status: stable-advisory
 audience: implementers of the staging area; advisory and local-only (not exchanged between peers)
 ---
 
-# SPEC-INDEX — mkit v2 repo-local index file
+# SPEC-INDEX — mkit repo-local index file
 
 Status: **Advisory** for mkit. Local-only; not exchanged between
-peers.
+peers. See SPEC-CONVENTIONS §2 for the maturity/bindingness status
+vocabulary this frontmatter uses.
 Scope: the on-disk layout of `.mkit/index`, used by the staging area.
 
 ---
@@ -17,15 +18,14 @@ Scope: the on-disk layout of `.mkit/index`, used by the staging area.
 
 `.mkit/index` (the `INDEX_FILE` constant) is the staging area — a list
 of paths that will be included in the next commit, each paired with an
-object hash, a status byte, and (since v2) a stat cache that lets
-`add`/`status` prove a worktree file unchanged in O(stat) instead of
-O(content). It is repo-local; it is never serialised to a transport and
-never signed.
+object hash, a status byte, and a stat cache that lets `add`/`status`
+prove a worktree file unchanged in O(stat) instead of O(content).
+It is repo-local; it is never serialised to a transport and never
+signed.
 
 Because it is local-only, its stability requirements are weaker than
-commit / pack / ref formats. Nonetheless each version pins a layout to
-prevent accidental drift and to provide a migration path for future
-evolution. v2 is that anticipated migration from v1.
+commit / pack / ref formats: an implementation change here never
+affects wire compatibility with any other peer.
 
 ---
 
@@ -39,7 +39,7 @@ offset  size    field
 9       …       entries          entry_count × entry
 ```
 
-Each v2 entry:
+Each entry:
 
 ```
 [u8 status]                          see §3
@@ -58,10 +58,6 @@ Each v2 entry:
 [path_len bytes path]                UTF-8 relative path, forward slashes only
 ```
 
-A v1 entry (version byte `0x01`) omits the four stat-cache fields
-(35-byte minimum instead of 67). Readers MUST accept v1 streams and
-zero-fill the cache (see §5); writers always emit v2.
-
 Path validation rules (enforced by writers; readers reject violations
 with `IndexError::Corrupt` for length bounds and `IndexError::InvalidPath`
 for content):
@@ -74,6 +70,8 @@ for content):
 - No byte in any segment is `0x00` (NUL) or `\\` (backslash).
 - The path is not `.mkit` or `.git`, and does not start with `.mkit/`
   or `.git/`. (Repo metadata cannot be staged.)
+- The index is a single-stage resolved staging area: it never holds
+  more than one live entry per path (no unmerged/conflict stages).
 
 These rules are **looser** than SPEC-OBJECTS §4.1: per-segment Windows
 reserved-name, trailing dot/space, and case-insensitive `.mkit`/`.git`
@@ -125,12 +123,13 @@ mtime+size with different bytes. Readers MUST therefore treat as
 *uncached* any entry whose `mtime_ns` is not safely older than the
 index file's own mtime. The window is judged PER ENTRY: the tight
 window (10ms) applies only when both the index file's mtime and the
-entry's recorded mtime show sub-second precision; an entry with a
-whole-second mtime (vfat/SMB mounts, tar/touch-truncated timestamps)
-keeps the conservative 1-second window. Racy entries are re-hashed on
-use; a later index write (whose file mtime is then newer) heals the
-cache. This is git's racy-git rule applied at read time, which
-preserves the on-disk cache instead of destroying it.
+entry's recorded mtime show sub-second precision — this follows the
+common coarse-clock granularity on the platforms mkit targets; an
+entry with a whole-second mtime (vfat/SMB mounts, tar/touch-truncated
+timestamps) keeps the conservative 1-second window. Racy entries are
+re-hashed on use; a later index write (whose file mtime is then newer)
+heals the cache. This is git's racy-git rule applied at read time,
+which preserves the on-disk cache instead of destroying it.
 
 Producers record all four cache fields from the metadata of the
 **opened file descriptor** used for hashing (not a separate pre-open
@@ -162,19 +161,20 @@ Readers tolerate:
 - File > 64 MiB (`MAX_INDEX_BYTES`) → `IndexError::TooLarge`. This cap
   is hit only by pathological repos.
 
-Version handling: readers MUST accept version bytes `0x01` (zero-filled
-stat cache) and `0x02`, and MUST reject any other version with
-`IndexError::UnsupportedVersion(byte)`. Writers always emit `0x02`, so
-a v1 index upgrades in place on the first index-writing command.
-Query commands (`status`) MUST NOT perform that upgrade — an
-opportunistic cache refresh skips v1 indexes so a read-only invocation
-never breaks an older binary sharing the worktree.
+Version handling: readers MUST accept exactly the current version byte
+`0x02` and MUST reject any other value — including any byte that was
+ever emitted by an older mkit — with `IndexError::UnsupportedVersion(byte)`.
+There is no dual-version read compatibility: the index is local-only
+and advisory (§1), so an implementation change here carries no
+cross-peer compatibility obligation, and mkit does not maintain
+migration shims for its own local, unreleased state files (see
+SPEC-CONVENTIONS §2's note on versioning).
 
 Additionally, readers MUST reject a `count` header that cannot possibly
-fit in the remaining buffer (each entry is at minimum 67 bytes in v2 —
-1 status + 32 hash + 32 stat cache + 2 path_len + 0 path — and
-35 bytes in v1). A 9-byte buffer declaring `count = u32::MAX` is
-rejected as `IndexError::Corrupt` before the entry-allocation loop runs.
+fit in the remaining buffer (each entry is at minimum 67 bytes —
+1 status + 32 hash + 32 stat cache + 2 path_len + 0 path). A 9-byte
+buffer declaring `count = u32::MAX` is rejected as `IndexError::Corrupt`
+before the entry-allocation loop runs.
 
 Readers MUST reject any trailing bytes after the declared entry list.
 Readers MUST also reject duplicate exact paths as `IndexError::DuplicatePath`;
@@ -183,35 +183,20 @@ path.
 
 ---
 
-## 6. Version history
-
-| Version | Changes                                                            |
-|---------|--------------------------------------------------------------------|
-| `0x01`  | Initial layout: status + hash + path.                              |
-| `0x02`  | Adds per-entry `mtime_ns`+`size`+`ino`+`ctime_ns` stat cache (§4). v1 read-compat. |
-
-Future versions evolving the index MUST:
-- Preserve the `"MKIX"` magic as a format-family marker.
-- Bump the version byte.
-- Continue to reject unknown versions with
-  `IndexError::UnsupportedVersion(byte)`.
-
----
-
-## 7. Test vectors
+## 6. Test vectors
 
 1. **Empty index**: magic + version + `count=0` = 9 bytes. Record
    BLAKE3 of those bytes (informative — index is never hashed for
    protocol purposes).
-2. **Single v2 entry**: path = "hello.txt", status = blob,
+2. **Single entry**: path = "hello.txt", status = blob,
    `mtime_ns = 0x0102030405060708`, `size = 11`, pinned ino/ctime.
    Total length is **85 bytes** (9 header + 1 status + 32 hash +
    32 stat cache + 2 path_len + 9 path). Pinned by
-   `v2_single_entry_pinned_bytes`.
-3. **v1 read-compat**: the 53-byte v1 single-entry stream parses with
-   `mtime_ns = 0`, `size = 0`. Pinned by
-   `reads_v1_index_with_zeroed_stat_cache`.
-4. **Reject `ZMIX` magic** on read → `IndexError::BadMagic`.
+   `single_entry_pinned_bytes`.
+3. **Reject `ZMIX` magic** on read → `IndexError::BadMagic`.
+4. **Reject version `0x01`** (an old, no-longer-supported version byte,
+   rejected the same as any other unrecognized value) →
+   `IndexError::UnsupportedVersion`. Pinned by `rejects_old_version_0x01`.
 5. **Reject version `0x03`** → `IndexError::UnsupportedVersion`.
 6. **Corrupt-path-length** (path_len > remaining bytes) →
    `IndexError::Corrupt`.
@@ -220,19 +205,21 @@ Future versions evolving the index MUST:
    → `IndexError::Corrupt`. Guards against attacker-controlled
    pre-allocation.
 
-The Phase 4 golden vectors under `rust/tests/golden/phase4/` pin both
-formats explicitly: `index_empty.bin` / `index_3entries.bin` are
-version-`0x01` read-compatibility fixtures (no stat cache) that must keep
-parsing, while `index_empty_v2.bin` / `index_3entries_v2.bin` carry the
-same logical entries in the version-`0x02` layout writers emit today and
-must round-trip byte-for-byte (deserialize → serialize is the identity on
-v2). The v1 files are never regenerated to v2; `generate_phase4_goldens`
+The golden vectors under `rust/tests/golden/refs-index/` pin the
+current format explicitly: `index_empty.bin` / `index_3entries.bin`
+carry the entries above and must round-trip byte-for-byte
+(deserialize → serialize is the identity). Entries within a serialized
+index MUST appear in the order they were added to the in-memory
+`Index` — the format does not require path-sorted output, so
+byte-identity is a property of a specific fixture's construction, not
+a general "any two logically-equal indexes serialize identically"
+guarantee. The generator `examples/generate_refs_index_goldens.rs`
 re-emits each filename byte-identically and records every BLAKE3 in
 `MANIFEST.txt`.
 
 ---
 
-## 8. Non-goals
+## 7. Non-goals
 
 - No merkle tree over index entries. The index is not a consensus
   artifact.
@@ -240,15 +227,19 @@ re-emits each filename byte-identically and records every BLAKE3 in
 - No compression. Large indexes are expected to be rare in this
   regime; if they become common, future work.
 - No reflog or journal embedded in the index; those are separate
-  sidecar files (out of scope for v2 spec).
+  sidecar files (out of scope for this spec).
+- No dual-version read compatibility (see §5). If a future change to
+  this format is ever needed, it ships as a new current version with
+  no obligation to keep reading the old one — this is a local,
+  advisory file with no installed base to protect.
 
 ---
 
-## 9. Invariants
+## 8. Invariants
 
 | Invariant | Enforced by |
 |---|---|
-| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; version whitelist `0x01`/`0x02` → `IndexError::UnsupportedVersion` (§2, §5) |
+| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; exactly one accepted version → `IndexError::UnsupportedVersion` (§2, §5) |
 | A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
@@ -257,8 +248,7 @@ re-emits each filename byte-identically and records every BLAKE3 in
 | The stat cache never changes an observable result | cache is an optimisation only — all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
 | A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); absent or zero-length file reads as empty (§5) |
-| A read-only command never breaks an older binary sharing the worktree | query commands MUST NOT upgrade a v1 index (§5) |
 
 The index is local-only and advisory: never transported, never signed,
-no merkle structure (§1, §8). Nothing above is load-bearing for history
+no merkle structure (§1, §7). Nothing above is load-bearing for history
 integrity — that lives in SPEC-OBJECTS.

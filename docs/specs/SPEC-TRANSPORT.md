@@ -1,7 +1,7 @@
 ---
 spec: SPEC-TRANSPORT
 version: 1
-status: draft
+status: stable-normative
 audience: implementers of compatible transport clients and servers
 ---
 
@@ -199,7 +199,19 @@ back-compatibility surface to preserve.
 
 On a CAS mismatch the server returns `Error { code =
 ERROR_CODE_INVALID_REQUEST }` with the current ref value in
-`Error.details`.
+`Error.details`. Per SPEC-RPC §3.3, `Error.details` is opaque and
+programs MUST NOT pattern-match on its contents; conforming clients
+today check only whether `details` is **non-empty** as a boolean
+signal to reclassify the error as `TransportError::RefConflict`
+(rather than a generic invalid-request), and do not decode the 32
+bytes themselves as the current ref value. **Disambiguation — actually
+learning what the ref's current value is — is a separate, explicit
+`read_ref` call after the fact (§7), not a side effect of parsing this
+field.** The current-ref bytes in `details` exist for
+forward-compatibility and out-of-band diagnostics (e.g. a log line),
+not as a client-consumed protocol value; a future revision MAY define
+a structured, non-opaque field for this if a real need for it emerges,
+rather than asking clients to parse an "opaque" field.
 
 ### 4.3 Trust model
 

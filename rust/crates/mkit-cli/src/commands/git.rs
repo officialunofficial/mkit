@@ -775,10 +775,14 @@ fn publish_attestations(
             format::json_escape(dest),
             format::json_escape(&e.ref_name)
         );
+        let head_bytes = store
+            .read(&e.mkit_hash)
+            .map_err(|err| (format!("read {}: {err}", mkit_core::to_hex(&e.mkit_hash)), exit::GENERAL_ERROR))?;
         let stmt = statement::encode(&statement::Statement {
             subjects: vec![statement::Subject {
                 name: Some(e.ref_name.clone()),
                 digest_blake3_hex: mkit_core::to_hex(&e.mkit_hash),
+                digest_sha256_hex: statement::sha256_hex(&head_bytes),
             }],
             predicate_type: PREDICATE_TYPE.to_owned(),
             predicate_jcs: predicate.as_bytes(),

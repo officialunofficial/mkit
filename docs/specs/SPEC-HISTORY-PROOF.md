@@ -52,8 +52,10 @@ mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.5.0`:
 
 The wire shape of the inclusion proof is byte-for-byte the wire shape
 of that crate's `merkle::mmr::Proof` at the same version (see §2
-below). We accept that crate's ALPHA stability marker and explicitly
-tie our own pre-`v0.2` window to it: see §4.
+below). We accept that crate's ALPHA stability marker: while
+`history-mmr` remains an opt-in, default-off feature (§5), this
+document's wire and on-disk formats are not yet frozen against upstream
+changes to that crate — see §4 and §5.
 
 [cw-mmr]: https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/
 
@@ -300,24 +302,26 @@ On reopen via `CommitHistory::open_at`:
   message attached. The repo administrator MUST intervene; mkit
   does not attempt to fabricate digests.
 - A missing `history/<branch>/` directory is treated as "first
-  open" and an empty MMR is initialised. For repos created against
-  v0.1.x mkit (no history persistence) this is the entry point to
-  the rebuild shim — see §4.5.
+  open" and an empty MMR is initialised. For a branch with an existing
+  ref value but no journal yet, this is the entry point to the rebuild
+  shim — see §4.5.
 
 mkit's own contract is narrower than commonware's: **reopening a
 half-written journal MUST NOT panic, MUST NOT silently expose stale
 data, and MUST surface any unrecoverable state through `HistoryError`.**
 
-### 4.5 v0.1.x → v0.2.x rebuild shim
+### 4.5 Rebuilding a journal from an empty or missing history directory
 
-A repo created against an older mkit has `refs/heads/<branch>` on
-disk but no `history/<branch>/` directory. The first
-[`CommitHistory::open_at`] against such a repo returns an empty
-journaled MMR. Its production call site is `mkit-cli`'s
-`write_ref_recording_history`: before delegating to
-`update_ref_with_history`, if the journal is empty AND the branch
-already has a ref value on disk, it opens an `ObjectStore` rooted at
-the repo and invokes
+A branch can reach `write_ref_recording_history` with a ref value already
+on disk but no (or an empty) `history/<branch>/` journal — the first
+[`CommitHistory::open_at`] against such a branch returns an empty
+journaled MMR. This isn't only a first-write case (§4.3 already covers a
+clean first append): it's the general recovery path any time a branch's
+journal doesn't yet reflect its current ref value, including a missing
+`history/<branch>/` directory. Before delegating to
+`update_ref_with_history`, if the journal is empty AND the branch already
+has a ref value on disk, `write_ref_recording_history` opens an
+`ObjectStore` rooted at the repo and invokes
 [`mkit_core::history::rebuild_from_chain(history, current, parent_of)`],
 which:
 
@@ -328,36 +332,50 @@ which:
 3. Calls [`CommitHistory::append`] for each entry in order.
 
 This same call degenerates safely to a single append when `current`
-is a root commit — which is exactly what happens when the "empty
-journal" case is not a deep v0.1.x migration but a crash on the
-branch's very first tracked write (§4.3): `rebuild_from_chain` just
-walks the one-commit chain and appends it, no different in effect
-from the §4.3 step-3 heal that the non-empty case uses. This is why
-`update_ref_with_history` itself does not need to distinguish the two
-sub-cases of an empty journal — only `mkit-core::refs`, which has no
-`ObjectStore` access, defers *both* to this shim.
+is a root commit — exactly what happens on a crash on the branch's
+very first tracked write (§4.3): `rebuild_from_chain` just walks the
+one-commit chain and appends it, no different in effect from the §4.3
+step-3 heal that the non-empty case uses. This is why
+`update_ref_with_history` itself does not need to distinguish "journal
+never existed" from "journal exists but is behind" — only
+`mkit-core::refs`, which has no `ObjectStore` access, defers both to
+this shim.
 
-The shim is one-shot (subsequent `open_at` calls find a non-empty
-journal and skip it). Cost is `O(n)` BLAKE3 hashes for an `n`-commit
-branch; on commodity hardware this completes in single-digit
-milliseconds for branches up to a few hundred thousand commits. A
-backfill failure (an unreadable or non-commit object anywhere on the
-chain) is fail-closed: `write_ref_recording_history` propagates the
-error rather than proceeding with a silently incomplete journal.
+The shim is one-shot per gap (subsequent `open_at` calls find a
+non-empty, caught-up journal and skip it). Cost is `O(n)` BLAKE3 hashes
+for an `n`-commit branch; on commodity hardware this completes in
+single-digit milliseconds for branches up to a few hundred thousand
+commits. A backfill failure (an unreadable or non-commit object anywhere
+on the chain) is fail-closed: `write_ref_recording_history` propagates
+the error rather than proceeding with a silently incomplete journal.
+
+**Concurrency (normative as of SPEC-CONCURRENCY §3.3):** the emptiness
+check that triggers this shim currently runs *before*
+`refs-history.lock` is acquired, which lets two concurrent writers both
+observe an empty journal and both backfill, producing duplicate leaves.
+The check MUST be re-performed after the lock is acquired (i.e. inside
+the §4.3 critical section), and the backfill MUST only proceed if the
+journal is *still* empty under the lock; see SPEC-CONCURRENCY §3.3 for
+the full rule and implementation-status note.
 
 ## 5. Implementation status and roadmap
 
-| Stage   | Scope                                                                  | Lands in     |
+Format evolution here follows named, independently-gated capabilities
+(matching, e.g., Git's `extensions.*` model) rather than a numbered
+sequence of releases — each row below is a distinct piece of work gated
+by its own flag or milestone, not an entry in a "v0.2/v0.3" timeline.
+
+| Stage   | Scope                                                                  | Status / gate |
 | ------- | ---------------------------------------------------------------------- | ------------ |
-| In-memory MMR | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | `feat/history-mmr-phase1` (issue #157, merged in PR #162) |
-| Journaled persistence | **Shipped.** Journaled persistence via `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`, with `Bagging::ForwardFold`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | `feat/history-mmr-phase2-commonware` |
-| Proto-field integration | New `Commit.history_root` proto field at the v0.2 break; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | v0.2         |
-| Attestation predicate | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | v0.2         |
-| Default-on promotion | Promote `history-mmr` from opt-in feature to default                   | v0.3         |
+| In-memory MMR | `mem`-backed MMR, `CommitHistory::{open, append, root, prove}`, `verify_inclusion()`, §1–§3 of this spec | Shipped (issue #157, PR #162) |
+| Journaled persistence | Journaled persistence via `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`, with `Bagging::ForwardFold`. `CommitHistory::open_at`, `refs::update_ref_with_history`, `rebuild_from_chain`. §4 of this spec. | Shipped, behind the `history-mmr` feature flag (default off) |
+| Proto-field integration | New `Commit.history_root` proto field; new signing-bytes layout + golden vectors; SPEC-OBJECTS update | Planned, gated on the `history-mmr` flag remaining opt-in until this lands |
+| Attestation predicate | `mkit-attest` `commit_in_branch` predicate bundling `(commit, position, proof)` | Planned, same gate |
+| Default-on promotion | Promote `history-mmr` from opt-in to default | Planned, gated on the two rows above landing and Phase 4b's leaf-semantics redesign closing (see SPEC-HISTORY-PROOF's own open items) |
 
-The journaled-persistence stage (this PR) deliberately does *not*:
+The journaled-persistence stage deliberately does *not*:
 
-- touch `rust/crates/mkit-rpc/proto/` — no Commit field yet,
+- touch `rust/crates/mkit-rpc/proto/` — no `Commit` field yet,
   no wire-breaking change yet;
 - touch `rust/crates/mkit-core/src/sign.rs` — signing bytes unchanged,
   no golden-vector churn;
@@ -367,11 +385,11 @@ The journaled-persistence stage (this PR) deliberately does *not*:
 Stability call: commonware-storage is ALPHA. We pin to an exact
 `=2026.5.0` and accept that future minor versions may change the
 proof's `digests` layout *and* the on-disk partition shape described
-in §4. Because the proto-field integration stage includes a new
-signing-bytes golden vector anyway, the wire format documented in §2 and the on-disk format
-documented in §4 are both "frozen relative to the v0.2 break" — any
-change to commonware between now and v0.2 lands as part of the same
-migration, not as a separate break.
+in §4. The wire format documented in §2 and the on-disk format
+documented in §4 are both unfrozen while `history-mmr` stays opt-in:
+nothing outside the flag depends on today's bytes, so an upstream
+commonware change before default-on promotion is absorbed directly,
+with no separate compatibility break to manage.
 
 ---
 
@@ -391,6 +409,7 @@ migration, not as a separate break.
 | Reopening a half-written journal never panics or silently exposes stale data | torn trailing leaf rewound by `mmr::full::Mmr::init`; anything deeper surfaces as `HistoryError::Corrupted` (§4.4) |
 | Proof bytes decode identically for every consumer | commonware-codec at the pinned `=2026.5.0` (§2.2) |
 
-These invariants are frozen relative to the v0.2 break: any upstream
-commonware change to the proof layout or partition shape lands as part
-of that migration, not as a separate break (§5).
+These invariants are unfrozen while `history-mmr` remains opt-in (§5):
+any upstream commonware change to the proof layout or partition shape
+is absorbed directly, with no separate compatibility break to manage,
+until the flag promotes to default-on.

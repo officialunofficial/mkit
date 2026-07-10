@@ -439,6 +439,7 @@ mod tests {
             subjects: vec![Subject {
                 name: Some("commit".into()),
                 digest_blake3_hex: commit_hex.into(),
+                digest_sha256_hex: "00".repeat(32),
             }],
             predicate_type: "https://example.com/predicate/v1".into(),
             predicate_jcs,
@@ -550,6 +551,7 @@ mod tests {
             subjects: vec![Subject {
                 name: Some("commit".into()),
                 digest_blake3_hex: hex,
+                digest_sha256_hex: "00".repeat(32),
             }],
             predicate_type: "https://example.com/p".into(),
             predicate_jcs: b"{}",
@@ -800,6 +802,7 @@ mod tests {
             subjects: vec![crate::statement::Subject {
                 name: Some("commit".into()),
                 digest_blake3_hex: "a".repeat(64),
+                digest_sha256_hex: "00".repeat(32),
             }],
             predicate_type: "https://example.com/p/v1".into(),
             predicate_jcs: b"{}",
@@ -859,6 +862,7 @@ mod tests {
             subjects: vec![crate::statement::Subject {
                 name: Some("commit".into()),
                 digest_blake3_hex: "b".repeat(64),
+                digest_sha256_hex: "00".repeat(32),
             }],
             predicate_type: "https://example.com/p/v1".into(),
             predicate_jcs: b"{}",

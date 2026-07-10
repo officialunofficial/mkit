@@ -1,1 +1,1 @@
-{"_type":"https://in-toto.io/Statement/v1","predicate":{},"predicateType":"https://example.com/predicate/v1","subject":[{"digest":{"blake3":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"name":"commit"}]}
+{"_type":"https://in-toto.io/Statement/v1","predicate":{},"predicateType":"https://example.com/predicate/v1","subject":[{"digest":{"blake3":"ae34d73494e0610c585ad42f7623c9293c86693f5b304ffc8de63b93806a35e9","sha256":"cf025764d81337b11d729249c35b09da9c09a66acf91896a68bf3396f308a7f8"},"name":"commit"}]}

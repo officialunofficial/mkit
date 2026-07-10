@@ -915,6 +915,8 @@ fn mint_attestations(
     kp: &KeyPair,
 ) -> CmdResult<()> {
     let remote_url = remote_identity(url);
+    let obj_store = mkit_core::store::ObjectStore::open(layout)
+        .map_err(|e| (format!("not a mkit repo: {e}"), exit::GENERAL_ERROR))?;
     for (name, git_id, mkit_hash) in imported {
         if let Some(prev) = prior.get(name.as_str())
             && prev.mkit_hash == *mkit_hash
@@ -933,10 +935,14 @@ fn mint_attestations(
             format::json_escape(&mkit_ref),
             format::json_escape(&remote_url)
         );
+        let head_bytes = obj_store
+            .read(mkit_hash)
+            .map_err(|e| (format!("read {}: {e}", mkit_core::to_hex(mkit_hash)), exit::GENERAL_ERROR))?;
         let stmt = statement::encode(&statement::Statement {
             subjects: vec![statement::Subject {
                 name: Some(mkit_ref),
                 digest_blake3_hex: mkit_core::to_hex(mkit_hash),
+                digest_sha256_hex: statement::sha256_hex(&head_bytes),
             }],
             predicate_type: PREDICATE_TYPE.to_owned(),
             predicate_jcs: predicate.as_bytes(),

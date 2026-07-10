@@ -1,19 +1,24 @@
 ---
 spec: SPEC-GC
 version: 1
-status: implemented
+status: stable-normative
 audience: implementers of gc / recovery and reviewers of object pruning
 ---
 
 # SPEC-GC — garbage-collection retention roots & recovery
 
-Status: **implemented**. The recovery model (#260) — Part 1 (retention
+Status: **Normative** for mkit v1; **implemented** (see below). See
+SPEC-CONVENTIONS §2 for the maturity/bindingness status vocabulary this
+frontmatter uses. Concurrency: see SPEC-CONCURRENCY (this document no
+longer states its own lock model). The recovery model (#260) — Part 1 (retention
 roots + live closure, `ops::gc`), Part 2a (recovery log + retention
 policy, `ops::recovery`), Part 2b (producers — amend/reset/rebase record
 the superseded tip) — **and the `mkit gc` command itself (#233)** are all
 shipped. `mkit gc` runs `recovery::expire` → `ops::gc::run_gc`
 (`live_objects` then prune `store ∖ live`, skipping objects within the
-grace window) under the repo lock.
+grace window) under the locks SPEC-CONCURRENCY §4 assigns to `gc`
+(the worktree registry lock, then every registered tree's per-tree lock,
+then the ref-history lock for the recovery-log expire step).
 
 ## Why this spec exists
 
@@ -88,18 +93,21 @@ stop pinning objects. A gc run expires first, then computes roots.
 `record` is durable — it `fsync`s the log file and its parent directory
 before returning — so a crash cannot leave a ref rewrite persisted while
 its recovery entry is lost. `record` and `expire` are **not** internally
-synchronized: callers MUST hold the repo lock (`worktree.lock`, which all
-mutating commands and gc take), and gc MUST run its "expire → collect
-roots → prune" sequence under that lock, so a producer append cannot race
-an `expire` rewrite and vanish.
+synchronized: callers MUST hold `refs-history.lock` (see SPEC-CONCURRENCY
+§3.2 — the recovery log is common-dir state shared by every linked
+worktree, so a per-tree lock cannot serialize it), and gc MUST run its
+"expire → collect roots → prune" sequence under the full lock set
+SPEC-CONCURRENCY §4 assigns to `gc`, so a producer append cannot race an
+`expire` rewrite and vanish.
 
 **Status:** complete. The recovery log (Part 2a) and its producers
 (Part 2b) are implemented — `commit --amend`, `reset`, and `rebase` each
 record the superseded tip (op tokens `amend`/`reset`/`rebase`) before
 moving the ref, and `stash pop` records the popped commit (op token
 `stash-pop`) before restoring the worktree and dropping the manifest
-entry — each under the worktree lock — and the **`mkit gc` command**
-(#233) consumes them: under the repo lock it expires the recovery log,
+entry — each per the lock set SPEC-CONCURRENCY §4 assigns to that
+command — and the **`mkit gc` command** (#233) consumes them: under
+gc's lock set (SPEC-CONCURRENCY §4) it expires the recovery log,
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
 prunes all, `--dry-run` previews).

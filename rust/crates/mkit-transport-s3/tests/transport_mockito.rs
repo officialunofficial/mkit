@@ -889,3 +889,51 @@ fn list_refs_prefix_without_trailing_slash_strips_separator() {
     assert_eq!(refs[0].name, "main");
     assert_eq!(refs[0].hash.unwrap(), h_main);
 }
+
+/// Regression (SPEC-REFS §4): `list_refs("refs/heads/feat")` must not
+/// return "refs/heads/featx" stripped down to "x". S3's own
+/// `ListObjectsV2` `prefix` query is a literal string prefix with no
+/// path-component awareness, so the server can legitimately return both
+/// keys for this query — the client-side suffix computation is the only
+/// place the path-component boundary is enforced, and before the fix it
+/// accepted the false match.
+#[test]
+fn list_refs_prefix_respects_path_component_boundary() {
+    let mut server = mockito::Server::new();
+
+    let xml = br#"<ListBucketResult>
+        <Contents><Key>refs/heads/feat/x</Key></Contents>
+        <Contents><Key>refs/heads/featx</Key></Contents>
+    </ListBucketResult>"#;
+    let _m_list = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"/bucket\?list-type=2".into()),
+        )
+        .with_status(200)
+        .with_body(xml)
+        .create();
+
+    let h_x = [0x11u8; 32];
+    let h_featx = [0x22u8; 32];
+    let mut body_x = to_hex(&h_x).into_bytes();
+    body_x.push(b'\n');
+    let mut body_featx = to_hex(&h_featx).into_bytes();
+    body_featx.push(b'\n');
+    let _m_x = server
+        .mock("GET", "/bucket/refs/heads/feat/x")
+        .with_status(200)
+        .with_body(body_x)
+        .create();
+    let _m_featx = server
+        .mock("GET", "/bucket/refs/heads/featx")
+        .with_status(200)
+        .with_body(body_featx)
+        .create();
+
+    let t = build_transport(&server.url());
+    let refs = t.list_refs("refs/heads/feat").unwrap();
+    assert_eq!(refs.len(), 1, "featx must not match prefix feat");
+    assert_eq!(refs[0].name, "x");
+    assert_eq!(refs[0].hash.unwrap(), h_x);
+}

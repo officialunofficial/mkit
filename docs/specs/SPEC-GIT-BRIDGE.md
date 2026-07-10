@@ -1,7 +1,7 @@
 ---
 spec: SPEC-GIT-BRIDGE
 version: 1
-status: draft
+status: draft-normative
 audience: implementers of the mkit→git export bridge and its verifiers
 ---
 
@@ -513,6 +513,17 @@ internal state are never exported.
   is what keeps wiped state rebuildable, §12.3). The push is
   `--atomic`: either every ref in the export lands or none does, so
   recorded state can never go stale for a subset of refs.
+  **Threat note:** this presence check trusts the mirror's own SHA-1
+  namespace — consistent with §2's "SHA-1 is a locator, never a
+  proof" doctrine, a consumer of the mirror who does not independently
+  re-verify against the signed `git-bridge/v1` attestation (§11) is
+  trusting whatever bytes the mirror happens to have at that SHA-1,
+  not something this bridge cryptographically guarantees. A mirror
+  with write access controlled by an untrusted party, or a real SHA-1
+  collision, could pre-plant an object this exporter would then skip
+  rewriting. See SPEC-GIT-IMPORT §5's collision-resistant-hashing
+  requirement for the corresponding mandate on the import side; the
+  same requirement applies to any SHA-1 this bridge computes.
 - Deleting an mkit branch never deletes it on the mirror (export is
   add/update-only); a later re-created branch of the same name
   updates the mirror ref under the observed-value lease.

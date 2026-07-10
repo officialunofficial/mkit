@@ -1,7 +1,7 @@
 ---
 spec: SPEC-GIT-IMPORT
 version: 1
-status: draft
+status: draft-normative
 audience: implementers of the git→mkit import bridge and its verifiers
 ---
 
@@ -260,20 +260,42 @@ Three layers, from authoritative to advisory:
    SHOULD skip re-minting for a head whose recorded imported state is
    unchanged (mirroring SPEC-GIT-BRIDGE §11's guidance).
 2. **Retained raw bytes**: the original git commit and tag object
-   bytes in their FRAMED form — `"<type> <len>\0" + body`, the sha1
-   preimage (this framing is normative for both retention and the
-   `content_digest` input; body-only would fork digests across
-   implementations) — sha1-addressed, under the per-remote state dir. Small
-   (commits/tags only — trees/blobs are recoverable from the staging
-   mirror and re-derivable from the mkit twins). These are what make
-   the lossy field mapping (§3.2) recoverable and the translation
-   byte-auditable.
-3. **`content_digest` = BLAKE3(raw git commit bytes)** (advisory):
-   in the hashed commit bytes but excluded from signing bytes
-   (SPEC-OBJECTS §5.1), therefore **malleable in isolation** — a
-   signature-preserving sibling with a forged slot is constructible.
-   Verifiers MUST treat it as a hint; the attestation and retained
-   bytes are the proof surface.
+   bytes in their FRAMED form — `"<type> <len>\0" + body` — stored
+   under the per-remote state dir, keyed by their sha1 preimage purely
+   as a **lookup key** (this framing is normative for both retention
+   and the `content_digest` input; body-only would fork digests across
+   implementations). Small (commits/tags only — trees/blobs are
+   recoverable from the staging mirror and re-derivable from the mkit
+   twins). **Consistent with SPEC-GIT-BRIDGE §2/§11: sha1 here is a
+   locator, never a security proof.** Keying storage by sha1 does not
+   make the retained bytes trustworthy on its own — an adversary who
+   can compute a sha1 collision (practical for chosen-prefix collisions
+   since 2020) could in principle plant different bytes under the same
+   key. What actually establishes trust is described in point 3 below.
+3. **The proof surface is the mkit-side signed attestation, not the
+   sha1-addressed storage.** The head attestation (this section's
+   opening paragraphs) has a BLAKE3 subject digest over the *mkit*
+   commit — the same "locator vs. subject" split SPEC-GIT-BRIDGE §11
+   uses for the export direction — and an Ed25519 signature over that
+   subject. That signature is the actual proof surface: it transitively
+   pins the imported closure because parents are inside the signed
+   commit bytes (this section's opening paragraph). `content_digest`
+   = BLAKE3(raw git commit bytes) is carried as an **advisory** field,
+   excluded from signing bytes (SPEC-OBJECTS §5.1) and therefore
+   **malleable in isolation** — a signature-preserving sibling with a
+   forged slot is constructible. Verifiers MUST treat `content_digest`
+   as a hint for locating/diffing retained bytes, never as something
+   the signature vouches for.
+
+**Collision-resistant hashing (normative requirement, pending
+implementation):** because sha1 here still functions as a lookup key
+over data an adversary may control (untrusted upstream Git history),
+every sha1 computed over upstream bytes in the bridge/import path MUST
+use a collision-detecting SHA-1 construction (rejecting known
+cryptanalytic collision patterns), not a plain SHA-1 implementation —
+matching real Git's own practice for exactly this reason. This is not
+yet reflected in `mkit-git-bridge`'s current dependency (`sha1 = "0.11"`,
+a plain implementation); tracked as a follow-up dependency change.
 
 ---
 
@@ -427,7 +449,7 @@ MUST `verify_commit`/`verify_tag` under the test key.
 | Untrusted upstream input is never silently altered | parse-and-carry or typed per-ref refusal — the §3 refusal matrix; never crash or normalize undeclared (§2, §3) |
 | Imported stores are always exportable | normative 1 MiB threshold + writer-side FastCDC rule, so SPEC-GIT-BRIDGE §4 refusals never trigger (§3.1) |
 | The translation is byte-auditable after the fact | framed raw commit/tag bytes retained sha1-addressed; head attestation transitively pins the signed closure (§5.1, §5.2) |
-| A forged `content_digest` cannot defeat verification | the slot is advisory and excluded from signing bytes; the attestation and retained bytes are the proof surface (§5.3) |
+| A forged `content_digest` cannot defeat verification | the slot is advisory and excluded from signing bytes; the mkit-side signed attestation (BLAKE3 subject + Ed25519 signature), not the sha1-addressed retained bytes, is the proof surface (§5.3) |
 | One state dir tracks exactly one upstream, in exactly one direction | canonical remote identity (§8) immutable after first use; mixed import/plain-export use refused at open (§6) |
 | Re-importing an already-imported upstream in the same store is caught | state-dir identity check (structural) + content probe (best-effort) (§6.1) |
 | An upstream force-push never silently rewrites local work | tracking refs move with a loud warning; the current branch advances only by fast-forward (§7) |

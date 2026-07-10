@@ -1,7 +1,7 @@
 ---
 spec: SPEC-ATTESTATIONS
 version: 1
-status: draft
+status: stable-normative
 audience: implementers and integrators producing or verifying native mkit attestations (in-toto v1 + DSSE)
 ---
 
@@ -297,9 +297,9 @@ For each envelope attached to the commit:
 2. For each signature, look up the `keyid` in the trust-root
    `Registry` (§6.3). On hit, run the algorithm-specific verifier
    over `PAE(payloadType, payload)` + signature bytes:
-   - `TrustRoot::Ed25519PubKey([u8; 32])` — `ed25519-dalek`
-     `verify_strict` (rejects malleability — non-canonical R, s ≥ ℓ,
-     non-canonical A).
+   - `TrustRoot::Ed25519PubKey([u8; 32])` — the SPEC-SIGNING §1
+     acceptance predicate (rejects malleability: non-canonical R,
+     out-of-range S, non-canonical or low-order A/R).
    - `TrustRoot::P256PubKeySec1(Vec<u8>)` — ECDSA-P-256/SHA-256 over
      a SEC1-encoded pubkey (33-byte compressed or 65-byte
      uncompressed).
@@ -318,11 +318,34 @@ For each envelope attached to the commit:
    `Reason::Ok`. The caller is also responsible for binding the
    envelope to the commit being asked about — `mkit-attest` exposes
    `verify::extract_primary_commit_hash` to read the first subject's
-   blake3 digest out of the Statement payload for that purpose.
+   blake3 digest out of the Statement payload for that purpose. A
+   signature-valid envelope whose subject digest does not match the
+   commit actually being queried MUST NOT be treated as an attestation
+   *for that commit* — the attestation directory name
+   (`.mkit/attestations/<commit-hex>/`) is not itself proof of what a
+   given envelope attests to, since it is ordinary repo-tree state any
+   process with write access to the repo can populate.
+
+**Conformance requirement:** every caller-facing verification entry
+point MUST perform the binding check in the previous paragraph itself
+— it MUST NOT be an opt-in step callers can forget. `mkit verify-attest`
+(the CLI) already does this correctly: it calls
+`extract_primary_commit_hash` and rejects any envelope whose subject
+hash does not equal the commit hex the directory is keyed under
+(`mkit-cli`'s `verify_attest` command), before considering the
+envelope's signature at all. **The WASM binding
+(`mkit_wasm::attest::attest_verify`) does not** — it takes no
+commit-hash parameter and returns whether *any* signature verifies,
+with no subject-binding check, despite being a public, documented API
+surface. That is a real, narrow, unresolved gap in one entry point,
+not a property of `mkit-attest`'s verification model in general;
+tracked as a Phase 2 code fix (add a required commit-hash parameter to
+`attest_verify` and perform the same check internally).
 
 The `mkit verify-attest` CLI enumerates every envelope under
 `.mkit/attestations/<commit>/`, prints a per-signature verdict, and
-exits 0 iff every envelope has at least one verifying signature.
+exits 0 iff every envelope has at least one verifying signature whose
+subject binds to that commit.
 
 There is no revocation list. Revocation is: stop trusting the
 `keyid`. Transparency-log-backed signatures would solve this

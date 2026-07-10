@@ -307,9 +307,13 @@ fn verify(args: &[String]) -> u8 {
 
 // ---------------------------------------------------------------- shared
 
-/// `(basename, blake3-hex)` pairs, sorted by basename, duplicates rejected.
-fn subjects_for(paths: &[String]) -> Result<Vec<(String, String)>, (String, u8)> {
-    let mut out: Vec<(String, String)> = Vec::with_capacity(paths.len());
+/// `(basename, blake3-hex, sha256-hex)` triples, sorted by basename,
+/// duplicates rejected. Both digests are of the identical artifact
+/// bytes (SPEC-ATTESTATIONS §4.2) — `sha256` is what lets cosign /
+/// `gh attestation verify` / the SLSA verifier read this attestation's
+/// subjects at all.
+fn subjects_for(paths: &[String]) -> Result<Vec<(String, String, String)>, (String, u8)> {
+    let mut out: Vec<(String, String, String)> = Vec::with_capacity(paths.len());
     for p in paths {
         let name = Path::new(p)
             .file_name()
@@ -317,7 +321,11 @@ fn subjects_for(paths: &[String]) -> Result<Vec<(String, String)>, (String, u8)>
             .ok_or_else(|| (format!("artifact '{p}' has no usable basename"), EXIT_USAGE))?
             .to_owned();
         let bytes = std::fs::read(p).map_err(|e| (format!("read {p}: {e}"), EXIT_NOINPUT))?;
-        out.push((name, hash::to_hex(&hash::hash(&bytes))));
+        out.push((
+            name,
+            hash::to_hex(&hash::hash(&bytes)),
+            statement::sha256_hex(&bytes),
+        ));
     }
     out.sort();
     if let Some(w) = out.windows(2).find(|w| w[0].0 == w[1].0) {
@@ -331,7 +339,7 @@ fn subjects_for(paths: &[String]) -> Result<Vec<(String, String)>, (String, u8)>
 
 /// Encode the in-toto Statement with predicate `{"tag": "<tag>"}`.
 fn encode_release_statement(
-    subjects: &[(String, String)],
+    subjects: &[(String, String, String)],
     tag: &str,
 ) -> Result<Vec<u8>, mkit_attest::Error> {
     let predicate = jcs::encode(&jcs::Value::Object(vec![jcs::Member::new(
@@ -341,9 +349,10 @@ fn encode_release_statement(
     let stmt = statement::Statement {
         subjects: subjects
             .iter()
-            .map(|(name, digest)| statement::Subject {
+            .map(|(name, blake3_digest, sha256_digest)| statement::Subject {
                 name: Some(name.clone()),
-                digest_blake3_hex: digest.clone(),
+                digest_blake3_hex: blake3_digest.clone(),
+                digest_sha256_hex: sha256_digest.clone(),
             })
             .collect(),
         predicate_type: PREDICATE_TYPE_RELEASE_V1.to_owned(),

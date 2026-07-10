@@ -77,22 +77,23 @@ fn manifest_blake3_digests_match_bin_files() {
 
 #[test]
 fn golden_index_empty_round_trips() {
-    // The committed index golden is a v1 stream: it must still PARSE (read
-    // compat is the v1→v2 migration path, SPEC-INDEX §"versioning"),
-    // and re-serialisation upgrades it to the current v2 layout.
+    // Pins the format writers actually emit today (SPEC-INDEX §6/§7): the
+    // index round-trips losslessly, so deserialize→serialize reproduces
+    // the exact bytes.
     let bytes = read_golden("index_empty.bin");
     assert_eq!(bytes.len(), 9);
     assert_eq!(&bytes[..4], b"MKIX");
+    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins the current version");
     let idx = index::deserialize(&bytes).unwrap();
     assert!(idx.entries.is_empty());
-    let upgraded = idx.serialize();
-    assert_eq!(upgraded[4], index::FORMAT_VERSION, "writer emits v2");
-    assert_eq!(index::deserialize(&upgraded).unwrap(), idx);
+    assert_eq!(idx.serialize(), bytes, "round-trip is byte-identical");
 }
 
 #[test]
 fn golden_index_3entries_round_trips() {
     let bytes = read_golden("index_3entries.bin");
+    assert_eq!(&bytes[..4], b"MKIX");
+    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins the current version");
     let idx = index::deserialize(&bytes).unwrap();
     assert_eq!(idx.entries.len(), 3);
     let by_path: std::collections::HashMap<_, _> = idx
@@ -103,43 +104,7 @@ fn golden_index_3entries_round_trips() {
     assert_eq!(by_path["README.md"], EntryStatus::Blob);
     assert_eq!(by_path["src"], EntryStatus::Tree);
     assert_eq!(by_path["scripts/build"], EntryStatus::Executable);
-    // v1 entries parse with an empty stat cache and upgrade to v2 on
-    // write, preserving every entry.
-    assert!(idx.entries.iter().all(|e| e.mtime_ns == 0 && e.size == 0));
-    let upgraded = idx.serialize();
-    assert_eq!(upgraded[4], index::FORMAT_VERSION, "writer emits v2");
-    assert_eq!(index::deserialize(&upgraded).unwrap(), idx);
-}
-
-#[test]
-fn golden_index_empty_v2_round_trips() {
-    // The `_v2` golden pins the format writers actually emit today
-    // (SPEC-INDEX §6/§7): a v2 stream round-trips losslessly, so
-    // deserialize→serialize reproduces the exact bytes.
-    let bytes = read_golden("index_empty_v2.bin");
-    assert_eq!(&bytes[..4], b"MKIX");
-    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins v2");
-    let idx = index::deserialize(&bytes).unwrap();
-    assert!(idx.entries.is_empty());
-    assert_eq!(idx.serialize(), bytes, "v2 → v2 is byte-identical");
-}
-
-#[test]
-fn golden_index_3entries_v2_round_trips() {
-    let bytes = read_golden("index_3entries_v2.bin");
-    assert_eq!(&bytes[..4], b"MKIX");
-    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins v2");
-    let idx = index::deserialize(&bytes).unwrap();
-    assert_eq!(idx.entries.len(), 3);
-    let by_path: std::collections::HashMap<_, _> = idx
-        .entries
-        .iter()
-        .map(|e| (e.path.as_str(), e.status))
-        .collect();
-    assert_eq!(by_path["README.md"], EntryStatus::Blob);
-    assert_eq!(by_path["src"], EntryStatus::Tree);
-    assert_eq!(by_path["scripts/build"], EntryStatus::Executable);
-    assert_eq!(idx.serialize(), bytes, "v2 → v2 is byte-identical");
+    assert_eq!(idx.serialize(), bytes, "round-trip is byte-identical");
 }
 
 #[test]

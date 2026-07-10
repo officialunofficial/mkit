@@ -245,6 +245,33 @@ pub fn run(args: &[String]) -> u8 {
         Err((msg, code)) => return emit_err(&msg, code),
     };
 
+    // --- Read the commit's serialised bytes for the subject digest. --
+    // The in-toto Statement subject now carries both a blake3 and a
+    // sha256 digest of the SAME bytes (SPEC-ATTESTATIONS §4.2), so we
+    // need the raw serialised commit, not just its hash. Reading here
+    // (before signing/the lock below) doesn't weaken the existing
+    // anti-race protection: the lock-held re-check further down still
+    // catches a concurrent `gc` pruning the commit between resolution
+    // and the final save.
+    let commit_bytes = {
+        let obj_store = match mkit_core::store::ObjectStore::open(&layout) {
+            Ok(s) => s,
+            Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
+        };
+        match obj_store.read(&commit_hash) {
+            Ok(b) => b,
+            Err(e) => {
+                return emit_err(
+                    &format!(
+                        "read commit {}: {e}",
+                        hash_mod::to_hex(&commit_hash)
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+        }
+    };
+
     // --- Resolve primary algorithm + signer. ------------------------
     let alg_str = parsed
         .algorithm
@@ -305,7 +332,12 @@ pub fn run(args: &[String]) -> u8 {
         .unwrap_or_else(|| DEFAULT_PREDICATE_TYPE.to_owned());
 
     // --- Build Statement. ------------------------------------------
-    let stmt_bytes = match statement::for_commit(&commit_hash, &predicate_type, &predicate_bytes) {
+    let stmt_bytes = match statement::for_commit(
+        &commit_hash,
+        &commit_bytes,
+        &predicate_type,
+        &predicate_bytes,
+    ) {
         Ok(s) => s.into_bytes(),
         Err(
             mkit_attest::Error::PredicateMustBeJsonObject
