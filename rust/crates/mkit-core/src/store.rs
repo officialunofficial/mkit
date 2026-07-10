@@ -210,6 +210,14 @@ pub struct ObjectStore {
     /// `durability.objects = per-object` onto it for deployments that
     /// want the strict historical schedule.
     default_policy: SyncPolicy,
+    /// Test-only counter of physical reads (`read_raw` calls) this store
+    /// has performed. There is no read-side equivalent of `syncer` to
+    /// inject a recording double against, so this is a plain counter
+    /// instead — used to prove callers (e.g. the pack reader's delta-base
+    /// resolution, issue #643) hit the store at most once per distinct
+    /// object rather than once per reference to it.
+    #[cfg(test)]
+    read_calls: Arc<AtomicU64>,
 }
 
 impl ObjectStore {
@@ -241,6 +249,8 @@ impl ObjectStore {
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
+            #[cfg(test)]
+            read_calls: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -260,6 +270,8 @@ impl ObjectStore {
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
+            #[cfg(test)]
+            read_calls: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -282,6 +294,15 @@ impl ObjectStore {
     /// The active flush/rename primitives, shared with [`WriteBatch`].
     pub(crate) fn syncer(&self) -> &Arc<dyn Syncer> {
         &self.syncer
+    }
+
+    /// Test-only: number of physical filesystem reads this store has
+    /// performed (via [`Self::read`] or [`Self::read_unverified`]) since
+    /// creation. See the `read_calls` field doc for why this is a plain
+    /// counter rather than an injectable double like [`Self::set_syncer`].
+    #[cfg(test)]
+    pub(crate) fn read_call_count(&self) -> u64 {
+        self.read_calls.load(Ordering::Relaxed)
     }
 
     /// Start a batched write with the store's configured policy
@@ -400,6 +421,8 @@ impl ObjectStore {
     /// [`Self::read`] and [`Self::read_unverified`]; neither hashes nor
     /// verifies, that's each caller's job.
     fn read_raw(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        #[cfg(test)]
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
         let path = self.path_for(h);
         let mut file = File::open(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
