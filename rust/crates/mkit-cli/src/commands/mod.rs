@@ -45,6 +45,7 @@ pub mod pack_shard;
 pub mod pull;
 pub mod push;
 pub mod rebase;
+pub mod ref_cmd;
 pub mod reflog;
 pub mod remote;
 pub mod reset;

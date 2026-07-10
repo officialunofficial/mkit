@@ -15,7 +15,7 @@
 complete -c mkit -f
 
 set -l __mkit_subcommands \
-    init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref commit log reflog status diff branch checkout switch clean \
+    init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify \
     attest verify-attest self version help
@@ -127,6 +127,9 @@ complete -c mkit -n "__fish_seen_subcommand_from symbolic-ref" \
     -l short -d "Print the short ref name"
 complete -c mkit -n "__fish_seen_subcommand_from update-ref" \
     -l delete -s d -d "Delete the ref"
+complete -c mkit -n "__fish_seen_subcommand_from ref; and not __fish_seen_subcommand_from list cat" -a "list cat"
+complete -c mkit -n "__fish_seen_subcommand_from ref; and __fish_seen_subcommand_from list" \
+    -l pattern -d "Shell-glob filter on the full ref name"
 complete -c mkit -n "__fish_seen_subcommand_from status" \
     -l porcelain -d "Machine-readable XY output" -xa "v1 v2"
 complete -c mkit -n "__fish_seen_subcommand_from status" \

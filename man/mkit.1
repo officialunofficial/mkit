@@ -423,6 +423,26 @@ deletes the ref, optionally checking a
 first \(em an all-zero value is rejected in delete mode, since a ref asserted
 absent has nothing to delete. Deleting a branch refuses the currently
 checked-out one, an mkit safety divergence.
+.It Cm ref list Op Fl Fl pattern Ar glob
+Print every ref's full name and resolved hash, one
+.Ql <refname> <hash>
+line per ref, sorted by name. Covers
+.Pa refs/heads/* , refs/tags/* ,
+and
+.Pa refs/remotes/*/* .
+An empty repo prints nothing and still exits 0.
+.Fl Fl pattern
+filters to full ref names matching a shell glob
+.Pq Ql * No spans Ql / .
+.It Cm ref cat Ar name
+Print the resolved hash for one ref, following
+.Cm HEAD Ns 's
+symbolic indirection.
+.Ar name
+must be a fully-qualified ref
+.Pq Pa refs/heads/<b> , refs/tags/<t> , refs/remotes/<r>/<b>
+or the literal
+.Cm HEAD .
 .It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
 Create a signed commit. With
 .Fl a
