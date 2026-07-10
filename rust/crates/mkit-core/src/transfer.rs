@@ -539,22 +539,24 @@ pub fn plan_pack(
     let mut deltas = Vec::new();
 
     for h in &send {
-        let bytes = store.read(h)?;
-        // The object-type tag is the first prologue byte (SPEC-OBJECTS §1);
-        // decode it through the canonical helper rather than re-deriving the
-        // format here.
-        let is_blob =
-            bytes.first().and_then(|b| ObjectType::from_u8(*b).ok()) == Some(ObjectType::Blob);
+        // Classify via the cheap 6-byte prologue check (`object_type`)
+        // instead of a full read+verify of the object's bytes — the send-set
+        // classification only needs the type tag, not the content (INV-14).
+        // Bytes are read (and BLAKE3-verified) below, lazily, only for the
+        // subset that are actually delta candidates.
+        let is_blob = store.object_type(h)? == ObjectType::Blob;
 
         // Only blobs (FastCDC chunks) are delta candidates, and only against
         // a base the remote actually holds.
         if is_blob
             && let Some(base) = base_map.get(h)
             && remote_set.contains(base)
-            && let Some(planned) = try_delta(store, *h, *base, &bytes)?
         {
-            deltas.push(planned);
-            continue;
+            let bytes = store.read(h)?;
+            if let Some(planned) = try_delta(store, *h, *base, &bytes)? {
+                deltas.push(planned);
+                continue;
+            }
         }
 
         if is_blob {
@@ -788,6 +790,88 @@ mod tests {
         // commit + tree + manifest + every chunk must be present.
         let full = crate::ops::reachable_objects(&s, &c1).unwrap();
         assert_eq!(plan.object_count(), full.len());
+    }
+
+    // =================================================================
+    // object_type() short-circuit for plan_pack's type check (#636 /
+    // INV-14) — classification must use the cheap type-prologue check
+    // rather than a full read+verify, while objects actually selected as
+    // delta candidates still get a real, verified read.
+    // =================================================================
+
+    /// Flip a byte well past the 6-byte type prologue so the object's
+    /// on-disk content no longer matches its BLAKE3 hash, while its type
+    /// tag stays intact and `object_type()` still reads it correctly.
+    fn corrupt_payload_byte(s: &ObjectStore, h: &Hash) {
+        use std::fs::OpenOptions;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let path = s.path_for(h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(SeekFrom::Start(6)).unwrap();
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).unwrap();
+        f.seek(SeekFrom::Start(6)).unwrap();
+        f.write_all(&[byte[0] ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[test]
+    fn plan_pack_first_push_tolerates_corrupted_raw_blob_content() {
+        // First push: every blob in the send-set is `raw` (no delta base
+        // exists yet), so classification never needs to read a blob's
+        // content — only its type. A blob whose payload has bit-rotted
+        // must therefore still plan cleanly and land in `raw`; the actual
+        // pack build is where its (now-failing) integrity check belongs.
+        let (_d, s) = store();
+        let file = put_chunked(&s, &big_buffer());
+        let c1 = commit_with_file(&s, file, vec![], "v1");
+
+        let full = crate::ops::reachable_objects(&s, &c1).unwrap();
+        let blob_hash = *full
+            .iter()
+            .find(|h| s.object_type(h).unwrap() == ObjectType::Blob)
+            .expect("chunked big_buffer must contain at least one blob chunk");
+        corrupt_payload_byte(&s, &blob_hash);
+
+        // Sanity: a full verified read of this object now fails.
+        assert!(matches!(
+            s.read(&blob_hash),
+            Err(StoreError::HashMismatch { .. })
+        ));
+
+        let plan = plan_pack(&s, c1, None).unwrap();
+        assert!(plan.raw.contains(&blob_hash));
+        assert_eq!(plan.object_count(), full.len());
+    }
+
+    #[test]
+    fn plan_pack_second_push_still_verifies_delta_candidate_bytes() {
+        // A blob that IS a delta candidate (paired with a base the remote
+        // holds) must still get a real, verified read — the short-circuit
+        // only removes the *classification* read, not the read needed to
+        // actually build a delta.
+        let (_d, s) = store();
+        let v1 = big_buffer();
+        let file1 = put_chunked(&s, &v1);
+        let c1 = commit_with_file(&s, file1, vec![], "v1");
+
+        let mut v2 = v1.clone();
+        for k in 0..16 {
+            v2[900_000 + k] ^= 0xFF;
+        }
+        let file2 = put_chunked(&s, &v2);
+        let c2 = commit_with_file(&s, file2, vec![c1], "v2");
+
+        let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
+        let target = *bases.keys().next().expect("expected a paired chunk");
+        corrupt_payload_byte(&s, &target);
+
+        let err = plan_pack(&s, c2, Some(c1)).unwrap_err();
+        assert!(matches!(err, StoreError::HashMismatch { .. }));
     }
 
     #[test]
