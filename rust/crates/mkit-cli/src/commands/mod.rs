@@ -681,6 +681,65 @@ pub fn write_ref_recording_history(
     }
 }
 
+/// `mkit branch -d`/`-D` helper: deletes a branch ref and, on
+/// `--features history-mmr` builds, also destroys its history-MMR
+/// journal partition (issue #648). Refuses the checked-out branch, same
+/// as plain `refs::delete_ref_safe`.
+///
+/// Without this, a branch recreated under a previously-deleted name
+/// would reopen the dead incarnation's non-empty journal (the
+/// commonware partition is keyed on the sanitized branch name, not any
+/// per-incarnation identifier) and resume appending on top of its old
+/// leaves — the new branch's MMR root would then span two unrelated
+/// incarnations, and the deleted incarnation's stale leaves would keep
+/// producing valid-looking inclusion proofs "on this branch". See
+/// [`mkit_core::refs::delete_ref_safe_with_history`] for the full
+/// crash-ordering contract.
+///
+/// - **Default build (no `history-mmr`)** — exactly
+///   `refs::delete_ref_safe(layout, branch)`.
+/// - **`--features history-mmr`** — routes through
+///   [`mkit_core::refs::delete_ref_safe_with_history`], sharing the same
+///   process-global executor as [`write_ref_recording_history`].
+pub fn delete_ref_recording_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        refs::delete_ref_safe_with_history(layout, branch, history_executor())
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref_safe(layout, branch)
+    }
+}
+
+/// `mkit branch -m` helper: deletes the OLD name's ref after a rename
+/// and, on `--features history-mmr` builds, also destroys its history-MMR
+/// journal partition (issue #648).
+///
+/// Unlike [`delete_ref_recording_history`], this does NOT refuse the
+/// checked-out branch — `branch -m` legitimately renames the current
+/// branch and moves HEAD to the new name immediately after this call.
+/// The NEW name's ref is created first by the caller (via
+/// [`write_ref_recording_history`], which seeds it with a fresh
+/// journal), so by the time this runs the old and new incarnations are
+/// already disjoint; this just makes sure the OLD name's journal is not
+/// left behind to be inherited by a future branch of the same name.
+///
+/// - **Default build (no `history-mmr`)** — exactly
+///   `refs::delete_ref(layout, branch)`.
+/// - **`--features history-mmr`** — routes through
+///   [`mkit_core::refs::delete_ref_with_history`].
+pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        refs::delete_ref_with_history(layout, branch, history_executor())
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref(layout, branch)
+    }
+}
+
 /// Current branch name for recovery logging — empty for a detached HEAD
 /// or an unreadable/symbolic-only HEAD.
 #[must_use]

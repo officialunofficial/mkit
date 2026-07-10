@@ -654,6 +654,51 @@ impl<X: Executor + 'static> CommitHistory<X> {
             }
         }
     }
+
+    /// Permanently delete this history's on-disk journal + metadata
+    /// partitions (issue #648).
+    ///
+    /// Consumes `self`: there is no valid handle to keep using once the
+    /// backing storage is gone. A no-op for the mem-only flavour (there
+    /// is nothing on disk to remove).
+    ///
+    /// This is the primitive [`crate::refs::delete_ref_with_history`]
+    /// uses to fence a branch's journal on `branch -d` / `branch -m`:
+    /// without it, re-creating a branch with a previously-used name
+    /// would reopen the dead incarnation's non-empty journal (same
+    /// sanitized partition name) and resume appending on top of its old
+    /// leaves — see SPEC-HISTORY-PROOF and issue #648 for the full
+    /// write-up of the resulting stale-inclusion-proof bug.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Mmr`] if commonware's underlying journal/metadata
+    /// `destroy()` fails (e.g. an I/O error removing the partition
+    /// files).
+    pub fn destroy(self) -> Result<(), HistoryError> {
+        match self.backend {
+            Backend::Mem { .. } => Ok(()),
+            Backend::Journaled(b) => {
+                // Destructure so `executor` and `ctx` (which keeps the
+                // bootstrap commonware runtime alive — see the
+                // `JournaledBackend` doc comment) both stay in scope for
+                // the duration of `block_on`, exactly like every other
+                // method on this type. `ctx` itself is unused here beyond
+                // that lifetime-extension role (see #640, which made the
+                // field readable elsewhere but `destroy` has no need to
+                // read it).
+                let JournaledBackend {
+                    mmr,
+                    executor,
+                    ctx: _ctx,
+                    ..
+                } = *b;
+                executor
+                    .block_on(mmr.destroy())
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))
+            }
+        }
+    }
 }
 
 impl Default for CommitHistory<TokioExecutor> {
@@ -1174,6 +1219,96 @@ mod tests {
         assert_eq!(b.len(), 0, "sibling branch must not see appended leaf");
         b.append(&synth(1)).unwrap();
         assert_ne!(a.root(), b.root());
+    }
+
+    // ---- destroy (issue #648: branch-delete journal lifecycle) ----
+
+    #[test]
+    fn destroy_removes_on_disk_partition() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..5u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "feature").unwrap();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        assert_eq!(h.len(), 5);
+
+        // Sanitized partition name for "feature" is "feature" →
+        // "feature__journal-blobs" (same layout documented on
+        // `HISTORY_DIR` and exercised by the truncation test above).
+        let journal_blobs = mkit_dir.history_dir().join("feature__journal-blobs");
+        let journal_metadata = mkit_dir.history_dir().join("feature__journal-metadata");
+        assert!(
+            journal_blobs.exists(),
+            "journal blob dir must exist after appends"
+        );
+
+        h.destroy().unwrap();
+
+        assert!(
+            !journal_blobs.exists(),
+            "destroy must remove the on-disk journal blob partition"
+        );
+        assert!(
+            !journal_metadata.exists(),
+            "destroy must remove the on-disk journal metadata partition"
+        );
+    }
+
+    #[test]
+    fn destroyed_journal_reopens_empty_not_resuming_dead_incarnation() {
+        // This is the exact invariant `mkit branch -d` + recreate under
+        // the same name relies on (issue #648): once a branch's journal
+        // has been destroyed, reopening the SAME sanitized partition
+        // name must start completely fresh — not resume the deleted
+        // incarnation's leaves.
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..3u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir, "feature").unwrap();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        assert_eq!(h.len(), 3);
+        h.destroy().unwrap();
+
+        let reopened = CommitHistory::open_at(exec, &mkit_dir, "feature").unwrap();
+        assert_eq!(
+            reopened.len(),
+            0,
+            "a destroyed journal must reopen with zero leaves, not resume the dead incarnation"
+        );
+        assert_eq!(
+            reopened.root(),
+            CommitHistory::open().root(),
+            "a fresh reopen after destroy must match a genuinely empty MMR's root"
+        );
+    }
+
+    #[test]
+    fn destroy_of_one_branch_does_not_touch_a_sibling_branch() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "a").unwrap();
+        let mut b = CommitHistory::open_at(exec.clone(), &mkit_dir, "b").unwrap();
+        a.append(&synth(0)).unwrap();
+        b.append(&synth(1)).unwrap();
+        let b_root = b.root();
+        drop(b);
+
+        a.destroy().unwrap();
+
+        let b_reopened = CommitHistory::open_at(exec, &mkit_dir, "b").unwrap();
+        assert_eq!(
+            b_reopened.len(),
+            1,
+            "destroying branch 'a' must not affect sibling branch 'b'"
+        );
+        assert_eq!(b_reopened.root(), b_root);
     }
 
     #[test]
