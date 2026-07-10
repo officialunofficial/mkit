@@ -20,9 +20,11 @@
 //!
 //! CAS variants for [`update_ref`] follow SPEC-REFS §5: `Any` (clobber),
 //! `Missing` (fail if it exists), `Match(H)` (fail if current value !=
-//! H). The local-filesystem `Match` is **not atomic** across processes
-//! — that is the documented v1 gap; transports that need true atomicity
-//! must use s3/http/ssh.
+//! H). As of #637, the local-filesystem `Match` read-compare-write is
+//! serialized under a shared `refs.lock` in the common dir (the same
+//! blocking kernel-lock primitive `repo_lock` uses elsewhere), so it is
+//! atomic across processes regardless of what other locks each caller
+//! holds — this closes the v1 gap previously documented here.
 
 use std::fs;
 use std::io;
@@ -390,7 +392,7 @@ pub fn update_ref(
     }
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, branch, condition)
+    cas_write(layout.common_dir(), &path, &wire, branch, condition)
 }
 
 // -----------------------------------------------------------------------------
@@ -625,7 +627,13 @@ pub fn write_remote_ref(
     validate_remote_and_branch(remote, branch)?;
     let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, branch, RefWriteCondition::Any)
+    cas_write(
+        layout.common_dir(),
+        &path,
+        &wire,
+        branch,
+        RefWriteCondition::Any,
+    )
 }
 
 /// Delete a remote-tracking branch ref (e.g. after the upstream
@@ -708,7 +716,7 @@ pub fn update_tag(
     }
     let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, name, condition)
+    cas_write(layout.common_dir(), &path, &wire, name, condition)
 }
 
 /// Delete a tag ref.
@@ -828,6 +836,7 @@ fn read_ref_under(common_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Opt
 }
 
 fn cas_write(
+    common_dir: &Path,
     path: &Path,
     wire: &[u8; 65],
     name_for_err: &str,
@@ -850,8 +859,29 @@ fn cas_write(
             Ok(())
         }
         RefWriteCondition::Match(expected) => {
-            // Read-then-write — non-atomic per SPEC-REFS §5.1 (file
-            // transport row). The spec explicitly documents this gap.
+            // INV-15/#637: the read-compare-write below has no
+            // filesystem-level atomicity of its own, and callers cannot
+            // be relied on to already share a lock that covers this —
+            // `branch -m` (`worktrees.lock`) racing `commit`
+            // (`worktree.lock`), or two linked worktrees each holding
+            // their own `worktree.lock`, both write `refs/heads/*`
+            // through this path without ever sharing a lock. Take a
+            // dedicated `refs.lock` (same blocking kernel-lock
+            // primitive `repo_lock` uses elsewhere, e.g.
+            // `update_ref_with_history`'s `refs-history.lock`) scoped
+            // to the whole read-compare-write so any two callers on the
+            // same repo — regardless of what other locks they hold —
+            // serialize here and cannot both observe a stale-but-still-
+            // matching `current` value.
+            let _lock = crate::repo_lock::acquire_default(common_dir, "refs.lock").map_err(
+                |e| match e {
+                    crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+                    other => RefError::InvalidRef(format!(
+                        "{name_for_err}: refs.lock acquisition: {other}"
+                    )),
+                },
+            )?;
+
             let current = match fs::read(path) {
                 Ok(b) => Some(
                     decode_ref_wire(&b)
@@ -955,6 +985,7 @@ pub fn _hash_from_lowercase_hex_for_tests(s: &str) -> Option<Hash> {
 mod tests {
     use super::*;
     use crate::hash;
+    use std::sync::Barrier;
     use tempfile::TempDir;
 
     fn fresh_repo() -> (TempDir, RepoLayout) {
@@ -1309,6 +1340,106 @@ mod tests {
         let (_dir, mkit) = fresh_repo();
         let err = update_ref(&mkit, "main", RefWriteCondition::Match(h("a")), &h("b")).unwrap_err();
         assert!(matches!(err, RefError::Conflict(_)));
+    }
+
+    // --- INV-15 / #637: Match CAS must be atomic across uncoordinated
+    // callers -------------------------------------------------------------
+
+    /// Reproduces the lost-update race described in INV-15: two callers
+    /// that do NOT share any lock (mimicking `branch -m` under
+    /// `worktrees.lock` racing `commit` under `worktree.lock`, or two
+    /// linked worktrees each holding their own `worktree.lock`) both
+    /// read the ref's current value, both see it matches their
+    /// expectation, and both `cas_write`. Without cross-process
+    /// atomicity on the read-compare-write, both calls can report
+    /// success even though only one write actually survives — silently
+    /// losing the other caller's update.
+    ///
+    /// `layout_a`/`layout_b` are two distinct [`RepoLayout`]s (a
+    /// "single" layout and a "linked" layout with a different
+    /// `worktree_root`/`worktree_state_dir`) that share only
+    /// `common_dir` — exactly the shape of two linked worktrees, each
+    /// of which would hold its own separate `worktree.lock` and thus
+    /// share no lock with the other over this CAS. A `Barrier` forces
+    /// both threads to enter `update_ref` at (as close to) the same
+    /// instant as the scheduler allows, and the loop repeats many
+    /// iterations because the race window is a handful of syscalls wide
+    /// and is not guaranteed to be hit on any single attempt.
+    ///
+    /// Before the #637 fix (no shared `refs.lock` around the `Match`
+    /// arm) this reliably reproduces a "both succeeded" iteration within
+    /// a few hundred attempts. After the fix, the shared lock makes the
+    /// read-compare-write atomic across both callers, so this must
+    /// never happen — exactly one of the two racing writers may
+    /// succeed.
+    #[test]
+    fn cas_match_race_never_loses_an_update_across_uncoordinated_callers() {
+        let (_dir, layout_a) = fresh_repo();
+        let layout_b = RepoLayout::linked(
+            layout_a.worktree_root().join("other-worktree"),
+            layout_a.common_dir().join("worktrees").join("other"),
+            layout_a.common_dir(),
+        );
+
+        let base = h("base");
+        write_ref(&layout_a, "main", &base).unwrap();
+
+        let iterations: usize = 500;
+        let mut double_success_iteration = None;
+
+        for i in 0..iterations {
+            // Reset to a known base before each round. `Any` bypasses
+            // CAS entirely, so this is not itself part of what's under
+            // test.
+            update_ref(&layout_a, "main", RefWriteCondition::Any, &base).unwrap();
+
+            let val_a = h(&format!("race-a-{i}"));
+            let val_b = h(&format!("race-b-{i}"));
+            let barrier = Barrier::new(2);
+
+            let (result_a, result_b) = std::thread::scope(|scope| {
+                let handle_a = scope.spawn(|| {
+                    barrier.wait();
+                    update_ref(&layout_a, "main", RefWriteCondition::Match(base), &val_a)
+                });
+                let handle_b = scope.spawn(|| {
+                    barrier.wait();
+                    update_ref(&layout_b, "main", RefWriteCondition::Match(base), &val_b)
+                });
+                (handle_a.join().unwrap(), handle_b.join().unwrap())
+            });
+
+            if result_a.is_ok() && result_b.is_ok() {
+                double_success_iteration = Some(i);
+                break;
+            }
+        }
+
+        assert!(
+            double_success_iteration.is_none(),
+            "both uncoordinated Match CAS callers reported success on iteration \
+             {double_success_iteration:?} — an update was silently lost \
+             (INV-15/INV-6 violation)"
+        );
+    }
+
+    /// Normal-case companion to the race test above: with no
+    /// contention, a sequence of `Match` CAS writes on the same ref must
+    /// still succeed every time and never wedge (guards against the
+    /// `refs.lock` acquire/release added for #637 leaking or
+    /// deadlocking across repeated calls from the same layout).
+    #[test]
+    fn cas_match_succeeds_repeatedly_when_uncontended() {
+        let (_dir, mkit) = fresh_repo();
+        let mut current = h("seed");
+        write_ref(&mkit, "main", &current).unwrap();
+
+        for i in 0..20 {
+            let next = h(&format!("v{i}"));
+            update_ref(&mkit, "main", RefWriteCondition::Match(current), &next).unwrap();
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(next));
+            current = next;
+        }
     }
 
     // --- name-validation enforcement -----------------------------------
