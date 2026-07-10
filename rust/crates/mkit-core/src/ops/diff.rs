@@ -779,7 +779,7 @@ pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, us
 /// Sniff window for git's binary heuristic: content is classified from at
 /// most this many leading bytes. Exposed so a caller that only needs the
 /// classification — not a diff — can read just this much of a blob (e.g.
-/// [`crate::worktree::read_blob_prefix`]) instead of paying for full
+/// [`crate::worktree::LoadedBlob::prefix`]) instead of paying for full
 /// content, which matters for a chunked blob (mkit#606).
 pub const BINARY_SNIFF_LEN: usize = 8000;
 
