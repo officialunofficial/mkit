@@ -73,8 +73,9 @@ pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as Sequentia
 // local behavior change. Fixing that needs a `MANIFEST_VERSION` bump
 // (or an out-of-band hasher negotiation) and a spec update, which
 // the issue's own "Out of scope" section excludes ("not touching...
-// the shard wire format"). Tracked as a candidate for a follow-up
-// issue instead of folded into this one.
+// the shard wire format"). Tracked as
+// https://github.com/officialunofficial/mkit/issues/661 instead of
+// folded into this one.
 type RsScheme = commonware_coding::ReedSolomon<Sha256>;
 type Commitment = <RsScheme as commonware_coding::Scheme>::Commitment;
 type RsChunk = <RsScheme as commonware_coding::Scheme>::Shard;
