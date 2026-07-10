@@ -339,28 +339,55 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 
 /// Move the per-remote state directory for `old` to `new` under `root`,
 /// tolerating multi-segment remote names (which map to nested
-/// subdirectories) on both sides: the destination's parent is created
-/// first since `fs::rename` won't do it, and once the move succeeds any
-/// now-empty parent directories left behind under the source are pruned
-/// so a rename away from a multi-segment name doesn't strand empty
-/// directories. Both sides are derived from `root` here so the prune
-/// can never walk outside it. A missing source directory is a no-op
-/// (nothing to move). Both extra steps are best-effort — parent
-/// creation failures fall through to `rename` (which then fails and the
-/// caller's warning fires, possibly leaving the just-created empty
-/// destination parents behind — an accepted wart on this warn-only
-/// path), and prune failures are silent since they're just tidiness,
-/// not correctness.
+/// subdirectories) on both sides, *including* the case where one name is
+/// a path-prefix of the other (`a` <-> `a/b`). A direct `fs::rename(src,
+/// dst)` breaks for that case in both directions: renaming `a` to `a/b`
+/// asks the OS to move a directory into its own subtree (EINVAL), and
+/// renaming `a/b` to `a` lands on the non-empty old ancestor (ENOTEMPTY).
+/// git's per-ref transactions don't have this problem, so this was a
+/// real parity gap, not an exotic input.
+///
+/// The fix is a two-step move through a dot-named temp directory
+/// directly under `root`: rename `src` to the temp sibling (always legal
+/// — never a move into one's own subtree), prune any now-empty parents
+/// left behind under `src`, create the destination's parents (`fs::rename`
+/// won't), then rename the temp directory into place. This is one
+/// uniform path with no prefix-nesting case analysis. The temp name
+/// can't collide with any remote's state directory because remote names
+/// are validated dot-free (`validate_remote_name`).
+///
+/// A missing source directory is a no-op (nothing to move). If the final
+/// rename fails (e.g. an orphaned state directory already occupies the
+/// destination), the state is restored to `src` on a best-effort basis
+/// before the error is returned, so a failed move is a clean no-op
+/// rather than stranding state in the temp directory — the caller's
+/// existing warning then fires as before. Parent creation/pruning are
+/// both best-effort: creation failures fall through to the following
+/// `rename`, which then fails and is handled by the same restore path;
+/// prune failures are silent since they're tidiness, not correctness.
+///
+/// Accepted wart: a crash between the two renames leaves a
+/// `.rename-<pid>` directory orphaned directly under `root`. This is the
+/// same class of debris as other accepted warts on this warn-only path;
+/// no cleanup machinery is added for it.
 fn rename_state_dir(root: &Path, old: &str, new: &str) -> std::io::Result<()> {
     let (src, dst) = (root.join(old), root.join(new));
     if !src.is_dir() {
         return Ok(());
     }
+    let tmp = root.join(format!(".rename-{}", std::process::id()));
+    std::fs::rename(&src, &tmp)?;
+    prune_empty_parents(&src, root);
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::rename(&src, &dst)?;
-    prune_empty_parents(&src, root);
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        if let Some(parent) = src.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&tmp, &src);
+        return Err(e);
+    }
     Ok(())
 }
 
