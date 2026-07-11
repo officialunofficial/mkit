@@ -160,8 +160,8 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
 /// commits. Bounds the walk on adversarial / pathologically nested trees.
 const MAX_TREE_DEPTH: usize = 64;
 
-/// Choose, for each changed `FastCDC` chunk in `new_tip`, a base chunk from
-/// `old_tip` to delta against.
+/// Choose, for each changed `FastCDC` chunk or small blob in `new_tip`, a
+/// base object from `old_tip` to delta against.
 ///
 /// (SPEC-DELTA §5 is informative — any base the size-gate later accepts is
 /// fine.) Diff the two commits' trees by path; where the same path is a
@@ -171,11 +171,17 @@ const MAX_TREE_DEPTH: usize = 64;
 /// boundaries) or by content similarity when they differ (an insert/delete
 /// did, via `pair_chunks`). Identical chunks (present byte-for-byte in the
 /// old manifest) are skipped — they dedup for free and never need a delta.
+/// Where the same path is a plain [`crate::object::Blob`] on both sides
+/// (a changed small file, under `CHUNK_THRESHOLD`), the old blob is paired
+/// as the new blob's delta base directly — no similarity search, just
+/// "same path, old version" (#646a). A path whose kind changed between the
+/// two blob/chunked-blob variants, or that has no old-side counterpart at
+/// all (added path, or a rename), is left unpaired.
 ///
-/// The returned map is `new_chunk_hash -> base_chunk_hash`. Every base is
-/// reachable from `old_tip`, so a remote that already holds `old_tip` holds
-/// the base. The caller still gates on whether the delta actually saves
-/// bytes ([`plan_pack`]).
+/// The returned map is `new_hash -> base_hash`. Every base is reachable
+/// from `old_tip`, so a remote that already holds `old_tip` holds the
+/// base. The caller still gates on whether the delta actually saves bytes
+/// ([`plan_pack`]).
 ///
 /// # Errors
 ///
@@ -249,7 +255,10 @@ fn pair_trees(
 }
 
 /// Dispatch a changed same-named entry: recurse into subtrees, pair
-/// chunked blobs, ignore everything else.
+/// chunked blobs, pair small blobs against their same-path prior version
+/// (#646a), ignore everything else (in particular, a `Blob<->ChunkedBlob`
+/// kind mismatch — a file crossing `CHUNK_THRESHOLD` between the two
+/// commits — is deliberately left unpaired here).
 fn pair_entry(
     store: &ObjectStore,
     new_hash: Hash,
@@ -263,6 +272,14 @@ fn pair_entry(
         }
         (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => {
             pair_chunks(store, &new_cb.chunks, &old_cb.chunks, out)
+        }
+        // A changed same-path small blob: the old blob at this path is a
+        // natural delta base for the new one (#646a). Never overwrite an
+        // existing pairing for `new_hash`, mirroring `pair_chunks`'
+        // determinism guarantee.
+        (Ok(Object::Blob(_)), Ok(Object::Blob(_))) => {
+            out.entry(new_hash).or_insert(old_hash);
+            Ok(())
         }
         // A missing object or a kind mismatch (file became a chunked blob,
         // etc.) just yields no pairing for this entry.
@@ -651,11 +668,24 @@ mod tests {
     }
 
     fn commit_with_file(s: &ObjectStore, file_hash: Hash, parents: Vec<Hash>, msg: &str) -> Hash {
+        commit_with_named_file(s, b"big.bin", file_hash, parents, msg)
+    }
+
+    /// Like [`commit_with_file`], but with a caller-chosen tree entry name —
+    /// needed to build trees with more than one entry, or to control whether
+    /// two commits share a path.
+    fn commit_with_named_file(
+        s: &ObjectStore,
+        name: &[u8],
+        file_hash: Hash,
+        parents: Vec<Hash>,
+        msg: &str,
+    ) -> Hash {
         let tree = put(
             s,
             &Object::Tree(Tree {
                 entries: vec![TreeEntry {
-                    name: b"big.bin".to_vec(),
+                    name: name.to_vec(),
                     mode: EntryMode::Blob,
                     object_hash: file_hash,
                 }],
@@ -1097,6 +1127,135 @@ mod tests {
             bases.get(&b_mod_id),
             Some(&b_id),
             "in-place edit pairs by index"
+        );
+    }
+
+    // =================================================================
+    // #646a — small (non-chunked) blob delta pairing. `pair_entry` must
+    // pair a changed `Blob<->Blob` same-path entry (previously a no-op),
+    // using the old blob as the delta base for the new one, without
+    // touching cross-path or `Blob<->ChunkedBlob` transitions.
+    // =================================================================
+
+    #[test]
+    fn small_blob_edit_is_delta_paired_against_same_path_prior_version() {
+        let (_d, s) = store();
+        // Small, well under CHUNK_THRESHOLD: a single Blob object, not a
+        // ChunkedBlob manifest. Large enough (many unchanged lines around a
+        // single mid-file edit) that a delta's fixed per-instruction
+        // overhead (SPEC-DELTA header + two COPYs + one INSERT + the
+        // HASH_LEN base pointer) is comfortably smaller than the raw blob.
+        let mut v1 = Vec::new();
+        for i in 0..40 {
+            v1.extend_from_slice(format!("unchanged line number {i:02}\n").as_bytes());
+        }
+        let mut v2 = v1.clone();
+        // Replace exactly one line in the middle with a different one,
+        // keeping everything before/after byte-identical to v1.
+        let needle = b"unchanged line number 20\n".to_vec();
+        let pos = v2
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .unwrap();
+        v2.splice(
+            pos..pos + needle.len(),
+            b"THIS LINE WAS EDITED\n".iter().copied(),
+        );
+
+        let blob1 = put_blob(&s, v1.clone());
+        let blob2 = put_blob(&s, v2.clone());
+        let c1 = commit_with_named_file(&s, b"small.txt", blob1, vec![], "v1");
+        let c2 = commit_with_named_file(&s, b"small.txt", blob2, vec![c1], "v2");
+
+        let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
+        assert_eq!(
+            bases.get(&blob2),
+            Some(&blob1),
+            "same-path small-blob edit must pair against the prior version"
+        );
+
+        // The pairing must actually be usable by plan_pack: it should
+        // produce a delta for blob2, and that delta must be strictly
+        // smaller on the wire than sending blob2 raw.
+        let plan = plan_pack(&s, c2, Some(c1)).unwrap();
+        let planned = plan
+            .deltas
+            .iter()
+            .find(|d| d.target == blob2)
+            .expect("expected a planned delta for the edited small blob");
+        assert_eq!(planned.base, blob1);
+        assert!(
+            hash::HASH_LEN + planned.stream.len() < v2.len(),
+            "delta payload must beat sending the new blob raw"
+        );
+        assert!(
+            !plan.raw.contains(&blob2),
+            "the edited blob should not also be sent raw"
+        );
+
+        assert_pack_reconstructs(&s, &plan, c1, c2);
+    }
+
+    #[test]
+    fn small_blob_pairing_is_strictly_same_path() {
+        // Two unrelated paths, each holding a small blob, where the "new"
+        // path's content is a near-duplicate of the "old" path's content.
+        // Despite the content similarity, pairing is same-path only — a
+        // blob at a path with no old-side counterpart must never be paired
+        // against a differently-named entry's prior blob.
+        let (_d, s) = store();
+        let a_v1 = b"shared prefix content for path a\n".to_vec();
+        let mut a_v2 = a_v1.clone();
+        a_v2.push(b'!');
+
+        let blob_a1 = put_blob(&s, a_v1.clone());
+        let blob_a2 = put_blob(&s, a_v2);
+        let c1 = commit_with_named_file(&s, b"a.txt", blob_a1, vec![], "v1");
+
+        // c2 changes "a.txt" AND introduces a brand-new path "b.txt" whose
+        // content is near-identical to a.txt's OLD content (but it is a
+        // distinct path with no old-side entry at all).
+        let blob_b = put_blob(&s, a_v1);
+        let tree2 = put(
+            &s,
+            &Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"a.txt".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: blob_a2,
+                    },
+                    TreeEntry {
+                        name: b"b.txt".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: blob_b,
+                    },
+                ],
+            }),
+        );
+        let c2 = put(
+            &s,
+            &Object::Commit(Commit::new_unannotated(
+                tree2,
+                vec![c1],
+                Identity::ed25519([7; 32]),
+                [0; 32],
+                b"v2".to_vec(),
+                2,
+                [0; 64],
+            )),
+        );
+
+        let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
+        assert_eq!(
+            bases.get(&blob_a2),
+            Some(&blob_a1),
+            "a.txt's edit still pairs against its own prior version"
+        );
+        assert!(
+            !bases.contains_key(&blob_b),
+            "b.txt has no old-side counterpart and must not be paired at all, \
+             even against a content-similar blob from a different path"
         );
     }
 }
