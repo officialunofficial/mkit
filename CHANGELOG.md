@@ -180,6 +180,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (`mkit-core`, `pack-shards` feature): pack-shard Reed-Solomon
+  hasher cut over from `Sha256` to `Blake3`.** `pack_shard::RsScheme` now
+  wraps `commonware_coding::ReedSolomon<Blake3>` instead of `Sha256`,
+  matching the hasher mkit uses everywhere else and dropping a redundant
+  per-shard SHA-256 pass inside commonware's own Merkle-tree build (it
+  was already fully separate from this module's BLAKE3 `shard_hashes`
+  envelope check, which is unchanged). `MANIFEST_VERSION` is bumped
+  `0x01` → `0x02` since the wire-visible `ShardSet::commitment` value
+  changes; this is a **hard cutover, not dual-hasher support** — a
+  `0x01` manifest is rejected with a version-specific error ("manifest
+  version 0x01 (Sha256-era) — re-shard with a current mkit") instead of
+  the generic unsupported-version message, and `0x01` is retired
+  permanently. Producers and consumers on different `pack-shards`-era
+  mkit versions cannot interoperate; re-shard with a current build.
+  `docs/specs/SPEC-PACK-SHARDS.md` §2.1/§4 updated to match, and §4's
+  stale "`Sequential` parallel strategy" phrasing (left over from #653,
+  which made the strategy a caller-selectable parameter) is corrected
+  alongside it ([#661](https://github.com/officialunofficial/mkit/issues/661)).
 - **SPEC-WORKTREE.md + worktree parity docs (#493 Phase 4).** New
   normative spec covering the common-dir/per-worktree state split, the
   `mkitdir:` pointer-file format, the `worktrees/` registry, discovery

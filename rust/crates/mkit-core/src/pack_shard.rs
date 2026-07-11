@@ -2,9 +2,10 @@
 //!
 //! This module is the in-process encode/reconstruct core for issue #159:
 //! it wraps
-//! `commonware_coding::ReedSolomon<Sha256>` so a producer can split a
+//! `commonware_coding::ReedSolomon<Blake3>` so a producer can split a
 //! pack into `N + K` shards and a consumer can reconstruct the pack
-//! from any `N` of those shards.
+//! from any `N` of those shards. (Issue #661 cut this over from
+//! `ReedSolomon<Sha256>`; see the `RsScheme` type alias below.)
 //!
 //! The wire format and motivation are normatively documented in
 //! `docs/specs/SPEC-PACK-SHARDS.md`. The implementation here matches the v0
@@ -43,7 +44,7 @@ use std::sync::OnceLock;
 
 use commonware_codec::{Decode, Encode};
 use commonware_coding::{CodecConfig, Scheme as _};
-use commonware_cryptography::Sha256;
+use commonware_cryptography::Blake3;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 
 use crate::hash::{self, HASH_LEN, Hash};
@@ -59,24 +60,25 @@ pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as Sequentia
 // the hash primitive mkit uses elsewhere (`history.rs`) and drop a
 // redundant per-shard hash pass (the internal Merkle-tree build in
 // `commonware-coding::reed_solomon::{encode, decode}` hashes every
-// shard with `H::new()` — currently SHA-256 — completely separately
-// from this module's own BLAKE3 `shard_hashes` envelope check).
+// shard with `H::new()` — previously SHA-256 — completely separately
+// from this module's own BLAKE3 `shard_hashes` envelope check), but
+// deferred it: `H` determines `Commitment` (the BMT root stored in
+// `ShardSet::commitment`), and a hasher swap changes the wire-visible
+// commitment value, breaking interop between a producer and consumer
+// on different mkit versions unless the manifest format itself
+// versions that change.
 //
-// Deferred: `H` determines `Commitment` (the BMT root stored in
-// `ShardSet::commitment`), and SPEC-PACK-SHARDS §4 pins that as
-// "`ReedSolomon<Sha256>` with the `Sequential` parallel strategy.
-// Producers and consumers MUST use the same scheme and digest." A
-// producer on this hasher and a consumer on the old one would
-// compute different commitments for the *same* shard set and every
-// Merkle-proof check (`RsScheme::check`) would fail — a silent,
-// total interop break between independent mkit processes, not a
-// local behavior change. Fixing that needs a `MANIFEST_VERSION` bump
-// (or an out-of-band hasher negotiation) and a spec update, which
-// the issue's own "Out of scope" section excludes ("not touching...
-// the shard wire format"). Tracked as
-// https://github.com/officialunofficial/mkit/issues/661 instead of
-// folded into this one.
-type RsScheme = commonware_coding::ReedSolomon<Sha256>;
+// Issue #661 landed the cutover: `MANIFEST_VERSION` bumped `0x01` →
+// `0x02`, `RsScheme` now wraps `Blake3`, and `decode_manifest` rejects
+// a `0x01` manifest with a version-specific error instead of the
+// generic "unsupported version" message, since a `0x01` manifest's
+// commitment can never check out against a Blake3-based `RsScheme`.
+// This is a **hard cutover, not dual-hasher support** — a `0x01`
+// producer and a `0x02`+ consumer (or vice versa) simply cannot
+// interoperate; the old peer must re-shard with a current mkit. See
+// SPEC-PACK-SHARDS.md §4 and
+// https://github.com/officialunofficial/mkit/issues/661.
+type RsScheme = commonware_coding::ReedSolomon<Blake3>;
 type Commitment = <RsScheme as commonware_coding::Scheme>::Commitment;
 type RsChunk = <RsScheme as commonware_coding::Scheme>::Shard;
 
@@ -156,8 +158,16 @@ pub const SHARD_SIZE_THRESHOLD: u64 = 1024 * 1024;
 pub const MANIFEST_MAGIC: [u8; 4] = *b"MKSH";
 
 /// Wire-format version for a serialised [`ShardSet`]. Bumped whenever
-/// the on-the-wire layout changes in a non-backwards-compatible way.
-pub const MANIFEST_VERSION: u8 = 0x01;
+/// the on-the-wire layout — or, as with the issue #661 `Sha256` →
+/// `Blake3` hasher cutover, the meaning of an existing field —
+/// changes in a non-backwards-compatible way.
+///
+/// `0x01` is retired (it identified the pre-#661 `ReedSolomon<Sha256>`
+/// scheme) and MUST NOT be reused for a different wire meaning: an old
+/// cached manifest or peer stuck on `0x01` must always be recognised
+/// and rejected with [`decode_manifest`]'s version-specific error,
+/// never silently misread under a new scheme.
+pub const MANIFEST_VERSION: u8 = 0x02;
 
 /// Total prologue size: magic (4) + version (1).
 const MANIFEST_PROLOGUE_LEN: usize = 5;
@@ -498,22 +508,30 @@ pub fn decode_pack_from_shards_with_strategy<S: Strategy>(
     Ok(pack)
 }
 
-/// Extract the raw 32 bytes from a commonware `Sha256` digest.
+/// Extract the raw 32 bytes from a `RsScheme` [`Commitment`] digest.
+///
+/// Deliberately written against `Commitment` — i.e.
+/// `<RsScheme as commonware_coding::Scheme>::Commitment` — rather than
+/// a concrete hasher's digest type, so a future `RsScheme` hasher swap
+/// (as #661 did to this function's previous `Sha256`-typed signature)
+/// only needs `Commitment` to keep satisfying the same two bounds:
+/// `AsRef<[u8]>` and a fixed size equal to [`HASH_LEN`].
 fn digest_to_bytes(d: &Commitment) -> [u8; HASH_LEN] {
-    // `Sha256::Digest` derefs to `[u8; 32]`. We avoid relying on a
-    // specific accessor name by going through `AsRef<[u8]>` which the
-    // digest type implements.
+    // We avoid relying on a specific accessor name by going through
+    // `AsRef<[u8]>`, which every commonware digest type implements.
     let slice: &[u8] = d.as_ref();
     let mut out = [0u8; HASH_LEN];
     out.copy_from_slice(slice);
     out
 }
 
-/// Inverse of [`digest_to_bytes`]: reconstruct a commonware digest
-/// from the 32 bytes stored in the manifest.
+/// Inverse of [`digest_to_bytes`]: reconstruct a `Commitment` digest
+/// from the 32 bytes stored in the manifest. See [`digest_to_bytes`]
+/// for why this is typed against `Commitment` rather than a concrete
+/// hasher's digest type.
 fn bytes_to_digest(b: &[u8; HASH_LEN]) -> Commitment {
-    // `Sha256::Digest` is a 32-byte `Array` and only exposes
-    // `From<[u8; 32]>`, not `TryFrom<&[u8]>`. Copy through a fixed
+    // Every commonware digest type is a fixed-size `Array` exposing
+    // `From<[u8; N]>` but not `TryFrom<&[u8]>`. Copy through a fixed
     // array to keep the bound surface narrow.
     use commonware_codec::FixedSize;
     debug_assert_eq!(<Commitment as FixedSize>::SIZE, HASH_LEN);
@@ -529,7 +547,7 @@ fn bytes_to_digest(b: &[u8; HASH_LEN]) -> Commitment {
 //     offset  size  field
 //     ------  ----  -----------------------------------------
 //     0       4     magic = b"MKSH"
-//     4       1     version = 0x01
+//     4       1     version = 0x02
 //     5       32    pack_hash
 //     37      2     config.minimum_shards
 //     39      2     config.extra_shards
@@ -632,6 +650,16 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ShardSet, ShardError> {
         return Err(ShardError::InvalidManifestPrologue("bad magic"));
     }
     if bytes[4] != MANIFEST_VERSION {
+        // 0x01 is not just "some other unsupported version" — it's the
+        // specific, retired pre-#661 Sha256-era scheme. A commitment
+        // computed under that scheme can never check out against the
+        // current Blake3-based `RsScheme`, so give the caller a
+        // pointed, actionable message instead of the generic one.
+        if bytes[4] == 0x01 {
+            return Err(ShardError::InvalidManifestPrologue(
+                "manifest version 0x01 (Sha256-era) — re-shard with a current mkit",
+            ));
+        }
         return Err(ShardError::InvalidManifestPrologue("unsupported version"));
     }
     let mut pos = MANIFEST_PROLOGUE_LEN;
@@ -1112,6 +1140,107 @@ mod tests {
                 }
             ),
             "expected InsufficientShards{{15, 16}}, got {err:?}"
+        );
+    }
+
+    // ---- Issue #661: hard cutover from ReedSolomon<Sha256> to
+    // ReedSolomon<Blake3> --------------------------------------------
+
+    #[test]
+    fn manifest_version_is_0x02_and_v01_is_rejected() {
+        assert_eq!(
+            MANIFEST_VERSION, 0x02,
+            "MANIFEST_VERSION must be bumped to 0x02 for the Blake3 cutover"
+        );
+
+        // A validly-shaped manifest, but with the prologue version byte
+        // forced back to the retired 0x01 (Sha256-era) value — as if a
+        // pre-#661 producer (or a stale cache) handed it to a current
+        // decoder.
+        let pack = synthetic_pack(32 * 1024);
+        let (_, manifest) = encode_pack_to_shards(&pack, default_config()).unwrap();
+        let mut bytes = encode_manifest(&manifest).unwrap();
+        assert_eq!(
+            bytes[4], 0x02,
+            "encode_manifest must emit the current MANIFEST_VERSION"
+        );
+        bytes[4] = 0x01;
+
+        let err = decode_manifest(&bytes).unwrap_err();
+        match err {
+            ShardError::InvalidManifestPrologue(msg) => {
+                assert!(
+                    msg.contains("0x01"),
+                    "expected the version-specific message to name 0x01, got {msg:?}"
+                );
+                assert!(
+                    msg.to_ascii_lowercase().contains("sha256"),
+                    "expected the version-specific message to call out the \
+                     retired Sha256-era scheme, got {msg:?}"
+                );
+            }
+            other => panic!("expected InvalidManifestPrologue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn blake3_scheme_roundtrips() {
+        // Same shape as `lossy_round_trip_drops_shards_0_5_10_17`, but
+        // named to pin down that the post-#661 `RsScheme =
+        // ReedSolomon<Blake3>` swap round-trips correctly end to end:
+        // encode, drop `extra_shards` (4) shards, decode from the
+        // remaining `minimum_shards` (16), and confirm the reconstructed
+        // pack's BLAKE3 matches `manifest.pack_hash`.
+        let pack = synthetic_pack(1024 * 1024);
+        let config = default_config();
+        let (shards, manifest) = encode_pack_to_shards(&pack, config).unwrap();
+        assert_eq!(shards.len(), 20);
+
+        let dropped = [1u16, 6, 11, 18];
+        let subset: Vec<Shard> = shards
+            .into_iter()
+            .filter(|s| !dropped.contains(&s.index))
+            .collect();
+        assert_eq!(subset.len(), 16);
+
+        let recovered = decode_pack_from_shards(&subset, &manifest).unwrap();
+        assert_eq!(recovered, pack);
+        assert_eq!(hash::hash(&recovered), manifest.pack_hash);
+    }
+
+    #[test]
+    fn commitment_from_a_different_scheme_fails_the_merkle_check_not_silently() {
+        // Emulates a producer stuck on the pre-#661 Sha256-era scheme
+        // handing a manifest to a consumer decoding with the
+        // post-cutover Blake3 `RsScheme`. The manifest's version byte
+        // could read 0x02 (e.g. corrupted or forged) without the
+        // commitment actually being a Blake3 BMT root — the real
+        // defense is `RsScheme::check` at the Merkle-proof step, which
+        // must fail loudly rather than let `decode` silently reconstruct
+        // (or fail to reconstruct) without a typed error.
+        use commonware_cryptography::Sha256;
+        type OldRsScheme = commonware_coding::ReedSolomon<Sha256>;
+
+        let pack = synthetic_pack(256 * 1024);
+        let config = default_config();
+        let (shards, mut manifest) = encode_pack_to_shards(&pack, config).unwrap();
+
+        // Compute what the commitment would have been under the retired
+        // Sha256-era scheme, for the exact same pack + config.
+        let (old_commitment, _old_chunks) =
+            OldRsScheme::encode(&config, pack.as_slice(), &Sequential)
+                .expect("old-scheme (Sha256) encode must still succeed");
+        let old_bytes: &[u8] = old_commitment.as_ref();
+        let mut forged = [0u8; HASH_LEN];
+        forged.copy_from_slice(old_bytes);
+        manifest.commitment = forged;
+
+        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
+        let err = decode_pack_from_shards(&subset, &manifest).unwrap_err();
+        assert!(
+            matches!(err, ShardError::DecodeFailed(_)),
+            "expected a typed DecodeFailed error at the Merkle-proof check \
+             step, got {err:?}"
         );
     }
 }
