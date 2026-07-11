@@ -79,6 +79,9 @@ rendered on the web **[`/parity`](../apps/web/src/pages/parity.tsx)** page from
 [`apps/web/src/lib/parity-data.ts`](../apps/web/src/lib/parity-data.ts). That
 page is the single source of truth for *which commands and flags* behave like
 git today; keep it current when a command's behavior changes.
+[`apps/web/src/lib/parity-sync.test.ts`](../apps/web/src/lib/parity-sync.test.ts)
+parses the "Deferred flags" list below and fails CI if a command listed there
+is rendered with an unqualified `'parity'` status on the web page.
 
 This document keeps the surrounding **contract** that the web page distills out
 (it carries user-facing notes only): the scope gate above, and the
