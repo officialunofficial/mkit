@@ -55,3 +55,18 @@ Unofficial account, `CLOUDFLARE_ACCOUNT_ID=0bc82bff…`), or wire a Cloudflare
 Workers Build that runs `worker-build --release` on merge to `main` — the same
 mechanism the other mkit workers use. `keys.mkit.sh` is auto-provisioned via the
 `custom_domain` route on the `mkit.sh` zone.
+
+## Staging
+
+`wrangler.jsonc` also declares an `env.staging` block: an isolated deployment
+(`mkit-keys-staging`, its own `NAMES` KV namespace) fronted by
+`staging-keys.mkit.sh` — writes there never touch the production
+`mkit-keys-NAMES` namespace.
+
+```sh
+# validate the config without deploying (no resources touched)
+wrangler deploy --env staging --dry-run
+
+# deploy for real (needs an authenticated wrangler / CLOUDFLARE_API_TOKEN)
+wrangler deploy --env staging
+```

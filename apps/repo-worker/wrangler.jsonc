@@ -39,6 +39,42 @@
   "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
 
   // SQLite-backed DO classes are declared in a `new_sqlite_classes` migration
-  // (the DO uses `state.storage().sql()`).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  // (the DO uses `state.storage().sql()`). Top-level `migrations` is a
+  // top-level-only key: it is inherited by every named environment below
+  // (including `staging`), so it is not repeated there.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }],
+
+  // Named environments. `wrangler deploy --env staging` deploys an isolated
+  // Worker (`mkit-repo-worker-staging`) with its own route, R2 bucket, and
+  // RefStore DO namespace (Durable Object bindings are never inherited across
+  // environments — Wrangler auto-suffixes the DO's owning script name with
+  // `-staging`, so storage is isolated even though the class name is
+  // unchanged). Staging writes can never land in the production
+  // `mkit-repo-objects` bucket because `r2_buckets` is also non-inheritable
+  // and is fully re-specified here. If you add more top-level bindings later,
+  // remember non-inheritable keys (vars, durable_objects, kv_namespaces,
+  // r2_buckets, routes) must be duplicated into every `env.*` block that
+  // needs them — see
+  // https://developers.cloudflare.com/workers/wrangler/configuration/#non-inheritable-keys.
+  "env": {
+    "staging": {
+      "name": "mkit-repo-worker-staging",
+
+      // Non-production route so schema/auth/rate-limit changes can be
+      // validated against a real Cloudflare deployment before promotion to
+      // api.mkit.sh. Update apps/web/src/security-policy.js CSP `connect-src`
+      // (and the web build's `VITE_REPO_BACKEND_URL`) if the web app needs to
+      // target this host for end-to-end checks.
+      "routes": [{ "pattern": "staging-api.mkit.sh", "custom_domain": true }],
+
+      // Dedicated staging bucket (created via `wrangler r2 bucket create
+      // mkit-repo-objects-staging`) — never the production
+      // `mkit-repo-objects` bucket.
+      "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-repo-objects-staging" }],
+
+      // Same RefStore class, but bound to the staging Worker script
+      // (`mkit-repo-worker-staging`), so it gets its own DO storage.
+      "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] }
+    }
+  }
 }

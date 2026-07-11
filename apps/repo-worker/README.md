@@ -299,5 +299,27 @@ instead:
   `workers.dev` subdomain (step 2 above) avoids the zone requirement
   altogether.
 
+## Staging
+
+`wrangler.jsonc` also declares an `env.staging` block: a fully isolated
+deployment (`mkit-repo-worker-staging`, its own `mkit-repo-objects-staging` R2
+bucket, its own RefStore DO storage) fronted by `staging-api.mkit.sh`. It
+never shares state with production.
+
+```sh
+# validate the config without deploying (no resources touched)
+wrangler deploy --env staging --dry-run
+
+# deploy for real (needs an authenticated wrangler / CLOUDFLARE_API_TOKEN)
+wrangler deploy --env staging
+```
+
+Use it to validate schema, auth-interceptor, or rate-limit changes against a
+real Cloudflare account before promoting them to `api.mkit.sh`. To exercise it
+end to end, point a generated Connect client (or `src/bin/sign.rs` +
+`curl`) at `https://staging-api.mkit.sh` and run a `PutObject`/`GetObject`
+round trip — the same generated client used against production works
+unmodified, just retargeted.
+
 [workers-rs]: https://github.com/cloudflare/workers-rs
 [ConnectRPC]: https://connectrpc.com/
