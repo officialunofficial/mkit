@@ -11,9 +11,9 @@ Status: **Normative** for mkit v1.
 Scope: `.mkit/objects/` content and the byte layout of every object type.
 Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
 
-This document defines what W2 (on-disk V1 bump) and W3 (identity / remix
-generalisation) must implement. External tools MUST be able to produce and
-consume these bytes with only this document.
+This document defines the on-disk object byte layout and the identity /
+remix object model. External tools MUST be able to produce and consume
+these bytes with only this document.
 
 ---
 
@@ -191,8 +191,8 @@ repeat parent_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from mkit:
-- `author_mid: u64` → `Identity` tagged union (§9). (W2.)
+Differences from mkit's legacy (pre-v1) commit encoding:
+- `author_mid: u64` → `Identity` tagged union (§9).
 - `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
   7d).
 - Relative field order of `signer` and `message` is preserved.
@@ -512,10 +512,9 @@ multi-version readers.
    message, all-zero signature): `Tag` is a flat type — record
    serialised bytes + `BLAKE3` of those bytes as the id.
 9. **Signed tag** (same shape, signed with seed `[0x07;32]` over the
-   `mkit.tag\0` domain — pending rename to the SPEC-CONVENTIONS §4
-   registry notation, tracked separately from this vector): record
-   serialised bytes, the canonical tag signing bytes, the signing hash,
-   and the 64-byte Ed25519 signature.
+   `mkit.tag\0` domain — a permanent domain separator per
+   SPEC-CONVENTIONS §4): record serialised bytes, the canonical tag
+   signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 
 Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
 vectors 8–9 under `rust/tests/golden/tags/`. Each set ships a
@@ -549,7 +548,3 @@ mechanism that enforces or detects each:
 These are format-level guarantees. Signature guarantees are specified in
 SPEC-SIGNING; per-object tamper evidence for merkelized types in
 SPEC-MERKLE-OBJECTS §6.
-
----
-
-*~1750 words.*

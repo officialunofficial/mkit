@@ -769,12 +769,11 @@ Does NOT protect against:
 
 ## 12. Stability
 
-This document is draft through the first implementation PR. Once
-shipped in a tagged release, any breaking change to the on-disk
-layout or wire envelope requires a version bump and a
-`SPEC-ATTESTATIONS-v2.md` (same pattern as `SPEC-OBJECTS`). The DSSE
-+ in-toto bodies are governed by their upstream specs; mkit tracks
-those as they evolve.
+This document stays draft while the §5.3 WASM-verification gap remains
+open. Once that closes, any breaking change to the on-disk layout or
+wire envelope requires a version bump and a `SPEC-ATTESTATIONS-v2.md`
+(same pattern as `SPEC-OBJECTS`). The DSSE + in-toto bodies are
+governed by their upstream specs; mkit tracks those as they evolve.
 
 Items currently marked **(planned)** — §5.2 (`--add-signature`),
 §7.3 (transport verbs), §8 (`mkit attest ls/show/rm`,

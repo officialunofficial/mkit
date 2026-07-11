@@ -392,11 +392,9 @@ defines; it says nothing about whether a 32-byte value that is a valid
 `signing_hash` under §2.1 could ever also be validly interpreted as a
 DSSE PAE byte string or an SSH signed blob under those other
 protocols' own framing. Recommending key reuse without that analysis
-is a real, open gap — tracked as a Security Considerations addition to
-this document (see the project's spec-remediation plan) rather than
-resolved here. Until that analysis exists, treat cross-protocol key
-reuse as convenient but **unproven** rather than as a stated security
-property.
+is a real, open gap: cross-protocol domain separation is not analyzed
+here. Until that analysis exists, treat cross-protocol key reuse as
+convenient but **unproven** rather than as a stated security property.
 
 Nothing in the protocol REQUIRES a single key — separate signing and
 transport keys are valid, and are the safer default until the

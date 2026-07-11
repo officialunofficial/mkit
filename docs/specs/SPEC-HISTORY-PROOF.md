@@ -15,9 +15,9 @@ and the wire format of the inclusion proof that lets a light client
 verify "commit `X` was the `N`-th commit on branch `Y` at root `R`".
 
 This document is normative for the `mkit-core::history` module and for
-any future on-disk or on-wire consumer. It does **not** yet mandate a
-wire `Commit` field or an attestation predicate — those are the
-proto-field integration stage / `mkit-attest` respectively (see §4).
+any future on-disk or on-wire consumer. It does **not** mandate a wire
+`Commit` field or an attestation predicate — those belong to
+proto-field integration and `mkit-attest` respectively (see §5).
 
 ---
 

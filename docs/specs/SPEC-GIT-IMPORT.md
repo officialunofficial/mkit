@@ -287,15 +287,14 @@ Three layers, from authoritative to advisory:
    as a hint for locating/diffing retained bytes, never as something
    the signature vouches for.
 
-**Collision-resistant hashing (normative requirement, pending
-implementation):** because sha1 here still functions as a lookup key
-over data an adversary may control (untrusted upstream Git history),
-every sha1 computed over upstream bytes in the bridge/import path MUST
-use a collision-detecting SHA-1 construction (rejecting known
-cryptanalytic collision patterns), not a plain SHA-1 implementation —
-matching real Git's own practice for exactly this reason. This is not
-yet reflected in `mkit-git-bridge`'s current dependency (`sha1 = "0.11"`,
-a plain implementation); tracked as a follow-up dependency change.
+**Collision-resistant hashing (normative requirement):** because sha1
+here still functions as a lookup key over data an adversary may control
+(untrusted upstream Git history), every sha1 computed over upstream
+bytes in the bridge/import path MUST use a collision-detecting SHA-1
+construction (rejecting known cryptanalytic collision patterns), not a
+plain SHA-1 implementation — matching real Git's own practice for
+exactly this reason. `mkit-git-bridge`'s current dependency (`sha1 =
+"0.11"`) is a plain implementation and does not meet this requirement.
 
 ---
 

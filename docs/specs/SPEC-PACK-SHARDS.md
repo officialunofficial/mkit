@@ -1,14 +1,14 @@
 ---
 spec: SPEC-PACK-SHARDS
 version: 0
-status: transport-delivery-shipped
+status: stable-normative
 audience: implementers of pack producers and consumers; transport implementers
 ---
 
 # SPEC-PACK-SHARDS — erasure-coded pack delivery
 
-Status: **Transport delivery shipped** for mkit v0.x — the in-process
-codec and the wire/transport delivery surface have both landed. Tracks issue
+Status: **Normative** for mkit v0.x — the in-process codec and the
+wire/transport delivery surface are both implemented. Tracks issue
 [#159](https://github.com/officialunofficial/mkit/issues/159).
 Scope: a wire-level encoding *of* a pack — the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
