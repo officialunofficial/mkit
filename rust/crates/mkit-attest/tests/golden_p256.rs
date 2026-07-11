@@ -168,6 +168,7 @@ fn registry_dispatch_p256() {
         subjects: vec![Subject {
             name: Some("commit".into()),
             digest_blake3_hex: commit_hex.into(),
+            digest_sha256_hex: "00".repeat(32),
         }],
         predicate_type: "https://example.com/predicate/v1".into(),
         predicate_jcs: b"{}",

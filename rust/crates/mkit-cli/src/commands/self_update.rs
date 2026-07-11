@@ -1156,6 +1156,7 @@ mod tests {
                 .map(|(name, body)| statement::Subject {
                     name: Some((*name).to_owned()),
                     digest_blake3_hex: hash::to_hex(&hash::hash(body)),
+                    digest_sha256_hex: statement::sha256_hex(body),
                 })
                 .collect(),
             predicate_type: PREDICATE_TYPE_RELEASE_V1.to_owned(),

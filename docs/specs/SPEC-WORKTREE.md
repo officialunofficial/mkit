@@ -143,15 +143,20 @@ the registry cannot be enumerated.
 
 ### 4.3 Locks
 
+This document originates the `worktree.lock`/`worktrees.lock` primitives
+and their per-command holder details below; the total lock order across
+*all* mkit locks (including `refs-history.lock` and the file-transport's
+`refs/.lock`), and the enumeration of every writer, is owned by
+SPEC-CONCURRENCY — see that document for the authoritative order. This
+section states only the two locks this document defines and how the
+commands specified here use them.
+
 | Lock | Location | Guards |
 |---|---|---|
 | `worktree.lock` | each tree's state dir | that tree's worktree/index read-modify-write |
 | `worktrees.lock` | common dir | registry mutations (`worktree add`/`remove`/`prune`) |
-| `refs-history.lock` | common dir | ref-write + history-MMR append critical section (pre-existing) |
 
-**Global lock order.** A process that takes more than one of these
-MUST acquire in the order `worktrees.lock` ≺ per-tree
-`worktree.lock`(s) ≺ `refs-history.lock`. Holders:
+Per-command holders:
 
 - gc takes the registry lock first (freezing the worktree set — a
   concurrent `worktree add` cannot register a tree between root

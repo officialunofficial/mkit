@@ -179,12 +179,22 @@ impl Transport for MemoryTransport {
             .refs
             .iter()
             .filter_map(|(full_name, wire)| {
-                // The ref name must start with the (trimmed) prefix.
+                // The ref name must start with the (trimmed) prefix AT A
+                // PATH-COMPONENT BOUNDARY: "refs/heads/feat" must not match
+                // "refs/heads/featx" just because the former is a string
+                // prefix of the latter (SPEC-REFS §4).
                 let rest = if prefix_trimmed.is_empty() {
                     full_name.as_str()
                 } else if let Some(after) = full_name.strip_prefix(prefix_trimmed) {
-                    // Skip the separator slash between prefix and suffix.
-                    after.strip_prefix('/').unwrap_or(after)
+                    match after.strip_prefix('/') {
+                        Some(stripped) => stripped,
+                        // No separator immediately after the prefix: either
+                        // an exact match (rest = "", rejected below by
+                        // validate_ref_name) or a false string-prefix hit
+                        // like "featx" — neither is a real boundary match.
+                        None if after.is_empty() => after,
+                        None => return None,
+                    }
                 } else {
                     return None;
                 };
@@ -424,6 +434,24 @@ mod tests {
         t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
         let tags = t.list_refs("refs/tags/").unwrap();
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn list_refs_prefix_respects_path_component_boundary() {
+        // SPEC-REFS §4: "refs/heads/feat" must not match "refs/heads/featx" —
+        // a plain string-prefix match with no boundary check would wrongly
+        // return "featx" (stripped to "x") as a hit for prefix "feat".
+        let t = MemoryTransport::new();
+        t.write_ref("refs/heads/feat/x", &blake3_hash(b"a"))
+            .unwrap();
+        t.write_ref("refs/heads/featx", &blake3_hash(b"b")).unwrap();
+
+        let matches = t.list_refs("refs/heads/feat").unwrap();
+        assert_eq!(matches.len(), 1, "featx must not match prefix feat");
+        assert_eq!(matches[0].name, "x");
+
+        let all = t.list_refs("refs/heads/").unwrap();
+        assert_eq!(all.len(), 2, "both refs still exist under the parent");
     }
 
     #[test]

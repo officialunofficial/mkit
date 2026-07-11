@@ -3,7 +3,7 @@
 //! On-disk layout per `docs/specs/SPEC-INDEX.md`:
 //!
 //! ```text
-//! [4B magic "MKIX"][1B version=0x02][4B LE entry_count][entries...]
+//! [4B magic "MKIX"][1B version][4B LE entry_count][entries...]
 //! entry := [1B status][32B object_hash][8B LE mtime_ns][8B LE size]
 //!          [8B LE ino][8B LE ctime_ns][2B LE path_len][path_len UTF-8 bytes]
 //! ```
@@ -13,9 +13,7 @@
 //! `add`/`status` may reuse `object_hash` without re-reading or
 //! re-hashing the content — O(stat) instead of O(content) for unchanged
 //! files. `mtime_ns == 0` is the sentinel for "no cache, always
-//! re-hash"; v1 streams (version `0x01`, 35-byte entries without the
-//! four stat-cache fields) still parse, with the cache zero-filled.
-//! Writers smudge (zero) the cache of any entry
+//! re-hash". Writers smudge (zero) the cache of any entry
 //! whose mtime falls within the racy window of the index write itself
 //! — see [`write_index`].
 //!
@@ -37,11 +35,8 @@ use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
 /// Magic bytes — ASCII `"MKIX"`.
 pub const MAGIC: [u8; 4] = *b"MKIX";
-/// Current format version (v2 = stat-cached entries). v1 streams are
-/// still read; see [`deserialize`].
+/// The current (and only supported) format version.
 pub const FORMAT_VERSION: u8 = 0x02;
-/// The pre-stat-cache format version, accepted read-only.
-pub const FORMAT_VERSION_V1: u8 = 0x01;
 /// Hard cap on a serialised index file (64 MiB), per SPEC-INDEX §4.
 pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard cap on a single entry's path length (SPEC-INDEX §2).
@@ -210,8 +205,7 @@ pub enum IndexError {
     /// Magic bytes were not `"MKIX"`.
     #[error("index file has wrong magic (expected MKIX)")]
     BadMagic,
-    /// `version` byte was neither the current `FORMAT_VERSION` (`0x02`)
-    /// nor the legacy read-only `FORMAT_VERSION_V1` (`0x01`).
+    /// `version` byte was not the current `FORMAT_VERSION`.
     #[error("unsupported index version: {0:#x}")]
     UnsupportedVersion(u8),
     /// Status byte was outside the documented {0x00..=0x04} range.
@@ -270,21 +264,20 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         return Err(IndexError::BadMagic);
     }
     let version = data[4];
-    if version != FORMAT_VERSION && version != FORMAT_VERSION_V1 {
+    if version != FORMAT_VERSION {
         return Err(IndexError::UnsupportedVersion(version));
     }
-    // v2 entries carry mtime_ns(8) + size(8) + ino(8) + ctime_ns(8)
-    // before path_len.
-    let stat_cache_len: usize = if version == FORMAT_VERSION { 32 } else { 0 };
+    // Entries carry mtime_ns(8) + size(8) + ino(8) + ctime_ns(8) before
+    // path_len.
+    let stat_cache_len: usize = 32;
     // Fixed bytes per entry: status(1) + hash(32) + stat cache + path_len(2).
     let min_entry_len = 1 + HASH_LEN + stat_cache_len + 2;
     let count = u32::from_le_bytes([data[5], data[6], data[7], data[8]]) as usize;
     // Reject an attacker-supplied `count` that is impossible given the
-    // remaining bytes. The minimum wire-length of an entry is 35 bytes
-    // for v1 / 51 for v2 (empty path). Without this up-front check the
-    // loop would walk `count` iterations before failing (v1 minimum is
-    // 35 bytes, v2 is 67) — trivially
-    // triggered with a 9-byte buffer declaring `count = u32::MAX`.
+    // remaining bytes. The minimum wire-length of an entry is 67 bytes
+    // (empty path). Without this up-front check the loop would walk
+    // `count` iterations before failing — trivially triggered with a
+    // 9-byte buffer declaring `count = u32::MAX`.
     // Mirrors the same up-front bound used in `serialize.rs`.
     if (count as u64).saturating_mul(min_entry_len as u64) > data.len() as u64 {
         return Err(IndexError::Corrupt);
@@ -302,16 +295,13 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         let mut object_hash = [0u8; HASH_LEN];
         object_hash.copy_from_slice(&data[offset..offset + HASH_LEN]);
         offset += HASH_LEN;
-        // v1 streams have no stat cache — zero-filled = "always re-hash".
-        let (mtime_ns, size, ino, ctime_ns) = if version == FORMAT_VERSION {
+        let (mtime_ns, size, ino, ctime_ns) = {
             let mut next_u64 = || {
                 let v = u64::from_le_bytes(data[offset..offset + 8].try_into().expect("8 bytes"));
                 offset += 8;
                 v
             };
             (next_u64(), next_u64(), next_u64(), next_u64())
-        } else {
-            (0, 0, 0, 0)
         };
         let path_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
@@ -560,13 +550,13 @@ mod tests {
         assert_eq!(parsed, idx);
     }
 
-    // ---- v2 stat cache ------------------------------------------------
+    // ---- stat cache -----------------------------------------------------
 
-    /// Pinned v2 vector: header(9) + status(1) + hash(32) +
+    /// Pinned vector: header(9) + status(1) + hash(32) +
     /// `mtime_ns`(8) + `size`(8) + `ino`(8) + `ctime_ns`(8) +
     /// `path_len`(2) + "hello.txt"(9) = 85 bytes.
     #[test]
-    fn v2_single_entry_pinned_bytes() {
+    fn single_entry_pinned_bytes() {
         let h = seed_hash("hello");
         let idx = Index {
             entries: vec![IndexEntry {
@@ -593,39 +583,14 @@ mod tests {
         expected.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
         expected.extend_from_slice(&9u16.to_le_bytes());
         expected.extend_from_slice(b"hello.txt");
-        assert_eq!(bytes, expected, "v2 byte layout is pinned");
+        assert_eq!(bytes, expected, "byte layout is pinned");
         assert_eq!(deserialize(&bytes).unwrap(), idx);
     }
 
-    /// The exact v1 byte stream (35-byte entries, version 0x01) must
-    /// still parse — stat fields zero-filled, meaning "no cache,
-    /// always re-hash".
     #[test]
-    fn reads_v1_index_with_zeroed_stat_cache() {
-        let h = seed_hash("hello");
-        let mut v1 = Vec::new();
-        v1.extend_from_slice(b"MKIX");
-        v1.push(0x01);
-        v1.extend_from_slice(&1u32.to_le_bytes());
-        v1.push(0x01); // Blob
-        v1.extend_from_slice(&h);
-        v1.extend_from_slice(&9u16.to_le_bytes());
-        v1.extend_from_slice(b"hello.txt");
-        assert_eq!(v1.len(), 53);
-
-        let parsed = deserialize(&v1).unwrap();
-        assert_eq!(parsed.entries.len(), 1);
-        let e = &parsed.entries[0];
-        assert_eq!(e.path, "hello.txt");
-        assert_eq!(e.object_hash, h);
-        assert_eq!(e.mtime_ns, 0, "v1 entries carry no stat cache");
-        assert_eq!(e.size, 0);
-    }
-
-    #[test]
-    fn rejects_v2_count_overflow_at_min_entry_bytes() {
-        // 9-byte header declaring u32::MAX entries: the v2 minimum
-        // entry is 67 bytes, so this must fail fast, before looping.
+    fn rejects_count_overflow_at_min_entry_bytes() {
+        // 9-byte header declaring u32::MAX entries: the minimum entry is
+        // 67 bytes, so this must fail fast, before looping.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"MKIX");
         bytes.push(0x02);
@@ -649,6 +614,22 @@ mod tests {
         assert!(matches!(
             deserialize(&bytes),
             Err(IndexError::UnsupportedVersion(0x03))
+        ));
+    }
+
+    /// The old pre-stat-cache format (version `0x01`) is rejected like any
+    /// other unsupported version — mkit does not carry dual-version
+    /// read-compat for its local, advisory index file (SPEC-CONVENTIONS
+    /// §4: no version-suffixed compatibility eras).
+    #[test]
+    fn rejects_old_version_0x01() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"MKIX");
+        bytes.push(0x01);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            deserialize(&bytes),
+            Err(IndexError::UnsupportedVersion(0x01))
         ));
     }
 
@@ -913,9 +894,9 @@ mod tests {
 
     #[test]
     fn rejects_zmix_magic_explicitly() {
-        // SPEC-INDEX §5: v1 readers MUST reject `"ZMIX"`-prefixed files.
-        // We construct the rejected magic as ASCII bytes here rather than
-        // embedding the legacy literal string.
+        // SPEC-INDEX §5: readers MUST reject `"ZMIX"`-prefixed files. We
+        // construct the rejected magic as ASCII bytes here rather than
+        // embedding the wrong literal string.
         let bytes = [
             0x5A,
             0x4D,

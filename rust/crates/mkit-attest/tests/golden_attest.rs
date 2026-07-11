@@ -29,10 +29,19 @@ use mkit_attest::verify::{self, Reason, Registry, TrustRoot};
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::sign::KeyPair;
 
-const ATTEST_COMMIT_HASH: [u8; 32] = [0xCC; 32];
+// The subject digest is now a pair (blake3 + sha256) of the SAME
+// underlying bytes (SPEC-ATTESTATIONS §4.2), so the golden vector's
+// commit hash must be derived from real bytes rather than an arbitrary
+// fixed hash value — there's no way to pick bytes whose sha256 AND
+// blake3 both equal chosen constants.
+const ATTEST_COMMIT_BYTES: &[u8] = b"pretend-serialised-commit-bytes-for-attest-golden-v1";
 const ATTEST_PREDICATE_TYPE: &str = "https://example.com/predicate/v1";
 const ATTEST_PREDICATE_JCS: &[u8] = b"{}";
 const ATTEST_ED25519_SEED: [u8; 32] = [0xAB; 32];
+
+fn attest_commit_hash() -> [u8; 32] {
+    hash(ATTEST_COMMIT_BYTES)
+}
 
 /// Derive the keyid string from the fixed seed.
 /// keyid = "blake3:" || hex(BLAKE3(pubkey)) where pubkey is derived from seed.
@@ -57,7 +66,8 @@ fn statement_basic_matches_golden_jcs_bytes() {
         .expect("read statement_basic.json");
 
     let got = statement::for_commit(
-        &ATTEST_COMMIT_HASH,
+        &attest_commit_hash(),
+        ATTEST_COMMIT_BYTES,
         ATTEST_PREDICATE_TYPE,
         ATTEST_PREDICATE_JCS,
     )
@@ -73,11 +83,13 @@ fn statement_basic_matches_golden_jcs_bytes() {
 #[test]
 fn statement_basic_built_via_struct_form_also_matches() {
     let golden = std::fs::read(golden_dir().join("statement_basic.json")).unwrap();
-    let hex = to_hex(&ATTEST_COMMIT_HASH);
+    let hex = to_hex(&attest_commit_hash());
+    let sha256_hex = statement::sha256_hex(ATTEST_COMMIT_BYTES);
     let got = statement::encode(&Statement {
         subjects: vec![Subject {
             name: Some("commit".into()),
             digest_blake3_hex: hex,
+            digest_sha256_hex: sha256_hex,
         }],
         predicate_type: ATTEST_PREDICATE_TYPE.into(),
         predicate_jcs: ATTEST_PREDICATE_JCS,
@@ -121,7 +133,7 @@ fn envelope_basic_subject_extraction_recovers_commit_hash() {
     let golden = std::fs::read(golden_dir().join("envelope_basic.json")).unwrap();
     let env = env_mod::decode(&golden).unwrap();
     let recovered = verify::extract_primary_commit_hash(&env.payload).unwrap();
-    assert_eq!(recovered, ATTEST_COMMIT_HASH);
+    assert_eq!(recovered, attest_commit_hash());
 }
 
 #[test]

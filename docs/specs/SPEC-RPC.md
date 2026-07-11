@@ -1,7 +1,7 @@
 ---
 spec: SPEC-RPC
 version: 1
-status: draft
+status: stable-normative
 audience: integrators implementing an mkit external signer or mkit-server
 ---
 
@@ -19,10 +19,12 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
 
-Protocol-version integer is `1` (`PROTOCOL_VERSION_1`). All v0.1.x mkit
-releases speak this and only this. A future breaking revision will
-introduce sibling `signer2.proto` / `ssh2.proto` with
-`PROTOCOL_VERSION_2`; v1 is frozen.
+Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) — the only
+value mkit currently speaks. Wire-breaking changes (renumbering or
+removing a field) are made by introducing a sibling `signer2.proto` /
+`ssh2.proto` package and bumping to a new `ProtocolVersion` value,
+never by silently reinterpreting `PROTOCOL_VERSION_1`'s existing wire
+shape (see §2).
 
 ---
 
@@ -187,9 +189,15 @@ choice is deliberate:
   prose specs (this file, SPEC-EXTERNAL-SIGNER, SPEC-TRANSPORT) are
   derivative.
 
-The buffa runtime (`buffa = "0.7"`) is used by the Rust reference
-implementations. Other languages can use any compliant protobuf 3 /
-edition 2023 toolchain.
+The Rust reference implementations currently generate their protobuf
+bindings with the `buffa` runtime — this is a reference-implementation
+detail, not a specification requirement, and this document does not
+pin a version (a version pinned in prose drifts silently from whatever
+the workspace actually builds against). Other languages, and other
+Rust implementations, can use any protobuf 3 / edition 2023 toolchain
+that emits the wire bytes defined by the `.proto` files listed at the
+top of this document (§1); conformance is defined by those bytes,
+never by which codegen tool produced them.
 
 ---
 

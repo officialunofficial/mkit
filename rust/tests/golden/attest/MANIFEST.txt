@@ -1,5 +1,5 @@
 # Attestation golden vectors (deterministic)
 # Produced by the attest envelope/statement fixtures
 # Format: <name> <blake3-hex-of-bin-bytes>
-statement_basic f16487164072097ed704c4d8687e2069dadc6dfcba453d14b45db1ceb7eba59f
-envelope_basic e0dcd6fa098c6e7de2f9f7ebfbea441b93c91b19638852718670657e4c0fbebc
+statement_basic 8e825bb1ad7328c0f969045450a87144094286f9a2e6ac630c48cb7a9679b4e8
+envelope_basic d0d1707cb9e11b83bb7fa279156eaa4463c39f87a9aa759bc595feb2b1668835

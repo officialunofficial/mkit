@@ -1,7 +1,7 @@
 ---
 spec: SPEC-RELEASE-THRESHOLD
 version: 1
-status: draft
+status: draft-normative
 audience: implementers and integrators producing or verifying mkit release-party threshold signatures
 ---
 
@@ -175,23 +175,55 @@ the SLSA bundle; the public key is registered once in the verifier
 trust root and amortised across every release. We minimise the
 signature side (48 bytes vs. 96).
 
-### 3.6 Namespace
+### 3.6 Ciphersuite
 
-The BLS hash-to-curve namespace for mkit release signatures is fixed
+The signature scheme is the IETF BLS-signature construction over
+BLS12-381 with a proof-of-possession scheme, using the `MinSig`
+variant selected in §3.5:
+
+```text
+BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_
+```
+
+This identifies, per
+[draft-irtf-cfrg-bls-signature](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/):
+the curve (BLS12-381), the signature group (G1, i.e. `MinSig`), the
+hash-to-curve suite (`XMD:SHA-256_SSWU_RO_`, an
+[RFC 9380](https://www.rfc-editor.org/rfc/rfc9380) expand-message-XMD
+construction with SHA-256 and the Simplified Shallue–van de Woestijne–
+Ulas map), and the proof-of-possession scheme (`POP_`, which requires
+each participating key to have a separately-verified proof of
+possession before it may contribute to an aggregate — closing the
+rogue-key attack that plain BLS aggregation is vulnerable to without
+one). This is a real, standard IETF ciphersuite; it is not an mkit- or
+commonware-specific construction, and any BLS12-381 implementation
+conforming to that draft and RFC 9380 can be checked against it.
+
+### 3.7 Namespace
+
+Layered *on top of* the ciphersuite in §3.6 (not a replacement for its
+hash-to-curve step) is an mkit-specific application namespace, fixed
 at:
 
 ```text
 NAMESPACE = b"mkit-attest/dsse/v1"
 ```
 
-`mkit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. The
-namespace separates the maintainer-set BLS key from any other context
-that might share the same shares — a release signature cannot be
-replayed as a vote, a commit endorsement, or any other BLS message
-under a different namespace.
+`mkit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
+and verification combine the namespace and the message (the DSSE PAE,
+§4) via a unique, unambiguous encoding — not bare concatenation — before
+that combined value is hash-to-curve'd per §3.6. The namespace separates
+the maintainer-set BLS key from any other context that might share the
+same shares — a release signature cannot be replayed as a vote, a
+commit endorsement, or any other BLS message under a different
+namespace.
 
-Protocol-v2 will bump to `mkit-attest/dsse/v2`. The namespace is
-**not** versioned independently of the mkit protocol version.
+The `dsse/v1` suffix names the current, and so far only, application
+namespace this key is used under — it is not a compatibility-era label
+(see SPEC-CONVENTIONS §4). If a distinct application use of this key
+is ever introduced, it gets its own distinctly-named namespace
+constant; there is no plan to migrate this namespace's bytes to a
+different value while today's usage continues.
 
 ---
 
@@ -360,7 +392,7 @@ Acceptance for the issue overall (#160):
 | No single maintainer can produce a valid release signature | M-of-N threshold with quorum = ceil(2n/3) under the `N3f1` fault model (§1, §2.1) |
 | Verifiers check exactly one signature against exactly one public key, with a binary verdict | single `verify_message::<MinSig>` pairing check; any step failure is fatal, no per-share verdict at the aggregated layer (§4) |
 | Malformed key or signature bytes never reach the pairing | fixed sizes (96-byte G2 key, 48-byte G1 signature) and point-decode rejection, verifier steps 1–4 (§3.2, §3.3, §4) |
-| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `mkit-attest/dsse/v1` (§3.6) |
+| A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `mkit-attest/dsse/v1` (§3.7) |
 | The DSSE `keyid` resolves to the intended cohort key, not an attacker-supplied one | trust-root registry maps `bls12381-thr:<hex>` to pinned public-key bytes (§3.3, §4) |
 | A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README + trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
 | Maintainer rotation never invalidates existing verifier pins | resharing keeps the aggregated public key unchanged (§1, §5.3) |

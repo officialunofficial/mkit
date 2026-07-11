@@ -1,7 +1,7 @@
 ---
 spec: SPEC-KEYSTORE
 version: 1
-status: draft
+status: stable-normative
 audience: implementers and reviewers of the `mkit-keystore` crate, its CLI surface (`mkit key`), and the keystore-backed commit and attestation signers
 ---
 
@@ -648,7 +648,88 @@ Storage-security modes:
 - The raw compatibility backend must be clearly reported as
   `BackendKind::SoftwareRaw` and must not claim encrypted-at-rest protection.
 
-#### 6.1.1 BLS12-381 Threshold Share Storage
+#### 6.1.1 `EncryptedKeyRecord` wire format
+
+This is the byte-exact on-disk layout of the encrypted software-key
+record referenced by the bullet list above (fields bound as AAD;
+XChaCha20-Poly1305; OS-protector-wrapped DEK). Every multi-byte integer
+is little-endian per SPEC-CONVENTIONS §3. A "length-prefixed field"
+below means `[u32 LE length][length bytes]` — this applies even to the
+fixed-24-byte nonce, which still carries its own length prefix rather
+than a bare 24-byte slice, for uniformity with every other field.
+
+```
+offset  size     field
+0       8        magic              "MKITKSV1"
+8       1        version            0x01
+9       1        algorithm_id       registry below
+10      1        attrs_bits         key-attribute bitflags (extractable, etc.)
+11      …        protector          length-prefixed UTF-8 (e.g. "macos-keychain")
+…       …        public_key         length-prefixed raw bytes
+…       …        keyid              length-prefixed UTF-8 (canonical keyid string)
+…       4+24     nonce              length-prefixed; length is always 24
+…       …        wrapped_dek        length-prefixed; OS-protector output over the 32-byte DEK
+…       …        ciphertext         length-prefixed; XChaCha20-Poly1305 ciphertext + 16-byte tag
+```
+
+`algorithm_id` registry:
+
+| Value | Algorithm |
+|---|---|
+| `0x01` | Ed25519 |
+| `0x02` | Secp256k1 |
+| `0x03` | P256 |
+| `0x04` | *Reserved* — never appears in a canonical `EncryptedKeyRecord`. BLS12-381 threshold shares share this algorithm-id space conceptually but are encoded through the distinct `BlsShareRecord` format (magic `MKITKSB1`, §6.1.2), since a share's plaintext is a variable-length `commonware`-encoded structure, not a 32-byte scalar. A decoder MUST reject id `0x04` inside a `MKITKSV1` record. |
+
+`attrs_bits` registry (bit 0 = LSB):
+
+| Bit | Meaning |
+|---|---|
+| 0 | `extractable` |
+| 1 | `require_user_presence` |
+| 2 | `device_bound` |
+
+Any bit outside 0–2 set MUST be rejected as a decoding error.
+
+Readers MUST reject any version byte other than `0x01` (no dual-version
+compatibility — see SPEC-CONVENTIONS §2's note on versioning; this is
+local, unreleased state with no installed base to protect) and MUST
+reject any trailing bytes after the declared field list, the same
+discipline SPEC-INDEX applies to the staging-area file.
+
+**Nonce sourcing (normative):** the 24-byte nonce is generated fresh,
+from a CSPRNG, for every `encrypt` call — never derived, never a
+counter. This is safe without any uniqueness-tracking mechanism because
+XChaCha20's 192-bit nonce space makes an accidental collision
+astronomically unlikely across any realistic number of key records; a
+96-bit (regular ChaCha20/AES-GCM-sized) nonce would not have this
+property and would need a counter or record-count cap instead.
+
+**AAD construction (normative):** the Additional Authenticated Data
+bound into the AEAD tag — and separately supplied to the OS-native
+protector wrapping the DEK, though some protectors ignore it (§6.1) —
+is the concatenation, in this exact order, of:
+
+```
+magic (8 bytes) || version (1 byte)
+|| length-prefixed literal "software"
+|| length-prefixed label
+|| algorithm_id (1 byte) || attrs_bits (1 byte)
+|| length-prefixed protector
+|| length-prefixed public_key
+|| length-prefixed keyid
+```
+
+Every variable-length field is length-prefixed exactly as in the record
+encoding above, so the AAD has no field-boundary ambiguity — the same
+canonicalization discipline SPEC-SIGNING §2.1 uses for its domain
+digests. This AAD binding is what defeats a substitution attack (an
+adversary swapping one key's ciphertext/wrapped-DEK into another
+key's record slot, or changing the claimed algorithm/attrs after the
+fact) — decryption fails closed if any bound field doesn't match what
+was encrypted.
+
+#### 6.1.2 BLS12-381 Threshold Share Storage
 
 The keystore-backed share storage stage of issue #160 (and §6 of
 `SPEC-RELEASE-THRESHOLD.md`) adds support for storing BLS12-381 threshold
