@@ -2,12 +2,12 @@
 //
 // Signed-write envelope (DEMO MODE — open write, verify-only, no allow-list).
 //
-// A faithful Rust port of reference-ts/lib/envelope.ts. The wire protocol is
-// ConnectRPC; the envelope rides in request metadata (headers), so one guard
-// covers every procedure uniformly. The client signs a canonical request
-// string; the server recomputes it, BLAKE3-hashes it, and STRICT-verifies the
-// Ed25519 signature. A valid signature proves request integrity + same-author,
-// but grants NO authority — any valid key may write any ref.
+// The wire protocol is ConnectRPC; the envelope rides in request metadata
+// (headers), so one guard covers every procedure uniformly. The client signs
+// a canonical request string; the server recomputes it, BLAKE3-hashes it, and
+// STRICT-verifies the Ed25519 signature. A valid signature proves request
+// integrity + same-author, but grants NO authority — any valid key may write
+// any ref.
 //
 // THE CANONICAL STRING (client and server build it byte-for-byte):
 //
@@ -89,7 +89,7 @@ fn is_hex(s: &str, len: usize) -> bool {
 
 /// Verify a write envelope. Pure given `now` (epoch-ms) and the
 /// server-computed `actual_body_digest` (lowercase-hex BLAKE3 of the raw
-/// request body). Mirrors `verifyEnvelope` in reference-ts/lib/envelope.ts.
+/// request body).
 #[must_use]
 pub fn verify_envelope(
     procedure: &str,
@@ -172,8 +172,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    // Deterministic test signer matching reference-ts/test/envelope.test.ts:
-    // SEED = 32 bytes of 0x07.
+    // Deterministic test signer: SEED = 32 bytes of 0x07.
     fn signer() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])
     }
