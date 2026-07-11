@@ -27,12 +27,12 @@
 //! commit and has `any_verified = true`, nonzero otherwise.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 use mkit_attest::envelope;
 use mkit_attest::verify::{extract_primary_commit_hash, verify};
-use mkit_attest::{Algorithm, Registry, TrustRoot, store};
+use mkit_attest::{Algorithm, store};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::{hash as hash_mod, refs};
@@ -102,6 +102,7 @@ pub fn run(args: &[String]) -> u8 {
     ) {
         return code;
     }
+    note_if_missing(&trust_path);
     let registry = match load_trust_roots(&trust_path) {
         Ok(r) => r,
         Err((msg, code)) => return emit_err(&msg, code),
@@ -246,58 +247,17 @@ pub fn run(args: &[String]) -> u8 {
     }
 }
 
-/// Resolve the user-scoped default trust-roots path:
-/// `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
-fn default_trust_roots_path() -> PathBuf {
-    crate::config::xdg_config_home().join("mkit/trust-roots.toml")
-}
-
-/// Refuse to verify against an in-repo trust-roots file unless the user
-/// passed `--trust-roots` explicitly. Without this gate, a hostile
-/// cloned repo could ship `<repo>/.mkit/attest-trust-roots.toml` listing
-/// attacker keys and `mkit verify-attest` would print "ok".
-fn warn_if_unsafe_trust_roots(
-    trust_path: &Path,
-    mkit_dir: &Path,
-    user_provided_flag: bool,
-) -> Result<(), u8> {
-    if user_provided_flag {
-        return Ok(());
-    }
-    if trust_path.starts_with(mkit_dir) {
-        return Err(emit_err(
-            &format!(
-                "refusing to use in-repo trust-roots at {} — pass `--trust-roots` \
-                 explicitly or move the file to {}",
-                trust_path.display(),
-                default_trust_roots_path().display()
-            ),
-            exit::CONFIG_ERROR,
-        ));
-    }
-    if !trust_path.exists() {
-        // Print a hint, but do NOT silently fall back to the in-repo
-        // path. Empty registry → no signatures will pass; the loop
-        // below prints the per-attestation failure.
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "note: trust-roots file not found at {} — no keys loaded",
-            trust_path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`.
-fn short_keyid(keyid: &str) -> String {
-    match keyid.split_once(':') {
-        Some((prefix, body)) if body.len() > 16 => {
-            format!("{prefix}:{}…", &body[..16])
-        }
-        _ => keyid.to_owned(),
-    }
-}
+// The trust-roots file format (`[[trust_root]]` TOML blocks), the
+// in-repo path-fencing policy, and the keyid<->pubkey cross-check all
+// live in `commands/trust_roots.rs` now — shared with `mkit trust
+// add/list/remove` and `mkit verify --trusted` so the three never grow
+// separate trust-file formats (issue #693). Pull the names this module
+// still uses directly into scope; the `mod tests` block below resolves
+// them via `use super::*`.
+use super::trust_roots::{
+    default_trust_roots_path, load_registry as load_trust_roots, note_if_missing, short_keyid,
+    warn_if_unsafe_trust_roots,
+};
 
 fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
     if let Some(hex) = flag {
@@ -311,191 +271,15 @@ fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (Stri
     }
 }
 
-/// Hand-rolled TOML-ish parser for the trust-roots file. Recognised
-/// grammar (a strict subset of TOML):
-///
-/// ```toml
-/// [[trust_root]]
-/// keyid = "..."
-/// kind  = "ed25519"
-/// pubkey_hex = "..."
-/// ```
-///
-/// Lines outside a `[[trust_root]]` block, comments (`#`), and blank
-/// lines are ignored. Missing-file case returns an empty registry —
-/// the caller's signatures will all report `UnknownKeyid`, which is
-/// the documented "no trust-roots configured" UX.
-fn load_trust_roots(path: &Path) -> Result<Registry, (String, u8)> {
-    let mut reg = Registry::new();
-    let text = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(reg);
-        }
-        Err(e) => {
-            return Err((format!("read {}: {e}", path.display()), exit::NOINPUT));
-        }
-    };
-
-    let mut in_block = false;
-    let mut keyid = String::new();
-    let mut kind = String::new();
-    let mut pubkey_hex = String::new();
-
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line == "[[trust_root]]" {
-            if in_block {
-                flush_trust_root(&mut reg, &keyid, &kind, &pubkey_hex);
-            }
-            in_block = true;
-            keyid.clear();
-            kind.clear();
-            pubkey_hex.clear();
-            continue;
-        }
-        if !in_block {
-            // Silently ignore top-level noise — keeps the parser tolerant.
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let key = k.trim();
-        let val = v.trim().trim_matches('"').to_owned();
-        match key {
-            "keyid" => keyid = val,
-            // `algorithm` is an alias for `kind` to match the wording
-            // in `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. Either field
-            // name parses to the same arm.
-            "kind" | "algorithm" => kind = val,
-            "pubkey_hex" => pubkey_hex = val,
-            _ => {} // tolerate unknown keys
-        }
-    }
-    if in_block {
-        flush_trust_root(&mut reg, &keyid, &kind, &pubkey_hex);
-    }
-    Ok(reg)
-}
-
-fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &str) {
-    if keyid.is_empty() || pubkey_hex.is_empty() {
-        return;
-    }
-    let Some(pk_bytes) = hex_decode(pubkey_hex) else {
-        return;
-    };
-    // #223: cross-check the keyid against the declared pubkey so a
-    // trust-roots file that lists keyid `secp256k1:<A>` next to
-    // `pubkey_hex = <B>` (a copy-paste mix-up that would silently trust
-    // the wrong key) is rejected rather than loaded. Skip the entry on a
-    // mismatch — `verify-attest` then reports the keyid as
-    // `UnknownKeyid` instead of verifying against the wrong pubkey.
-    if !keyid_matches_pubkey(keyid, &pk_bytes) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "note: trust-root '{}' dropped — keyid does not match its pubkey_hex",
-            short_keyid(keyid)
-        );
-        return;
-    }
-    match kind {
-        "ed25519" if pk_bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&pk_bytes);
-            reg.add(keyid.to_owned(), TrustRoot::Ed25519PubKey(arr));
-        }
-        "p256-sec1" | "p256" => {
-            // mkit-attest default features enable algo-p256, so the
-            // variant is always present in the public API.
-            reg.add(keyid.to_owned(), TrustRoot::P256PubKeySec1(pk_bytes));
-        }
-        "secp256k1" | "secp256k1-sec1" => {
-            reg.add(keyid.to_owned(), TrustRoot::Secp256k1PubKeySec1(pk_bytes));
-        }
-        // BLS12-381 threshold cohort public key — see
-        // `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. The `bls12381-thr`
-        // prefix matches the canonical algorithm tag returned by
-        // `mkit_attest::Algorithm::prefix`. Pinned to the 96-byte
-        // MinSig G2 compressed encoding; anything else is dropped.
-        #[cfg(feature = "bls-threshold")]
-        "bls12381-thr" if pk_bytes.len() == mkit_attest::BLS_THRESHOLD_PUBLIC_KEY_SIZE => {
-            reg.add(
-                keyid.to_owned(),
-                TrustRoot::Bls12381ThresholdPubKey(pk_bytes),
-            );
-        }
-        _ => {
-            // Unknown kind — skip.
-        }
-    }
-}
-
-/// Cross-check (#223) that the keyid is consistent with the declared
-/// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
-///
-/// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.
-/// - `ed25519` / `secp256k1` / `p256` / `bls12381-thr:<hex>` — body is
-///   the raw lowercase-hex pubkey; verify it equals `pubkey_hex`.
-/// - Anything else (unknown prefix, no `:` separator) is left to the
-///   downstream `kind`-based loader and not cross-checked here — return
-///   `true` so forward-compatible keyids are not dropped.
-fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
-    let Some((prefix, body)) = keyid.split_once(':') else {
-        return true;
-    };
-    let body = body.to_ascii_lowercase();
-    match prefix {
-        "blake3" => {
-            let digest = mkit_core::hash::hash(pubkey);
-            body == mkit_core::hash::to_hex(&digest)
-        }
-        "ed25519" | "secp256k1" | "p256" | "bls12381-thr" => {
-            body == mkit_core::hash::to_hex_bytes(pubkey)
-        }
-        // Unknown / opaque (e.g. `sigstore:`) keyids carry no embedded
-        // pubkey to compare against.
-        _ => true,
-    }
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let hi = nibble(b[i])?;
-        let lo = nibble(b[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Some(out)
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => 10 + c - b'a',
-        b'A'..=b'F' => 10 + c - b'A',
-        _ => return None,
-    })
-}
-
 use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::trust_roots::keyid_matches_pubkey;
     use clap::Parser;
     use std::fs;
+    use std::path::Path;
 
     /// Test-only adapter: drive the clap-derive parser with just the
     /// trailing args.

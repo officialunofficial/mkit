@@ -328,14 +328,27 @@ unchanged.
 
 ## 5. Trust-roots scope
 
-`mkit verify-attest` loads its trust roots from
-`$XDG_CONFIG_HOME/mkit/trust-roots.toml` by default. The path is
-**not** repo-local for the same reason as §4: a hostile clone must
-not choose its own verifier.
+`mkit verify-attest` and `mkit verify --trusted` (issue #693) both load
+trust roots from `$XDG_CONFIG_HOME/mkit/trust-roots.toml` by default.
+The path is **not** repo-local for the same reason as §4: a hostile
+clone must not choose its own verifier. `mkit trust add/list/remove`
+manages the same file.
 
-A user can override the path on the command line for ad-hoc
-verification, but the override is per-invocation; there is no repo
-config knob that sets it.
+A user can override the path on the command line (`--trust-roots
+<path>`) for ad-hoc verification, but the override is per-invocation;
+there is no repo config knob that sets it. Both commands additionally
+refuse an in-repo trust-roots path unless `--trust-roots` was passed
+explicitly (`warn_if_unsafe_trust_roots` in
+`rust/crates/mkit-cli/src/commands/trust_roots.rs`) — a hostile clone
+that ships `.mkit/trust-roots.toml` listing attacker keys cannot get it
+selected implicitly.
+
+Without `--trusted`, `mkit verify` proves only that the object's
+embedded `signer` produced its signature — it does not consult trust
+roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
+attacker-controlled key is indistinguishable from a trusted one unless
+the caller opts into `--trusted`. `mkit clone`/`pull`/`fetch` do not run
+any verification by default; that remains a separate, tracked gap.
 
 ---
 
