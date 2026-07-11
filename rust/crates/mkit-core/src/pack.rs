@@ -246,7 +246,7 @@ impl PackWriter {
     ///
     /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
     /// if `bytes` compresses under zstd strictly smaller on the wire
-    /// (and is long enough to bother, see [`MIN_COMPRESS_LEN`]), this
+    /// (and is long enough to bother, see `MIN_COMPRESS_LEN`), this
     /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
     /// never need to opt in. Either way the returned/stored identity
     /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
