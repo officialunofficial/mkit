@@ -307,13 +307,15 @@ fn verify(args: &[String]) -> u8 {
 
 // ---------------------------------------------------------------- shared
 
-/// `(basename, blake3-hex, sha256-hex)` triples, sorted by basename,
-/// duplicates rejected. Both digests are of the identical artifact
-/// bytes (SPEC-ATTESTATIONS §4.2) — `sha256` is what lets cosign /
-/// `gh attestation verify` / the SLSA verifier read this attestation's
-/// subjects at all.
-fn subjects_for(paths: &[String]) -> Result<Vec<(String, String, String)>, (String, u8)> {
-    let mut out: Vec<(String, String, String)> = Vec::with_capacity(paths.len());
+/// `(basename, blake3-hex, sha256-hex)`. Both digests are of the
+/// identical artifact bytes (SPEC-ATTESTATIONS §4.2) — `sha256` is what
+/// lets cosign / `gh attestation verify` / the SLSA verifier read this
+/// attestation's subjects at all.
+type ArtifactSubject = (String, String, String);
+
+/// Subjects sorted by basename, duplicates rejected.
+fn subjects_for(paths: &[String]) -> Result<Vec<ArtifactSubject>, (String, u8)> {
+    let mut out: Vec<ArtifactSubject> = Vec::with_capacity(paths.len());
     for p in paths {
         let name = Path::new(p)
             .file_name()
@@ -339,7 +341,7 @@ fn subjects_for(paths: &[String]) -> Result<Vec<(String, String, String)>, (Stri
 
 /// Encode the in-toto Statement with predicate `{"tag": "<tag>"}`.
 fn encode_release_statement(
-    subjects: &[(String, String, String)],
+    subjects: &[ArtifactSubject],
     tag: &str,
 ) -> Result<Vec<u8>, mkit_attest::Error> {
     let predicate = jcs::encode(&jcs::Value::Object(vec![jcs::Member::new(
@@ -363,7 +365,7 @@ fn encode_release_statement(
 
 /// Full release-attestation check: DSSE signature against any of
 /// `pubkeys`, predicate type + tag match, and subject set EXACTLY equal
-/// to `expected` (basename + blake3). Returns the verifying keyid.
+/// to `expected` (basename + blake3 + sha256). Returns the verifying keyid.
 ///
 /// This is the same predicate `mkit self update` enforces — release.yml
 /// runs it right after signing so a key mismatch or a subject drift
@@ -372,7 +374,7 @@ fn verify_release_dsse(
     dsse_bytes: &[u8],
     pubkeys: &[[u8; 32]],
     tag: &str,
-    expected: &[(String, String)],
+    expected: &[ArtifactSubject],
 ) -> Result<String, String> {
     let mut registry = Registry::new();
     for pk in pubkeys {
@@ -404,13 +406,20 @@ fn verify_release_dsse(
     let Some(subject_arr) = stmt["subject"].as_array() else {
         return Err("statement has no subject array".to_owned());
     };
-    let mut actual: Vec<(String, String)> = Vec::with_capacity(subject_arr.len());
+    let mut actual: Vec<ArtifactSubject> = Vec::with_capacity(subject_arr.len());
     for s in subject_arr {
-        let (Some(name), Some(digest)) = (s["name"].as_str(), s["digest"]["blake3"].as_str())
-        else {
-            return Err("subject entry missing name or blake3 digest".to_owned());
+        let (Some(name), Some(blake3_digest), Some(sha256_digest)) = (
+            s["name"].as_str(),
+            s["digest"]["blake3"].as_str(),
+            s["digest"]["sha256"].as_str(),
+        ) else {
+            return Err("subject entry missing name, blake3 digest, or sha256 digest".to_owned());
         };
-        actual.push((name.to_owned(), digest.to_owned()));
+        actual.push((
+            name.to_owned(),
+            blake3_digest.to_owned(),
+            sha256_digest.to_owned(),
+        ));
     }
     actual.sort();
     if actual != expected {
@@ -532,7 +541,7 @@ mod tests {
         (seed, pk)
     }
 
-    fn sign_bytes(seed: &Zeroizing<[u8; 32]>, subjects: &[(String, String)], tag: &str) -> Vec<u8> {
+    fn sign_bytes(seed: &Zeroizing<[u8; 32]>, subjects: &[ArtifactSubject], tag: &str) -> Vec<u8> {
         let stmt = encode_release_statement(subjects, tag).unwrap();
         let mut signer = RepoKeySigner::from_seed_zeroizing(seed);
         let pae = pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt);
@@ -550,8 +559,12 @@ mod tests {
         .into_bytes()
     }
 
-    fn subj(name: &str, body: &[u8]) -> (String, String) {
-        (name.to_owned(), hash::to_hex(&hash::hash(body)))
+    fn subj(name: &str, body: &[u8]) -> ArtifactSubject {
+        (
+            name.to_owned(),
+            hash::to_hex(&hash::hash(body)),
+            statement::sha256_hex(body),
+        )
     }
 
     #[test]

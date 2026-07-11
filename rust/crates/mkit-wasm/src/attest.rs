@@ -8,7 +8,6 @@ use mkit_attest::algorithm::Algorithm;
 use mkit_attest::envelope::{Envelope, Sig};
 use mkit_attest::signer_k256::Secp256k1Signer;
 use mkit_attest::signer_p256::P256Signer;
-use mkit_attest::statement::{Statement, Subject, encode as encode_statement};
 use mkit_attest::verify::{Registry, TrustRoot, verify_envelope};
 use mkit_attest::webauthn::{WebAuthnPolicy, WebAuthnWrapping};
 use mkit_attest::{PAYLOAD_TYPE_IN_TOTO, Signer, signer_repo_key::RepoKeySigner};
@@ -79,8 +78,14 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
     }
 }
 
-/// Build a DSSE-wrapped in-toto v1 attestation over a commit hash, signed with the chosen algorithm.
+/// Build a DSSE-wrapped in-toto v1 attestation over a subject, signed with the chosen algorithm.
 ///
+/// * `subject_bytes` is the subject's serialised bytes — its `blake3` and
+///   paired `sha256` digest (SPEC-ATTESTATIONS §4.2) are both derived from
+///   these bytes, so the two can never disagree. For a real commit this is
+///   the commit's serialised bytes; callers binding a non-commit subject
+///   (e.g. a derived-key identity binding) pass whatever bytes that
+///   subject's identifier is itself the hash of.
 /// * `predicate_type` is a URI like `https://example.com/Review/v1`.
 /// * `predicate_jcs` is the predicate body as already-canonical JCS bytes (must start with `{` and end with `}`).
 /// * `seed_hex` is a 32-byte seed. How it's interpreted depends on `algo`:
@@ -91,26 +96,24 @@ pub fn attest_keypair(seed_hex: &str, algo: &str) -> Result<AttestKeyPairJs, JsV
 /// Returns `{ envelope_json, keyid, attestation_id_hex }`. The keyid's prefix reveals which algorithm was used.
 #[wasm_bindgen]
 pub fn attest_build(
-    commit_hash_hex: &str,
+    subject_bytes: &[u8],
     predicate_type: &str,
     predicate_jcs: &[u8],
     seed_hex: &str,
     algo: &str,
 ) -> Result<AttestationJs, JsValue> {
-    let _ = parse_hash_hex(commit_hash_hex)?;
+    let subject_hash = hash(subject_bytes);
     // # Zeroization — see `attest_keypair`.
     let seed: Zeroizing<[u8; 32]> = Zeroizing::new(parse_hash_hex(seed_hex)?);
     let alg = parse_algo(algo)?;
 
-    let stmt = Statement {
-        subjects: vec![Subject {
-            name: Some("commit".to_string()),
-            digest_blake3_hex: commit_hash_hex.to_string(),
-        }],
-        predicate_type: predicate_type.to_string(),
+    let statement_json = mkit_attest::statement::for_commit(
+        &subject_hash,
+        subject_bytes,
+        predicate_type,
         predicate_jcs,
-    };
-    let statement_json = encode_statement(&stmt).map_err(|e| js_err(format!("statement: {e}")))?;
+    )
+    .map_err(|e| js_err(format!("statement: {e}")))?;
     let payload = statement_json.into_bytes();
 
     let mut env = Envelope {
@@ -284,11 +287,11 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
 // ---------------------------------------------------------------------
 
 /// Compute the DSSE PAE for an (unsigned) in-toto attestation over a
-/// commit hash. This is the exact byte string a browser passkey MUST
+/// subject. This is the exact byte string a browser passkey MUST
 /// place in its `WebAuthn` `challenge` so the resulting assertion
 /// verifies under [`verify_webauthn_wrapping`].
 ///
-/// Same `(commit_hash_hex, predicate_type, predicate_jcs)` inputs as
+/// Same `(subject_bytes, predicate_type, predicate_jcs)` inputs as
 /// [`attest_build`], minus the key — the PAE is signer-independent, so a
 /// passkey and a software key over the same statement bind to identical
 /// bytes. Returns the raw PAE; the JS side passes it straight to
@@ -299,24 +302,21 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
 /// small (see the research note's "challenge sizing" fork).
 ///
 /// # Errors
-/// `commit_hash_hex` is not 64 lowercase hex chars, or the statement
-/// fails to encode.
+/// The statement fails to encode.
 #[wasm_bindgen]
 pub fn attest_pae(
-    commit_hash_hex: &str,
+    subject_bytes: &[u8],
     predicate_type: &str,
     predicate_jcs: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
-    let _ = parse_hash_hex(commit_hash_hex)?;
-    let stmt = Statement {
-        subjects: vec![Subject {
-            name: Some("commit".to_string()),
-            digest_blake3_hex: commit_hash_hex.to_string(),
-        }],
-        predicate_type: predicate_type.to_string(),
+    let subject_hash = hash(subject_bytes);
+    let statement_json = mkit_attest::statement::for_commit(
+        &subject_hash,
+        subject_bytes,
+        predicate_type,
         predicate_jcs,
-    };
-    let statement_json = encode_statement(&stmt).map_err(|e| js_err(format!("statement: {e}")))?;
+    )
+    .map_err(|e| js_err(format!("statement: {e}")))?;
     let env = Envelope {
         payload_type: PAYLOAD_TYPE_IN_TOTO.to_string(),
         payload: statement_json.into_bytes(),
@@ -611,13 +611,12 @@ mod tests {
     /// this returned `false` (keyid mismatch → lookup miss).
     #[test]
     fn attest_verify_accepts_uncompressed_p256_pubkey() {
-        let commit = to_hex(&hash(b"commit-bytes"));
         let mut seed = [0u8; 32];
         seed[31] = 7;
         let seed_hex = to_hex(&seed);
 
         let att = attest_build(
-            &commit,
+            b"commit-bytes",
             "https://example/predicate",
             b"{}",
             &seed_hex,

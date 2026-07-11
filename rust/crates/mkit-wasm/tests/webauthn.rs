@@ -34,7 +34,7 @@ const SECRET: [u8; 32] = [
     0xd1, 0xc0, 0xbf, 0xb8, 0xa7, 0x96, 0x83, 0x72, 0x61, 0x50, 0x40, 0x3a, 0x2b, 0x1c, 0x0d, 0x0e,
 ];
 
-const COMMIT: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const COMMIT_BYTES: &[u8] = b"webauthn-demo-commit-fixture";
 const PREDICATE_TYPE: &str = "https://mkit.sh/Review/v1";
 const PREDICATE: &[u8] = br#"{"approved":true}"#;
 const RP_ID: &str = "mkit.sh";
@@ -43,7 +43,7 @@ const ORIGIN: &str = "https://mkit.sh";
 /// Build a complete forged passkey assertion over the attestation PAE,
 /// returning everything the wasm verify functions consume.
 fn forge_assertion() -> (Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>) {
-    let pae = attest_pae(COMMIT, PREDICATE_TYPE, PREDICATE).unwrap();
+    let pae = attest_pae(COMMIT_BYTES, PREDICATE_TYPE, PREDICATE).unwrap();
 
     // clientDataJSON with challenge == base64url-nopad(PAE) — exactly
     // what the verifier re-derives. Built via the shared mkit-attest
@@ -103,7 +103,7 @@ fn challenge_not_bound_to_pae_is_rejected() {
     // binding must fail. Error path builds a JsError (panics natively),
     // so we assert the panic rather than an Err value.
     let (_unused, auth, cdj, pk, sig) = forge_assertion();
-    let tampered = attest_pae(COMMIT, PREDICATE_TYPE, br#"{"approved":false}"#).unwrap();
+    let tampered = attest_pae(COMMIT_BYTES, PREDICATE_TYPE, br#"{"approved":false}"#).unwrap();
     let result = std::panic::catch_unwind(|| {
         let _ = verify_webauthn_wrapping(&tampered, &auth, &cdj, &pk, &sig);
     });
@@ -115,8 +115,8 @@ fn pae_is_signer_independent_and_stable() {
     // The challenge a passkey signs is the same bytes a software key
     // would sign over the same statement — proving a passkey assertion
     // and `attest_build` bind to identical content.
-    let a = attest_pae(COMMIT, PREDICATE_TYPE, PREDICATE).unwrap();
-    let b = attest_pae(COMMIT, PREDICATE_TYPE, PREDICATE).unwrap();
+    let a = attest_pae(COMMIT_BYTES, PREDICATE_TYPE, PREDICATE).unwrap();
+    let b = attest_pae(COMMIT_BYTES, PREDICATE_TYPE, PREDICATE).unwrap();
     assert_eq!(a, b, "attest_pae must be deterministic");
     assert!(a.starts_with(b"DSSEv1 "), "PAE carries the DSSE prologue");
     // And the challenge round-trips through base64url-nopad as the

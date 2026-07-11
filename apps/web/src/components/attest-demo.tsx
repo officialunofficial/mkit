@@ -20,9 +20,11 @@ const ALICE_ECDSA_SEED = '4a7c6b5a493827160908070605040302d1c0bfb8a7968372615040
 // A second identity. A low value is in range for every curve (and fine for Ed25519).
 const MALLORY_SEED = '0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20'
 
-// The two commits the attestation can point at.
-const COMMIT_A = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
-const COMMIT_B = '1111111122222222333333334444444455555555666666667777777788888888'
+// The two commits the attestation can point at (demo stand-ins, not real
+// commit objects — their "hash" is genuinely blake3(bytes) below, just not
+// a real commit's serialised bytes).
+const COMMIT_A_BYTES = TEXT_ENCODER.encode('commit-a-demo')
+const COMMIT_B_BYTES = TEXT_ENCODER.encode('commit-b-demo')
 
 // What alice actually signed. Editing the claim or repointing the subject in the
 // UI diverges from this, so the signature no longer matches.
@@ -41,6 +43,11 @@ function safe<T>(fn: () => T): Safe<T> {
 
 export function AttestDemo() {
   const api = useMkit()
+  // Real blake3 hashes of the demo byte fixtures above (not literals) — so
+  // this demo's "commit hash" is genuinely computed, just not from a real
+  // commit object's bytes.
+  const COMMIT_A = useMemo(() => api.blake3_hex(COMMIT_A_BYTES), [api])
+  const COMMIT_B = useMemo(() => api.blake3_hex(COMMIT_B_BYTES), [api])
   const [algo, setAlgo] = useState<Algo>('ed25519')
   const [claim, setClaim] = useState(ORIGINAL_CLAIM)
   const [subject, setSubject] = useState(COMMIT_A)
@@ -54,7 +61,10 @@ export function AttestDemo() {
   // algorithm changes — NOT when the user edits the claim or subject, which are
   // the verifier's view used to demonstrate tampering.
   const signed = useMemo(
-    () => safe(() => api.attest_build(COMMIT_A, PREDICATE_TYPE, TEXT_ENCODER.encode(ORIGINAL_CLAIM), aliceSeed, algo)),
+    () =>
+      safe(() =>
+        api.attest_build(COMMIT_A_BYTES, PREDICATE_TYPE, TEXT_ENCODER.encode(ORIGINAL_CLAIM), aliceSeed, algo),
+      ),
     [api, aliceSeed, algo],
   )
 

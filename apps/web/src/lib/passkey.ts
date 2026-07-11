@@ -17,7 +17,7 @@
 // a single prompt vouch for both the seed AND the Ed25519 pubkey it derived.
 
 import { p256 } from '@noble/curves/p256'
-import { bytesToHex } from '../components/use-mkit'
+import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
 /** Fixed 26-byte DER prefix for a P-256 (secp256r1) SPKI public key, per RFC 5480. */
@@ -329,11 +329,11 @@ export async function attestIdentityBinding(
 ): Promise<{ authenticatorDataHex: string; clientDataJSON: string; paeHex: string }> {
   if (!webauthnAvailable()) throw new Error("This browser can't use passkeys here.")
 
-  // A tiny in-toto-style predicate binding the Ed25519 key; commit hash is a
-  // placeholder "subject" (the binding is over the predicate, not a real commit).
+  // A tiny in-toto-style predicate binding the Ed25519 key; the subject is
+  // the Ed25519 pubkey's own raw bytes (the binding is over the predicate,
+  // not a real commit — there is no commit here to attest to).
   const predicate = TEXT_ENCODER.encode(JSON.stringify({ ed25519_pubkey: ed25519PubkeyHex }))
-  const commitHash = ed25519PubkeyHex.padEnd(64, '0').slice(0, 64)
-  const pae = api.attest_pae(commitHash, 'https://mkit.sh/EdBinding/v1', predicate)
+  const pae = api.attest_pae(hexToBytes(ed25519PubkeyHex), 'https://mkit.sh/EdBinding/v1', predicate)
 
   // Same salt `deriveEd25519Seed` uses — carried purely so this ceremony is
   // indistinguishable from an unlock prompt; the PRF result itself is unused.
