@@ -12,7 +12,7 @@ use connectrpc::{ConnectRpcService, Router};
 use http_body_util::{BodyExt, Full};
 use tower::ServiceExt;
 use worker::send::SendFuture;
-use worker::{event, Context, Env, Method, Request, Response, Result};
+use worker::{Context, Env, Method, Request, Response, Result, event};
 
 pub mod auth;
 pub mod commit_index;
@@ -99,8 +99,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
 /// The Connect `invalid_argument` 400 returned when a request body exceeds the cap.
 fn body_too_large() -> Result<Response> {
-    let payload =
-        format!("{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}");
+    let payload = format!(
+        "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
+    );
     let mut resp = Response::error(payload, 400)?;
     let _ = resp.headers_mut().set("Content-Type", "application/json");
     Ok(resp)

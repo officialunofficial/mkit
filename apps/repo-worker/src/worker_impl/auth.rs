@@ -14,10 +14,10 @@
 // The verified writer pubkey is stashed on `ctx.extensions` as `AuthorPubkey`
 // so UpdateRef can attribute the RefEvent without re-parsing headers.
 
-use connectrpc::{async_trait, ConnectError, Interceptor, Next};
 use connectrpc::interceptor::{UnaryRequest, UnaryResponse};
+use connectrpc::{ConnectError, Interceptor, Next, async_trait};
 
-use crate::envelope::{verify_envelope, EnvelopeHeaders, VerifyEnvelope};
+use crate::envelope::{EnvelopeHeaders, VerifyEnvelope, verify_envelope};
 use crate::hashing::blake3_hex;
 
 /// The verified Ed25519 writer pubkey (64-hex), placed on `ctx.extensions`
@@ -50,7 +50,10 @@ fn requires_write_auth(procedure: &str) -> bool {
 /// Normalize an incoming hex header: strip an optional `0x`, lowercase.
 fn normalize_hex(v: &str) -> String {
     let v = v.trim();
-    let v = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")).unwrap_or(v);
+    let v = v
+        .strip_prefix("0x")
+        .or_else(|| v.strip_prefix("0X"))
+        .unwrap_or(v);
     v.to_ascii_lowercase()
 }
 
@@ -91,10 +94,16 @@ impl Interceptor for AuthInterceptor {
 
         let now = now_ms();
         match verify_envelope(&procedure, &actual_body_digest, now, &headers) {
-            VerifyEnvelope::Ok { public_key, idempotency_key, .. } => {
+            VerifyEnvelope::Ok {
+                public_key,
+                idempotency_key,
+                ..
+            } => {
                 let mut req = req;
                 req.ctx.extensions_mut().insert(AuthorPubkey(public_key));
-                req.ctx.extensions_mut().insert(IdempotencyKey(idempotency_key));
+                req.ctx
+                    .extensions_mut()
+                    .insert(IdempotencyKey(idempotency_key));
                 next.run(req).await
             }
             VerifyEnvelope::Err { status: 400, error } => {

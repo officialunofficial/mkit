@@ -147,5 +147,9 @@ pub(super) fn walk(sql: &SqlStorage, head: String, cap: usize) -> ListCommitsRes
         }
         current = parent;
     }
-    ListCommitsResp { commits, next_cursor, complete }
+    ListCommitsResp {
+        commits,
+        next_cursor,
+        complete,
+    }
 }

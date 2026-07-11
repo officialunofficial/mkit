@@ -145,8 +145,14 @@ mod tests {
     // --- evaluate_cas conformance vectors ------------------------------------
     #[test]
     fn any_clobbers() {
-        assert_eq!(evaluate_cas(Some(ID_A), RefExpectation::Any, None), CasDecision::Committed);
-        assert_eq!(evaluate_cas(None, RefExpectation::Any, None), CasDecision::Committed);
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Any, None),
+            CasDecision::Committed
+        );
+        assert_eq!(
+            evaluate_cas(None, RefExpectation::Any, None),
+            CasDecision::Committed
+        );
         assert!(matches!(
             evaluate_cas(Some(ID_A), RefExpectation::Any, Some(ID_A)),
             CasDecision::Invalid(_)
@@ -155,7 +161,10 @@ mod tests {
 
     #[test]
     fn missing_create_only() {
-        assert_eq!(evaluate_cas(None, RefExpectation::Missing, None), CasDecision::Committed);
+        assert_eq!(
+            evaluate_cas(None, RefExpectation::Missing, None),
+            CasDecision::Committed
+        );
         assert_eq!(
             evaluate_cas(Some(ID_A), RefExpectation::Missing, None),
             CasDecision::Conflict(ConflictReason::Exists)
@@ -202,7 +211,15 @@ mod tests {
         for r in ["demo", "room-1", "a.b_c", "A1", &"x".repeat(64)] {
             assert!(is_valid_room(r), "should accept {r:?}");
         }
-        for r in ["", "a/b", "a b", "a\\b", "a@b", &"x".repeat(65), "refs/heads"] {
+        for r in [
+            "",
+            "a/b",
+            "a b",
+            "a\\b",
+            "a@b",
+            &"x".repeat(65),
+            "refs/heads",
+        ] {
             assert!(!is_valid_room(r), "should reject {r:?}");
         }
     }

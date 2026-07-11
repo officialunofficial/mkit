@@ -18,25 +18,25 @@ use worker::send::SendFuture;
 use worker::{Env, Method, Request as WorkerRequest, RequestInit};
 
 use super::auth::{AuthorPubkey, IdempotencyKey};
-use crate::hashing::object_id_matches;
-use crate::refs::{
-    is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
-};
-use crate::proto::mkit::repo::v1::{
-    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListCommitsRequest,
-    ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
-    ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
-    PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
-    RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
-};
-use std::collections::HashSet;
 use super::refstore::WatchFrame;
 use super::wire::{
     CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
     ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
     RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
+use crate::hashing::object_id_matches;
+use crate::proto::mkit::repo::v1::{
+    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
+    ListCommitsRequest, ListCommitsResponse, ListMessagesRequest, ListMessagesResponse,
+    ListReactionsRequest, ListReactionsResponse, ListRefsRequest, ListRefsResponse,
+    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest,
+    ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse,
+    WatchRefsRequest,
+};
+use crate::refs::{
+    is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
+};
+use std::collections::HashSet;
 
 const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
@@ -70,7 +70,9 @@ fn check_room(room: &str) -> Result<(), connectrpc::ConnectError> {
     if is_valid_room(room) {
         Ok(())
     } else {
-        Err(ce_invalid("room is empty or invalid (^[A-Za-z0-9._-]{1,64}$)"))
+        Err(ce_invalid(
+            "room is empty or invalid (^[A-Za-z0-9._-]{1,64}$)",
+        ))
     }
 }
 
@@ -93,7 +95,11 @@ fn message_key(room: &str, id: &[u8]) -> String {
 /// true when this call wrote (key was absent), false when it already existed.
 /// Shared by PutObject and PostMessage so the idempotent-store contract lives in
 /// ONE place.
-async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, connectrpc::ConnectError> {
+async fn put_addressed(
+    env: &Env,
+    key: &str,
+    bytes: Vec<u8>,
+) -> Result<bool, connectrpc::ConnectError> {
     let bucket = env
         .bucket(STORAGE_BUCKET)
         .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
@@ -116,7 +122,11 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, con
 /// indexes nothing (the index is backfillable), never failing the update.
 async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<CommitMetaWire> {
     let bucket = env.bucket(STORAGE_BUCKET).ok()?;
-    let obj = bucket.get(&object_key(room, new_id)).execute().await.ok()??;
+    let obj = bucket
+        .get(&object_key(room, new_id))
+        .execute()
+        .await
+        .ok()??;
     let bytes = obj.body()?.bytes().await.ok()?;
     let m = crate::commit_log::extract_commit_meta(&bytes)?;
     // Compute the borrowing fields before moving the owned `String`s out of `m`.
@@ -165,7 +175,8 @@ async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
 
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_body(Some(payload.into()));
+    init.with_method(Method::Post)
+        .with_body(Some(payload.into()));
     let req = WorkerRequest::new_with_init(&format!("https://refstore{op}"), &init)
         .map_err(|e| ce_internal(e.to_string()))?;
 
@@ -330,10 +341,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         }
 
         // The verified writer pubkey stashed by the auth interceptor.
-        let author = ctx
-            .extensions()
-            .get::<AuthorPubkey>()
-            .map(|a| a.0.clone());
+        let author = ctx.extensions().get::<AuthorPubkey>().map(|a| a.0.clone());
         // The request's Idempotency-Key (verified in the envelope) — the DO
         // uses it, together with `author` and `name`, to dedupe a replayed
         // signed UpdateRef into its original result instead of re-running the
@@ -389,8 +397,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: ListResp =
-                do_call(&env, &room, "/list", &ListReq { prefix }).await?;
+            let resp: ListResp = do_call(&env, &room, "/list", &ListReq { prefix }).await?;
             let refs = resp
                 .refs
                 .into_iter()
@@ -485,7 +492,12 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 &env,
                 &room,
                 "/post",
-                &PostReq { id: hex::encode(id), author, text, idem },
+                &PostReq {
+                    id: hex::encode(id),
+                    author,
+                    text,
+                    idem,
+                },
             )
             .await?;
 
@@ -499,7 +511,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 // Only surface a content address for a message that was actually
                 // stored; a rejected post returns an empty id so a client keying
                 // off message_id can't mistake a refusal for a stored message.
-                message_id: Some(if resp.accepted { id.to_vec() } else { Vec::new() }),
+                message_id: Some(if resp.accepted {
+                    id.to_vec()
+                } else {
+                    Vec::new()
+                }),
                 accepted: Some(resp.accepted),
                 rate_limited: Some(resp.rate_limited),
                 ..Default::default()
@@ -521,7 +537,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: MessagesResp = do_call(&env, &room, "/messages", &MessagesReq { limit }).await?;
+            let resp: MessagesResp =
+                do_call(&env, &room, "/messages", &MessagesReq { limit }).await?;
             let messages = resp
                 .messages
                 .into_iter()
@@ -558,7 +575,9 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         // reactions table's cardinality and stop arbitrary content being
         // persisted + broadcast to every viewer.
         if !crate::chat::is_valid_target_id(&target) {
-            return Err(ce_invalid("target_id must be a 64-char lowercase-hex feed-item id"));
+            return Err(ce_invalid(
+                "target_id must be a 64-char lowercase-hex feed-item id",
+            ));
         }
         if !crate::chat::is_allowed_emoji(&emoji) {
             return Err(ce_invalid("emoji is not in the allowed reaction set"));
@@ -568,7 +587,9 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .extensions()
             .get::<AuthorPubkey>()
             .map(|a| a.0.clone())
-            .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+            .ok_or_else(|| {
+                connectrpc::ConnectError::unauthenticated("missing verified author pubkey")
+            })?;
         // The request's Idempotency-Key — the DO dedupes a replayed signed React
         // (a toggle) into its original result rather than flipping state again.
         let idem = ctx
@@ -579,8 +600,18 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: ReactResp =
-                do_call(&env, &room, "/react", &ReactReq { target, emoji, author, idem }).await?;
+            let resp: ReactResp = do_call(
+                &env,
+                &room,
+                "/react",
+                &ReactReq {
+                    target,
+                    emoji,
+                    author,
+                    idem,
+                },
+            )
+            .await?;
             Ok(Response::new(ReactResponse {
                 active: Some(resp.active),
                 count: Some(resp.count),
@@ -656,7 +687,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 "/list-commits",
                 &ListCommitsReq {
                     r#ref: ref_name.clone(),
-                    start_id: if start_id.is_empty() { String::new() } else { hex::encode(&start_id) },
+                    start_id: if start_id.is_empty() {
+                        String::new()
+                    } else {
+                        hex::encode(&start_id)
+                    },
                     page_size: cap as u32,
                 },
             )
@@ -680,8 +715,15 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             let head: Vec<u8> = if !start_id.is_empty() {
                 start_id
             } else {
-                let resp: GetResp =
-                    do_call(&env, &room, "/get", &GetReq { name: ref_name.clone() }).await?;
+                let resp: GetResp = do_call(
+                    &env,
+                    &room,
+                    "/get",
+                    &GetReq {
+                        name: ref_name.clone(),
+                    },
+                )
+                .await?;
                 if !resp.exists {
                     return Ok(Response::new(ListCommitsResponse::default()));
                 }
@@ -745,7 +787,10 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     &env,
                     &room,
                     "/record-commits",
-                    &RecordCommitsReq { r#ref: ref_name, commits: rows.clone() },
+                    &RecordCommitsReq {
+                        r#ref: ref_name,
+                        commits: rows.clone(),
+                    },
                 )
                 .await;
             }
