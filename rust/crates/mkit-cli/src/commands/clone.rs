@@ -44,6 +44,12 @@ struct CloneOpts {
     url: String,
     /// Destination directory. Defaults to the final URL segment.
     dir: Option<String>,
+    /// Skip Ed25519 signature verification on fetched commits/remixes/tags
+    /// (issue #692). Verification is ON by default and fails closed on an
+    /// unsigned or invalid signature — this flag, or the user-scoped
+    /// `pull.require_signed = false` config, is the only way to opt out.
+    #[arg(long = "no-verify-signatures")]
+    no_verify_signatures: bool,
 }
 
 #[must_use]
@@ -125,14 +131,24 @@ pub fn run(args: &[String]) -> u8 {
         Ok(merged) => merged,
         Err(e) => return emit_err(&format!("read config: {e}"), exit::CONFIG_ERROR),
     };
+    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
+    // or the user-scoped `pull.require_signed = false` config opted out.
+    // `merged` only ever carries user-scoped + built-in values here (the
+    // repo config we just wrote holds only `remote_endpoint`/`remote_type`),
+    // so a hostile remote cannot influence this via its own repo config —
+    // there isn't one yet.
+    let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();
     let pull_outcome = match remote_dispatch::open_with_config(url, &merged) {
-        Ok(tx) => remote_dispatch::pull_all(&target, tx.as_ref(), "default"),
+        Ok(tx) => remote_dispatch::pull_all_with(&target, tx.as_ref(), "default", require_signed),
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
     let n = match pull_outcome {
         Ok(n) => n,
         Err(remote_dispatch::DispatchError::Interrupted) => {
             return emit_err("clone: interrupted", exit::TEMPFAIL);
+        }
+        Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
+            return emit_err(&format!("pull: {e}"), exit::DATAERR);
         }
         Err(e) => return emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
     };

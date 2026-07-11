@@ -83,6 +83,19 @@ mkit defends:
   `.mkit/config` cannot select which key file is read, which binary
   is spawned as an external signer, which keystore backend/key ref is
   used, or what argv an external signer gets.
+- Unsigned/forged history on `clone`/`pull`/`fetch`. Every
+  commit/remix/tag a fetch newly introduces is run through
+  `mkit_core::sign::{verify_commit,verify_remix,verify_tag}` — the same
+  check `mkit verify <rev>` runs manually — before the remote-tracking
+  ref is published; a structurally invalid or missing signature aborts
+  the fetch and leaves local state untouched (issue #692). This is a
+  default, not a guarantee against every key an attacker could produce:
+  it proves the signature is well-formed over the object's own bytes,
+  not that the signing key is one the user trusts (no trust-root /
+  authorized-signer binding yet — separate follow-up work). Opt-out is
+  explicit and user-scoped only (`--no-verify-signatures` / the
+  user-scoped `pull.require_signed = false` config, never settable from
+  a cloned repo's own `.mkit/config` — see §4).
 
 mkit does NOT defend:
 
@@ -268,6 +281,7 @@ ignored.
 | `ssh.user_known_hosts_file`         | **User**  | Selects which file is the source of trust.                |
 | `ssh.identity_file`                 | **User**  | Selects which private key SSH presents.                   |
 | `user.identity`                     | **User**  | Author identity; cannot be repo-selected for signed data. |
+| `pull.require_signed`               | **User**  | Disables post-fetch signature verification (§3.1, #692).  |
 | `default_branch`                    | Repo      | UX default. No security weight.                           |
 | `remote_endpoint`                   | Repo      | Address; trust is on the user's transport config.         |
 | `remote_bucket`                     | Repo      | Address.                                                  |

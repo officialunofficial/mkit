@@ -19,6 +19,13 @@ use crate::remote_dispatch;
 struct PullOpts {
     /// Named remote to pull from (default: the flat default remote).
     remote: Option<String>,
+    /// Skip Ed25519 signature verification on newly-fetched commits/
+    /// remixes/tags (issue #692). Verification is ON by default and fails
+    /// closed on an unsigned or invalid signature — this flag, or the
+    /// user-scoped `pull.require_signed = false` config, is the only way
+    /// to opt out. Not settable from repo-scoped config.
+    #[arg(long = "no-verify-signatures")]
+    no_verify_signatures: bool,
 }
 
 #[must_use]
@@ -59,20 +66,29 @@ pub fn run(args: &[String]) -> u8 {
     let old_tip = branch
         .as_deref()
         .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
+    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
+    // or the user-scoped `pull.require_signed = false` config opted out.
+    let require_signed = !opts.no_verify_signatures && cfg.merged.pull_require_signed_or_default();
     match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
-        Ok(tx) => match remote_dispatch::pull_all(&cwd, tx.as_ref(), &resolved.name) {
-            Ok(_) => {
-                let new_tip = branch
-                    .as_deref()
-                    .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
-                report_pull(&layout, endpoint, old_tip, new_tip);
-                exit::OK
+        Ok(tx) => {
+            match remote_dispatch::pull_all_with(&cwd, tx.as_ref(), &resolved.name, require_signed)
+            {
+                Ok(_) => {
+                    let new_tip = branch
+                        .as_deref()
+                        .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
+                    report_pull(&layout, endpoint, old_tip, new_tip);
+                    exit::OK
+                }
+                Err(remote_dispatch::DispatchError::Interrupted) => {
+                    emit_err("pull: interrupted", exit::TEMPFAIL)
+                }
+                Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
+                    emit_err(&format!("pull: {e}"), exit::DATAERR)
+                }
+                Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
             }
-            Err(remote_dispatch::DispatchError::Interrupted) => {
-                emit_err("pull: interrupted", exit::TEMPFAIL)
-            }
-            Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
-        },
+        }
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
             emit_err(&msg, exit::CONFIG_ERROR)
         }
