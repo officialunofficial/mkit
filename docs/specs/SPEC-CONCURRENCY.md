@@ -7,10 +7,9 @@ audience: implementers of any lock-taking mkit-core/mkit-cli code path; reviewer
 
 # SPEC-CONCURRENCY — the total mkit lock order
 
-Status: **Normative** for lock naming, location, and acquisition order;
-**Draft** because §3.2/§3.3's per-branch history lock and §3.3's
-backfill-race fix are not yet on `main` — see the Implementation Status
-note below. See SPEC-CONVENTIONS §2 for what draft/normative mean.
+Status: **Normative** for lock naming, location, and acquisition order.
+**Draft** because §3.1 documents an open coordination gap this document
+does not resolve. See SPEC-CONVENTIONS §2 for what draft/normative mean.
 
 Scope: this document is the single owner of the total lock order across
 *every* lock any mkit process takes — repo-local locks defined in
@@ -19,18 +18,6 @@ and the file-transport's own CAS lock defined in SPEC-TRANSPORT. Any
 other `SPEC-*.md` document that mentions a lock cross-references this
 one rather than restating the order; this document does not restate
 those other documents' non-locking content.
-
-### Implementation Status
-
-Everything in §2's inventory except the two rows marked **(pending
-Epic #634 / PR #668)** is shipped on `main` today. Those two rows —
-the per-branch `refs-history-<branch>.lock` (replacing a single
-repo-wide `refs-history.lock`) and the per-ref `refs-<ref>.lock`
-guarding `cas_write` — plus the §3.3 backfill-race fix, ship together
-in PR #668. Until that PR merges, `main` has: one repo-wide
-`refs-history.lock` (not per-branch), no lock around `cas_write` at
-all (a real, currently open race between e.g. `branch -m` and
-`commit`), and the §3.3 backfill race unfixed.
 
 ---
 
@@ -50,8 +37,8 @@ document points here.
 |---|---|---|---|---|
 | `worktree.lock` | each tree's state dir | per-tree | that tree's worktree/index read-modify-write | SPEC-WORKTREE §4.3 |
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
-| `refs-history-<branch>.lock` | common dir | per-branch **(pending #668; single repo-wide `refs-history.lock` on `main` today)** | ref-write + history-MMR-append critical section for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
-| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref **(pending #668; unlocked on `main` today)** | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.2 |
+| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ref-write + history-MMR-append critical section for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
+| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.2 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own `Match` CAS critical section (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** — see
@@ -69,16 +56,15 @@ not coordinate with `worktree.lock`, `worktrees.lock`, or
 no knowledge of those locks or of the `RepoLayout` abstraction they're
 keyed on.
 
-**This is a real, acknowledged gap, not a rule that closes it**: a
-local `mkit commit`/`checkout`/`gc` running directly against a
-directory that is *simultaneously* being served by `mkit serve` (a
-file-transport listener) over that same directory is not coordinated
-against by the transport's lock, and vice versa. mkit's supported
-deployment shape for the file transport is a bare/shared remote a
-worktree-owning process does not also mutate directly — see
-SPEC-TRANSPORT's scope note. Running local worktree commands directly
-against a live `mkit serve` root is unsupported; nothing currently
-detects or rejects it.
+This is a real, permanent gap, not a rule that closes it: a local
+`mkit commit`/`checkout`/`gc` running directly against a directory that
+is *simultaneously* being served by `mkit serve` (a file-transport
+listener) over that same directory is not coordinated against by the
+transport's lock, and vice versa. mkit's supported deployment shape for
+the file transport is a bare/shared remote a worktree-owning process
+does not also mutate directly — see SPEC-TRANSPORT's scope note.
+Running local worktree commands directly against a live `mkit serve`
+root is unsupported; nothing detects or rejects it.
 
 ### 3.2 Recovery-log `record`/`expire` synchronization
 
@@ -98,10 +84,10 @@ dedicated lock of their own. Correctness instead relies on lock
 Because gc's lock set always contains whichever single `worktree.lock`
 a producer would be holding, a producer's `record` append and gc's
 `expire` rewrite can never interleave — without a separate recovery-log
-lock being necessary. This is deliberate: `ops::recovery`'s module doc
-calls this "the repo lock" generically rather than naming a specific
-lock file, precisely because the guarantee comes from lock containment,
-not from a dedicated primitive.
+lock being necessary. `ops::recovery`'s module doc calls this "the repo
+lock" generically rather than naming a specific lock file, precisely
+because the guarantee comes from lock containment, not from a
+dedicated primitive.
 
 ### 3.3 History-MMR empty-journal-then-backfill race
 
@@ -111,21 +97,20 @@ never-before-journaled branch is written (a v0.1.x-era repo enabling
 `history-mmr`, or a crash on a branch's first tracked write) — see
 SPEC-HISTORY-PROOF §4.5.
 
-**The fix (Epic #634 / PR #668, issue #638 / INV-18):** the
-empty-journal check and the backfill loop both run *inside*
-`refs-history-<branch>.lock`'s critical section (via
-`mkit_core::refs::update_ref_with_history_and_backfill`), not before
-it. Only the first writer to acquire the lock for a given branch can
-observe an empty journal and perform the backfill; every subsequent
-concurrent writer reopens the journal after acquiring the same lock
-and finds it already non-empty, skipping straight to its own append.
+The empty-journal check and the backfill loop MUST both run *inside*
+`refs-history-<branch>.lock`'s critical section (`mkit_core::refs
+::update_ref_with_history_and_backfill`), never before it. Only the
+first writer to acquire the lock for a given branch may observe an
+empty journal and perform the backfill; every subsequent concurrent
+writer reopens the journal after acquiring the same lock and finds it
+already non-empty, skipping straight to its own append.
 
-**Before the fix (still true on `main` today):** the check and backfill
-ran before any lock was acquired. Two ref-only writers on the same
-never-before-journaled branch — e.g. two concurrent `update-ref` calls,
-which deliberately skip `worktree.lock` — could both observe an empty
-journal and both independently backfill, writing to overlapping journal
-leaf positions from two disagreeing in-memory MMR states.
+Checking before the lock is acquired is insufficient: two ref-only
+writers on the same never-before-journaled branch — e.g. two
+concurrent `update-ref` calls, which deliberately skip `worktree.lock`
+— could both observe an empty journal and both independently backfill,
+writing to overlapping journal leaf positions from two disagreeing
+in-memory MMR states (invariant INV-18).
 
 ## 4. Global lock order and per-command lock sets
 
@@ -154,8 +139,8 @@ the history lock):
 
 A process that violates this order and blocks on two locks acquired in
 opposite order by two racing processes will each time out independently
-(`repo_lock`'s default 5s timeout, §DEFAULT_TIMEOUT) rather than
-deadlock indefinitely — but SHOULD NOT rely on the timeout as a
-substitute for correct ordering; a timed-out multi-lock command leaves
-its already-acquired locks released (RAII drop) but may leave
-mid-sequence on-disk state requiring the caller to retry.
+(`repo_lock`'s default 5s timeout) rather than deadlock indefinitely —
+but SHOULD NOT rely on the timeout as a substitute for correct
+ordering; a timed-out multi-lock command leaves its already-acquired
+locks released (RAII drop) but may leave mid-sequence on-disk state
+requiring the caller to retry.
