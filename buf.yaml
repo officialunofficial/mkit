@@ -1,0 +1,15 @@
+version: v2
+# Single-module buf.yaml scoped to the new mkit.transport.v1 proto, mirroring
+# apps/repo-worker/buf.yaml's per-app pattern. mkit#677 (buf workspace + proto
+# path restructure) widens this into a three-module workspace covering
+# rust/crates/mkit-rpc/proto (mkit.rpc.v1), apps/repo-worker/proto
+# (mkit.repo.v1), and this module (mkit.transport.v1) — see
+# docs/specs/SPEC-TRANSPORT-CONNECT.md §1.
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

@@ -27,4 +27,5 @@ front matter.
 - [SPEC-SIGNING](SPEC-SIGNING.md) — commit / remix / tag signing hashes and verification.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) — verifiable server-side sparse checkout over HTTP/S3.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) — seven-verb transport wire protocol (file, SSH, HTTP, S3, memory).
+- [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) — draft `mkit.transport.v1` Connect service, the canonical remote protocol superseding SPEC-TRANSPORT §5.
 - [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) — self-contained encrypted-stream transport (`mkit+enc://`).
