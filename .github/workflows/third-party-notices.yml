@@ -1,0 +1,121 @@
+name: "CI: Third-party notices"
+
+# Fast pre-release feedback for the `cargo about generate` step in
+# release.yml's `third-party-notices` job: catches a new dependency shipping
+# under a license not in rust/about.toml's `accepted` list (kept in lockstep
+# with rust/deny.toml's [licenses] allow list) at PR time, not at tag time.
+# cargo-about and cargo-deny parse/evaluate SPDX license expressions with
+# different logic, so this is a distinct check from the cargo-deny license
+# gate already running on Cloud Build (cloudbuild/security.yaml) — not a
+# duplicate of it.
+#
+# Does not compile the workspace: cargo-about resolves the dependency graph
+# via `cargo metadata`, so this job is cheap even though it isn't on Cloud
+# Build.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/third-party-notices.yml'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/crates/**/Cargo.toml'
+      - 'rust/about.toml'
+      - 'rust/about.hbs'
+  # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
+  # its required check (third-party-notices-gate) is never absent. The `check`
+  # job is gated on the in-workflow paths-filter below instead — this avoids
+  # the "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch the dependency
+  # graph. Mirrors the same pattern already used by mcp.yml/web.yml.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Detect whether this PR touches the dependency graph or the cargo-about
+  # policy files. The `check` job runs only when it does; the
+  # `third-party-notices-gate` job below always runs and is the stable
+  # required-check name.
+  changes:
+    name: Detect dependency-graph changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.filter.outputs.deps }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+        id: filter
+        with:
+          filters: |
+            deps:
+              - '.github/workflows/third-party-notices.yml'
+              - 'rust/Cargo.lock'
+              - 'rust/Cargo.toml'
+              - 'rust/crates/**/Cargo.toml'
+              - 'rust/about.toml'
+              - 'rust/about.hbs'
+
+  check:
+    name: cargo about generate
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.deps == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3  # v2
+        with:
+          tool: cargo-about@0.9.1
+
+      # Same invocation as the release job (.github/workflows/release.yml)
+      # minus the artifact upload — this only needs to fail loudly on an
+      # unapproved license, not produce a publishable file.
+      - name: Generate THIRD-PARTY-NOTICES
+        working-directory: rust
+        run: |
+          cargo about generate --all-features about.hbs -o /dev/null
+
+  # Stable required-check name for branch protection. Always runs on PRs
+  # (if: always()) so the status is never absent — closing the
+  # "required-but-skipped" trap. Passes when `check` succeeded OR was
+  # legitimately skipped because the PR touched no dependency-graph paths;
+  # fails if `check` actually failed or was cancelled.
+  third-party-notices-gate:
+    name: Third-party notices gate
+    if: always() && github.event_name == 'pull_request'
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check `check` job result
+        shell: bash
+        env:
+          CHECK: ${{ needs.check.result }}
+        run: |
+          echo "check: ${CHECK}"
+          case "${CHECK}" in
+            success|skipped)
+              echo "Third-party notices gate satisfied."
+              ;;
+            *)
+              echo "::error::check job did not succeed (result=${CHECK})"
+              exit 1
+              ;;
+          esac

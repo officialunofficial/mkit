@@ -153,6 +153,7 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 | `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
 | `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `apps/web/**` / `apps/mcp/**` change; each has an always-run gate job so a required check is always present |
+| `CI: Third-party notices` | push/PR, path-filtered | runs `cargo about generate` against `rust/about.toml`'s accepted-license policy when the dependency graph changes; same tool `Release: *`'s `third-party-notices` job uses to build `THIRD-PARTY-NOTICES` |
 | `Security: Rust` | PR, weekly, dispatch | `cargo audit` + `cargo deny` |
 | `Nightly: Fuzz` | scheduled, dispatch | fuzz harnesses |
 | `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |
