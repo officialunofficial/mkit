@@ -149,7 +149,7 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 
 | Workflow | Triggers | Notes |
 |----------|----------|-------|
-| `CI: Rust` | every PR; push `main`¹ | Build, test, clippy, fmt on every PR. The OS-matrix keystore-backends and MSRV jobs run on `main` pushes and approved reviews; a `ci-gate` job aggregates everything into one required check. |
+| `CI: Rust` | every PR; push `main`¹ | Linux build/test/clippy/fmt run on every PR (Cloud Build, see below). `rust.yml` adds: a macOS build-and-test leg on `push` to `main` only (10x runner cost, so not on every PR); a Windows smoke build+`cargo test --lib` on every PR (2x cost); and a 3-OS `keystore-backends` matrix that stays `workflow_dispatch`-only (see `docs/RELEASE.md`'s pre-release checklist). A `ci-gate` job aggregates all three into one required check. |
 | `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
 | `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `apps/web/**` / `apps/mcp/**` change; each has an always-run gate job so a required check is always present |

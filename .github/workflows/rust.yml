@@ -3,32 +3,42 @@ name: "CI: Rust"
 # Scope note: the Linux Rust gates (fmt/clippy/build/nextest/doctests, msrv,
 # codegen-freshness, supply-chain, docs, geiger, coverage) run on Google Cloud
 # Build — see cloudbuild/README.md. This workflow keeps only the legs Cloud
-# Build's Linux containers CAN'T run: the macOS build/test leg and the
-# cross-platform keystore-backends matrix (macOS/Windows native keystores).
+# Build's Linux containers CAN'T run: the macOS build/test leg, a Windows
+# smoke build/test leg, and the cross-platform keystore-backends matrix
+# (macOS/Windows native keystores).
 #
-# Cost note: macOS runners bill at 10x Linux minutes (Windows at 2x). Both
-# heavy jobs below (build-and-test, keystore-backends) are therefore MANUAL
-# ONLY — gated to `workflow_dispatch` and nothing else. They do not run
-# automatically on any PR push, review approval, or push to main. Trigger
-# them explicitly (Actions tab, or `gh workflow run rust.yml --ref <branch>`)
-# when you specifically need macOS/Windows/keystore coverage. Fast per-push
-# feedback comes from the Linux gate on Cloud Build (cloudbuild/ci.yaml)
-# instead. See both jobs' `SHOULD_RUN` gates below — they're intentionally
-# identical expressions.
+# Cost note: macOS runners bill at 10x Linux minutes (Windows at 2x).
+# `build-and-test` (macOS) therefore runs automatically only on `push` to
+# `main` (bounding the 10x cost to post-merge, not every PR push) plus
+# `workflow_dispatch` for on-demand runs. A lightweight Windows smoke leg
+# (`windows-smoke`, build + `cargo test --lib`, not the full nextest/doctest
+# suite) runs on every PR to catch Windows-only regressions before merge at
+# a bounded 2x cost. `keystore-backends` (3-OS matrix) stays the heaviest job
+# and remains MANUAL ONLY — gated to `workflow_dispatch` and nothing else; it
+# does not run automatically on any PR push, review approval, or push to
+# main. Trigger it explicitly (Actions tab, or
+# `gh workflow run rust.yml --ref <branch>`) when you specifically need
+# keystore coverage — see docs/RELEASE.md's pre-release checklist, which
+# calls this out explicitly. Fast per-push feedback for everything else
+# comes from the Linux gate on Cloud Build (cloudbuild/ci.yaml) plus the two
+# jobs above.
 
 on:
-  # No `paths:` filter: the workflow ALWAYS triggers on PRs so its required
-  # check (ci-gate) is never absent. Both heavy jobs (build-and-test,
-  # keystore-backends) are gated on the SHOULD_RUN env below instead — this
-  # avoids the "required-but-skipped" trap where a path-filtered trigger
-  # leaves a required status stuck pending. Mirrors the same pattern already
-  # used by web.yml/mcp.yml. Neither job does any real work on this trigger;
-  # they're manual-only (see the Cost note above).
+  # `push` to main runs build-and-test (macOS) automatically — see the Cost
+  # note above. No `paths:` filter on either trigger: the workflow ALWAYS
+  # triggers on PRs (and pushes to main) so its required check (ci-gate) is
+  # never absent. windows-smoke always runs on `pull_request`; build-and-test
+  # runs on `push` (and workflow_dispatch); keystore-backends stays
+  # dispatch-only. Mirrors the same pattern already used by web.yml/mcp.yml.
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
-  # The only way to actually run build-and-test / keystore-backends: manual
-  # dispatch, on demand, against any branch/ref.
+  # The only way to actually run keystore-backends: manual dispatch, on
+  # demand, against any branch/ref. Also usable to force-run build-and-test /
+  # windows-smoke against an arbitrary ref.
   workflow_dispatch:
 
 permissions:
@@ -51,24 +61,23 @@ jobs:
     name: Build & Test (${{ matrix.os }})
     # macOS-only here: the Linux leg moved to Cloud Build (cloudbuild/ci.yaml).
     #
-    # Manual-only (matches keystore-backends' pattern exactly, incl. the
-    # rationale for gating per-step instead of at job level): runs ONLY on
-    # `workflow_dispatch` — never automatically on a pull_request push, a
-    # review approval, or a push to main. A job-level `if: false` would
-    # short-circuit before the matrix expands, so GitHub would show one
-    # synthetic entry named literally "Build & Test (${{ matrix.os }})"
-    # (unexpanded) instead of the real per-leg name — confusing in the PR
-    # checks list even though nothing is misconfigured. Gating per-step below
-    # (via env.SHOULD_RUN) keeps the matrix expanding normally (real name,
-    # real "skipped" steps) at effectively the same cost: the trivial steps
-    # below.
+    # Runs on `push` to main (bounding the 10x macOS cost to post-merge, not
+    # every PR push) and on `workflow_dispatch` for on-demand runs. Does NOT
+    # run automatically on a pull_request push or a review approval — a
+    # job-level `if: false` would short-circuit before the matrix expands, so
+    # GitHub would show one synthetic entry named literally "Build & Test
+    # (${{ matrix.os }})" (unexpanded) instead of the real per-leg name —
+    # confusing in the PR checks list even though nothing is misconfigured.
+    # Gating per-step below (via env.SHOULD_RUN) keeps the matrix expanding
+    # normally (real name, real "skipped" steps) at effectively the same cost
+    # on PRs: the trivial steps below.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest]
     env:
-      SHOULD_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+      SHOULD_RUN: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
         if: env.SHOULD_RUN == 'true'
@@ -213,10 +222,57 @@ jobs:
           cargo build --locked -p mkit-cli --features enc-transport
           cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast
 
+  windows-smoke:
+    name: Windows smoke build
+    # Runs on every PR (Windows bills at 2x, not 10x, so a per-PR leg is
+    # affordable) plus `workflow_dispatch` for on-demand runs. Deliberately
+    # NOT on `push` to main — build-and-test's macOS leg already covers the
+    # post-merge signal this issue asked for, and doubling up here would just
+    # add cost without new coverage. Scoped to a fast subset (build +
+    # `cargo test --lib`, no nextest/doctest/ignored-lane/contrib-signers
+    # passes) to keep PR latency reasonable; the full suite still runs on
+    # Linux (Cloud Build) and macOS (build-and-test above).
+    runs-on: windows-latest
+    env:
+      SHOULD_RUN: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        if: env.SHOULD_RUN == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # No protoc: same rationale as build-and-test above — mkit-rpc stages
+      # pre-committed generated/ sources by default.
+      - name: Set up Rust and cache
+        if: env.SHOULD_RUN == 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+          cache-prefix: "rust-ci-windows-smoke"
+          protoc: "false"
+
+      - name: Build
+        if: env.SHOULD_RUN == 'true'
+        working-directory: rust
+        run: cargo build --locked --workspace
+
+      # Fast subset only: lib-target unit tests, not the full
+      # nextest/doctest/ignored-lane suite (that's build-and-test's job on
+      # macOS push-to-main, and Cloud Build's job on Linux every push).
+      - name: Test (lib)
+        if: env.SHOULD_RUN == 'true'
+        working-directory: rust
+        run: cargo test --locked --workspace --lib
+
   keystore-backends:
     name: Keystore backends (${{ matrix.name }})
-    # Heavier (3-OS matrix): manual-only, same as build-and-test. Runs ONLY on
-    # `workflow_dispatch` — NOT on any pull_request, review approval, or push.
+    # Heaviest job in this workflow (3-OS matrix): stays manual-only, unlike
+    # build-and-test/windows-smoke above. Runs ONLY on `workflow_dispatch` —
+    # NOT on any pull_request, review approval, or push. See
+    # docs/RELEASE.md's pre-release checklist for the reminder to dispatch it
+    # before a release.
     #
     # The gate lives on each STEP below (via env.SHOULD_RUN), not on the job
     # itself. A job-level `if: false` short-circuits before the matrix is ever
@@ -303,51 +359,103 @@ jobs:
         run: cargo clippy --locked -p mkit-keystore --features "${{ matrix.features }}" --all-targets -- -D warnings
 
   # Aggregator gate — the single stable check to mark "required" in branch
-  # protection for THIS workflow's legs. It `needs` the macOS build/test leg and
-  # the keystore matrix and runs with `if: always()`, so it reports a real
-  # success/failure even when a job is skipped, cancelled, or fails:
-  #   - build-and-test: manual-only via each step's env.SHOULD_RUN, identical
-  #     pattern and expression to keystore-backends (see that job's comment).
-  #     On every non-workflow_dispatch trigger every step no-ops, so the job
-  #     reports 'success' trivially; 'skipped' remains accepted too in case
-  #     that ever changes. Only 'failure'/'cancelled' fail it.
-  #   - keystore-backends: same manual-only gating via each step's
-  #     env.SHOULD_RUN (not a job-level `if:`, so the matrix still expands to
-  #     real per-leg names instead of one unexpanded synthetic entry — see the
-  #     job's comment). On every non-workflow_dispatch trigger every step
-  #     no-ops, so the job reports 'success' trivially; 'skipped' remains
-  #     accepted too in case that ever changes. Only 'failure'/'cancelled'
-  #     fail it.
+  # protection for THIS workflow's legs. It `needs` all three jobs above and
+  # runs with `if: always()`, so it reports a real success/failure even when
+  # a job is skipped, cancelled, or fails.
+  #
+  # Critically, 'skipped' is accepted ONLY on the trigger types where the job
+  # is genuinely not expected to do any work on this event — never as a
+  # blanket pass. A job-level `if:` isn't used on any of these three jobs (to
+  # keep matrix legs expanded with real names — see each job's comment), so
+  # in practice a 'skipped' *result* only shows up if that changes later; the
+  # per-event branching below exists so that regression is still caught
+  # instead of silently accepted, which is the exact bug this gate used to
+  # have (a hardcoded `workflow_dispatch`-only SHOULD_RUN plus a blanket
+  # `success|skipped` case arm meant the required check was green even though
+  # zero macOS/Windows coverage ever ran):
+  #   - build-and-test: expected to actually run (SHOULD_RUN=true) on `push`
+  #     and `workflow_dispatch`; on those triggers only 'success' is
+  #     accepted. On `pull_request` it's a no-op by design, so 'skipped' is
+  #     also accepted there.
+  #   - windows-smoke: expected to actually run on `pull_request` and
+  #     `workflow_dispatch`; only 'success' is accepted on those triggers. On
+  #     `push` it's a no-op by design, so 'skipped' is also accepted there.
+  #   - keystore-backends: manual-only on every trigger (3-OS matrix cost) —
+  #     'skipped' is accepted on any event, but it must not have failed or
+  #     been cancelled when it did run. See docs/RELEASE.md's pre-release
+  #     checklist for the reminder to dispatch it before a release.
   # The Linux Rust gate lives on Cloud Build (cloudbuild/ci.yaml) and posts its
   # own commit status — mark that "required" alongside this one.
   ci-gate:
     name: Rust CI gate
     if: always()
-    needs: [build-and-test, keystore-backends]
+    needs: [build-and-test, windows-smoke, keystore-backends]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no critical job failed
         shell: bash
         env:
           BUILD_AND_TEST: ${{ needs.build-and-test.result }}
+          WINDOWS_SMOKE: ${{ needs.windows-smoke.result }}
           KEYSTORE_BACKENDS: ${{ needs.keystore-backends.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          echo "build-and-test:    ${BUILD_AND_TEST}"
-          echo "keystore-backends: ${KEYSTORE_BACKENDS}"
+          echo "event:              ${EVENT_NAME}"
+          echo "build-and-test:     ${BUILD_AND_TEST}"
+          echo "windows-smoke:      ${WINDOWS_SMOKE}"
+          echo "keystore-backends:  ${KEYSTORE_BACKENDS}"
 
           fail=0
 
-          # Manual-only: may be skipped on non-workflow_dispatch triggers, but
-          # must not have failed or been cancelled when it did run.
-          case "${BUILD_AND_TEST}" in
-            success|skipped) ;;
+          # Expected to run on push/workflow_dispatch — only 'success' is
+          # acceptable there. On pull_request it's a deliberate no-op, so
+          # 'skipped' is also accepted.
+          case "${EVENT_NAME}" in
+            push|workflow_dispatch)
+              case "${BUILD_AND_TEST}" in
+                success) ;;
+                *)
+                  echo "::error::build-and-test did not succeed on ${EVENT_NAME} (result=${BUILD_AND_TEST})"
+                  fail=1
+                  ;;
+              esac
+              ;;
             *)
-              echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST})"
-              fail=1
+              case "${BUILD_AND_TEST}" in
+                success|skipped) ;;
+                *)
+                  echo "::error::build-and-test did not succeed (result=${BUILD_AND_TEST})"
+                  fail=1
+                  ;;
+              esac
               ;;
           esac
 
-          # Manual-only: may be skipped on non-workflow_dispatch triggers, but
+          # Expected to run on pull_request/workflow_dispatch — only
+          # 'success' is acceptable there. On push it's a deliberate no-op,
+          # so 'skipped' is also accepted.
+          case "${EVENT_NAME}" in
+            pull_request|workflow_dispatch)
+              case "${WINDOWS_SMOKE}" in
+                success) ;;
+                *)
+                  echo "::error::windows-smoke did not succeed on ${EVENT_NAME} (result=${WINDOWS_SMOKE})"
+                  fail=1
+                  ;;
+              esac
+              ;;
+            *)
+              case "${WINDOWS_SMOKE}" in
+                success|skipped) ;;
+                *)
+                  echo "::error::windows-smoke did not succeed (result=${WINDOWS_SMOKE})"
+                  fail=1
+                  ;;
+              esac
+              ;;
+          esac
+
+          # Manual-only on every trigger: may be skipped on any event, but
           # must not have failed or been cancelled when it did run.
           case "${KEYSTORE_BACKENDS}" in
             success|skipped) ;;
