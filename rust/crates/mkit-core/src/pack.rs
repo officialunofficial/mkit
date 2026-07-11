@@ -56,6 +56,12 @@ pub const TRAILER_LEN: usize = 32;
 pub const HEADER_LEN: usize = 4 + 4 + 4;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
+/// Byte offset of the 4-byte `entry_count` field within the header —
+/// after the 4-byte magic and 4-byte version fields. Found hardcoded
+/// as the literal range `8..12` at four call sites during the
+/// epic-#634 code review; named here instead, consistent with this
+/// file's existing `HEADER_LEN`/`TRAILER_LEN` convention.
+pub const ENTRY_COUNT_OFFSET: usize = 8;
 
 /// Packfile errors. Distinct from [`MkitError`] so callers can match on
 /// pack-specific failures (trailer mismatch, base-missing) without
@@ -238,7 +244,8 @@ impl PackWriter {
         if self.entry_count > MAX_ENTRIES {
             return Err(PackError::TooManyObjects(self.entry_count));
         }
-        self.buf[8..12].copy_from_slice(&self.entry_count.to_le_bytes());
+        self.buf[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+            .copy_from_slice(&self.entry_count.to_le_bytes());
         let trailer = hash::hash(&self.buf);
         if let Some(c) = bytes_copied {
             c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
@@ -289,7 +296,11 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
     if version != VERSION {
         return Err(PackError::UnsupportedVersion(version));
     }
-    let count = u32::from_le_bytes(pack_bytes[8..12].try_into().expect("4 bytes"));
+    let count = u32::from_le_bytes(
+        pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+            .try_into()
+            .expect("4 bytes"),
+    );
     if count > MAX_ENTRIES {
         return Err(PackError::TooManyObjects(count));
     }
@@ -419,7 +430,11 @@ impl PackReader {
             return Err(PackError::PackfileCorrupted);
         }
         // 5. Entry count + cap.
-        let count = u32::from_le_bytes(pack_bytes[8..12].try_into().expect("4 bytes"));
+        let count = u32::from_le_bytes(
+            pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+                .try_into()
+                .expect("4 bytes"),
+        );
         if count > MAX_ENTRIES {
             return Err(PackError::TooManyObjects(count));
         }
@@ -618,7 +633,14 @@ mod tests {
         assert_eq!(pack.len(), HEADER_LEN + TRAILER_LEN);
         assert_eq!(&pack[..4], MAGIC);
         assert_eq!(u32::from_le_bytes(pack[4..8].try_into().unwrap()), VERSION);
-        assert_eq!(u32::from_le_bytes(pack[8..12].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_le_bytes(
+                pack[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
 
         let (_dir, store) = fresh_store();
         let report = PackReader::read(&pack, &store).unwrap();
