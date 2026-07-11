@@ -5,7 +5,9 @@ Each spec carries its own `status` (stable / normative / draft) in its
 front matter.
 
 - [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) — native attestations: in-toto v1 statements in DSSE envelopes.
+- [SPEC-CONCURRENCY](SPEC-CONCURRENCY.md) — the total mkit lock order across worktree, ref-history, and CAS locks.
 - [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md) — user-vs-repo config trust boundary and key classification rules.
+- [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) — shared vocabulary (RFC 2119 keywords, status vocabulary, encoding notation) for the SPEC-*.md corpus.
 - [SPEC-DELTA](SPEC-DELTA.md) — delta encoding for packfile objects.
 - [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) — subprocess protocol for out-of-process signers (HSM, TPM, WebAuthn, …).
 - [SPEC-FASTCDC](SPEC-FASTCDC.md) — deterministic content-defined chunking for chunked blobs.

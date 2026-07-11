@@ -256,8 +256,11 @@ transport's lock should use s3/http/ssh.
 by itself only serializes the file transport against concurrent instances
 of itself — it does not, on its own, coordinate against a `commit`,
 `checkout`, or `gc` running locally against the same directory via the
-`worktrees.lock`/`worktree.lock`/`refs-history.lock` path. See
-SPEC-CONCURRENCY §3.1 for the closing rule and its lock order.
+`worktrees.lock`/`worktree.lock`/`refs-history.lock` path. **There is no
+rule that closes this gap** — see SPEC-CONCURRENCY §3.1, which documents
+it as a real, currently unresolved coordination gap, and states mkit's
+supported deployment shape (a served root a worktree-owning process
+does not also mutate directly) rather than a locking fix.
 
 ### 5.2 ETag encoding divergence
 

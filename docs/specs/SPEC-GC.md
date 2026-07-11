@@ -17,8 +17,9 @@ the superseded tip) — **and the `mkit gc` command itself (#233)** are all
 shipped. `mkit gc` runs `recovery::expire` → `ops::gc::run_gc`
 (`live_objects` then prune `store ∖ live`, skipping objects within the
 grace window) under the locks SPEC-CONCURRENCY §4 assigns to `gc`
-(the worktree registry lock, then every registered tree's per-tree lock,
-then the ref-history lock for the recovery-log expire step).
+(the worktree registry lock, then every registered tree's per-tree
+lock — no separate lock guards the recovery-log expire step; the
+per-tree locks gc already holds are what serializes it, see §3.2).
 
 ## Why this spec exists
 
@@ -93,12 +94,14 @@ stop pinning objects. A gc run expires first, then computes roots.
 `record` is durable — it `fsync`s the log file and its parent directory
 before returning — so a crash cannot leave a ref rewrite persisted while
 its recovery entry is lost. `record` and `expire` are **not** internally
-synchronized: callers MUST hold `refs-history.lock` (see SPEC-CONCURRENCY
-§3.2 — the recovery log is common-dir state shared by every linked
-worktree, so a per-tree lock cannot serialize it), and gc MUST run its
-"expire → collect roots → prune" sequence under the full lock set
-SPEC-CONCURRENCY §4 assigns to `gc`, so a producer append cannot race an
-`expire` rewrite and vanish.
+synchronized: `ops::recovery`'s own concurrency note requires callers to
+hold "the repo lock" — in practice each producer's per-tree
+`worktree.lock` (see SPEC-CONCURRENCY §3.2). gc's "expire → collect
+roots → prune" sequence runs under the full lock set SPEC-CONCURRENCY §4
+assigns to `gc` — every registered tree's `worktree.lock`, a superset of
+any single producer's one tree — so a producer append can never race an
+`expire` rewrite and vanish, without either side needing a distinct,
+dedicated recovery-log lock.
 
 **Status:** complete. The recovery log (Part 2a) and its producers
 (Part 2b) are implemented — `commit --amend`, `reset`, and `rebase` each
