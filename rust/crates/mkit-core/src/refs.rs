@@ -797,8 +797,8 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 /// success, rename reports success, and the commit becomes unreachable.
 ///
 /// This closes that gap by making the delete itself compare-and-swap:
-/// it acquires the SAME per-ref lock [`cas_write`]'s `Match` arm takes
-/// (via [`cas_lock_name`], keyed off the ref's path so it can never
+/// it acquires the SAME per-ref lock `cas_write`'s `Match` arm takes
+/// (via `cas_lock_name`, keyed off the ref's path so it can never
 /// collide with an unrelated ref of the same bare name), reads the
 /// current value under that lock, and only removes the file if it is
 /// still exactly `expected`. Because a concurrent `Match`-conditioned
@@ -959,8 +959,8 @@ pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
 ///
 /// Lock order MUST stay `history_lock_name` (outer), then
 /// [`delete_ref_if_matches`]'s `cas_lock_name` (inner) — the exact order
-/// [`update_ref_with_history_locked`] already uses (it calls into
-/// [`update_ref`], which calls [`cas_write`], while still holding
+/// `update_ref_with_history_locked` already uses (it calls into
+/// [`update_ref`], which calls `cas_write`, while still holding
 /// `history_lock_name`). Reversing this for just this one caller would
 /// open a deadlock class between this delete and a concurrent
 /// `update_ref_with_history*` call on the same branch — two locks
