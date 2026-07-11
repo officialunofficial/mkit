@@ -55,8 +55,8 @@ export const categories: ParityCategory[] = [
       },
       {
         cmd: 'diff',
-        status: 'divergent',
-        note: "Worktree, --staged, ranges, --stat, --name-status, and byte-exact Myers hunks. -w/-b (whitespace) and -U<n> (context lines) aren't implemented yet.",
+        status: 'parity',
+        note: 'Worktree, --staged, ranges, --stat, --name-status, -w/-b whitespace modes, -U<n> context, and byte-exact Myers hunks.',
       },
       { cmd: 'commit', status: 'parity', note: '-m, -a, --amend, --author. Every commit is signed.' },
       { cmd: 'rm', status: 'parity', note: '--cached, -r, -f. Refuses to destroy modified content without -f.' },
@@ -101,8 +101,8 @@ export const categories: ParityCategory[] = [
     items: [
       {
         cmd: 'log',
-        status: 'divergent',
-        note: "Ranges, -n, --oneline, --format=json. --graph is accepted as a no-op. -p, --stat, --decorate, --author, --grep, --since, --until, --no-merges, --first-parent, and --all aren't implemented yet.",
+        status: 'parity',
+        note: 'Ranges, -n, --oneline, --format=json, --author/--grep (substring), --since/--until, --no-merges, --first-parent. --graph is accepted as a no-op.',
       },
       {
         cmd: 'show',

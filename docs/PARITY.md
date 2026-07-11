@@ -186,10 +186,12 @@ These commonly-typed flags are recognized as in-scope for full parity but are
 **not yet implemented**; they are larger feature additions best done as their
 own change, and are listed here so the gap is explicit:
 
-- `log -p` / `--stat` / `--decorate` / `--author` / `--grep` / `--since` /
-  `--until` / `--no-merges` / `--first-parent` / `--all` — needs the log
-  renderer + walk extensions.
-- `diff -w` / `-b` / `-U<n>` — whitespace and context-line control.
+- `log -p` / `--stat` / `--decorate` / `--all` — needs the log renderer
+  + walk extensions. (`--author` / `--grep` / `--since` / `--until` /
+  `--no-merges` / `--first-parent` shipped: #712 — `--author`/`--grep`
+  are substring matches rather than regexes, and `--since`/`--until`
+  use a small explicit date grammar rather than git's `approxidate`;
+  both are documented divergences, not gaps.)
 - `branch -r` / `-a` / `-u` / `--unset-upstream` — remote-tracking listing and
   upstream config.
 - `add -n` / `--dry-run` — needs the path-selection pass without the index

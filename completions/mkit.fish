@@ -86,6 +86,12 @@ complete -c mkit -n "__fish_seen_subcommand_from diff" \
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -l merge-base -d "Diff against the merge base of the revisions"
 complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -s w -l ignore-all-space -d "Ignore whitespace when comparing lines"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -s b -l ignore-space-change -d "Ignore changes in the amount of whitespace"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
+    -s U -l unified -d "Context lines around each hunk (default 3)"
+complete -c mkit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
 complete -c mkit -n "__fish_seen_subcommand_from cat-file" \
     -s t -d "Print object type"
@@ -176,6 +182,18 @@ complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l format -d "Output format (json)" -r -a json
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -l graph -d "Accepted for compat; currently a no-op"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l author -d "Filter by author substring" -r
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l grep -d "Filter by message substring" -r
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l since -d "Only commits at or after this date" -r
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l until -d "Only commits at or before this date" -r
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l no-merges -d "Hide merge commits from the output"
+complete -c mkit -n "__fish_seen_subcommand_from log" \
+    -l first-parent -d "Follow only first parents"
 complete -c mkit -n "__fish_seen_subcommand_from log" \
     -s n -d "Limit number of commits" -r
 complete -c mkit -n "__fish_seen_subcommand_from reflog" \

@@ -495,7 +495,7 @@ unreachable object until
 .Cm gc
 ships
 .Pq issue #233 .
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl graph Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl n Ar N Oc Oo Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -539,6 +539,33 @@ timestamp for machine consumption.
 .Fl Fl graph
 is accepted for compatibility but is currently a no-op (no ASCII graph is
 drawn).
+.Fl Fl author Ar pattern
+and
+.Fl Fl grep Ar pattern
+filter by a plain substring match \(em
+.Fl Fl author
+against the short and full identity forms,
+.Fl Fl grep
+against the full commit message. mkit identities are opaque (Ed25519 keys,
+mid numbers, DID keys), not free-text names, so this is not a regex.
+.Fl Fl since Ar date
+and
+.Fl Fl until Ar date
+bound the commit timestamp; accepted forms are
+.Ql @<unix-seconds> ,
+.Ql now Ns / Ns Ql today Ns / Ns Ql yesterday ,
+.Ql <N> <unit> ago ,
+.Ql YYYY-MM-DD ,
+and
+.Ql YYYY-MM-DD HH:MM:SS
+(UTC).
+.Fl Fl no-merges
+hides merge commits from the output;
+.Fl Fl first-parent
+walks only first parents, so a merged side branch never enters the walk.
+These filters apply before
+.Fl n Ap s
+limit.
 .It Cm reflog Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
 Show a branch's recorded movement history, read-only. Walks the branch
 tip's first-parent chain newest-first, addressing each entry
@@ -568,7 +595,7 @@ indexes the reachable chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. This command never mutates refs, the
 journal, or any object.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -619,6 +646,20 @@ instead NUL-terminates records and emits raw paths, and is only valid with
 .Fl Fl name-only
 or
 .Fl Fl name-status .
+.Fl w
+.Pq Fl Fl ignore-all-space
+ignores whitespace when comparing lines, so a line differing from its
+counterpart only in whitespace shows as unchanged context;
+.Fl b
+.Pq Fl Fl ignore-space-change
+is the weaker form where differing amounts of whitespace compare equal but a
+line with whitespace where the other side has none still differs.
+.Fl w
+wins if both are given; either way the printed lines keep their own real
+bytes, only comparison changes.
+.Fl U Ar n
+.Pq Fl Fl unified Ns = Ns Ar n
+sets the number of unchanged context lines around each hunk (default 3).
 .It Cm status Oo Fl Fl porcelain Ns Oo = Ns Cm v1 | Cm v2 Oc Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc
 Show the staged and working-tree changes.
 .Fl s

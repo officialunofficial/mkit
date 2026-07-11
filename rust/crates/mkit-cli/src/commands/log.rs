@@ -27,6 +27,15 @@
 //! achievable given mkit's content-addressed model; a limited
 //! `--oneline --graph` renderer remains a possible post-v1 follow-up.
 //!
+//! History filters — `--author`/`--grep` (substring matches),
+//! `--since`/`--until` (a small explicit date grammar, see the
+//! `dateparse` submodule), and `--no-merges`/`--first-parent` — are
+//! applied to the walk before `-n`'s limit, so the limit caps the
+//! filtered result like git's does. `--first-parent` prunes the *walk*
+//! itself (a merged side branch never enters the candidate set);
+//! `--no-merges` only hides merge commits from the already-walked
+//! output.
+//!
 //! Argument parsing is delegated to clap-derive via
 //! [`crate::clap_shim::parse`]; clap emits standard diagnostics on
 //! errors and the shim maps them to mkit sysexits (`USAGE` for
@@ -51,6 +60,8 @@ use crate::exit;
 use crate::format;
 use crate::signal;
 
+mod dateparse;
+
 /// Default abbreviated-hash length, matching git's nominal `core.abbrev`
 /// starting point. Overridable with `--abbrev[=N]`.
 const DEFAULT_ABBREV: usize = 7;
@@ -69,6 +80,7 @@ enum Format {
     disable_help_flag = false,
     disable_version_flag = true
 )]
+#[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct LogOpts {
     /// Compact one-line-per-commit output. Equivalent to
     /// `--format=oneline`; if both are given, `--format` wins.
@@ -97,6 +109,47 @@ struct LogOpts {
     /// no-op (documented v1 non-goal).
     #[arg(long)]
     graph: bool,
+
+    /// Only show commits whose author identity contains `<pattern>`
+    /// (substring match against both the short display form — `mkit
+    /// log`'s `Author:` line — and the full `kind:hex`/`mid:N` form used
+    /// by `--format=json`'s `author` field). Unlike git, mkit identities
+    /// are opaque (Ed25519 keys, `mid:N` numbers, DID keys) rather than
+    /// free-text `Name <email>`, so this is a plain substring match, not
+    /// a regex.
+    #[arg(long, value_name = "PATTERN")]
+    author: Option<String>,
+
+    /// Only show commits whose message (title + body) contains
+    /// `<pattern>` (substring match, case-sensitive — like git's default
+    /// `--grep`).
+    #[arg(long, value_name = "PATTERN")]
+    grep: Option<String>,
+
+    /// Only show commits at or after this time. Accepts `@<unix-seconds>`,
+    /// `now`/`today`/`yesterday`, `<N> <unit> ago`
+    /// (second/minute/hour/day/week/month/year), `YYYY-MM-DD`, or
+    /// `YYYY-MM-DD HH:MM:SS` (UTC).
+    #[arg(long, value_name = "DATE")]
+    since: Option<String>,
+
+    /// Only show commits at or before this time. Same formats as
+    /// `--since`.
+    #[arg(long, value_name = "DATE")]
+    until: Option<String>,
+
+    /// Hide merge commits (more than one parent) from the output. The
+    /// walk itself is unchanged — this only filters what gets printed —
+    /// like `git log --no-merges`.
+    #[arg(long = "no-merges")]
+    no_merges: bool,
+
+    /// Follow only the first parent at each merge, so a merged side
+    /// branch never enters the walk at all (stronger than `--no-merges`,
+    /// which still walks through merges but hides them from the
+    /// output). Like `git log --first-parent`.
+    #[arg(long = "first-parent")]
+    first_parent: bool,
 
     /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
     /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
@@ -141,6 +194,26 @@ pub fn run(args: &[String]) -> u8 {
     let abbrev = opts.abbrev_len();
     let _ = opts.graph; // accepted, currently no-op.
 
+    // `--since`/`--until` are validated up front (a bad date is a usage
+    // error, not a silent no-match) before touching the repository.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let since = match opts.since.as_deref() {
+        Some(s) => match dateparse::parse_date(s, now) {
+            Ok(t) => Some(t),
+            Err(msg) => return emit_err(&format!("--since: {msg}"), exit::USAGE),
+        },
+        None => None,
+    };
+    let until = match opts.until.as_deref() {
+        Some(s) => match dateparse::parse_date(s, now) {
+            Ok(t) => Some(t),
+            Err(msg) => return emit_err(&format!("--until: {msg}"), exit::USAGE),
+        },
+        None => None,
+    };
+
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -169,20 +242,72 @@ pub fn run(args: &[String]) -> u8 {
         Err(msg) => return emit_err(&msg, exit::DATAERR),
     };
 
-    let ordered = match ordered_commits(&store, &tips, &excluded) {
+    let ordered = match ordered_commits_opts(&store, &tips, &excluded, opts.first_parent) {
         Ok(v) => v,
         Err(code) => return code,
     };
 
     let mut stdout = std::io::stdout().lock();
+    // `-n <limit>` caps the *filtered* set, not the raw walk, so it
+    // composes with `--author`/`--grep`/`--since`/`--until`/`--no-merges`
+    // the way git's does.
     let limit = opts.limit.unwrap_or(usize::MAX);
-    for (hash, c) in ordered.iter().take(limit) {
+    let mut shown = 0usize;
+    for (hash, c) in &ordered {
         if signal::is_shutdown() {
             return exit::TEMPFAIL;
         }
+        if shown >= limit {
+            break;
+        }
+        if !commit_matches(
+            c,
+            opts.author.as_deref(),
+            opts.grep.as_deref(),
+            since,
+            until,
+            opts.no_merges,
+        ) {
+            continue;
+        }
         render_commit(&mut stdout, fmt, abbrev, hash, c);
+        shown += 1;
     }
     exit::OK
+}
+
+/// Does `c` pass every active `log` filter? `since`/`until` are already
+/// resolved Unix seconds; `author`/`grep` are substring patterns.
+fn commit_matches(
+    c: &Commit,
+    author: Option<&str>,
+    grep: Option<&str>,
+    since: Option<u64>,
+    until: Option<u64>,
+    no_merges: bool,
+) -> bool {
+    if no_merges && c.parents.len() > 1 {
+        return false;
+    }
+    if since.is_some_and(|s| c.timestamp < s) {
+        return false;
+    }
+    if until.is_some_and(|u| c.timestamp > u) {
+        return false;
+    }
+    if let Some(pat) = author
+        && !(format::short_identity(&c.author).contains(pat)
+            || format::full_identity(&c.author).contains(pat))
+    {
+        return false;
+    }
+    if let Some(pat) = grep {
+        let msg = String::from_utf8_lossy(&c.message);
+        if !msg.contains(pat) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The include tips to walk plus the excluded ancestor set, resolved from a
@@ -352,10 +477,26 @@ const MAX_LOG_COMMITS: usize = 1_000_000;
 /// monotonic-timestamp history.
 /// Topologically-ordered (reverse-chronological) commit walk from `tips`,
 /// excluding `excluded` and their ancestors. Shared with `rev-list`.
+/// Equivalent to [`ordered_commits_opts`] with `first_parent: false`.
 pub(super) fn ordered_commits(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
+) -> Result<Vec<(Hash, Commit)>, u8> {
+    ordered_commits_opts(store, tips, excluded, false)
+}
+
+/// Like [`ordered_commits`] but with `--first-parent` control: when
+/// `first_parent` is set, the candidate-collection walk follows only each
+/// commit's first parent, so a merge's later parents — and anything only
+/// reachable through them — never enter the candidate set at all. Matches
+/// git's `log --first-parent` (stronger than `--no-merges`, which still
+/// walks through merges and only hides them from the printed list).
+pub(super) fn ordered_commits_opts(
+    store: &ObjectStore,
+    tips: &[Hash],
+    excluded: &HashSet<Hash>,
+    first_parent: bool,
 ) -> Result<Vec<(Hash, Commit)>, u8> {
     // 1. Collect the candidate commit set (DFS over parents, skip excluded).
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
@@ -382,7 +523,12 @@ pub(super) fn ordered_commits(
                 ));
             }
         };
-        for p in &c.parents {
+        let parents: &[Hash] = if first_parent {
+            c.parents.get(..1).unwrap_or(&[])
+        } else {
+            &c.parents
+        };
+        for p in parents {
             if !excluded.contains(p) {
                 stack.push(*p);
             }
@@ -534,6 +680,12 @@ mod tests {
             abbrev_commit: false,
             abbrev: None,
             graph: false,
+            author: None,
+            grep: None,
+            since: None,
+            until: None,
+            no_merges: false,
+            first_parent: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -548,6 +700,12 @@ mod tests {
             abbrev_commit: false,
             abbrev: None,
             graph: false,
+            author: None,
+            grep: None,
+            since: None,
+            until: None,
+            no_merges: false,
+            first_parent: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
@@ -562,6 +720,12 @@ mod tests {
             abbrev_commit: false,
             abbrev: None,
             graph: false,
+            author: None,
+            grep: None,
+            since: None,
+            until: None,
+            no_merges: false,
+            first_parent: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Default);
@@ -576,6 +740,12 @@ mod tests {
             abbrev_commit: false,
             abbrev: None,
             graph: false,
+            author: None,
+            grep: None,
+            since: None,
+            until: None,
+            no_merges: false,
+            first_parent: false,
             start: None,
         };
         assert_eq!(opts.render_format(), Format::Json);
@@ -589,6 +759,12 @@ mod tests {
             abbrev_commit,
             abbrev,
             graph: false,
+            author: None,
+            grep: None,
+            since: None,
+            until: None,
+            no_merges: false,
+            first_parent: false,
             start: None,
         }
     }
@@ -616,5 +792,91 @@ mod tests {
             opts_for_abbrev(true, false, Some(12)).abbrev_len(),
             Some(12)
         );
+    }
+
+    fn commit_for(
+        parents: Vec<Hash>,
+        author: mkit_core::object::Identity,
+        message: &str,
+        timestamp: u64,
+    ) -> Commit {
+        Commit::new_unannotated(
+            mkit_core::hash::ZERO,
+            parents,
+            author,
+            [0u8; 32],
+            message.as_bytes().to_vec(),
+            timestamp,
+            [0u8; 64],
+        )
+    }
+
+    #[test]
+    fn commit_matches_no_filters_passes_everything() {
+        let c = commit_for(
+            vec![],
+            mkit_core::object::Identity::opaque(b"alice".to_vec()),
+            "m",
+            100,
+        );
+        assert!(commit_matches(&c, None, None, None, None, false));
+    }
+
+    #[test]
+    fn commit_matches_author_is_substring_against_short_and_full_identity() {
+        let c = commit_for(
+            vec![],
+            mkit_core::object::Identity::opaque(b"alice".to_vec()),
+            "m",
+            100,
+        );
+        assert!(commit_matches(&c, Some("alice"), None, None, None, false));
+        assert!(!commit_matches(&c, Some("bob"), None, None, None, false));
+    }
+
+    #[test]
+    fn commit_matches_grep_checks_message_substring() {
+        let c = commit_for(
+            vec![],
+            mkit_core::object::Identity::opaque(b"alice".to_vec()),
+            "fix: widget overflow",
+            100,
+        );
+        assert!(commit_matches(&c, None, Some("widget"), None, None, false));
+        assert!(!commit_matches(&c, None, Some("gadget"), None, None, false));
+    }
+
+    #[test]
+    fn commit_matches_since_until_bound_the_timestamp() {
+        let c = commit_for(
+            vec![],
+            mkit_core::object::Identity::opaque(b"a".to_vec()),
+            "m",
+            500,
+        );
+        assert!(commit_matches(&c, None, None, Some(500), Some(500), false));
+        assert!(commit_matches(&c, None, None, Some(499), Some(501), false));
+        assert!(!commit_matches(&c, None, None, Some(501), None, false));
+        assert!(!commit_matches(&c, None, None, None, Some(499), false));
+    }
+
+    #[test]
+    fn commit_matches_no_merges_excludes_multi_parent_commits() {
+        let solo = commit_for(
+            vec![],
+            mkit_core::object::Identity::opaque(b"a".to_vec()),
+            "m",
+            1,
+        );
+        let merge = commit_for(
+            vec![mkit_core::hash::ZERO, mkit_core::hash::ZERO],
+            mkit_core::object::Identity::opaque(b"a".to_vec()),
+            "m",
+            1,
+        );
+        assert!(commit_matches(&solo, None, None, None, None, true));
+        assert!(!commit_matches(&merge, None, None, None, None, true));
+        // Without --no-merges, merges still pass.
+        assert!(commit_matches(&merge, None, None, None, None, false));
     }
 }

@@ -79,12 +79,19 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp;
-                    --graph is accepted but currently a no-op). Optional
+                    --graph is accepted but currently a no-op). --author/
+                    --grep filter by substring match on the author identity
+                    / commit message; --since/--until bound the commit
+                    timestamp (@<unix>, now/today/yesterday, N-unit-ago,
+                    or YYYY-MM-DD[ HH:MM:SS]); --no-merges hides
+                    merge commits from the output; --first-parent walks
+                    only first parents, never entering a merged side
+                    branch. Filters apply before -n's limit. Optional
                     <rev> starts the walk there; <A>..<B> shows commits in B
                     not in A; <A>...<B> the symmetric difference (empty
                     side = HEAD)
@@ -102,7 +109,7 @@ commands:
                     --porcelain=v2 emits git's richer per-path format with
                     modes + object ids; special-byte paths are C-style
                     quoted; -z NUL-terminates records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-w|-b] [-U N] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, an A..B range, or an A...B
@@ -114,7 +121,10 @@ commands:
                     A/D/M (T = mode change) letter; --stat shows per-file
                     change counts + a +/- graph and a summary line; -z
                     NUL-terminates name-only/-status records with raw paths
-                    (else special-byte paths are C-style quoted)
+                    (else special-byte paths are C-style quoted); -w/
+                    --ignore-all-space and -b/--ignore-space-change control
+                    whitespace sensitivity (-w wins if both given); -U<n>/
+                    --unified=<n> sets the context-line count (default 3)
   branch [-v|--verbose] [--format=json]
                     List branches (* marks current; no commit id by
                     default, like git; -v adds the abbreviated id +
