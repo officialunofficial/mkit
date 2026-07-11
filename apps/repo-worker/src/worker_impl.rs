@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::{ConnectRpcService, Router};
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use tower::ServiceExt;
 use worker::send::SendFuture;
@@ -179,12 +180,39 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
 
     let status = http_resp.status().as_u16();
     let resp_headers = http_resp.headers().clone();
-    let collected = SendFuture::new(async move { http_resp.into_body().collect().await })
-        .await
-        .map(|c| c.to_bytes())
-        .unwrap_or_default();
 
-    let mut out = Response::from_bytes(collected.to_vec())?.with_status(status);
+    // Stream the response body chunk-by-chunk rather than buffering it whole.
+    // A unary response is a single chunk either way, but a server-streaming
+    // RPC (`WatchRefs`) produces an OPEN-ENDED body — it only reaches EOF
+    // when the client disconnects — so the previous `.collect()`-then-
+    // `from_bytes` would block forever waiting for a terminal chunk that
+    // never comes, and the client would never see a single byte. Bridging a
+    // borrowed `WebSocket::events()` into a `'static + Send` `ServiceStream`
+    // (see `worker_impl/service.rs::watch_refs`) is necessary but not
+    // SUFFICIENT for Connect server-streaming on Workers — this half, the
+    // generic HTTP adapter's response side, is the other half: it has to
+    // forward each Connect envelope frame to the client as `svc.oneshot`
+    // produces it, not wait for the stream to end.
+    //
+    // KNOWN GAP (2026-07-11): switching to `from_stream` here made the
+    // bridge itself provably work under `wrangler dev` (see the `watch_refs`
+    // doc comment) but did NOT get a byte of the response back to a test
+    // client — `curl -N`/`fetch()` against `WatchRefs` still see zero bytes,
+    // even after the bridge logged real `RefEvent`s flowing through it. Not
+    // yet root-caused: could be a `wrangler dev`/miniflare-local limitation
+    // for wasm-worker `ReadableStream` responses, or a remaining issue in
+    // this adapter — unverified against a real deployed Worker (no deploy
+    // credentials in this environment). See README "WatchRefs / streaming".
+    let body_stream = http_resp
+        .into_body()
+        .into_data_stream()
+        .map(|item: std::result::Result<Bytes, std::convert::Infallible>| {
+            // `ConnectRpcBody`'s `Error` is `Infallible`, so `item` is always
+            // `Ok`; `unwrap_or_default()` just avoids matching a variant that
+            // can't exist while giving the closure a concrete `Result` type.
+            Ok::<Vec<u8>, worker::Error>(item.unwrap_or_default().to_vec())
+        });
+    let mut out = Response::from_stream(body_stream)?.with_status(status);
     let out_headers = out.headers_mut();
     for (k, v) in resp_headers.iter() {
         if let Ok(val) = v.to_str() {

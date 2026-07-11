@@ -13,12 +13,12 @@
 // lives in the service struct.
 
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
+use futures_util::StreamExt;
 use serde::Serialize;
 use worker::send::SendFuture;
-use worker::{Env, Method, Request as WorkerRequest, RequestInit};
+use worker::{Env, Method, Request as WorkerRequest, RequestInit, WebSocket, WebsocketEvent};
 
 use super::auth::{AuthorPubkey, IdempotencyKey};
-use super::refstore::WatchFrame;
 use super::wire::{
     CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
     ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
@@ -36,6 +36,7 @@ use crate::proto::mkit::repo::v1::{
 use crate::refs::{
     is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
 };
+use crate::watch_frame::WatchFrame;
 use std::collections::HashSet;
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -192,6 +193,87 @@ async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     resp.json::<Resp>()
         .await
         .map_err(|e| ce_internal(format!("refstore decode: {e}")))
+}
+
+/// Open + accept a WebSocket to the room DO's `/watch` endpoint — the same
+/// upgrade `worker_impl.rs::watch_fallback` proxies straight through to a
+/// browser client, but here the WORKER itself is the WebSocket client: the
+/// returned, owned `WebSocket` is what `bridge_watch_socket` below pumps into
+/// the Connect stream. `stub.fetch_with_request` on an `Upgrade: websocket`
+/// request resolves once the DO has accepted the pair (see
+/// `refstore::RefStore::fetch`'s `/watch` branch), carrying the client
+/// half of the pair on the response (`resp.websocket()`).
+async fn open_watch_socket(env: Env, room: String) -> Result<WebSocket, connectrpc::ConnectError> {
+    let ns = env
+        .durable_object(REFSTORE_BINDING)
+        .map_err(|e| ce_internal(format!("REFSTORE binding: {e}")))?;
+    let stub = ns
+        .id_from_name(&room)
+        .and_then(|id| id.get_stub())
+        .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
+
+    let mut req = WorkerRequest::new("https://refstore/watch", Method::Get)
+        .map_err(|e| ce_internal(e.to_string()))?;
+    req.headers_mut()
+        .map_err(|e| ce_internal(e.to_string()))?
+        .set("upgrade", "websocket")
+        .map_err(|e| ce_internal(e.to_string()))?;
+
+    let resp = stub
+        .fetch_with_request(req)
+        .await
+        .map_err(|e| ce_internal(format!("REFSTORE watch fetch: {e}")))?;
+
+    let ws = resp
+        .websocket()
+        .ok_or_else(|| ce_internal("REFSTORE /watch did not upgrade to a websocket"))?;
+    ws.accept()
+        .map_err(|e| ce_internal(format!("REFSTORE watch accept: {e}")))?;
+    Ok(ws)
+}
+
+/// Own `ws` end-to-end and drain its (borrowed-from-`ws`, never escaping this
+/// function) `EventStream` onto `tx`, translating each `Commit` frame into a
+/// `RefEvent`. Runs inside `wasm_bindgen_futures::spawn_local` — see the
+/// `watch_refs` doc comment for why that, and not a `Send`-bounded spawn, is
+/// what makes this sound. `Chat`/`Reaction`/malformed/unrecognized frames are
+/// silently skipped (`WatchFrame::decode_ref_event`'s contract) rather than
+/// failing the stream; only a genuine socket error or close ends it.
+async fn bridge_watch_socket(
+    ws: WebSocket,
+    tx: futures_channel::mpsc::UnboundedSender<Result<RefEvent, connectrpc::ConnectError>>,
+) {
+    let mut events = match ws.events() {
+        Ok(events) => events,
+        Err(e) => {
+            let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket events: {e}"))));
+            return;
+        }
+    };
+    while let Some(item) = events.next().await {
+        match item {
+            Ok(WebsocketEvent::Message(msg)) => {
+                let Some(text) = msg.text() else { continue };
+                if let Some(event) = WatchFrame::decode_ref_event(&text) {
+                    // The receiver end (`rx`, the ServiceStream) is dropped
+                    // when the Connect client disconnects and the dispatcher
+                    // stops polling the stream; a failed send means exactly
+                    // that, so stop pumping rather than looping forever.
+                    if tx.unbounded_send(Ok(event)).is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(WebsocketEvent::Close(_)) => break,
+            Err(e) => {
+                let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket error: {e}"))));
+                break;
+            }
+        }
+    }
+    // Best-effort: the socket may already be closed (that's often why the
+    // loop above exited), so a failure here is not itself an error.
+    let _ = ws.close(None, None::<&str>);
 }
 
 // DO wire types are declared once in `super::wire` and shared with refstore.rs.
@@ -415,29 +497,70 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         .await
     }
 
+    // WatchRefs — Connect server-streaming over an owned-channel DO bridge.
+    //
+    // The lifetime wall this used to hit: `WebSocket::events()` returns
+    // `EventStream<'ws>`, which BORROWS the socket, so a struct holding both
+    // the `WebSocket` and its own `EventStream<'_>` is self-referential and
+    // can't be built in safe Rust — which blocked returning it as the
+    // `'static + Send` `ServiceStream<RefEvent>` the generated trait requires
+    // (see git history / apps/repo-worker/README.md before this change for
+    // the previous `unimplemented` stub and its full rationale).
+    //
+    // The bridge: never let the borrow escape a function at all.
+    // `bridge_watch_socket` below OWNS the `WebSocket` and calls `.events()`
+    // on it locally — the resulting `EventStream<'_>` borrows a value that
+    // lives exactly as long as that async fn's stack frame, and is fully
+    // drained (`while let Some(item) = events.next().await`) before the
+    // function returns. It never needs to be `Send` either, because it runs
+    // inside `wasm_bindgen_futures::spawn_local` — the one Cloudflare-Workers
+    // task primitive that does NOT require its future to be `Send` (matching
+    // the Router's own internal spawn per the module doc in worker_impl.rs).
+    // Each event is translated into a fully-owned `RefEvent` (or dropped, or
+    // turned into an owned `ConnectError`) and pushed onto a
+    // `futures_channel::mpsc::unbounded` sender. The receiver end — the
+    // "owned channel" — holds no borrow into the spawned task or the
+    // WebSocket: it is `Send` because `Result<RefEvent, ConnectError>` is
+    // `Send` (plain owned data, no JsValue), and `'static` because it has no
+    // lifetime parameters at all. That receiver, not the WebSocket or its
+    // event stream, is what crosses the `ServiceStream<RefEvent>` boundary.
+    //
+    // VERIFIED (2026-07-11, `wrangler dev` + a hand-rolled Connect-streaming
+    // client): the bridge itself works end-to-end. A live `wrangler dev`
+    // instance showed the worker opening the DO `/watch` WebSocket
+    // (`101 Switching Protocols`), `ws.events()` yielding real events, and
+    // this code correctly translating a `Commit` frame from a concurrent
+    // `UpdateRef` into a `RefEvent`. NOT yet verified: a Connect client
+    // actually receiving that `RefEvent` over the wire — see README
+    // "WatchRefs / streaming" for the separate, still-open gap this
+    // surfaced in the generic HTTP response adapter (`worker_impl.rs`).
     async fn watch_refs(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, WatchRefsRequest>,
+        request: ServiceRequest<'_, WatchRefsRequest>,
     ) -> ServiceResult<ServiceStream<RefEvent>> {
-        // FALLBACK (documented): live ref streaming is served over a raw
-        // WebSocket at the worker route `GET /watch/<room>`, NOT over Connect
-        // server-streaming.
-        //
-        // Why: the worker `WebSocket::events()` stream is `EventStream<'ws>` —
-        // it borrows the WebSocket — so it cannot be boxed into the `'static +
-        // Send` `ServiceStream<RefEvent>` the generated trait requires without
-        // a self-referential owner. Rather than let this block the unary path
-        // (PutObject/GetObject/GetRef/UpdateRef/ListRefs all work), WatchRefs
-        // over Connect returns `unimplemented` and points clients at the
-        // WebSocket route, which is fully wired: the RefStore DO broadcasts a
-        // JSON RefEvent frame to every `/watch` subscriber on each successful
-        // UpdateRef. See README "WatchRefs / streaming".
-        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<WatchFrame>);
-        Err(connectrpc::ConnectError::unimplemented(
-            "WatchRefs is served over the WebSocket route GET /watch/<room>, \
-             not Connect server-streaming (see README)",
-        ))
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        let room_for_open = room.clone();
+        // Opening + accepting the WebSocket touches `!Send` JS handles
+        // (Stub, Request, Response), so — like every other DO call in this
+        // file — it's wrapped in `SendFuture` (sound under single-threaded
+        // wasm; see the module doc at the top of this file).
+        let ws = SendFuture::new(open_watch_socket(env, room_for_open)).await?;
+
+        let (tx, rx) =
+            futures_channel::mpsc::unbounded::<Result<RefEvent, connectrpc::ConnectError>>();
+        // `spawn_local`, not `SendFuture` + an ordinary `.await`: this task
+        // must keep running to feed `rx` for the lifetime of the stream,
+        // independent of `watch_refs` having already returned. It has no
+        // `Send` bound, which is exactly what lets it own the
+        // borrow-of-itself `EventStream` described above.
+        wasm_bindgen_futures::spawn_local(bridge_watch_socket(ws, tx));
+
+        Response::stream_ok(rx)
     }
 
     async fn post_message(

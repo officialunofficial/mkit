@@ -142,22 +142,86 @@ ConnectRPC unary, `POST /mkit.repo.v1.RepoService/<Method>`:
 | `GetRef`    | read  | DO read → `{exists, object_id}`. |
 | `UpdateRef` | write | CAS (`ANY`/`MISSING`/`MATCH`) inside the DO's serial execution → `{committed, conflict, current_id}`. |
 | `ListRefs`  | read  | DO list under an optional prefix → `{refs}`. |
-| `WatchRefs` | read  | See below. |
+| `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket — **the DO bridge is verified working; delivery to a Connect client over HTTP is not (see below)**. |
 
-### WatchRefs / streaming (fallback)
+### WatchRefs / streaming — M2 spike status (issue #697)
 
-Live ref streaming is served over a **raw WebSocket** at the worker route
-`GET /watch/<room>`, **not** over Connect server-streaming.
+`WatchRefs` is no longer an `unimplemented` stub. The worker opens its own
+WebSocket connection to the room's RefStore DO `/watch` endpoint (the same
+endpoint the raw-WebSocket fallback below proxies to a browser), consumes it,
+and re-emits `Commit` frames as `RefEvent`s on the `ServiceStream<RefEvent>`
+the generated trait requires. This is a **spike**, not a finished feature —
+read this section before relying on it.
 
-Why the fallback: the worker `WebSocket::events()` stream is borrowed
-(`EventStream<'ws>`), so it cannot be boxed into the `'static + Send`
-`ServiceStream<RefEvent>` the generated trait requires. Rather than block the
-unary path, `WatchRefs` over Connect is unimplemented; clients use the
-WebSocket route. The RefStore DO accepts each `/watch` subscriber as a
+**The lifetime wall, and the bridge past it (VERIFIED).** `WebSocket::events()`
+returns `EventStream<'ws>`, which *borrows* the socket — a struct holding
+both a `WebSocket` and its own `EventStream<'_>` is self-referential and
+can't be built in safe Rust, so naively trying to return that borrowed stream
+as the `'static + Send` `ServiceStream<RefEvent>` doesn't compile. The fix:
+never let the borrow escape a function. `service.rs::bridge_watch_socket`
+owns the `WebSocket`, calls `.events()` on it locally, and fully drains that
+borrowed stream inside its own async body — which runs under
+`wasm_bindgen_futures::spawn_local` rather than a `Send`-bounded spawn, so it
+never needs to be `Send` either. Each event it decodes is translated into a
+fully-owned `RefEvent` (or `ConnectError`) and pushed onto a
+`futures_channel::mpsc::unbounded` sender; the **receiver** end — the "owned
+channel" — is what actually satisfies `ServiceStream<RefEvent>`: it holds no
+borrow into the WebSocket or the spawned task, so it is `Send` (its item type
+is plain owned data) and `'static` (no lifetime parameters at all), with no
+`unsafe impl Send` required anywhere in the bridge.
+
+This is verified two ways, not just "it compiles": (1) `cargo check --target
+wasm32-unknown-unknown` is clean, proving the borrow checker accepts the
+pattern under the exact `Send + 'static` bound the generated trait imposes;
+(2) a live `wrangler dev` run — worker opening the DO `/watch` WebSocket
+(`101 Switching Protocols`), `ws.events()` yielding real events, and this
+code correctly matching a `Commit` frame from a concurrent `UpdateRef` and
+skipping the DO's own `"presence"` frame — confirmed via `wrangler dev`
+console output during development (not captured as an automated test; see
+"Known gap" below for why an automated end-to-end test isn't included yet).
+See the doc comment on `RepoServer::watch_refs` in
+[`src/worker_impl/service.rs`](src/worker_impl/service.rs) for the full
+walkthrough, and [`src/watch_frame.rs`](src/watch_frame.rs) (host-testable,
+covered by `cargo test --lib`) for the `Commit`-frame → `RefEvent`
+translation.
+
+**Known gap: response delivery is NOT verified end-to-end.** Getting the
+resulting `RefEvent` stream to actually reach a Connect client over HTTP
+required also switching `worker_impl.rs::serve_connect`'s response path from
+buffer-the-whole-body (`.collect()`, which can never terminate for an
+open-ended stream) to `Response::from_stream` — necessary, but in testing
+against local `wrangler dev` it was **not sufficient**: a `curl -N` / raw
+`fetch()` Connect-streaming client against `WatchRefs` still received zero
+bytes, even *after* the bridge had already logged a real `RefEvent` flowing
+through it. This was not root-caused before time ran out on the spike; it
+could be a `wrangler dev`/miniflare-local limitation for wasm-worker
+`ReadableStream` responses (there's precedent for streaming-response rough
+edges in local Workers dev tooling), or a remaining bug in the adapter — it
+is **unverified against a real deployed Worker**, since this environment has
+no Cloudflare deploy credentials (see the org's `project-cloudflare-deploy-account`
+memory note). This is why issue #697 does not claim the full "TS Connect
+client receives a live `RefEvent`" pass bar from its own Testing Decisions —
+that requires either fixing this gap or testing against a real deployment.
+
+**Scope, even once delivery is fixed.** The bridge only translates `Commit`
+frames — `Chat`/`Reaction` frames and the untyped `"presence"` frame are
+silently skipped on the Connect stream (`RefEvent` has no `oneof` for them
+yet; see the issue this shipped under for the unresolved schema-unification
+work). It is also single-subscriber-per-request, not bidi: each `WatchRefs`
+call opens its own worker→DO WebSocket, which is fine for a spike/demo
+fan-out but is a DO connection per Connect subscriber, not shared.
+
+**Raw-WebSocket fallback (still wired, still the production path).** Live ref
+streaming is *also* still reachable over a raw WebSocket at the worker route
+`GET /watch/<room>` — the RefStore DO accepts each subscriber as a
 hibernatable WebSocket and broadcasts a JSON frame
-(`{ "name", "object_id", "author_pubkey" }`, all hex) to every subscriber on
-each successful `UpdateRef`. The unary path is fully functional independent of
-this.
+(`{ "name", "object_id", "author_pubkey" }`, all hex, plus the chat/reaction/
+presence frames outside the `RefEvent` schema) to every subscriber on each
+successful `UpdateRef`. `apps/web`'s `subscribeRoom` still uses this route
+directly and should keep doing so until the gap above is resolved (see the
+issue's Implementation Notes for the client migration this spike sets up but
+does not itself perform). The unary path is fully functional independent of
+either streaming path.
 
 ## RefStore Durable Object
 

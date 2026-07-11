@@ -43,6 +43,10 @@ use super::wire::{
     MessagesResp, MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp,
     RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
+// `/watch` frame: declared once (host+wasm target-independent) in
+// `crate::watch_frame` and shared with the WatchRefs Connect-streaming
+// bridge in `service.rs`, so a field rename can't desync producer/consumer.
+use crate::watch_frame::WatchFrame;
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
 /// `limit=0` gets the default; anything above the max is clamped.
@@ -60,37 +64,6 @@ const MESSAGES_RETAINED: i64 = 1_000;
 /// bounds the DO's SQLite so a flood of (target, emoji, author) tuples can't
 /// grow it without limit; `list_reactions` reads at most this many.
 const REACTIONS_RETAINED: i64 = 5_000;
-
-/// A live frame broadcast to every `/watch` subscriber. The SAME socket carries
-/// commit / chat / reaction frames so the lobby renders one merged feed; the
-/// `kind` discriminator is the serde tag (set by the enum, not by hand), so a
-/// variant and its tag can't drift. Hex fields are decoded back to raw bytes by
-/// the worker before re-encoding into the proto where needed. Wire shape is
-/// `{"kind":"commit"|"chat"|"reaction", …variant fields}` — matched 1:1 by the
-/// client's `parseActivityFrame`.
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WatchFrame {
-    Commit {
-        name: String,
-        object_id: String,             // 64-hex
-        author_pubkey: Option<String>, // 64-hex
-    },
-    Chat {
-        message_id: String,    // 64-hex content address
-        author_pubkey: String, // 64-hex
-        text: String,
-        created_at: i64,
-        seq: u64,
-    },
-    Reaction {
-        target_id: String,
-        emoji: String,
-        author_pubkey: String, // 64-hex
-        active: bool,
-        count: u32,
-    },
-}
 
 /// The smallest string strictly greater than every string having `prefix` as a
 /// prefix — used as the exclusive upper bound of a prefix range scan. Clone the

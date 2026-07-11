@@ -992,6 +992,8 @@ dependencies = [
  "connectrpc",
  "connectrpc-build",
  "ed25519-dalek",
+ "futures-channel",
+ "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.4.3",
  "hex",
@@ -1004,6 +1006,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tower",
+ "wasm-bindgen-futures",
  "worker",
 ]
 
