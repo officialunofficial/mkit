@@ -44,7 +44,20 @@ bls-threshold = [
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it; path-only deps are rejected by
 # the registry. Track the workspace.package.version.
-mkit-core = { version = "0.3", path = "../mkit-core" }
+#
+# `default-features = false`: mkit-core's default set includes
+# `pack-zstd` (SPEC-PACKFILE v2 compression, issue #646), which pulls
+# `zstd-sys` — not wasm32-buildable. mkit-attest doesn't touch
+# `pack.rs`, but it IS a dependency of mkit-wasm (wasm32 target), and
+# Cargo unifies a dependency's enabled features across every edge that
+# reaches it within one build — so leaving this edge on defaults would
+# silently drag `zstd-sys` back into mkit-wasm's build even though
+# mkit-wasm's own `mkit-core` edge already opts out. Every OTHER
+# consumer of mkit-attest (mkit-cli, mkit-keystore, release-attest)
+# also depends on mkit-core directly with default features on, so
+# their builds are unaffected — the union still includes `pack-zstd`
+# there via that direct edge.
+mkit-core = { version = "0.3", path = "../mkit-core", default-features = false }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 buffa = "0.8.1"

@@ -42,7 +42,16 @@ thiserror = "2"
 # `TransportError`, `Ref`, `RefWriteCondition`, and `validate_ref_name`
 # from mkit-core. mkit-core does NOT depend on mkit-rpc, so this is
 # acyclic.
-mkit-core = { version = "0.3", path = "../mkit-core" }
+#
+# `default-features = false`: same wasm32-safety rationale as
+# mkit-attest's edge to mkit-core (see that crate's Cargo.toml) — this
+# crate sits on the mkit-wasm -> mkit-attest -> mkit-rpc -> mkit-core
+# path, and mkit-core's default `pack-zstd` feature (issue #646) pulls
+# a non-wasm32-buildable C dependency. Every other consumer of
+# mkit-rpc (mkit-cli, mkit-attest, mkit-transport-enc,
+# mkit-transport-ssh) also depends on mkit-core directly with default
+# features on, so their builds still get `pack-zstd` via that edge.
+mkit-core = { version = "0.3", path = "../mkit-core", default-features = false }
 
 [build-dependencies]
 buffa-build = "0.8.1"
