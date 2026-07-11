@@ -236,5 +236,67 @@ live for everyone:
 Open write is intentional (anonymous demo); see the security note above for the
 replay-window / rate-limit caveats before exposing it publicly.
 
+### Run your own instance (self-hosting)
+
+The steps above assume the maintainers' own Cloudflare account, the
+`mkit-repo-objects` R2 bucket, and the `api.mkit.sh` route
+(`wrangler.jsonc:31`/`:35`). To run a private instance on your own account
+instead:
+
+1. **Provision your own bucket.** Edit `r2_buckets[0].bucket_name` in
+   `wrangler.jsonc` (currently `mkit-repo-objects`) to a globally-unique name
+   of your own, then create it: `wrangler r2 bucket create <your-bucket-name>`.
+   Reusing the literal `mkit-repo-objects` name will collide with the
+   maintainers' bucket if you ever deploy to the same account.
+2. **Point the route at your own domain, or drop it.** Edit
+   `routes[0].pattern` in `wrangler.jsonc` (currently `api.mkit.sh`) to a
+   hostname on a Cloudflare zone you control, or delete the `routes` array
+   entirely to deploy to the default `<name>.<subdomain>.workers.dev` origin
+   instead — no custom domain required.
+3. **Deploy:** `wrangler deploy` (needs an authenticated wrangler /
+   `CLOUDFLARE_API_TOKEN`). The `RefStore` Durable Object and its `v1` SQLite
+   migration (`wrangler.jsonc:40-43`) are created automatically on first
+   deploy, same as the maintainers' instance.
+4. **Re-point the web app's CSP and backend URL, if you're also self-hosting
+   `apps/web`** (or writing your own client): add your Worker's origin, in
+   both `https://` and `wss://` forms, to the `connect-src` directive in
+   `apps/web/src/security-policy.js` (the `wss://` form covers the
+   `/watch/<room>` WebSocket — see "WatchRefs / streaming" above), and set the
+   web build's `VITE_REPO_BACKEND_URL` to your Worker's `https://` origin
+   (unset, the web app falls back to an in-memory mock backend).
+
+#### Cloudflare plan and cost notes
+
+- **Durable Objects with the SQLite storage backend** — what `RefStore` uses
+  (`wrangler.jsonc:40-43`, `new_sqlite_classes: ["RefStore"]`) — run on
+  **both** the Workers Free and Workers Paid plans; Cloudflare lifted the
+  earlier Paid-only restriction for the SQLite storage class. Re-verify
+  against Cloudflare's [Durable Objects
+  pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
+  page before budgeting — pricing and plan gating change over time, and a
+  stale number here would be worse than none.
+- **Free plan caps** worth knowing before a real (non-toy) deployment: 100,000
+  Durable Object requests/day, 100,000 SQLite row writes/day, 5 GB total
+  SQLite storage, and 13,000 GB-s of compute duration/day, all per account.
+  Every `UpdateRef` costs one DO request plus at least one row write, so a
+  busy shared room can exhaust the daily write cap.
+- **R2** (the `STORAGE` binding, holding every `PutObject`'s bytes) requires a
+  payment method on file to activate at all, even if usage stays inside its
+  free tier (10 GB storage, 1M Class A ops/month, 10M Class B ops/month, no
+  egress charge — see [R2
+  pricing](https://developers.cloudflare.com/r2/pricing/)). R2 is billed
+  independently of the Workers plan tier.
+- **If you outgrow the Free plan**, Workers Paid is a **$5/month minimum**
+  (metered beyond the included allotments — see [Workers
+  pricing](https://developers.cloudflare.com/workers/platform/pricing/)),
+  which also raises the Durable Object allotments to 1M requests + 400,000
+  GB-s duration + 25B row reads + 50M row writes included per month.
+- **Custom domains** (`routes[0].custom_domain: true`) need the domain's zone
+  active on your Cloudflare account (nameservers pointed at Cloudflare) but
+  are themselves available on the Free plan — you do not need Paid just to
+  attach a custom domain. Dropping the `routes` block and using the default
+  `workers.dev` subdomain (step 2 above) avoids the zone requirement
+  altogether.
+
 [workers-rs]: https://github.com/cloudflare/workers-rs
 [ConnectRPC]: https://connectrpc.com/

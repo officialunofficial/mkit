@@ -361,6 +361,7 @@ series.
 | [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commits |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
+| [`apps/repo-worker/README.md#run-your-own-instance-self-hosting`](apps/repo-worker/README.md#run-your-own-instance-self-hosting) | Operators — self-hosting the anonymous-multiplayer repo server: Cloudflare plan/cost requirements, R2 bucket + route overrides |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 
 ## Build
