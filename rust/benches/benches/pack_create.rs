@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use mkit_benches::{Sample, Unit, time_one_with_setup};
 use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
@@ -50,11 +50,16 @@ fn bench_pack(c: &mut Criterion) {
                     |(_dir, store)| pack_via_mkit(&store, &blobs),
                 );
             });
-            let t = time_one(1, 5, || {
-                let dir = tempfile::tempdir().unwrap();
-                let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
-                pack_via_mkit(&store, &blobs);
-            });
+            let t = time_one_with_setup(
+                1,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                    (dir, store)
+                },
+                |(_dir, store)| pack_via_mkit(&store, &blobs),
+            );
             samples.push(Sample {
                 category: "pack-create".into(),
                 axis: axis.into(),
@@ -79,11 +84,16 @@ fn bench_pack(c: &mut Criterion) {
                     |(_dir, repo)| pack_via_git2(&repo, &blobs),
                 );
             });
-            let t = time_one(1, 5, || {
-                let dir = tempfile::tempdir().unwrap();
-                let repo = git2::Repository::init(dir.path()).unwrap();
-                pack_via_git2(&repo, &blobs);
-            });
+            let t = time_one_with_setup(
+                1,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let repo = git2::Repository::init(dir.path()).unwrap();
+                    (dir, repo)
+                },
+                |(_dir, repo)| pack_via_git2(&repo, &blobs),
+            );
             samples.push(Sample {
                 category: "pack-create".into(),
                 axis: axis.into(),

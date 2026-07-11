@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use mkit_benches::{Sample, Unit, time_one_with_setup};
 use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
@@ -52,11 +52,16 @@ fn bench_object_commit(c: &mut Criterion) {
                     |(_dir, store)| commit_via_mkit(&store, &payloads),
                 );
             });
-            let t = time_one(2, 5, || {
-                let dir = tempfile::tempdir().unwrap();
-                let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
-                commit_via_mkit(&store, &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                    (dir, store)
+                },
+                |(_dir, store)| commit_via_mkit(&store, &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
@@ -81,11 +86,16 @@ fn bench_object_commit(c: &mut Criterion) {
                     |(_dir, repo)| commit_via_git2(&repo, &payloads),
                 );
             });
-            let t = time_one(2, 5, || {
-                let dir = tempfile::tempdir().unwrap();
-                let repo = git2::Repository::init(dir.path()).unwrap();
-                commit_via_git2(&repo, &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let repo = git2::Repository::init(dir.path()).unwrap();
+                    (dir, repo)
+                },
+                |(_dir, repo)| commit_via_git2(&repo, &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
@@ -110,11 +120,16 @@ fn bench_object_commit(c: &mut Criterion) {
                     |dir| commit_via_git_cli(dir.path(), &payloads),
                 );
             });
-            let t = time_one(2, 5, || {
-                let dir = tempfile::tempdir().unwrap();
-                init_git_repo(dir.path());
-                commit_via_git_cli(dir.path(), &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    init_git_repo(dir.path());
+                    dir
+                },
+                |dir| commit_via_git_cli(dir.path(), &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
