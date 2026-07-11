@@ -12,7 +12,7 @@
 // Internal wire protocol (the worker -> DO via `stub.fetch_with_request`),
 // all JSON over HTTP to a `https://refstore/<op>` URL:
 //   POST /get    { "name": "<ref>" }                       -> { "exists", "value"? }
-//   POST /update { "name", "new", "expectation", "expected"?, "author"? }
+//   POST /update { "name", "new", "expectation", "expected"?, "author"?, "idem" }
 //                                                          -> { "committed", "conflict", "current"? }
 //   POST /list   { "prefix": "<prefix>" }                  -> { "refs": [ { "name", "value" } ] }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
@@ -215,6 +215,9 @@ impl DurableObject for RefStore {
                     if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
                         return Response::error(format!("storage init failed: {e}"), 500);
                     }
+                    if let Err(e) = self.ensure_update_idem_table() {
+                        return Response::error(format!("storage init failed: {e}"), 500);
+                    }
                 }
             }
             "/post" | "/messages" => {
@@ -385,7 +388,27 @@ impl RefStore {
 
     /// Apply the CAS update serially. Reads the current value, evaluates the
     /// pure CAS decision, and on commit upserts + broadcasts a RefEvent.
+    ///
+    /// Replay dedupe runs FIRST, mirroring `handle_post`/`handle_react`: a
+    /// re-submitted signed UpdateRef (same author + ref name + idempotency-key)
+    /// returns the ORIGINAL `(committed, conflict, current)` result instead of
+    /// re-evaluating the CAS against whatever the ref holds now. This is what
+    /// closes the `REF_EXPECTATION_ANY` replay hole — without it, a captured
+    /// signed ANY-update stays replayable (and re-clobbers the ref to the stale
+    /// value) for the whole envelope freshness window. UNLIKE chat/react, which
+    /// dedupe globally per author, the key here is `(author, name, idem)`: the
+    /// same idempotency key must not collide across two different refs.
     fn handle_update(&self, req: UpdateReq) -> Result<Response> {
+        let author = req.author.clone().unwrap_or_default();
+        let now = Date::now().as_millis() as i64;
+
+        if !req.idem.is_empty()
+            && !author.is_empty()
+            && let Some(resp) = self.update_idem_lookup(&author, &req.name, &req.idem)
+        {
+            return Response::from_json(&resp);
+        }
+
         let current = self.read_ref(&req.name);
         let expectation = RefExpectation::from_wire(req.expectation);
         let expected_bytes = req.expected.as_ref().and_then(|s| hex::decode(s).ok());
@@ -419,11 +442,15 @@ impl RefStore {
                     object_id: req.new.clone(),
                     author_pubkey: req.author.clone(),
                 });
-                Response::from_json(&UpdateResp {
+                let resp = UpdateResp {
                     committed: true,
                     conflict: false,
                     current: Some(req.new),
-                })
+                };
+                if !req.idem.is_empty() && !author.is_empty() {
+                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
+                }
+                Response::from_json(&resp)
             }
             CasDecision::Conflict(reason) => {
                 // On a precondition failure return the present value (if any)
@@ -432,14 +459,108 @@ impl RefStore {
                     ConflictReason::Missing => None,
                     _ => current,
                 };
-                Response::from_json(&UpdateResp {
+                let resp = UpdateResp {
                     committed: false,
                     conflict: true,
                     current,
-                })
+                };
+                if !req.idem.is_empty() && !author.is_empty() {
+                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
+                }
+                Response::from_json(&resp)
             }
             CasDecision::Invalid(msg) => Response::error(msg, 400),
         }
+    }
+
+    /// Idempotently create the `update_idem` replay-dedupe ledger for
+    /// UpdateRef, mirroring `idem_keys` (chat) / `react_idem` (React). Keyed on
+    /// `(author, name, idem)` — UNLIKE chat/react, which dedupe globally per
+    /// author, UpdateRef must include the ref `name` in the key since the same
+    /// idempotency key must not collide across different refs.
+    fn ensure_update_idem_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS update_idem (\
+               author TEXT NOT NULL, \
+               name TEXT NOT NULL, \
+               idem TEXT NOT NULL, \
+               committed INTEGER NOT NULL, \
+               conflict INTEGER NOT NULL, \
+               current TEXT, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (author, name, idem));",
+            None,
+        )?;
+        // Index the time column so the per-update freshness prune
+        // (`DELETE … WHERE created_at < ?`) seeks the expired tail instead of
+        // full-scanning the whole room-wide ledger on every committed update.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS update_idem_created ON update_idem(created_at);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// A prior `(author, name, idem)` UpdateRef result, so a replay returns it
+    /// unchanged instead of re-running the CAS against the (possibly since
+    /// changed) current value. `None` on a first-seen key.
+    fn update_idem_lookup(&self, author: &str, name: &str, idem: &str) -> Option<UpdateResp> {
+        #[derive(Deserialize)]
+        struct Row {
+            committed: i64,
+            conflict: i64,
+            current: Option<String>,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT committed, conflict, current FROM update_idem \
+                 WHERE author = ? AND name = ? AND idem = ? LIMIT 1;",
+                vec![author.into(), name.into(), idem.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| UpdateResp {
+            committed: r.committed != 0,
+            conflict: r.conflict != 0,
+            current: r.current,
+        })
+    }
+
+    /// Record this `(author, name, idem)` → result for replay dedupe, then drop
+    /// entries older than the envelope freshness window (a replay that old
+    /// fails envelope verification, so its key is no longer needed).
+    fn record_update_idem(
+        &self,
+        author: &str,
+        name: &str,
+        idem: &str,
+        resp: &UpdateResp,
+        now: i64,
+    ) {
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "INSERT OR REPLACE INTO update_idem \
+               (author, name, idem, committed, conflict, current, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?);",
+            vec![
+                author.into(),
+                name.into(),
+                idem.into(),
+                i64::from(resp.committed).into(),
+                i64::from(resp.conflict).into(),
+                resp.current.clone().into(),
+                now.into(),
+            ],
+        );
+        let _ = sql.exec(
+            "DELETE FROM update_idem WHERE created_at < ?;",
+            vec![(now - FRESHNESS_WINDOW_MS).into()],
+        );
     }
 
     /// List refs whose path starts with `prefix` (empty = all).
