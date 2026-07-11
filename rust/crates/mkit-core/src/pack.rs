@@ -37,7 +37,8 @@ use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ASCII magic ("MKIT") at the start of every v1 pack.
 pub const MAGIC: &[u8; 4] = b"MKIT";
@@ -55,6 +56,12 @@ pub const TRAILER_LEN: usize = 32;
 pub const HEADER_LEN: usize = 4 + 4 + 4;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
+/// Byte offset of the 4-byte `entry_count` field within the header —
+/// after the 4-byte magic and 4-byte version fields. Found hardcoded
+/// as the literal range `8..12` at four call sites during the
+/// epic-#634 code review; named here instead, consistent with this
+/// file's existing `HEADER_LEN`/`TRAILER_LEN` convention.
+pub const ENTRY_COUNT_OFFSET: usize = 8;
 
 /// Packfile errors. Distinct from [`MkitError`] so callers can match on
 /// pack-specific failures (trailer mismatch, base-missing) without
@@ -103,33 +110,59 @@ pub struct UnpackReport {
     pub stored: Vec<Hash>,
 }
 
-/// Builds a packfile in memory, enforcing entry/payload caps and
-/// recording entries in insertion order. Call [`Self::finish`] to obtain
-/// the final packfile bytes (header + entries + trailer).
-#[derive(Debug, Default)]
+/// Builds a packfile, enforcing entry/payload caps and streaming each
+/// pushed entry's frame directly into the final output buffer as it
+/// arrives. [`Self::finish`] only patches the header's entry count
+/// (unknown up front from a streaming writer) and appends the trailer —
+/// it never re-copies the pushed entries into a second, same-sized
+/// buffer (issue #647).
+#[derive(Debug)]
 pub struct PackWriter {
-    // Buffered entries. Each `(entry_type, payload)` pair is written
-    // verbatim by `finish`; the writer adds the per-entry frame.
-    entries: Vec<(u8, Vec<u8>)>,
+    // The final packfile bytes, built incrementally: `new` writes the
+    // header with a zero entry-count placeholder (patched by `finish`
+    // once the final count is known); `push_raw`/`push_delta` append
+    // each entry's `[type][len][payload]` frame directly here. There is
+    // no separate per-entry collection copied a second time at
+    // `finish`.
+    buf: Vec<u8>,
+    entry_count: u32,
     total_payload: u64,
+}
+
+impl Default for PackWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PackWriter {
     /// Create an empty writer.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut buf = Vec::with_capacity(HEADER_LEN);
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // entry_count placeholder; `finish` patches it in.
+        Self {
+            buf,
+            entry_count: 0,
+            total_payload: 0,
+        }
     }
 
     /// Append a raw object entry. `bytes` is the fully serialised object
     /// payload; `hash_of_bytes` is the BLAKE3 of those same bytes —
     /// callers usually have it on hand from the object store, so we take
     /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
-    /// Returns the same hash for chaining.
-    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: Vec<u8>) -> Result<Hash, PackError> {
+    /// Takes `bytes` by reference (not by value): the streaming writer
+    /// copies it straight into the output buffer as it's pushed, so it
+    /// never needs to own the caller's copy (issue #647). Returns the
+    /// same hash for chaining.
+    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
         self.check_caps_for(bytes.len())?;
         self.total_payload += bytes.len() as u64;
-        self.entries.push((0x00, bytes));
+        self.append_entry(0x00, &[bytes])?;
+        self.entry_count += 1;
         Ok(hash_of_bytes)
     }
 
@@ -140,16 +173,32 @@ impl PackWriter {
     pub fn push_delta(&mut self, base_hash: &Hash, delta_stream: &[u8]) -> Result<(), PackError> {
         let payload_len = hash::HASH_LEN + delta_stream.len();
         self.check_caps_for(payload_len)?;
-        let mut payload = Vec::with_capacity(payload_len);
-        payload.extend_from_slice(base_hash);
-        payload.extend_from_slice(delta_stream);
-        self.total_payload += payload.len() as u64;
-        self.entries.push((0x02, payload));
+        self.total_payload += payload_len as u64;
+        self.append_entry(0x02, &[base_hash.as_slice(), delta_stream])?;
+        self.entry_count += 1;
+        Ok(())
+    }
+
+    /// Append one entry's frame — `[1B type][4B payload_len][payload]`
+    /// — straight onto the output buffer. `parts` is the payload split
+    /// into its logical pieces (a delta entry is `[base_hash][stream]`)
+    /// so no intermediate concatenated buffer is ever built just to
+    /// hand a single contiguous slice to `finish`.
+    fn append_entry(&mut self, etype: u8, parts: &[&[u8]]) -> Result<(), PackError> {
+        let payload_len: usize = parts.iter().map(|p| p.len()).sum();
+        let plen: u32 = payload_len
+            .try_into()
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        self.buf.push(etype);
+        self.buf.extend_from_slice(&plen.to_le_bytes());
+        for p in parts {
+            self.buf.extend_from_slice(p);
+        }
         Ok(())
     }
 
     fn check_caps_for(&self, add_len: usize) -> Result<(), PackError> {
-        let next_count = self.entries.len() as u64 + 1;
+        let next_count = u64::from(self.entry_count) + 1;
         if next_count > u64::from(MAX_ENTRIES) {
             return Err(PackError::TooManyObjects(MAX_ENTRIES + 1));
         }
@@ -163,45 +212,46 @@ impl PackWriter {
     /// Number of entries pushed so far. Useful for sizing diagnostics.
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.entry_count as usize
     }
 
-    /// Serialise the pack: header + entries + trailer. The trailer is
-    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
-    /// the on-disk pack key — see [`pack_key`].
+    /// Serialise the pack: header + entries + trailer. Entries are
+    /// already in `self.buf` (streamed in by `push_raw`/`push_delta`);
+    /// `finish` only patches the header's entry count and appends the
+    /// trailer, `BLAKE3(everything_before_trailer)`. The whole pack's
+    /// BLAKE3 is the on-disk pack key — see [`pack_key`].
     pub fn finish(self) -> Result<Vec<u8>, PackError> {
-        let count: u32 = self
-            .entries
-            .len()
-            .try_into()
-            .map_err(|_| PackError::TooManyObjects(MAX_ENTRIES + 1))?;
-        if count > MAX_ENTRIES {
-            return Err(PackError::TooManyObjects(count));
-        }
+        self.finish_inner(None)
+    }
 
-        // Pre-size: header + per-entry overhead + payloads + trailer.
-        let mut size = HEADER_LEN + TRAILER_LEN;
-        for (_, p) in &self.entries {
-            size += ENTRY_FRAME_LEN + p.len();
-        }
-        let mut buf = Vec::with_capacity(size);
+    /// Test-only variant of [`Self::finish`] that also reports, via
+    /// `bytes_copied`, how many payload bytes it copies WHILE finishing
+    /// (as opposed to while entries were pushed). Proves `finish`
+    /// streams rather than double-buffers (issue #647): the unpatched
+    /// writer re-copied every pushed entry's payload into a fresh
+    /// same-size buffer inside `finish`, so this counter would track
+    /// the whole pack; the streaming writer only ever appends the
+    /// 32-byte trailer here.
+    #[cfg(test)]
+    pub(crate) fn finish_tracking_bytes_copied(
+        self,
+        bytes_copied: &AtomicU64,
+    ) -> Result<Vec<u8>, PackError> {
+        self.finish_inner(Some(bytes_copied))
+    }
 
-        buf.extend_from_slice(MAGIC);
-        buf.extend_from_slice(&VERSION.to_le_bytes());
-        buf.extend_from_slice(&count.to_le_bytes());
-        for (etype, payload) in self.entries {
-            buf.push(etype);
-            let plen: u32 = payload
-                .len()
-                .try_into()
-                .map_err(|_| PackError::PackfileTooLarge)?;
-            buf.extend_from_slice(&plen.to_le_bytes());
-            buf.extend_from_slice(&payload);
+    fn finish_inner(mut self, bytes_copied: Option<&AtomicU64>) -> Result<Vec<u8>, PackError> {
+        if self.entry_count > MAX_ENTRIES {
+            return Err(PackError::TooManyObjects(self.entry_count));
         }
-        // Trailer over everything written so far.
-        let trailer = hash::hash(&buf);
-        buf.extend_from_slice(&trailer);
-        Ok(buf)
+        self.buf[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+            .copy_from_slice(&self.entry_count.to_le_bytes());
+        let trailer = hash::hash(&self.buf);
+        if let Some(c) = bytes_copied {
+            c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
+        }
+        self.buf.extend_from_slice(&trailer);
+        Ok(self.buf)
     }
 }
 
@@ -246,7 +296,11 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
     if version != VERSION {
         return Err(PackError::UnsupportedVersion(version));
     }
-    let count = u32::from_le_bytes(pack_bytes[8..12].try_into().expect("4 bytes"));
+    let count = u32::from_le_bytes(
+        pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+            .try_into()
+            .expect("4 bytes"),
+    );
     if count > MAX_ENTRIES {
         return Err(PackError::TooManyObjects(count));
     }
@@ -321,6 +375,31 @@ impl PackReader {
         store: &ObjectStore,
         payload_cap: u64,
     ) -> Result<UnpackReport, PackError> {
+        Self::read_inner(pack_bytes, store, payload_cap, None)
+    }
+
+    /// Test-only variant of [`Self::read`] that also reports, via
+    /// `owned_bytes`, the total number of payload bytes it allocates
+    /// freshly (as opposed to borrowing straight from the
+    /// already-resident `pack_bytes`). Proves the streaming reader
+    /// (issue #647) never re-copies a raw entry's bytes: only delta
+    /// targets — genuinely new bytes produced by `delta::decode`, which
+    /// cannot alias `pack_bytes` — increment this counter.
+    #[cfg(test)]
+    pub(crate) fn read_tracking_owned_bytes(
+        pack_bytes: &[u8],
+        store: &ObjectStore,
+        owned_bytes: &AtomicU64,
+    ) -> Result<UnpackReport, PackError> {
+        Self::read_inner(pack_bytes, store, MAX_TOTAL_PAYLOAD, Some(owned_bytes))
+    }
+
+    fn read_inner(
+        pack_bytes: &[u8],
+        store: &ObjectStore,
+        payload_cap: u64,
+        owned_bytes: Option<&AtomicU64>,
+    ) -> Result<UnpackReport, PackError> {
         // 1. Length sanity: must fit header + trailer at minimum.
         if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
             return Err(PackError::PackfileTooShort);
@@ -335,6 +414,14 @@ impl PackReader {
             return Err(PackError::UnsupportedVersion(version));
         }
         // 4. Trailer must match BEFORE we touch the store. SPEC-PACKFILE §8.
+        // Every entry parsed below is staged into the batch as it's
+        // seen (not buffered up front), but that's only safe to do
+        // BECAUSE the pack's own integrity is already established here,
+        // first — a corrupt/truncated pack is rejected before a single
+        // byte is staged, so the "abort leaves the store untouched"
+        // guarantee does not depend on holding the whole pack's staged
+        // output in memory at once (see `WriteBatch`'s module docs: a
+        // dropped, uncommitted batch unlinks its temp files for free).
         let split = pack_bytes.len() - TRAILER_LEN;
         let body = &pack_bytes[..split];
         let trailer = &pack_bytes[split..];
@@ -343,7 +430,11 @@ impl PackReader {
             return Err(PackError::PackfileCorrupted);
         }
         // 5. Entry count + cap.
-        let count = u32::from_le_bytes(pack_bytes[8..12].try_into().expect("4 bytes"));
+        let count = u32::from_le_bytes(
+            pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+                .try_into()
+                .expect("4 bytes"),
+        );
         if count > MAX_ENTRIES {
             return Err(PackError::TooManyObjects(count));
         }
@@ -354,16 +445,32 @@ impl PackReader {
         }
 
         let mut report = UnpackReport::default();
-        let mut pending_writes: Vec<(Hash, Arc<[u8]>)> = Vec::new();
-        // Track raw entries we wrote in *this* pack so subsequent delta
-        // entries can resolve their base from memory before falling back
-        // to the on-disk store. We keep the resolved object bytes (raw
-        // serialised SPEC-OBJECTS payload) so the delta apply doesn't
-        // need to re-read them.
-        let mut in_pack: std::collections::HashMap<Hash, Arc<[u8]>> =
+        // Track entries resolved in *this* pack so subsequent delta
+        // entries can resolve their base from memory before falling
+        // back to the on-disk store: `WriteBatch::write_prehashed`
+        // stages bytes durably-pending but NOT visible until
+        // `commit()`, so a not-yet-committed entry can only be found
+        // here, never via `store`. Raw entries borrow straight out of
+        // `pack_bytes` — it's already resident for the whole call, so
+        // keeping a second owned copy alongside it would just double
+        // the memory a large pack needs (issue #647). Only
+        // delta-resolved entries need an owned buffer, since
+        // `delta::decode` produces bytes that don't alias `pack_bytes`.
+        let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
             std::collections::HashMap::new();
         let mut total_payload: u64 = 0;
         let mut pos = HEADER_LEN;
+
+        // Stage each entry into the batch as soon as it's parsed and
+        // validated, rather than collecting every entry's bytes into a
+        // second list first and writing them all out after the loop.
+        // `commit()` still runs exactly once, after the loop below, so
+        // the "durable and visible together" contract (see the
+        // `WriteBatch` module docs) is unaffected — only the point at
+        // which each entry's bytes are handed to the batch moves
+        // earlier, from "after every entry is parsed" to "as each
+        // entry is parsed".
+        let batch = store.batch();
 
         for _ in 0..count {
             // Frame: [type][payload_len].
@@ -388,16 +495,15 @@ impl PackReader {
 
             match etype {
                 0x00 => {
-                    // raw — validate and stage for writing after the whole pack parses.
+                    // raw — validate, then stage into the batch immediately.
                     let obj = validate_storable_object(payload)?;
                     // Address by the dispatched id (merkle root for
                     // Tree/ChunkedBlob, BLAKE3 otherwise) from the object we
                     // just decoded, so the unpacked object lands under the same
                     // key every sink uses without a second decode.
                     let stored_hash = crate::object::id_from_object(&obj, payload);
-                    let bytes: Arc<[u8]> = Arc::from(payload);
-                    in_pack.insert(stored_hash, Arc::clone(&bytes));
-                    pending_writes.push((stored_hash, bytes));
+                    batch.write_prehashed(stored_hash, &[payload])?;
+                    in_pack.insert(stored_hash, Cow::Borrowed(payload));
                     report.raw_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -409,24 +515,38 @@ impl PackReader {
                     let mut base_hash = [0u8; hash::HASH_LEN];
                     base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
                     let stream = &payload[hash::HASH_LEN..];
-                    // Resolve base: in-pack first, then on-disk.
-                    let base_bytes: std::borrow::Cow<'_, [u8]> =
-                        if let Some(b) = in_pack.get(&base_hash) {
-                            std::borrow::Cow::Borrowed(b.as_ref())
-                        } else if store.contains(&base_hash) {
-                            let bytes = store.read(&base_hash)?;
-                            validate_storable_object(&bytes)?;
-                            std::borrow::Cow::Owned(bytes)
-                        } else {
-                            return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
-                        };
+                    // Resolve base: in-pack first, then on-disk. A
+                    // store-resolved base is cached into `in_pack` under
+                    // its own hash so a later delta entry referencing the
+                    // same out-of-pack base hits the cache-hit branch
+                    // above instead of paying another full read + verify +
+                    // decode (#643). This is safe because `store.read`
+                    // already hash-verified the bytes against `base_hash`.
+                    // Cloning once here (vs. #643's original Arc::clone)
+                    // is the cost of composing with #647's Cow-based
+                    // `in_pack`, which trades that one-time clone for
+                    // zero-copy borrows on the far more common raw-entry
+                    // path — a net win, and this clone only happens once
+                    // per unique out-of-pack base, not per delta entry.
+                    let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
+                        Cow::Borrowed(b.as_ref())
+                    } else if store.contains(&base_hash) {
+                        let bytes = store.read(&base_hash)?;
+                        validate_storable_object(&bytes)?;
+                        in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
+                        Cow::Owned(bytes)
+                    } else {
+                        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
+                    };
                     validate_delta_result_size(stream)?;
                     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
                     let obj = validate_storable_object(&resolved)?;
                     let stored_hash = crate::object::id_from_object(&obj, &resolved);
-                    let bytes: Arc<[u8]> = Arc::from(resolved);
-                    in_pack.insert(stored_hash, Arc::clone(&bytes));
-                    pending_writes.push((stored_hash, bytes));
+                    batch.write_prehashed(stored_hash, &[&resolved])?;
+                    if let Some(c) = owned_bytes {
+                        c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+                    }
+                    in_pack.insert(stored_hash, Cow::Owned(resolved));
                     report.delta_count += 1;
                     report.stored.push(stored_hash);
                 }
@@ -442,12 +562,6 @@ impl PackReader {
         // Batched durability: one full flush for the whole pack instead
         // of one per object. The caller's ref update happens after
         // `read` returns, so the commit-before-reference ordering holds.
-        let batch = store.batch();
-        for (h, bytes) in pending_writes {
-            // Every entry was BLAKE3-hashed above (trailer-verified
-            // pack, hash recorded in the report); skip the re-hash.
-            batch.write_prehashed(h, &[&bytes])?;
-        }
         batch.commit()?;
 
         Ok(report)
@@ -519,7 +633,14 @@ mod tests {
         assert_eq!(pack.len(), HEADER_LEN + TRAILER_LEN);
         assert_eq!(&pack[..4], MAGIC);
         assert_eq!(u32::from_le_bytes(pack[4..8].try_into().unwrap()), VERSION);
-        assert_eq!(u32::from_le_bytes(pack[8..12].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_le_bytes(
+                pack[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            0
+        );
 
         let (_dir, store) = fresh_store();
         let report = PackReader::read(&pack, &store).unwrap();
@@ -539,7 +660,7 @@ mod tests {
         let mut blobs = Vec::new();
         for i in 0u32..30 {
             let blob = write_blob_via_serialize(format!("pack object {i}").as_bytes());
-            w.push_raw(hash::hash(&blob), blob.clone()).unwrap();
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
             blobs.push(blob);
         }
         let pack = w.finish().unwrap();
@@ -571,7 +692,7 @@ mod tests {
         let h = hash::hash(&blob);
 
         let mut w = PackWriter::new();
-        w.push_raw(h, blob.clone()).unwrap();
+        w.push_raw(h, &blob).unwrap();
         let pack = w.finish().unwrap();
 
         let (_dir, store) = fresh_store();
@@ -601,7 +722,7 @@ mod tests {
         let stream = delta::encode(&base_obj, &target_obj).unwrap();
 
         let mut w = PackWriter::new();
-        w.push_raw(base_hash, base_obj.clone()).unwrap();
+        w.push_raw(base_hash, &base_obj).unwrap();
         w.push_delta(&base_hash, &stream).unwrap();
         let pack = w.finish().unwrap();
 
@@ -627,7 +748,7 @@ mod tests {
         let stream_b = delta::encode(&base_b, &target_b).unwrap();
 
         let mut w = PackWriter::new();
-        w.push_raw(ha, base_a).unwrap(); // a raw entry — must be ignored
+        w.push_raw(ha, &base_a).unwrap(); // a raw entry — must be ignored
         w.push_delta(&ha, &stream_a).unwrap();
         w.push_delta(&hb, &stream_b).unwrap();
         w.push_delta(&ha, &stream_a).unwrap(); // duplicate base — deduped
@@ -680,7 +801,7 @@ mod tests {
         let payload = crate::serialize::serialize(&delta).unwrap();
         let payload_hash = hash::hash(&payload);
         let mut w = PackWriter::new();
-        w.push_raw(payload_hash, payload).unwrap();
+        w.push_raw(payload_hash, &payload).unwrap();
         let pack = w.finish().unwrap();
 
         let (_dir, store) = fresh_store();
@@ -698,7 +819,7 @@ mod tests {
         let stream = delta::encode(&base_obj, &invalid_target).unwrap();
 
         let mut w = PackWriter::new();
-        w.push_raw(base_hash, base_obj).unwrap();
+        w.push_raw(base_hash, &base_obj).unwrap();
         w.push_delta(&base_hash, &stream).unwrap();
         let pack = w.finish().unwrap();
 
@@ -723,7 +844,7 @@ mod tests {
         );
 
         let mut w = PackWriter::new();
-        w.push_raw(base_hash, base_obj).unwrap();
+        w.push_raw(base_hash, &base_obj).unwrap();
         w.push_delta(&base_hash, &stream).unwrap();
         let pack = w.finish().unwrap();
 
@@ -802,7 +923,7 @@ mod tests {
         let blob = write_blob_via_serialize(b"trailer test");
         let h = hash::hash(&blob);
         let mut w = PackWriter::new();
-        w.push_raw(h, blob).unwrap();
+        w.push_raw(h, &blob).unwrap();
         let mut pack = w.finish().unwrap();
         let last = pack.len() - 1;
         pack[last] ^= 0x01; // flip one bit
@@ -912,8 +1033,8 @@ mod tests {
         let blob_a = write_blob_via_serialize(&[0xAA; 64]);
         let blob_b = write_blob_via_serialize(&[0xBB; 64]);
         let mut w = PackWriter::new();
-        w.push_raw(hash::hash(&blob_a), blob_a.clone()).unwrap();
-        w.push_raw(hash::hash(&blob_b), blob_b.clone()).unwrap();
+        w.push_raw(hash::hash(&blob_a), &blob_a).unwrap();
+        w.push_raw(hash::hash(&blob_b), &blob_b).unwrap();
         let pack = w.finish().unwrap();
 
         let (_dir, store) = fresh_store();
@@ -939,9 +1060,113 @@ mod tests {
         let blob = write_blob_via_serialize(b"key test");
         let h = hash::hash(&blob);
         let mut w = PackWriter::new();
-        w.push_raw(h, blob).unwrap();
+        w.push_raw(h, &blob).unwrap();
         let pack = w.finish().unwrap();
         assert_eq!(pack_key(&pack), hash::hash(&pack));
+    }
+
+    #[test]
+    fn unpack_does_not_recopy_raw_payloads_into_a_second_buffer() {
+        // Issue #647: `PackReader::read` used to copy EVERY raw entry's
+        // payload into a fresh `Arc<[u8]>` retained in `in_pack` for the
+        // whole call — redundant given `pack_bytes` (the pack's own
+        // bytes) is already resident in the caller's memory the whole
+        // time. A streaming reader only needs a BORROW into
+        // `pack_bytes` for raw entries; nothing about a raw entry's
+        // bytes should ever be copied a second time. `owned_bytes`
+        // tracks the exact production code path that would otherwise
+        // do that copy (see `read_tracking_owned_bytes`), so this is a
+        // precise, allocator-free proof rather than a fuzzy proxy.
+        let mut w = PackWriter::new();
+        for i in 0u32..64 {
+            let payload = vec![u8::try_from(i % 256).unwrap(); 16 * 1024];
+            let blob = write_blob_via_serialize(&payload);
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        let pack = w.finish().unwrap();
+        assert!(
+            pack.len() > 512 * 1024,
+            "sanity: synthetic pack should be substantial, got {}",
+            pack.len()
+        );
+
+        let (_dir, store) = fresh_store();
+        let owned_bytes = AtomicU64::new(0);
+        let report = PackReader::read_tracking_owned_bytes(&pack, &store, &owned_bytes).unwrap();
+        assert_eq!(report.raw_count, 64);
+
+        assert_eq!(
+            owned_bytes.load(Ordering::Relaxed),
+            0,
+            "an all-raw pack must not allocate a second copy of any entry's payload"
+        );
+    }
+
+    #[test]
+    fn unpack_owned_bytes_for_deltas_is_exactly_the_delta_targets_not_the_whole_pack() {
+        // Complements the all-raw test above: the raw base must still
+        // be a zero-copy borrow, and each delta's "owned" cost must be
+        // exactly its reconstructed target size — never the base's size
+        // too, and never the whole pack's.
+        let mut content_base = vec![0u8; 4096];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).unwrap();
+        }
+        let base_obj = write_blob_via_serialize(&content_base);
+        let base_hash = hash::hash(&base_obj);
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let mut expected_owned = 0u64;
+        for i in 0u32..10 {
+            let mut target = content_base.clone();
+            target[i as usize] ^= 0xFF;
+            let target_obj = write_blob_via_serialize(&target);
+            let stream = delta::encode(&base_obj, &target_obj).unwrap();
+            w.push_delta(&base_hash, &stream).unwrap();
+            expected_owned += target_obj.len() as u64;
+        }
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let owned_bytes = AtomicU64::new(0);
+        let report = PackReader::read_tracking_owned_bytes(&pack, &store, &owned_bytes).unwrap();
+        assert_eq!(report.raw_count, 1);
+        assert_eq!(report.delta_count, 10);
+
+        assert_eq!(
+            owned_bytes.load(Ordering::Relaxed),
+            expected_owned,
+            "owned bytes must equal exactly the sum of delta target sizes — \
+             no extra copy of the raw base"
+        );
+    }
+
+    #[test]
+    fn pack_writer_finish_does_not_recopy_pushed_payloads() {
+        // Issue #647: `PackWriter::finish()` used to hold every pushed
+        // entry in a separate `entries` list and then copy ALL of them
+        // a second time into a freshly `Vec::with_capacity`'d output
+        // buffer. A streaming writer appends each entry's frame
+        // directly into the one output buffer as it's pushed, so
+        // `finish()` itself should only ever append the 32-byte
+        // trailer — `bytes_copied` tracks exactly that production code
+        // path (see `finish_tracking_bytes_copied`).
+        let mut w = PackWriter::new();
+        for i in 0u32..64 {
+            let payload = vec![u8::try_from(i % 256).unwrap(); 16 * 1024];
+            let blob = write_blob_via_serialize(&payload);
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        let bytes_copied = AtomicU64::new(0);
+        let pack = w.finish_tracking_bytes_copied(&bytes_copied).unwrap();
+        assert!(pack.len() > 512 * 1024);
+
+        assert_eq!(
+            bytes_copied.load(Ordering::Relaxed),
+            TRAILER_LEN as u64,
+            "finish() must only append the trailer, not re-copy every pushed entry"
+        );
     }
 
     #[test]
@@ -970,5 +1195,55 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.raw_count, 0);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn multiple_deltas_against_shared_external_base_read_store_once() {
+        // Regression for #643: N deltas in one pack all referencing the
+        // SAME out-of-pack (already-in-store) base object must resolve
+        // that base with exactly one physical store read, not N — the
+        // first store-resolved base should be cached into `in_pack` for
+        // subsequent deltas to hit in memory.
+        const N: usize = 5;
+
+        let (_dir, store) = fresh_store();
+
+        let mut content_base = vec![0u8; 512];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let base_obj = write_blob_via_serialize(&content_base);
+        let base_hash = store.write(&base_obj).unwrap();
+
+        // Five distinct deltas against the one shared external base.
+        let mut w = PackWriter::new();
+        let mut expected_targets = Vec::new();
+        for i in 0..N {
+            let mut content_target = content_base.clone();
+            content_target[100] = u8::try_from(i).unwrap();
+            let target_obj = write_blob_via_serialize(&content_target);
+            let target_hash = hash::hash(&target_obj);
+            let stream = delta::encode(&base_obj, &target_obj).unwrap();
+            w.push_delta(&base_hash, &stream).unwrap();
+            expected_targets.push((target_hash, target_obj));
+        }
+        let pack = w.finish().unwrap();
+
+        let reads_before = store.read_call_count();
+        let report = PackReader::read(&pack, &store).unwrap();
+        let reads_after_for_base = store.read_call_count() - reads_before;
+
+        assert_eq!(report.delta_count, u32::try_from(N).unwrap());
+        assert_eq!(
+            reads_after_for_base, 1,
+            "base object must be read from the store exactly once for {N} deltas sharing it, got {reads_after_for_base}"
+        );
+
+        // Correctness: caching the store-resolved base must not change
+        // the decoded result for any of the N deltas — every target
+        // still comes out byte-identical to the uncached decode.
+        for (target_hash, target_obj) in expected_targets {
+            assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+        }
     }
 }

@@ -2,13 +2,13 @@
 //! store, keyed by remote — the fetch-side redownload-avoidance cache for
 //! issue #409.
 //!
-//! `fetch_pack_chain` ([`super::packmap::fetch_pack_chain`]) always walks a
-//! branch's *whole* packmap chain to discover its shape (chain-node
-//! downloads are small blobs and stay unconditional — see that function's
-//! docs), but without this record it re-downloads and re-unpacks every pack
-//! in the chain on every fetch, even packs the local object store already
-//! has applied. [`AppliedPacks`] lets the loop skip download + unpack for
-//! any pack digest already recorded, so a steady-state fetch costs
+//! [`super::packmap::resolve_and_download_chain`] always walks a branch's
+//! *whole* packmap chain to discover its shape (chain-node downloads are
+//! small blobs and stay unconditional — see that function's docs), but
+//! without this record it re-downloads and re-unpacks every pack in the
+//! chain on every fetch, even packs the local object store already has
+//! applied. [`AppliedPacks`] lets the download and unpack loops skip any
+//! pack digest already recorded, so a steady-state fetch costs
 //! `O(new packs)` instead of `O(chain length)`.
 //!
 //! # Format
@@ -39,7 +39,7 @@
 //! purely a performance win, never a correctness risk *on its own*. The one
 //! hazard this record introduces is staleness relative to the object store
 //! (e.g. `.mkit/objects` wiped out-of-band while `applied-packs/` survives);
-//! the fetch-side self-heal path in `fetch_pack_chain` handles that by
+//! the fetch-side self-heal path in `apply_fetched_chain` handles that by
 //! clearing the record and retrying once with a full re-download whenever a
 //! run that skipped at least one pack also hits an error.
 //!

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use mkit_benches::{Sample, Unit, time_one_with_setup};
 use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
@@ -37,16 +37,31 @@ fn bench_object_commit(c: &mut Criterion) {
         // --- mkit-core: hash + atomic-write each payload as a blob ------
         // Uses ObjectStore::write so the comparison is apples-to-apples
         // with git2's odb.write and `git hash-object -w` below — all
-        // three perform a real on-disk write, not just a hash.
+        // three perform a real on-disk write, not just a hash. Every
+        // measured iteration gets a fresh tempdir + store (like
+        // store_write.rs's iter_with_setup) so writes never dedup
+        // against a payload already staged by a prior iteration.
         {
-            let dir = tempfile::tempdir().unwrap();
-            let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
             c.bench_function(&format!("commit/{axis}/mkit"), |b| {
-                b.iter(|| commit_via_mkit(&store, &payloads));
+                b.iter_with_setup(
+                    || {
+                        let dir = tempfile::tempdir().unwrap();
+                        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                        (dir, store)
+                    },
+                    |(_dir, store)| commit_via_mkit(&store, &payloads),
+                );
             });
-            let t = time_one(2, 5, || {
-                commit_via_mkit(&store, &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                    (dir, store)
+                },
+                |(_dir, store)| commit_via_mkit(&store, &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
@@ -57,15 +72,30 @@ fn bench_object_commit(c: &mut Criterion) {
         }
 
         // --- git2 (libgit2 binding) -------------------------------------
+        // Same fresh-repo-per-iteration treatment: libgit2's odb.write
+        // is content-addressed too, so a reused repo would dedup from
+        // the second iteration onward exactly like mkit's store.
         {
-            let dir = tempfile::tempdir().unwrap();
-            let repo = git2::Repository::init(dir.path()).unwrap();
             c.bench_function(&format!("commit/{axis}/git2"), |b| {
-                b.iter(|| commit_via_git2(&repo, &payloads));
+                b.iter_with_setup(
+                    || {
+                        let dir = tempfile::tempdir().unwrap();
+                        let repo = git2::Repository::init(dir.path()).unwrap();
+                        (dir, repo)
+                    },
+                    |(_dir, repo)| commit_via_git2(&repo, &payloads),
+                );
             });
-            let t = time_one(2, 5, || {
-                commit_via_git2(&repo, &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let repo = git2::Repository::init(dir.path()).unwrap();
+                    (dir, repo)
+                },
+                |(_dir, repo)| commit_via_git2(&repo, &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
@@ -76,37 +106,30 @@ fn bench_object_commit(c: &mut Criterion) {
         }
 
         // --- git CLI ----------------------------------------------------
+        // `git hash-object -w` is also content-addressed and skips the
+        // write when the object already exists, so this needs a fresh
+        // repo per iteration for the same reason as mkit and git2 above.
         if git_available {
-            let dir = tempfile::tempdir().unwrap();
-            let _ = Command::new("git")
-                .args(["init", "--quiet", dir.path().to_str().unwrap()])
-                .output();
-            // Configure user so commits don't prompt.
-            let _ = Command::new("git")
-                .args([
-                    "-C",
-                    dir.path().to_str().unwrap(),
-                    "config",
-                    "user.email",
-                    "bench@example.com",
-                ])
-                .output();
-            let _ = Command::new("git")
-                .args([
-                    "-C",
-                    dir.path().to_str().unwrap(),
-                    "config",
-                    "user.name",
-                    "bench",
-                ])
-                .output();
-
             c.bench_function(&format!("commit/{axis}/git-cli"), |b| {
-                b.iter(|| commit_via_git_cli(dir.path(), &payloads));
+                b.iter_with_setup(
+                    || {
+                        let dir = tempfile::tempdir().unwrap();
+                        init_git_repo(dir.path());
+                        dir
+                    },
+                    |dir| commit_via_git_cli(dir.path(), &payloads),
+                );
             });
-            let t = time_one(2, 5, || {
-                commit_via_git_cli(dir.path(), &payloads);
-            });
+            let t = time_one_with_setup(
+                2,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    init_git_repo(dir.path());
+                    dir
+                },
+                |dir| commit_via_git_cli(dir.path(), &payloads),
+            );
             samples.push(Sample {
                 category: "object-commit".into(),
                 axis: axis.into(),
@@ -118,6 +141,20 @@ fn bench_object_commit(c: &mut Criterion) {
     }
 
     mkit_benches::write_summary("object_commit", &samples);
+}
+
+/// `git init` a fresh repo and configure a commit identity so runs
+/// don't prompt. Shared by the git-CLI setup closure and its
+/// `time_one` counterpart.
+fn init_git_repo(dir: &Path) {
+    let path = dir.to_str().unwrap();
+    let _ = Command::new("git").args(["init", "--quiet", path]).output();
+    let _ = Command::new("git")
+        .args(["-C", path, "config", "user.email", "bench@example.com"])
+        .output();
+    let _ = Command::new("git")
+        .args(["-C", path, "config", "user.name", "bench"])
+        .output();
 }
 
 fn commit_via_mkit(store: &ObjectStore, payloads: &[Vec<u8>]) {

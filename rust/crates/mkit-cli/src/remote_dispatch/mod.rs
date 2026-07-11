@@ -44,8 +44,8 @@ use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
 use packmap::{
-    ChainAction, advance_packmap, commit_head, fetch_pack_chain, packmap_ref, probe_chain,
-    rebaseline_depth,
+    ChainAction, advance_packmap, apply_fetched_chain, commit_head, packmap_ref, probe_chain,
+    rebaseline_depth, resolve_and_download_chain,
 };
 
 const DEFAULT_REMOTE: &str = "default";
@@ -378,23 +378,39 @@ pub fn push_all_with(
     let refs_list = refs::list_refs(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
-    for r in refs_list {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
-        }
-        let Some(h) = r.hash else { continue };
-        let condition = if force {
-            refs::RefWriteCondition::Any
-        } else {
-            match refs::read_remote_ref(&layout, remote, &r.name)? {
-                Some(tracked) => refs::RefWriteCondition::Match(tracked),
-                None => refs::RefWriteCondition::Missing,
+    // Batch every pushed branch's remote-tracking-ref write (#645):
+    // publishing lands each ref as soon as its branch's `push_branch`
+    // succeeds (same visibility as before), but the directory fsync that
+    // makes those renames crash-durable is deferred to one pass over the
+    // distinct directories touched, below — instead of once per branch.
+    let mut tracking = refs::RemoteRefBatch::new(&layout, remote)?;
+    let result: Result<(), DispatchError> = (|| {
+        for r in refs_list {
+            if crate::signal::is_shutdown() {
+                return Err(DispatchError::Interrupted);
             }
-        };
-        push_branch(tx, &store, &r.name, h, condition)?;
-        refs::write_remote_ref(&layout, remote, &r.name, &h)?;
-        n += 1;
-    }
+            let Some(h) = r.hash else { continue };
+            let condition = if force {
+                refs::RefWriteCondition::Any
+            } else {
+                match refs::read_remote_ref(&layout, remote, &r.name)? {
+                    Some(tracked) => refs::RefWriteCondition::Match(tracked),
+                    None => refs::RefWriteCondition::Missing,
+                }
+            };
+            push_branch(tx, &store, &r.name, h, condition)?;
+            tracking.write(&r.name, &h)?;
+            n += 1;
+        }
+        Ok(())
+    })();
+    // Commit whatever tracking-ref writes succeeded regardless of how the
+    // loop above ended, so a mid-loop failure still durably publishes the
+    // prefix that already pushed successfully — matching the old
+    // per-branch loop, where each completed ref write was independently
+    // durable before the loop moved to the next branch.
+    tracking.commit()?;
+    result?;
     Ok(n)
 }
 
@@ -653,7 +669,7 @@ pub fn push_branch_with_depth(
     let mut w = PackWriter::new();
     for h in &plan.raw {
         let bytes = store.read(h)?;
-        w.push_raw(*h, bytes)?;
+        w.push_raw(*h, &bytes)?;
     }
     for d in &plan.deltas {
         w.push_delta(&d.base, &d.stream)?;
@@ -687,16 +703,11 @@ pub fn push_branch_with_depth(
 /// advertised remote branch when the current default branch is absent.
 pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
-    // ONE repo lock across BOTH phases — the fetch (object write + remote
-    // refs) and the fast-forward (branch ref + HEAD + worktree). Validate
-    // the repo first for a clean non-repo error, and do NOT re-acquire the
-    // lock (it is a non-reentrant file lock): the fetch phase runs via the
-    // non-locking `fetch_objects`, not `fetch_all` (#267).
     let store = crate::commands::open_store_configured(&layout)?;
-    let _lock = mkit_core::repo_lock::acquire_default(
-        layout.worktree_state_dir(),
-        crate::commands::WORKTREE_LOCK,
-    )?;
+    // Fetch phase: `fetch_objects` takes the repo lock itself, narrowly and
+    // per branch, around only the local unpack + remote-ref-publish window
+    // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
+    // across the network transfer.
     let n = fetch_objects(&store, &layout, tx, remote)?;
     let remote_refs = refs::list_remote_refs(&layout, remote)?
         .into_iter()
@@ -706,6 +717,18 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
         return Ok(n);
     }
 
+    // Fast-forward phase (#642): branch ref + HEAD + worktree, narrowly
+    // locked around just this window rather than bundled with the fetch
+    // above. The objects `remote_tip` points at are already reachable via
+    // the remote-tracking ref published during the fetch phase, so this
+    // lock's job here is worktree-mutation exclusivity against concurrent
+    // commands (e.g. a racing `commit`/`checkout`/`reset`), not GC
+    // protection — that hazard was already closed before this lock was
+    // taken.
+    let _lock = mkit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        crate::commands::WORKTREE_LOCK,
+    )?;
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
         Some(Head::Branch(branch)) => {
@@ -802,37 +825,37 @@ fn rollback_pull_ref(
 /// `refs/remotes/default/<branch>`.
 pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
-    // Validate the repo BEFORE locking so a non-repo reports cleanly rather
-    // than as a lock error, then hold the repo lock across the whole
-    // object-write + remote-ref-publish window. This serializes fetch
-    // against `gc` so a concurrent `gc --grace-secs 0` can't prune freshly
-    // downloaded objects before their refs make them reachable (#267).
+    // No outer lock here (#642): `fetch_objects` takes the repo lock
+    // itself, narrowly and per branch, around only the local unpack +
+    // remote-ref-publish window for that branch — never across the
+    // network transfer. See `packmap::resolve_and_download_chain` /
+    // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    let _lock = mkit_core::repo_lock::acquire_default(
-        layout.worktree_state_dir(),
-        crate::commands::WORKTREE_LOCK,
-    )?;
     fetch_objects(&store, &layout, tx, remote)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
-/// publish the remote-tracking refs. The caller MUST already hold the repo
-/// lock (so the object writes and ref publication are serialized against
-/// `gc`).
+/// publish the remote-tracking refs. Each branch's local object writes and
+/// its ref publish happen under a repo lock acquired fresh for that branch
+/// (#642) — see [`fetch_objects_inner`] — so the caller does NOT need to
+/// hold the repo lock around this call.
 ///
 /// mkit speaks a single, packmap-only transfer dialect (the legacy
 /// per-object download path was removed): for every advertised branch the
 /// flow is exactly
 ///
 /// 1. read the branch's packmap ref (`refs/mkit/packmap/<branch>`),
-/// 2. walk its chain oldest-first, skip any pack the local applied-pack
-///    record already has, and unpack the rest
-///    ([`packmap::fetch_pack_chain`]), then
-/// 3. assert the tip's closure is fully present
+/// 2. walk its chain oldest-first and download any pack the local
+///    applied-pack record doesn't already have
+///    ([`packmap::resolve_and_download_chain`]) — no repo lock held,
+/// 3. acquire the repo lock, unpack the downloaded packs
+///    ([`packmap::apply_fetched_chain`]), then
+/// 4. assert the tip's closure is fully present
 ///    ([`verify_closure_present`]) — a pure integrity check that downloads
-///    nothing.
+///    nothing (still under the lock from step 3), then publish the
+///    branch's remote-tracking ref and release the lock (#642).
 ///
-/// Steps 2 and 3 are both performed *inside* [`packmap::fetch_pack_chain`]
+/// Steps 3 and 4 are both performed *inside* [`packmap::apply_fetched_chain`]
 /// (rather than sequenced here) so a closure-completeness failure counts
 /// toward that function's applied-pack self-heal retry (#409): if the
 /// local record wrongly claims every pack in the chain is already applied
@@ -862,14 +885,28 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
 ///
 /// The applied-pack record (`<common dir>/applied-packs/<remote>`, #409) is
 /// keyed by remote, not by branch, so this function — not
-/// [`packmap::fetch_pack_chain`] — owns its lifecycle for the WHOLE fetch:
-/// loaded once before the branch loop, persisted once after, however many
-/// branches are fetched. `fetch_pack_chain` only mutates the record in memory
-/// (inserting applied digests, or clearing on self-heal); it never touches
-/// disk. The final persist is unconditional and best-effort — it runs on
-/// every outcome so a fetch that applied packs before failing never loses
-/// that progress, and the record is a pure performance cache whose own I/O
-/// must never fail a fetch whose objects durably landed.
+/// [`packmap::resolve_and_download_chain`] / [`packmap::apply_fetched_chain`]
+/// — owns its lifecycle for the WHOLE fetch: loaded once before the branch
+/// loop, persisted once after, however many branches are fetched. Those two
+/// functions only mutate the record in memory (inserting applied digests,
+/// or clearing on self-heal); neither touches disk. The final persist is
+/// unconditional and best-effort — it runs on every outcome so a fetch that
+/// applied packs before failing never loses that progress, and the record
+/// is a pure performance cache whose own I/O must never fail a fetch whose
+/// objects durably landed.
+///
+/// # Repo-lock scope (mkit #642)
+///
+/// Each branch acquires the repo lock fresh, right before
+/// [`packmap::apply_fetched_chain`] unpacks that branch's downloaded packs,
+/// and releases it right after the branch's remote-tracking ref is
+/// published — see [`fetch_objects_inner`]. Nothing here holds the lock
+/// during [`packmap::resolve_and_download_chain`]'s network I/O, and the
+/// lock is released between branches, so only the local write + ref-publish
+/// window for one branch at a time is ever locked. This still closes the
+/// #267 GC-prune race: `gc` takes the very same lock before computing its
+/// live set, so it can never observe a branch's objects on disk without
+/// that branch's ref already published.
 fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -893,44 +930,108 @@ fn fetch_objects_inner(
 ) -> Result<usize, DispatchError> {
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
-    for r in remote_refs {
-        if crate::signal::is_shutdown() {
-            return Err(DispatchError::Interrupted);
-        }
-        let Some(h) = r.hash else { continue };
-        // A branch tip without a packmap is a corrupt/incomplete remote, not
-        // a format we degrade to: the push path ALWAYS advertises a packmap
-        // before moving the branch ref. A real transport error (network blip,
-        // auth) propagates unchanged — only `Ok(None)` is the explicit
-        // "no packmap" verdict, and it is now an error.
-        let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
-            return Err(DispatchError::PackmapMissing(r.name.clone()));
-        };
-        // The tip we publish: normally the listed `h`, but if the chain fails
-        // because a concurrent re-baseline moved the branch under us, the
-        // freshly re-read tip (see this fn's doc comment).
-        let published_tip =
-            match fetch_pack_chain(store, tx, remote, &r.name, chain_head, h, applied) {
-                Ok(()) => h,
-                Err(e @ DispatchError::RemoteMissingObject(_)) => {
-                    // Re-read the branch's CURRENT tip + packmap. If either
-                    // is gone (branch deleted mid-fetch) the original error
-                    // stands. Otherwise retry the chain ONCE with the fresh
-                    // pair; a second failure propagates via `?`.
-                    let (Some(fresh_h), Some(fresh_head)) = (
-                        tx.read_ref(&format!("refs/heads/{}", r.name))?,
-                        tx.read_ref(&packmap_ref(&r.name))?,
-                    ) else {
-                        return Err(e);
-                    };
-                    fetch_pack_chain(store, tx, remote, &r.name, fresh_head, fresh_h, applied)?;
-                    fresh_h
-                }
-                Err(e) => return Err(e),
+    // Batch every fetched branch's remote-tracking-ref write (#645): see
+    // `push_all_with` for the same pattern and its rationale. `tracking.write`
+    // still runs inside this branch's `_lock` scope below, so ref visibility
+    // timing is unchanged from the per-branch-publish-then-unlock model
+    // (#642) — only the parent-directory fsync is deferred to one pass after
+    // the loop. GC's #267 protection is unaffected: it depends on the
+    // repo lock covering the object-write-to-ref-publish window (still true
+    // per branch below), not on when the ref directory itself is fsynced.
+    let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
+    let result: Result<(), DispatchError> = (|| {
+        for r in remote_refs {
+            if crate::signal::is_shutdown() {
+                return Err(DispatchError::Interrupted);
+            }
+            let Some(h) = r.hash else { continue };
+            // A branch tip without a packmap is a corrupt/incomplete remote, not
+            // a format we degrade to: the push path ALWAYS advertises a packmap
+            // before moving the branch ref. A real transport error (network blip,
+            // auth) propagates unchanged — only `Ok(None)` is the explicit
+            // "no packmap" verdict, and it is now an error.
+            let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
+                return Err(DispatchError::PackmapMissing(r.name.clone()));
             };
-        refs::write_remote_ref(layout, remote, &r.name, &published_tip)?;
-        n += 1;
-    }
+
+            // Phase 1 (#642): resolve this branch's chain and download its
+            // packs — pure network I/O, no repo lock held (see
+            // `packmap::resolve_and_download_chain`).
+            let fetched = resolve_and_download_chain(tx, &r.name, chain_head, applied)?;
+
+            // Phase 2 (#642): unpack + verify + publish this branch's ref,
+            // under a repo lock acquired fresh for this branch and released
+            // once this loop iteration ends — never held across another
+            // branch's download. See `packmap::apply_fetched_chain`'s doc
+            // comment for the safety contract (closing the #267 GC-prune
+            // race) this depends on.
+            let lock = mkit_core::repo_lock::acquire_default(
+                layout.worktree_state_dir(),
+                crate::commands::WORKTREE_LOCK,
+            )?;
+            // The tip we publish: normally the listed `h`, but if the chain fails
+            // because a concurrent re-baseline moved the branch under us, the
+            // freshly re-read tip (see this fn's doc comment). The match also
+            // carries the lock guard out, so whichever branch runs, the
+            // correct (possibly re-acquired) guard is what's held at
+            // `tracking.write` below — see the retry branch's comment for why
+            // there are two guards, not one held across the whole match.
+            let (published_tip, _lock) =
+                match apply_fetched_chain(store, tx, remote, &r.name, fetched, h, applied) {
+                    Ok(()) => (h, lock),
+                    Err(e @ DispatchError::RemoteMissingObject(_)) => {
+                        // Re-read the branch's CURRENT tip + packmap. If either
+                        // is gone (branch deleted mid-fetch) the original error
+                        // stands. Otherwise retry the chain ONCE with the fresh
+                        // pair; a second failure propagates via `?`.
+                        let (Some(fresh_h), Some(fresh_head)) = (
+                            tx.read_ref(&format!("refs/heads/{}", r.name))?,
+                            tx.read_ref(&packmap_ref(&r.name))?,
+                        ) else {
+                            return Err(e);
+                        };
+                        // Release the lock for the retry's network
+                        // re-download too — mirrors phase 1's unlocked
+                        // download exactly, rather than the previously
+                        // "accepted trade" of holding the lock across a
+                        // second network round-trip on this rare
+                        // race-recovery path. Re-acquire before the
+                        // retry's local unpack + publish, which still
+                        // needs the same #267 protection phase 2 always
+                        // has.
+                        drop(lock);
+                        let fresh_fetched =
+                            resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
+                        let lock = mkit_core::repo_lock::acquire_default(
+                            layout.worktree_state_dir(),
+                            crate::commands::WORKTREE_LOCK,
+                        )?;
+                        apply_fetched_chain(
+                            store,
+                            tx,
+                            remote,
+                            &r.name,
+                            fresh_fetched,
+                            fresh_h,
+                            applied,
+                        )?;
+                        (fresh_h, lock)
+                    }
+                    Err(e) => return Err(e),
+                };
+            // Still inside `_lock`'s scope (the original guard, or the
+            // retry's re-acquired one — see above).
+            tracking.write(&r.name, &published_tip)?;
+            n += 1;
+        }
+        Ok(())
+    })();
+    // Commit whatever tracking-ref writes succeeded regardless of how the
+    // loop above ended — a mid-loop failure still durably publishes the
+    // prefix that already verified successfully, matching the old
+    // per-branch loop's per-write durability.
+    tracking.commit()?;
+    result?;
     Ok(n)
 }
 

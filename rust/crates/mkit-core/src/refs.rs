@@ -20,10 +20,13 @@
 //!
 //! CAS variants for [`update_ref`] follow SPEC-REFS §5: `Any` (clobber),
 //! `Missing` (fail if it exists), `Match(H)` (fail if current value !=
-//! H). The local-filesystem `Match` is **not atomic** across processes
-//! — that is the documented v1 gap; transports that need true atomicity
-//! must use s3/http/ssh.
+//! H). As of #637, the local-filesystem `Match` read-compare-write is
+//! serialized under a shared `refs.lock` in the common dir (the same
+//! blocking kernel-lock primitive `repo_lock` uses elsewhere), so it is
+//! atomic across processes regardless of what other locks each caller
+//! holds — this closes the v1 gap previously documented here.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -176,6 +179,68 @@ pub fn validate_ref_name(name: &str) -> bool {
         return false;
     }
     true
+}
+
+/// Hex-escape an arbitrary ref-like name (branch, tag, remote ref, or
+/// a `refs.rs`-relative path) into a filename-safe token:
+/// `[A-Za-z0-9-_]`-only input, injective, self-delimiting.
+///
+/// Every non-`[A-Za-z0-9-]` byte is encoded as `_xx` where `xx` is the
+/// lowercase-hex byte value; `_` itself encodes as `_5f`, so every `_`
+/// in the output is unambiguously the lead-in of a two-hex-digit
+/// escape, never a literal.
+///
+/// Examples:
+///   `main`        → `main`
+///   `feat/v1.0`   → `feat_2fv1_2e0`
+///   `feat_v1_0`   → `feat_5fv1_5f0`
+///
+/// Deliberately NOT gated behind `history-mmr` (unlike the `history`
+/// module, which is): [`cas_write`]'s per-ref lock naming needs this
+/// in every build, and `history.rs` (when the feature is enabled)
+/// reuses this same implementation for its journal-partition naming —
+/// matching the dependency direction `history.rs` already has on this
+/// module via [`validate_ref_name`], rather than the reverse (which
+/// would make this unavailable exactly where `cas_write` needs it).
+pub(crate) fn sanitize_ref_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for &b in name.as_bytes() {
+        let allowed = b.is_ascii_alphanumeric() || b == b'-';
+        if allowed {
+            out.push(b as char);
+        } else {
+            use core::fmt::Write as _;
+            let _ = write!(&mut out, "_{b:02x}");
+        }
+    }
+    out
+}
+
+/// The `refs-history-<branch>.lock` filename [`update_ref_with_history_locked`]
+/// and [`delete_ref_with_history`] both acquire. A named function
+/// (not an inline `format!` repeated at each call site) so tests can
+/// call the SAME naming decision production makes, rather than
+/// independently reimplementing the formula — a test that recomputes
+/// its own copy of this format string would silently stop catching a
+/// regression if production's naming ever changed without the test's
+/// hand-copied version changing too.
+#[cfg(feature = "history-mmr")]
+pub(crate) fn history_lock_name(branch: &str) -> String {
+    format!("refs-history-{}.lock", sanitize_ref_name(branch))
+}
+
+/// The `refs-<ref>.lock` filename [`cas_write`]'s `Match` arm
+/// acquires, keyed off `path` relative to `common_dir` (not just a
+/// bare name) so a branch and a tag/remote-ref sharing the same bare
+/// name get distinct locks. Named for the same reason as
+/// [`history_lock_name`]: a test that independently recomputes this
+/// formula would stop catching a regression the moment production's
+/// formula changed without the test's copy changing too.
+pub(crate) fn cas_lock_name(common_dir: &Path, path: &Path) -> String {
+    let ref_key = path
+        .strip_prefix(common_dir)
+        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy());
+    format!("refs-{}.lock", sanitize_ref_name(&ref_key))
 }
 
 /// Validate a prefix passed to `list_refs`. An empty prefix is allowed.
@@ -390,7 +455,7 @@ pub fn update_ref(
     }
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, branch, condition)
+    cas_write(layout.common_dir(), &path, &wire, branch, condition)
 }
 
 // -----------------------------------------------------------------------------
@@ -422,12 +487,18 @@ pub fn update_ref(
 ///
 /// On any failure between steps 4 and 5 the ref will be ahead of the
 /// history journal by one commit; the next call's step 3 heals it as
-/// above. If the journal was empty going into step 3, healing instead
-/// falls to `mkit-cli`'s `write_ref_recording_history`, which has the
-/// `ObjectStore` access needed to invoke
-/// [`crate::history::rebuild_from_chain`] (SPEC-HISTORY-PROOF §4.5) —
-/// this function alone can't tell a fresh branch's first write apart
-/// from a v0.1.x-era repo's deep, un-migrated history.
+/// above. If the journal was empty going into step 3, this function
+/// alone can't tell a fresh branch's first write apart from a
+/// v0.1.x-era repo's deep, un-migrated history — that needs
+/// `ObjectStore` access this module doesn't have. See
+/// [`update_ref_with_history_and_backfill`], which threads a
+/// `parent_of` walker through so the empty-journal check AND the
+/// backfill itself (SPEC-HISTORY-PROOF §4.5) also run inside this same
+/// locked critical section (issue #638 / INV-18): without that, two
+/// ref-only writers on the same never-before-journaled branch (e.g.
+/// two `update-ref` calls, which deliberately skip the worktree lock)
+/// could both observe an empty journal and both independently
+/// backfill, corrupting the journal's leaf positions.
 ///
 /// # Design note (Option B vs Option A)
 ///
@@ -470,6 +541,94 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
     hash: &Hash,
     history: &mut crate::history::CommitHistory<X>,
 ) -> RefResult<()> {
+    // No backfill walker: an empty journal here is left untouched (the
+    // ambiguous case documented on `heal_one_ahead_gap`), exactly the
+    // pre-#638 behaviour for callers that don't need the v0.1.x
+    // migration shim.
+    update_ref_with_history_locked(layout, branch, condition, hash, history, |_, _| Ok(()))
+}
+
+/// [`update_ref_with_history`], additionally backfilling an empty
+/// journal from `parent_of` before the CAS-write + append — all inside
+/// the SAME `refs-history.lock` acquisition (issue #638 / INV-18).
+///
+/// `parent_of` is the same walker shape [`crate::history::rebuild_from_chain`]
+/// takes: given a commit hash, `Ok(Some(parent))`, `Ok(None)` at the
+/// root, or `Err(_)` on lookup failure. `mkit-cli`'s
+/// `write_ref_recording_history` is the production caller — it has the
+/// `ObjectStore` access this module deliberately doesn't depend on.
+///
+/// Moving the empty-journal check and the backfill loop inside the
+/// lock (rather than running them before it, as `write_ref_recording_history`
+/// used to) closes the race this function's sibling could not: two
+/// ref-only writers on the same never-before-journaled branch (e.g.
+/// two concurrent `update-ref` calls, which deliberately skip the
+/// worktree lock) used to both observe an empty journal and both
+/// independently backfill + append, writing to overlapping journal
+/// positions from two disagreeing in-memory MMR states. Now only the
+/// first to acquire the lock backfills; the second reopens onto an
+/// already-nonempty journal and proceeds straight to its own append.
+///
+/// # Errors
+///
+/// Same as [`update_ref_with_history`], plus: the backfill's
+/// [`crate::history::RebuildError`] (propagated from `parent_of` or
+/// the underlying append) is surfaced via a `String` payload on
+/// [`RefError::InvalidRef`], for the same signature-stability reason
+/// documented on [`update_ref_with_history`].
+#[cfg(feature = "history-mmr")]
+pub fn update_ref_with_history_and_backfill<X, F, E>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+    mut parent_of: F,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    F: FnMut(&Hash) -> Result<Option<Hash>, E>,
+    E: core::fmt::Display,
+{
+    update_ref_with_history_locked(
+        layout,
+        branch,
+        condition,
+        hash,
+        history,
+        |history, current| {
+            crate::history::rebuild_from_chain(history, current, &mut parent_of)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )
+}
+
+/// Shared critical section for [`update_ref_with_history`] and
+/// [`update_ref_with_history_and_backfill`].
+///
+/// `on_empty_journal` is called, still under the lock and after
+/// `history` has been [`crate::history::CommitHistory::reopen`]'d, iff
+/// the journal is empty AND `branch` already has a ref value on disk
+/// (`current`). It is the ONLY difference between the two public
+/// entry points: the no-backfill caller passes a no-op, the
+/// backfilling caller passes a [`crate::history::rebuild_from_chain`]
+/// invocation. Everything else — lock acquisition, reopen, the
+/// one-ahead-gap heal, the CAS-write, the final append — is identical
+/// and runs exactly once, inside the same lock.
+#[cfg(feature = "history-mmr")]
+fn update_ref_with_history_locked<X, G>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+    mut on_empty_journal: G,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    G: FnMut(&mut crate::history::CommitHistory<X>, Hash) -> Result<(), String>,
+{
     // Defence-in-depth: history must be a journaled flavour;
     // a mem-only flavour would silently drop the appended leaf on
     // process exit, defeating the whole point of this coupling.
@@ -490,14 +649,24 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
         )));
     }
 
-    // Single repo-level lock around the ref-write + MMR-append
-    // critical section. Cross-process interleaving is impossible
-    // while any holder owns this lock.
-    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
-        .map_err(|e| match e {
+    // Per-branch lock around the ref-write + MMR-append (and, for the
+    // backfilling entry point, the empty-journal check and the
+    // backfill loop itself) critical section. Cross-process
+    // interleaving on THIS branch is impossible while any holder owns
+    // this lock. Scoped per branch (not repo-wide) since nothing about
+    // the history-mmr coupling spans branches — each branch's journal
+    // is its own partition — so an operation on branch A must never
+    // contend with one on unrelated branch B (found during the
+    // epic-#634 code review; matters in practice for linked worktrees,
+    // #493, where different worktrees routinely advance different
+    // branches at the same time).
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
-        })?;
+        },
+    )?;
 
     // `history` may have been opened (its `CommitHistory::open_at`
     // bootstrap read the on-disk journal) before this call took the
@@ -508,17 +677,28 @@ pub fn update_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
         .reopen()
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history reopen: {e}")))?;
 
-    // Crash recovery (§4.5): if a prior `update_ref_with_history` call
-    // CAS-wrote the ref but crashed before its own append + sync, the
-    // ref is one commit ahead of the journal. Detect that by checking
-    // whether the journal's last leaf already covers the ref's CURRENT
-    // (pre-this-write) value, and heal by appending it directly — we
-    // know exactly which hash is missing without walking any parent
-    // chain, because it's precisely the value already sitting in the
-    // ref file.
     if let Some(current) = read_ref(layout, branch)? {
-        heal_one_ahead_gap(history, &current)
-            .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
+        if history.is_empty() {
+            // v0.1.x-style migration (or a crash on this branch's very
+            // first tracked write): the ref already has a value but the
+            // journal has never been touched. Backfill (a no-op for the
+            // non-backfilling entry point) before proceeding, all still
+            // under the lock so no concurrent writer can also observe
+            // "empty" and race this same backfill.
+            on_empty_journal(history, current)
+                .map_err(|e| RefError::InvalidRef(format!("{branch}: history backfill: {e}")))?;
+        } else {
+            // Crash recovery (§4.5): if a prior `update_ref_with_history`
+            // call CAS-wrote the ref but crashed before its own append +
+            // sync, the ref is one commit ahead of the journal. Detect
+            // that by checking whether the journal's last leaf already
+            // covers the ref's CURRENT (pre-this-write) value, and heal
+            // by appending it directly — we know exactly which hash is
+            // missing without walking any parent chain, because it's
+            // precisely the value already sitting in the ref file.
+            heal_one_ahead_gap(history, &current)
+                .map_err(|e| RefError::InvalidRef(format!("{branch}: history recovery: {e}")))?;
+        }
     }
 
     update_ref(layout, branch, condition, hash)?;
@@ -600,6 +780,120 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// History-coupled branch delete (feature: history-mmr) — issue #648
+// -----------------------------------------------------------------------------
+//
+// Deleting a branch ref alone leaves its `history/<branch>__*` journal
+// partition on disk. Since the partition is keyed on the branch NAME
+// (sanitized, not on any per-incarnation identifier), a later branch
+// created with the same name reopens the dead incarnation's non-empty
+// journal via `CommitHistory::open_at` and resumes appending on top of
+// its old leaves — the new branch's MMR root then spans two unrelated
+// incarnations, and the deleted incarnation's stale leaves keep
+// producing valid-looking inclusion proofs "on this branch". These
+// functions close that hole by destroying the journal as part of the
+// same delete, so a branch name and its journal are always retired
+// together.
+
+/// Delete a branch ref and permanently destroy its history-MMR journal
+/// partition, so a later branch created with the same name never
+/// resumes a deleted incarnation's leaves (issue #648).
+///
+/// Order: the journal is destroyed **before** the ref file is removed.
+/// That means once this call returns `Ok`, both are gone together with
+/// no window in between. If the process is interrupted between the two
+/// steps, the ref still exists (the caller sees this call never
+/// returned, so the delete visibly did not complete) but its journal is
+/// already gone; retrying re-creates a fresh empty journal via
+/// `CommitHistory::open_at`, destroys that (a cheap no-op — nothing was
+/// appended to it), and finishes the ref removal. There is no ordering
+/// under which `delete_ref` can report success while the old journal
+/// survives on disk, which is exactly the state that would let a
+/// same-named recreated branch inherit it.
+///
+/// Does not check whether `branch` is the currently checked-out branch
+/// — see [`delete_ref_safe_with_history`] for that guard. Used directly
+/// by `mkit branch -m` (rename), which intentionally deletes the OLD
+/// name's ref even when it is the checked-out branch (HEAD is moved to
+/// the new name by the caller).
+///
+/// # Errors
+///
+/// - [`RefError::NotFound`] — `branch` has no ref on disk. Checked
+///   before the journal is touched, so a typo'd/absent branch name
+///   never creates a journal partition just to destroy it.
+/// - [`RefError::InvalidRef`] — the history journal could not be opened
+///   or destroyed. The wrapped [`crate::history::HistoryError`] is
+///   exposed via a `String` payload, matching
+///   [`update_ref_with_history`]'s convention.
+/// - [`RefError::Io`] — filesystem failure removing the ref file
+///   itself, or acquiring the per-branch history lock.
+///
+/// # Locking
+///
+/// Runs the read-check + journal-destroy + ref-delete sequence under
+/// the same per-branch `refs-history-<branch>.lock`
+/// `update_ref_with_history_locked` uses (found during code review
+/// after #638 landed: this function originally ran unlocked, which
+/// reopened exactly the race #638 closed one layer up — a concurrent
+/// ref-only writer that deliberately skips the worktree lock, e.g.
+/// `update-ref`, could interleave its journal append with this
+/// delete's journal destroy). Held for the whole sequence, not just
+/// the destroy, so a concurrent `update_ref_with_history*` call on the
+/// SAME branch either fully precedes or fully follows this delete —
+/// never interleaves with it. Scoped per branch (not repo-wide), so
+/// this never contends with an operation on an unrelated branch.
+#[cfg(feature = "history-mmr")]
+pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
+    layout: &RepoLayout,
+    branch: &str,
+    executor: std::sync::Arc<X>,
+) -> RefResult<()> {
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
+            crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+            other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
+        },
+    )?;
+
+    if read_ref(layout, branch)?.is_none() {
+        return Err(RefError::NotFound(branch.to_string()));
+    }
+
+    let history = crate::history::CommitHistory::open_at(executor, layout, branch)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
+    history
+        .destroy()
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: destroy history journal: {e}")))?;
+
+    delete_ref(layout, branch)
+}
+
+/// [`delete_ref_with_history`] guarded by the same current-branch check
+/// as [`delete_ref_safe`] — refuses to delete (and does not touch the
+/// journal of) the branch HEAD currently points at. This is the
+/// history-mmr counterpart `mkit branch -d`/`-D` route through.
+///
+/// # Errors
+///
+/// [`RefError::CurrentBranch`] if `branch` is the checked-out branch;
+/// otherwise the same errors as [`delete_ref_with_history`].
+#[cfg(feature = "history-mmr")]
+pub fn delete_ref_safe_with_history<X: crate::protocol::async_shim::Executor + 'static>(
+    layout: &RepoLayout,
+    branch: &str,
+    executor: std::sync::Arc<X>,
+) -> RefResult<()> {
+    match read_head(layout) {
+        Ok(Head::Branch(current)) if current == branch => {
+            Err(RefError::CurrentBranch(branch.to_string()))
+        }
+        _ => delete_ref_with_history(layout, branch, executor),
+    }
+}
+
 /// List all branch refs, sorted lexicographically by name.
 pub fn list_refs(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
     list_refs_under(layout.common_dir(), HEADS_DIR)
@@ -625,7 +919,134 @@ pub fn write_remote_ref(
     validate_remote_and_branch(remote, branch)?;
     let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, branch, RefWriteCondition::Any)
+    cas_write(
+        layout.common_dir(),
+        &path,
+        &wire,
+        branch,
+        RefWriteCondition::Any,
+    )
+}
+
+/// Batched writer for remote-tracking refs (#645): amortises the
+/// parent-directory fsync across every ref written into it, instead of
+/// paying one per ref like [`write_remote_ref`] in a loop.
+///
+/// `push`/`fetch` publish one tracking ref per branch
+/// (`refs/remotes/<remote>/<branch>`) in a loop; each individual
+/// [`write_remote_ref`] call goes through `write_atomic`'s
+/// temp+fsync+rename+**dirsync** pattern, so N branches cost N serial
+/// directory fsyncs even though every write lands under the same
+/// `refs/remotes/<remote>/` tree. `RemoteRefBatch` instead:
+///
+/// 1. [`Self::write`]s each ref durable-content-before-visible (fsyncs
+///    the wire bytes, then renames — same invariant
+///    `crate::atomic::write_content_synced` gives object writes: a
+///    reader can never observe a torn file), immediately, one call at a
+///    time, deferring only the directory fsync that makes the RENAME
+///    itself crash-durable;
+/// 2. [`Self::commit`] fsyncs every distinct directory touched, once
+///    each, deduplicated — O(distinct directories) instead of O(refs).
+///    For the common case (one remote, flat branch names) that is
+///    exactly one fsync for the whole batch.
+///
+/// This is deliberately scoped to `refs/remotes/*` ONLY — see
+/// `atomic.rs`'s module docs for why branch heads (`refs/heads/*`,
+/// [`write_ref`]/[`update_ref`]) keep the unbatched per-write contract:
+/// tracking refs are a locally-cached, recomputable-from-a-re-fetch
+/// view of another repository, not a pointer anything else orders
+/// against.
+///
+/// # Partial-failure semantics
+///
+/// Best-effort, fail-fast — the same contract
+/// [`crate::batch::WriteBatch::commit`] documents for the object store's
+/// batched writes. [`Self::write`] renames each ref as soon as it
+/// validates and its content is durable, so a ref that made it through
+/// `write` is visible to readers immediately, exactly as it would have
+/// been under the old per-ref loop. If a later `write` in the same
+/// batch fails (bad name or I/O error), earlier successful writes are
+/// **not** rolled back — content-addressed dedup isn't in play here,
+/// but the same reasoning applies: remote-tracking refs are
+/// recomputable, so a partially-applied batch is exactly as safe to
+/// retry as the old loop was after failing at the same point. Callers
+/// that want the successful prefix to be durable even when the batch as
+/// a whole errors out should call [`Self::commit`] regardless of
+/// whether the write loop returned early (see
+/// `remote_dispatch::push_all_with` / `fetch_objects_inner` for the
+/// pattern).
+#[derive(Debug)]
+pub struct RemoteRefBatch<'a> {
+    layout: &'a RepoLayout,
+    sub_dir: String,
+    touched_dirs: BTreeSet<PathBuf>,
+}
+
+impl<'a> RemoteRefBatch<'a> {
+    /// Start a batch for `remote`.
+    ///
+    /// # Errors
+    /// [`RefError::InvalidRefName`] if `remote` fails [`validate_ref_name`].
+    pub fn new(layout: &'a RepoLayout, remote: &str) -> RefResult<Self> {
+        if !validate_ref_name(remote) {
+            return Err(RefError::InvalidRefName(remote.to_string()));
+        }
+        Ok(Self {
+            layout,
+            sub_dir: remote_ref_dir(remote),
+            touched_dirs: BTreeSet::new(),
+        })
+    }
+
+    /// Write one remote-tracking ref: validates `branch`, fsyncs its
+    /// wire-encoded content, then renames it into place — visible
+    /// immediately, same as [`write_remote_ref`]. Only the directory
+    /// fsync (rename durability) is deferred to [`Self::commit`].
+    ///
+    /// # Errors
+    /// - [`RefError::InvalidRefName`] if `branch` fails
+    ///   [`validate_ref_name`] — no I/O is attempted for an invalid name.
+    /// - [`RefError::Io`] for filesystem failures.
+    ///
+    /// # Panics
+    /// Never in practice: `ref_path` always produces a path with a
+    /// parent (it is `self.layout.common_dir()` joined with at least the
+    /// remote's subdirectory and the branch name).
+    pub fn write(&mut self, branch: &str, h: &Hash) -> RefResult<()> {
+        if !validate_ref_name(branch) {
+            return Err(RefError::InvalidRefName(branch.to_string()));
+        }
+        let path = ref_path(self.layout.common_dir(), &self.sub_dir, branch);
+        let parent = path
+            .parent()
+            .expect("remote-tracking ref path always has a parent")
+            .to_path_buf();
+        fs::create_dir_all(&parent)?;
+        let wire = encode_ref_wire(h);
+        crate::atomic::write_content_synced(&path, &wire)?;
+        self.touched_dirs.insert(parent);
+        Ok(())
+    }
+
+    /// Fsync every directory touched by a completed [`Self::write`],
+    /// once each. Idempotent to call on a batch with nothing staged (a
+    /// no-op). MUST be called after the last `write` a caller intends to
+    /// make durable — refs written but never committed are visible but
+    /// not crash-durable (the rename may not have reached stable
+    /// storage), the same window [`crate::store::BulkWriter::commit`]
+    /// documents for bulk object writes.
+    ///
+    /// # Errors
+    /// [`RefError::Io`] on the first directory fsync failure. Directories
+    /// are synced in sorted order for determinism; a failure partway
+    /// through leaves the remaining directories un-synced (best-effort,
+    /// matching [`Self::write`]'s partial-failure contract).
+    pub fn commit(self) -> RefResult<()> {
+        for dir in &self.touched_dirs {
+            crate::atomic::sync_dir(dir)?;
+        }
+        Ok(())
+    }
 }
 
 /// Delete a remote-tracking branch ref (e.g. after the upstream
@@ -708,7 +1129,7 @@ pub fn update_tag(
     }
     let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     let wire = encode_ref_wire(h);
-    cas_write(&path, &wire, name, condition)
+    cas_write(layout.common_dir(), &path, &wire, name, condition)
 }
 
 /// Delete a tag ref.
@@ -828,6 +1249,7 @@ fn read_ref_under(common_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Opt
 }
 
 fn cas_write(
+    common_dir: &Path,
     path: &Path,
     wire: &[u8; 65],
     name_for_err: &str,
@@ -850,8 +1272,38 @@ fn cas_write(
             Ok(())
         }
         RefWriteCondition::Match(expected) => {
-            // Read-then-write — non-atomic per SPEC-REFS §5.1 (file
-            // transport row). The spec explicitly documents this gap.
+            // INV-15/#637: the read-compare-write below has no
+            // filesystem-level atomicity of its own, and callers cannot
+            // be relied on to already share a lock that covers this —
+            // `branch -m` (`worktrees.lock`) racing `commit`
+            // (`worktree.lock`), or two linked worktrees each holding
+            // their own `worktree.lock`, both write `refs/heads/*`
+            // through this path without ever sharing a lock. Take a
+            // dedicated per-ref lock (same blocking kernel-lock
+            // primitive `repo_lock` uses elsewhere, e.g.
+            // `update_ref_with_history`'s per-branch `refs-history-*.lock`)
+            // scoped to the whole read-compare-write so any two callers
+            // on the same repo targeting the SAME ref — regardless of
+            // what other locks they hold — serialize here and cannot
+            // both observe a stale-but-still-matching `current` value.
+            //
+            // Keyed off `path` (relative to `common_dir`), not just
+            // `name_for_err`, so a branch and a tag/remote-ref sharing
+            // the same bare name (e.g. both named "main") get distinct
+            // locks — `name_for_err` alone can be just the bare name
+            // (see `write_remote_ref`), which would otherwise cause
+            // unrelated ref kinds to falsely contend. Scoped per ref
+            // (not repo-wide) since nothing about this CAS invariant
+            // spans refs (found during the epic-#634 code review).
+            let lock_name = cas_lock_name(common_dir, path);
+            let _lock =
+                crate::repo_lock::acquire_default(common_dir, &lock_name).map_err(|e| match e {
+                    crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+                    other => RefError::InvalidRef(format!(
+                        "{name_for_err}: refs.lock acquisition: {other}"
+                    )),
+                })?;
+
             let current = match fs::read(path) {
                 Ok(b) => Some(
                     decode_ref_wire(&b)
@@ -955,6 +1407,7 @@ pub fn _hash_from_lowercase_hex_for_tests(s: &str) -> Option<Hash> {
 mod tests {
     use super::*;
     use crate::hash;
+    use std::sync::Barrier;
     use tempfile::TempDir;
 
     fn fresh_repo() -> (TempDir, RepoLayout) {
@@ -1311,6 +1764,145 @@ mod tests {
         assert!(matches!(err, RefError::Conflict(_)));
     }
 
+    // --- INV-15 / #637: Match CAS must be atomic across uncoordinated
+    // callers -------------------------------------------------------------
+
+    /// Reproduces the lost-update race described in INV-15: two callers
+    /// that do NOT share any lock (mimicking `branch -m` under
+    /// `worktrees.lock` racing `commit` under `worktree.lock`, or two
+    /// linked worktrees each holding their own `worktree.lock`) both
+    /// read the ref's current value, both see it matches their
+    /// expectation, and both `cas_write`. Without cross-process
+    /// atomicity on the read-compare-write, both calls can report
+    /// success even though only one write actually survives — silently
+    /// losing the other caller's update.
+    ///
+    /// `layout_a`/`layout_b` are two distinct [`RepoLayout`]s (a
+    /// "single" layout and a "linked" layout with a different
+    /// `worktree_root`/`worktree_state_dir`) that share only
+    /// `common_dir` — exactly the shape of two linked worktrees, each
+    /// of which would hold its own separate `worktree.lock` and thus
+    /// share no lock with the other over this CAS. A `Barrier` forces
+    /// both threads to enter `update_ref` at (as close to) the same
+    /// instant as the scheduler allows, and the loop repeats many
+    /// iterations because the race window is a handful of syscalls wide
+    /// and is not guaranteed to be hit on any single attempt.
+    ///
+    /// Before the #637 fix (no shared `refs.lock` around the `Match`
+    /// arm) this reliably reproduces a "both succeeded" iteration within
+    /// a few hundred attempts. After the fix, the shared lock makes the
+    /// read-compare-write atomic across both callers, so this must
+    /// never happen — exactly one of the two racing writers may
+    /// succeed.
+    #[test]
+    fn cas_match_race_never_loses_an_update_across_uncoordinated_callers() {
+        let (_dir, layout_a) = fresh_repo();
+        let layout_b = RepoLayout::linked(
+            layout_a.worktree_root().join("other-worktree"),
+            layout_a.common_dir().join("worktrees").join("other"),
+            layout_a.common_dir(),
+        );
+
+        let base = h("base");
+        write_ref(&layout_a, "main", &base).unwrap();
+
+        let iterations: usize = 500;
+        let mut double_success_iteration = None;
+
+        for i in 0..iterations {
+            // Reset to a known base before each round. `Any` bypasses
+            // CAS entirely, so this is not itself part of what's under
+            // test.
+            update_ref(&layout_a, "main", RefWriteCondition::Any, &base).unwrap();
+
+            let val_a = h(&format!("race-a-{i}"));
+            let val_b = h(&format!("race-b-{i}"));
+            let barrier = Barrier::new(2);
+
+            let (result_a, result_b) = std::thread::scope(|scope| {
+                let handle_a = scope.spawn(|| {
+                    barrier.wait();
+                    update_ref(&layout_a, "main", RefWriteCondition::Match(base), &val_a)
+                });
+                let handle_b = scope.spawn(|| {
+                    barrier.wait();
+                    update_ref(&layout_b, "main", RefWriteCondition::Match(base), &val_b)
+                });
+                (handle_a.join().unwrap(), handle_b.join().unwrap())
+            });
+
+            if result_a.is_ok() && result_b.is_ok() {
+                double_success_iteration = Some(i);
+                break;
+            }
+        }
+
+        assert!(
+            double_success_iteration.is_none(),
+            "both uncoordinated Match CAS callers reported success on iteration \
+             {double_success_iteration:?} — an update was silently lost \
+             (INV-15/INV-6 violation)"
+        );
+    }
+
+    /// Normal-case companion to the race test above: with no
+    /// contention, a sequence of `Match` CAS writes on the same ref must
+    /// still succeed every time and never wedge (guards against the
+    /// `refs.lock` acquire/release added for #637 leaking or
+    /// deadlocking across repeated calls from the same layout).
+    #[test]
+    fn cas_match_succeeds_repeatedly_when_uncontended() {
+        let (_dir, mkit) = fresh_repo();
+        let mut current = h("seed");
+        write_ref(&mkit, "main", &current).unwrap();
+
+        for i in 0..20 {
+            let next = h(&format!("v{i}"));
+            update_ref(&mkit, "main", RefWriteCondition::Match(current), &next).unwrap();
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(next));
+            current = next;
+        }
+    }
+
+    /// Cross-ref counterpart to the race test above: `refs.lock` used
+    /// to be one repo-wide lock, so a `Match` CAS on branch "other"
+    /// would block one on unrelated branch "main" for no reason —
+    /// nothing about this CAS invariant spans refs. Now keyed per ref
+    /// via [`cas_lock_name`]; proves an externally-held lock on
+    /// "other"'s ref path does NOT block a `Match` CAS on "main"'s.
+    #[test]
+    fn cas_match_does_not_contend_across_different_refs() {
+        let (_dir, mkit) = fresh_repo();
+        write_ref(&mkit, "main", &h("m0")).unwrap();
+        write_ref(&mkit, "other", &h("o0")).unwrap();
+
+        let other_path = ref_path(mkit.common_dir(), HEADS_DIR, "other");
+        let other_lock_name = cas_lock_name(mkit.common_dir(), &other_path);
+        let common_dir = mkit.common_dir().to_path_buf();
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _lock = crate::repo_lock::acquire_default(&common_dir, &other_lock_name).unwrap();
+            holding_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        holding_rx.recv().unwrap();
+
+        let start = std::time::Instant::now();
+        update_ref(&mkit, "main", RefWriteCondition::Match(h("m0")), &h("m1")).unwrap();
+        let elapsed = start.elapsed();
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "Match CAS on \"main\" took {elapsed:?} while \"other\"'s ref lock was held \
+             elsewhere — refs are contending when they shouldn't be"
+        );
+        assert_eq!(read_ref(&mkit, "main").unwrap(), Some(h("m1")));
+    }
+
     // --- name-validation enforcement -----------------------------------
 
     #[test]
@@ -1432,6 +2024,159 @@ mod tests {
         assert_eq!(loaded[0], valid);
     }
 
+    // --- remote-ref batching (#645) --------------------------------------
+    //
+    // `push`/`fetch` publish one remote-tracking ref per branch in a loop
+    // (`mkit-cli`'s `remote_dispatch::push_all_with` /
+    // `fetch_objects_inner`). Each `write_remote_ref` call goes through
+    // `cas_write` → `write_atomic`, which pays a parent-directory fsync
+    // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N
+    // directory fsyncs, serially, even though they all land in the same
+    // `refs/remotes/<remote>/` directory. `RemoteRefBatch` amortises that
+    // into one fsync per distinct directory touched, however many refs
+    // were written into it.
+
+    /// Baseline (pre-#645): today's per-ref loop — exactly what
+    /// `push_all_with`/`fetch_objects_inner` do today — pays one
+    /// directory fsync per ref, even though every ref lands in the same
+    /// `refs/remotes/origin/` directory. This is the O(N) cost #645
+    /// exists to amortise; it must keep holding after the fix, since
+    /// `write_remote_ref` itself (used elsewhere for single-ref writes)
+    /// is intentionally left on the unbatched path.
+    #[test]
+    fn write_remote_ref_loop_pays_one_dir_sync_per_ref_today() {
+        let (_dir, mkit) = fresh_repo();
+        let n: u64 = 25;
+        crate::atomic::testing::reset_dir_sync_calls();
+        for i in 0..n {
+            write_remote_ref(
+                &mkit,
+                "origin",
+                &format!("branch-{i}"),
+                &h(&format!("c{i}")),
+            )
+            .unwrap();
+        }
+        let calls = crate::atomic::testing::dir_sync_calls();
+        assert_eq!(
+            calls, n,
+            "the current per-ref write path must cost exactly one directory \
+             fsync per ref (O(N)); got {calls} for {n} refs"
+        );
+    }
+
+    /// The #645 fix: staging N remote-tracking-ref writes into one
+    /// `RemoteRefBatch` and committing once must cost O(1) directory
+    /// fsyncs (one per distinct directory touched — here a single flat
+    /// `refs/remotes/origin/` namespace, so exactly one), not O(N).
+    #[test]
+    fn remote_ref_batch_pays_one_dir_sync_for_many_refs() {
+        let (_dir, mkit) = fresh_repo();
+        let n = 25;
+        let entries: Vec<(String, Hash)> = (0..n)
+            .map(|i| (format!("branch-{i}"), h(&format!("c{i}"))))
+            .collect();
+
+        crate::atomic::testing::reset_dir_sync_calls();
+        let mut batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        for (branch, hash) in &entries {
+            batch.write(branch, hash).unwrap();
+        }
+        batch.commit().unwrap();
+
+        let calls = crate::atomic::testing::dir_sync_calls();
+        assert_eq!(
+            calls, 1,
+            "batching {n} tracking-ref writes into one flat remote \
+             namespace must cost exactly one directory fsync (O(1)), got {calls}"
+        );
+    }
+
+    /// Correctness: batched writes must produce the exact same final ref
+    /// states as the old per-ref `write_remote_ref` loop — same hashes,
+    /// same readability, for every branch.
+    #[test]
+    fn remote_ref_batch_matches_per_ref_loop_final_state() {
+        let (_dir, old_path) = fresh_repo();
+        let (_dir2, new_path) = fresh_repo();
+        let n = 12;
+        let entries: Vec<(String, Hash)> = (0..n)
+            .map(|i| (format!("team/branch-{i}"), h(&format!("state{i}"))))
+            .collect();
+
+        for (branch, hash) in &entries {
+            write_remote_ref(&old_path, "origin", branch, hash).unwrap();
+        }
+
+        let mut batch = RemoteRefBatch::new(&new_path, "origin").unwrap();
+        for (branch, hash) in &entries {
+            batch.write(branch, hash).unwrap();
+        }
+        batch.commit().unwrap();
+
+        for (branch, hash) in &entries {
+            let old_val = read_remote_ref(&old_path, "origin", branch).unwrap();
+            let new_val = read_remote_ref(&new_path, "origin", branch).unwrap();
+            assert_eq!(old_val, Some(*hash));
+            assert_eq!(new_val, Some(*hash));
+            assert_eq!(old_val, new_val, "branch {branch} diverged");
+        }
+    }
+
+    /// Partial-failure semantics: best-effort / fail-fast, matching
+    /// `WriteBatch::commit`'s documented contract (already-renamed
+    /// entries stay visible; no rollback). An invalid branch name in the
+    /// middle of a batch aborts every write from that point on — the
+    /// refs staged before it stay visible and readable, exactly as they
+    /// would have under the old per-ref loop had it hit the same
+    /// mid-loop error (each earlier ref was already independently
+    /// visible before the loop reached the bad one).
+    #[test]
+    fn remote_ref_batch_partial_failure_keeps_already_written_refs_visible() {
+        let (_dir, mkit) = fresh_repo();
+        let mut batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        batch.write("good-1", &h("g1")).unwrap();
+        batch.write("good-2", &h("g2")).unwrap();
+        let err = batch.write("bad//name", &h("x")).unwrap_err();
+        assert!(matches!(err, RefError::InvalidRefName(_)));
+
+        // Committing what was staged before the bad write must still
+        // durably publish the good entries.
+        batch.commit().unwrap();
+        assert_eq!(
+            read_remote_ref(&mkit, "origin", "good-1").unwrap(),
+            Some(h("g1"))
+        );
+        assert_eq!(
+            read_remote_ref(&mkit, "origin", "good-2").unwrap(),
+            Some(h("g2"))
+        );
+        // "bad//name" was never a valid ref name in the first place —
+        // nothing was ever staged for it, on either the old or new path.
+        let never_written = read_remote_ref(&mkit, "origin", "bad//name").unwrap_err();
+        assert!(matches!(never_written, RefError::InvalidRefName(_)));
+    }
+
+    #[test]
+    fn remote_ref_batch_rejects_invalid_remote_name() {
+        let (_dir, mkit) = fresh_repo();
+        let err = RemoteRefBatch::new(&mkit, "../escape").unwrap_err();
+        assert!(matches!(err, RefError::InvalidRefName(_)));
+    }
+
+    #[test]
+    fn remote_ref_batch_of_zero_entries_is_a_noop_commit() {
+        let (_dir, mkit) = fresh_repo();
+        crate::atomic::testing::reset_dir_sync_calls();
+        let batch = RemoteRefBatch::new(&mkit, "origin").unwrap();
+        batch.commit().unwrap();
+        assert_eq!(
+            crate::atomic::testing::dir_sync_calls(),
+            0,
+            "an empty batch must not touch any directory"
+        );
+    }
+
     // --- history-coupled ref writes (history-mmr feature) -------------
 
     #[cfg(feature = "history-mmr")]
@@ -1455,6 +2200,96 @@ mod tests {
 
             assert_eq!(read_ref(&mkit, "main").unwrap(), Some(c2));
             assert_eq!(hist.len(), 2, "two appends → two leaves in the MMR");
+        }
+
+        /// Regression test for the epic-#634 follow-up: `refs-history.lock`
+        /// (and `refs.lock`) used to be one repo-wide lock, so an
+        /// operation on branch "other" would block one on unrelated
+        /// branch "main" for no reason — nothing about the history-mmr
+        /// coupling spans branches. Locks are now keyed per branch
+        /// (`refs-history-<sanitized-branch>.lock`); this proves an
+        /// externally-held lock on branch "other" does NOT block
+        /// `update_ref_with_history` on branch "main".
+        #[test]
+        fn update_ref_with_history_does_not_contend_across_branches() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            // Hold "other" branch's per-branch history lock on a
+            // separate thread for well longer than this test's timeout
+            // budget would tolerate if "main" incorrectly contended on
+            // it. Calls the SAME `history_lock_name` production uses
+            // (not a hand-copied format! string) so this test can't
+            // silently decouple from whatever naming decision
+            // production actually makes.
+            let other_lock_name = history_lock_name("other");
+            let common_dir = mkit.common_dir().to_path_buf();
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _lock =
+                    crate::repo_lock::acquire_default(&common_dir, &other_lock_name).unwrap();
+                holding_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            holding_rx.recv().unwrap();
+
+            // If this contended on "other"'s lock, it would hang until
+            // the holder thread released — which we don't do until
+            // after this call returns. A generous-but-bounded elapsed
+            // check turns a regression into a fast test failure instead
+            // of an indefinite hang.
+            let start = std::time::Instant::now();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m1"), &mut hist)
+                .unwrap();
+            let elapsed = start.elapsed();
+
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "update_ref_with_history on \"main\" took {elapsed:?} while \"other\"'s \
+                 per-branch lock was held elsewhere — branches are contending when they \
+                 shouldn't be"
+            );
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(h("m1")));
+        }
+
+        /// Sanity control for the test above: the SAME branch's lock
+        /// must still serialize correctly — per-branch scoping must not
+        /// have accidentally broken same-branch mutual exclusion.
+        #[test]
+        fn update_ref_with_history_still_contends_on_the_same_branch() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            let main_lock_name = history_lock_name("main");
+            let common_dir = mkit.common_dir().to_path_buf();
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+            let held_for = std::time::Duration::from_millis(200);
+            let holder = std::thread::spawn(move || {
+                let _lock =
+                    crate::repo_lock::acquire_default(&common_dir, &main_lock_name).unwrap();
+                holding_tx.send(()).unwrap();
+                std::thread::sleep(held_for);
+            });
+            holding_rx.recv().unwrap();
+
+            let start = std::time::Instant::now();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m1"), &mut hist)
+                .unwrap();
+            let elapsed = start.elapsed();
+            holder.join().unwrap();
+
+            assert!(
+                elapsed >= held_for / 2,
+                "update_ref_with_history on \"main\" returned in {elapsed:?} while \"main\"'s \
+                 own lock was held for {held_for:?} elsewhere — same-branch mutual exclusion \
+                 is broken"
+            );
         }
 
         #[test]
@@ -1598,6 +2433,277 @@ mod tests {
             assert!(verify_inclusion(&a1, Position(0), &proof0, &root));
             let proof1 = hist_b.prove(Position(1)).unwrap();
             assert!(verify_inclusion(&b1, Position(1), &proof1, &root));
+        }
+
+        // --- journal lifecycle on branch delete/rename (issue #648) ---
+
+        /// The core regression test: delete a branch, recreate one with
+        /// the SAME name, and advance it once. The new incarnation's
+        /// journal must start fresh (one leaf), not resume the deleted
+        /// incarnation's leaves — otherwise the new branch's MMR root
+        /// commits to a sequence spanning unrelated incarnations, and
+        /// stale leaves from the deleted branch keep producing
+        /// valid-looking inclusion proofs "on this branch".
+        #[test]
+        fn delete_ref_with_history_prevents_partition_reuse_on_recreate() {
+            use crate::history::{Position, verify_inclusion};
+
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+
+            // Branch A, advanced twice — journal gets two leaves.
+            let a1 = h("a1");
+            let a2 = h("a2");
+            let mut hist_a = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &a1, &mut hist_a)
+                .unwrap();
+            update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Match(a1),
+                &a2,
+                &mut hist_a,
+            )
+            .unwrap();
+            assert_eq!(hist_a.len(), 2);
+            drop(hist_a);
+
+            // Delete branch A through the history-aware path.
+            delete_ref_with_history(&mkit, "feature", exec.clone()).unwrap();
+            assert_eq!(read_ref(&mkit, "feature").unwrap(), None);
+
+            // Recreate a NEW branch also named "feature" and advance it
+            // once. Its journal must be fresh: one leaf, not three.
+            let b1 = h("b1");
+            let mut hist_b = CommitHistory::open_at(exec, &mkit, "feature").unwrap();
+            assert_eq!(
+                hist_b.len(),
+                0,
+                "recreated branch must not inherit the deleted incarnation's leaves"
+            );
+            update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Missing,
+                &b1,
+                &mut hist_b,
+            )
+            .unwrap();
+            assert_eq!(
+                hist_b.len(),
+                1,
+                "the new incarnation's journal must contain exactly its own one leaf"
+            );
+
+            // The old leaves (a1, a2) must not verify against the new
+            // incarnation's root at any position — no splicing of
+            // unrelated incarnations.
+            let root = hist_b.root();
+            for pos in 0..hist_b.len() {
+                let proof = hist_b.prove(Position(pos)).unwrap();
+                assert!(
+                    !verify_inclusion(&a1, Position(pos), &proof, &root),
+                    "deleted incarnation's leaf a1 must not verify against the new root"
+                );
+                assert!(
+                    !verify_inclusion(&a2, Position(pos), &proof, &root),
+                    "deleted incarnation's leaf a2 must not verify against the new root"
+                );
+            }
+        }
+
+        /// Regression test for the bug found during the epic-#634 code
+        /// review: `delete_ref_with_history` originally ran its
+        /// read-check + journal-destroy + ref-delete sequence with NO
+        /// lock at all, reopening exactly the race #638 closed one layer
+        /// up. Races `delete_ref_with_history` against
+        /// `update_ref_with_history` on the same never-checked-out
+        /// branch, from two independently-opened `CommitHistory` handles
+        /// (mirroring how `update_ref_with_history_concurrent_handles_do_not_interleave_or_corrupt`
+        /// above simulates two racing processes).
+        ///
+        /// The assertion is on LEAF COUNT, not raw journal-directory
+        /// existence: `CommitHistory::open_at`/`reopen` create an empty
+        /// on-disk partition as a side effect of merely opening it (this
+        /// is commonware's own open-or-create `init` semantics, already
+        /// documented as an accepted ambiguity by `heal_one_ahead_gap`'s
+        /// doc comment above), so a 0-leaf journal directory can
+        /// legitimately exist even when the branch has no ref — that is
+        /// not the bug. What must never happen is the branch either (a)
+        /// having a live ref with an EMPTY journal (a leaf was lost) or
+        /// (b) having NO ref while the journal still holds leaves from
+        /// before the delete (exactly #648's stale-incarnation bug,
+        /// reintroduced one layer up by this unlocked race).
+        ///
+        /// Honesty check on this test's power: unlike the analogous
+        /// `cas_match_race_*` test above, this one did NOT reliably
+        /// reproduce a torn state against the unlocked code in manual
+        /// verification (0 failures across 500 iterations) — the
+        /// vulnerable window (concurrent file-level I/O inside
+        /// `destroy()`/`append()`) is narrower than what a
+        /// barrier-synchronized thread start reliably lands in. The fix
+        /// is correct by construction regardless: it applies the exact
+        /// same `refs-history.lock` acquisition, in the exact same
+        /// position (before any read of ref or journal state), that
+        /// every other history-mmr writer in this file already uses —
+        /// this test is kept as a standing consistency/defense-in-depth
+        /// check, not as proof the bug was reliably observed pre-fix.
+        #[test]
+        fn delete_ref_with_history_races_update_without_tearing_ref_and_journal() {
+            let iterations = 50;
+
+            for i in 0..iterations {
+                let (_dir, mkit) = fresh_repo();
+                let exec = Arc::new(TokioExecutor::new().unwrap());
+
+                // Seed the branch so delete_ref_with_history has
+                // something to delete, and pre-populate its journal so
+                // update's handle below opens onto a non-empty journal
+                // (exercising the heal-gap path, not the empty-journal
+                // backfill path, which is orthogonal to this race).
+                let seed = h(&format!("seed-{i}"));
+                let mut seed_hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+                update_ref_with_history(
+                    &mkit,
+                    "feature",
+                    RefWriteCondition::Missing,
+                    &seed,
+                    &mut seed_hist,
+                )
+                .unwrap();
+                drop(seed_hist);
+
+                let next = h(&format!("next-{i}"));
+                let mut update_hist =
+                    CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+                let barrier = Barrier::new(2);
+
+                std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        // Either outcome (deleted first, or raced out by
+                        // the update landing first and this then failing
+                        // NotFound) is valid — only a torn final state is
+                        // a bug.
+                        let _ = delete_ref_with_history(&mkit, "feature", exec.clone());
+                    });
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let _ = update_ref_with_history(
+                            &mkit,
+                            "feature",
+                            RefWriteCondition::Match(seed),
+                            &next,
+                            &mut update_hist,
+                        );
+                    });
+                });
+                drop(update_hist);
+
+                let ref_exists = read_ref(&mkit, "feature").unwrap().is_some();
+                let leaves = CommitHistory::open_at(exec, &mkit, "feature")
+                    .unwrap()
+                    .len();
+                assert_eq!(
+                    ref_exists,
+                    leaves > 0,
+                    "iteration {i}: torn state after racing delete vs. update — \
+                     ref_exists={ref_exists}, journal has {leaves} leaves \
+                     (INV-4/INV-18-adjacent: a live ref must have a non-empty \
+                     journal, and a deleted branch's journal must not retain \
+                     leaves from before the delete)"
+                );
+            }
+        }
+
+        #[test]
+        fn delete_ref_with_history_removes_journal_partition_from_disk() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &h("a"), &mut hist)
+                .unwrap();
+            drop(hist);
+
+            let journal_blobs = mkit.history_dir().join("feature__journal-blobs");
+            assert!(journal_blobs.exists());
+
+            delete_ref_with_history(&mkit, "feature", exec).unwrap();
+            assert!(
+                !journal_blobs.exists(),
+                "delete_ref_with_history must remove the on-disk journal partition"
+            );
+        }
+
+        #[test]
+        fn delete_ref_with_history_errors_on_missing_branch_without_touching_journal() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let err = delete_ref_with_history(&mkit, "nope", exec).unwrap_err();
+            assert!(matches!(err, RefError::NotFound(_)));
+        }
+
+        #[test]
+        fn delete_ref_safe_with_history_refuses_current_branch() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "main").unwrap();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m"), &mut hist)
+                .unwrap();
+            drop(hist);
+
+            let err = delete_ref_safe_with_history(&mkit, "main", exec).unwrap_err();
+            assert!(matches!(err, RefError::CurrentBranch(_)));
+            // Refusing the delete must leave the journal untouched.
+            assert!(mkit.history_dir().join("main__journal-blobs").exists());
+        }
+
+        /// Rename support: destroying the OLD name's journal after the
+        /// new name has already been seeded with a fresh journal (by
+        /// `write_ref_recording_history`, mkit-cli's create/rename path)
+        /// closes the same reuse hole for `branch -m`.
+        #[test]
+        fn delete_ref_with_history_supports_rename_by_destroying_the_old_name_only() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+
+            let mut hist_old = CommitHistory::open_at(exec.clone(), &mkit, "old").unwrap();
+            update_ref_with_history(
+                &mkit,
+                "old",
+                RefWriteCondition::Any,
+                &h("o1"),
+                &mut hist_old,
+            )
+            .unwrap();
+            drop(hist_old);
+
+            // Simulate the CLI rename: seed "new" with a fresh journal
+            // first (mirrors `write_ref_recording_history`'s Missing-CAS
+            // create), then drop "old" via the history-aware delete.
+            let mut hist_new = CommitHistory::open_at(exec.clone(), &mkit, "new").unwrap();
+            update_ref_with_history(
+                &mkit,
+                "new",
+                RefWriteCondition::Missing,
+                &h("o1"),
+                &mut hist_new,
+            )
+            .unwrap();
+            assert_eq!(hist_new.len(), 1);
+            drop(hist_new);
+
+            delete_ref_with_history(&mkit, "old", exec.clone()).unwrap();
+
+            assert_eq!(read_ref(&mkit, "old").unwrap(), None);
+            assert_eq!(read_ref(&mkit, "new").unwrap(), Some(h("o1")));
+            assert!(!mkit.history_dir().join("old__journal-blobs").exists());
+            assert!(mkit.history_dir().join("new__journal-blobs").exists());
+
+            // Recreating "old" afterward must not resume the destroyed
+            // incarnation's leaf.
+            let hist_old_reopened = CommitHistory::open_at(exec, &mkit, "old").unwrap();
+            assert_eq!(hist_old_reopened.len(), 0);
         }
     }
 }

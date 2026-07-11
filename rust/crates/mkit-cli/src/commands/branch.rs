@@ -182,13 +182,20 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
 
 /// `mkit branch -d/-D <name>` — delete a branch.
 ///
-/// Both `-d` and `-D` route through `delete_ref_safe`, which refuses to
-/// delete the branch HEAD currently points at (issue #206) — deleting
-/// the current branch would leave HEAD dangling, and git refuses this
-/// even under `-D`. mkit does not track per-branch merge status, so `-d`
-/// and `-D` behave identically here. Like git, **both** error on a
-/// missing branch (`error: branch '<name>' not found`); `-D` does not
-/// silently no-op, so a typo'd name is surfaced rather than swallowed.
+/// Both `-d` and `-D` route through `delete_ref_recording_history`,
+/// which refuses to delete the branch HEAD currently points at (issue
+/// #206) — deleting the current branch would leave HEAD dangling, and
+/// git refuses this even under `-D`. mkit does not track per-branch
+/// merge status, so `-d` and `-D` behave identically here. Like git,
+/// **both** error on a missing branch (`error: branch '<name>' not
+/// found`); `-D` does not silently no-op, so a typo'd name is surfaced
+/// rather than swallowed.
+///
+/// On `--features history-mmr` builds, `delete_ref_recording_history`
+/// additionally destroys the branch's history-MMR journal partition
+/// (issue #648): without that, recreating a branch under the same name
+/// would reopen the deleted incarnation's non-empty journal and resume
+/// appending on top of its old leaves.
 fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
     let [name] = names else {
         let flag = if force { "-D" } else { "-d" };
@@ -215,7 +222,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
         Ok(None) => {}
         Err(e) => return super::error(&e, crate::exit::DATAERR),
     }
-    match refs::delete_ref_safe(layout, name) {
+    match super::delete_ref_recording_history(layout, name) {
         Ok(()) => {
             let mut stderr = std::io::stderr().lock();
             match was {
@@ -248,7 +255,12 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
 /// checked-out branch. The create routes through
 /// `write_ref_recording_history` so the renamed branch seeds a fresh
 /// history-MMR journal on `--features history-mmr` builds, exactly as a
-/// freshly created branch would.
+/// freshly created branch would. The source deletion routes through
+/// `delete_ref_dropping_history`, which on the same builds destroys the
+/// OLD name's journal partition (issue #648) — a rename always starts
+/// the new name with a fresh journal, so leaving the old name's journal
+/// behind would only serve to be wrongly inherited if that name is ever
+/// reused (e.g. renamed back, or a new unrelated branch of that name).
 fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
     let (old, new) = match names {
         [new] => {
@@ -305,7 +317,7 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("write {new}: {e}"), exit::CANTCREAT),
     }
 
-    if let Err(e) = refs::delete_ref(layout, &old) {
+    if let Err(e) = super::delete_ref_dropping_history(layout, &old) {
         return emit_err(&format!("delete {old}: {e}"), exit::GENERAL_ERROR);
     }
 

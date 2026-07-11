@@ -106,6 +106,36 @@ pub use tokio_executor::TokioExecutor;
 /// without an on-disk format-version bump and a migration.
 const HISTORY_BAGGING: Bagging = Bagging::ForwardFold;
 
+// Test-only instrumentation: counts calls to the journaled flavour's
+// `journal.sync()` (fsync), thread-local so parallel `cargo test`
+// threads never interfere with each other's count. Exists purely to
+// let tests assert "backfilling N commits does one fsync, not N"
+// without depending on wall-clock timing. No production overhead —
+// compiled out entirely on non-test builds.
+#[cfg(test)]
+thread_local! {
+    static SYNC_CALL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_sync_call() {
+    SYNC_CALL_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// Reset this thread's fsync counter to 0. Call before the operation
+/// under test.
+#[cfg(test)]
+pub(crate) fn reset_sync_call_count() {
+    SYNC_CALL_COUNT.with(|c| c.set(0));
+}
+
+/// Number of `journal.sync()` (fsync) calls on this thread since the
+/// last [`reset_sync_call_count`].
+#[cfg(test)]
+pub(crate) fn sync_call_count() -> u64 {
+    SYNC_CALL_COUNT.with(std::cell::Cell::get)
+}
+
 /// The canonical hasher for the commit-history MMR — the single source of
 /// truth for [`HISTORY_BAGGING`], so the producer and verifier sides can
 /// never drift on the bagging policy.
@@ -236,7 +266,7 @@ enum Backend<X: Executor> {
 }
 
 struct JournaledBackend<X: Executor> {
-    // Order matters for Drop: `mmr` must drop before `_ctx` so
+    // Order matters for Drop: `mmr` must drop before `ctx` so
     // any pending async-resource shutdowns can still poll on the
     // surviving tokio runtime. In practice commonware's
     // `Journaled` only flushes synchronously in `sync`, but the
@@ -244,8 +274,10 @@ struct JournaledBackend<X: Executor> {
     mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest, Sequential>,
     executor: Arc<X>,
     // Held to keep the bootstrap tokio runtime (inside the Context's
-    // executor `Arc`) alive for the whole CommitHistory lifetime.
-    _ctx: commonware_runtime::tokio::Context,
+    // executor `Arc`) alive for the whole CommitHistory lifetime, AND
+    // read by `reopen` (issue #640) to derive a labelled child Context
+    // instead of paying for a second `bootstrap_commonware_context`.
+    ctx: commonware_runtime::tokio::Context,
     // Held so update_ref_with_history can take a fresh RepoLock for
     // every append. None for the mem-only flavour. This is the COMMON
     // dir: history is shared state across worktrees (#493).
@@ -338,8 +370,33 @@ impl<X: Executor + 'static> CommitHistory<X> {
         // `<mkit_dir>/history`. The Context survives the bootstrap
         // runner's drop because its inner `Arc<Executor>` (the
         // commonware Executor, not ours) holds the tokio runtime alive.
+        //
+        // This is the ONLY place a fresh Context gets bootstrapped.
+        // [`Self::reopen`] re-derives state via [`Self::init_journaled`]
+        // against its already-live Context instead of calling this
+        // again — see issue #640.
         let ctx = bootstrap_commonware_context(&history_dir)?;
 
+        Self::init_journaled(executor, ctx, common_dir, branch)
+    }
+
+    /// Open (or re-derive) the journaled backend against an
+    /// already-live commonware `Context`.
+    ///
+    /// This is the shared tail of [`Self::open_at_common_dir`] (which
+    /// bootstraps a fresh `Context` and hands it here) and
+    /// [`Self::reopen`] (which passes in the CURRENT handle's already
+    /// -bootstrapped `Context` instead of building a new one). Every
+    /// call re-runs `JournaledMmr::init`, so the returned handle always
+    /// reflects what's actually on disk right now — the expensive part
+    /// this function does NOT repeat is the OS-thread `Context`
+    /// bootstrap itself.
+    fn init_journaled(
+        executor: Arc<X>,
+        ctx: commonware_runtime::tokio::Context,
+        common_dir: &Path,
+        branch: &str,
+    ) -> Result<Self, HistoryError> {
         let sanitized = sanitize_branch(branch);
         let journal_partition = format!("{sanitized}{JOURNAL_PARTITION_SUFFIX}");
         let metadata_partition = format!("{sanitized}{METADATA_PARTITION_SUFFIX}");
@@ -378,7 +435,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
             backend: Backend::Journaled(Box::new(JournaledBackend {
                 mmr,
                 executor,
-                _ctx: ctx,
+                ctx,
                 common_dir: common_dir.to_path_buf(),
                 branch: branch.to_string(),
             })),
@@ -430,11 +487,28 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// if commonware cannot recover the journal,
     /// [`HistoryError::RuntimeBootstrap`] if the runtime bootstrap
     /// fails, [`HistoryError::Io`] for filesystem failures.
+    ///
+    /// # Bootstrap cost (issue #640)
+    ///
+    /// This does NOT spawn a second commonware `Context` bootstrap.
+    /// [`CommitHistory::open_at`]'s bootstrap thread already built a
+    /// full tokio runtime, metrics task, and buffer pools for this
+    /// handle; re-running that per call would double the cost of
+    /// every history-tracked ref write for no benefit, since the
+    /// bootstrapped Context is reusable — only the MMR's in-memory
+    /// view of the on-disk journal needs re-deriving. `reopen` takes a
+    /// labelled child of the handle's own already-live Context and
+    /// re-runs `JournaledMmr::init` against it, which is what actually
+    /// picks up a concurrent writer's append.
     pub fn reopen(&mut self) -> Result<(), HistoryError> {
         let Backend::Journaled(b) = &self.backend else {
             return Ok(());
         };
-        let fresh = Self::open_at_common_dir(b.executor.clone(), &b.common_dir, &b.branch)?;
+        // Reuse the already-bootstrapped Context — see the doc comment
+        // above and `bootstrap_commonware_context`'s doc comment for
+        // why a second bootstrap must not happen here.
+        let ctx = b.ctx.child("mmr_reopen");
+        let fresh = Self::init_journaled(b.executor.clone(), ctx, &b.common_dir, &b.branch)?;
         *self = fresh;
         Ok(())
     }
@@ -444,7 +518,34 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// Positions are dense: the *n*-th append returns `Position(n)`.
     /// For the journaled flavour, the underlying MMR is `sync`'d to
     /// disk before returning — survives a `SIGKILL` immediately after.
+    ///
+    /// A thin wrapper over `Self::append_no_sync` + `Self::sync` —
+    /// see those for the split. Callers appending many leaves in one
+    /// critical section (e.g. [`rebuild_from_chain`]'s backfill) should
+    /// call the two halves directly instead, batching the fsync.
     pub fn append(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
+        let pos = self.append_no_sync(commit_hash)?;
+        self.sync()?;
+        Ok(pos)
+    }
+
+    /// Append a commit hash WITHOUT flushing to disk.
+    ///
+    /// Identical to [`Self::append`] except the journaled flavour skips
+    /// the trailing `journal.sync()` (fsync). Unlike `append`, a leaf
+    /// written this way is only guaranteed durable once a subsequent
+    /// [`Self::sync`] call returns — a `SIGKILL` before that sync loses
+    /// it. Exists so a caller appending many leaves in one critical
+    /// section (e.g. [`rebuild_from_chain`]'s backfill) can defer the
+    /// fsync to once for the whole batch instead of once per leaf: at
+    /// roughly 1-10ms per fsync, one-per-commit made backfilling a
+    /// branch with tens of thousands of commits take minutes instead of
+    /// the single-digit milliseconds SPEC-HISTORY-PROOF promises.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::append`].
+    fn append_no_sync(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
         let leaf = digest_from_hash(commit_hash);
         match &mut self.backend {
             Backend::Mem { mmr } => {
@@ -464,16 +565,30 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 b.mmr
                     .apply_batch(&batch)
                     .map_err(|e| HistoryError::Mmr(e.to_string()))?;
-                // Flush to disk synchronously so a SIGKILL between
-                // append and the caller's next ref-write does not lose
-                // the leaf we just promised to persist.
-                let sync_fut = b.mmr.sync();
-                b.executor
-                    .block_on(sync_fut)
-                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
                 Ok(Position(u64::from(leaf_loc)))
             }
         }
+    }
+
+    /// Flush any leaves appended via [`Self::append_no_sync`] to disk.
+    /// No-op for the mem-only flavour (nothing to flush).
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Mmr`] if the underlying journal sync fails.
+    fn sync(&mut self) -> Result<(), HistoryError> {
+        if let Backend::Journaled(b) = &mut self.backend {
+            #[cfg(test)]
+            record_sync_call();
+            // Flush to disk synchronously so a SIGKILL between this
+            // call and the caller's next ref-write does not lose any
+            // leaf appended (via `append_no_sync`) since the last sync.
+            let sync_fut = b.mmr.sync();
+            b.executor
+                .block_on(sync_fut)
+                .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Current MMR root digest. 32-byte BLAKE3 (mkit `Hash` shape).
@@ -539,6 +654,51 @@ impl<X: Executor + 'static> CommitHistory<X> {
             }
         }
     }
+
+    /// Permanently delete this history's on-disk journal + metadata
+    /// partitions (issue #648).
+    ///
+    /// Consumes `self`: there is no valid handle to keep using once the
+    /// backing storage is gone. A no-op for the mem-only flavour (there
+    /// is nothing on disk to remove).
+    ///
+    /// This is the primitive [`crate::refs::delete_ref_with_history`]
+    /// uses to fence a branch's journal on `branch -d` / `branch -m`:
+    /// without it, re-creating a branch with a previously-used name
+    /// would reopen the dead incarnation's non-empty journal (same
+    /// sanitized partition name) and resume appending on top of its old
+    /// leaves — see SPEC-HISTORY-PROOF and issue #648 for the full
+    /// write-up of the resulting stale-inclusion-proof bug.
+    ///
+    /// # Errors
+    ///
+    /// [`HistoryError::Mmr`] if commonware's underlying journal/metadata
+    /// `destroy()` fails (e.g. an I/O error removing the partition
+    /// files).
+    pub fn destroy(self) -> Result<(), HistoryError> {
+        match self.backend {
+            Backend::Mem { .. } => Ok(()),
+            Backend::Journaled(b) => {
+                // Destructure so `executor` and `ctx` (which keeps the
+                // bootstrap commonware runtime alive — see the
+                // `JournaledBackend` doc comment) both stay in scope for
+                // the duration of `block_on`, exactly like every other
+                // method on this type. `ctx` itself is unused here beyond
+                // that lifetime-extension role (see #640, which made the
+                // field readable elsewhere but `destroy` has no need to
+                // read it).
+                let JournaledBackend {
+                    mmr,
+                    executor,
+                    ctx: _ctx,
+                    ..
+                } = *b;
+                executor
+                    .block_on(mmr.destroy())
+                    .map_err(|e| HistoryError::Mmr(e.to_string()))
+            }
+        }
+    }
 }
 
 impl Default for CommitHistory<TokioExecutor> {
@@ -590,10 +750,16 @@ pub fn verify_inclusion(
 /// `ObjectStore` dependency — the rebuild shim is a tool the caller
 /// (typically `mkit-cli`) drives.
 ///
+/// Batches all backfilled leaves into a single `journal.sync()` (fsync)
+/// for the whole chain, rather than one per commit — see
+/// `CommitHistory::append_no_sync`. Git adopted the same pattern
+/// (`core.fsyncMethod=batch`) for the same reason: fsync latency, not
+/// the MMR math, is what dominates a large backfill.
+///
 /// # Errors
 ///
 /// - Propagates any error from `parent_of`.
-/// - Propagates any [`HistoryError`] from `history.append`.
+/// - Propagates any [`HistoryError`] from the underlying append/sync.
 pub fn rebuild_from_chain<X, F, E>(
     history: &mut CommitHistory<X>,
     tip: Hash,
@@ -614,7 +780,11 @@ where
     chain.reverse();
     let count = chain.len() as u64;
     for h in &chain {
-        history.append(h).map_err(RebuildError::History)?;
+        history.append_no_sync(h).map_err(RebuildError::History)?;
+    }
+    // One fsync for the entire batch instead of one per commit.
+    if count > 0 {
+        history.sync().map_err(RebuildError::History)?;
     }
     Ok(count)
 }
@@ -642,36 +812,62 @@ fn digest_from_hash(h: &Hash) -> <Blake3 as CHasher>::Digest {
 }
 
 /// Hex-escape a mkit branch name into a commonware-partition-safe
-/// token.
+/// token — see [`crate::refs::sanitize_ref_name`] for the encoding
+/// (`main` → `main`, `feat/v1.0` → `feat_2fv1_2e0`, injective).
 ///
-/// commonware partition names are restricted to `[A-Za-z0-9_-]+`. mkit
-/// ref names can contain `.` and `/` (and `_`, which IS allowed
-/// upstream but which we must escape too to keep this encoding
-/// injective). Every non-`[A-Za-z0-9-]` byte is encoded as `_xx`
-/// where `xx` is the lowercase-hex byte value; `_` itself encodes as
-/// `_5f`. This makes the encoding self-delimiting — every `_` in the
-/// output is the lead-in of a two-hex-digit escape, never a literal.
+/// The canonical implementation lives in `refs.rs`, NOT here: this
+/// module is entirely `#[cfg(feature = "history-mmr")]`-gated (see
+/// `lib.rs`), but `cas_write`'s per-ref lock naming needs the same
+/// sanitizer in every build, including when this module doesn't
+/// exist. `refs.rs` already has the right dependency direction —
+/// `history.rs` already depends on it for [`crate::refs::validate_ref_name`]
+/// — so this is a thin re-export, not a second implementation, to
+/// avoid the two drifting (found during the epic-#634 code review).
+use crate::refs::sanitize_ref_name as sanitize_branch;
+
+/// Test-only instrumentation for observing how many times
+/// [`bootstrap_commonware_context`] actually spawns a bootstrap OS
+/// thread. Production builds pay zero cost for this (compiled out
+/// entirely under `#[cfg(test)]`).
 ///
-/// Examples:
-///   `main`        → `main`
-///   `feat/v1.0`   → `feat_2fv1_2e0`
-///   `feat_v1_0`   → `feat_5fv1_5f0`
-///
-/// The encoding is injective: different valid branch names always
-/// sanitize to different partition tokens, so the journaled MMRs of
-/// two branches in the same repo never share commonware partitions.
-fn sanitize_branch(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for &b in name.as_bytes() {
-        let allowed = b.is_ascii_alphanumeric() || b == b'-';
-        if allowed {
-            out.push(b as char);
-        } else {
-            use core::fmt::Write as _;
-            let _ = write!(&mut out, "_{b:02x}");
+/// The counter is installed per-thread rather than as one global
+/// static so that tests exercising this (like
+/// `reopen_reuses_the_bootstrapped_commonware_context_instead_of_rebootstrapping`)
+/// are not flaky under `cargo test`'s default multi-threaded runner —
+/// each test only observes bootstraps triggered by its own call
+/// chain. [`bootstrap_commonware_context`] reads the hook
+/// synchronously on the *calling* thread (before it spawns the
+/// bootstrap thread) and moves the resulting `Arc` into the spawned
+/// closure, so the count still lands correctly even though the
+/// bootstrap itself happens on a different OS thread.
+#[cfg(test)]
+mod bootstrap_probe {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    thread_local! {
+        static COUNTER: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+    }
+
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            COUNTER.with(|c| *c.borrow_mut() = None);
         }
     }
-    out
+
+    /// Install `counter` as the active probe for the current thread.
+    /// Returns a guard that clears the hook on drop.
+    #[must_use]
+    pub(super) fn track(counter: Arc<AtomicUsize>) -> impl Drop {
+        COUNTER.with(|c| *c.borrow_mut() = Some(counter));
+        Clear
+    }
+
+    pub(super) fn current() -> Option<Arc<AtomicUsize>> {
+        COUNTER.with(|c| c.borrow().clone())
+    }
 }
 
 /// Bootstrap a commonware tokio `Context` whose `storage_directory`
@@ -686,11 +882,22 @@ fn sanitize_branch(name: &str) -> String {
 /// See `docs/specs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
 /// the trade-off with the alternative "share the caller's tokio
 /// runtime" approach.
+///
+/// Callers that already hold a live [`commonware_runtime::tokio::Context`]
+/// (e.g. [`CommitHistory::reopen`]) MUST NOT call this a second time —
+/// see [`CommitHistory::init_journaled`], which re-derives on-disk
+/// state against an existing Context instead.
 fn bootstrap_commonware_context(
     storage_directory: &Path,
 ) -> Result<commonware_runtime::tokio::Context, HistoryError> {
     let dir = storage_directory.to_path_buf();
+    #[cfg(test)]
+    let probe = bootstrap_probe::current();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        if let Some(counter) = &probe {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let cfg = commonware_runtime::tokio::Config::new().with_storage_directory(dir);
         let runner = commonware_runtime::tokio::Runner::new(cfg);
         // Return an owned, labelled child Context. `Context::clone` and
@@ -935,6 +1142,40 @@ mod tests {
         assert!(verify_inclusion(&commits[17], target, &proof, &root));
     }
 
+    /// Issue #640: `write_ref_recording_history` does one `open_at`
+    /// before the repo lock, then `update_ref_with_history`'s
+    /// `reopen()` re-derives state under the lock. That sequence —
+    /// `open_at` followed by `reopen()` — must pay for exactly ONE
+    /// commonware Context bootstrap (one OS thread spawning a full
+    /// tokio runtime, metrics task, and buffer pools), not two. A
+    /// second bootstrap is pure waste: everything the first one built
+    /// is torn down milliseconds later.
+    #[test]
+    fn reopen_reuses_the_bootstrapped_commonware_context_instead_of_rebootstrapping() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = bootstrap_probe::track(counter.clone());
+
+        // Mirrors write_ref_recording_history's pre-lock open.
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "open_at must bootstrap the commonware Context exactly once"
+        );
+
+        // Mirrors update_ref_with_history's post-lock reopen().
+        h.reopen().unwrap();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "reopen() must reuse the already-bootstrapped Context rather than \
+             spawning a second bootstrap thread"
+        );
+    }
+
     #[test]
     fn open_at_distinct_branches_have_distinct_roots() {
         let (_tmp, mkit_dir) = fresh_mkit_dir();
@@ -959,6 +1200,96 @@ mod tests {
         assert_eq!(b.len(), 0, "sibling branch must not see appended leaf");
         b.append(&synth(1)).unwrap();
         assert_ne!(a.root(), b.root());
+    }
+
+    // ---- destroy (issue #648: branch-delete journal lifecycle) ----
+
+    #[test]
+    fn destroy_removes_on_disk_partition() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..5u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "feature").unwrap();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        assert_eq!(h.len(), 5);
+
+        // Sanitized partition name for "feature" is "feature" →
+        // "feature__journal-blobs" (same layout documented on
+        // `HISTORY_DIR` and exercised by the truncation test above).
+        let journal_blobs = mkit_dir.history_dir().join("feature__journal-blobs");
+        let journal_metadata = mkit_dir.history_dir().join("feature__journal-metadata");
+        assert!(
+            journal_blobs.exists(),
+            "journal blob dir must exist after appends"
+        );
+
+        h.destroy().unwrap();
+
+        assert!(
+            !journal_blobs.exists(),
+            "destroy must remove the on-disk journal blob partition"
+        );
+        assert!(
+            !journal_metadata.exists(),
+            "destroy must remove the on-disk journal metadata partition"
+        );
+    }
+
+    #[test]
+    fn destroyed_journal_reopens_empty_not_resuming_dead_incarnation() {
+        // This is the exact invariant `mkit branch -d` + recreate under
+        // the same name relies on (issue #648): once a branch's journal
+        // has been destroyed, reopening the SAME sanitized partition
+        // name must start completely fresh — not resume the deleted
+        // incarnation's leaves.
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..3u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec.clone(), &mkit_dir, "feature").unwrap();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        assert_eq!(h.len(), 3);
+        h.destroy().unwrap();
+
+        let reopened = CommitHistory::open_at(exec, &mkit_dir, "feature").unwrap();
+        assert_eq!(
+            reopened.len(),
+            0,
+            "a destroyed journal must reopen with zero leaves, not resume the dead incarnation"
+        );
+        assert_eq!(
+            reopened.root(),
+            CommitHistory::open().root(),
+            "a fresh reopen after destroy must match a genuinely empty MMR's root"
+        );
+    }
+
+    #[test]
+    fn destroy_of_one_branch_does_not_touch_a_sibling_branch() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+
+        let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "a").unwrap();
+        let mut b = CommitHistory::open_at(exec.clone(), &mkit_dir, "b").unwrap();
+        a.append(&synth(0)).unwrap();
+        b.append(&synth(1)).unwrap();
+        let b_root = b.root();
+        drop(b);
+
+        a.destroy().unwrap();
+
+        let b_reopened = CommitHistory::open_at(exec, &mkit_dir, "b").unwrap();
+        assert_eq!(
+            b_reopened.len(),
+            1,
+            "destroying branch 'a' must not affect sibling branch 'b'"
+        );
+        assert_eq!(b_reopened.root(), b_root);
     }
 
     #[test]
@@ -1199,6 +1530,68 @@ mod tests {
             h.root(),
             reference_root,
             "rebuilt root must match live-append root"
+        );
+    }
+
+    /// SPEC-HISTORY-PROOF's backfill cost claim ("single-digit
+    /// milliseconds for branches up to a few hundred thousand commits")
+    /// only holds if the backfill fsyncs once for the whole chain, not
+    /// once per commit. `journal.sync()` is fsync-latency-bound (~1-10ms
+    /// each), so 500 unbatched syncs alone would blow well past the
+    /// spec's budget. Instrumentation-based rather than wall-clock-based
+    /// so it can't flake under CI load.
+    #[test]
+    fn rebuild_from_chain_batches_backfill_into_a_single_sync() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..500u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        reset_sync_call_count();
+
+        let tip = commits[commits.len() - 1];
+        let count = rebuild_from_chain::<TokioExecutor, _, std::io::Error>(&mut h, tip, |hash| {
+            let idx = commits
+                .iter()
+                .position(|c| c == hash)
+                .expect("walker called with unknown hash");
+            if idx == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(commits[idx - 1]))
+            }
+        })
+        .unwrap();
+
+        assert_eq!(count, 500, "sanity: all 500 commits were backfilled");
+        assert_eq!(h.len(), 500, "sanity: all 500 leaves landed in the MMR");
+        assert_eq!(
+            sync_call_count(),
+            1,
+            "backfilling 500 commits must fsync exactly once for the \
+             whole batch, not once per commit"
+        );
+    }
+
+    /// A single live `append` (the non-backfill path) must still fsync
+    /// — batching must not silently drop the per-append durability
+    /// guarantee for ordinary commit-time writes.
+    #[test]
+    fn append_still_syncs_once_per_call() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        reset_sync_call_count();
+
+        h.append(&synth(0)).unwrap();
+        h.append(&synth(1)).unwrap();
+        h.append(&synth(2)).unwrap();
+
+        assert_eq!(
+            sync_call_count(),
+            3,
+            "each live `append` must still fsync on its own — only the \
+             backfill path batches"
         );
     }
 

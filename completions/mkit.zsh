@@ -32,6 +32,7 @@ _mkit() {
         'for-each-ref:Iterate refs with an optional --format'
         'symbolic-ref:Read or write a symbolic ref (e.g. HEAD)'
         'update-ref:Create, update, or delete a ref (guarded)'
+        'ref:List refs, or resolve one to its hash'
         'commit:Create a signed commit'
         'log:Show commit history'
         'reflog:Show a branch movement history (read-only)'
@@ -232,6 +233,11 @@ _mkit() {
                         '(-d --delete)'{-d,--delete}'[delete the ref]' \
                         '--help[show help]' \
                         '*:ref:'
+                    ;;
+                ref)
+                    _values 'ref subcommand' \
+                        'list[list every ref'\''s full name and resolved hash]' \
+                        'cat[print the resolved hash for one ref]'
                     ;;
                 status)
                     _arguments \

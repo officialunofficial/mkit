@@ -5,12 +5,27 @@
 //!
 //! mkit's ref-history is the per-branch, append-only **commit-history
 //! MMR** (`mkit_core::history::CommitHistory`, the `refs-history.lock`
-//! journal written by `write_ref_recording_history`). On *every* branch
-//! advance — commit, branch creation, merge, rebase, cherry-pick,
-//! amend, fetch/pull tip update — the new tip hash is appended as one
-//! leaf. The journal therefore stores:
+//! journal written by `write_ref_recording_history`). It records one
+//! leaf per **branch ref WRITE**, not one leaf per commit that ends up
+//! reachable from the tip. For most operations — a plain commit,
+//! branch creation, merge, cherry-pick, amend, a rebase `--abort`
+//! rollback, fetch/pull tip update — each new commit corresponds to
+//! exactly one ref write, so "one leaf per advance" and "one leaf per
+//! commit" coincide in practice.
 //!
-//! - the **count** of recorded advances (`len()`), and
+//! **`rebase` is the documented exception** (issue #648): a
+//! multi-commit rebase detaches HEAD for the whole operation and moves
+//! it once per replayed commit (`refs::write_head_detached`, NOT
+//! `write_ref_recording_history`), then performs exactly ONE branch ref
+//! write at finalize. A rebase that replays five commits therefore
+//! appends exactly one leaf, not five — the intermediate replayed
+//! commits are perfectly valid, reachable, mkit-created commits that
+//! were simply never in scope for per-commit journaling. The same gap
+//! applies to any future op that moves detached HEAD through multiple
+//! commits before a single branch-ref finalize. The journal therefore
+//! stores:
+//!
+//! - the **count** of recorded ref writes (`len()`), and
 //! - a tamper-evident **root** plus per-leaf inclusion proofs.
 //!
 //! It deliberately does **not** store what a Git reflog stores: there
@@ -35,6 +50,16 @@
 //! rewrite-robust — a reachable commit shows `[journaled]` as long as it
 //! was journaled at some point, even after a later amend/reset shifted
 //! the journal's leaf count past the reachable chain length.
+//!
+//! A reachable commit that does **not** verify is printed as `[not
+//! journaled]`, deliberately worded to describe absence rather than
+//! imply tampering: per the rebase gap above, an intermediate
+//! rebase-replayed commit is expected to show this marker every time —
+//! it is a normal consequence of one-leaf-per-ref-write, not evidence
+//! of anything wrong with the commit or the journal. A `[not journaled]`
+//! marker on a commit that was NOT created by a mid-rebase replay (e.g.
+//! a plain commit, or a rebase's own finalize tip) is the more
+//! interesting case worth investigating.
 //!
 //! This is **not** a full Git reflog: `@{N}` indexes the reachable
 //! first-parent chain (which drops superseded commits — e.g. after an
@@ -159,12 +184,19 @@ pub fn run(args: &[String]) -> u8 {
         // `@{0}` is the current tip (chain[0]); `@{N}` walks back.
         let selector = i;
         // Journal cross-check: was this reachable commit ever recorded
-        // as a journaled branch advance? We can't decode the opaque MMR
-        // leaves, so we ask the journal to *confirm* the commit at some
-        // leaf position via an inclusion proof. This is rewrite-robust:
-        // a commit reachable today verifies as long as it was journaled
-        // at some point (even if a later amend/reset shifted leaf
-        // counts). `None` on a default build (no journal).
+        // as a journaled branch ref write? We can't decode the opaque
+        // MMR leaves, so we ask the journal to *confirm* the commit at
+        // some leaf position via an inclusion proof. This is
+        // rewrite-robust: a commit reachable today verifies as long as
+        // it was journaled at some point (even if a later amend/reset
+        // shifted leaf counts). `None` on a default build (no journal).
+        //
+        // `Some(false)` is NOT a tamper signal by itself (see the
+        // module doc's rebase gap, issue #648): mkit journals one leaf
+        // per branch REF WRITE, not one per commit, so an intermediate
+        // commit created by a multi-commit rebase's detached-HEAD
+        // replay is expected to come back `Some(false)` every time —
+        // only the rebase's own finalize tip gets a leaf.
         let verified = journal.as_ref().map(|j| j.verify_present(&commit));
 
         let obj = match store.read_object(&commit) {
@@ -191,7 +223,13 @@ pub fn run(args: &[String]) -> u8 {
             Format::Default => {
                 let mark = match verified {
                     Some(true) => " [journaled]",
-                    Some(false) => " [NOT in journal]",
+                    // Deliberately "not journaled" rather than "NOT in
+                    // journal" — this describes an absence, not a
+                    // tamper signal. It is the EXPECTED marker for an
+                    // intermediate rebase-replayed commit (module doc,
+                    // issue #648): mkit records one leaf per branch ref
+                    // write, not one per commit.
+                    Some(false) => " [not journaled]",
                     None => "",
                 };
                 let _ = writeln!(

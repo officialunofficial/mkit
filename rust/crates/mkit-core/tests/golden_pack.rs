@@ -168,7 +168,7 @@ fn pack_basic_pin_bytes_roundtrip() {
     let blob_hash = hash::hash(&blob_bytes);
 
     let mut w = PackWriter::new();
-    w.push_raw(blob_hash, blob_bytes.clone()).unwrap();
+    w.push_raw(blob_hash, &blob_bytes).unwrap();
     let pack = w.finish().unwrap();
 
     // Pin the framing: header (12 bytes) + entry frame (5 bytes) +

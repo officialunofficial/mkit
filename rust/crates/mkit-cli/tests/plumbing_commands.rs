@@ -55,6 +55,17 @@ fn repo() -> (tempfile::TempDir, tempfile::TempDir) {
     (td, xdg)
 }
 
+/// An initialized repo with no commits at all — `refs/heads/main` has
+/// never been written (only the first commit creates the branch ref).
+fn empty_repo() -> (tempfile::TempDir, tempfile::TempDir) {
+    let td = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["init"]).status.success());
+    assert!(run_in(root, x, &["keygen"]).status.success());
+    (td, xdg)
+}
+
 fn out_str(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
@@ -665,5 +676,164 @@ fn status_porcelain_v2_line_shape() {
     assert!(
         lines.contains(&"? untracked.txt"),
         "expected untracked v2 record: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `mkit ref list` / `mkit ref cat` (#652) — stable ref-inspection plumbing,
+// decoupling "refs are ls-able" from "refs are stored as loose files".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ref_list_empty_repo_prints_nothing() {
+    // A freshly-initialized repo has HEAD pointing at `refs/heads/main`,
+    // but the branch ref file itself is only written by the first commit
+    // — so `ref list` on a truly empty repo must print nothing and still
+    // succeed (unlike `show-ref`, which treats "nothing matched" as a
+    // script-testable failure).
+    let (td, xdg) = empty_repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["ref", "list"]);
+    assert!(out.status.success(), "ref list on empty repo: {out:?}");
+    assert!(
+        out.stdout.is_empty(),
+        "expected no output, got: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ref_cat_on_empty_repo_head_errors() {
+    // HEAD is symbolic (-> refs/heads/main) but main has no commit yet,
+    // so `ref cat HEAD` must fail cleanly rather than print a bogus hash.
+    let (td, xdg) = empty_repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["ref", "cat", "HEAD"]);
+    assert!(
+        !out.status.success(),
+        "ref cat HEAD before any commit must error: {out:?}"
+    );
+}
+
+#[test]
+fn ref_list_multiple_branches_and_tags_sorted() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let head = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    assert!(
+        run_in(root, x, &["update-ref", "refs/heads/aaa", "HEAD"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(root, x, &["update-ref", "refs/heads/zzz", "HEAD"])
+            .status
+            .success()
+    );
+    assert!(run_in(root, x, &["tag", "v1"]).status.success());
+    assert!(run_in(root, x, &["tag", "v2"]).status.success());
+
+    let out = run_in(root, x, &["ref", "list"]);
+    assert!(out.status.success(), "ref list failed: {out:?}");
+    let text = out_str(&out);
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Every entry is `<refname> <hash>`, one per line.
+    for expected in [
+        "refs/heads/aaa",
+        "refs/heads/main",
+        "refs/heads/zzz",
+        "refs/tags/v1",
+        "refs/tags/v2",
+    ] {
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with(&format!("{expected} ")))
+            .unwrap_or_else(|| panic!("missing {expected} in: {text:?}"));
+        let hash = line.split(' ').nth(1).expect("hash field");
+        assert_eq!(hash, head, "{expected} should point at HEAD: {line:?}");
+    }
+
+    // Sorted lexicographically by full ref name.
+    let names: Vec<&str> = lines.iter().map(|l| l.split(' ').next().unwrap()).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "ref list must be sorted: {text:?}");
+}
+
+#[test]
+fn ref_list_pattern_filters_by_glob() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(run_in(root, x, &["tag", "v1"]).status.success());
+
+    let tags_only = out_str(&run_in(
+        root,
+        x,
+        &["ref", "list", "--pattern", "refs/tags/*"],
+    ));
+    assert!(
+        tags_only.contains("refs/tags/v1") && !tags_only.contains("refs/heads/"),
+        "pattern should keep only tags: {tags_only:?}"
+    );
+
+    let none = run_in(root, x, &["ref", "list", "--pattern", "refs/tags/nope-*"]);
+    assert!(none.status.success());
+    assert!(
+        none.stdout.is_empty(),
+        "non-matching pattern yields no rows: {none:?}"
+    );
+}
+
+#[test]
+fn ref_cat_resolves_branch_and_tag() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let head = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    assert!(run_in(root, x, &["tag", "v1"]).status.success());
+
+    assert_eq!(
+        out_str(&run_in(root, x, &["ref", "cat", "refs/heads/main"])),
+        head
+    );
+    assert_eq!(
+        out_str(&run_in(root, x, &["ref", "cat", "refs/tags/v1"])),
+        head
+    );
+}
+
+#[test]
+fn ref_cat_head_follows_symbolic_target() {
+    // HEAD -> refs/heads/main -> commit: `ref cat HEAD` must follow the
+    // symbolic indirection and print the same hash as the branch itself.
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let head = out_str(&run_in(root, x, &["ref", "cat", "HEAD"]));
+    let main = out_str(&run_in(root, x, &["ref", "cat", "refs/heads/main"]));
+    assert_eq!(head, main, "HEAD must resolve through its symbolic target");
+    assert_eq!(head, out_str(&run_in(root, x, &["rev-parse", "HEAD"])));
+}
+
+#[test]
+fn ref_cat_detached_head_prints_target_hash() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let full = out_str(&run_in(root, x, &["rev-parse", "HEAD"]));
+    assert!(run_in(root, x, &["checkout", &full]).status.success());
+    // HEAD is now a detached hash, not symbolic — `ref cat HEAD` still
+    // resolves it directly.
+    assert_eq!(out_str(&run_in(root, x, &["ref", "cat", "HEAD"])), full);
+}
+
+#[test]
+fn ref_cat_unknown_ref_errors() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let out = run_in(root, x, &["ref", "cat", "refs/heads/does-not-exist"]);
+    assert!(!out.status.success(), "unknown ref must error: {out:?}");
+    let bad = run_in(root, x, &["ref", "cat", "not-a-qualified-ref"]);
+    assert!(
+        !bad.status.success(),
+        "unqualified name must be rejected: {bad:?}"
     );
 }

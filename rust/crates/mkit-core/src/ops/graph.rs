@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
 use crate::hash::Hash;
-use crate::object::Object;
+use crate::object::{Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
 
 /// Hard cap on commits visited per call.
@@ -120,6 +120,24 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 /// [`StoreError::ObjectNotFound`] for a missing root or referenced
 /// object, so a caller (gc) fails closed rather than under-counting the
 /// live set.
+///
+/// # Content integrity of leaves (#636)
+///
+/// This walk classifies blob/delta leaves via a cheap type check
+/// ([`ObjectStore::object_type`]) instead of a full verified read, so a
+/// leaf's BLAKE3 content hash is **not** checked here — only its type.
+/// A blob whose stored bytes are corrupted but whose type prologue is
+/// intact is still counted as reachable (and, for `gc`, therefore
+/// survives). This is a deliberate scope change from the walk's
+/// pre-#636 behavior, where every leaf's content was verified
+/// incidentally as a side effect of the full read the old
+/// classification path did. Corruption is still caught — just later,
+/// the first time something actually reads the leaf's bytes (pack
+/// build, checkout, `cat-file`, ...) via `store.read`/`read_object`,
+/// both of which always verify. `gc`'s job is reachability, not
+/// content integrity, so this narrowing is intentional; it just means
+/// `gc`/push-planning are no longer an incidental corruption-detection
+/// pass the way they used to be.
 pub fn reachable_closure<'a, I>(store: &ObjectStore, roots: I) -> Result<BTreeSet<Hash>, StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
@@ -182,8 +200,24 @@ where
         if !out.insert(h) {
             continue;
         }
-        // Read the object. Missing objects bubble up — a reachable-set
-        // walk for a push must refuse to build a known-broken pack.
+        // Classify the node via the cheap 6-byte prologue check
+        // (`object_type`) instead of a full read+verify+decode
+        // (`read_object`) — INV-14. Missing objects bubble up here
+        // exactly as `read_object` would: a reachable-set walk for a
+        // push must refuse to build a known-broken pack.
+        let ty = store.object_type(&h)?;
+        if matches!(ty, ObjectType::Blob | ObjectType::Delta) {
+            // Leaves — nothing to walk, so there is nothing more to learn
+            // about this node than its type. Skip the full read entirely:
+            // its content (and therefore its BLAKE3 integrity) is never
+            // consulted by reachability. Whoever actually reads this
+            // object's bytes later (pack build, checkout, ...) still gets
+            // the full verified read via `store.read`/`read_object`.
+            continue;
+        }
+
+        // Every other kind needs its decoded body to find its children,
+        // so this still pays for a full read+verify+decode.
         let obj = store.read_object(&h)?;
         match obj {
             Object::Commit(c) => {
@@ -217,7 +251,10 @@ where
                 queue.push_back(t.target);
             }
             Object::Blob(_) | Object::Delta(_) => {
-                // Leaves — nothing to walk.
+                // Unreachable: `object_type` already filtered these out
+                // above. Kept so the match stays exhaustive if a new
+                // object kind is ever added.
+                unreachable!("blob/delta leaves are short-circuited before read_object")
             }
         }
     }
@@ -456,5 +493,143 @@ mod tests {
         let fake = hash::hash(b"nope");
         let err = reachable_objects(&s, &fake).unwrap_err();
         assert!(matches!(err, StoreError::ObjectNotFound(_)));
+    }
+
+    // =================================================================
+    // object_type() short-circuit (#636 / INV-14) — the walk must
+    // classify blob/delta leaves via the cheap type-prologue check
+    // instead of a full read+verify+decode, without changing the
+    // reachable/unreachable classification of any object (INV-3).
+    // =================================================================
+
+    /// Flip a byte well past the 6-byte type prologue (offset 0..6, which
+    /// `object_type()` reads) so the object's on-disk *content* no longer
+    /// matches its BLAKE3 hash, while its type tag stays intact.
+    fn corrupt_payload_byte(s: &ObjectStore, h: &Hash) {
+        use std::fs::OpenOptions;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let path = s.path_for(h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(SeekFrom::Start(6)).unwrap();
+        let mut byte = [0u8; 1];
+        f.read_exact(&mut byte).unwrap();
+        f.seek(SeekFrom::Start(6)).unwrap();
+        f.write_all(&[byte[0] ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[test]
+    fn reachable_closure_matches_expected_set_for_mixed_graph() {
+        // Correctness proxy for "byte-identical to the old full-read path":
+        // a hand-computed expected set over a graph that exercises every
+        // node kind the walk handles (commit chain, tree, nested tree,
+        // chunked-blob manifest, plain blobs).
+        let (_d, s) = store();
+        let leaf1 = put_blob(&s, b"leaf-one");
+        let inner = put_tree(
+            &s,
+            vec![TreeEntry {
+                name: b"leaf".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: leaf1,
+            }],
+        );
+        let chunk_a = put_blob(&s, b"chunk-a");
+        let chunk_b = put_blob(&s, b"chunk-b");
+        let cb_bytes = serialize::serialize(&Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 14,
+            chunk_size: 7,
+            chunks: vec![chunk_a, chunk_b],
+        }))
+        .unwrap();
+        let cb = s.write(&cb_bytes).unwrap();
+        let outer = put_tree(
+            &s,
+            vec![
+                TreeEntry {
+                    name: b"big".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: cb,
+                },
+                TreeEntry {
+                    name: b"sub".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: inner,
+                },
+            ],
+        );
+        let c1 = make_commit(&s, outer, &[], "c1");
+        let c2 = make_commit(&s, outer, &[c1], "c2");
+
+        let reach = reachable_objects(&s, &c2).unwrap();
+        let expected: BTreeSet<Hash> = [c1, c2, outer, inner, leaf1, cb, chunk_a, chunk_b]
+            .into_iter()
+            .collect();
+        assert_eq!(reach, expected);
+    }
+
+    #[test]
+    fn reachable_closure_short_circuits_corrupted_blob_leaf() {
+        let (_d, s) = store();
+        let blob = put_blob(&s, &vec![0xABu8; 4096]);
+        let tree = put_tree(
+            &s,
+            vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        );
+        let c1 = make_commit(&s, tree, &[], "c1");
+
+        corrupt_payload_byte(&s, &blob);
+
+        // Sanity: a full read+verify of this object now fails — proves the
+        // corruption is real and would have broken the old `read_object`
+        // path had it still been called for this leaf.
+        assert!(matches!(
+            s.read_object(&blob),
+            Err(StoreError::HashMismatch { .. })
+        ));
+
+        // The walk must still succeed, and the blob must still be
+        // classified reachable: reachability only needs to know this node
+        // has no children, and the intact type prologue already answers
+        // that. Content integrity is a concern for whoever reads the bytes
+        // later, not for this classification.
+        let (reach, truncated) = reachable_closure_checked(&s, [c1].iter()).unwrap();
+        assert!(!truncated);
+        assert!(reach.contains(&c1));
+        assert!(reach.contains(&tree));
+        assert!(reach.contains(&blob));
+        assert_eq!(reach.len(), 3);
+    }
+
+    #[test]
+    fn reachable_closure_still_fails_closed_on_corrupted_tree() {
+        // A non-leaf node (tree) still needs its decoded body to find its
+        // children, so corruption there must still surface as an error —
+        // proving the short-circuit is targeted at true leaves (blob/
+        // delta) only, not a blanket weakening of verification.
+        let (_d, s) = store();
+        let blob = put_blob(&s, b"hi");
+        let tree = put_tree(
+            &s,
+            vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        );
+        let c1 = make_commit(&s, tree, &[], "c1");
+
+        corrupt_payload_byte(&s, &tree);
+
+        let err = reachable_closure_checked(&s, [c1].iter()).unwrap_err();
+        assert!(matches!(err, StoreError::HashMismatch { .. }));
     }
 }

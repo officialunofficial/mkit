@@ -417,3 +417,61 @@ fn amend_advance_is_recorded_in_journal() {
         "two commits + one amend must record three advances in the journal"
     );
 }
+
+/// Issue #648, part (b): a multi-commit rebase only appends ONE leaf at
+/// finalize (`rebase.rs`'s replay loop moves detached HEAD per replayed
+/// commit via `write_head_detached`, never `write_ref_recording_history`).
+/// `reflog` must present the resulting gap on the intermediate replayed
+/// commit as an expected absence (`[not journaled]`), not as the old
+/// alarming `[NOT in journal]` wording that reads as tamper evidence.
+#[cfg(feature = "history-mmr")]
+#[test]
+fn reflog_labels_intermediate_rebase_replay_commit_as_not_journaled() {
+    let td = init_repo();
+    let root = td.path();
+    commit_file(root, "root.txt", "root\n", "root");
+
+    ok(root, &["checkout", "-b", "feature"]);
+    commit_file(root, "f1.txt", "f1\n", "f1");
+    commit_file(root, "f2.txt", "f2\n", "f2");
+
+    ok(root, &["checkout", "main"]);
+    commit_file(root, "m1.txt", "m1\n", "m1");
+
+    ok(root, &["checkout", "feature"]);
+    ok(root, &["rebase", "main"]);
+
+    let out = ok(root, &["reflog"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+
+    assert!(
+        !text.contains("[NOT in journal]"),
+        "must use the new neutral wording, not the old tamper-signal-\
+         reading wording:\n{text}"
+    );
+
+    let entries: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+        .collect();
+    assert!(
+        entries.len() >= 2,
+        "expected at least the rebase finalize tip + one replayed commit:\n{text}"
+    );
+    // `@{0}` = the rebase's finalize tip (f2, replayed last) — this one
+    // DOES go through `write_ref_recording_history` and must verify.
+    assert!(
+        entries[0].contains("[journaled]") && !entries[0].contains("[not journaled]"),
+        "rebase finalize tip must be journaled:\n{text}"
+    );
+    // `@{1}` = the intermediate replayed commit (f1) — moved via
+    // `write_head_detached` only, so it is EXPECTED to be unverified.
+    // This is the exact case the module doc and marker wording call out
+    // as a normal consequence of one-leaf-per-ref-write, not a tamper
+    // signal.
+    assert!(
+        entries[1].contains("[not journaled]"),
+        "intermediate rebase-replayed commit must show the neutral \
+         'not journaled' marker:\n{text}"
+    );
+}

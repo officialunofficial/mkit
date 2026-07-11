@@ -42,6 +42,19 @@ harness = false
 name = "store_write"
 harness = false
 
+# Issue #644 — refs::update_ref CAS-variant latency + list_refs at
+# increasing ref counts. No feature gate: refs are always compiled.
+[[bench]]
+name = "refs_ops"
+harness = false
+
+# Issue #644 — repo_lock acquire/release round trip + contended-handoff
+# latency. Also the regression guard for issue #635's lock-primitive
+# fix. No feature gate: repo_lock is always compiled.
+[[bench]]
+name = "lock_contention"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
@@ -56,9 +69,30 @@ name = "pack_shard_transfer"
 harness = false
 required-features = ["pack-shards"]
 
+# Issue #157 / #644 — journaled commit-history MMR: open_at (cold +
+# warm), a warm single append, and a backfill series. Default-off (the
+# `history-mmr` feature on mkit-core pulls in the same heavy
+# commonware-storage/-runtime + tokio stack as `pack-shards`). Run
+# with:
+#
+#     cargo bench -p mkit-benches --features history-mmr \
+#                 --bench history_mmr
+#
+# Not gated on in CI — exists for future regression tracking, mirroring
+# `pack_shard_transfer` above.
+[[bench]]
+name = "history_mmr"
+harness = false
+required-features = ["history-mmr"]
+
 [features]
 default = []
 pack-shards = ["mkit-core/pack-shards"]
+# Mirrors mkit-core's `history-mmr` feature so `history_mmr.rs` can be
+# conditionally compiled and run via
+# `cargo bench -p mkit-benches --features history-mmr`. Issue #644 —
+# this feature did not exist on the bench crate at all before this.
+history-mmr = ["mkit-core/history-mmr"]
 
 # The lib + render-charts bin only need serde for the Sample/Unit
 # contract; the bench suites pull in their measurement deps below.

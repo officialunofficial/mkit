@@ -38,26 +38,103 @@
 //! 25% redundancy. Any 16 of 20 shards reconstruct the pack. Tuning
 //! lives in `docs/specs/SPEC-PACK-SHARDS.md` §6.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroUsize};
+use std::sync::OnceLock;
 
 use commonware_codec::{Decode, Encode};
 use commonware_coding::{CodecConfig, Scheme as _};
 use commonware_cryptography::Sha256;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Rayon, Sequential, Strategy};
 
 use crate::hash::{self, HASH_LEN, Hash};
 
 // Re-exports so callers don't need to depend on `commonware-coding` directly.
 pub use commonware_coding::Config;
+// Re-export so callers building an explicit strategy (e.g. via the
+// `_with_strategy` entry points below) don't need a direct
+// `commonware-parallel` dependency of their own.
+pub use commonware_parallel::{Rayon as ParallelStrategy, Sequential as SequentialStrategy};
 
+// Issue #653 evaluated swapping this to `ReedSolomon<Blake3>` to match
+// the hash primitive mkit uses elsewhere (`history.rs`) and drop a
+// redundant per-shard hash pass (the internal Merkle-tree build in
+// `commonware-coding::reed_solomon::{encode, decode}` hashes every
+// shard with `H::new()` — currently SHA-256 — completely separately
+// from this module's own BLAKE3 `shard_hashes` envelope check).
+//
+// Deferred: `H` determines `Commitment` (the BMT root stored in
+// `ShardSet::commitment`), and SPEC-PACK-SHARDS §4 pins that as
+// "`ReedSolomon<Sha256>` with the `Sequential` parallel strategy.
+// Producers and consumers MUST use the same scheme and digest." A
+// producer on this hasher and a consumer on the old one would
+// compute different commitments for the *same* shard set and every
+// Merkle-proof check (`RsScheme::check`) would fail — a silent,
+// total interop break between independent mkit processes, not a
+// local behavior change. Fixing that needs a `MANIFEST_VERSION` bump
+// (or an out-of-band hasher negotiation) and a spec update, which
+// the issue's own "Out of scope" section excludes ("not touching...
+// the shard wire format"). Tracked as
+// https://github.com/officialunofficial/mkit/issues/661 instead of
+// folded into this one.
 type RsScheme = commonware_coding::ReedSolomon<Sha256>;
 type Commitment = <RsScheme as commonware_coding::Scheme>::Commitment;
 type RsChunk = <RsScheme as commonware_coding::Scheme>::Shard;
 
-/// Strategy used for the Reed-Solomon encode/decode internals. We use
-/// `Sequential` here so the encode/decode core has no rayon thread-pool
-/// surprises; benches can swap in a parallel strategy later.
-const STRATEGY: Sequential = Sequential;
+/// Pack length at (or above) which [`encode_pack_to_shards`] and
+/// [`decode_pack_from_shards`] default to a parallel, `Rayon`-backed
+/// `commonware-parallel` strategy instead of [`Sequential`].
+///
+/// Below this size the encode/decode core still does real per-shard
+/// work (hashing each of `config.total_shards()` shards, and — on
+/// decode — re-hashing any reconstructed shards to rebuild the BMT
+/// consistency check), but a `rayon` thread pool's per-call dispatch
+/// overhead (partitioning + joining ~20 small closures) is not
+/// reliably smaller than just doing that work on the current thread.
+/// 4 MiB is comfortably above [`SHARD_SIZE_THRESHOLD`] (1 MiB, below
+/// which producers should not shard at all per SPEC-PACK-SHARDS §6),
+/// so any pack that actually gets sharded and clears this threshold
+/// has multi-hundred-KiB shards where the parallel win is real.
+pub const PARALLEL_STRATEGY_THRESHOLD: usize = 4 * 1024 * 1024;
+
+/// Returns `true` when a pack of `pack_len` bytes should default to
+/// the parallel strategy. Kept as its own (private) function — rather
+/// than inlined into the two call sites — so a unit test can pin the
+/// threshold decision as a plain value comparison, independent of
+/// whether a `Rayon` thread pool can actually be built in the test
+/// environment.
+fn should_use_parallel_strategy(pack_len: usize) -> bool {
+    pack_len >= PARALLEL_STRATEGY_THRESHOLD
+}
+
+/// Lazily builds a single process-wide `Rayon` strategy, reused by
+/// every encode/decode call that clears [`PARALLEL_STRATEGY_THRESHOLD`].
+///
+/// Building a `rayon::ThreadPool` spins up OS threads and initializes
+/// its work-stealing queues, so we pay that cost once per process
+/// rather than once per call. `Rayon` wraps an `Arc<ThreadPool>`, so
+/// the clone returned to each caller is cheap. Returns `None` if the
+/// pool could not be built (e.g. the OS refuses to spawn threads);
+/// callers fall back to [`Sequential`] in that case.
+fn shared_parallel_strategy() -> Option<Rayon> {
+    static POOL: OnceLock<Option<Rayon>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        NonZeroUsize::new(threads).and_then(|n| Rayon::new(n).ok())
+    })
+    .clone()
+}
+
+/// Resolves the default strategy for a pack of `pack_len` bytes.
+/// `None` means "use [`Sequential`]" — either because `pack_len` is
+/// below [`PARALLEL_STRATEGY_THRESHOLD`], or because a parallel
+/// strategy could not be built.
+fn default_parallel_strategy_for_len(pack_len: usize) -> Option<Rayon> {
+    if should_use_parallel_strategy(pack_len) {
+        shared_parallel_strategy()
+    } else {
+        None
+    }
+}
 
 /// Cap on the per-shard codec payload size accepted at decode time.
 /// 4 GiB matches the existing packfile size cap (see
@@ -235,20 +312,62 @@ pub fn encode_pack_to_shards(
     pack: &[u8],
     config: Config,
 ) -> Result<(Vec<Shard>, ShardSet), ShardError> {
-    let (commitment, chunks) = RsScheme::encode(&config, pack, &STRATEGY)
+    match default_parallel_strategy_for_len(pack.len()) {
+        Some(strategy) => encode_pack_to_shards_with_strategy(pack, config, &strategy),
+        None => encode_pack_to_shards_with_strategy(pack, config, &Sequential),
+    }
+}
+
+/// Like [`encode_pack_to_shards`], but with an explicit
+/// `commonware-parallel` [`Strategy`] instead of the size-based
+/// default. Exists so callers (and tests / benches) can force a
+/// specific strategy — e.g. to compare `Sequential` against a
+/// `Rayon` pool of a given width — without going through the
+/// pack-length heuristic.
+///
+/// # Errors
+///
+/// Same as [`encode_pack_to_shards`].
+///
+/// # Panics
+///
+/// Infallible — same as [`encode_pack_to_shards`]; the only `expect`
+/// in the body asserts that commonware never emits more than
+/// `u16::MAX` shards, which it enforces in `ReedSolomon::encode`
+/// (`Error::TooManyTotalShards`).
+pub fn encode_pack_to_shards_with_strategy<S: Strategy>(
+    pack: &[u8],
+    config: Config,
+    strategy: &S,
+) -> Result<(Vec<Shard>, ShardSet), ShardError> {
+    let (commitment, chunks) = RsScheme::encode(&config, pack, strategy)
         .map_err(|e| ShardError::EncodeFailed(format!("{e:?}")))?;
 
     let total = config.total_shards() as usize;
     debug_assert_eq!(chunks.len(), total);
 
+    // Per-shard codec-serialise + BLAKE3 hash. Each iteration only
+    // touches its own chunk and produces its own output triple, so —
+    // unlike the RS math above, which commonware parallelises
+    // internally — this loop is ours to parallelise. We reuse the
+    // same `strategy` so a caller who opts into a parallel strategy
+    // gets the benefit here too, not just inside `RsScheme::encode`.
+    // `map_collect_vec` preserves input order for every `Strategy`
+    // impl (see commonware-parallel docs), so `results[i]` still
+    // corresponds to shard index `i`.
+    let results: Vec<(u16, Vec<u8>, Hash)> =
+        strategy.map_collect_vec(chunks.into_iter().enumerate(), |(i, chunk)| {
+            // `i < total <= u16::MAX` by commonware's own bound
+            // (`Chunk::index: u16`), so the conversion is infallible.
+            let index = u16::try_from(i).expect("commonware emits <= u16::MAX shards");
+            let bytes = chunk.encode().to_vec();
+            let h = hash::hash(&bytes);
+            (index, bytes, h)
+        });
+
     let mut shards = Vec::with_capacity(total);
     let mut shard_hashes = Vec::with_capacity(total);
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        // `i < total <= u16::MAX` by commonware's own bound
-        // (`Chunk::index: u16`), so the conversion is infallible.
-        let index = u16::try_from(i).expect("commonware emits <= u16::MAX shards");
-        let bytes = chunk.encode().to_vec();
-        let h = hash::hash(&bytes);
+    for (index, bytes, h) in results {
         shards.push(Shard { index, bytes });
         shard_hashes.push(h);
     }
@@ -284,6 +403,30 @@ pub fn encode_pack_to_shards(
 pub fn decode_pack_from_shards(
     shards: &[Shard],
     manifest: &ShardSet,
+) -> Result<Vec<u8>, ShardError> {
+    // The manifest doesn't carry the original pack length, so we use
+    // the total wire size of the supplied shards (envelope + proof
+    // overhead included) as a same-order-of-magnitude proxy for it.
+    // Good enough for a coarse "is this worth a thread pool" gate.
+    let size_hint: usize = shards.iter().map(|s| s.bytes.len()).sum();
+    match default_parallel_strategy_for_len(size_hint) {
+        Some(strategy) => decode_pack_from_shards_with_strategy(shards, manifest, &strategy),
+        None => decode_pack_from_shards_with_strategy(shards, manifest, &Sequential),
+    }
+}
+
+/// Like [`decode_pack_from_shards`], but with an explicit
+/// `commonware-parallel` [`Strategy`] instead of the size-based
+/// default. See [`encode_pack_to_shards_with_strategy`] for why this
+/// exists.
+///
+/// # Errors
+///
+/// Same as [`decode_pack_from_shards`].
+pub fn decode_pack_from_shards_with_strategy<S: Strategy>(
+    shards: &[Shard],
+    manifest: &ShardSet,
+    strategy: &S,
 ) -> Result<Vec<u8>, ShardError> {
     let total = manifest.config.total_shards();
     if manifest.shard_hashes.len() != total as usize {
@@ -344,7 +487,7 @@ pub fn decode_pack_from_shards(
     }
 
     // (5) Reed-Solomon decode.
-    let pack = RsScheme::decode(&manifest.config, &commitment, checked.iter(), &STRATEGY)
+    let pack = RsScheme::decode(&manifest.config, &commitment, checked.iter(), strategy)
         .map_err(|e| ShardError::DecodeFailed(format!("{e:?}")))?;
 
     // (6) Final BLAKE3 check.
@@ -583,6 +726,148 @@ mod tests {
         }
         out.truncate(bytes);
         out
+    }
+
+    // ---- Strategy is a runtime parameter, not a hardcoded const ----
+    //
+    // Issue #653: `pack_shard.rs` used to pin
+    // `const STRATEGY: Sequential = Sequential;` and pass `&STRATEGY`
+    // into every `RsScheme::encode` / `RsScheme::decode` call — no
+    // caller, test, or config could ever supply a different
+    // `commonware_parallel::Strategy` impl. The tests below prove two
+    // separate things:
+    //
+    // 1. `encode_pack_to_shards_with_strategy` /
+    //    `decode_pack_from_shards_with_strategy` are generic over
+    //    `S: Strategy` — a caller-supplied strategy compiles at all,
+    //    which a hardcoded const could never allow.
+    // 2. The supplied strategy is actually *invoked* by the encode /
+    //    decode core (via a spy that counts calls into
+    //    `Strategy::fold_init`), not merely accepted and discarded.
+
+    /// A `Strategy` that counts how many times `fold_init` is invoked
+    /// and otherwise behaves exactly like [`Sequential`]. Lets a test
+    /// assert the supplied strategy was genuinely exercised by the
+    /// encode/decode core, rather than silently ignored in favour of
+    /// some other, hidden strategy.
+    #[derive(Clone, Debug)]
+    struct CountingStrategy {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingStrategy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Strategy for CountingStrategy {
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            Sequential.join(a, b)
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn explicit_strategy_is_actually_exercised_by_encode_and_decode() {
+        let pack = synthetic_pack(64 * 1024);
+        let config = default_config();
+        let spy = CountingStrategy::new();
+
+        let (shards, manifest) = encode_pack_to_shards_with_strategy(&pack, config, &spy).unwrap();
+        let calls_after_encode = spy.calls();
+        assert!(
+            calls_after_encode > 0,
+            "encode_pack_to_shards_with_strategy never invoked the supplied strategy"
+        );
+
+        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
+        let recovered = decode_pack_from_shards_with_strategy(&subset, &manifest, &spy).unwrap();
+        assert_eq!(recovered, pack);
+        assert!(
+            spy.calls() > calls_after_encode,
+            "decode_pack_from_shards_with_strategy never invoked the supplied strategy"
+        );
+    }
+
+    #[test]
+    fn round_trip_with_explicit_parallel_strategy() {
+        // A pack well under `PARALLEL_STRATEGY_THRESHOLD` so this
+        // stays a fast unit test, but still multi-shard: exercises a
+        // genuine `Rayon` pool (not the spy above) end-to-end through
+        // both the RS math and the per-shard hash loop.
+        let pack = synthetic_pack(256 * 1024);
+        let config = default_config();
+        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).expect("build rayon pool");
+
+        let (shards, manifest) =
+            encode_pack_to_shards_with_strategy(&pack, config, &strategy).unwrap();
+        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
+        let recovered =
+            decode_pack_from_shards_with_strategy(&subset, &manifest, &strategy).unwrap();
+        assert_eq!(recovered, pack);
+    }
+
+    #[test]
+    fn default_strategy_selection_is_a_runtime_threshold_not_a_const() {
+        assert!(!should_use_parallel_strategy(0));
+        assert!(!should_use_parallel_strategy(
+            PARALLEL_STRATEGY_THRESHOLD - 1
+        ));
+        assert!(should_use_parallel_strategy(PARALLEL_STRATEGY_THRESHOLD));
+        assert!(should_use_parallel_strategy(
+            PARALLEL_STRATEGY_THRESHOLD + 1
+        ));
+    }
+
+    #[test]
+    fn default_encode_decode_round_trip_at_parallel_threshold() {
+        // Exercises the size-based default (`encode_pack_to_shards` /
+        // `decode_pack_from_shards`, no explicit strategy) at exactly
+        // the threshold, so the parallel branch in
+        // `default_parallel_strategy_for_len` actually runs.
+        let pack = synthetic_pack(PARALLEL_STRATEGY_THRESHOLD);
+        let config = default_config();
+        let (shards, manifest) = encode_pack_to_shards(&pack, config).unwrap();
+        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
+        let recovered = decode_pack_from_shards(&subset, &manifest).unwrap();
+        assert_eq!(recovered, pack);
     }
 
     #[test]
