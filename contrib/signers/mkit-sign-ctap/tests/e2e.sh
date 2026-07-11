@@ -97,7 +97,7 @@ echo "e2e: credential_id $CRED_ID"
 #
 # Hand-roll minimal protobuf encoding for the two frames we need
 # (Hello + SignRequest). No `protoc` / protobuf runtime dependency —
-# the schema is in `rust/crates/mkit-rpc/proto/{common,signer}.proto`.
+# the schema is in `rust/crates/mkit-rpc/proto/mkit/rpc/v1/{common.proto,signer/signer.proto}`.
 # `key_ref` is left empty so the signer uses its argv `--credential-id`
 # default (the KEY_FORM_RAW_BYTES fallback documented in the spec).
 

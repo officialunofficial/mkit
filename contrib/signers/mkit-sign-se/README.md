@@ -28,8 +28,8 @@ Headline properties:
 `SignerFrame` messages on stdin/stdout. This is the same protocol
 all other mkit reference signers (`mkit-sign-file`, `mkit-sign-tpm`,
 `mkit-sign-ctap`) speak; the schema is shared
-([`signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto)
-plus [`common.proto`](../../../rust/crates/mkit-rpc/proto/common.proto)).
+([`signer.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto)
+plus [`common.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/common.proto)).
 
 The Swift implementation links the canonical Apple-platform protobuf
 runtime — [SwiftProtobuf](https://github.com/apple/swift-protobuf),
@@ -42,8 +42,8 @@ To regenerate after a `.proto` change:
 $ brew install swift-protobuf   # provides `protoc-gen-swift`
 $ protoc --swift_out=contrib/signers/mkit-sign-se/Sources/mkit-sign-se/Generated \
          --proto_path=rust/crates/mkit-rpc/proto \
-         rust/crates/mkit-rpc/proto/common.proto \
-         rust/crates/mkit-rpc/proto/signer.proto
+         rust/crates/mkit-rpc/proto/mkit/rpc/v1/common.proto \
+         rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto
 ```
 
 ### Capabilities

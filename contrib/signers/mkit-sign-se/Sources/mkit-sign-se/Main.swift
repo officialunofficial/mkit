@@ -10,7 +10,7 @@
 // The `sign` subcommand is what mkit drives as an external signer; it
 // speaks the v1 wire protocol — length-prefixed protobuf `SignerFrame`
 // messages on stdin/stdout. See `docs/specs/SPEC-EXTERNAL-SIGNER.md` and
-// `rust/crates/mkit-rpc/proto/signer.proto`.
+// `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`.
 //
 // The tag identifying the Secure Enclave key can be supplied two ways:
 //

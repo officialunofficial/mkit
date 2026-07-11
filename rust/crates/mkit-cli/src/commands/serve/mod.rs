@@ -3,7 +3,7 @@
 //!
 //! The backing repo is accessed via `FileTransport`. Frames are
 //! length-prefixed protobuf [`SshFrame`] messages defined in
-//! `rust/crates/mkit-rpc/proto/ssh.proto` (buffa is the Rust
+//! `rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto` (buffa is the Rust
 //! runtime; the wire is protobuf 3 / edition 2023).
 
 use std::io::{Read, Write};

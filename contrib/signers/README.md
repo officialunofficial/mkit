@@ -4,8 +4,8 @@ Third-party signer implementations for mkit's `external` signer slot
 live here. They all speak the same wire protocol:
 
 > [**SPEC-EXTERNAL-SIGNER.md**](../../docs/specs/SPEC-EXTERNAL-SIGNER.md) — v1
-> length-prefixed protobuf [`SignerFrame`](../../rust/crates/mkit-rpc/proto/signer.proto)
-> messages over stdin/stdout. Schema is `mkit-rpc/proto/signer.proto`
+> length-prefixed protobuf [`SignerFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto)
+> messages over stdin/stdout. Schema is `mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`
 > (with `common.proto` for shared types); the Rust runtime is `buffa`.
 
 Write your signer to that spec and mkit will drive it via
@@ -42,7 +42,7 @@ and need to wrap the PAE inside a per-ceremony transport (here:
 ## WebAuthn wrapping (CTAP signers)
 
 `mkit-sign-ctap` populates `SignResponse.webauthn` (a `WebAuthnData`
-message defined in [`signer.proto`](../../rust/crates/mkit-rpc/proto/signer.proto))
+message defined in [`signer.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto))
 with the `authenticator_data` and `client_data_json` the authenticator
 signed over, and it returns the enrolled credential public key in
 `SignResponse.public_key`. Verifiers reconstruct

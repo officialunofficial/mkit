@@ -21,7 +21,7 @@ performs the scheme switch).
 
 The SSH wire format is defined in
 [`SPEC-RPC`](SPEC-RPC.md) and lives in the generated
-[`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto) bindings.
+[`ssh.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto) bindings.
 This document covers the cross-transport contract: verbs, URL
 parsing, authentication, the forced-command server pattern, size
 caps, retry policy, and the error taxonomy.
@@ -136,7 +136,7 @@ of any sibling tool.
 ## 4. SSH transport
 
 mkit's SSH transport spawns a long-lived `ssh(1)` child process and
-exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto)
+exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto)
 messages on its stdin/stdout. The framing layer is defined in
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
 

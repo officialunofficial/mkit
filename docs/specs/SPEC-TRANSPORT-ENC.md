@@ -10,7 +10,7 @@ audience: implementers of mkit encrypted-stream clients and servers
 `mkit-transport-enc` is the encrypted-stream sibling of
 `mkit-transport-ssh`. It implements the same seven-verb
 [`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait, exchanging
-the same [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto) protobuf
+the same [`SshFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto) protobuf
 messages, but over an authenticated, encrypted byte stream provided by
 [`commonware-stream::encrypted`](https://docs.rs/commonware-stream)
 instead of a system `ssh(1)` child process.
@@ -126,7 +126,7 @@ Not provided (also inherited):
 
 The application protocol on top of the encrypted stream is the same
 `SshFrame` protobuf message set used by `mkit-transport-ssh`, defined
-in [`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto). Verb
+in [`ssh.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto). Verb
 semantics, error mapping, ref-CAS encoding, and pack-streaming chunk
 boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 

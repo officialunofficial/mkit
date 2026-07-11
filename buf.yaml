@@ -1,11 +1,40 @@
 version: v2
-# Single-module buf.yaml scoped to the new mkit.transport.v1 proto, mirroring
-# apps/repo-worker/buf.yaml's per-app pattern. mkit#677 (buf workspace + proto
-# path restructure) widens this into a three-module workspace covering
-# rust/crates/mkit-rpc/proto (mkit.rpc.v1), apps/repo-worker/proto
-# (mkit.repo.v1), and this module (mkit.transport.v1) — see
-# docs/specs/SPEC-TRANSPORT-CONNECT.md §1.
 modules:
+  # mkit.rpc.v1 (+ .signer, .ssh, .verify) — external-signer, SSH-transport,
+  # and object-signature-verification wire protocols. v1 is wire-frozen
+  # (SPEC-RPC promise); breaking.use: FILE below enforces that
+  # mechanically.
+  - path: rust/crates/mkit-rpc/proto
+    lint:
+      # mkit.rpc.v1.signer, mkit.rpc.v1.ssh, and mkit.rpc.v1.verify all
+      # end their package in a sub-protocol name (signer/ssh/verify), not
+      # a version — none of them predate or postdate
+      # PACKAGE_VERSION_SUFFIX so much as deliberately nest under the
+      # shared mkit.rpc.v1 vocabulary instead of versioning
+      # independently. Renaming any of them would rename buffa's
+      # generated Rust modules and is out of scope for a
+      # directory-layout-only move; scope the exception to just these
+      # three files rather than the whole workspace.
+      ignore_only:
+        PACKAGE_VERSION_SUFFIX:
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/verify
+  # mkit.repo.v1 — the repo-worker's multiplayer coordinator contract.
+  - path: apps/repo-worker/proto
+    lint:
+      except:
+        # mkit-rpc's common.proto (imported transitively via ssh-frame
+        # concepts mirrored here) uses `bytes` for 32-byte BLAKE3 ids and
+        # a field literally named `bytes`; allow it here too.
+        - FIELD_LOWER_SNAKE_CASE
+        # The coordinator's contract names the WatchRefs stream element
+        # `RefEvent` (a broadcast event, reused conceptually across the
+        # stream), not `WatchRefsResponse`. Keep the spec'd name.
+        - RPC_RESPONSE_STANDARD_NAME
+  # mkit.transport.v1 — the canonical Connect remote protocol, defined by
+  # #698 (SPEC-TRANSPORT-CONNECT). Now that a real .proto exists here,
+  # this lands as the workspace's third module.
   - path: proto
 lint:
   use:

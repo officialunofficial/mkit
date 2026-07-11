@@ -17,10 +17,10 @@ fn main() {
     let proto_dir = PathBuf::from("proto");
 
     let files = [
-        proto_dir.join("common.proto"),
-        proto_dir.join("signer.proto"),
-        proto_dir.join("ssh.proto"),
-        proto_dir.join("verify.proto"),
+        proto_dir.join("mkit/rpc/v1/common.proto"),
+        proto_dir.join("mkit/rpc/v1/signer/signer.proto"),
+        proto_dir.join("mkit/rpc/v1/ssh/ssh.proto"),
+        proto_dir.join("mkit/rpc/v1/verify/verify.proto"),
     ];
 
     // Re-run when a .proto, the vendored output, or the mode changes.

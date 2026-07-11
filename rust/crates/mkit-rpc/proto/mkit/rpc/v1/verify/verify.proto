@@ -34,7 +34,7 @@ edition = "2023";
 
 package mkit.rpc.v1.verify;
 
-import "common.proto";
+import "mkit/rpc/v1/common.proto";
 
 // Mirrors the signed variants of mkit_core::object::Object — Blob, Tree,
 // ChunkedBlob, and Delta carry no signature and are never sent here.

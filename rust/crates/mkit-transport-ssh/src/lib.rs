@@ -6,7 +6,7 @@
 //! Implements [`mkit_core::protocol::Transport`] over a long-lived
 //! system `ssh(1)` child process, exchanging the seven mkit verbs as
 //! length-prefixed protobuf [`SshFrame`] messages defined in
-//! `mkit-rpc/proto/ssh.proto` (buffa is the Rust runtime mkit uses;
+//! `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto` (buffa is the Rust runtime mkit uses;
 //! the wire is plain protobuf 3 / edition 2023).
 //!
 //! # Design choice: `std::process::Command`, NOT `russh`
