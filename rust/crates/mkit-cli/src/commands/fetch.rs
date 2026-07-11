@@ -48,6 +48,9 @@ struct FetchOpts {
     /// is printed per remote fetched.
     #[arg(long, value_enum, default_value = "default")]
     format: FetchFormat,
+    /// Suppress transfer progress output on stderr (#711).
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[must_use]
@@ -86,7 +89,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = fetch_one(&cwd, &layout, &cfg, &name, require_signed, json);
+            let code = fetch_one(&cwd, &layout, &cfg, &name, require_signed, json, opts.quiet);
             if code != exit::OK {
                 worst = code;
             }
@@ -100,6 +103,7 @@ pub fn run(args: &[String]) -> u8 {
         opts.remote.as_deref().unwrap_or(""),
         require_signed,
         json,
+        opts.quiet,
     )
 }
 
@@ -113,6 +117,7 @@ fn fetch_one(
     remote: &str,
     require_signed: bool,
     json: bool,
+    quiet: bool,
 ) -> u8 {
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err_json(
@@ -131,8 +136,17 @@ fn fetch_one(
     let before = tracking_snapshot(layout, &resolved.name);
     match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg) {
         Ok(tx) => {
-            match remote_dispatch::fetch_all_with(cwd, tx.as_ref(), &resolved.name, require_signed)
-            {
+            let fetch_outcome = {
+                // Scoped tightly so the progress guard's final line
+                // lands before the `From <url>` summary printed below.
+                let _progress = crate::progress::start(
+                    "Unpacking objects",
+                    None,
+                    crate::progress::should_report(quiet),
+                );
+                remote_dispatch::fetch_all_with(cwd, tx.as_ref(), &resolved.name, require_signed)
+            };
+            match fetch_outcome {
                 Ok(_) => {
                     let after = tracking_snapshot(layout, &resolved.name);
                     report_fetch(endpoint, &resolved.name, &before, &after);

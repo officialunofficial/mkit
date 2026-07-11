@@ -685,13 +685,21 @@ pub fn push_branch_with_depth(
     for h in &plan.raw {
         let bytes = store.read(h)?;
         w.push_raw(*h, &bytes)?;
+        // Honest progress (#711): one real object just got staged into
+        // the outgoing pack. Never git's fabricated
+        // Enumerating/Counting/Compressing lines — see `crate::progress`.
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
     for d in &plan.deltas {
         w.push_delta(&d.base, &d.stream)?;
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
     let pack = w.finish()?;
     let pack_key = pack::pack_key(&pack);
     tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+    // Upload is complete — report the real byte count handed to the
+    // transport, not an estimate.
+    crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
 
     // Chain the pack onto the packmap AND move the head together (#408): a
     // transactional transport applies both atomically, the default does

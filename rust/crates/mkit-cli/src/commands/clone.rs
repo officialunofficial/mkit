@@ -62,9 +62,13 @@ struct CloneOpts {
     /// `pull.require_signed = false` config, is the only way to opt out.
     #[arg(long = "no-verify-signatures")]
     no_verify_signatures: bool,
+    /// Suppress transfer progress output on stderr (#711).
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // linear flow: parse + init + pull + report
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<CloneOpts>("mkit clone", args) {
         Ok(o) => o,
@@ -92,9 +96,12 @@ pub fn run(args: &[String]) -> u8 {
             exit::CANTCREAT,
         );
     }
-    // git prints this before doing any work; match the shape (mkit's
-    // honest object-transfer summary follows at the end — the pack/delta
-    // progress lines are a separate follow-up).
+    // git prints this before doing any work; match the shape. Honest
+    // per-object transfer progress (#711) streams on stderr during the
+    // pull below, and mkit's own object-transfer summary follows at the
+    // end — mkit deliberately never fabricates git's
+    // Enumerating/Counting/Compressing/`Total N (delta D)` lines (see
+    // docs/PARITY.md).
     {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Cloning into '{}'...", target.display());
@@ -160,13 +167,20 @@ pub fn run(args: &[String]) -> u8 {
     // there isn't one yet.
     let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();
     let pull_outcome = match remote_dispatch::open_with_config(url, &merged) {
-        Ok(tx) => remote_dispatch::pull_all_with(
-            &target,
-            tx.as_ref(),
-            &origin_name,
-            opts.branch.as_deref(),
-            require_signed,
-        ),
+        Ok(tx) => {
+            let _progress = crate::progress::start(
+                "Unpacking objects",
+                None,
+                crate::progress::should_report(opts.quiet),
+            );
+            remote_dispatch::pull_all_with(
+                &target,
+                tx.as_ref(),
+                &origin_name,
+                opts.branch.as_deref(),
+                require_signed,
+            )
+        }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
     let n = match pull_outcome {

@@ -61,6 +61,9 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
+    /// Suppress transfer progress output on stderr (#711).
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[must_use]
@@ -197,14 +200,25 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
 
-    match remote_dispatch::push_branch_tracked(
-        layout.worktree_root(),
-        tx.as_ref(),
-        &resolved.name,
-        &branch,
-        &remote_branch,
-        lease,
-    ) {
+    let push_outcome = {
+        // Scoped tightly around the transfer call so the progress
+        // guard's final `, done.` line lands before the git-shaped
+        // `To <url>` / ref-update summary printed below, not after it.
+        let _progress = crate::progress::start(
+            "Writing objects",
+            None,
+            crate::progress::should_report(opts.quiet),
+        );
+        remote_dispatch::push_branch_tracked(
+            layout.worktree_root(),
+            tx.as_ref(),
+            &resolved.name,
+            &branch,
+            &remote_branch,
+            lease,
+        )
+    };
+    match push_outcome {
         Ok(new_tip) => {
             // Remember the upstream so a bare `mkit push` works next
             // time (Git-like first-push convenience). Only persisted
@@ -324,12 +338,20 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         }
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
-    match remote_dispatch::push_all_with(
-        layout.worktree_root(),
-        tx.as_ref(),
-        Some(&resolved.name),
-        opts.force,
-    ) {
+    let push_outcome = {
+        let _progress = crate::progress::start(
+            "Writing objects",
+            None,
+            crate::progress::should_report(opts.quiet),
+        );
+        remote_dispatch::push_all_with(
+            layout.worktree_root(),
+            tx.as_ref(),
+            Some(&resolved.name),
+            opts.force,
+        )
+    };
+    match push_outcome {
         Ok(n) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
