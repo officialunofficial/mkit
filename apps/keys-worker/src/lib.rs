@@ -31,6 +31,13 @@ const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
 /// Cap on `/resolve` batch size (KV has no multi-get; we loop sequentially).
 const MAX_RESOLVE: usize = 256;
 
+/// Reject any request body larger than this. Both write bodies (`set_name`'s
+/// JSON name payload, `resolve`'s pubkey list) are tiny; buffering more than
+/// this is refused with `invalid_argument` before `req.bytes()` materializes
+/// the whole payload in the isolate. Mirrors apps/repo-worker's
+/// `worker_impl::MAX_BODY_BYTES` pattern.
+const MAX_BODY_BYTES: usize = 64 * 1024; // 64 KiB
+
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Answer the CORS preflight before routing so the browser can send the
@@ -41,6 +48,16 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let method = req.method();
     let path = req.path();
+
+    // Body cap, checked once in the shared entry point so both write routes
+    // (`set_name`, `resolve`) get the pre-buffer rejection for free. Reject by
+    // Content-Length BEFORE buffering (O(1)); the post-buffer check inside
+    // `read_capped_body` is the backstop for chunked/unknown-length requests.
+    if let Ok(Some(len)) = req.headers().get("content-length") {
+        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
+            return Ok(with_cors(body_too_large()?));
+        }
+    }
 
     let out = if method == Method::Get && (path == "/" || path == "/health") {
         Response::ok("mkit-keys-worker ok")
@@ -84,6 +101,30 @@ fn json_response(body: String) -> Result<Response> {
     Ok(resp)
 }
 
+/// The `invalid_argument` 400 returned when a request body exceeds the cap.
+/// Matches apps/repo-worker's `worker_impl::body_too_large` JSON shape so both
+/// workers' HTTP surfaces are consistent.
+fn body_too_large() -> Result<Response> {
+    let payload = format!(
+        "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
+    );
+    let mut resp = Response::error(payload, 400)?;
+    let _ = resp.headers_mut().set("Content-Type", "application/json");
+    Ok(resp)
+}
+
+/// Read the request body, enforcing `MAX_BODY_BYTES` as a backstop for
+/// chunked/unknown-length requests where Content-Length was absent (the
+/// `fetch` entry point already rejected any declared Content-Length over the
+/// cap before this runs).
+async fn read_capped_body(req: &mut Request) -> Result<std::result::Result<Vec<u8>, Response>> {
+    let body = req.bytes().await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Ok(Err(body_too_large()?));
+    }
+    Ok(Ok(body))
+}
+
 fn read_envelope_headers(req: &Request) -> EnvelopeHeaders {
     let h = req.headers();
     EnvelopeHeaders {
@@ -114,7 +155,10 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
     }
 
     let headers = read_envelope_headers(req);
-    let body = req.bytes().await?;
+    let body = match read_capped_body(req).await? {
+        Ok(body) => body,
+        Err(resp) => return Ok(resp),
+    };
     let actual_digest = blake3_hex(&body);
     let now = Date::now().as_millis() as i64;
 
@@ -147,7 +191,10 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
 
 /// POST /resolve — batch-read names for a list of pubkeys (for the commit log).
 async fn resolve(req: &mut Request, env: &Env) -> Result<Response> {
-    let body = req.bytes().await?;
+    let body = match read_capped_body(req).await? {
+        Ok(body) => body,
+        Err(resp) => return Ok(resp),
+    };
     let Ok(parsed) = serde_json::from_slice::<ResolveBody>(&body) else {
         return Response::error("invalid body", 400);
     };
