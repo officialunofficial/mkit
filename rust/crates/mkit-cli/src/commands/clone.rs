@@ -19,7 +19,7 @@ use mkit_core::refs;
 use mkit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_shim;
-use crate::config::{self, Config};
+use crate::config::{self, Config, RemoteEntry};
 use crate::exit;
 use crate::remote_dispatch;
 
@@ -40,6 +40,18 @@ struct CloneOpts {
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
     sparse: Vec<String>,
+    /// Check out `<branch>` instead of the remote's default branch. Must
+    /// name a branch the remote actually advertises; unlike the default
+    /// heuristic (current default branch, falling back to whatever the
+    /// remote advertises first) this never silently substitutes another
+    /// branch.
+    #[arg(short = 'b', long = "branch", value_name = "NAME")]
+    branch: Option<String>,
+    /// Name the cloned remote `<name>` in the new repo's `.mkit/config`
+    /// instead of the implicit flat `default` remote (mirrors `mkit
+    /// remote add <name> <url>`).
+    #[arg(short = 'o', long = "origin", value_name = "NAME")]
+    origin: Option<String>,
     /// Remote URL (e.g. `mkit+file:///abs/path`).
     url: String,
     /// Destination directory. Defaults to the final URL segment.
@@ -66,16 +78,10 @@ pub fn run(args: &[String]) -> u8 {
     // `mkit checkout` honours them. Sparse fetch over the wire is
     // wired through `mkit checkout --sparse` itself.
     let url = opts.url.as_str();
-    // Reject control characters (newline et al.) before the URL is
-    // persisted to `.mkit/config` via `config::write` (which emits values
-    // raw) — a newline would inject extra `key = value` lines into the
-    // config (config injection). Mirrors the `mkit remote add` check.
-    if config::validate_value(url).is_err() {
-        return emit_err(
-            &format!("invalid remote URL '{url}': contains control characters"),
-            exit::PROTOCOL_ERROR,
-        );
-    }
+    let origin_name = match validate_clone_inputs(&opts) {
+        Ok(name) => name,
+        Err(code) => return code,
+    };
     let target: PathBuf = match opts.dir.as_deref() {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),
@@ -114,8 +120,23 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("refs init: {e}"), exit::CANTCREAT);
     }
     let mut cfg = Config::with_defaults();
-    url.clone_into(&mut cfg.remote_endpoint);
-    cfg.remote_type = scheme_of(url).unwrap_or_default().to_string();
+    if origin_name == config::DEFAULT_REMOTE_NAME {
+        url.clone_into(&mut cfg.remote_endpoint);
+        cfg.remote_type = scheme_of(url).unwrap_or_default().to_string();
+    } else {
+        // A non-default `-o <name>` is a genuine named remote — persist it
+        // the same way `mkit remote add <name> <url>` would, so `pull_all`
+        // below (called with this same name) resolves tracking refs under
+        // `refs/remotes/<name>/*` consistently with what `.mkit/config`
+        // records.
+        cfg.remotes.insert(
+            origin_name.clone(),
+            RemoteEntry {
+                url: url.to_string(),
+                remote_type: scheme_of(url).unwrap_or_default().to_string(),
+            },
+        );
+    }
     if let Err(e) = config::write(&target_layout, &cfg) {
         return emit_err(&format!("write config: {e}"), exit::CANTCREAT);
     }
@@ -139,7 +160,13 @@ pub fn run(args: &[String]) -> u8 {
     // there isn't one yet.
     let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();
     let pull_outcome = match remote_dispatch::open_with_config(url, &merged) {
-        Ok(tx) => remote_dispatch::pull_all_with(&target, tx.as_ref(), "default", require_signed),
+        Ok(tx) => remote_dispatch::pull_all_with(
+            &target,
+            tx.as_ref(),
+            &origin_name,
+            opts.branch.as_deref(),
+            require_signed,
+        ),
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
     let n = match pull_outcome {
@@ -285,6 +312,77 @@ fn scheme_of(url: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Validate `--url`, `-o`/`--origin`, and `-b`/`--branch` before any
+/// filesystem or config side effect. `-o`/`--origin` names the remote
+/// that gets persisted to the new repo's `.mkit/config`; `-b`/`--branch`
+/// selects which advertised branch to land HEAD on. Both flow into
+/// config/ref writes, so they get the same config-injection guard as
+/// the URL, plus their own shape checks. Returns the resolved origin
+/// name (`"default"` when `-o` was not given) on success.
+fn validate_clone_inputs(opts: &CloneOpts) -> Result<String, u8> {
+    let url = opts.url.as_str();
+    // Reject control characters (newline et al.) before the URL is
+    // persisted to `.mkit/config` via `config::write` (which emits values
+    // raw) — a newline would inject extra `key = value` lines into the
+    // config (config injection). Mirrors the `mkit remote add` check.
+    if config::validate_value(url).is_err() {
+        return Err(emit_err(
+            &format!("invalid remote URL '{url}': contains control characters"),
+            exit::PROTOCOL_ERROR,
+        ));
+    }
+    let origin_name = match opts.origin.as_deref() {
+        Some(name) => {
+            validate_origin_name(name)?;
+            name.to_owned()
+        }
+        None => config::DEFAULT_REMOTE_NAME.to_owned(),
+    };
+    if let Some(branch) = opts.branch.as_deref() {
+        if config::validate_value(branch).is_err() {
+            return Err(emit_err(
+                &format!("invalid branch name '{branch}': contains control characters"),
+                exit::PROTOCOL_ERROR,
+            ));
+        }
+        if !refs::validate_ref_name(branch) {
+            return Err(emit_err(
+                &format!("invalid branch name '{branch}': not a valid ref name"),
+                exit::PROTOCOL_ERROR,
+            ));
+        }
+    }
+    Ok(origin_name)
+}
+
+/// Validate a `-o`/`--origin` name. Unlike `mkit remote add`'s
+/// `validate_remote_name`, the reserved name `default` IS accepted here
+/// — it is the (also valid) way to spell "use the flat default remote",
+/// matching clone's pre-flag behaviour. Any other name must be a
+/// dot-free ref-safe name, same as a named `remote add`, since it
+/// becomes a `remote.<name>.*` config key and a
+/// `refs/remotes/<name>/*` path component.
+fn validate_origin_name(name: &str) -> Result<(), u8> {
+    if config::validate_value(name).is_err() {
+        return Err(emit_err(
+            &format!("invalid remote name '{name}': contains control characters"),
+            exit::PROTOCOL_ERROR,
+        ));
+    }
+    if name != config::DEFAULT_REMOTE_NAME
+        && (!mkit_core::refs::validate_ref_name(name) || name.contains('.'))
+    {
+        return Err(emit_err(
+            &format!(
+                "invalid remote name '{name}': must be a dot-free ref-safe name \
+                 (or the reserved `default`)"
+            ),
+            exit::PROTOCOL_ERROR,
+        ));
+    }
+    Ok(())
 }
 
 use super::error as emit_err;

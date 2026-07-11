@@ -237,7 +237,7 @@ fn pull_roundtrip_against_mockito_http_server() {
     let dispatch_url = format!("mkit+{}/myproj", server.url());
     let tx = remote_dispatch::open(&dispatch_url).expect("open mkit+http");
 
-    let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default").expect("pull");
+    let n = remote_dispatch::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
     assert_eq!(n, 1, "one remote branch must be fetched");
     // Every leg of the pull actually landed.
     refs_list.assert();

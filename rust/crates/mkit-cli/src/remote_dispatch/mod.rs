@@ -715,14 +715,26 @@ pub fn push_branch_with_depth(
 /// [`pull_all_with`] with signature verification on — the CLI's default
 /// (issue #692). Existing in-process callers (the integration-test suite)
 /// that construct only validly-signed histories are unaffected.
-pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
-    pull_all_with(cwd, tx, remote, true)
+pub fn pull_all(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    target_branch: Option<&str>,
+) -> Result<usize, DispatchError> {
+    pull_all_with(cwd, tx, remote, target_branch, true)
 }
 
 /// Fetch remote refs, then fast-forward the current local branch from
 /// `refs/remotes/default/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
+///
+/// `target_branch`, when `Some`, overrides which remote branch to land
+/// on (used by `mkit clone -b <branch>`): the branch MUST exist among
+/// the remote's advertised refs or the call fails with
+/// [`DispatchError::RemoteBranchMissing`] rather than silently falling
+/// back to another branch. `None` preserves the historical HEAD-driven
+/// selection used by plain `pull`.
 ///
 /// `require_signed` gates the post-fetch commit/remix/tag signature check
 /// (issue #692) — `true` (the CLI's default, see [`pull_all`]) verifies
@@ -732,6 +744,7 @@ pub fn pull_all_with(
     cwd: &Path,
     tx: &dyn Transport,
     remote: &str,
+    target_branch: Option<&str>,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
@@ -763,17 +776,21 @@ pub fn pull_all_with(
     )?;
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
-        Some(Head::Branch(branch)) => {
-            let local_tip = refs::read_ref(&layout, branch)?;
-            let selected = if local_tip.is_some() {
+        Some(Head::Branch(head_branch)) => {
+            let want_branch = target_branch.unwrap_or(head_branch.as_str());
+            let local_tip = refs::read_ref(&layout, want_branch)?;
+            let selected = if local_tip.is_some() || target_branch.is_some() {
+                // An explicit `-b <branch>` (or an already-committed local
+                // branch of that name) must match exactly — no silent
+                // fallback to a different branch.
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == branch)
-                    .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.clone()))?
+                    .find(|(name, _)| name == want_branch)
+                    .ok_or_else(|| DispatchError::RemoteBranchMissing(want_branch.to_owned()))?
             } else {
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == branch)
+                    .find(|(name, _)| name == want_branch)
                     .unwrap_or(&remote_refs[0])
             };
             (selected.0.clone(), local_tip, selected.1)

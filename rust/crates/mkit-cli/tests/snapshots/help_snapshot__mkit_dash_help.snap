@@ -148,6 +148,8 @@ commands:
   config [--format=json]  Show all configuration values (JSON with --format=json)
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
+  config --unset <key>  Remove a configuration value (idempotent; unknown key errors)
+  config [--local|--global] <key> <value>|--unset <key>  Force repo/user scope
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
   config user.name|user.email <value>  Git-compatibility aliases; stored and
@@ -165,10 +167,12 @@ commands:
                     Push current branch to its upstream (--all mirrors every
                     branch; -u records the upstream; prints git's `To <url>` +
                     ref-update summary, or `Everything up-to-date`)
-  pull              Pull changes from remote (fast-forward; prints `Updating
-                    <a>..<b>`/`Fast-forward`/diffstat, or `Already up to date.`)
-  fetch             Download from remote without merging (prints `From <url>`
-                    + per-ref summary; silent when nothing changed)
+  pull [<remote>] [--all]  Pull changes from remote (fast-forward; prints
+                    `Updating <a>..<b>`/`Fast-forward`/diffstat, or `Already
+                    up to date.`); --all pulls every configured remote
+  fetch [<remote>] [--all]  Download from remote without merging (prints
+                    `From <url>` + per-ref summary; silent when nothing
+                    changed); --all fetches every configured remote
   worktree add <path> [<commit-ish>]  Create a linked working tree (shares the
                     object store and refs; own HEAD/index/stash). With no
                     commit-ish, creates a branch named after the path
@@ -185,7 +189,9 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
-  clone [--sparse ...] <url>  Clone a repository
+  clone [--sparse ...] [-b <branch>] [-o <name>] <url>  Clone a repository
+                    (-b checks out <branch> instead of the remote default;
+                    -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
                     `<name>	<url> (fetch)`/`(push)`; JSON with --format=json)
   remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)

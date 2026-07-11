@@ -863,25 +863,48 @@ Remote / sync:
 - `mkit remote get-url <name>` — print a remote's URL (use `default` for
   the flat default remote). `mkit remote set-url <name> <url>` — change an
   existing remote's URL (validated like `remote add`).
-- `mkit clone [--depth N] [--sparse ...] [--no-verify-signatures] <url> [<dir>]`
-  — clone a repository into `<dir>` (defaults to the final URL path
-  segment). `--sparse <pattern>...` persists the patterns and materialises
-  only the matching files via the verifiable sparse-checkout pipeline
-  (requires a build with `--features sparse-checkout`). Note this is an
+- `mkit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
+  [--no-verify-signatures] <url> [<dir>]` — clone a repository into
+  `<dir>` (defaults to the final URL path segment). `--sparse
+  <pattern>...` persists the patterns and materialises only the
+  matching files via the verifiable sparse-checkout pipeline (requires
+  a build with `--features sparse-checkout`). Note this is an
   **enhancement over git**: mkit's `--sparse` takes one or more PATTERN
   arguments, whereas git's `clone --sparse` is a boolean flag (it cones
   to the top-level files and you add patterns afterward). **`--depth N` is parsed but
   not yet wired**: passing it fails with a clear `--depth is not yet
   wired` usage error rather than silently producing a full clone; see
   "Divergences from Git".
-- `mkit fetch [<remote>] [--no-verify-signatures]` — download from remote
-  without merging. Fetched branch tips are stored under
-  `refs/remotes/default/<branch>` and do not move local branches.
-- `mkit pull [<remote>] [--no-verify-signatures]` — fetch, then
-  fast-forward the current branch from `refs/remotes/default/<branch>`.
+  - `-b`/`--branch <name>` — check out `<name>` instead of the remote's
+    default branch. The branch MUST exist among the remote's advertised
+    refs; unlike the default heuristic (current default branch, falling
+    back to whatever the remote advertises first) an explicit `-b` never
+    silently substitutes another branch — a missing branch fails the
+    clone with a "remote branch not found" error.
+  - `-o`/`--origin <name>` — name the cloned remote `<name>` in the new
+    repo's `.mkit/config` instead of the implicit flat `default` remote
+    (mirrors `mkit remote add <name> <url>` at clone time). The name
+    must be dot-free and ref-safe, like a named `remote add`. Tracking
+    refs land under `refs/remotes/<name>/*` to match.
+- `mkit fetch [<remote>] [--all] [--no-verify-signatures]` — download
+  from remote without merging. Fetched branch tips are stored under
+  `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>` for
+  the flat default remote) and do not move local branches. `--all`
+  fetches every configured remote (the flat default plus every named
+  `remote.<name>.url`) in one invocation, printing each remote's usual
+  `From <url>` + per-ref summary in turn; mutually exclusive with an
+  explicit `<remote>` argument. A per-remote failure does not stop the
+  others — `fetch --all` continues through the full list and exits
+  non-zero if any remote failed.
+- `mkit pull [<remote>] [--all] [--no-verify-signatures]` — fetch, then
+  fast-forward the current branch from `refs/remotes/<remote>/<branch>`.
   Divergent histories are refused; use explicit merge/rebase flows after
   resolving the divergence. Fresh repos with no local branch tip
   initialize the current branch/worktree from the remote default branch.
+  `--all` pulls from every configured remote in turn (same enumeration
+  and failure-tolerance as `fetch --all`), fast-forwarding the current
+  branch from each; mutually exclusive with an explicit `<remote>`
+  argument.
 - **Post-fetch signature verification (issue #692, default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces — the same check `mkit verify <rev>` runs manually
@@ -894,6 +917,8 @@ Remote / sync:
   `--no-verify-signatures`, or persistently for scripted/CI use via the
   **user-scoped** `pull.require_signed = false` config key — it cannot be
   set from a cloned repo's own `.mkit/config` (see THREAT-MODEL.md §4).
+  `--all` applies the same verification (and the same opt-out) to every
+  remote it iterates.
 - `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]`
   — push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
@@ -1105,6 +1130,26 @@ Config / keys / version:
 - `mkit config [--format=json]` — show all configuration values.
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
+- `mkit config --unset <key>` — remove a configuration value. Deletes
+  from whichever scope a `set` of that key would use — the repo layer
+  (`<repo>/.mkit/config`) for a repo-safe key, or the user-scoped layer
+  (`$XDG_CONFIG_HOME/mkit/config`) for a `REPO_FORBIDDEN_KEYS` key —
+  unless overridden by `--local`/`--global`. Idempotent: unsetting an
+  already-absent key is a silent success (like `rm -f`), not an error;
+  only an unknown key name is rejected. Takes no positional arguments.
+- `mkit config [--local|--global] <key> <value>` — set a configuration
+  value, or `--unset <key>` to remove one. `--local` forces the
+  repo-scoped layer (refused for a `REPO_FORBIDDEN_KEYS` key, which can
+  never live in a clone-traveling repo config); `--global` forces the
+  user-scoped layer even for an otherwise repo-safe key. **Put
+  `--local`/`--global` before `--unset`** (`mkit config --global --unset
+  <key>`, not `--unset --global <key>`) — like any clap value-taking
+  option, `--unset` consumes the very next token as `<KEY>`, so a flag
+  placed between `--unset` and the key is swallowed as (invalid) key
+  text rather than parsed separately. The two flags
+  are mutually exclusive; neither is needed for the common case, where
+  scope is chosen automatically by whether the key is in
+  `REPO_FORBIDDEN_KEYS`.
 - `mkit config <key> <value>` — set a configuration value. Config
   **section** and **variable** names are matched **case-insensitively**
   (canonicalized to lowercase), like git — so `user.Name`, `USER.EMAIL`,

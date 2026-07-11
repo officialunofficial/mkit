@@ -194,7 +194,7 @@ fn clone_after_delta_push_reconstructs_byte_identical() {
     // whole closure (base chunks + delta chunks) from the advertised packs.
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    pull_all(bob.path(), &tx, "default").expect("pull into fresh repo");
+    pull_all(bob.path(), &tx, "default", None).expect("pull into fresh repo");
 
     // The working file must be byte-for-byte identical to v2.
     assert_eq!(fs::read(bob.path().join("big.bin")).unwrap(), v2);
@@ -253,7 +253,7 @@ fn clone_reconstructs_multi_commit_delta_chain() {
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    pull_all(bob.path(), &tx, "default").expect("clone the delta chain");
+    pull_all(bob.path(), &tx, "default", None).expect("clone the delta chain");
     assert_eq!(fs::read(bob.path().join("big.bin")).unwrap(), latest);
 
     // Hash-verify the whole reconstructed closure.
@@ -389,7 +389,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
 
     let tx = CountingTransport::new();
     push_all(alice.path(), &tx).expect("alice base push");
-    pull_all(bob.path(), &tx, "default").expect("bob clones base");
+    pull_all(bob.path(), &tx, "default", None).expect("bob clones base");
 
     let shared_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")
         .unwrap()
@@ -447,7 +447,7 @@ fn divergent_concurrent_push_leaves_cloneable_remote() {
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));
     let carol = tempfile::tempdir().unwrap();
     init_repo(carol.path());
-    pull_all(carol.path(), &tx, "default").expect("carol clones");
+    pull_all(carol.path(), &tx, "default", None).expect("carol clones");
     assert_eq!(fs::read(carol.path().join("big.bin")).unwrap(), av);
 
     let carol_tip = refs::read_ref(&RepoLayout::single(carol.path()), "main")
@@ -536,7 +536,7 @@ fn fetch_fails_loudly_when_advertised_pack_is_missing() {
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    let err = pull_all(bob.path(), &tx, "default").unwrap_err();
+    let err = pull_all(bob.path(), &tx, "default", None).unwrap_err();
     assert!(
         matches!(err, DispatchError::AdvertisedPackMissing { .. }),
         "expected AdvertisedPackMissing, got {err:?}"
@@ -648,7 +648,7 @@ fn self_contained_push_resets_a_corrupt_packmap_chain() {
     // The packmap is healthy again — a fresh clone reconstructs carol's tree.
     let dave = tempfile::tempdir().unwrap();
     init_repo(dave.path());
-    pull_all(dave.path(), &tx, "default").expect("clone after reset");
+    pull_all(dave.path(), &tx, "default", None).expect("clone after reset");
     assert_eq!(fs::read(dave.path().join("c.bin")).unwrap(), carol_data);
 }
 

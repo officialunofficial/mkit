@@ -279,7 +279,7 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
     // before any assertion: panicking with `gate` still held would deadlock
     // `thread::scope`'s join instead of failing the test.
     let (started, lock_was_free, pull_result) = thread::scope(|s| {
-        let handle = s.spawn(|| pull_all(bob_path, &tx, "default"));
+        let handle = s.spawn(|| pull_all(bob_path, &tx, "default", None));
 
         let started = gate.wait_started(Duration::from_secs(5));
         let lock_was_free = started && lock_is_free(&bob_layout);
