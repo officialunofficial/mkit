@@ -1,13 +1,23 @@
 ---
 spec: SPEC-REFS
 version: 1
-status: draft
+status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
 
 # SPEC-REFS — mkit v1 ref wire format and semantics
 
-Status: **Normative** for mkit v1.
+Status: **Normative** and **Stable** for mkit v1 — the wire format,
+namespace layout, and CAS semantics below are settled and backed by
+shipped, tested transports (memory, file, s3, http, ssh). One
+deliberately-scoped limitation is called out inline rather than left
+implicit: the in-process memory transport's `.match` CAS, and the
+local `mkit-core` `refs::cas_write` helper used by commands that write
+refs directly, are a read-then-write race by design (§5.1, §8) — this
+is a documented, permanent property of those two code paths, not an
+open question about the format itself, and it does not block this
+document's stability. See SPEC-CONVENTIONS §2 for what draft/stable
+and normative/advisory mean.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
 semantics of `listRefs(prefix)` and `updateRef(condition)` across
 transports.

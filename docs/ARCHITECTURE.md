@@ -131,10 +131,13 @@ JCS canonical bytes    (RFC 8785; mkit-attest hand-rolled writer)
 PAE("application/vnd.in-toto+json", payload)
        │   SPEC-ATTESTATIONS §2.1
        ▼
-Signer ────► sig bytes        Signer is one of:
+Signer ────► sig bytes        Signer is one of the two implemented paths:
        │                        - repo-key  (Ed25519, .mkit/keys/default.key)
        │                        - external  (subprocess; SPEC-EXTERNAL-SIGNER)
-       │                        - sigstore-keyless (Fulcio/Rekor; planned)
+       │
+       │                      Roadmap, not implemented (`SigstoreSigner`
+       │                      returns `Error::SigstoreNotImplemented`):
+       │                        - sigstore-keyless (Fulcio/Rekor)
        ▼
 DSSE envelope ─► JCS ─► BLAKE3 → attestation id
        │

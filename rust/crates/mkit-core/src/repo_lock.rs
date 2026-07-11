@@ -32,6 +32,32 @@
 //! supported on Windows since Rust 1.89, so this works there too — the
 //! lock semantics are equivalent (mandatory `LockFileEx` rather than
 //! advisory `flock`).
+//!
+//! # Network-filesystem caveat
+//!
+//! Every guarantee this module makes — including the fail-closed
+//! GC-vs-writer exclusion `SPEC-GC.md` relies on — assumes `<dir>` is a
+//! genuinely local filesystem (or a well-behaved local-only virtual one
+//! such as tmpfs). `flock`/`fcntl` advisory locking is **not reliably
+//! coherent across NFS clients**: `NFSv3` offloads locking to a separate,
+//! frequently-absent `rpc.statd`/NLM side channel that many exports run
+//! without, and even where present, servers vary in whether a lock
+//! actually excludes a *different host's* holder rather than only
+//! callers on the same NFS client. `NFSv4`'s advertised in-protocol
+//! locking is closer to POSIX semantics but still depends on
+//! server/client support and is not something this module verifies at
+//! runtime. The same caution applies to SMB/CIFS mounts and to most
+//! FUSE-backed network filesystems. A `.mkit/` directory served from
+//! such a mount can silently lose the mutual-exclusion property this
+//! module documents above: two processes on different hosts (or even
+//! the same host, depending on client/server behavior) may both believe
+//! they hold the lock. This module performs no detection of the
+//! underlying filesystem type and has no fallback locking strategy for
+//! this case — repositories that must be shared across hosts should use
+//! one of mkit's network transports (see `docs/specs/SPEC-TRANSPORT.md`)
+//! rather than a shared network-mounted `.mkit/` directory. See
+//! `docs/THREAT-MODEL.md` §7 for how this affects mkit's fail-closed
+//! locking claims.
 
 use std::fs::{File, OpenOptions};
 use std::io;

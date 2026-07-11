@@ -251,14 +251,21 @@ one:
                        │   (in-toto v1 + DSSE)        │
                        └──────────┬───────────────────┘
                                   │
-        ┌─────────────────────────┼─────────────────────────────┐
-        ▼                         ▼                             ▼
-┌─────────────────┐    ┌──────────────────────┐    ┌────────────────────┐
-│ repo-key signer │    │ external signer      │    │ keyless / sigstore │
-│  (Ed25519 from  │    │ (subprocess, stdio   │    │ (planned, OIDC →   │
-│   .mkit/keys)   │    │   protocol; TPM,     │    │   short-lived cert)│
-│                 │    │   FIDO2/CTAP, SE,…)  │    │                    │
-└─────────────────┘    └──────────────────────┘    └────────────────────┘
+                 ┌────────────────┴────────────────┐
+                 ▼                                  ▼
+       ┌─────────────────┐              ┌──────────────────────┐
+       │ repo-key signer │              │ external signer      │
+       │  (Ed25519 from  │              │ (subprocess, stdio   │
+       │   .mkit/keys)   │              │   protocol; TPM,     │
+       │                 │              │   FIDO2/CTAP, SE,…)  │
+       └─────────────────┘              └──────────────────────┘
+                    implemented today, at parity
+
+       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+       ┆ keyless / sigstore  — roadmap, not implemented       ┆
+       ┆ (OIDC → short-lived cert; `SigstoreSigner` returns   ┆
+       ┆  `Error::SigstoreNotImplemented` unconditionally)    ┆
+       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 ```
 
 Attestations carry the commit hash as the in-toto `subject`, so they
