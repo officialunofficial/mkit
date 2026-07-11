@@ -1,6 +1,6 @@
 ---
 spec: SPEC-TRANSPORT-ENC
-version: 1 (real-TCP transport stage)
+version: 1
 status: draft
 audience: implementers of mkit encrypted-stream clients and servers
 ---
@@ -20,12 +20,12 @@ transport for environments where shelling out to OpenSSH is awkward
 (WASM, embedded targets, browser-hosted Workers) while keeping a single
 source of truth for verb-level framing across SSH and encrypted paths.
 
-The in-process scaffold (`EncSession` / `from_session`) and the
-deterministic-runtime round-trip test landed first. The real-TCP transport
-stage (this revision) adds real TCP: URL parsing, `connect_tcp` /
-`serve_tcp`, the `mkit-cli/enc-transport` feature gate, and the
-`mkit serve --listen-enc <addr>` listener. §6 records what now ships
-and what remains for the deferred follow-ups.
+The transport has two forms: a deterministic in-process scaffold
+(`EncSession` / `from_session`) exercised by the in-tree round-trip
+test suite, and the real TCP transport used in production — URL
+parsing, `connect_tcp` / `serve_tcp`, the `mkit-cli/enc-transport`
+feature gate, and the `mkit serve --listen-enc <addr>` listener. §6
+describes the TCP transport's mechanics and its current limitations.
 
 ---
 
@@ -33,7 +33,7 @@ and what remains for the deferred follow-ups.
 
 | Scheme prefix | Transport | Notes |
 |---|---|---|
-| `mkit+enc://[user@]host[:port][/path]?pubkey=<hex-or-b64url>` | `mkit-transport-enc` | Implemented by the real-TCP transport stage (`mkit_transport_enc::url::parse_enc_url`). The `user@` and `/path` components are accepted for round-tripping but not consulted by the handshake; trust is via the `?pubkey=` payload only. |
+| `mkit+enc://[user@]host[:port][/path]?pubkey=<hex-or-b64url>` | `mkit-transport-enc` | Implemented by `mkit_transport_enc::url::parse_enc_url`. The `user@` and `/path` components are accepted for round-tripping but not consulted by the handshake; trust is via the `?pubkey=` payload only. |
 
 The URL carries the **server's static `ed25519` public key** as a
 query-parameter `pubkey=<…>` in one of two equivalent encodings:
@@ -77,9 +77,9 @@ this section documents the parameters mkit configures.
 |---|---|---|
 | `namespace` | `b"mkit/transport-enc/v1"` | Pre-shared transcript binding. Prevents cross-application replay if peers share `ed25519` keys with another commonware-stream user. Bumping the `/v1` suffix is the lever for a hard cryptographic break in future. |
 | `max_message_size` | `mkit_rpc::MAX_FRAME_BYTES` (1 MiB) | Matches the inner `SshFrame` framing cap so a maximally-sized verb fits in one encrypted record. Removes an off-by-overhead class of bugs where one limit sneaks past the other. |
-| `synchrony_bound` | 30 s | Tolerable clock skew between client and server. Generous in the in-process scaffold to keep flaky-CI failures out of the in-tree round-trip test; real-network deployments tighten to ≤ 5 s. |
-| `max_handshake_age` | 30 s | Same envelope as `synchrony_bound`; real-network deployments tighten this. |
-| `handshake_timeout` | 60 s | Hard ceiling for handshake completion. Generous for the in-process scaffold; real-network deployments tighten to ≤ 10 s. |
+| `synchrony_bound` | 30 s | Tolerable clock skew between client and server. Generous, sized to keep flaky-CI failures out of the in-tree round-trip test; a production deployment operating over real, higher-latency networks SHOULD configure a tighter bound (≤ 5 s). |
+| `max_handshake_age` | 30 s | Same envelope as `synchrony_bound`; the same tightening applies for production use. |
+| `handshake_timeout` | 60 s | Hard ceiling for handshake completion. Generous for the in-process test scaffold; a production deployment SHOULD tighten to ≤ 10 s. |
 
 ### 2.2 Identity
 
@@ -89,7 +89,7 @@ static keypair. mkit chose ed25519 (over BLS) for the in-process scaffold becaus
 1. The keys are small (32-byte public, 32-byte private), matching the
    shape of SSH host keys mkit operators already manage.
 2. Verification is constant-time and fast, suitable for browser-hosted
-   clients in the planned Workers integration.
+   clients, including a Workers-hosted deployment.
 3. `commonware-cryptography::ed25519` is already a stable `Signer` and
    needs no application glue.
 
@@ -155,7 +155,7 @@ Concretely:
 ├──────────────────────────────────────────────┤
 │ commonware-stream varint length prefix       │  framing
 ├──────────────────────────────────────────────┤
-│ Sink / Stream byte transport                 │  TCP (real-TCP transport stage) or mocks::Channel (in-process scaffold tests)
+│ Sink / Stream byte transport                 │  TCP (production) or mocks::Channel (in-process test scaffold)
 └──────────────────────────────────────────────┘
 ```
 
@@ -195,8 +195,8 @@ The in-tree test suite lives in
 [`mkit-transport-enc/src/lib.rs`](../../rust/crates/mkit-transport-enc/src/lib.rs)
 under `#[cfg(test)] mod tests`. Tests run inside a single
 `commonware_runtime::deterministic::Runner` so they exercise the same
-async code paths the real-TCP transport stage's tokio wiring will hit,
-without depending on wall-clock time or a multi-threaded executor.
+async code paths the TCP transport's tokio wiring hits, without
+depending on wall-clock time or a multi-threaded executor.
 
 | Test | What it pins |
 |---|---|
@@ -205,86 +205,70 @@ without depending on wall-clock time or a multi-threaded executor.
 | `peer_rejected_error_maps_to_init_error` | Pure unit test: `EncryptedError::PeerRejected(_) → EncInitError::PeerRejected`. Catches regressions in the `From` impl even if a future commonware release moves which side surfaces the rejection. |
 | `url::parse_enc_url::*` (~25 cases) | URL parser: pins accepted forms (`mkit+enc://[user@]host[:port][/path]?pubkey=<hex\|b64url>`), both pubkey encodings, and rejection of bad inputs (missing prefix / pubkey, port overflow, CRLF / NUL injection, `..` path segments, b64 trailing-bit ambiguity, duplicate / unknown query params). |
 | `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly: a task spawned during the first `block_on` is still alive when a later `block_on` awaits it, so a refactor that drops and rebuilds the runtime between calls fails the test. |
-| `tcp_e2e::list_refs_round_trip_over_real_tcp` (real-TCP transport stage, gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
+| `tcp_e2e::list_refs_round_trip_over_real_tcp` (gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
 
 ---
 
-## 6. Rollout status
+## 6. TCP transport mechanics and known limitations
 
-### 6.1 Real-TCP transport — landed
+### 6.1 Mechanics
 
-1. ~~**URL parsing**~~ — done. `mkit_transport_enc::url::parse_enc_url`
-   accepts `mkit+enc://[user@]host[:port][/path]?pubkey=<hex|b64url>`.
-   Pubkey encoding is hex (64 chars) or unpadded url-safe base64
-   (43 chars) — both decode to the same 32-byte payload. See §1.
-2. ~~**TCP transport**~~ — done. `EncTransport::connect_tcp` opens a
-   tokio `TcpStream`, drives `commonware_stream::encrypted::dial`
-   against the URL-advertised peer pubkey, and returns a fully-wired
-   synchronous `Transport`. The dial is single-roundtrip; verb calls
-   block_on a per-call future through the `TokioExecutor`. Custom
-   `Sink`/`Stream` wrappers (`tokio_io::{TokioSink, TokioStream}`)
-   adapt tokio's `OwnedReadHalf` / `OwnedWriteHalf` to
-   `commonware_runtime::{Sink, Stream}` because the upstream
-   `pub(crate)` types aren't reachable from outside the runtime crate.
-3. ~~**CLI dispatch**~~ — done. `remote_dispatch::open` recognises the
-   `mkit+enc://` scheme behind the `mkit-cli/enc-transport` cargo
-   feature; default builds remain SSH-only.
-4. ~~**Server binary**~~ — done. `mkit serve --listen-enc <addr>`
-   spawns an async accept loop via
-   `mkit_transport_enc::serve_tcp_with_policy`. The listener is
-   **fail-closed** (issue #178): it refuses to bind unless the operator
-   supplies `--enc-authorized-peers <PATH>` (an allowlist of client
-   public keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape
-   that prints a loud warning). The allowlist bouncer rejects any
-   unlisted dialer at the handshake — a rejected peer never receives a
-   `HelloResponse`, list-refs, packs, or update-ref. The server
-   identity is a **stable** raw-32 key loaded/auto-created from
-   `--enc-server-key <PATH>` (or a user-scoped default
-   `~/.config/mkit/enc/server.key`) so the advertised `?pubkey=` is
-   stable across restarts; only the unsafe allow-any mode keeps the
-   historic ephemeral per-process key. Peer-authorization and identity
-   key paths are CLI-supplied or user-scoped and are **never** read
-   from repo-local `.mkit/config`.
+`mkit_transport_enc::url::parse_enc_url` accepts
+`mkit+enc://[user@]host[:port][/path]?pubkey=<hex|b64url>` per §1.
+`EncTransport::connect_tcp` opens a tokio `TcpStream`, drives
+`commonware_stream::encrypted::dial` against the URL-advertised peer
+pubkey, and returns a fully-wired synchronous `Transport`. The dial is
+single-roundtrip; verb calls block_on a per-call future through the
+`TokioExecutor`. Custom `Sink`/`Stream` wrappers
+(`tokio_io::{TokioSink, TokioStream}`) adapt tokio's `OwnedReadHalf` /
+`OwnedWriteHalf` to `commonware_runtime::{Sink, Stream}` because the
+upstream `pub(crate)` types aren't reachable from outside the runtime
+crate.
 
-### 6.2 Keystore integration & hardening — deferred
+`remote_dispatch::open` recognises the `mkit+enc://` scheme behind the
+`mkit-cli/enc-transport` cargo feature; default builds remain SSH-only.
 
-5. **Keystore integration** — the server identity and (optionally) the
-   client identity are now stable raw-32 key files on disk: the server
-   uses `--enc-server-key` / the user-scoped default, and a client can
-   pin its identity via the `MKIT_ENC_CLIENT_KEY` environment variable
-   (a user-scoped / CLI-supplied raw-32 key file) so an allowlisting
-   server can pin the client across restarts. When `MKIT_ENC_CLIENT_KEY`
-   is unset the client still derives an ephemeral per-process key (works
-   only against `--unsafe-allow-any-enc-peer` servers). Full
-   `mkit-keystore` integration — surfacing these identities through the
-   same backends as the SSH host keys and signing keys — remains the
-   deferred follow-up.
-6. **Tighten handshake bounds** — `default_handshake_config` still
-   uses the generous 30 s / 30 s / 60 s envelope inherited from
-   the in-process scaffold (deterministic-runtime tests). Real-network deployments
-   should tighten `synchrony_bound` / `max_handshake_age` to ≤ 5 s
-   and `handshake_timeout` to ≤ 10 s. Pending CI infra for a
-   real-network e2e job.
-7. ~~**Server-side keyring / bouncer policy**~~ — done (issue #178).
-   `serve_tcp_with_policy` consults a `PeerPolicy` — `AllowAny` (dev /
-   the explicit unsafe escape) or `Allowlist(HashSet<[u8;32]>)` built
-   from the `--enc-authorized-peers` file (one client pubkey per line,
-   64-hex or 43-char url-safe base64; `#` comments and blank lines
-   ignored). The bare `serve_tcp` retains `AllowAny` for the direct
-   e2e harness only. Surfacing the allowlist from a keystore partition
-   instead of a flat file remains a follow-up.
-8. **`publish = true`** — flip the `mkit-transport-enc` `Cargo.toml`
-   flag so the crate ships to crates.io alongside the other
-   transports. Requires keystore integration (#5) so the public
-   `connect_tcp` signature does not have to churn when raw
-   `PrivateKey` is replaced.
-9. **Buffer-pool footprint** — `connect_tcp` lazily bootstraps a
-   `commonware_runtime::BufferPool` by spinning up a one-shot
-   commonware tokio Runner on a fresh OS thread, then dropping the
-   bootstrap runtime while holding an `Arc` clone of the pool. The
-   pool is cached process-wide. A follow-up should land an upstream
-   contribution to `commonware-runtime` that exposes a public
-   `BufferPool::new_for_network()` so this trick can retire.
+`mkit serve --listen-enc <addr>` spawns an async accept loop via
+`mkit_transport_enc::serve_tcp_with_policy`. The listener is
+**fail-closed** (issue #178): it refuses to bind unless the operator
+supplies `--enc-authorized-peers <PATH>` (an allowlist of client public
+keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape that prints
+a loud warning). `serve_tcp_with_policy` consults a `PeerPolicy` —
+`AllowAny` (dev / the explicit unsafe escape) or
+`Allowlist(HashSet<[u8;32]>)` built from the `--enc-authorized-peers`
+file (one client pubkey per line, 64-hex or 43-char url-safe base64;
+`#` comments and blank lines ignored). The bare `serve_tcp` retains
+`AllowAny` for the direct e2e harness only. The allowlist bouncer
+rejects any unlisted dialer at the handshake — a rejected peer never
+receives a `HelloResponse`, list-refs, packs, or update-ref.
+
+The server identity is a **stable** raw-32 key loaded/auto-created from
+`--enc-server-key <PATH>` (or a user-scoped default
+`~/.config/mkit/enc/server.key`) so the advertised `?pubkey=` is stable
+across restarts; only the unsafe allow-any mode keeps an ephemeral
+per-process key. A client can similarly pin its identity via the
+`MKIT_ENC_CLIENT_KEY` environment variable (a user-scoped or
+CLI-supplied raw-32 key file) so an allowlisting server can pin the
+client across restarts; when unset, the client derives an ephemeral
+per-process key, which only an `--unsafe-allow-any-enc-peer` server
+will accept. Peer-authorization and identity key paths are CLI-supplied
+or user-scoped and are **never** read from repo-local `.mkit/config`.
+
+`connect_tcp` lazily bootstraps a `commonware_runtime::BufferPool` by
+spinning up a one-shot commonware tokio Runner on a fresh OS thread,
+then dropping the bootstrap runtime while holding an `Arc` clone of the
+pool; the pool is cached process-wide. This exists because
+`commonware-runtime` does not currently expose a public
+`BufferPool::new_for_network()` constructor.
+
+### 6.2 Known limitations
+
+Server and client identities are stable raw-32 key files on disk
+(`--enc-server-key` / `MKIT_ENC_CLIENT_KEY`), not yet routed through
+`mkit-keystore` the way SSH host keys and signing keys are; keystore
+integration would also let the public `connect_tcp` signature take a
+keystore-backed key type instead of a raw one. The allowlist is a flat
+`--enc-authorized-peers` file, not a keystore partition.
 
 ---
 

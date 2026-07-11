@@ -1,13 +1,15 @@
 ---
 spec: SPEC-WORKTREE
 version: 1
-status: draft
+status: draft-normative
 audience: implementers of repository layout, discovery, and gc
 ---
 
 # SPEC-WORKTREE — linked working trees
 
-Status: **Normative** for mkit v1.
+Status: **Normative** for the state/locking/discovery model specified
+here; **Draft** because §5's out-of-scope surface (`worktree
+move`/`lock`/`repair`) is not yet covered by this document.
 Scope: the common-dir / per-worktree state split, the linked-tree
 pointer-file format, the `worktrees/` registry, repository discovery,
 cross-worktree locking, and gc root-collection semantics. Issue #493.
@@ -25,7 +27,7 @@ of two classes:
 
 | Class | Contents |
 |---|---|
-| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `recovery-log`, `attestations/`, `applied-packs/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history.lock`, `worktrees.lock` |
+| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `recovery-log`, `attestations/`, `applied-packs/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history-<branch>.lock`, `worktrees.lock` |
 | **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `mkit-conflicts`, `MKIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
 
 In the classic single-worktree layout both directories are the same
@@ -143,15 +145,20 @@ the registry cannot be enumerated.
 
 ### 4.3 Locks
 
+This document originates the `worktree.lock`/`worktrees.lock` primitives
+and their per-command holder details below; the total lock order across
+*all* mkit locks (including `refs-history-<branch>.lock` and the
+file-transport's `refs/.lock`), and the enumeration of every writer, is
+owned by SPEC-CONCURRENCY — see that document for the authoritative
+order. This section states only the two locks this document defines and how the
+commands specified here use them.
+
 | Lock | Location | Guards |
 |---|---|---|
 | `worktree.lock` | each tree's state dir | that tree's worktree/index read-modify-write |
 | `worktrees.lock` | common dir | registry mutations (`worktree add`/`remove`/`prune`) |
-| `refs-history.lock` | common dir | ref-write + history-MMR append critical section (pre-existing) |
 
-**Global lock order.** A process that takes more than one of these
-MUST acquire in the order `worktrees.lock` ≺ per-tree
-`worktree.lock`(s) ≺ `refs-history.lock`. Holders:
+Per-command holders:
 
 - gc takes the registry lock first (freezing the worktree set — a
   concurrent `worktree add` cannot register a tree between root

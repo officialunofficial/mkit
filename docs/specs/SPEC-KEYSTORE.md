@@ -1,7 +1,7 @@
 ---
 spec: SPEC-KEYSTORE
 version: 1
-status: draft
+status: stable-normative
 audience: implementers and reviewers of the `mkit-keystore` crate, its CLI surface (`mkit key`), and the keystore-backed commit and attestation signers
 ---
 
@@ -34,22 +34,13 @@ software, OS-native, and hardware-backed key stores. It is deliberately a
 signing keystore, not a protocol lifecycle system. It returns signer handles;
 callers decide what those signers are allowed to sign.
 
-This spec distinguishes two milestones:
-
-- **Foundation V1**: the first implementation milestone. It creates the crate,
-  API, CLI, config, deterministic software backend, commit-signing adapter, and
-  attestation adapter. It is sufficient to start using and testing the
-  abstraction, but it does not close issue #104.
-- **Keystore V1**: the production keystore scope. It adds encrypted-at-rest
-  software storage, explicit raw-file compatibility, OS-native extractable
-  storage backends where implemented, keystore-backed commit/attestation
-  signing, and honest capability reporting. It does not claim Secure Enclave,
-  Windows TPM/CNG provider keys, TPM/PCR-bound systemd credentials, cloud KMS,
-  PKCS#11/HSM support, or FIDO2/WebAuthn keystore signing.
-
-Issue #104 may be resolved by this narrowed production contract only if project
-discussion accepts these deferred items; otherwise the deferred
-hardware/provider features remain follow-up work.
+`mkit-keystore` provides the crate, API, CLI, config, a software backend (both
+a deterministic raw-compatibility mode and an encrypted-at-rest mode), OS-native
+extractable storage backends where implemented, and keystore-backed
+commit/attestation signing, with honest capability reporting throughout. It
+does not provide Secure Enclave, Windows TPM/CNG provider keys, TPM/PCR-bound
+systemd credentials, cloud KMS, PKCS#11/HSM support, or FIDO2/WebAuthn keystore
+signing — those remain out of scope unless this spec is amended (§3.2).
 
 ### 1.1 Implementation Status
 
@@ -118,16 +109,13 @@ Not yet shipped against this spec:
    deterministic for the algorithm and imported key material. Hardware and OS
    ECDSA backends may produce valid but non-byte-equal signatures.
 9. WASM builds must not depend on native keystore code. Browser integrations
-   use an in-memory backend or a JS-side signer bridge in a later phase.
-10. Foundation V1 must not be presented as full issue #104 completion. Keystore
-    V1 is the production scope in section 15.2; deferred hardware/provider
-    claims remain follow-up work unless explicitly implemented and tested.
-11. For Keystore V1, `software:<label>` is the encrypted-at-rest software
-    backend. Production `mkit-cli` builds must enable the target-appropriate OS
-    protector feature, while `mkit-keystore` default features remain empty.
-    Raw-file compatibility is exposed only through the explicit
-    `software-raw:<label>` backend token and must not be the secure default.
-12. The encrypted software backend must use OS-protected envelope encryption,
+   use an in-memory backend or a JS-side signer bridge, not yet implemented.
+10. `software:<label>` is the encrypted-at-rest software backend. Production
+    `mkit-cli` builds must enable the target-appropriate OS protector feature,
+    while `mkit-keystore` default features remain empty. Raw-file
+    compatibility is exposed only through the explicit `software-raw:<label>`
+    backend token and must not be the secure default.
+11. The encrypted software backend must use OS-protected envelope encryption,
     not a password-derived key or an unaudited local encryption scheme.
 
 ## 3. Scope
@@ -157,11 +145,12 @@ Not yet shipped against this spec:
 - Arbitrary blob encryption or decryption APIs.
 - PKCS#11/HSM abstraction beyond the narrow signing handle model.
 - Network-aware key semantics such as `this key signs for chain X`.
-- Cloud KMS support in Keystore V1.
-- PKCS#11/HSM support in Keystore V1.
+- Cloud KMS support.
+- PKCS#11/HSM support.
 - Secure Enclave, Windows TPM/CNG provider keys, or TPM/PCR-bound
   `systemd-creds` behavior unless implemented and capability-tested.
-- Replacing all existing raw-key workflows in Foundation V1.
+- Replacing existing raw-key workflows (`mkit keygen`, `signing_key`) — they
+  remain supported alongside the keystore.
 
 ## 4. Crate Boundary
 
@@ -200,8 +189,8 @@ Forbidden dependencies:
 
 ## 5. Public Rust API
 
-The API below is normative for the Foundation V1 shape. Exact module names may
-change during implementation only if this file is updated in the same PR.
+The API below is normative. Exact module names may change only if this file
+is updated in the same change.
 
 ### 5.1 Algorithm
 
@@ -572,37 +561,37 @@ available through structured fields and developer/debug output.
 
 ## 6. Backend Requirements
 
-### 6.1 Foundation V1 Required Backend: Software Compatibility Vault
+### 6.1 Software Backend
 
-Foundation V1 must include a software backend in `mkit-keystore`.
+`mkit-keystore` includes a software backend with two storage-security modes,
+described below.
 
 Purpose:
 
 - Provide deterministic tests and a complete cross-platform baseline.
 - Provide import/export semantics for golden vectors.
-- Allow CLI and integration work to land before all OS-native backends are
+- Allow CLI and integration work to run before all OS-native backends are
   available.
 - Preserve current raw-key workflows through an abstraction without claiming
-  they satisfy the encrypted-at-rest Keystore V1 vault requirement.
+  they satisfy the encrypted-at-rest vault requirement.
 
 Storage:
 
-- Foundation V1 software keystore storage is user-scoped, not repo-scoped.
+- Software keystore storage is user-scoped, not repo-scoped.
 - Default storage root is `$XDG_DATA_HOME/mkit/keys/` on Unix-like platforms,
   falling back to `~/.local/share/mkit/keys/` when `XDG_DATA_HOME` is unset.
   Non-Unix platforms must use the platform's per-user application data
   directory or a documented equivalent.
 - `software:<label>` maps to exactly one encrypted key record under that
-  user-scoped storage root in Keystore V1. It must not resolve relative
-  to the current repo.
+  user-scoped storage root. It must not resolve relative to the current repo.
 - `software-raw:<label>` maps to exactly one raw compatibility key record under
   a raw-specific storage subtree. It exists for deterministic tests,
   compatibility, and explicit migration work only. It must never be selected by
-  default in Keystore V1.
+  default.
 - Legacy `.mkit/keys/*` files remain supported only through legacy raw-file
   flows such as `mkit keygen`, `signing_key`, and `repo-key` compatibility.
-- The software backend may reuse the existing hardened raw-file functions for
-  Foundation V1, but it must live behind the `mkit-keystore` abstraction.
+- The software backend reuses the existing hardened raw-file functions,
+  behind the `mkit-keystore` abstraction.
 - If it writes files, it must preserve or improve current hardening:
   - Unix `0600` key files.
   - Unix `0700` parent directories.
@@ -615,13 +604,12 @@ Storage:
 
 Storage-security modes:
 
-- **Compatibility raw-file mode** may be used for Foundation V1. It preserves
-  current hardened `0600` raw-key behavior and is acceptable only as the first
-  implementation milestone.
-- Compatibility raw-file mode does not satisfy Keystore V1's encrypted-at-rest
-  software-backend acceptance criterion and must be named `software-raw`.
-- **Encrypted software-file mode** is required for Keystore V1
-  and owns the `software` backend token. It must encrypt key material at rest
+- **Compatibility raw-file mode** (`software-raw`) preserves the hardened
+  `0600` raw-key behavior of legacy `mkit keygen`. It does not satisfy the
+  encrypted-at-rest software-backend acceptance criterion, and must never be
+  the default.
+- **Encrypted software-file mode** owns the `software` backend token. It must
+  encrypt key material at rest
   using OS-protected envelope encryption:
   - Generate a fresh random data-encryption key (DEK) per stored key record.
   - Encrypt the 32-byte secret with an AEAD approved by workspace supply-chain
@@ -648,11 +636,91 @@ Storage-security modes:
 - The raw compatibility backend must be clearly reported as
   `BackendKind::SoftwareRaw` and must not claim encrypted-at-rest protection.
 
-#### 6.1.1 BLS12-381 Threshold Share Storage
+#### 6.1.1 `EncryptedKeyRecord` wire format
 
-The keystore-backed share storage stage of issue #160 (and §6 of
-`SPEC-RELEASE-THRESHOLD.md`) adds support for storing BLS12-381 threshold
-shares in the encrypted software backend. The contract:
+This is the byte-exact on-disk layout of the encrypted software-key
+record referenced by the bullet list above (fields bound as AAD;
+XChaCha20-Poly1305; OS-protector-wrapped DEK). Every multi-byte integer
+is little-endian per SPEC-CONVENTIONS §3. A "length-prefixed field"
+below means `[u32 LE length][length bytes]` — this applies even to the
+fixed-24-byte nonce, which still carries its own length prefix rather
+than a bare 24-byte slice, for uniformity with every other field.
+
+```
+offset  size     field
+0       8        magic              "MKITKSV1"
+8       1        version            0x01
+9       1        algorithm_id       registry below
+10      1        attrs_bits         key-attribute bitflags (extractable, etc.)
+11      …        protector          length-prefixed UTF-8 (e.g. "macos-keychain")
+…       …        public_key         length-prefixed raw bytes
+…       …        keyid              length-prefixed UTF-8 (canonical keyid string)
+…       4+24     nonce              length-prefixed; length is always 24
+…       …        wrapped_dek        length-prefixed; OS-protector output over the 32-byte DEK
+…       …        ciphertext         length-prefixed; XChaCha20-Poly1305 ciphertext + 16-byte tag
+```
+
+`algorithm_id` registry:
+
+| Value | Algorithm |
+|---|---|
+| `0x01` | Ed25519 |
+| `0x02` | Secp256k1 |
+| `0x03` | P256 |
+| `0x04` | *Reserved* — never appears in a canonical `EncryptedKeyRecord`. BLS12-381 threshold shares share this algorithm-id space conceptually but are encoded through the distinct `BlsShareRecord` format (magic `MKITKSB1`, §6.1.2), since a share's plaintext is a variable-length `commonware`-encoded structure, not a 32-byte scalar. A decoder MUST reject id `0x04` inside a `MKITKSV1` record. |
+
+`attrs_bits` registry (bit 0 = LSB):
+
+| Bit | Meaning |
+|---|---|
+| 0 | `extractable` |
+| 1 | `require_user_presence` |
+| 2 | `device_bound` |
+
+Any bit outside 0–2 set MUST be rejected as a decoding error.
+
+Readers MUST reject any version byte other than `0x01` (no dual-version
+compatibility — see SPEC-CONVENTIONS §2's note on versioning; this is
+local, unreleased state with no installed base to protect) and MUST
+reject any trailing bytes after the declared field list, the same
+discipline SPEC-INDEX applies to the staging-area file.
+
+**Nonce sourcing (normative):** the 24-byte nonce is generated fresh,
+from a CSPRNG, for every `encrypt` call — never derived, never a
+counter. This is safe without any uniqueness-tracking mechanism because
+XChaCha20's 192-bit nonce space makes an accidental collision
+astronomically unlikely across any realistic number of key records; a
+96-bit (regular ChaCha20/AES-GCM-sized) nonce would not have this
+property and would need a counter or record-count cap instead.
+
+**AAD construction (normative):** the Additional Authenticated Data
+bound into the AEAD tag — and separately supplied to the OS-native
+protector wrapping the DEK, though some protectors ignore it (§6.1) —
+is the concatenation, in this exact order, of:
+
+```
+magic (8 bytes) || version (1 byte)
+|| length-prefixed literal "software"
+|| length-prefixed label
+|| algorithm_id (1 byte) || attrs_bits (1 byte)
+|| length-prefixed protector
+|| length-prefixed public_key
+|| length-prefixed keyid
+```
+
+Every variable-length field is length-prefixed exactly as in the record
+encoding above, so the AAD has no field-boundary ambiguity — the same
+canonicalization discipline SPEC-SIGNING §2.1 uses for its domain
+digests. This AAD binding is what defeats a substitution attack (an
+adversary swapping one key's ciphertext/wrapped-DEK into another
+key's record slot, or changing the claimed algorithm/attrs after the
+fact) — decryption fails closed if any bound field doesn't match what
+was encrypted.
+
+#### 6.1.2 BLS12-381 Threshold Share Storage
+
+The encrypted software backend stores BLS12-381 threshold shares (issue #160;
+see also §6 of `SPEC-RELEASE-THRESHOLD.md`). The contract:
 
 - BLS shares are **variable-length** (≈52 bytes for the `MinSig`
   variant — the wire-encoded
@@ -699,10 +767,9 @@ shares in the encrypted software backend. The contract:
   <base>` surface.
 - Hostile backends (`yubikey`, `macos-keychain`, `windows-credential`,
   `linux-secret-service`, `systemd-creds`) MUST reject
-  `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage
-  is software-backend-only in the keystore-backed share storage stage; a
-  later stage may extend to native backends with their own threshold-aware
-  wire formats.
+  `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage is
+  software-backend-only; extending it to native backends with their own
+  threshold-aware wire formats is out of scope unless this spec is amended.
 
 ### 6.2 Memory Backend
 
@@ -725,20 +792,19 @@ Requirements:
 - Store extractable software keys as Keychain generic password or keychain key
   items under a stable service/account scheme.
 - Implement deterministic listing of keys created by the mkit service/account
-  scheme so `mkit key list --backend macos-keychain` works for Keystore
-  V1.
-- V1 create/import refuses existing `(label, algorithm)` values in the normal
+  scheme so `mkit key list --backend macos-keychain` works.
+- create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-label create/import atomicity depends on the
   native Keychain primitive exposed by the selected dependency and is not a
-  cross-process lock guarantee in V1.
-- Keystore V1 stores extractable signing seeds in the user Keychain and must not
-  claim Secure Enclave, non-extractable, or device-bound semantics.
+  cross-process lock guarantee.
+- Stores extractable signing seeds in the user Keychain and must not claim
+  Secure Enclave, non-extractable, or device-bound semantics.
 - Device-bound Keychain storage using
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and
-  `kSecAttrSynchronizable = false` is follow-up work unless implemented and
-  covered by capability tests.
-- P-256 Secure Enclave support is optional after Foundation V1 but must report
-  non-extractable and user-presence capabilities accurately if implemented.
+  `kSecAttrSynchronizable = false` is out of scope unless this spec is amended
+  and the property is covered by capability tests.
+- P-256 Secure Enclave support is optional, but must report non-extractable
+  and user-presence capabilities accurately if implemented.
 - Ed25519 must not be advertised as Secure Enclave-backed. Apple Secure
   Enclave does not provide Ed25519 signing.
 
@@ -750,17 +816,17 @@ Default target: Windows only.
 
 Requirements:
 
-- Use Windows-native user-bound storage. Keystore V1 uses Credential Manager
-  with DPAPI-protected extractable records unless a CNG provider-backed key
+- Use Windows-native user-bound storage. Uses Credential Manager with
+  DPAPI-protected extractable records unless a CNG provider-backed key
   implementation is added.
 - Implement deterministic listing of keys created by the mkit target-name scheme
-  so `mkit key list --backend windows-credential` works for Keystore V1.
-- V1 create/import refuses existing `(label, algorithm)` values in the normal
+  so `mkit key list --backend windows-credential` works.
+- create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-target create/import atomicity depends on the
   Credential Manager primitive exposed by the selected dependency and is not a
-  cross-process lock guarantee in V1.
+  cross-process lock guarantee.
 - Report TPM/provider-backed behavior only when actually using a TPM-capable
-  provider such as `MS_PLATFORM_CRYPTO_PROVIDER`. Keystore V1 does not claim
+  provider such as `MS_PLATFORM_CRYPTO_PROVIDER`. Does not claim
   TPM/provider-backed behavior for Credential Manager records.
 - Ed25519 hardware support must be capability-detected, not assumed.
 
@@ -774,13 +840,12 @@ Requirements:
 
 - Use the Secret Service API through a reviewed dependency or a small adapter.
 - Implement deterministic listing of keys created by the mkit service/attribute
-  scheme so `mkit key list --backend linux-secret-service` works for
-  Keystore V1.
+  scheme so `mkit key list --backend linux-secret-service` works.
 - Must fail clearly when no service is available or the session is locked.
-- V1 create/import refuses existing `(label, algorithm)` values in the normal
+- create/import refuses existing `(label, algorithm)` values in the normal
   sequential case. Concurrent same-attribute create/import atomicity depends on
   the Secret Service implementation and dependency surface and is not a
-  cross-process lock guarantee in V1.
+  cross-process lock guarantee.
 - Must not be selected by default for headless/server mode.
 
 ### 6.6 systemd-creds Backend
@@ -795,7 +860,7 @@ Requirements:
   TPM2 libraries.
 - Shelling out must avoid shell interpolation. Use `Command` with argv tokens.
 - Backend must clearly report when `systemd-creds` is not available.
-- Keystore V1 treats `systemd-creds` as encrypted credential storage. It does
+- Treats `systemd-creds` as encrypted credential storage. It does
   not claim TPM/PCR sealing or device binding unless the backend explicitly
   requests and verifies those properties.
 
@@ -808,14 +873,14 @@ Requirements:
 - Support may be split across OpenPGP, PIV, and FIDO2/CTAP implementations.
 - Backend must advertise the exact applet and algorithm support it can use.
 - FIDO2/WebAuthn signing must preserve the existing WebAuthn wrapping
-  semantics already used by `mkit-attest` and contrib CTAP signer. V1 must
-  fail closed through the keystore API for FIDO2/CTAP labels and route users to
+  semantics already used by `mkit-attest` and contrib CTAP signer. Fails
+  closed through the keystore API for FIDO2/CTAP labels and routes users to
   the external CTAP signer unless a future keystore signer API can return the
   full WebAuthn assertion metadata.
 - User presence/PIN prompts must be represented through typed errors or an
   explicit prompt flow. Do not block indefinitely without timeout handling.
-- Keystore V1 does not accept YubiKey PINs through environment variables. PIN-
-  or touch-required signing fails closed with typed authentication errors until
+- Does not accept YubiKey PINs through environment variables. PIN- or
+  touch-required signing fails closed with typed authentication errors until
   a bounded prompt provider is implemented. FIDO2/CTAP labels continue to route
   users to the external signer path.
 
@@ -840,10 +905,10 @@ Current implementation status:
 
 ### 6.8 External And Cloud Backends
 
-External signer and cloud KMS support are not Foundation V1 blockers unless
-this spec is amended.
+External signer and cloud KMS support are out of scope unless this spec is
+amended.
 
-If implemented later:
+If implemented:
 
 - External signing should reuse `mkit-rpc` signer protocol where practical.
 - Cloud KMS backends must clearly identify non-extractability, algorithm
@@ -889,9 +954,7 @@ strictly stronger than the §5.7 validation: labels coming from a key-ref
 string cannot contain shell or environment-expansion characters even if a
 future backend would accept them in a non-ref context.
 
-Foundation V1 may initially support only the software family while preserving
-the syntax for later backends. Issue-complete V1 must support the required
-backend matrix in section 15.2.
+The syntax covers the full backend matrix in §6.
 
 A full key ref includes the backend. For signing integrations,
 `key.<algorithm>_ref = <backend>:<label>` is authoritative and must route to
@@ -902,8 +965,8 @@ when no explicit backend or configured key ref supplies one.
 
 ### 8.1 New User-Scoped Keys
 
-Foundation V1 must introduce user-scoped config keys for keystore selection.
-Exact names are normative unless amended here:
+`mkit-keystore` introduces these user-scoped config keys for keystore
+selection. Exact names are normative unless amended here:
 
 ```text
 signer = legacy
@@ -941,8 +1004,8 @@ Precedence:
   `key.ed25519_ref`, `key.secp256k1_ref`, or `key.p256_ref`. If the selected
   per-algorithm ref is empty, it uses `key.default_ref`.
 - Commit signing and attestation signing intentionally share the same default
-  per-algorithm key refs in Foundation V1. Separate attestation-only key refs
-  are out of scope unless this spec is amended.
+  per-algorithm key refs. Separate attestation-only key refs are out of scope
+  unless this spec is amended.
 - CLI flags override config for the command being run because they are explicit
   user input.
 - A configured full key ref's backend must not be ignored. For example,
@@ -987,8 +1050,8 @@ Compatibility behavior:
 - `signing_key` continues to drive legacy raw-file Ed25519 commit signing.
 - `attest.*_key_path` continues to drive legacy repo-key attestation signing.
 - Existing security scope rules remain unchanged.
-- Keystore refs do not replace existing path keys in Foundation V1; they are a
-  parallel mechanism.
+- Keystore refs do not replace existing path keys; they are a parallel
+  mechanism.
 
 ## 9. CLI Specification
 
@@ -1017,7 +1080,7 @@ mkit key generate [--backend <backend>] [--label <label>]
 
 Defaults:
 
-- `--backend`: `key.backend`, fallback `software` for Foundation V1.
+- `--backend`: `key.backend`, fallback `software`.
 - `--label`: parsed from the algorithm-specific configured key ref; if no ref
   is configured, defaults to `default` for Ed25519, `default-secp256k1` for
   secp256k1, and `default-p256` for P-256.
@@ -1101,8 +1164,8 @@ Behavior:
 - Export must fail for non-extractable keys.
 - Export must print only secret hex when scripting mode is requested. Human
   warnings must go to stderr.
-- Foundation V1 supports stdout export only. Exporting directly to a file is
-  deferred until a hardened file-output contract is added to this spec.
+- Supports stdout export only. Exporting directly to a file is out of scope
+  until a hardened file-output contract is added to this spec.
 - Export must never happen implicitly as part of signing, listing, or metadata
   lookup.
 
@@ -1118,7 +1181,7 @@ mkit key delete [--backend <backend>] [--label <label>]
 
 Behavior:
 
-- Must require `--yes` in Foundation V1. No interactive prompt is required.
+- Must require `--yes`. No interactive prompt is required.
 - Must delete exactly one selected key.
 - Must report key-not-found distinctly from successful deletion.
 - Must not delete legacy raw key files unless the selected backend is the
@@ -1146,7 +1209,7 @@ Requirements:
 - Ed25519 keystore commit signing must produce the same commit signature as
   current `KeyPair` signing for the same seed and same commit object.
 - Commit objects continue to embed the Ed25519 public key in `Commit.signer`.
-- Verification remains unchanged for Foundation V1.
+- Verification remains unchanged.
 - Missing keystore keys must be hard errors. Do not auto-generate during
   commit.
 
@@ -1159,12 +1222,9 @@ Implementation options:
 - Do not duplicate `domain_digest` construction in `mkit-cli` or
   `mkit-keystore`.
 
-Required cleanup:
-
-- `docs/specs/SPEC-SIGNING.md` now describes `BLAKE3(len_le16(domain) || domain ||
-  signing_bytes)` and matches the implementation. **Done.** Cross-reference
-  SPEC-SIGNING §3 for the canonical formula and `mkit_core::sign::domain_digest`
-  for the implementation.
+`docs/specs/SPEC-SIGNING.md` describes `BLAKE3(len_le16(domain) || domain ||
+signing_bytes)`, matching the implementation — see SPEC-SIGNING §3 for the
+canonical formula and `mkit_core::sign::domain_digest` for the implementation.
 
 ## 11. Attestation Integration
 
@@ -1202,7 +1262,7 @@ Key ID compatibility:
 ## 12. External Signer Relationship
 
 `mkit-rpc` already defines a signer protocol with `KEY_FORM_OPAQUE_HANDLE`.
-`mkit-keystore` does not replace this protocol in Foundation V1.
+`mkit-keystore` does not replace this protocol.
 
 Rules:
 
@@ -1210,8 +1270,8 @@ Rules:
   integrations.
 - `mkit-keystore` may later provide an external signer backend or bridge using
   the same RPC protocol.
-- Foundation V1 keystore work must not mutate the v1 RPC wire schema unless
-  this spec is updated with a compatibility analysis.
+- Keystore work must not mutate the v1 RPC wire schema unless this spec is
+  updated with a compatibility analysis.
 - If key refs are passed to external signers in the future, use
   `KEY_FORM_OPAQUE_HANDLE` and explicit key_ref bytes.
 
@@ -1260,9 +1320,9 @@ Rules:
 
 ### 13.6 Audit Logging
 
-Audit logging is not required for Foundation V1.
+Audit logging is not required.
 
-If later implemented:
+If implemented:
 
 - It must be opt-in.
 - It must not log secret material, signatures, raw payloads, or private key
@@ -1290,7 +1350,7 @@ If later implemented:
 
 `mkit-cli` must test:
 
-- `mkit key generate` creates a key through the Foundation V1 backend.
+- `mkit key generate` creates a key through the software backend.
 - `mkit key list` reports generated keys.
 - `mkit key import` imports a known Ed25519 seed.
 - `mkit key export --unsafe-print-secret` round-trips an imported extractable
@@ -1336,9 +1396,9 @@ environment gate set.
 
 Hardware tests may be ignored by default and documented as manual tests.
 
-### 14.5 Foundation V1 CI Gates
+### 14.5 CI Gates
 
-Foundation V1 must pass:
+`mkit-keystore` and its integrations must pass:
 
 ```text
 cd rust
@@ -1352,138 +1412,12 @@ cargo test --locked --workspace --doc
 If all-features cannot include OS-native backends on every CI OS, features must
 be structured so unsupported target-specific code is cfg-gated correctly.
 
-## 15. Completion Requirements
-
-### 15.1 Foundation V1 Completion Requirements
-
-Foundation V1 is complete only when all items below are done. Completing this
-section is not enough to close issue #104.
-
-Crate:
-
-- `rust/crates/mkit-keystore` exists.
-- It is a workspace member.
-- It exposes the API categories in section 5.
-- It has structured errors.
-- It has a software backend sufficient for deterministic tests and
-  compatibility-mode persistence.
-- It may have a memory backend for tests, but memory-only is not sufficient for
-  Foundation V1.
-- It builds without native platform services by default.
-
-CLI:
-
-- `mkit key generate` implemented.
-- `mkit key list` implemented.
-- `mkit key import` implemented.
-- `mkit key export` implemented with explicit unsafe export flag.
-- `mkit key delete` implemented with explicit `--yes`.
-- `mkit keygen` remains supported.
-- Help text and CLI tests are updated.
-
-Config:
-
-- Keystore config keys are implemented.
-- Every keystore selector is repo-forbidden.
-- Config tests prove repo config cannot select keys or backends.
-
-Signing:
-
-- `mkit-attest` can sign through a keystore-backed signer.
-- Ed25519 commit signing can sign through a keystore-backed signer.
-- Existing raw-file signing remains supported.
-- Existing verification behavior remains unchanged.
-
-Tests:
-
-- Unit tests cover keystore API behavior.
-- CLI integration tests cover new commands.
-- Golden compatibility tests cover deterministic signature equivalence.
-- Negative security tests cover repo-config rejection and missing-key behavior.
-
-Docs/spec cleanup:
-
-- `docs/specs/SPEC-SIGNING.md` is updated to match current implementation:
-  `BLAKE3(len_le16(domain) || domain || signing_bytes)`. **Done** — see
-  `digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)` in
-  SPEC-SIGNING §3 and the matching `domain_digest` implementation in
-  `mkit_core::sign`.
-- Threat model is updated with keystore backend assumptions. **In flight.**
-- CLI docs may summarize this behavior, but this specification remains the
-  source of truth unless amended in a later spec change.
-
-Review:
-
-- Crypto/key-handling changes receive dedicated review.
-- Any new direct dependency receives supply-chain review.
-- Any unsafe code must be justified locally and reviewed explicitly.
-
-### 15.2 Keystore V1 Completion Requirements
-
-Keystore V1 is complete only when all Foundation V1 requirements are complete
-and all items below are done. Deferred provider claims from the original issue
-remain out of scope unless explicitly added to this list.
-
-Backends:
-
-- Software encrypted-at-rest file mode is implemented or this spec is amended
-  with an equivalent reviewed design.
-- macOS Keychain backend is implemented and tested.
-- Windows DPAPI/Credential Manager backend is implemented and tested.
-- Linux Secret Service backend is implemented and tested.
-- `systemd-creds` backend is implemented and tested for Linux headless/server
-  use.
-- YubiKey backend is implemented behind a feature flag, with OpenPGP/PIV
-  discovery and FIDO2/CTAP fail-closed routing. PIN- or touch-required signing
-  must fail closed until a bounded prompt provider is implemented.
-
-Backend honesty:
-
-- macOS Secure Enclave support, if present, advertises P-256 only.
-- Windows TPM/provider-backed support is not claimed in Keystore V1.
-- Linux desktop and headless backend selection is explicit or documented; a
-  headless system must not silently try to use a locked desktop keyring.
-- Hardware-backed Ed25519 limitations are documented and reflected in
-  capabilities.
-
-CLI and integrations:
-
-- `mkit key {generate,list,import,export,delete}` works against every required
-  backend where the backend supports the requested operation.
-- macOS Keychain, Windows Credential Manager, Linux Secret Service, and
-  `systemd-creds` must support deterministic listing for keys created through
-  their V1 mkit backend schemes.
-- `mkit-attest` accepts a keystore-backed signer for every supported algorithm
-  and backend combination that can sign that algorithm.
-- Ed25519 commit signing can use every backend that advertises usable Ed25519
-  signing.
-
-Tests and CI:
-
-- Cross-platform CI covers macOS, Linux desktop-compatible paths,
-  Linux headless/server-compatible paths, and Windows.
-- Backend-specific tests are target- and feature-gated so unsupported backends
-  do not break unrelated platforms.
-- OS-native backend tests create unique labels, exercise supported create, list,
-  open, export, and delete paths, and clean up without relying on
-  developer-specific keychain state.
-- Golden vectors cover deterministic software/importable backends.
-- Hardware and OS ECDSA backends are tested for verification equivalence, not
-  byte equality, unless the backend guarantees deterministic signatures.
-
-Docs/spec cleanup:
-
-- `docs/THREAT-MODEL.md` documents the accepted malware, disk extraction,
-  backup exfiltration, and side-channel assumptions for each backend family.
-- User-facing docs may summarize the final behavior, but this specification
-  remains the implementation-review authority unless replaced by a later spec.
-
-## 16. Implementation Stages
+## 15. Implementation Stages
 
 Status tags below describe what is in the current build. They are advisory;
 the per-section requirements above remain normative.
 
-### Foundation — shipped
+### Crate and Core API
 
 - Add `mkit-keystore` crate. **Shipped.**
 - Add core API, errors, label/key-ref parsing, capabilities. **Shipped.**
@@ -1495,7 +1429,7 @@ the per-section requirements above remain normative.
   `mkit_core::sign::{load_raw_32, save_raw_32, save_raw_32_create_new}`.
 - Add unit tests. **Shipped.**
 
-### CLI Surface — shipped
+### CLI Surface
 
 - Add `commands/key.rs`. **Shipped** at
   `rust/crates/mkit-cli/src/commands/key.rs`.
@@ -1505,14 +1439,14 @@ the per-section requirements above remain normative.
   `REPO_FORBIDDEN_KEYS` in `mkit-cli/src/config.rs`.
 - Add CLI integration tests. **Shipped.**
 
-### Attestation Integration — shipped
+### Attestation Integration
 
 - Add keystore-backed `mkit_attest::Signer` adapter. **Shipped** as
   `KeystoreAttestSigner` in `commands/attest_factory.rs`.
 - Extend `attest_factory` for `attest.signer = keystore`. **Shipped.**
 - Add DSSE signing and verification tests. **Shipped.**
 
-### Commit Integration — shipped
+### Commit Integration
 
 - Add or expose the minimal `mkit-core` helper needed for keystore commit
   signing without creating a dependency cycle. **Shipped** —
@@ -1524,7 +1458,7 @@ the per-section requirements above remain normative.
   `keystore_commit_signature_matches_legacy_keypair_signature` in
   `commands/commit.rs` tests.
 
-### Keystore V1 Backend Matrix — mostly shipped
+### Backend Matrix
 
 - Make `software` the encrypted-at-rest software backend using OS-protected
   envelope encryption. **Shipped** — `SoftwareKeystore` + `EncryptedKeyRecord`
@@ -1544,39 +1478,39 @@ the per-section requirements above remain normative.
   in `commands/key.rs`, mirrored in commit and attest paths.
 - Add platform-gated tests and capability honesty tests. **Shipped.**
 
-### Production Readiness — in flight
+### CI and Documentation
 
-- Add cross-platform CI for macOS, Windows, Linux desktop-compatible paths, and
-  Linux headless/server-compatible paths. **Partially in flight** — live
-  OS-native backend tests are gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per
-  §14.4; CI matrix coverage is still being expanded.
-- Add golden vectors and verification-equivalence tests. **Shipped** for
+- Cross-platform CI for macOS, Windows, Linux desktop-compatible paths, and
+  Linux headless/server-compatible paths: live OS-native backend tests are
+  gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per §14.4; not every CI runner
+  currently exercises every backend.
+- Golden vectors and verification-equivalence tests: **shipped** for
   deterministic software/software-raw signers; hardware/OS ECDSA
-  verification-equivalence coverage is still expanding.
-- Update threat model, user-facing docs, supply-chain review notes, and backend
-  manual-test documentation. **Partially shipped** — see `docs/keystore.md`
-  for the end-user overview; `docs/THREAT-MODEL.md` updates per §15.2 are
-  still being landed.
+  verification-equivalence coverage does not yet cover every backend.
+- Threat model and user-facing docs: `docs/keystore.md` is the end-user
+  overview; `docs/THREAT-MODEL.md` does not yet document per-backend malware,
+  disk-extraction, backup-exfiltration, and side-channel assumptions for
+  every backend in §6.
 
-## 17. Deferred Decisions
+## 16. Design Decisions and Defaults
 
-The following decisions are resolved for the Keystore V1 target:
+- `mkit-keystore` includes macOS Keychain, Windows DPAPI/Credential Manager,
+  Linux Secret Service, `systemd-creds`, and YubiKey backends with capability
+  reports limited to what they actually implement.
+- The encrypted software-file design is OS-protected envelope encryption. The
+  `software` backend is encrypted-at-rest; raw compatibility is explicit via
+  `software-raw`.
+- YubiKey support includes OpenPGP/PIV discovery and FIDO2/CTAP fail-closed
+  routing; bounded PIN/touch prompt signing is out of scope unless this spec
+  is amended.
+- Commit signing and attestation signing deliberately share the same
+  per-algorithm `key.*_ref` defaults; attestation-only key refs are out of
+  scope unless a future need is identified and this spec is amended.
 
-1. The branch includes macOS Keychain, Windows DPAPI/Credential Manager, Linux
-   Secret Service, `systemd-creds`, and YubiKey backends with capability reports
-   limited to what they actually implement.
-2. The encrypted software-file design is OS-protected envelope encryption. The
-   `software` backend is encrypted-at-rest; raw compatibility is explicit via
-   `software-raw`.
-3. Whether a future `mkit key export --file <path>` mode is worth adding. It is
-   out of scope for Foundation V1.
-4. YubiKey support includes OpenPGP/PIV discovery and FIDO2/CTAP fail-closed
-   routing for V1; bounded PIN/touch prompt signing is follow-up work.
-5. Whether future releases need attestation-only key refs separate from the
-   shared `key.<algorithm>_ref` defaults. Foundation V1 deliberately shares
-   commit and attestation refs.
+Open question: whether a future `mkit key export --file <path>` mode is
+worth adding. Out of scope for now.
 
-Foundation V1 uses these fixed conservative defaults:
+`mkit-keystore` uses these fixed conservative defaults:
 
 - default backend: encrypted-at-rest software backend (`software`)
 - raw compatibility backend: explicit `software-raw`
@@ -1591,7 +1525,7 @@ Foundation V1 uses these fixed conservative defaults:
 - no repo-controlled key refs
 - no hardware capability claims without runtime proof
 
-## 18. Invariants
+## 17. Invariants
 
 §2 fixes the design-level invariants and §13 the security requirements;
 this table indexes them (plus the backend rules of §5–§6) by the
@@ -1607,7 +1541,7 @@ here adds a new requirement.
 | Requested key attributes are honored or refused, never silently weakened | backends reject unsupported attribute combinations (§5.2, §13.4) |
 | Secret bytes never leak via Debug, logs, or implicit paths | `Zeroizing` storage, manual `Debug`, `expose_secret` naming, redacting `Display` (§5.5, §5.8, §13.3) |
 | Export happens only explicitly and only for extractable keys | `--unsafe-print-secret` gate; typed non-extractable error; non-exportable backends omit `KeyExporter` (§5.7, §9.4, §13.3) |
-| `software` keys are encrypted at rest under an OS protector, never a password | per-record DEK + AEAD, OS-wrapped, fail closed with no usable protector (§2.11–2.12, §6.1) |
+| `software` keys are encrypted at rest under an OS protector, never a password | per-record DEK + AEAD, OS-wrapped, fail closed with no usable protector (§2.10–2.11, §6.1) |
 | An encrypted record cannot be re-bound to different metadata | AAD binds version/backend/label/algorithm/pubkey/keyid/attrs; BLS AAD additionally binds cohort pubkey + share index + M + N (§6.1, §6.1.1) |
 | `(label, algorithm)` is never silently overwritten, and delete removes exactly one key | overwrite requires `--force` / `overwrite: true`; no prefix deletes (§5.7, §9.1, §9.5) |
 | A configured full key ref's backend is authoritative | the ref routes to its backend; never reinterpreted via `key.backend` (§7, §8.1) |

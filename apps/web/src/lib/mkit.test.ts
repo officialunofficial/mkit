@@ -80,9 +80,9 @@ describe('mkit-wasm wrapper', () => {
     expect(kp.pubkey_hex).toMatch(pubkeyRe)
     expect(kp.algo).toBe(algo)
 
-    const commitHash = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'
+    const subjectBytes = new TextEncoder().encode('commit-fixture')
     const predicate = new TextEncoder().encode('{"approved":true}')
-    const att = m.attest_build(commitHash, 'https://example.com/Review/v1', predicate, SEED_A, algo)
+    const att = m.attest_build(subjectBytes, 'https://example.com/Review/v1', predicate, SEED_A, algo)
     expect(att.keyid).toBe(kp.keyid)
     expect(att.attestation_id_hex).toMatch(/^[0-9a-f]{64}$/)
     expect(m.attest_verify(att.envelope_json, kp.pubkey_hex, algo)).toBe(true)

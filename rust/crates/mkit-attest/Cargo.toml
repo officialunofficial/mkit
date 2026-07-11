@@ -25,8 +25,8 @@ workspace = true
 # signer_k256.rs, signer_p256.rs).
 default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
-algo-secp256k1 = ["dep:k256", "dep:sha2"]
-algo-p256 = ["dep:p256", "dep:sha2"]
+algo-secp256k1 = ["dep:k256"]
+algo-p256 = ["dep:p256"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
 # OFF by default: commonware-cryptography pulls blst (a sizeable
 # precompiled BLS library) and a portion of the commonware monorepo's
@@ -75,9 +75,12 @@ k256 = { version = "0.13", optional = true, default-features = false, features =
 # Enclave, Android Keystore, iOS CryptoKit, browser WebCrypto. Gated
 # behind `algo-p256`. Same `0.13` RustCrypto major as k256.
 p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
-# ES256K / ES256 both sign SHA256(pae); pull in a standalone sha2 so the
-# signers don't rely on k256/p256 re-exports bleeding across features.
-sha2 = { version = "0.10", optional = true, default-features = false }
+# Unconditional (not feature-gated): ES256K/ES256 sign SHA256(pae) when
+# those signer features are on, and every in-toto Statement subject
+# emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so
+# cosign / `gh attestation verify` / the SLSA verifier can read it,
+# regardless of which signing algorithms are compiled in.
+sha2 = { version = "0.10", default-features = false }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
 # commonware-cryptography's default `std` feature. The whole dep tree is
 # default-off; opt-in carries the cost. `commonware-codec` is the

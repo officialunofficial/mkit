@@ -138,9 +138,22 @@ algorithm below is what a transport server / a future
 transport compatible.
 
 `listRefs(prefix) -> [{name, hash}]` walks the ref namespace and
-returns all refs whose full name begins with `prefix`. The `name` in
-each returned tuple has `prefix` stripped, plus any trailing `/` on the
-prefix is also absorbed.
+returns all refs whose full name begins with `prefix` **at a path-
+component boundary**. The `name` in each returned tuple has `prefix`
+(plus the separating `/`) stripped.
+
+**Correction:** an earlier version of this section specified a third
+case — matching `F` against `P'` as a bare string prefix with no
+separator required — and justified it with a worked example
+(`listRefs("refs/heads/feat")` matching `refs/heads/feature`). That
+case is removed: it made the prefix-to-name mapping **non-injective**
+(`refs/heads/feat/x` and `refs/heads/featx` both stripped to the name
+`x` under the old rule, a real defect this document's own §4.1
+uniqueness invariant explicitly disallows) and could produce a
+returned `name` starting with `/` or otherwise violating the §3 name
+grammar. Prefix matching now requires a component boundary,
+unconditionally — matching Git's own `for-each-ref`/`show-ref`
+prefix semantics.
 
 Normative behaviour (this is the single source of truth; all transports
 MUST conform):
@@ -158,11 +171,11 @@ Given full ref name F, prefix P, returned name N:
             skip
         elif F starts with P' + '/':
             N = F[len(P') + 1 ..]
-        elif F starts with P':
-            # P' was a prefix without separator; this matches, e.g.
-            # listRefs("refs/heads/feat") matching "refs/heads/feature"
-            N = F[len(P') ..]
         else:
+            # F does not extend P' at a component boundary — including
+            # the case where F is a bare string-prefix match with no
+            # following '/' (e.g. P' = "refs/heads/feat", F =
+            # "refs/heads/featx"). This is NOT a match.
             skip
 ```
 
@@ -170,16 +183,19 @@ In practice the common case is:
 
 - `listRefs("refs/heads")` → returned names are `{"main", "feature/x"}`.
 - `listRefs("refs/heads/")` → same result.
-- `listRefs("refs/heads/feat")` → returned names are `{"/x"}` if
-  `refs/heads/feat/x` exists, or `{"ure/y"}` if `refs/heads/featUre/y`
-  exists (edge case — discouraged but specified).
+- `listRefs("refs/heads/feat")` → returns `{"x"}` if `refs/heads/feat/x`
+  exists. It does **not** return anything derived from
+  `refs/heads/featx` or `refs/heads/feature` — those names do not
+  extend `refs/heads/feat` at a `/` boundary, so they are excluded
+  entirely, not truncated into a malformed name.
 
-Callers SHOULD pass prefixes that end at a path component boundary.
 Callers MUST NOT assume `prefix` includes a trailing `/`; the transport
 normalises either form.
 
 The spec pins the behaviour above; transports MUST conform or fail
-conformance tests.
+conformance tests. `mkit-transport-memory` and `mkit-transport-s3`'s
+`list_refs` are pinned against this exact rule by the regression test
+`list_refs_prefix_respects_path_component_boundary` (one per crate).
 
 ### 4.1 Ordering and duplicates
 
@@ -242,6 +258,16 @@ worktrees — can no longer both observe a stale `current` value and both
 report success while one write is silently lost. Only the in-process
 memory transport's `.match` remains genuinely non-atomic (single-fibre
 races), matching the row above.
+
+*Coordination with local worktree operations:* `<root>/.mkit/refs/.lock`
+by itself only serializes the file transport against concurrent instances
+of itself — it does not, on its own, coordinate against a `commit`,
+`checkout`, or `gc` running locally against the same directory via the
+`worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock` path. **There is no
+rule that closes this gap** — see SPEC-CONCURRENCY §3.1, which documents
+it as a real, currently unresolved coordination gap, and states mkit's
+supported deployment shape (a served root a worktree-owning process
+does not also mutate directly) rather than a locking fix.
 
 ### 5.2 ETag encoding divergence
 
@@ -392,7 +418,3 @@ file transport, is a read-then-write race (§5.1, test vector 5). The file
 transport's own `.match` is race-free (OS exclusive lock). Callers needing
 CAS under concurrency through a code path other than the file transport
 MUST use s3/http/ssh.
-
----
-
-*~1450 words.*

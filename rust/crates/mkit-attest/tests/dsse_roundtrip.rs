@@ -16,10 +16,10 @@ use mkit_attest::signer::Signer;
 use mkit_attest::signer_repo_key::{KEYID_PREFIX, RepoKeySigner};
 use mkit_attest::statement;
 use mkit_attest::verify::{self, Reason, Registry, TrustRoot};
-use mkit_core::hash::to_hex;
+use mkit_core::hash::{hash, to_hex};
 use mkit_core::sign::KeyPair;
 
-const COMMIT: [u8; 32] = [0x77; 32];
+const COMMIT_BYTES: &[u8] = b"dsse-roundtrip-fixed-commit-bytes";
 const SEED: [u8; 32] = [0x42; 32];
 
 fn build_envelope_signed_with_repo_key() -> (Envelope, [u8; 32], String) {
@@ -29,8 +29,14 @@ fn build_envelope_signed_with_repo_key() -> (Envelope, [u8; 32], String) {
     let keyid = signer.keyid().expect("keyid");
 
     // Build the payload (in-toto Statement) and the PAE we sign.
-    let payload =
-        statement::for_commit(&COMMIT, "https://example.com/predicate/v1", b"{\"k\":1}").unwrap();
+    let commit = hash(COMMIT_BYTES);
+    let payload = statement::for_commit(
+        &commit,
+        COMMIT_BYTES,
+        "https://example.com/predicate/v1",
+        b"{\"k\":1}",
+    )
+    .unwrap();
     let pae = env_mod::pae_of(PAYLOAD_TYPE_IN_TOTO, payload.as_bytes());
     let sig_bytes = signer.sign(&pae).unwrap();
 

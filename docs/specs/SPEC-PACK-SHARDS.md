@@ -1,14 +1,14 @@
 ---
 spec: SPEC-PACK-SHARDS
 version: 0
-status: transport-delivery-shipped
+status: stable-normative
 audience: implementers of pack producers and consumers; transport implementers
 ---
 
 # SPEC-PACK-SHARDS — erasure-coded pack delivery
 
-Status: **Transport delivery shipped** for mkit v0.x — the in-process
-codec and the wire/transport delivery surface have both landed. Tracks issue
+Status: **Normative** for mkit v0.x — the in-process codec and the
+wire/transport delivery surface are both implemented. Tracks issue
 [#159](https://github.com/officialunofficial/mkit/issues/159).
 Scope: a wire-level encoding *of* a pack — the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
@@ -71,7 +71,7 @@ decode_manifest}`.
 offset  size   field
 ------  -----  -----------------------------------------
 0       4      magic        = b"MKSH"
-4       1      version      = 0x01
+4       1      version      = 0x02
 5       32     pack_hash
 37      2      minimum_shards (u16, non-zero)
 39      2      extra_shards   (u16, non-zero)
@@ -82,6 +82,18 @@ offset  size   field
 
 For the v0 default `(16, 4)` config the manifest is `717` bytes:
 `5 + 32 + 2 + 2 + 32 + 4 + 20 * 32`.
+
+`version` was bumped `0x01` → `0x02` by issue
+[#661](https://github.com/officialunofficial/mkit/issues/661), which
+switched the Reed-Solomon hasher from `Sha256` to `Blake3` (§4) — a
+hard cutover, not dual-hasher support. `0x01` (the pre-#661
+`ReedSolomon<Sha256>` scheme) is retired **permanently** and MUST NOT
+be reused for a different wire meaning: a `0x01` manifest's
+`commitment` can never check out against the `Blake3`-based decoder,
+so a decoder that sees `0x01` MUST reject it with a version-specific
+error rather than the generic unrecognised-version error, so a caller
+stuck on an old producer gets an actionable message (re-shard with a
+current mkit) instead of an opaque failure.
 
 Decoders MUST:
 
@@ -136,17 +148,21 @@ The implementation lives in `mkit_core::pack_shard` and wraps
 [`commonware-coding`](https://docs.rs/commonware-coding) **v2026.5.0**
 (ALPHA stability — pinned exactly in `Cargo.toml`).
 
-The reference scheme is `commonware_coding::ReedSolomon<Sha256>` with
-the `Sequential` parallel strategy. Producers and consumers MUST use
-the same scheme and digest.
+The reference scheme is `commonware_coding::ReedSolomon<Blake3>`.
+Producers and consumers MUST use the same scheme and digest. The
+`commonware-parallel` execution strategy (`Sequential` vs a `Rayon`
+thread pool) is a caller-selectable performance parameter, not part
+of the wire contract — see `encode_pack_to_shards_with_strategy` /
+`decode_pack_from_shards_with_strategy` and issue
+[#653](https://github.com/officialunofficial/mkit/issues/653).
 
 ### 4.1 Encode
 
 ```text
-input:  pack: &[u8], config: Config
+input:  pack: &[u8], config: Config, strategy: impl Strategy
 output: (Vec<Shard>, ShardSet)
 
-1. (commitment, chunks) := ReedSolomon::encode(config, pack, Sequential)
+1. (commitment, chunks) := ReedSolomon::encode(config, pack, strategy)
 2. for i in 0..total_shards:
        bytes := codec_encode(chunks[i])
        shards[i] := Shard { index: i, bytes }
@@ -163,7 +179,7 @@ output: (Vec<Shard>, ShardSet)
 ### 4.2 Decode
 
 ```text
-input:  shards: &[Shard], manifest: &ShardSet
+input:  shards: &[Shard], manifest: &ShardSet, strategy: impl Strategy
 output: Vec<u8>  (the reconstructed pack)
 
 1. validate manifest.shard_hashes.len() == config.total_shards()
@@ -175,7 +191,7 @@ output: Vec<u8>  (the reconstructed pack)
    d. chunk := codec_decode(shard.bytes)
    e. checked := ReedSolomon::check(config, commitment, shard.index, chunk)
 3. require checked.len() >= minimum_shards
-4. pack := ReedSolomon::decode(config, commitment, checked.iter(), Sequential)
+4. pack := ReedSolomon::decode(config, commitment, checked.iter(), strategy)
 5. require BLAKE3(pack) == manifest.pack_hash
 6. return pack
 ```

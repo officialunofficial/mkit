@@ -1,7 +1,7 @@
 {
   "name": "statement_basic",
-  "description": "in-toto v1 Statement; commit subject 0xCC*32, predicate {} (JCS-canonical)",
+  "description": "in-toto v1 Statement; commit subject digest of ATTEST_COMMIT_BYTES (blake3 + sha256), predicate {} (JCS-canonical)",
   "bin": "statement_basic.json",
-  "size": 226,
-  "blake3": "f16487164072097ed704c4d8687e2069dadc6dfcba453d14b45db1ceb7eba59f"
+  "size": 302,
+  "blake3": "8e825bb1ad7328c0f969045450a87144094286f9a2e6ac630c48cb7a9679b4e8"
 }
