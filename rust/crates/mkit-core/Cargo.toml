@@ -60,6 +60,16 @@ subtle = { version = "2", default-features = false }
 tempfile = "3"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
+# Per-entry pack payload compression (SPEC-PACKFILE v2, issue #646).
+# `zstd-sys` is a C lib that cannot target wasm32 (see the comment on
+# `commonware-storage` above) — this is `optional = true`, gated by the
+# `pack-zstd` feature below, so `mkit-wasm` (which needs `pack.rs` to
+# compile but never calls into pack compression) can opt out via
+# `default-features = false`. 0.13.3 is already resolved transitively
+# via the commonware dependency stack (same version pinned here), so
+# this is not a new supply-chain root — just an explicit direct dep on
+# a crate already present in the tree.
+zstd = { version = "0.13", optional = true }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
@@ -67,7 +77,21 @@ zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 
 [features]
-default = []
+# `pack-zstd` is on by default for every normal (native) consumer —
+# `PackWriter`/`PackReader` transparently compress/decompress pack
+# entries per SPEC-PACKFILE v2 without any call-site changes. It is
+# the one default feature that pulls a dependency outside the
+# always-wasm-safe base, so the single crate that must NOT get it
+# (`mkit-wasm`, built for wasm32-unknown-unknown) opts out explicitly
+# with `default-features = false` on its `mkit-core` dependency.
+default = ["pack-zstd"]
+# SPEC-PACKFILE v2 (issue #646): zstd-compressed pack entries (`0x03`
+# zstd-raw, `0x04` zstd-delta). Disabling this feature does not make
+# `pack.rs` reject v2 packs at compile time — a build without it can
+# still fail closed at runtime on a `0x03`/`0x04` entry — it only
+# means this build's `PackWriter` never emits them and this build's
+# `PackReader` can't decompress ones it receives.
+pack-zstd = ["dep:zstd"]
 # Issue #157 — append-only MMR over the commit chain.
 #
 # The mem-only path (`CommitHistory::open`) needs only the in-process

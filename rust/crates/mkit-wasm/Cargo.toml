@@ -33,8 +33,16 @@ wasm-opt = false
 [lints]
 workspace = true
 
+# `default-features = false`: mkit-core's default feature set includes
+# `pack-zstd` (SPEC-PACKFILE v2 per-entry compression, issue #646),
+# which pulls `zstd-sys` — a C lib that cannot target
+# wasm32-unknown-unknown. mkit-wasm's bindings never call into
+# `pack.rs` (see `src/`), so opting out costs nothing here and keeps
+# this crate's wasm32 build zstd-sys-free, matching the same
+# wasm-avoidance rationale already documented on mkit-core's
+# `commonware-storage` dependency.
 [dependencies]
-mkit-core = { path = "../mkit-core" }
+mkit-core = { path = "../mkit-core", default-features = false }
 mkit-attest = { path = "../mkit-attest" }
 wasm-bindgen = "0.2"
 hex = "0.4"

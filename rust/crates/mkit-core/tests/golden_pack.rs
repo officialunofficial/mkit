@@ -218,3 +218,170 @@ fn empty_pack_pin_bytes() {
     let trailer = hash::hash(&pack[..12]);
     assert_eq!(&pack[12..], trailer.as_slice());
 }
+
+/// The exact 61 bytes `pack_basic_pin_bytes_roundtrip` builds via
+/// `PackWriter` — captured as a literal byte-for-byte pin BEFORE
+/// issue #646's v2/zstd changes landed. Unlike that test (which
+/// re-derives the pack through the current `PackWriter` and would
+/// silently drift if writer and reader changed in lockstep), this
+/// array can never change: it is the one fixed point
+/// `v1_pack_still_reads_bit_identical` decodes against, so any v1
+/// framing regression shows up as a decode failure here even if
+/// `PackWriter` itself is buggy in a way that's invisible to
+/// self-roundtrip tests.
+const PINNED_V1_SINGLE_RAW_PACK: [u8; 61] = [
+    0x4d, 0x4b, 0x49, 0x54, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00,
+    0x00, 0x01, 0x4d, 0x4b, 0x54, 0x31, 0x01, 0x02, 0x00, 0x00, 0x00, 0x68, 0x69, 0x8e, 0x3d, 0xbb,
+    0x17, 0x27, 0x3f, 0xd9, 0xca, 0x89, 0x34, 0xc6, 0x4e, 0x78, 0xe4, 0xe7, 0x55, 0xc3, 0x76, 0x81,
+    0x80, 0xf7, 0x8f, 0x08, 0x2c, 0xc1, 0xbf, 0x66, 0x95, 0xa8, 0xa6, 0x91, 0x34,
+];
+
+#[test]
+fn v1_pack_still_reads_bit_identical() {
+    // No-regression guardrail for issue #646 (SPEC-PACKFILE v2,
+    // zstd-compressed entries): a pre-existing v1 pack, pinned as raw
+    // bytes captured before the v2 changes, MUST decode to exactly the
+    // same result after those changes as it did before. `PackWriter`
+    // now sometimes emits `version = 2`, and `PackReader` now handles
+    // `0x03`/`0x04` — none of that may perturb how a plain `version =
+    // 1`, all-`0x00`/`0x02` pack like this one is read.
+    let blob = mkit_core::object::Object::Blob(mkit_core::object::Blob {
+        data: b"hi".to_vec(),
+    });
+    let blob_bytes = mkit_core::serialize::serialize(&blob).unwrap();
+    let blob_hash = hash::hash(&blob_bytes);
+
+    let pack = &PINNED_V1_SINGLE_RAW_PACK;
+    assert_eq!(u32::from_le_bytes(pack[4..8].try_into().unwrap()), 1);
+    assert_eq!(
+        pack[12], 0x00,
+        "sanity: pinned pack's only entry is 0x00 raw"
+    );
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let report = PackReader::read(pack.as_slice(), &store).unwrap();
+    assert_eq!(report.raw_count, 1);
+    assert_eq!(report.delta_count, 0);
+    assert_eq!(report.stored, vec![blob_hash]);
+    assert_eq!(store.read(&blob_hash).unwrap(), blob_bytes);
+}
+
+#[test]
+#[cfg(feature = "pack-zstd")]
+fn pack_v2_compressed_raw_pin_bytes_roundtrip() {
+    // Minimal v2 pack: one highly-compressible raw entry, forced into
+    // the 0x03 zstd-raw path by the §3.3 writer policy.
+    let payload = vec![0x42u8; 4096];
+    let blob = mkit_core::object::Object::Blob(mkit_core::object::Blob { data: payload });
+    let blob_bytes = mkit_core::serialize::serialize(&blob).unwrap();
+    let blob_hash = hash::hash(&blob_bytes);
+
+    let mut w = PackWriter::new();
+    w.push_raw(blob_hash, &blob_bytes).unwrap();
+    let pack = w.finish().unwrap();
+
+    // Header: version = 2.
+    assert_eq!(&pack[0..4], b"MKIT");
+    assert_eq!(u32::from_le_bytes(pack[4..8].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(pack[8..12].try_into().unwrap()), 1);
+
+    // Entry frame: type 0x03, payload = [4B uncompressed_len][zstd frame].
+    assert_eq!(pack[12], 0x03);
+    let entry_payload_len = u32::from_le_bytes(pack[13..17].try_into().unwrap()) as usize;
+    let uncompressed_len = u32::from_le_bytes(pack[17..21].try_into().unwrap()) as usize;
+    assert_eq!(uncompressed_len, blob_bytes.len());
+    // The whole point of compression: on-wire payload is much smaller
+    // than the 4096+ byte original for this maximally-repetitive input.
+    assert!(
+        entry_payload_len < blob_bytes.len() / 4,
+        "expected substantial compression, on-wire={entry_payload_len} raw={}",
+        blob_bytes.len()
+    );
+
+    // Trailer.
+    let split = pack.len() - 32;
+    let trailer = hash::hash(&pack[..split]);
+    assert_eq!(&pack[split..], trailer.as_slice());
+    assert_eq!(pack_key(&pack), hash::hash(&pack));
+
+    // Roundtrip through reader: recovered bytes are byte-identical to
+    // the pre-compression original.
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let report = PackReader::read(&pack, &store).unwrap();
+    assert_eq!(report.raw_count, 1);
+    assert_eq!(report.delta_count, 0);
+    assert_eq!(report.stored, vec![blob_hash]);
+    assert_eq!(store.read(&blob_hash).unwrap(), blob_bytes);
+}
+
+#[test]
+#[cfg(feature = "pack-zstd")]
+fn pack_v2_compressed_delta_pin_bytes_roundtrip() {
+    // Minimal v2 pack: a raw base plus one delta entry whose stream is
+    // highly-compressible, forced into the 0x04 zstd-delta path.
+    let base_blob = mkit_core::object::Object::Blob(mkit_core::object::Blob {
+        data: b"delta base filler, deliberately unrelated to the target".to_vec(),
+    });
+    let base_bytes = mkit_core::serialize::serialize(&base_blob).unwrap();
+    let base_hash = hash::hash(&base_bytes);
+
+    let target_blob = mkit_core::object::Object::Blob(mkit_core::object::Blob {
+        data: vec![0x42u8; 4096],
+    });
+    let target_bytes = mkit_core::serialize::serialize(&target_blob).unwrap();
+    let target_hash = hash::hash(&target_bytes);
+
+    let stream = delta::encode(&base_bytes, &target_bytes).unwrap();
+    assert!(
+        stream.len() >= 64,
+        "sanity: stream must clear the compression-candidate floor"
+    );
+
+    let mut w = PackWriter::new();
+    w.push_raw(base_hash, &base_bytes).unwrap();
+    w.push_delta(&base_hash, &stream).unwrap();
+    let pack = w.finish().unwrap();
+
+    assert_eq!(u32::from_le_bytes(pack[4..8].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(pack[8..12].try_into().unwrap()), 2);
+
+    // First entry: raw base (0x00, base_bytes is short and not worth
+    // compressing).
+    assert_eq!(pack[12], 0x00);
+    let base_payload_len = u32::from_le_bytes(pack[13..17].try_into().unwrap()) as usize;
+    assert_eq!(&pack[17..17 + base_payload_len], base_bytes.as_slice());
+
+    // Second entry: 0x04 zstd-delta, payload = [32B base_hash]
+    // [4B uncompressed_len][zstd frame].
+    let second_offset = 12 + 5 + base_payload_len;
+    assert_eq!(pack[second_offset], 0x04);
+    let second_payload_offset = second_offset + 5;
+    assert_eq!(
+        &pack[second_payload_offset..second_payload_offset + 32],
+        base_hash.as_slice(),
+        "0x04's base_hash must be uncompressed and in the same position as 0x02's"
+    );
+    let uncompressed_len_offset = second_payload_offset + 32;
+    let uncompressed_len = u32::from_le_bytes(
+        pack[uncompressed_len_offset..uncompressed_len_offset + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    assert_eq!(uncompressed_len, stream.len());
+
+    // Trailer.
+    let split = pack.len() - 32;
+    let trailer = hash::hash(&pack[..split]);
+    assert_eq!(&pack[split..], trailer.as_slice());
+
+    // Roundtrip through reader.
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let report = PackReader::read(&pack, &store).unwrap();
+    assert_eq!(report.raw_count, 1);
+    assert_eq!(report.delta_count, 1);
+    assert_eq!(report.stored, vec![base_hash, target_hash]);
+    assert_eq!(store.read(&target_hash).unwrap(), target_bytes);
+}

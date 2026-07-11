@@ -38,6 +38,15 @@ harness = false
 name = "pack_create"
 harness = false
 
+# Issue #646 — SPEC-PACKFILE v2 zstd compression: pack-byte comparison
+# ({v1 uncompressed, v2 compressed}) for a small multi-commit text-file
+# corpus. Not gated on any feature — `pack-zstd` is a default feature
+# of `mkit-core`, so a plain `cargo bench -p mkit-benches --bench
+# pack_compression` exercises the real compressed path.
+[[bench]]
+name = "pack_compression"
+harness = false
+
 [[bench]]
 name = "store_write"
 harness = false

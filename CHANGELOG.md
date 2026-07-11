@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
+  `PackWriter`/`PackReader` transparently compress/decompress pack
+  entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
+  each carrying its own independent zstd frame (no shared dictionary,
+  no whole-pack stream, so existing framing/caps/trailer semantics are
+  unchanged and decompression memory is bounded to one entry at a
+  time). No call-site changes needed: `push_raw`/`push_delta` compress
+  a candidate payload when it is at least 64 bytes and compresses
+  strictly smaller on the wire (mirroring the existing delta-preference
+  gate's posture), using zstd level 3 (library default). The writer
+  emits `version = 1` when a pack has no compressed entries and
+  `version = 2` the moment it has at least one; `0x03`/`0x04` are
+  illegal inside a `version = 1` pack and rejected as `InvalidEntryType`
+  if seen there. Old (pre-v2) readers hitting a v2 pack fail closed
+  with `UnsupportedVersion` — the intended behavior, not a bug. Decode
+  is bomb-guarded: the claimed decompressed length is checked against
+  the 1 GiB object cap *before* any decompression allocation,
+  decompression is capacity-bounded to that claim, and the actual
+  decompressed length is re-checked against the claim afterward (new
+  `PackError::DecompressedSizeOverCap` / `DecompressedSizeMismatch` /
+  `ZstdEntryTruncated` / `ZstdDecompress` variants). On a synthetic
+  6-commit / 4-file-per-commit text corpus (files 8–48 KiB, <100 KB
+  cap), pack bytes went from 655,764 (v1 uncompressed) to 184,881 (v2
+  compressed) — a 3.55x reduction (71.8% saved); see
+  `rust/benches/benches/pack_compression.rs`. New direct `zstd`
+  dependency on `mkit-core` (behind a `pack-zstd` feature, on by
+  default) — already present transitively via the `commonware-storage`
+  dependency stack at the same resolved version (0.13.3), so this adds
+  no new supply-chain root. `mkit-wasm` opts out (`default-features =
+  false`) since `zstd-sys` cannot target wasm32.
 - **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
   machine-readable blame: a per-line header (`<id> <orig> <final>
   [<group-len>]`) plus a metadata block (author/committer, `author-time`/

@@ -4,10 +4,10 @@
 //!
 //! ```text
 //! [4B  magic            "MKIT"]                       offset 0
-//! [4B  version u32 LE  == 1   ]
+//! [4B  version u32 LE  == 1 or 2]
 //! [4B  entry_count u32 LE     ]
 //!   for each entry:
-//!     [u8  entry_type]                                0x00 raw | 0x02 delta
+//!     [u8  entry_type]           0x00 raw | 0x02 delta | 0x03 zstd-raw | 0x04 zstd-delta
 //!     [u32 LE payload_len]                            length of payload only
 //!     [payload_len bytes payload]
 //! [32B trailer = BLAKE3 of all preceding bytes]
@@ -15,18 +15,45 @@
 //!
 //! Entry types (SPEC-PACKFILE §3):
 //!
-//! * `0x00` raw  — payload is a fully serialised mkit object.
-//! * `0x01`      — RESERVED, MUST be rejected.
-//! * `0x02` delta — payload is `[32B base_hash][SPEC-DELTA stream]`.
+//! * `0x00` raw        — payload is a fully serialised mkit object.
+//! * `0x01`             — RESERVED, MUST be rejected.
+//! * `0x02` delta       — payload is `[32B base_hash][SPEC-DELTA stream]`.
+//! * `0x03` zstd-raw    — v2 only. payload is `[4B uncompressed_len LE][zstd frame]`;
+//!   the frame decompresses to exactly what a `0x00` payload would be.
+//! * `0x04` zstd-delta  — v2 only. payload is `[32B base_hash][4B uncompressed_len LE][zstd frame]`;
+//!   `base_hash` stays uncompressed, the frame decompresses to exactly
+//!   what a `0x02` entry's post-base-hash bytes would be.
 //!
-//! Caps (SPEC-PACKFILE §5):
+//! **Version selection is writer policy, not caller policy**
+//! (SPEC-PACKFILE §1): [`PackWriter`] emits `version = 1` when the
+//! finished pack contains no `0x03`/`0x04` entries, and `version = 2`
+//! the moment it contains at least one — even in an otherwise-mixed
+//! pack. `0x03`/`0x04` are illegal inside a `version = 1` pack; a
+//! reader seeing one there rejects with `InvalidEntryType` exactly as
+//! it would for any other unrecognized type (SPEC-PACKFILE §3).
+//!
+//! **Compression is per-entry**, not a whole-pack stream: every
+//! `0x03`/`0x04` entry carries its own independent zstd frame, so
+//! existing framing/caps/trailer semantics (§2, §5, §8) are unchanged
+//! and decompression memory is bounded to one entry at a time.
+//! Decoding a `0x03`/`0x04` entry is bomb-guarded: the claimed
+//! `uncompressed_len` is checked against [`MAX_RAW_OBJECT_SIZE`]
+//! *before* any decompression allocation, decompression itself is
+//! capacity-bounded to that claim, and the actual decompressed length
+//! is re-checked against the claim afterward (`DecompressedSizeMismatch`
+//! / `DecompressedSizeOverCap`).
+//!
+//! Caps (SPEC-PACKFILE §5, unchanged by v2 — measured on the *wire*
+//! size; the decompressed-side cap above is separate and new):
 //!
 //! * `entry_count <= 10_000_000`
 //! * total `payload_len` sum `<= 4 GiB`
 //!
 //! Delta-base ordering rule (SPEC-PACKFILE §4): every delta entry's
-//! `base_hash` MUST appear earlier in the same pack as a raw entry, OR
-//! already exist in the destination object store.
+//! (`0x02` or `0x04`) `base_hash` MUST appear earlier in the same pack
+//! as a raw entry, OR already exist in the destination object store.
+//! `0x04`'s `base_hash` is never compressed, so this never requires
+//! decompression to evaluate.
 //!
 //! The pack key (SPEC-PACKFILE §7) is `packs/<lower-hex BLAKE3 of entire
 //! pack>`. The trailer is then redundant w.r.t. that key, but it lets a
@@ -40,10 +67,17 @@ use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// ASCII magic ("MKIT") at the start of every v1 pack.
+/// ASCII magic ("MKIT") at the start of every pack, v1 or v2.
 pub const MAGIC: &[u8; 4] = b"MKIT";
-/// Current packfile version. Reader rejects anything else.
+/// Packfile version emitted when a pack contains no compressed
+/// (`0x03`/`0x04`) entries. Also the minimum version any reader
+/// accepts.
 pub const VERSION: u32 = 1;
+/// Packfile version emitted the moment a pack contains at least one
+/// compressed (`0x03`/`0x04`) entry (SPEC-PACKFILE §1, §9). Readers
+/// accept both `VERSION` and `VERSION_V2`; only `VERSION_V2` packs may
+/// contain `0x03`/`0x04` entries.
+pub const VERSION_V2: u32 = 2;
 
 /// Hard cap on entries (SPEC-PACKFILE §5).
 pub const MAX_ENTRIES: u32 = 10_000_000;
@@ -56,12 +90,33 @@ pub const TRAILER_LEN: usize = 32;
 pub const HEADER_LEN: usize = 4 + 4 + 4;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
+/// Byte offset of the 4-byte `version` field within the header —
+/// right after the 4-byte magic. `PackWriter::finish` patches this
+/// once the final v1-vs-v2 decision is known (mirrors
+/// `ENTRY_COUNT_OFFSET` below).
+pub const VERSION_OFFSET: usize = 4;
 /// Byte offset of the 4-byte `entry_count` field within the header —
 /// after the 4-byte magic and 4-byte version fields. Found hardcoded
 /// as the literal range `8..12` at four call sites during the
 /// epic-#634 code review; named here instead, consistent with this
 /// file's existing `HEADER_LEN`/`TRAILER_LEN` convention.
 pub const ENTRY_COUNT_OFFSET: usize = 8;
+
+/// Compression candidates shorter than this are never compressed
+/// (SPEC-PACKFILE §3.3) — per-entry zstd framing overhead and CPU
+/// cost isn't worth it for tiny payloads. Only meaningful when the
+/// `pack-zstd` feature is compiled in (see `maybe_compress`).
+#[cfg(feature = "pack-zstd")]
+const MIN_COMPRESS_LEN: usize = 64;
+/// zstd compression level `PackWriter` uses for `0x03`/`0x04` entries.
+/// The library default (`ZSTD_CLEVEL_DEFAULT`); no benchmark evidence
+/// in issue #646 justified deviating from it.
+#[cfg(feature = "pack-zstd")]
+const ZSTD_LEVEL: i32 = 3;
+/// Byte length of a `0x03`/`0x04` entry's `uncompressed_len` length
+/// prefix. Part of the wire format regardless of whether this build
+/// can itself produce/consume `0x03`/`0x04` entries.
+const ZSTD_LEN_PREFIX: usize = 4;
 
 /// Packfile errors. Distinct from [`MkitError`] so callers can match on
 /// pack-specific failures (trailer mismatch, base-missing) without
@@ -72,9 +127,12 @@ pub enum PackError {
     PackfileTooShort,
     #[error("first 4 bytes are not ASCII \"MKIT\"")]
     InvalidMagic,
-    #[error("version {0} is not supported (v1 only)")]
+    #[error("version {0} is not supported (v1 or v2 only)")]
     UnsupportedVersion(u32),
-    #[error("entry_type {0:#04x} is not 0x00 (raw) or 0x02 (delta)")]
+    #[error(
+        "entry_type {0:#04x} is not 0x00 (raw), 0x02 (delta), 0x03 (zstd-raw), or 0x04 \
+         (zstd-delta) — or is a v2-only entry type inside a version-1 pack"
+    )]
     InvalidEntryType(u8),
     #[error("entry_count {0} exceeds the {MAX_ENTRIES} cap")]
     TooManyObjects(u32),
@@ -98,6 +156,27 @@ pub enum PackError {
     TrailingData,
     #[error("store I/O failure: {0}")]
     Store(#[from] crate::store::StoreError),
+    /// `0x03`/`0x04` payload shorter than its `[uncompressed_len]`
+    /// length-prefix header (SPEC-PACKFILE §3.3, §3.4) — distinct from
+    /// `DeltaEntryTruncated`, which covers the 32-byte `base_hash`
+    /// prefix a `0x04` entry has in front of this.
+    #[error("zstd entry payload is shorter than its length-prefix header")]
+    ZstdEntryTruncated,
+    /// Claimed `uncompressed_len` exceeds [`MAX_RAW_OBJECT_SIZE`] —
+    /// rejected before any decompression allocation is attempted
+    /// (SPEC-PACKFILE §3.3 bomb-guarding).
+    #[error(
+        "zstd entry's claimed decompressed size {0} exceeds the {MAX_RAW_OBJECT_SIZE}-byte cap"
+    )]
+    DecompressedSizeOverCap(usize),
+    /// The zstd frame decompressed successfully but produced a
+    /// different byte count than the entry's claimed
+    /// `uncompressed_len` (SPEC-PACKFILE §3.3 bomb-guarding).
+    #[error("zstd entry claims {0} decompressed bytes but produced {1}")]
+    DecompressedSizeMismatch(usize, usize),
+    /// The zstd frame itself is corrupt / not a valid zstd stream.
+    #[error("zstd decompression failed: {0}")]
+    ZstdDecompress(String),
 }
 
 /// Result of an unpack: which entries were stored, plus a count of
@@ -127,6 +206,11 @@ pub struct PackWriter {
     buf: Vec<u8>,
     entry_count: u32,
     total_payload: u64,
+    // Set the first time `push_raw`/`push_delta` emits a `0x03`/`0x04`
+    // entry. `finish` reads this to decide the header's `version`
+    // field (SPEC-PACKFILE §1's writer version-selection rule) — v2
+    // the moment ANY entry ended up compressed, v1 otherwise.
+    has_compressed_entry: bool,
 }
 
 impl Default for PackWriter {
@@ -147,6 +231,7 @@ impl PackWriter {
             buf,
             entry_count: 0,
             total_payload: 0,
+            has_compressed_entry: false,
         }
     }
 
@@ -158,10 +243,29 @@ impl PackWriter {
     /// copies it straight into the output buffer as it's pushed, so it
     /// never needs to own the caller's copy (issue #647). Returns the
     /// same hash for chaining.
+    ///
+    /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
+    /// if `bytes` compresses under zstd strictly smaller on the wire
+    /// (and is long enough to bother, see [`MIN_COMPRESS_LEN`]), this
+    /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
+    /// never need to opt in. Either way the returned/stored identity
+    /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
     pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
-        self.check_caps_for(bytes.len())?;
-        self.total_payload += bytes.len() as u64;
-        self.append_entry(0x00, &[bytes])?;
+        if let Some(frame) = maybe_compress(bytes) {
+            let uncompressed_len: u32 = bytes
+                .len()
+                .try_into()
+                .map_err(|_| PackError::PackfileTooLarge)?;
+            let payload_len = ZSTD_LEN_PREFIX + frame.len();
+            self.check_caps_for(payload_len)?;
+            self.total_payload += payload_len as u64;
+            self.append_entry(0x03, &[&uncompressed_len.to_le_bytes(), &frame])?;
+            self.has_compressed_entry = true;
+        } else {
+            self.check_caps_for(bytes.len())?;
+            self.total_payload += bytes.len() as u64;
+            self.append_entry(0x00, &[bytes])?;
+        }
         self.entry_count += 1;
         Ok(hash_of_bytes)
     }
@@ -170,11 +274,37 @@ impl PackWriter {
     /// entry in this pack OR an object already in the destination store.
     /// `delta_stream` MUST be a valid SPEC-DELTA stream — we don't
     /// re-validate here (the writer is trusted), but the reader will.
+    ///
+    /// Applies the same §3.3 compression policy as [`Self::push_raw`],
+    /// but ONLY to `delta_stream` — `base_hash` is always written
+    /// uncompressed (SPEC-PACKFILE §3.4), so ordering/base-discovery
+    /// logic never needs to decompress anything. Emits `0x04`
+    /// zstd-delta when the stream compresses strictly smaller on the
+    /// wire and is long enough to bother; `0x02` delta otherwise.
     pub fn push_delta(&mut self, base_hash: &Hash, delta_stream: &[u8]) -> Result<(), PackError> {
-        let payload_len = hash::HASH_LEN + delta_stream.len();
-        self.check_caps_for(payload_len)?;
-        self.total_payload += payload_len as u64;
-        self.append_entry(0x02, &[base_hash.as_slice(), delta_stream])?;
+        if let Some(frame) = maybe_compress(delta_stream) {
+            let uncompressed_len: u32 = delta_stream
+                .len()
+                .try_into()
+                .map_err(|_| PackError::PackfileTooLarge)?;
+            let payload_len = hash::HASH_LEN + ZSTD_LEN_PREFIX + frame.len();
+            self.check_caps_for(payload_len)?;
+            self.total_payload += payload_len as u64;
+            self.append_entry(
+                0x04,
+                &[
+                    base_hash.as_slice(),
+                    &uncompressed_len.to_le_bytes(),
+                    &frame,
+                ],
+            )?;
+            self.has_compressed_entry = true;
+        } else {
+            let payload_len = hash::HASH_LEN + delta_stream.len();
+            self.check_caps_for(payload_len)?;
+            self.total_payload += payload_len as u64;
+            self.append_entry(0x02, &[base_hash.as_slice(), delta_stream])?;
+        }
         self.entry_count += 1;
         Ok(())
     }
@@ -217,9 +347,11 @@ impl PackWriter {
 
     /// Serialise the pack: header + entries + trailer. Entries are
     /// already in `self.buf` (streamed in by `push_raw`/`push_delta`);
-    /// `finish` only patches the header's entry count and appends the
-    /// trailer, `BLAKE3(everything_before_trailer)`. The whole pack's
-    /// BLAKE3 is the on-disk pack key — see [`pack_key`].
+    /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
+    /// iff at least one entry ended up compressed, v1 otherwise) and
+    /// `entry_count`, then appends the trailer,
+    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
+    /// the on-disk pack key — see [`pack_key`].
     pub fn finish(self) -> Result<Vec<u8>, PackError> {
         self.finish_inner(None)
     }
@@ -244,6 +376,12 @@ impl PackWriter {
         if self.entry_count > MAX_ENTRIES {
             return Err(PackError::TooManyObjects(self.entry_count));
         }
+        let version = if self.has_compressed_entry {
+            VERSION_V2
+        } else {
+            VERSION
+        };
+        self.buf[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
         self.buf[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
             .copy_from_slice(&self.entry_count.to_le_bytes());
         let trailer = hash::hash(&self.buf);
@@ -261,6 +399,79 @@ impl PackWriter {
 #[must_use]
 pub fn pack_key(pack_bytes: &[u8]) -> Hash {
     hash::hash(pack_bytes)
+}
+
+/// SPEC-PACKFILE §3.3 writer compression policy: compress `data` with
+/// zstd and return the frame ONLY if doing so is worth it — `data` is
+/// at least [`MIN_COMPRESS_LEN`] bytes AND the compressed frame plus
+/// its `ZSTD_LEN_PREFIX`-byte length prefix is strictly smaller than
+/// `data` itself. Mirrors `transfer.rs`'s `try_delta` gate's
+/// "strictly smaller or don't bother" posture. Returns `None` (never
+/// an error) on any compression failure or when compression isn't
+/// worth it — compression is a pure wire-size optimization, so a
+/// writer always has a correct fallback (emit the entry uncompressed)
+/// rather than a new failure mode to propagate.
+#[cfg(feature = "pack-zstd")]
+fn maybe_compress(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < MIN_COMPRESS_LEN {
+        return None;
+    }
+    let compressed = zstd::bulk::compress(data, ZSTD_LEVEL).ok()?;
+    if ZSTD_LEN_PREFIX + compressed.len() < data.len() {
+        Some(compressed)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "pack-zstd"))]
+fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
+    // No compression backend compiled in (e.g. mkit-wasm, which opts
+    // out of `pack-zstd` for wasm32-buildability — see mkit-core's
+    // Cargo.toml). Every pack this build writes is a valid v1 pack;
+    // it just never uses the v2-only entry types.
+    None
+}
+
+/// Parse and decompress a `0x03`/`0x04`-style `[uncompressed_len][zstd
+/// frame]` payload, enforcing SPEC-PACKFILE §3.3's bomb-guarding
+/// before any decompression allocation: the claimed length is checked
+/// against [`MAX_RAW_OBJECT_SIZE`] first, decompression is bounded to
+/// that claim, and the actual decompressed length is re-checked
+/// against the claim afterward.
+fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
+    if payload.len() < ZSTD_LEN_PREFIX {
+        return Err(PackError::ZstdEntryTruncated);
+    }
+    let uncompressed_len =
+        u32::from_le_bytes(payload[..ZSTD_LEN_PREFIX].try_into().expect("4 bytes")) as usize;
+    if uncompressed_len > MAX_RAW_OBJECT_SIZE {
+        return Err(PackError::DecompressedSizeOverCap(uncompressed_len));
+    }
+    let frame = &payload[ZSTD_LEN_PREFIX..];
+    let decompressed = zstd_decompress_capped(frame, uncompressed_len)?;
+    if decompressed.len() != uncompressed_len {
+        return Err(PackError::DecompressedSizeMismatch(
+            uncompressed_len,
+            decompressed.len(),
+        ));
+    }
+    Ok(decompressed)
+}
+
+/// Decompress `frame`, bounding the allocation to `capacity` bytes
+/// (already checked against [`MAX_RAW_OBJECT_SIZE`] by the caller) so
+/// a corrupt or hostile frame can't force an over-large allocation.
+#[cfg(feature = "pack-zstd")]
+fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+    zstd::bulk::decompress(frame, capacity).map_err(|e| PackError::ZstdDecompress(e.to_string()))
+}
+
+#[cfg(not(feature = "pack-zstd"))]
+fn zstd_decompress_capped(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
+    Err(PackError::ZstdDecompress(
+        "this build was compiled without the `pack-zstd` feature".to_string(),
+    ))
 }
 
 /// Collect the `base_hash` of every `0x02` delta entry in `pack_bytes`,
@@ -293,7 +504,7 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
         return Err(PackError::InvalidMagic);
     }
     let version = u32::from_le_bytes(pack_bytes[4..8].try_into().expect("4 bytes"));
-    if version != VERSION {
+    if version != VERSION && version != VERSION_V2 {
         return Err(PackError::UnsupportedVersion(version));
     }
     let count = u32::from_le_bytes(
@@ -322,7 +533,11 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
         if pos + payload_len > split {
             return Err(PackError::UnexpectedEof);
         }
-        if etype == 0x02 {
+        // `0x04`'s base_hash sits at the same offset (byte 0 of the
+        // payload) as `0x02`'s and is always uncompressed
+        // (SPEC-PACKFILE §3.4), so both entry types are scanned the
+        // same way here — no decompression needed to pre-fetch bases.
+        if etype == 0x02 || etype == 0x04 {
             if payload_len < TRAILER_LEN {
                 return Err(PackError::DeltaEntryTruncated);
             }
@@ -400,49 +615,11 @@ impl PackReader {
         payload_cap: u64,
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
-        // 1. Length sanity: must fit header + trailer at minimum.
-        if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
-            return Err(PackError::PackfileTooShort);
-        }
-        // 2. Magic.
-        if &pack_bytes[..4] != MAGIC.as_slice() {
-            return Err(PackError::InvalidMagic);
-        }
-        // 3. Version.
-        let version = u32::from_le_bytes(pack_bytes[4..8].try_into().expect("4 bytes"));
-        if version != VERSION {
-            return Err(PackError::UnsupportedVersion(version));
-        }
-        // 4. Trailer must match BEFORE we touch the store. SPEC-PACKFILE §8.
-        // Every entry parsed below is staged into the batch as it's
-        // seen (not buffered up front), but that's only safe to do
-        // BECAUSE the pack's own integrity is already established here,
-        // first — a corrupt/truncated pack is rejected before a single
-        // byte is staged, so the "abort leaves the store untouched"
-        // guarantee does not depend on holding the whole pack's staged
-        // output in memory at once (see `WriteBatch`'s module docs: a
-        // dropped, uncommitted batch unlinks its temp files for free).
-        let split = pack_bytes.len() - TRAILER_LEN;
-        let body = &pack_bytes[..split];
-        let trailer = &pack_bytes[split..];
-        let computed = hash::hash(body);
-        if computed.as_slice() != trailer {
-            return Err(PackError::PackfileCorrupted);
-        }
-        // 5. Entry count + cap.
-        let count = u32::from_le_bytes(
-            pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
-                .try_into()
-                .expect("4 bytes"),
-        );
-        if count > MAX_ENTRIES {
-            return Err(PackError::TooManyObjects(count));
-        }
-        // Quick lower bound sanity: each entry is at least ENTRY_FRAME_LEN bytes.
-        let body_after_header = body.len() - HEADER_LEN;
-        if u64::from(count) * ENTRY_FRAME_LEN as u64 > body_after_header as u64 {
-            return Err(PackError::TooManyObjects(count));
-        }
+        // Steps 1-5 (length/magic/version/trailer/entry-count) live in
+        // `validate_pack_header` — pulled out purely to keep this
+        // function's entry-parsing loop under clippy's line-count cap;
+        // no behavior moves, just where it's written.
+        let (version, split, count) = validate_pack_header(pack_bytes)?;
 
         let mut report = UnpackReport::default();
         // Track entries resolved in *this* pack so subsequent delta
@@ -496,16 +673,13 @@ impl PackReader {
             match etype {
                 0x00 => {
                     // raw — validate, then stage into the batch immediately.
-                    let obj = validate_storable_object(payload)?;
-                    // Address by the dispatched id (merkle root for
-                    // Tree/ChunkedBlob, BLAKE3 otherwise) from the object we
-                    // just decoded, so the unpacked object lands under the same
-                    // key every sink uses without a second decode.
-                    let stored_hash = crate::object::id_from_object(&obj, payload);
-                    batch.write_prehashed(stored_hash, &[payload])?;
-                    in_pack.insert(stored_hash, Cow::Borrowed(payload));
-                    report.raw_count += 1;
-                    report.stored.push(stored_hash);
+                    stage_raw_object(
+                        &batch,
+                        &mut in_pack,
+                        &mut report,
+                        owned_bytes,
+                        Cow::Borrowed(payload),
+                    )?;
                 }
                 0x02 => {
                     // delta — payload is [32B base_hash][stream].
@@ -515,40 +689,47 @@ impl PackReader {
                     let mut base_hash = [0u8; hash::HASH_LEN];
                     base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
                     let stream = &payload[hash::HASH_LEN..];
-                    // Resolve base: in-pack first, then on-disk. A
-                    // store-resolved base is cached into `in_pack` under
-                    // its own hash so a later delta entry referencing the
-                    // same out-of-pack base hits the cache-hit branch
-                    // above instead of paying another full read + verify +
-                    // decode (#643). This is safe because `store.read`
-                    // already hash-verified the bytes against `base_hash`.
-                    // Cloning once here (vs. #643's original Arc::clone)
-                    // is the cost of composing with #647's Cow-based
-                    // `in_pack`, which trades that one-time clone for
-                    // zero-copy borrows on the far more common raw-entry
-                    // path — a net win, and this clone only happens once
-                    // per unique out-of-pack base, not per delta entry.
-                    let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
-                        Cow::Borrowed(b.as_ref())
-                    } else if store.contains(&base_hash) {
-                        let bytes = store.read(&base_hash)?;
-                        validate_storable_object(&bytes)?;
-                        in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
-                        Cow::Owned(bytes)
-                    } else {
-                        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
-                    };
-                    validate_delta_result_size(stream)?;
-                    let resolved = delta::decode(base_bytes.as_ref(), stream)?;
-                    let obj = validate_storable_object(&resolved)?;
-                    let stored_hash = crate::object::id_from_object(&obj, &resolved);
-                    batch.write_prehashed(stored_hash, &[&resolved])?;
-                    if let Some(c) = owned_bytes {
-                        c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+                    stage_delta_target(
+                        store,
+                        &batch,
+                        &mut in_pack,
+                        &mut report,
+                        owned_bytes,
+                        base_hash,
+                        stream,
+                    )?;
+                }
+                0x03 if version == VERSION_V2 => {
+                    // zstd-raw — payload is [4B uncompressed_len][zstd frame]
+                    // (SPEC-PACKFILE §3.3). Decompress, then treat exactly
+                    // like a 0x00 raw entry.
+                    let obj_bytes = decompress_zstd_entry(payload)?;
+                    stage_raw_object(
+                        &batch,
+                        &mut in_pack,
+                        &mut report,
+                        owned_bytes,
+                        Cow::Owned(obj_bytes),
+                    )?;
+                }
+                0x04 if version == VERSION_V2 => {
+                    // zstd-delta — payload is [32B base_hash (uncompressed)]
+                    // [4B uncompressed_len][zstd frame] (SPEC-PACKFILE §3.4).
+                    if payload.len() < hash::HASH_LEN {
+                        return Err(PackError::DeltaEntryTruncated);
                     }
-                    in_pack.insert(stored_hash, Cow::Owned(resolved));
-                    report.delta_count += 1;
-                    report.stored.push(stored_hash);
+                    let mut base_hash = [0u8; hash::HASH_LEN];
+                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
+                    let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
+                    stage_delta_target(
+                        store,
+                        &batch,
+                        &mut in_pack,
+                        &mut report,
+                        owned_bytes,
+                        base_hash,
+                        &stream,
+                    )?;
                 }
                 0x01 => return Err(PackError::InvalidEntryType(0x01)),
                 other => return Err(PackError::InvalidEntryType(other)),
@@ -566,6 +747,158 @@ impl PackReader {
 
         Ok(report)
     }
+}
+
+/// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
+/// trailer verification (BEFORE anything touches the store), and
+/// entry-count cap. Returns `(version, split, count)` — `split` is the
+/// byte offset where the trailer begins (entries live in
+/// `pack_bytes[HEADER_LEN..split]`). Split out of
+/// [`PackReader::read_inner`] purely to keep that function's
+/// entry-parsing loop under clippy's line-count cap; no check moves,
+/// reorders, or changes behavior.
+fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackError> {
+    // 1. Length sanity: must fit header + trailer at minimum.
+    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+        return Err(PackError::PackfileTooShort);
+    }
+    // 2. Magic.
+    if &pack_bytes[..4] != MAGIC.as_slice() {
+        return Err(PackError::InvalidMagic);
+    }
+    // 3. Version. v1 and v2 both decode here; only v2 packs may
+    // contain `0x03`/`0x04` entries (enforced per-entry by the caller).
+    let version = u32::from_le_bytes(pack_bytes[4..8].try_into().expect("4 bytes"));
+    if version != VERSION && version != VERSION_V2 {
+        return Err(PackError::UnsupportedVersion(version));
+    }
+    // 4. Trailer must match BEFORE we touch the store. SPEC-PACKFILE §8.
+    // Every entry parsed by the caller is staged into its batch as
+    // it's seen (not buffered up front), but that's only safe to do
+    // BECAUSE the pack's own integrity is already established here,
+    // first — a corrupt/truncated pack is rejected before a single
+    // byte is staged, so the "abort leaves the store untouched"
+    // guarantee does not depend on holding the whole pack's staged
+    // output in memory at once (see `WriteBatch`'s module docs: a
+    // dropped, uncommitted batch unlinks its temp files for free).
+    let split = pack_bytes.len() - TRAILER_LEN;
+    let body = &pack_bytes[..split];
+    let trailer = &pack_bytes[split..];
+    let computed = hash::hash(body);
+    if computed.as_slice() != trailer {
+        return Err(PackError::PackfileCorrupted);
+    }
+    // 5. Entry count + cap.
+    let count = u32::from_le_bytes(
+        pack_bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+            .try_into()
+            .expect("4 bytes"),
+    );
+    if count > MAX_ENTRIES {
+        return Err(PackError::TooManyObjects(count));
+    }
+    // Quick lower bound sanity: each entry is at least ENTRY_FRAME_LEN bytes.
+    let body_after_header = body.len() - HEADER_LEN;
+    if u64::from(count) * ENTRY_FRAME_LEN as u64 > body_after_header as u64 {
+        return Err(PackError::TooManyObjects(count));
+    }
+    Ok((version, split, count))
+}
+
+/// Validate `payload` as a canonical storable object and stage it into
+/// `batch`/`in_pack`/`report`. Shared by the `0x00` and `0x03` branches
+/// of [`PackReader::read_inner`] — they differ only in whether
+/// `payload` is a zero-copy borrow straight out of `pack_bytes` (`0x00`)
+/// or an owned buffer produced by decompression (`0x03`); `owned_bytes`
+/// is credited only for the latter (`Cow::Owned`), preserving the
+/// zero-copy accounting issue #647 established for raw entries.
+fn stage_raw_object<'p>(
+    batch: &crate::batch::WriteBatch<'_>,
+    in_pack: &mut std::collections::HashMap<Hash, Cow<'p, [u8]>>,
+    report: &mut UnpackReport,
+    owned_bytes: Option<&AtomicU64>,
+    payload: Cow<'p, [u8]>,
+) -> Result<(), PackError> {
+    let obj = validate_storable_object(&payload)?;
+    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
+    // BLAKE3 otherwise) from the object we just decoded, so the
+    // unpacked object lands under the same key every sink uses without
+    // a second decode.
+    let stored_hash = crate::object::id_from_object(&obj, &payload);
+    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
+        c.fetch_add(payload.len() as u64, Ordering::Relaxed);
+    }
+    in_pack.insert(stored_hash, payload);
+    report.raw_count += 1;
+    report.stored.push(stored_hash);
+    Ok(())
+}
+
+/// Resolve a delta's base, decode `stream` against it, and stage the
+/// reconstructed target into `batch`/`in_pack`/`report`. Shared by the
+/// `0x02` and `0x04` branches of [`PackReader::read_inner`] — `0x04`
+/// differs only in how `stream` was sourced (decompressed vs. borrowed
+/// straight from `pack_bytes`), not in how base resolution, delta
+/// decoding, or staging work.
+#[allow(clippy::too_many_arguments)]
+fn stage_delta_target(
+    store: &ObjectStore,
+    batch: &crate::batch::WriteBatch<'_>,
+    in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
+    report: &mut UnpackReport,
+    owned_bytes: Option<&AtomicU64>,
+    base_hash: Hash,
+    stream: &[u8],
+) -> Result<(), PackError> {
+    let resolved = resolve_delta_target(store, in_pack, base_hash, stream)?;
+    let obj = validate_storable_object(&resolved)?;
+    let stored_hash = crate::object::id_from_object(&obj, &resolved);
+    batch.write_prehashed(stored_hash, &[&resolved])?;
+    if let Some(c) = owned_bytes {
+        c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+    }
+    in_pack.insert(stored_hash, Cow::Owned(resolved));
+    report.delta_count += 1;
+    report.stored.push(stored_hash);
+    Ok(())
+}
+
+/// Resolve a delta's base (in-pack first, then on-disk store) and decode
+/// `stream` against it. Shared by the `0x02` and `0x04` branches of
+/// [`PackReader::read_inner`] — `0x04` differs only in how `stream` was
+/// sourced (decompressed vs. borrowed straight from `pack_bytes`), not
+/// in how base resolution or delta decoding work.
+fn resolve_delta_target(
+    store: &ObjectStore,
+    in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
+    base_hash: Hash,
+    stream: &[u8],
+) -> Result<Vec<u8>, PackError> {
+    // Resolve base: in-pack first, then on-disk. A store-resolved base
+    // is cached into `in_pack` under its own hash so a later delta
+    // entry referencing the same out-of-pack base hits the cache-hit
+    // branch above instead of paying another full read + verify +
+    // decode (#643). This is safe because `store.read` already
+    // hash-verified the bytes against `base_hash`. Cloning once here
+    // (vs. #643's original Arc::clone) is the cost of composing with
+    // #647's Cow-based `in_pack`, which trades that one-time clone for
+    // zero-copy borrows on the far more common raw-entry path — a net
+    // win, and this clone only happens once per unique out-of-pack
+    // base, not per delta entry.
+    let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
+        Cow::Borrowed(b.as_ref())
+    } else if store.contains(&base_hash) {
+        let bytes = store.read(&base_hash)?;
+        validate_storable_object(&bytes)?;
+        in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
+        Cow::Owned(bytes)
+    } else {
+        return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
+    };
+    validate_delta_result_size(stream)?;
+    let resolved = delta::decode(base_bytes.as_ref(), stream)?;
+    Ok(resolved)
 }
 
 /// Decode `bytes`, enforce the size and storability invariants, and hand back
@@ -625,6 +958,31 @@ mod tests {
         let trailer = hash::hash(&body);
         body.extend_from_slice(&trailer);
         body
+    }
+
+    /// Deterministic, high-entropy filler for tests that specifically
+    /// exercise UNCOMPRESSED-entry behavior (zero-copy borrows, exact
+    /// on-wire cap arithmetic) and therefore need payloads the §3.3
+    /// writer policy will decline to compress. A simple LCG byte
+    /// stream is enough: zstd's LZ+entropy stages find no exploitable
+    /// redundancy in it, unlike a repeated-byte or short-period
+    /// pattern, so `4 + compressed_len < raw_len` never holds and
+    /// these payloads stay `0x00`/`0x02` exactly as before this
+    /// change. (Payloads elsewhere in this file that use a short
+    /// repeating pattern are fine to leave as-is — those tests assert
+    /// only functional round-trip correctness, not wire-format byte
+    /// counts, so whether they end up compressed doesn't affect them.)
+    fn incompressible_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        let mut state = seed | 1; // odd seed keeps the LCG full-period
+        for chunk in buf.chunks_mut(8) {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bytes = state.to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        buf
     }
 
     #[test]
@@ -1030,8 +1388,12 @@ mod tests {
         // impractical to trip directly in a unit test without
         // allocating gigabytes. `read_with_payload_cap` is the
         // test-only injection point: same check, caller-supplied cap.
-        let blob_a = write_blob_via_serialize(&[0xAA; 64]);
-        let blob_b = write_blob_via_serialize(&[0xBB; 64]);
+        // Incompressible filler (not `[0xAA; 64]`/`[0xBB; 64]`, which
+        // the §3.3 writer policy would shrink to a handful of
+        // compressed bytes): this test's cap arithmetic below assumes
+        // `blob_a.len()`/`blob_b.len()` ARE the on-wire sizes.
+        let blob_a = write_blob_via_serialize(&incompressible_bytes(0xA5A5, 64));
+        let blob_b = write_blob_via_serialize(&incompressible_bytes(0xB6B6, 64));
         let mut w = PackWriter::new();
         w.push_raw(hash::hash(&blob_a), &blob_a).unwrap();
         w.push_raw(hash::hash(&blob_b), &blob_b).unwrap();
@@ -1077,9 +1439,13 @@ mod tests {
         // tracks the exact production code path that would otherwise
         // do that copy (see `read_tracking_owned_bytes`), so this is a
         // precise, allocator-free proof rather than a fuzzy proxy.
+        // Incompressible filler: a repeated-byte 16 KiB payload would
+        // trip the §3.3 writer policy into emitting `0x03` zstd-raw
+        // instead of `0x00` raw, which genuinely DOES need an owned
+        // decompression buffer — that's not what this test is about.
         let mut w = PackWriter::new();
         for i in 0u32..64 {
-            let payload = vec![u8::try_from(i % 256).unwrap(); 16 * 1024];
+            let payload = incompressible_bytes(0x1000_0000 + u64::from(i), 16 * 1024);
             let blob = write_blob_via_serialize(&payload);
             w.push_raw(hash::hash(&blob), &blob).unwrap();
         }
@@ -1088,6 +1454,11 @@ mod tests {
             pack.len() > 512 * 1024,
             "sanity: synthetic pack should be substantial, got {}",
             pack.len()
+        );
+        assert_eq!(
+            u32::from_le_bytes(pack[VERSION_OFFSET..VERSION_OFFSET + 4].try_into().unwrap()),
+            VERSION,
+            "sanity: incompressible filler must stay an uncompressed v1 pack"
         );
 
         let (_dir, store) = fresh_store();
@@ -1107,11 +1478,11 @@ mod tests {
         // Complements the all-raw test above: the raw base must still
         // be a zero-copy borrow, and each delta's "owned" cost must be
         // exactly its reconstructed target size — never the base's size
-        // too, and never the whole pack's.
-        let mut content_base = vec![0u8; 4096];
-        for (i, b) in content_base.iter_mut().enumerate() {
-            *b = u8::try_from(i % 251).unwrap();
-        }
+        // too, and never the whole pack's. Incompressible base content,
+        // same rationale as that test: a compressible base would
+        // legitimately need an owned decompression buffer, which is
+        // not what this test measures.
+        let content_base = incompressible_bytes(0x2BAD_2BAD, 4096);
         let base_obj = write_blob_via_serialize(&content_base);
         let base_hash = hash::hash(&base_obj);
 
@@ -1152,9 +1523,15 @@ mod tests {
         // `finish()` itself should only ever append the 32-byte
         // trailer — `bytes_copied` tracks exactly that production code
         // path (see `finish_tracking_bytes_copied`).
+        // Incompressible filler (see the comment in
+        // `unpack_does_not_recopy_raw_payloads_into_a_second_buffer`):
+        // a repeated-byte payload would shrink dramatically under the
+        // §3.3 writer policy, invalidating the `pack.len() > 512 KiB`
+        // sanity check below, which has nothing to do with what this
+        // test is proving.
         let mut w = PackWriter::new();
         for i in 0u32..64 {
-            let payload = vec![u8::try_from(i % 256).unwrap(); 16 * 1024];
+            let payload = incompressible_bytes(0x2000_0000 + u64::from(i), 16 * 1024);
             let blob = write_blob_via_serialize(&payload);
             w.push_raw(hash::hash(&blob), &blob).unwrap();
         }
@@ -1245,5 +1622,196 @@ mod tests {
         for (target_hash, target_obj) in expected_targets {
             assert_eq!(store.read(&target_hash).unwrap(), target_obj);
         }
+    }
+
+    // =====================================================================
+    // SPEC-PACKFILE v2: zstd-compressed entries (issue #646)
+    // =====================================================================
+
+    /// Highly-compressible synthetic payload: `MIN_COMPRESS_LEN` (64) is
+    /// the writer's floor, so use something well past it — a single
+    /// repeated byte is the easiest thing for zstd to shrink hard.
+    fn compressible_bytes(len: usize) -> Vec<u8> {
+        vec![0x42u8; len]
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn compressed_raw_entry_roundtrips() {
+        let payload = compressible_bytes(4096);
+        let blob = write_blob_via_serialize(&payload);
+        let h = hash::hash(&blob);
+
+        let mut w = PackWriter::new();
+        w.push_raw(h, &blob).unwrap();
+        let pack = w.finish().unwrap();
+
+        assert_eq!(
+            u32::from_le_bytes(pack[VERSION_OFFSET..VERSION_OFFSET + 4].try_into().unwrap()),
+            VERSION_V2,
+            "a pack containing a compressed entry must be emitted as version 2"
+        );
+        assert_eq!(
+            pack[HEADER_LEN], 0x03,
+            "a highly-compressible raw payload must be emitted as 0x03 zstd-raw"
+        );
+
+        let (_dir, store) = fresh_store();
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(report.raw_count, 1);
+        assert_eq!(report.delta_count, 0);
+        assert_eq!(report.stored, vec![h]);
+        assert_eq!(
+            store.read(&h).unwrap(),
+            blob,
+            "recovered object must be byte-identical to the pre-compression original"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn compressed_delta_entry_roundtrips() {
+        // Base and target share (almost) nothing, so `delta::encode`
+        // emits a stream dominated by one big INSERT of the target's
+        // highly-compressible content — long and repetitive enough for
+        // the §3.3 writer policy to compress it into a 0x04 entry.
+        let base_obj =
+            write_blob_via_serialize(b"delta base filler bytes, not compressible-target-shaped");
+        let base_hash = hash::hash(&base_obj);
+        let target_content = compressible_bytes(4096);
+        let target_obj = write_blob_via_serialize(&target_content);
+        let target_hash = hash::hash(&target_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+        assert!(
+            stream.len() >= 64,
+            "sanity: delta stream must clear the writer's compression-candidate floor, got {}",
+            stream.len()
+        );
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let pack = w.finish().unwrap();
+
+        assert_eq!(
+            u32::from_le_bytes(pack[VERSION_OFFSET..VERSION_OFFSET + 4].try_into().unwrap()),
+            VERSION_V2,
+            "a pack containing a compressed entry must be emitted as version 2"
+        );
+        // Walk past the first (raw base) entry's frame to find the
+        // second entry's type byte.
+        let base_payload_len =
+            u32::from_le_bytes(pack[HEADER_LEN + 1..HEADER_LEN + 5].try_into().unwrap()) as usize;
+        let second_entry_type_offset = HEADER_LEN + ENTRY_FRAME_LEN + base_payload_len;
+        assert_eq!(
+            pack[second_entry_type_offset], 0x04,
+            "a highly-compressible delta stream must be emitted as 0x04 zstd-delta"
+        );
+
+        let (_dir, store) = fresh_store();
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(report.raw_count, 1);
+        assert_eq!(report.delta_count, 1);
+        assert_eq!(report.stored, vec![base_hash, target_hash]);
+        assert_eq!(
+            store.read(&target_hash).unwrap(),
+            target_obj,
+            "recovered delta target must be byte-identical to the pre-compression original"
+        );
+    }
+
+    #[test]
+    fn rejects_v2_entry_type_in_v1_pack() {
+        // Hand-build a version-1-declared pack with one 0x03 entry —
+        // even though 0x03's byte layout is otherwise well-formed, it
+        // MUST be rejected because the header says version 1
+        // (SPEC-PACKFILE §3).
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes()); // version = 1
+        buf.extend_from_slice(&1u32.to_le_bytes()); // entry_count = 1
+        buf.push(0x03);
+        let inner_payload = 0u32.to_le_bytes(); // uncompressed_len = 0, no frame bytes
+        buf.extend_from_slice(&u32::try_from(inner_payload.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&inner_payload);
+        let pack = finish_pack_body(buf);
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(err, PackError::InvalidEntryType(0x03)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn rejects_decompressed_len_mismatch() {
+        // Build a real compressed pack, then tamper the payload so the
+        // claimed `uncompressed_len` no longer matches what the frame
+        // actually decompresses to.
+        let payload = compressible_bytes(4096);
+        let blob = write_blob_via_serialize(&payload);
+        let h = hash::hash(&blob);
+        let mut w = PackWriter::new();
+        w.push_raw(h, &blob).unwrap();
+        let mut pack = w.finish().unwrap();
+
+        assert_eq!(pack[HEADER_LEN], 0x03, "sanity: must be a zstd-raw entry");
+        let len_prefix_offset = HEADER_LEN + ENTRY_FRAME_LEN;
+        let claimed_len = u32::from_le_bytes(
+            pack[len_prefix_offset..len_prefix_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        // Lie about the length: claim one byte more than the frame
+        // actually decompresses to. The trailer no longer matches the
+        // tampered body, so recompute it (this test targets the
+        // length-mismatch check specifically, not trailer verification,
+        // which is already covered by `rejects_bit_flipped_trailer`).
+        pack[len_prefix_offset..len_prefix_offset + 4]
+            .copy_from_slice(&(claimed_len + 1).to_le_bytes());
+        let split = pack.len() - TRAILER_LEN;
+        let new_trailer = hash::hash(&pack[..split]);
+        pack[split..].copy_from_slice(&new_trailer);
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(err, PackError::DecompressedSizeMismatch(_, _)),
+            "got {err:?}"
+        );
+        assert!(!store.contains(&h));
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn rejects_decompressed_len_over_object_cap() {
+        // A `0x03` entry claiming a decompressed size over
+        // MAX_RAW_OBJECT_SIZE must be rejected before any decompression
+        // is attempted — hand-build the entry rather than actually
+        // producing a >1 GiB frame.
+        let claimed_len = u32::try_from(MAX_RAW_OBJECT_SIZE + 1).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION_V2.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(0x03);
+        // Payload: [4B claimed uncompressed_len][tiny bogus "frame"].
+        // The over-cap check must fire before the (bogus) frame is
+        // ever touched, so its content doesn't need to be valid zstd.
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&claimed_len.to_le_bytes());
+        inner.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&u32::try_from(inner.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&inner);
+        let pack = finish_pack_body(buf);
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(err, PackError::DecompressedSizeOverCap(n) if n == claimed_len as usize),
+            "got {err:?}"
+        );
     }
 }
