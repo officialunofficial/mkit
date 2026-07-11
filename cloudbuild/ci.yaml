@@ -135,6 +135,40 @@ steps:
           cargo nextest run --locked --all-features
         )
 
+        # ── apps/repo-worker, apps/keys-worker (separate standalone crates) ──
+        # Neither is a member of the rust/ workspace (each pins its own
+        # rust-toolchain.toml for the Cloudflare Workers Build image — see
+        # their Cargo.toml headers), so `cargo test --workspace` above never
+        # touches them. `cargo test` on the host target only compiles each
+        # crate's pure, non-wasm-gated modules (chat/envelope/hashing/refs/
+        # commit_log/audit for repo-worker; envelope/names/audit for
+        # keys-worker) — the Durable Object / `#[event(fetch)]` worker glue
+        # (repo-worker's `worker_impl`, all of keys-worker's `lib.rs`-level
+        # handlers) is exercised for COMPILATION only, via the wasm32 build,
+        # since it needs a live Workers runtime to actually run (see #695's
+        # audit.rs module docs). This is what catches "a regression that
+        # silently drops accepted/rejected-write logging" — the pure
+        # audit::WriteAudit derivation is unit-tested; the wasm32 build
+        # confirms the interceptor/handler wiring around it still compiles.
+        #
+        # `cargo fmt --check` / `cargo clippy -D warnings` are intentionally
+        # NOT gated here for repo-worker: its wasm32-only worker_impl module
+        # (predating #695) carries pre-existing fmt/clippy debt this issue
+        # didn't introduce, and gating on it now would fail CI for unrelated
+        # reasons. keys-worker has no such debt, so it gets the full sweep.
+        ( cd apps/repo-worker
+          cargo fetch --locked
+          cargo test --locked
+          cargo build --locked --target wasm32-unknown-unknown
+        )
+        ( cd apps/keys-worker
+          cargo fetch --locked
+          cargo fmt --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked
+          cargo build --locked --target wasm32-unknown-unknown
+        )
+
         # ── rust/ workspace: tests ──────────────────────────────────────────
         ( cd rust
           cargo nextest run --locked --workspace --all-features

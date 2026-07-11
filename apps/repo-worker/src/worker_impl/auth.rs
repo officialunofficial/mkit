@@ -24,21 +24,45 @@
 // ConnectError translation, never the counter. PostMessage/React already
 // have their own DO-side rate limits (`chat::is_rate_limited`,
 // `REACT_MIN_INTERVAL_MS`) and are not additionally quota-checked here.
+//
+// OBSERVABILITY: every write this interceptor sees — accepted or rejected —
+// is also mirrored to the `WRITE_EVENTS` Analytics Engine dataset (see
+// wrangler.jsonc), so per-room write volume and auth-failure rate are
+// queryable instead of invisible. The *decision* of what to log lives in the
+// pure, host-testable `crate::audit` module; this file only decodes the room
+// (accepted writes only — see `crate::audit::WriteAudit`) and pushes the
+// resulting record to Analytics Engine. A dataset write failure (or a
+// missing binding, e.g. local `wrangler dev` without it configured) is
+// logged via `console_error!` and never fails the request — telemetry must
+// never take the write path down (same "count and log, don't silently drop"
+// posture as `refstore::broadcast_str`). Logging happens BEFORE the
+// write-quota check below: the envelope verified, so the write IS
+// `WriteAudit::Accepted` from an observability standpoint even if the quota
+// gate then throttles it — quota rejections stay out of
+// `WriteAudit::Rejected`, which is reserved for envelope-verification
+// failures (see `crate::audit::WriteAudit` doc).
 
 use connectrpc::interceptor::{UnaryRequest, UnaryResponse};
+use connectrpc::payload::Payload;
 use connectrpc::{ConnectError, Interceptor, Next, async_trait};
+use worker::{AnalyticsEngineDataPointBuilder, AnalyticsEngineDataset, Env};
 
 use buffa::Message as _;
-use worker::Env;
 use worker::send::SendFuture;
 
+use crate::audit::{WriteAudit, audit_for};
 use crate::envelope::{EnvelopeHeaders, VerifyEnvelope, verify_envelope};
 use crate::hashing::blake3_hex;
-use crate::proto::mkit::repo::v1::{PutObjectRequest, UpdateRefRequest};
+use crate::proto::mkit::repo::v1::{
+    PostMessageRequest, PutObjectRequest, ReactRequest, UpdateRefRequest,
+};
 use crate::refs::is_valid_room;
 
 use super::service::do_call;
 use super::wire::{QuotaCheckReq, QuotaCheckResp};
+
+/// Analytics Engine binding name (see wrangler.jsonc `analytics_engine_datasets`).
+const WRITE_EVENTS_BINDING: &str = "WRITE_EVENTS";
 
 /// The verified Ed25519 writer pubkey (64-hex), placed on `ctx.extensions`
 /// by the interceptor for the handler to read.
@@ -78,8 +102,10 @@ fn normalize_hex(v: &str) -> String {
 }
 
 pub struct AuthInterceptor {
-    /// Needed to address the room's RefStore DO for the write-quota check.
-    /// Cheap to clone (see `worker::Env`'s doc note on `worker_impl.rs`).
+    /// Needed to address the room's RefStore DO for the write-quota check,
+    /// and to reach the `WRITE_EVENTS` Analytics Engine binding for
+    /// accepted/rejected-write telemetry. Cheap to clone (see `worker::Env`'s
+    /// doc note on `worker_impl.rs`).
     env: Env,
 }
 
@@ -134,6 +160,18 @@ impl AuthInterceptor {
         })
         .await
     }
+
+    /// Push one audit record to the `WRITE_EVENTS` Analytics Engine dataset.
+    /// A missing binding or a failed write is logged and swallowed —
+    /// telemetry must never fail the request it's describing.
+    fn log_write(&self, audit: WriteAudit) {
+        match self.env.analytics_engine(WRITE_EVENTS_BINDING) {
+            Ok(dataset) => write_data_point(&dataset, &audit),
+            Err(e) => worker::console_error!(
+                "auth: {WRITE_EVENTS_BINDING} analytics engine binding unavailable: {e}"
+            ),
+        }
+    }
 }
 
 /// For a write procedure that carries a per-room quota (`PutObject`,
@@ -177,6 +215,7 @@ impl Interceptor for AuthInterceptor {
         // BLAKE3 of the raw request body (the serialized protobuf message),
         // computed server-side — this is what the envelope binds to.
         let actual_body_digest = blake3_hex(req.payload.bytes());
+        let body_len = req.payload.bytes().len() as u64;
 
         let header = |name: &str| {
             req.ctx
@@ -194,7 +233,16 @@ impl Interceptor for AuthInterceptor {
         };
 
         let now = now_ms();
-        match verify_envelope(&procedure, &actual_body_digest, now, &headers) {
+        let result = verify_envelope(&procedure, &actual_body_digest, now, &headers);
+        // `audit_for` only decodes the room on the accepted path (see its
+        // doc) — a rejected envelope's body isn't authenticated, so we don't
+        // spend a decode on it.
+        let audit = audit_for(&procedure, body_len, &result, || {
+            room_of(&procedure, &req.payload)
+        });
+        self.log_write(audit);
+
+        match result {
             VerifyEnvelope::Ok {
                 public_key,
                 idempotency_key,
@@ -204,7 +252,11 @@ impl Interceptor for AuthInterceptor {
                 // cleanly (no check) when the body doesn't decode or carries
                 // an invalid room — the handler's own validation rejects
                 // those with a clean `invalid_argument`, so there is nothing
-                // for a quota to protect yet.
+                // for a quota to protect yet. Runs AFTER the audit log above
+                // (the envelope verified, so the write is "accepted" from an
+                // observability standpoint) but STILL short-circuits before
+                // `next.run` — the handler never sees a request that fails
+                // its quota.
                 if let Some((room, incoming_bytes)) =
                     parse_write_target(&procedure, req.payload.bytes())
                     && is_valid_room(&room)
@@ -229,6 +281,76 @@ impl Interceptor for AuthInterceptor {
     }
     // intercept_streaming keeps the default passthrough: WatchRefs is an
     // unauthenticated read.
+}
+
+/// Read the write's `room` field out of the request payload. Every
+/// procedure `requires_write_auth` covers (PutObject, UpdateRef,
+/// PostMessage, React) declares `room` as field 1 of its request message
+/// (see proto/mkit/repo/v1/repo.proto) — decoding into the exact generated
+/// type for the procedure (via `Payload::message`, which handles both the
+/// proto and Connect-JSON wire codecs) keeps this correct instead of
+/// hand-parsing the wire format. A decode failure (shouldn't happen — the
+/// handler decodes the same bytes right after) yields an empty room rather
+/// than failing the request; this is telemetry, not the auth decision.
+fn room_of(procedure: &str, payload: &Payload) -> String {
+    let room = if procedure.ends_with("/PutObject") {
+        payload
+            .message::<PutObjectRequest>()
+            .ok()
+            .and_then(|m| m.room.clone())
+    } else if procedure.ends_with("/UpdateRef") {
+        payload
+            .message::<UpdateRefRequest>()
+            .ok()
+            .and_then(|m| m.room.clone())
+    } else if procedure.ends_with("/PostMessage") {
+        payload
+            .message::<PostMessageRequest>()
+            .ok()
+            .and_then(|m| m.room.clone())
+    } else if procedure.ends_with("/React") {
+        payload
+            .message::<ReactRequest>()
+            .ok()
+            .and_then(|m| m.room.clone())
+    } else {
+        None
+    };
+    room.unwrap_or_default()
+}
+
+/// Encode one `WriteAudit` as an Analytics Engine data point and write it.
+/// `indexes` takes exactly one value (Analytics Engine drops multi-index
+/// points) — "accepted"/"rejected" — so the two outcomes are cheaply
+/// filterable in a query without parsing blobs.
+fn write_data_point(dataset: &AnalyticsEngineDataset, audit: &WriteAudit) {
+    let point = match audit {
+        WriteAudit::Accepted {
+            room,
+            procedure,
+            author_pubkey,
+            bytes,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["accepted"])
+            .add_blob(procedure.as_str())
+            .add_blob(room.as_str())
+            .add_blob(author_pubkey.as_str())
+            .add_double(*bytes as f64)
+            .build(),
+        WriteAudit::Rejected {
+            procedure,
+            reason,
+            status,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["rejected"])
+            .add_blob(procedure.as_str())
+            .add_blob(reason.as_str())
+            .add_double(f64::from(*status))
+            .build(),
+    };
+    if let Err(e) = dataset.write_data_point(&point) {
+        worker::console_error!("auth: analytics engine write_data_point failed: {e}");
+    }
 }
 
 /// Current epoch milliseconds. On wasm32 this reads the JS `Date.now()` via
