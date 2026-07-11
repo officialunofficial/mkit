@@ -32,6 +32,19 @@ pub fn is_valid_ref_prefix(prefix: &str) -> bool {
     mkit_core::refs::validate_ref_prefix(prefix)
 }
 
+/// Validate the length of an `UpdateRef` CAS `expected_id`. Empty is valid —
+/// ANY/MISSING expectations carry no `expected_id` (see [`evaluate_cas`]
+/// below) — but a non-empty value must be exactly 32 bytes (a BLAKE3 object
+/// id). Enforced at the RPC boundary in `worker_impl::service::update_ref`,
+/// mirroring [`is_valid_room`] / [`is_valid_ref_name`] above, so a malformed
+/// length is rejected with `invalid_argument` before it ever reaches
+/// [`evaluate_cas`], where comparing mismatched-length byte slices can never
+/// be equal and would otherwise silently resolve to `Conflict(Mismatch)`.
+#[must_use]
+pub fn is_valid_expected_id_len(expected_id: &[u8]) -> bool {
+    expected_id.is_empty() || expected_id.len() == 32
+}
+
 /// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
 /// Wire numbers are load-bearing (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,5 +215,47 @@ mod tests {
         assert_eq!(RefExpectation::from_wire(3), RefExpectation::Match);
         assert_eq!(RefExpectation::from_wire(0), RefExpectation::Unspecified);
         assert_eq!(RefExpectation::from_wire(99), RefExpectation::Unspecified);
+    }
+
+    // --- is_valid_expected_id_len (issue #682) -------------------------
+    //
+    // Regression for the `update_ref` RPC-boundary guard: a MATCH request
+    // with a non-empty, wrong-length `expected_id` must be caught here
+    // (service.rs returns `invalid_argument`) instead of falling through to
+    // `evaluate_cas`, where comparing mismatched-length byte slices can
+    // never be equal and would deterministically — but misleadingly —
+    // resolve to `Conflict(Mismatch)`.
+    #[test]
+    fn expected_id_len_rejects_non_empty_wrong_lengths() {
+        for len in [1, 16, 31, 33, 64] {
+            assert!(
+                !is_valid_expected_id_len(&vec![0xaa; len]),
+                "length {len} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_id_len_accepts_empty_for_any_missing() {
+        assert!(is_valid_expected_id_len(&[]));
+    }
+
+    #[test]
+    fn expected_id_len_accepts_32_bytes_for_match() {
+        assert!(is_valid_expected_id_len(ID_A));
+    }
+
+    // Confirms the exact failure mode this guard prevents: without the
+    // length check, a malformed `expected_id` reaches `evaluate_cas` and
+    // resolves to a misleading `Conflict(Mismatch)` rather than a protocol
+    // error, because mismatched-length slices are never `==`.
+    #[test]
+    fn without_the_guard_evaluate_cas_would_mask_the_malformed_request() {
+        let malformed_expected: &[u8] = &[0xaa; 16]; // not 32 bytes
+        assert!(!is_valid_expected_id_len(malformed_expected));
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Match, Some(malformed_expected)),
+            CasDecision::Conflict(ConflictReason::Mismatch)
+        );
     }
 }
