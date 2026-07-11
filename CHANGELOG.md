@@ -210,6 +210,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (`mkit-core`, `pack-shards` feature): pack-shard Reed-Solomon
+  hasher cut over from `Sha256` to `Blake3`.** `pack_shard::RsScheme` now
+  wraps `commonware_coding::ReedSolomon<Blake3>` instead of `Sha256`,
+  matching the hasher mkit uses everywhere else and dropping a redundant
+  per-shard SHA-256 pass inside commonware's own Merkle-tree build (it
+  was already fully separate from this module's BLAKE3 `shard_hashes`
+  envelope check, which is unchanged). `MANIFEST_VERSION` is bumped
+  `0x01` → `0x02` since the wire-visible `ShardSet::commitment` value
+  changes; this is a **hard cutover, not dual-hasher support** — a
+  `0x01` manifest is rejected with a version-specific error ("manifest
+  version 0x01 (Sha256-era) — re-shard with a current mkit") instead of
+  the generic unsupported-version message, and `0x01` is retired
+  permanently. Producers and consumers on different `pack-shards`-era
+  mkit versions cannot interoperate; re-shard with a current build.
+  `docs/specs/SPEC-PACK-SHARDS.md` §2.1/§4 updated to match, and §4's
+  stale "`Sequential` parallel strategy" phrasing (left over from #653,
+  which made the strategy a caller-selectable parameter) is corrected
+  alongside it ([#661](https://github.com/officialunofficial/mkit/issues/661)).
 - **SPEC-WORKTREE.md + worktree parity docs (#493 Phase 4).** New
   normative spec covering the common-dir/per-worktree state split, the
   `mkitdir:` pointer-file format, the `worktrees/` registry, discovery
@@ -342,9 +360,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size-checked detail of `blame_file_with`. Both are pre-1.0 API breaks; no
   in-workspace consumers were affected. (release-plz's `semver_check`
   enforces the matching version bump at release time.)
+- **BREAKING (`mkit-core`):** dropped `.mkit/index` v1 read compatibility.
+  `deserialize` now accepts only the current stat-cached format
+  (`FORMAT_VERSION = 0x02`) and rejects every other version byte,
+  including the legacy v1 (`0x01`, 35-byte entries with no stat cache).
+  The index is repo-local, advisory, and never exchanged between peers
+  (SPEC-INDEX §1), so this carries no cross-peer compatibility
+  obligation; there is no migration path for a stray v1 file, since mkit
+  never shipped a release that wrote one. Pre-1.0 API/format break.
+- **BREAKING (`mkit-attest`):** `Subject` gained a new required field,
+  `digest_sha256_hex`, and `sha256_hex()` was added to compute it. Every
+  subject now carries a `sha256` digest alongside `blake3` (SPEC-ATTESTATIONS
+  §4.2) — both digests of the identical underlying bytes — so cosign,
+  `gh attestation verify`, and the SLSA verifier (all of which only read
+  the in-toto/SLSA `DigestSet` `sha256` key) can read mkit attestations.
+  `sha2` moves from optional (gated behind `algo-secp256k1`/`algo-p256`) to
+  an unconditional `mkit-attest` dependency. Pre-1.0 API break; every
+  caller constructing a `Subject` (`git.rs`, `git_import.rs`,
+  `self_update.rs`, `release-attest`) was updated.
 
 ### Fixed
 
+- **`listRefs(prefix)` no longer matches across a ref-name component
+  boundary in `mkit-transport-memory` and `mkit-transport-s3`.** A
+  request for prefix `refs/heads/feat` incorrectly matched
+  `refs/heads/featx` (a bare string-prefix check with no boundary
+  enforcement), returning the malformed suffix `"x"`. Both transports
+  now require the match be followed by `/` or end-of-string, per
+  SPEC-REFS's normative `listRefs` algorithm; a ref that merely shares a
+  string prefix with the query, without extending it at a `/` boundary,
+  is excluded entirely rather than truncated into a bogus name.
 - **CAS conflicts over `mkit serve` now surface as `RefConflict`.**
   Per SPEC-TRANSPORT §4.2.1 the server answers a compare-and-swap
   mismatch on `updateRef` with `Error{INVALID_REQUEST}` carrying the

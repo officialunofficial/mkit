@@ -11,9 +11,9 @@ Status: **Normative** for mkit v1.
 Scope: `.mkit/objects/` content and the byte layout of every object type.
 Endianness: **little-endian** throughout. All hashes are 32-byte BLAKE3.
 
-This document defines what W2 (on-disk V1 bump) and W3 (identity / remix
-generalisation) must implement. External tools MUST be able to produce and
-consume these bytes with only this document.
+This document defines the on-disk object byte layout and the identity /
+remix object model. External tools MUST be able to produce and consume
+these bytes with only this document.
 
 ---
 
@@ -191,8 +191,8 @@ repeat parent_count:
 [64 bytes signature]                      Ed25519, see SPEC-SIGNING
 ```
 
-Differences from mkit:
-- `author_mid: u64` → `Identity` tagged union (§9). (W2.)
+Differences from mkit's legacy (pre-v1) commit encoding:
+- `author_mid: u64` → `Identity` tagged union (§9).
 - `timestamp: u32` → `u64`. Avoids 2106 overflow (red-team 7d / Team Lead
   7d).
 - Relative field order of `signer` and `message` is preserved.
@@ -475,13 +475,26 @@ multi-version readers.
 
 ## 13. Test vectors (implementer MUST produce)
 
-1. **Empty blob hash**: `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`
-   — 10 bytes total input. Record the resulting hex digest.
-2. **Empty tree hash**: `BLAKE3(prologue{0x02,MKT1,0x01} ‖ u32(0))`
-   — 10 bytes total input.
+1. **Empty blob id**: `Blob` is a flat type (§10) — its id is
+   `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`, a 10-byte total input.
+   Record the resulting hex digest.
+2. **Empty tree id**: `Tree` is a **merkelized** type (§10 /
+   SPEC-MERKLE-OBJECTS) — its id is the domain-wrapped Merkle root over
+   its (empty) entry set, **not** `BLAKE3` of the serialised prologue
+   bytes. The empty tree's id is pinned as a real, common object:
+
+   ```
+   1ab8d0788b29fe5992011e64d6c922ec93f4248b3755b92b15b07e664cb15652
+   ```
+
+   (`mkit-core::merkle::TREE_EMPTY_ID`; the empty BMT root is
+   `H(leaf_count ‖ H(""))`, not `H(0 ‖ 0)` — see SPEC-MERKLE-OBJECTS §4.)
 3. **Canonical single-file tree**: one entry `{name="README.md",
-   mode=0x01, object_hash=<hash of §13.1>}`. Record both the serialised
-   bytes and the resulting BLAKE3 digest.
+   mode=0x01, object_hash=<id of §13.1>}`. Record the serialised bytes,
+   and separately record the object's id computed per the merkelized
+   rule (§10 / SPEC-MERKLE-OBJECTS) — the two are different values; do
+   not conflate "the serialised bytes' flat BLAKE3" with "the object id"
+   for this type.
 4. **Identity round-trip**: encode `Identity{kind=0x01, len=32,
    payload=[0xAA; 32]}` → must be exactly 35 bytes.
 5. **Root commit with zero message_hash/content_digest and Ed25519
@@ -490,11 +503,17 @@ multi-version readers.
 6. **Remix with two sources (identical upstream_id, distinct
    commit_hash)**: verify sort orders by secondary key.
 7. **ChunkedBlob with `chunk_size=0` and 3 chunks**: verify prologue
-   present and length=6+8+4+4+32*3=118.
+   present and length=6+8+4+4+32*3=118. `ChunkedBlob` is also
+   **merkelized** (§10 / SPEC-MERKLE-OBJECTS): its id is the
+   domain-wrapped Merkle root over its chunk leaves plus the metadata
+   leaf, not a flat `BLAKE3` of these 118 bytes. Record both the
+   serialised bytes and the merkelized id separately.
 8. **Annotated tag** (`target_type=0x03`, ed25519 tagger, non-empty
-   message, all-zero signature): record serialised bytes + BLAKE3.
+   message, all-zero signature): `Tag` is a flat type — record
+   serialised bytes + `BLAKE3` of those bytes as the id.
 9. **Signed tag** (same shape, signed with seed `[0x07;32]` over the
-   `mkit.tag\0` domain): record serialised bytes, the canonical tag
+   `mkit.tag\0` domain — a permanent domain separator per
+   SPEC-CONVENTIONS §4): record serialised bytes, the canonical tag
    signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 
 Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
@@ -529,7 +548,3 @@ mechanism that enforces or detects each:
 These are format-level guarantees. Signature guarantees are specified in
 SPEC-SIGNING; per-object tamper evidence for merkelized types in
 SPEC-MERKLE-OBJECTS §6.
-
----
-
-*~1750 words.*

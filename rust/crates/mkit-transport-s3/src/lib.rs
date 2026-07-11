@@ -715,12 +715,26 @@ impl Transport for S3Transport {
             };
             // Strip the (trimmed) prefix and the separating '/' so the
             // returned name is suffix-only per the Transport contract.
+            // S3's `ListObjectsV2` `prefix` query is a literal string
+            // prefix with no path-component awareness, so a request for
+            // ".../refs/heads/feat" can legitimately come back with a key
+            // for ".../refs/heads/featx" — this client-side check is the
+            // only place that boundary is enforced (SPEC-REFS §4); it
+            // MUST NOT accept a match that isn't followed by either a
+            // `/` or end-of-string.
             let suffix = if prefix_trimmed.is_empty() {
                 repo_key
             } else if let Some(after) = repo_key.strip_prefix(prefix_trimmed) {
-                after.strip_prefix('/').unwrap_or(after)
+                match after.strip_prefix('/') {
+                    Some(stripped) => stripped,
+                    None if after.is_empty() => after,
+                    None => continue,
+                }
             } else {
-                repo_key
+                // Doesn't even string-match the requested prefix — an
+                // unexpected/adversarial listing response, not a ref of
+                // this listing.
+                continue;
             };
             if !validate_ref_name(suffix) {
                 continue;

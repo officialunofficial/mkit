@@ -1,25 +1,31 @@
 ---
 spec: SPEC-GC
 version: 1
-status: implemented
+status: stable-normative
 audience: implementers of gc / recovery and reviewers of object pruning
 ---
 
 # SPEC-GC — garbage-collection retention roots & recovery
 
-Status: **implemented**. The recovery model (#260) — Part 1 (retention
+Status: **Normative** for mkit v1; **implemented** (see below). See
+SPEC-CONVENTIONS §2 for the maturity/bindingness status vocabulary this
+frontmatter uses. Concurrency: see SPEC-CONCURRENCY (this document no
+longer states its own lock model). The recovery model (#260) — Part 1 (retention
 roots + live closure, `ops::gc`), Part 2a (recovery log + retention
 policy, `ops::recovery`), Part 2b (producers — amend/reset/rebase record
 the superseded tip) — **and the `mkit gc` command itself (#233)** are all
 shipped. `mkit gc` runs `recovery::expire` → `ops::gc::run_gc`
 (`live_objects` then prune `store ∖ live`, skipping objects within the
-grace window) under the repo lock.
+grace window) under the locks SPEC-CONCURRENCY §4 assigns to `gc`
+(the worktree registry lock, then every registered tree's per-tree
+lock — no separate lock guards the recovery-log expire step; the
+per-tree locks gc already holds are what serializes it, see §3.2).
 
 ## Why this spec exists
 
 mkit's object store is append-only and never prunes, so unreachable
 objects accumulate (notably the commits superseded by `commit --amend`,
-`reset`, and `rebase`). `mkit gc` (#233) will reclaim them. Pruning is
+`reset`, and `rebase`). `mkit gc` (#233) reclaims them. Pruning is
 safe **only** against a complete, exact retention root set: anything
 reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object — silent corruption.
@@ -88,18 +94,23 @@ stop pinning objects. A gc run expires first, then computes roots.
 `record` is durable — it `fsync`s the log file and its parent directory
 before returning — so a crash cannot leave a ref rewrite persisted while
 its recovery entry is lost. `record` and `expire` are **not** internally
-synchronized: callers MUST hold the repo lock (`worktree.lock`, which all
-mutating commands and gc take), and gc MUST run its "expire → collect
-roots → prune" sequence under that lock, so a producer append cannot race
-an `expire` rewrite and vanish.
+synchronized: `ops::recovery`'s own concurrency note requires callers to
+hold "the repo lock" — in practice each producer's per-tree
+`worktree.lock` (see SPEC-CONCURRENCY §3.2). gc's "expire → collect
+roots → prune" sequence runs under the full lock set SPEC-CONCURRENCY §4
+assigns to `gc` — every registered tree's `worktree.lock`, a superset of
+any single producer's one tree — so a producer append can never race an
+`expire` rewrite and vanish, without either side needing a distinct,
+dedicated recovery-log lock.
 
 **Status:** complete. The recovery log (Part 2a) and its producers
 (Part 2b) are implemented — `commit --amend`, `reset`, and `rebase` each
 record the superseded tip (op tokens `amend`/`reset`/`rebase`) before
 moving the ref, and `stash pop` records the popped commit (op token
 `stash-pop`) before restoring the worktree and dropping the manifest
-entry — each under the worktree lock — and the **`mkit gc` command**
-(#233) consumes them: under the repo lock it expires the recovery log,
+entry — each per the lock set SPEC-CONCURRENCY §4 assigns to that
+command — and the **`mkit gc` command** (#233) consumes them: under
+gc's lock set (SPEC-CONCURRENCY §4) it expires the recovery log,
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
 prunes all, `--dry-run` previews).

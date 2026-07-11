@@ -1,7 +1,7 @@
 ---
 spec: SPEC-TRANSPORT
 version: 1
-status: draft
+status: stable-normative
 audience: implementers of compatible transport clients and servers
 ---
 
@@ -96,7 +96,7 @@ Programs MUST NOT pattern-match on the advisory message strings.
 | `mkit+http://localhost…` | Plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
 | `mkit+ssh://user@host[:port]/path` | SSH child + `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty / `.` / `..` segments. SCP-style `mkit+ssh://user@host:path` / `mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
-| `mkit+enc://[user@]host[:port]/path?pubkey=<…>` | Encrypted-stream (`EncTransport`) | Self-contained ChaCha20-Poly1305 + ed25519 transport — does not shell out to `ssh(1)`. The server's static public key MUST be carried out-of-band in the URL. URL parsing + CLI plumbing land with the real-TCP transport stage; see [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md). |
+| `mkit+enc://[user@]host[:port]/path?pubkey=<…>` | Encrypted-stream (`EncTransport`) | Self-contained ChaCha20-Poly1305 + ed25519 transport — does not shell out to `ssh(1)`. The server's static public key MUST be carried out-of-band in the URL. URL parsing and CLI plumbing are part of the TCP transport; see [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md). |
 
 Bare `ssh://`, `https://`, `http://`, `s3://`, `file://` URLs (without
 the `mkit+` prefix) are deliberately rejected. The prefix marks a URL
@@ -199,7 +199,19 @@ back-compatibility surface to preserve.
 
 On a CAS mismatch the server returns `Error { code =
 ERROR_CODE_INVALID_REQUEST }` with the current ref value in
-`Error.details`.
+`Error.details`. Per SPEC-RPC §3.3, `Error.details` is opaque and
+programs MUST NOT pattern-match on its contents; conforming clients
+today check only whether `details` is **non-empty** as a boolean
+signal to reclassify the error as `TransportError::RefConflict`
+(rather than a generic invalid-request), and do not decode the 32
+bytes themselves as the current ref value. **Disambiguation — actually
+learning what the ref's current value is — is a separate, explicit
+`read_ref` call after the fact (§7), not a side effect of parsing this
+field.** The current-ref bytes in `details` exist for
+forward-compatibility and out-of-band diagnostics (e.g. a log line),
+not as a client-consumed protocol value; a future revision MAY define
+a structured, non-opaque field for this if a real need for it emerges,
+rather than asking clients to parse an "opaque" field.
 
 ### 4.3 Trust model
 
@@ -323,7 +335,7 @@ so a CAS write never silently turns into a duplicate PUT.
 inside an async context MUST wrap calls with
 `tokio::task::spawn_blocking`.
 
-### 5.6 Verifiable sparse-checkout fetch (issue #158, wire & transport delivery stage)
+### 5.6 Verifiable sparse-checkout fetch (issue #158)
 
 Feature-gated extension. Off by default — built only when the
 `sparse-checkout` cargo feature is enabled on the consuming crate
@@ -434,7 +446,7 @@ surfaces `TransportError::AccessDenied`.
 
 Same ladder as §7. 5xx and 429 retry; 4xx including 412 does not.
 
-### 6.6 Verifiable sparse-checkout fetch (issue #158, wire & transport delivery stage)
+### 6.6 Verifiable sparse-checkout fetch (issue #158)
 
 Feature-gated extension. Off by default — built only when the
 `sparse-checkout` cargo feature is enabled on the consuming crate

@@ -104,8 +104,12 @@ Notes:
 Payload is exactly the bytes you would get from SPEC-OBJECTS
 serialisation, starting with the object prologue. Unpackers insert
 these bytes into the object store verbatim (writing
-`.mkit/objects/<dd>/<rr...>`) after verifying BLAKE3 matches the
-expected storage path.
+`.mkit/objects/<dd>/<rr...>`) after verifying the object's id — computed
+per the type-dependent rule in SPEC-OBJECTS §10 (a flat BLAKE3 digest of
+the serialised bytes for most object types; the domain-wrapped Merkle
+root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) — matches the
+expected storage path. It is never simply `BLAKE3(bytes)` for every
+type.
 
 ### 3.2 `delta` (0x02)
 
@@ -121,9 +125,10 @@ previous `raw` entry in the same pack or already present in the
 destination object store. If unresolvable → `DeltaBaseMissing`.
 
 Delta payloads reconstruct a full serialised object (with its
-SPEC-OBJECTS prologue). The reconstructed bytes are then hashed to
-produce the object's storage path — the same way a `raw` entry is
-stored.
+SPEC-OBJECTS prologue). The reconstructed bytes are then run through
+the same type-dependent id rule as a `raw` entry (SPEC-OBJECTS §10 /
+SPEC-MERKLE-OBJECTS) to produce the object's storage path — never a
+flat `BLAKE3(bytes)` for a reconstructed `Tree` or `ChunkedBlob`.
 
 Readers MUST validate every `raw` payload and every reconstructed delta
 target as a canonical SPEC-OBJECTS object before storing it. Payloads
@@ -469,7 +474,7 @@ verification fails.
 | Any bit-flip or truncation before the trailer is detected | 32-byte BLAKE3 trailer, verified **before** any entry is stored (§8) |
 | No entry read past the pack tail | mandatory `payload_len` bounds-check against the remaining pre-trailer bytes → `UnexpectedEof` (§2) |
 | Only known entry types are processed | anything but `0x00`/`0x02`/`0x03`/`0x04` (incl. reserved `0x01`) → `InvalidEntryType`; `0x03`/`0x04` additionally require `version = 2` or the same error fires (§3) |
-| Every stored object's bytes match its storage path | BLAKE3 verified before writing `objects/<dd>/<rr…>`; delta targets reconstructed (decompressed first, for `0x03`/`0x04`), then hashed the same way (§3.1–§3.4) |
+| Every stored object's bytes match its storage path | id computed via the type-dependent rule (SPEC-OBJECTS §10 / SPEC-MERKLE-OBJECTS) and verified before writing `objects/<dd>/<rr…>`; delta targets reconstructed (decompressed first, for `0x03`/`0x04`), then run through the same rule (§3.1–§3.4) |
 | No malformed or pack-only object reaches the object store | canonical SPEC-OBJECTS deserialization gate; `Object::Delta` payloads rejected (§3) |
 | Every delta is resolvable when encountered | ordering rule: base precedes its delta in-pack or pre-exists in the store; else `DeltaBaseMissing`; no buffering of undefined chains; `0x04`'s uncompressed `base_hash` needs no decompression to check (§4) |
 | Resource use is bounded on the wire | `entry_count ≤ 10M` → `TooManyObjects`; payload sum ≤ 4 GiB → `PackfileTooLarge`, never silent truncation (§5) |
@@ -482,7 +487,3 @@ verification fails.
 The trailer detects accidental corruption; it is not a signature (§1).
 Authenticity rests on the caller-supplied content address (§7) and the
 per-object hash verification of §3.
-
----
-
-*~2400 words.*
