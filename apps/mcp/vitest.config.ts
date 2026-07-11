@@ -40,6 +40,26 @@ export default defineConfig(async () => {
           },
         },
       ],
+      // Coverage is scoped to the "unit" project only (`npm run test:coverage`
+      // runs `vitest run --project unit --coverage`): the "integration" project
+      // executes inside the real Workers runtime via
+      // @cloudflare/vitest-pool-workers, whose isolate doesn't support the v8
+      // coverage provider used here (it needs the separate `istanbul`
+      // provider). Instrumenting only the pure-logic unit project keeps this
+      // simple and still gives a real, CI-enforced floor on the
+      // parser/guard/seed code that has no Workers-runtime dependency.
+      coverage: {
+        provider: "v8",
+        reporter: ["text", "lcov"],
+        include: ["src/**/*.ts"],
+        exclude: ["src/**/*.test.ts", "test/**"],
+        thresholds: {
+          lines: 40,
+          statements: 40,
+          functions: 37,
+          branches: 32,
+        },
+      },
     },
   };
 });
