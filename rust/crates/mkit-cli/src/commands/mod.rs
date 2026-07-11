@@ -117,6 +117,22 @@ pub fn open_store_configured(
     Ok(store)
 }
 
+/// Read an object's serialised bytes from `store`, mapping a failure to
+/// the `(message, exit-code)` shape commands return. Shared by `attest`,
+/// `git`'s `publish_attestations`, and `git_import`'s `mint_attestations`
+/// — each needs a commit's raw bytes (not just its hash) to compute the
+/// attestation subject's paired `sha256` digest (SPEC-ATTESTATIONS
+/// §4.2), and previously duplicated this read-and-format-error shape
+/// independently.
+pub(crate) fn read_object_bytes(store: &ObjectStore, hash: &Hash) -> Result<Vec<u8>, (String, u8)> {
+    store.read(hash).map_err(|e| {
+        (
+            format!("read {}: {e}", mkit_core::hash::to_hex(hash)),
+            exit::GENERAL_ERROR,
+        )
+    })
+}
+
 /// Resolve the [`RepoLayout`] a command operates on (#493 Phase 1):
 /// pointer-following discovery. A `.mkit` DIRECTORY (or none at all)
 /// resolves to the classic single-worktree layout exactly as before; a

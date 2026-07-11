@@ -83,7 +83,11 @@ fn golden_index_empty_round_trips() {
     let bytes = read_golden("index_empty.bin");
     assert_eq!(bytes.len(), 9);
     assert_eq!(&bytes[..4], b"MKIX");
-    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins the current version");
+    assert_eq!(
+        bytes[4],
+        index::FORMAT_VERSION,
+        "golden pins the current version"
+    );
     let idx = index::deserialize(&bytes).unwrap();
     assert!(idx.entries.is_empty());
     assert_eq!(idx.serialize(), bytes, "round-trip is byte-identical");
@@ -93,7 +97,11 @@ fn golden_index_empty_round_trips() {
 fn golden_index_3entries_round_trips() {
     let bytes = read_golden("index_3entries.bin");
     assert_eq!(&bytes[..4], b"MKIX");
-    assert_eq!(bytes[4], index::FORMAT_VERSION, "golden pins the current version");
+    assert_eq!(
+        bytes[4],
+        index::FORMAT_VERSION,
+        "golden pins the current version"
+    );
     let idx = index::deserialize(&bytes).unwrap();
     assert_eq!(idx.entries.len(), 3);
     let by_path: std::collections::HashMap<_, _> = idx

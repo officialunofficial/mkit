@@ -935,9 +935,7 @@ fn mint_attestations(
             format::json_escape(&mkit_ref),
             format::json_escape(&remote_url)
         );
-        let head_bytes = obj_store
-            .read(mkit_hash)
-            .map_err(|e| (format!("read {}: {e}", mkit_core::to_hex(mkit_hash)), exit::GENERAL_ERROR))?;
+        let head_bytes = super::read_object_bytes(&obj_store, mkit_hash)?;
         let stmt = statement::encode(&statement::Statement {
             subjects: vec![statement::Subject {
                 name: Some(mkit_ref),

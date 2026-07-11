@@ -1,7 +1,7 @@
 ---
 spec: SPEC-ATTESTATIONS
 version: 1
-status: stable-normative
+status: draft
 audience: implementers and integrators producing or verifying native mkit attestations (in-toto v1 + DSSE)
 ---
 
@@ -48,7 +48,13 @@ crate or CLI; consumers MUST NOT rely on them.
    used **only** to (a) parse-and-validate a caller-supplied predicate
    body as a JSON object before pass-through, and (b) extract the
    `subject[].digest.blake3` field on the verify path. The canonical
-   encoder never goes through `serde_json::to_string` — see §4.3.
+   encoder never goes through `serde_json::to_string` — see §4.3. `sha2`
+   is an unconditional dependency (not feature-gated): every subject
+   carries a `sha256` digest alongside `blake3` (§4.2) regardless of
+   which signing-algorithm features are compiled in, so external
+   consumers (cosign, `gh attestation verify`, the SLSA verifier) that
+   only understand the in-toto/SLSA DigestSet `sha256` key can still
+   read mkit's subjects.
 
 ---
 
@@ -191,7 +197,7 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
   "predicateType": "<uri-identifying-the-predicate>",
   "subject": [
     {
-      "digest": { "blake3": "<commit-hash-hex>" },
+      "digest": { "blake3": "<commit-hash-hex>", "sha256": "<commit-hash-hex>" },
       "name": "<optional-human-readable-string>"
     }
   ]
@@ -199,7 +205,17 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
 ```
 
 - Inside each subject entry, `"digest"` precedes the optional
-  `"name"`. The encoder emits `name` only when set.
+  `"name"`; within `"digest"`, `"blake3"` precedes `"sha256"` (JCS
+  codepoint sort). The encoder emits `name` only when set.
+- `subject[0].digest` is **mandatory** on both keys: every subject
+  carries both a `blake3` digest (mkit's own content-addressing hash)
+  and a `sha256` digest of the identical underlying bytes — never a
+  second, independent artifact reference, just an additional name for
+  the same one. `sha256` exists because it's the digest algorithm the
+  in-toto/SLSA `DigestSet` convention — and every widely-deployed
+  consumer (cosign, `gh attestation verify`, the SLSA verifier) —
+  actually looks for; without it those tools cannot read a mkit
+  attestation's subjects at all.
 - `subject[0].digest.blake3` is the commit hash. Additional subjects
   MAY appear (e.g. a file within the commit's tree); implementations
   MUST NOT require them.
@@ -337,10 +353,11 @@ envelope's signature at all. **The WASM binding
 (`mkit_wasm::attest::attest_verify`) does not** — it takes no
 commit-hash parameter and returns whether *any* signature verifies,
 with no subject-binding check, despite being a public, documented API
-surface. That is a real, narrow, unresolved gap in one entry point,
-not a property of `mkit-attest`'s verification model in general;
-tracked as a Phase 2 code fix (add a required commit-hash parameter to
-`attest_verify` and perform the same check internally).
+surface. That is a real, narrow gap in one entry point, not a property
+of `mkit-attest`'s verification model in general. Closing it requires
+adding a required commit-hash parameter to `attest_verify` and
+performing the same check internally; this document stays **Draft**
+until that lands.
 
 The `mkit verify-attest` CLI enumerates every envelope under
 `.mkit/attestations/<commit>/`, prints a per-signature verdict, and

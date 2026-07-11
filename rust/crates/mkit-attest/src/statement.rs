@@ -16,7 +16,7 @@
 //!
 //! Every subject carries **both** a `blake3` digest (mkit's own
 //! content-addressing hash) and a `sha256` digest (the in-toto/SLSA
-//! DigestSet convention every widely-deployed consumer — cosign,
+//! `DigestSet` convention every widely-deployed consumer — cosign,
 //! `gh attestation verify`, the SLSA verifier — actually looks for).
 //! Both digests are of the identical underlying bytes; `sha256` is not
 //! a second, independent artifact reference, it's an additional name

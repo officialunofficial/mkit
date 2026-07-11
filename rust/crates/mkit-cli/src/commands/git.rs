@@ -775,9 +775,7 @@ fn publish_attestations(
             format::json_escape(dest),
             format::json_escape(&e.ref_name)
         );
-        let head_bytes = store
-            .read(&e.mkit_hash)
-            .map_err(|err| (format!("read {}: {err}", mkit_core::to_hex(&e.mkit_hash)), exit::GENERAL_ERROR))?;
+        let head_bytes = super::read_object_bytes(store, &e.mkit_hash)?;
         let stmt = statement::encode(&statement::Statement {
             subjects: vec![statement::Subject {
                 name: Some(e.ref_name.clone()),

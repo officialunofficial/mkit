@@ -258,17 +258,9 @@ pub fn run(args: &[String]) -> u8 {
             Ok(s) => s,
             Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
         };
-        match obj_store.read(&commit_hash) {
+        match super::read_object_bytes(&obj_store, &commit_hash) {
             Ok(b) => b,
-            Err(e) => {
-                return emit_err(
-                    &format!(
-                        "read commit {}: {e}",
-                        hash_mod::to_hex(&commit_hash)
-                    ),
-                    exit::GENERAL_ERROR,
-                );
-            }
+            Err((msg, code)) => return emit_err(&msg, code),
         }
     };
 
