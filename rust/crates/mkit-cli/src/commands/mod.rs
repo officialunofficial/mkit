@@ -741,6 +741,39 @@ pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<
     }
 }
 
+/// CAS-guarded sibling of [`delete_ref_dropping_history`] (issue #658):
+/// only deletes `branch` (and, on `--features history-mmr` builds,
+/// destroys its journal) if its current value is exactly `expected`.
+///
+/// `mkit branch -m` uses this — not the unconditional version — for
+/// BOTH the source-branch drop and, on a lost race, the rollback delete
+/// of the just-created destination: an unconditional delete here can't
+/// tell "the branch tip I read is still current" from "a concurrent
+/// `commit` just advanced it out from under me", so it would silently
+/// destroy the concurrently-landed commit's only ref. See
+/// [`mkit_core::refs::delete_ref_if_matches`] for the full race
+/// analysis.
+///
+/// - **Default build (no `history-mmr`)** — exactly
+///   `refs::delete_ref_if_matches(layout, branch, expected)`.
+/// - **`--features history-mmr`** — routes through
+///   [`mkit_core::refs::delete_ref_with_history_if_matches`], sharing
+///   the same process-global executor as [`write_ref_recording_history`].
+pub fn delete_ref_dropping_history_if_matches(
+    layout: &RepoLayout,
+    branch: &str,
+    expected: Hash,
+) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        refs::delete_ref_with_history_if_matches(layout, branch, expected, history_executor())
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref_if_matches(layout, branch, expected)
+    }
+}
+
 /// Current branch name for recovery logging — empty for a detached HEAD
 /// or an unreadable/symbolic-only HEAD.
 #[must_use]

@@ -780,6 +780,83 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     }
 }
 
+/// CAS-guarded delete: removes a branch ref only if its current on-disk
+/// value is exactly `expected`. Issue #658.
+///
+/// [`delete_ref`] is unconditional — it removes whatever is at `path`
+/// regardless of what a caller last read. That is fine for the
+/// user-initiated `branch -d`/`-D` path (deleting a specific named
+/// branch is meaningful even if its tip moved since the user last
+/// looked), but it is NOT fine for `branch -m`'s rename: a rename reads
+/// the source branch's tip, publishes it under the new name, and then
+/// drops the source ref. If a concurrent `commit` (via
+/// [`RefWriteCondition::Match`], see `mkit-cli`'s `advance_head`)
+/// advances the source branch in the window between the rename's read
+/// and its delete, an unconditional delete destroys that freshly-landed
+/// commit's only ref with no error to either caller — commit reports
+/// success, rename reports success, and the commit becomes unreachable.
+///
+/// This closes that gap by making the delete itself compare-and-swap:
+/// it acquires the SAME per-ref lock [`cas_write`]'s `Match` arm takes
+/// (via [`cas_lock_name`], keyed off the ref's path so it can never
+/// collide with an unrelated ref of the same bare name), reads the
+/// current value under that lock, and only removes the file if it is
+/// still exactly `expected`. Because a concurrent `Match`-conditioned
+/// advance on the SAME ref takes the identical lock, the two can never
+/// interleave: either the advance's CAS write lands first (this call
+/// then sees the new value, doesn't match, and errors `Conflict`
+/// without touching the file) or this delete lands first (the advance's
+/// subsequent `Match(expected)` then sees the ref gone and itself fails
+/// `Conflict`) — never both "succeeding" against the same prior state.
+///
+/// Note this only closes the race against OTHER `Match`-locked writers.
+/// [`RefWriteCondition::Any`] writers never take this lock (by design —
+/// `Any` has no precondition to protect), so an `Any` advance racing a
+/// conditioned delete on the same ref is a caller error the lock cannot
+/// paper over; `mkit-cli`'s `commit` must use `Match`/`Missing` (not
+/// `Any`) for this guarantee to hold end-to-end (see issue #658's Fix
+/// B, `advance_head`).
+///
+/// # Errors
+/// - [`RefError::InvalidRefName`] if `branch` is not a valid name.
+/// - [`RefError::Conflict`] if the ref's current value is not exactly
+///   `expected` — this includes the ref not existing at all. The ref
+///   file is left completely untouched in this case.
+/// - [`RefError::Io`] for filesystem or lock-acquisition failures.
+pub fn delete_ref_if_matches(layout: &RepoLayout, branch: &str, expected: Hash) -> RefResult<()> {
+    if !validate_ref_name(branch) {
+        return Err(RefError::InvalidRefName(branch.to_string()));
+    }
+    let common_dir = layout.common_dir();
+    let path = ref_path(common_dir, HEADS_DIR, branch);
+
+    let lock_name = cas_lock_name(common_dir, &path);
+    let _lock = crate::repo_lock::acquire_default(common_dir, &lock_name).map_err(|e| match e {
+        crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+        other => RefError::InvalidRef(format!("{branch}: refs.lock acquisition: {other}")),
+    })?;
+
+    let current = match fs::read(&path) {
+        Ok(b) => Some(decode_ref_wire(&b).ok_or_else(|| RefError::InvalidRef(branch.to_string()))?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(RefError::Io(e)),
+    };
+    if current != Some(expected) {
+        return Err(RefError::Conflict(branch.to_string()));
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // Another caller can't have raced us here — we hold the lock
+        // guarding every write AND delete path to this ref — but treat
+        // a vanished file as a conflict rather than success, matching
+        // this function's fail-closed contract instead of assuming.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(RefError::Conflict(branch.to_string()))
+        }
+        Err(e) => Err(RefError::Io(e)),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // History-coupled branch delete (feature: history-mmr) — issue #648
 // -----------------------------------------------------------------------------
@@ -869,6 +946,82 @@ pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'stati
         .map_err(|e| RefError::InvalidRef(format!("{branch}: destroy history journal: {e}")))?;
 
     delete_ref(layout, branch)
+}
+
+/// [`delete_ref_with_history`], but CAS-guarded like
+/// [`delete_ref_if_matches`]: only deletes (and destroys the journal of)
+/// `branch` if its current on-disk value is exactly `expected`. Issue
+/// #658 — the `history-mmr` counterpart `mkit branch -m` routes through
+/// so a rename's rollback of a lost race also drops the correct
+/// journal.
+///
+/// # Locking
+///
+/// Lock order MUST stay `history_lock_name` (outer), then
+/// [`delete_ref_if_matches`]'s `cas_lock_name` (inner) — the exact order
+/// [`update_ref_with_history_locked`] already uses (it calls into
+/// [`update_ref`], which calls [`cas_write`], while still holding
+/// `history_lock_name`). Reversing this for just this one caller would
+/// open a deadlock class between this delete and a concurrent
+/// `update_ref_with_history*` call on the same branch — two locks
+/// acquired in opposite orders by different call paths is exactly the
+/// shape a deadlock needs, even though today's callers happen not to
+/// hold both at once. Since `history_lock_name` is taken first and held
+/// for this call's entire body, no concurrent history-mmr writer on
+/// THIS branch can interleave with the check below — so it is safe to
+/// read-then-act non-atomically with respect to those callers; the
+/// still-needed atomicity against a plain (non-history) `Match` writer
+/// on the same ref (relevant on a build with `history-mmr` racing one
+/// without it, or the file transport) is what `cas_lock_name` inside
+/// [`delete_ref_if_matches`] itself continues to provide.
+///
+/// The CAS condition is checked BEFORE the journal is touched (unlike
+/// [`delete_ref_with_history`]'s unconditional destroy-then-delete
+/// ordering): destroying the journal first and only then discovering
+/// the delete itself must fail would leave a live ref with a destroyed
+/// journal — precisely the torn state
+/// `delete_ref_with_history_races_update_without_tearing_ref_and_journal`
+/// guards against. A failed call here leaves BOTH the ref and its
+/// journal completely untouched.
+///
+/// # Errors
+///
+/// - [`RefError::Conflict`] — `branch`'s current value is not exactly
+///   `expected` (including "does not exist"). Neither the ref nor its
+///   journal are touched.
+/// - Otherwise the same errors as [`delete_ref_with_history`].
+#[cfg(feature = "history-mmr")]
+pub fn delete_ref_with_history_if_matches<X: crate::protocol::async_shim::Executor + 'static>(
+    layout: &RepoLayout,
+    branch: &str,
+    expected: Hash,
+    executor: std::sync::Arc<X>,
+) -> RefResult<()> {
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
+            crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+            other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
+        },
+    )?;
+
+    match read_ref(layout, branch)? {
+        Some(current) if current == expected => {}
+        _ => return Err(RefError::Conflict(branch.to_string())),
+    }
+
+    let history = crate::history::CommitHistory::open_at(executor, layout, branch)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
+    history
+        .destroy()
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: destroy history journal: {e}")))?;
+
+    // Re-checks the condition under `cas_lock_name` before removing the
+    // file — redundant with the read above given `history_lock_name` is
+    // still held (nothing on this branch could have moved it), but this
+    // keeps a single source of truth for "delete iff still `expected`"
+    // rather than duplicating `fs::remove_file` here.
+    delete_ref_if_matches(layout, branch, expected)
 }
 
 /// [`delete_ref_with_history`] guarded by the same current-branch check
@@ -1864,6 +2017,168 @@ mod tests {
         }
     }
 
+    // --- INV-15 / #658: CAS-guarded delete must not lose a concurrent
+    // Match-conditioned advance ---------------------------------------
+
+    /// Primitive-level reproduction of #658's "Race 1": a caller (e.g.
+    /// `branch -m`) reads a branch's tip `T`, then — before it gets
+    /// around to deleting the ref — a concurrent `Match(T)` CAS (e.g.
+    /// `commit`'s fixed advance) lands, moving the ref to `C`. The
+    /// caller's delete must detect that the ref no longer matches what
+    /// it read and refuse, leaving `C` on disk untouched.
+    ///
+    /// Confirmed against the pre-fix shape of this codebase: pointing
+    /// this same sequence at plain, unconditional [`delete_ref`] instead
+    /// of [`delete_ref_if_matches`] removes the ref regardless of `T` vs
+    /// `C`, silently destroying the concurrently-landed `C` — exactly
+    /// the bug #658 reports. [`delete_ref_if_matches`] must refuse
+    /// instead.
+    #[test]
+    fn cas_delete_refuses_when_ref_moved_after_read() {
+        let (_dir, mkit) = fresh_repo();
+        let t = h("t");
+        let c = h("c");
+        write_ref(&mkit, "main", &t).unwrap();
+
+        // Caller reads the tip...
+        let read_t = read_ref(&mkit, "main").unwrap().unwrap();
+        assert_eq!(read_t, t);
+
+        // ...then a concurrent Match(T) CAS (a fixed `commit`) lands
+        // before the caller's delete runs.
+        update_ref(&mkit, "main", RefWriteCondition::Match(t), &c).unwrap();
+
+        let err = delete_ref_if_matches(&mkit, "main", read_t).unwrap_err();
+        assert!(
+            matches!(err, RefError::Conflict(_)),
+            "expected Conflict, got {err:?}"
+        );
+        assert_eq!(
+            read_ref(&mkit, "main").unwrap(),
+            Some(c),
+            "the concurrently-landed commit must survive the refused delete untouched"
+        );
+    }
+
+    /// `delete_ref_if_matches` refusing to delete must not remove the
+    /// file at all — a second, correctly-conditioned delete against the
+    /// NEW value must still succeed.
+    #[test]
+    fn cas_delete_refusal_leaves_ref_deletable_against_its_new_value() {
+        let (_dir, mkit) = fresh_repo();
+        let t = h("t");
+        let c = h("c");
+        write_ref(&mkit, "main", &t).unwrap();
+        update_ref(&mkit, "main", RefWriteCondition::Match(t), &c).unwrap();
+
+        assert!(matches!(
+            delete_ref_if_matches(&mkit, "main", t).unwrap_err(),
+            RefError::Conflict(_)
+        ));
+        delete_ref_if_matches(&mkit, "main", c).unwrap();
+        assert_eq!(read_ref(&mkit, "main").unwrap(), None);
+    }
+
+    #[test]
+    fn cas_delete_fails_on_missing_ref() {
+        let (_dir, mkit) = fresh_repo();
+        let err = delete_ref_if_matches(&mkit, "main", h("anything")).unwrap_err();
+        assert!(matches!(err, RefError::Conflict(_)));
+    }
+
+    /// Racing-loop version of the reproduction above, mirroring
+    /// [`cas_match_race_never_loses_an_update_across_uncoordinated_callers`]'s
+    /// pattern: on each iteration, one thread performs a `Match`-guarded
+    /// advance (mirroring a fixed `commit`) and the other performs a
+    /// `delete_ref_if_matches` against the pre-advance value (mirroring
+    /// `branch -m`'s rename), both released by the same `Barrier` so the
+    /// scheduler is given its best shot at interleaving them. Because
+    /// both operations serialize under the same per-ref lock
+    /// ([`cas_lock_name`]), exactly one of the two may ever report
+    /// success against a given prior value — never both, and the loser
+    /// must never observe (or cause) a torn/lost state.
+    #[test]
+    fn cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance() {
+        let (_dir, mkit) = fresh_repo();
+        let iterations: usize = 500;
+        let mut bad_iteration: Option<(usize, &'static str)> = None;
+
+        for i in 0..iterations {
+            let base = h(&format!("base-{i}"));
+            write_ref(&mkit, "main", &base).unwrap();
+            let new_tip = h(&format!("advanced-{i}"));
+            let barrier = Barrier::new(2);
+
+            let (advance_result, delete_result) = std::thread::scope(|scope| {
+                let advance_handle = scope.spawn(|| {
+                    barrier.wait();
+                    update_ref(&mkit, "main", RefWriteCondition::Match(base), &new_tip)
+                });
+                let delete_handle = scope.spawn(|| {
+                    barrier.wait();
+                    delete_ref_if_matches(&mkit, "main", base)
+                });
+                (
+                    advance_handle.join().unwrap(),
+                    delete_handle.join().unwrap(),
+                )
+            });
+
+            match (&advance_result, &delete_result) {
+                (Ok(()), Ok(())) => {
+                    bad_iteration = Some((
+                        i,
+                        "both the concurrent advance and the concurrent delete reported success",
+                    ));
+                }
+                (Ok(()), Err(RefError::Conflict(_))) => {
+                    // The advance won the race; its value must survive.
+                    if read_ref(&mkit, "main").unwrap() != Some(new_tip) {
+                        bad_iteration = Some((
+                            i,
+                            "advance reported success but its value is not on disk — lost update",
+                        ));
+                    }
+                }
+                (Err(RefError::Conflict(_)), Ok(())) => {
+                    // The delete won the race before the advance landed;
+                    // the ref must be gone (the advance must have then
+                    // failed its own CAS, which the match arm above
+                    // already confirms).
+                    if read_ref(&mkit, "main").unwrap().is_some() {
+                        bad_iteration = Some((
+                            i,
+                            "delete reported success but the ref is still present on disk",
+                        ));
+                    }
+                }
+                (Err(RefError::Conflict(_)), Err(RefError::Conflict(_))) => {
+                    // Both lost — impossible on a fresh `base` write each
+                    // round with only these two writers, but not itself a
+                    // safety violation; leave unhandled rather than
+                    // silently accepting on a bug that could produce it.
+                    bad_iteration = Some((
+                        i,
+                        "both the advance and the delete reported Conflict against a freshly-written base",
+                    ));
+                }
+                _ => {
+                    bad_iteration = Some((i, "unexpected error variant"));
+                }
+            }
+
+            if bad_iteration.is_some() {
+                break;
+            }
+        }
+
+        assert!(
+            bad_iteration.is_none(),
+            "iteration {bad_iteration:?}: a concurrent Match-conditioned advance and a \
+             CAS-guarded delete on the same ref did not serialize correctly (issue #658)"
+        );
+    }
+
     /// Cross-ref counterpart to the race test above: `refs.lock` used
     /// to be one repo-wide lock, so a `Match` CAS on branch "other"
     /// would block one on unrelated branch "main" for no reason —
@@ -2704,6 +3019,62 @@ mod tests {
             // incarnation's leaf.
             let hist_old_reopened = CommitHistory::open_at(exec, &mkit, "old").unwrap();
             assert_eq!(hist_old_reopened.len(), 0);
+        }
+
+        /// #658: the CAS-guarded history-mmr delete succeeds and
+        /// destroys the journal when `expected` still matches.
+        #[test]
+        fn delete_ref_with_history_if_matches_succeeds_and_destroys_journal_on_match() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            let tip = h("tip");
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &tip, &mut hist)
+                .unwrap();
+            drop(hist);
+
+            delete_ref_with_history_if_matches(&mkit, "feature", tip, exec).unwrap();
+
+            assert_eq!(read_ref(&mkit, "feature").unwrap(), None);
+            assert!(!mkit.history_dir().join("feature__journal-blobs").exists());
+        }
+
+        /// #658: when `expected` no longer matches (a concurrent
+        /// history-mmr advance landed first), the CAS-guarded delete
+        /// must refuse WITHOUT touching either the ref or its journal —
+        /// unlike the unconditional [`delete_ref_with_history`], which
+        /// destroys the journal before ever looking at the ref's value.
+        #[test]
+        fn delete_ref_with_history_if_matches_leaves_ref_and_journal_untouched_on_conflict() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec.clone(), &mkit, "feature").unwrap();
+            let stale = h("stale");
+            let current = h("current");
+            update_ref_with_history(&mkit, "feature", RefWriteCondition::Any, &stale, &mut hist)
+                .unwrap();
+            update_ref_with_history(
+                &mkit,
+                "feature",
+                RefWriteCondition::Match(stale),
+                &current,
+                &mut hist,
+            )
+            .unwrap();
+            let leaves_before = hist.len();
+            drop(hist);
+
+            let err = delete_ref_with_history_if_matches(&mkit, "feature", stale, exec.clone())
+                .unwrap_err();
+            assert!(matches!(err, RefError::Conflict(_)));
+
+            assert_eq!(read_ref(&mkit, "feature").unwrap(), Some(current));
+            let hist_reopened = CommitHistory::open_at(exec, &mkit, "feature").unwrap();
+            assert_eq!(
+                hist_reopened.len(),
+                leaves_before,
+                "a refused conditional delete must not touch the journal"
+            );
         }
     }
 }
