@@ -261,10 +261,13 @@ jobs:
       # Fast subset only: lib-target unit tests, not the full
       # nextest/doctest/ignored-lane suite (that's build-and-test's job on
       # macOS push-to-main, and Cloud Build's job on Linux every push).
+      # --no-fail-fast: run every test binary instead of stopping at the
+      # first failing one, so a single flaky/failing crate doesn't hide
+      # failures in the crates that would have run after it.
       - name: Test (lib)
         if: env.SHOULD_RUN == 'true'
         working-directory: rust
-        run: cargo test --locked --workspace --lib
+        run: cargo test --locked --workspace --lib --no-fail-fast
 
   keystore-backends:
     name: Keystore backends (${{ matrix.name }})
