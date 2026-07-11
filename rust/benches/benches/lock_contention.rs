@@ -36,9 +36,11 @@ use mkit_core::repo_lock;
 const LOCK_NAME: &str = "bench.lock";
 /// How long the holder keeps the lock before releasing, once the
 /// waiter has signalled it is about to contend. Long enough that the
-/// waiter is guaranteed to have lost the `create_new` race and entered
-/// its poll-sleep before we release (avoiding a lucky race where the
-/// waiter's very first attempt happens to land after release).
+/// waiter is guaranteed to have lost its uncontended `try_lock()` fast
+/// path and be parked in the blocking-wait helper thread (spawned to
+/// hold the real kernel `lock()` call, per #635's fix) before we
+/// release — avoiding a lucky race where the waiter's very first
+/// attempt happens to land after release.
 const HOLD_AFTER_CONTENTION: Duration = Duration::from_millis(5);
 
 fn time_ms(f: impl FnMut()) -> f64 {
@@ -72,8 +74,9 @@ fn contended_handoff_ms(dir: &Path) -> f64 {
     });
 
     // Block until the waiter thread is alive and about to make its
-    // first attempt, then give it long enough to lose the create race
-    // and enter its poll-sleep before we release.
+    // first attempt, then give it long enough to lose the uncontended
+    // fast path and be parked in the blocking-wait helper thread
+    // before we release.
     ready_rx.recv().unwrap();
     thread::sleep(HOLD_AFTER_CONTENTION);
     drop(held);
