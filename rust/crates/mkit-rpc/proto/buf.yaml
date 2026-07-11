@@ -1,0 +1,26 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # common.proto, signer.proto, and ssh.proto live flat in this
+    # directory (mirrors apps/repo-worker/buf.yaml's own
+    # PACKAGE_DIRECTORY_MATCH exception) rather than under a nested
+    # mkit/rpc/v1/ tree.
+    - PACKAGE_DIRECTORY_MATCH
+    # signer.proto and ssh.proto deliberately share this directory
+    # with common.proto but use their own sub-packages
+    # (mkit.rpc.v1.signer / mkit.rpc.v1.ssh) built on top of the
+    # shared mkit.rpc.v1 vocabulary — see the file-header comments on
+    # each proto for the versioning rationale (a future breaking
+    # revision adds a sibling signer2.proto/ssh2.proto, not a new
+    # directory). DIRECTORY_SAME_PACKAGE is the inverse check of
+    # PACKAGE_DIRECTORY_MATCH above (multiple packages found in one
+    # directory).
+    - DIRECTORY_SAME_PACKAGE
+    # The v1 marker is embedded mid-package (mkit.rpc.v1, then
+    # .signer / .ssh appended) rather than trailing as a version
+    # suffix — intentional, not a lint violation to fix here.
+    - PACKAGE_VERSION_SUFFIX
