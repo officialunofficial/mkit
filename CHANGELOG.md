@@ -37,8 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependency on `mkit-core` (behind a `pack-zstd` feature, on by
   default) — already present transitively via the `commonware-storage`
   dependency stack at the same resolved version (0.13.3), so this adds
-  no new supply-chain root. `mkit-wasm` opts out (`default-features =
-  false`) since `zstd-sys` cannot target wasm32.
+  no new supply-chain root. `mkit-wasm` and `apps/repo-worker` (both
+  compile to wasm32-unknown-unknown) opt out (`default-features =
+  false`) since `zstd-sys` cannot target that platform.
+- **`mkit-core`: CAS-guarded ref delete.** New public `refs` primitives
+  `delete_ref_if_matches` and (on `--features history-mmr`)
+  `delete_ref_with_history_if_matches` — a `delete_ref`/
+  `delete_ref_with_history` that only removes the ref (and, on
+  history-mmr builds, its journal) when its current on-disk value is
+  exactly the caller-supplied `expected` hash, using the same per-ref
+  `cas_lock_name` lock `update_ref`'s `Match` arm already takes.
+  `mkit branch -m` now routes its source-branch drop (and, on a lost
+  race, its destination rollback) through these instead of an
+  unconditional delete — see the Fixed entry below
+  ([#658](https://github.com/officialunofficial/mkit/issues/658)).
 - **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
   machine-readable blame: a per-line header (`<id> <orig> <final>
   [<group-len>]`) plus a metadata block (author/committer, `author-time`/
@@ -381,6 +393,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`branch -m` racing `commit` on the same branch could silently lose
+  the commit.** #637 serialized `Match`-conditioned ref writes under a
+  shared per-ref lock, but `commit`'s ref advance still used
+  `RefWriteCondition::Any` (an unconditional clobber) and `branch -m`'s
+  delete of the renamed-away source ref was unconditional too — neither
+  side went through `Match`, so the shared lock never engaged between
+  them. A rename could read a branch's tip, let a concurrent `commit`
+  land on top of it via its own CAS, and then delete the ref anyway,
+  destroying the just-landed commit with both commands reporting
+  success. `commit`'s `advance_head` now writes `Match(expected_tip)` /
+  `Missing` instead of `Any` (aborting with a clear, GC-recoverable
+  `TEMPFAIL` if the branch moved underneath it since composing the
+  message), and `branch -m` now deletes the source ref via the new
+  CAS-guarded `delete_ref_if_matches`, rolling back the just-created
+  destination and erroring instead of destroying a concurrent commit
+  ([#658](https://github.com/officialunofficial/mkit/issues/658)).
 - **`listRefs(prefix)` no longer matches across a ref-name component
   boundary in `mkit-transport-memory` and `mkit-transport-s3`.** A
   request for prefix `refs/heads/feat` incorrectly matched
