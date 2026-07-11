@@ -812,37 +812,18 @@ fn digest_from_hash(h: &Hash) -> <Blake3 as CHasher>::Digest {
 }
 
 /// Hex-escape a mkit branch name into a commonware-partition-safe
-/// token.
+/// token — see [`crate::refs::sanitize_ref_name`] for the encoding
+/// (`main` → `main`, `feat/v1.0` → `feat_2fv1_2e0`, injective).
 ///
-/// commonware partition names are restricted to `[A-Za-z0-9_-]+`. mkit
-/// ref names can contain `.` and `/` (and `_`, which IS allowed
-/// upstream but which we must escape too to keep this encoding
-/// injective). Every non-`[A-Za-z0-9-]` byte is encoded as `_xx`
-/// where `xx` is the lowercase-hex byte value; `_` itself encodes as
-/// `_5f`. This makes the encoding self-delimiting — every `_` in the
-/// output is the lead-in of a two-hex-digit escape, never a literal.
-///
-/// Examples:
-///   `main`        → `main`
-///   `feat/v1.0`   → `feat_2fv1_2e0`
-///   `feat_v1_0`   → `feat_5fv1_5f0`
-///
-/// The encoding is injective: different valid branch names always
-/// sanitize to different partition tokens, so the journaled MMRs of
-/// two branches in the same repo never share commonware partitions.
-fn sanitize_branch(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for &b in name.as_bytes() {
-        let allowed = b.is_ascii_alphanumeric() || b == b'-';
-        if allowed {
-            out.push(b as char);
-        } else {
-            use core::fmt::Write as _;
-            let _ = write!(&mut out, "_{b:02x}");
-        }
-    }
-    out
-}
+/// The canonical implementation lives in `refs.rs`, NOT here: this
+/// module is entirely `#[cfg(feature = "history-mmr")]`-gated (see
+/// `lib.rs`), but `cas_write`'s per-ref lock naming needs the same
+/// sanitizer in every build, including when this module doesn't
+/// exist. `refs.rs` already has the right dependency direction —
+/// `history.rs` already depends on it for [`crate::refs::validate_ref_name`]
+/// — so this is a thin re-export, not a second implementation, to
+/// avoid the two drifting (found during the epic-#634 code review).
+use crate::refs::sanitize_ref_name as sanitize_branch;
 
 /// Test-only instrumentation for observing how many times
 /// [`bootstrap_commonware_context`] actually spawns a bootstrap OS

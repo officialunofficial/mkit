@@ -181,6 +181,68 @@ pub fn validate_ref_name(name: &str) -> bool {
     true
 }
 
+/// Hex-escape an arbitrary ref-like name (branch, tag, remote ref, or
+/// a `refs.rs`-relative path) into a filename-safe token:
+/// `[A-Za-z0-9-_]`-only input, injective, self-delimiting.
+///
+/// Every non-`[A-Za-z0-9-]` byte is encoded as `_xx` where `xx` is the
+/// lowercase-hex byte value; `_` itself encodes as `_5f`, so every `_`
+/// in the output is unambiguously the lead-in of a two-hex-digit
+/// escape, never a literal.
+///
+/// Examples:
+///   `main`        → `main`
+///   `feat/v1.0`   → `feat_2fv1_2e0`
+///   `feat_v1_0`   → `feat_5fv1_5f0`
+///
+/// Deliberately NOT gated behind `history-mmr` (unlike the `history`
+/// module, which is): [`cas_write`]'s per-ref lock naming needs this
+/// in every build, and `history.rs` (when the feature is enabled)
+/// reuses this same implementation for its journal-partition naming —
+/// matching the dependency direction `history.rs` already has on this
+/// module via [`validate_ref_name`], rather than the reverse (which
+/// would make this unavailable exactly where `cas_write` needs it).
+pub(crate) fn sanitize_ref_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for &b in name.as_bytes() {
+        let allowed = b.is_ascii_alphanumeric() || b == b'-';
+        if allowed {
+            out.push(b as char);
+        } else {
+            use core::fmt::Write as _;
+            let _ = write!(&mut out, "_{b:02x}");
+        }
+    }
+    out
+}
+
+/// The `refs-history-<branch>.lock` filename [`update_ref_with_history_locked`]
+/// and [`delete_ref_with_history`] both acquire. A named function
+/// (not an inline `format!` repeated at each call site) so tests can
+/// call the SAME naming decision production makes, rather than
+/// independently reimplementing the formula — a test that recomputes
+/// its own copy of this format string would silently stop catching a
+/// regression if production's naming ever changed without the test's
+/// hand-copied version changing too.
+#[cfg(feature = "history-mmr")]
+pub(crate) fn history_lock_name(branch: &str) -> String {
+    format!("refs-history-{}.lock", sanitize_ref_name(branch))
+}
+
+/// The `refs-<ref>.lock` filename [`cas_write`]'s `Match` arm
+/// acquires, keyed off `path` relative to `common_dir` (not just a
+/// bare name) so a branch and a tag/remote-ref sharing the same bare
+/// name get distinct locks. Named for the same reason as
+/// [`history_lock_name`]: a test that independently recomputes this
+/// formula would stop catching a regression the moment production's
+/// formula changed without the test's copy changing too.
+pub(crate) fn cas_lock_name(common_dir: &Path, path: &Path) -> String {
+    let ref_key = path
+        .strip_prefix(common_dir)
+        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy());
+    format!("refs-{}.lock", sanitize_ref_name(&ref_key))
+}
+
 /// Validate a prefix passed to `list_refs`. An empty prefix is allowed.
 /// A single trailing `/` is allowed; otherwise the prefix must satisfy
 /// [`validate_ref_name`].
@@ -587,15 +649,24 @@ where
         )));
     }
 
-    // Single repo-level lock around the ref-write + MMR-append (and,
-    // for the backfilling entry point, the empty-journal check and the
+    // Per-branch lock around the ref-write + MMR-append (and, for the
+    // backfilling entry point, the empty-journal check and the
     // backfill loop itself) critical section. Cross-process
-    // interleaving is impossible while any holder owns this lock.
-    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
-        .map_err(|e| match e {
+    // interleaving on THIS branch is impossible while any holder owns
+    // this lock. Scoped per branch (not repo-wide) since nothing about
+    // the history-mmr coupling spans branches — each branch's journal
+    // is its own partition — so an operation on branch A must never
+    // contend with one on unrelated branch B (found during the
+    // epic-#634 code review; matters in practice for linked worktrees,
+    // #493, where different worktrees routinely advance different
+    // branches at the same time).
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
-        })?;
+        },
+    )?;
 
     // `history` may have been opened (its `CommitHistory::open_at`
     // bootstrap read the on-disk journal) before this call took the
@@ -757,31 +828,35 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 ///   exposed via a `String` payload, matching
 ///   [`update_ref_with_history`]'s convention.
 /// - [`RefError::Io`] — filesystem failure removing the ref file
-///   itself, or acquiring `refs-history.lock`.
+///   itself, or acquiring the per-branch history lock.
 ///
 /// # Locking
 ///
 /// Runs the read-check + journal-destroy + ref-delete sequence under
-/// the same `refs-history.lock` [`update_ref_with_history_locked`]
-/// uses (found during code review after #638 landed: this function
-/// originally ran unlocked, which reopened exactly the race #638
-/// closed one layer up — a concurrent ref-only writer that
-/// deliberately skips the worktree lock, e.g. `update-ref`, could
-/// interleave its journal append with this delete's journal destroy).
-/// Held for the whole sequence, not just the destroy, so a concurrent
-/// `update_ref_with_history*` call on the same branch either fully
-/// precedes or fully follows this delete — never interleaves with it.
+/// the same per-branch `refs-history-<branch>.lock`
+/// [`update_ref_with_history_locked`] uses (found during code review
+/// after #638 landed: this function originally ran unlocked, which
+/// reopened exactly the race #638 closed one layer up — a concurrent
+/// ref-only writer that deliberately skips the worktree lock, e.g.
+/// `update-ref`, could interleave its journal append with this
+/// delete's journal destroy). Held for the whole sequence, not just
+/// the destroy, so a concurrent `update_ref_with_history*` call on the
+/// SAME branch either fully precedes or fully follows this delete —
+/// never interleaves with it. Scoped per branch (not repo-wide), so
+/// this never contends with an operation on an unrelated branch.
 #[cfg(feature = "history-mmr")]
 pub fn delete_ref_with_history<X: crate::protocol::async_shim::Executor + 'static>(
     layout: &RepoLayout,
     branch: &str,
     executor: std::sync::Arc<X>,
 ) -> RefResult<()> {
-    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), "refs-history.lock")
-        .map_err(|e| match e {
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
             crate::repo_lock::LockError::Io(io) => RefError::Io(io),
             other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
-        })?;
+        },
+    )?;
 
     if read_ref(layout, branch)?.is_none() {
         return Err(RefError::NotFound(branch.to_string()));
@@ -1204,21 +1279,30 @@ fn cas_write(
             // (`worktree.lock`), or two linked worktrees each holding
             // their own `worktree.lock`, both write `refs/heads/*`
             // through this path without ever sharing a lock. Take a
-            // dedicated `refs.lock` (same blocking kernel-lock
+            // dedicated per-ref lock (same blocking kernel-lock
             // primitive `repo_lock` uses elsewhere, e.g.
-            // `update_ref_with_history`'s `refs-history.lock`) scoped
-            // to the whole read-compare-write so any two callers on the
-            // same repo — regardless of what other locks they hold —
-            // serialize here and cannot both observe a stale-but-still-
-            // matching `current` value.
-            let _lock = crate::repo_lock::acquire_default(common_dir, "refs.lock").map_err(
-                |e| match e {
+            // `update_ref_with_history`'s per-branch `refs-history-*.lock`)
+            // scoped to the whole read-compare-write so any two callers
+            // on the same repo targeting the SAME ref — regardless of
+            // what other locks they hold — serialize here and cannot
+            // both observe a stale-but-still-matching `current` value.
+            //
+            // Keyed off `path` (relative to `common_dir`), not just
+            // `name_for_err`, so a branch and a tag/remote-ref sharing
+            // the same bare name (e.g. both named "main") get distinct
+            // locks — `name_for_err` alone can be just the bare name
+            // (see `write_remote_ref`), which would otherwise cause
+            // unrelated ref kinds to falsely contend. Scoped per ref
+            // (not repo-wide) since nothing about this CAS invariant
+            // spans refs (found during the epic-#634 code review).
+            let lock_name = cas_lock_name(common_dir, path);
+            let _lock =
+                crate::repo_lock::acquire_default(common_dir, &lock_name).map_err(|e| match e {
                     crate::repo_lock::LockError::Io(io) => RefError::Io(io),
                     other => RefError::InvalidRef(format!(
                         "{name_for_err}: refs.lock acquisition: {other}"
                     )),
-                },
-            )?;
+                })?;
 
             let current = match fs::read(path) {
                 Ok(b) => Some(
@@ -1780,6 +1864,45 @@ mod tests {
         }
     }
 
+    /// Cross-ref counterpart to the race test above: `refs.lock` used
+    /// to be one repo-wide lock, so a `Match` CAS on branch "other"
+    /// would block one on unrelated branch "main" for no reason —
+    /// nothing about this CAS invariant spans refs. Now keyed per ref
+    /// via [`cas_lock_name`]; proves an externally-held lock on
+    /// "other"'s ref path does NOT block a `Match` CAS on "main"'s.
+    #[test]
+    fn cas_match_does_not_contend_across_different_refs() {
+        let (_dir, mkit) = fresh_repo();
+        write_ref(&mkit, "main", &h("m0")).unwrap();
+        write_ref(&mkit, "other", &h("o0")).unwrap();
+
+        let other_path = ref_path(mkit.common_dir(), HEADS_DIR, "other");
+        let other_lock_name = cas_lock_name(mkit.common_dir(), &other_path);
+        let common_dir = mkit.common_dir().to_path_buf();
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _lock = crate::repo_lock::acquire_default(&common_dir, &other_lock_name).unwrap();
+            holding_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        holding_rx.recv().unwrap();
+
+        let start = std::time::Instant::now();
+        update_ref(&mkit, "main", RefWriteCondition::Match(h("m0")), &h("m1")).unwrap();
+        let elapsed = start.elapsed();
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "Match CAS on \"main\" took {elapsed:?} while \"other\"'s ref lock was held \
+             elsewhere — refs are contending when they shouldn't be"
+        );
+        assert_eq!(read_ref(&mkit, "main").unwrap(), Some(h("m1")));
+    }
+
     // --- name-validation enforcement -----------------------------------
 
     #[test]
@@ -2077,6 +2200,96 @@ mod tests {
 
             assert_eq!(read_ref(&mkit, "main").unwrap(), Some(c2));
             assert_eq!(hist.len(), 2, "two appends → two leaves in the MMR");
+        }
+
+        /// Regression test for the epic-#634 follow-up: `refs-history.lock`
+        /// (and `refs.lock`) used to be one repo-wide lock, so an
+        /// operation on branch "other" would block one on unrelated
+        /// branch "main" for no reason — nothing about the history-mmr
+        /// coupling spans branches. Locks are now keyed per branch
+        /// (`refs-history-<sanitized-branch>.lock`); this proves an
+        /// externally-held lock on branch "other" does NOT block
+        /// `update_ref_with_history` on branch "main".
+        #[test]
+        fn update_ref_with_history_does_not_contend_across_branches() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            // Hold "other" branch's per-branch history lock on a
+            // separate thread for well longer than this test's timeout
+            // budget would tolerate if "main" incorrectly contended on
+            // it. Calls the SAME `history_lock_name` production uses
+            // (not a hand-copied format! string) so this test can't
+            // silently decouple from whatever naming decision
+            // production actually makes.
+            let other_lock_name = history_lock_name("other");
+            let common_dir = mkit.common_dir().to_path_buf();
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _lock =
+                    crate::repo_lock::acquire_default(&common_dir, &other_lock_name).unwrap();
+                holding_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            holding_rx.recv().unwrap();
+
+            // If this contended on "other"'s lock, it would hang until
+            // the holder thread released — which we don't do until
+            // after this call returns. A generous-but-bounded elapsed
+            // check turns a regression into a fast test failure instead
+            // of an indefinite hang.
+            let start = std::time::Instant::now();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m1"), &mut hist)
+                .unwrap();
+            let elapsed = start.elapsed();
+
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "update_ref_with_history on \"main\" took {elapsed:?} while \"other\"'s \
+                 per-branch lock was held elsewhere — branches are contending when they \
+                 shouldn't be"
+            );
+            assert_eq!(read_ref(&mkit, "main").unwrap(), Some(h("m1")));
+        }
+
+        /// Sanity control for the test above: the SAME branch's lock
+        /// must still serialize correctly — per-branch scoping must not
+        /// have accidentally broken same-branch mutual exclusion.
+        #[test]
+        fn update_ref_with_history_still_contends_on_the_same_branch() {
+            let (_dir, mkit) = fresh_repo();
+            let exec = Arc::new(TokioExecutor::new().unwrap());
+            let mut hist = CommitHistory::open_at(exec, &mkit, "main").unwrap();
+
+            let main_lock_name = history_lock_name("main");
+            let common_dir = mkit.common_dir().to_path_buf();
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+            let held_for = std::time::Duration::from_millis(200);
+            let holder = std::thread::spawn(move || {
+                let _lock =
+                    crate::repo_lock::acquire_default(&common_dir, &main_lock_name).unwrap();
+                holding_tx.send(()).unwrap();
+                std::thread::sleep(held_for);
+            });
+            holding_rx.recv().unwrap();
+
+            let start = std::time::Instant::now();
+            update_ref_with_history(&mkit, "main", RefWriteCondition::Any, &h("m1"), &mut hist)
+                .unwrap();
+            let elapsed = start.elapsed();
+            holder.join().unwrap();
+
+            assert!(
+                elapsed >= held_for / 2,
+                "update_ref_with_history on \"main\" returned in {elapsed:?} while \"main\"'s \
+                 own lock was held for {held_for:?} elsewhere — same-branch mutual exclusion \
+                 is broken"
+            );
         }
 
         #[test]
