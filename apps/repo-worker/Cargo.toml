@@ -47,7 +47,11 @@ serde_json = "1"
 # Both are wasm-clean in their default builds (no tokio / no commonware
 # heavy features). mkit-wasm depends on these same paths and ships to
 # wasm32, which is our parity proof that they compile to the target.
-mkit-core = { path = "../../rust/crates/mkit-core" }
+# `default-features = false` on mkit-core drops `pack-zstd` (on by
+# default for native consumers): zstd-sys can't target
+# wasm32-unknown-unknown, and this worker compiles to that target via
+# worker-build same as mkit-wasm — mirror its opt-out here too.
+mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
 mkit-attest = { path = "../../rust/crates/mkit-attest" }
 
 # Ed25519 strict verify for the write-envelope. The envelope is a PLAIN

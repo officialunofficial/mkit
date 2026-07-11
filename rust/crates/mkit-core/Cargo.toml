@@ -81,9 +81,10 @@ libc = "0.2"
 # `PackWriter`/`PackReader` transparently compress/decompress pack
 # entries per SPEC-PACKFILE v2 without any call-site changes. It is
 # the one default feature that pulls a dependency outside the
-# always-wasm-safe base, so the single crate that must NOT get it
-# (`mkit-wasm`, built for wasm32-unknown-unknown) opts out explicitly
-# with `default-features = false` on its `mkit-core` dependency.
+# always-wasm-safe base, so every crate that targets
+# wasm32-unknown-unknown (`mkit-wasm`; `apps/repo-worker`, built via
+# worker-build) opts out explicitly with `default-features = false`
+# on its `mkit-core` dependency.
 default = ["pack-zstd"]
 # SPEC-PACKFILE v2 (issue #646): zstd-compressed pack entries (`0x03`
 # zstd-raw, `0x04` zstd-delta). Disabling this feature does not make
