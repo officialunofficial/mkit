@@ -11,6 +11,16 @@
 //! against (`crate::batch` module docs). Each one must hit stable
 //! storage in its own right before its caller returns. Do not
 //! "optimise" these writes onto the batch path.
+//!
+//! The one documented exception is `refs::RemoteRefBatch` (#645):
+//! `refs/remotes/*` entries are not pointers anything orders against —
+//! they are a locally-cached, trivially recomputable-from-a-re-fetch
+//! view of another repository's branches — so a multi-ref fan-out (one
+//! `push`/`fetch` updating N tracking refs) is allowed to defer the
+//! parent-directory fsync ([`sync_dir`]) across the whole batch instead
+//! of paying it per ref. `refs/heads/*` (branch heads) and everything
+//! else in this module keep the unbatched per-write contract described
+//! above.
 
 use std::fs;
 #[cfg(unix)]
@@ -138,6 +148,8 @@ pub(crate) fn write_create_new(
 
 #[cfg(unix)]
 pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    testing::record_dir_sync_call();
     match File::open(parent) {
         Ok(dir) => dir.sync_all(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -148,5 +160,43 @@ pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    testing::record_dir_sync_call();
     Ok(())
+}
+
+/// Test-only directory-fsync call counter (issue #645).
+///
+/// [`sync_parent_dir`] is the single choke point every parent-directory
+/// fsync in this crate goes through — `write_atomic`, `write_create_new`,
+/// [`sync_dir`], and [`crate::store`]'s syncers all bottom out here. A
+/// per-thread counter (rather than a process-global one) lets tests run
+/// under the default parallel test harness without a lock: `cargo test`
+/// gives each `#[test]` its own OS thread, so one test's count can never
+/// be perturbed by another running concurrently.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DIR_SYNC_CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn record_dir_sync_call() {
+        DIR_SYNC_CALLS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Zero this thread's counter. Call at the start of a test that
+    /// asserts a call count, so any directory syncs performed by earlier
+    /// setup (`fresh_repo`, etc.) on the same thread aren't counted.
+    pub(crate) fn reset_dir_sync_calls() {
+        DIR_SYNC_CALLS.with(|c| c.set(0));
+    }
+
+    /// This thread's directory-fsync count since the last
+    /// [`reset_dir_sync_calls`].
+    #[must_use]
+    pub(crate) fn dir_sync_calls() -> u64 {
+        DIR_SYNC_CALLS.with(Cell::get)
+    }
 }

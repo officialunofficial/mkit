@@ -94,6 +94,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "for-each-ref" => commands::for_each_ref::run(&rest),
         "symbolic-ref" => commands::symbolic_ref::run(&rest),
         "update-ref" => commands::update_ref::run(&rest),
+        "ref" => commands::ref_cmd::run(&rest),
         "tree" => commands::tree::run(&rest),
         "add" => commands::add::run(&rest),
         "rm" => commands::rm::run(&rest),

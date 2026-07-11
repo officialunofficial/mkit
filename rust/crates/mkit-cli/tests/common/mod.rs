@@ -266,14 +266,33 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
             .map_err(|e| format!("[{label}] live object {} missing/corrupt: {e}", to_hex(h)))?;
     }
 
-    // No leaked lock files: every `.mkit/*.lock` is acquired and released within
-    // a single command, so none must survive a returned command.
+    // No leaked *held* locks: every `.mkit/*.lock` is acquired and released
+    // within a single command, so none may still be kernel-locked once the
+    // command has returned. The sentinel files themselves are allowed (even
+    // expected) to persist on disk — `repo_lock` never unlinks them (see
+    // `mkit_core::repo_lock` module docs): unlinking on release reopens the
+    // stale-vs-live inode-swap race a blocking wait exists to close. So the
+    // check here is "not currently locked," not "does not exist."
     if let Ok(rd) = std::fs::read_dir(&mkit_dir) {
         for ent in rd.flatten() {
             let name = ent.file_name();
             let name = name.to_string_lossy();
-            if name.ends_with(".lock") {
-                return Err(format!("[{label}] leaked lock file: .mkit/{name}"));
+            if !name.ends_with(".lock") {
+                continue;
+            }
+            let path = ent.path();
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("[{label}] open lock sentinel .mkit/{name}: {e}"))?;
+            match file.try_lock() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                }
+                Err(_) => {
+                    return Err(format!("[{label}] leaked held lock: .mkit/{name}"));
+                }
             }
         }
     }

@@ -239,6 +239,13 @@ fn collect_tree_roots(
 /// The full live-object keep-set for `mkit gc`: the reachable closure
 /// over every retention root from [`collect_roots`].
 ///
+/// Does not verify leaf (blob/delta) content integrity as part of the
+/// walk — see [`super::graph::reachable_closure`]'s "Content integrity
+/// of leaves" doc section. `gc` is therefore no longer an incidental
+/// corruption-detection pass over blob content the way it was before
+/// #636; it still fails closed on a *missing* object, just not on a
+/// present-but-corrupted one.
+///
 /// # Errors
 ///
 /// [`GcRootsError`] if roots cannot be collected, or a [`StoreError`]

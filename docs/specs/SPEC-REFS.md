@@ -246,11 +246,18 @@ not exist or contains a different hash → `RefConflict`.
 
 *memory CAS:* v1 ships the non-atomic `.match` implementation for the
 in-process memory transport only. The file transport's `.match` is atomic
-across processes via the OS lock above; the read-then-write race survives
-only in the local `mkit-core` `refs::cas_write` helper used by commands that
-mutate refs directly on disk without going through the file transport.
-Production deployments needing CAS across processes without the file
-transport's lock should use s3/http/ssh.
+across processes via the OS lock above. As of #637, the local `mkit-core`
+`refs::cas_write` helper used by commands that mutate refs directly on
+disk (without going through the file transport) is also atomic across
+processes: its `.match` arm takes a dedicated `<common_dir>/refs.lock`
+OS exclusive lock (distinct from the file transport's
+`<root>/.mkit/refs/.lock`, but the same blocking-kernel-lock primitive)
+around the read-check-write, so two uncoordinated callers on the same
+repo — e.g. `branch -m` and `commit`, or `update-ref` from two linked
+worktrees — can no longer both observe a stale `current` value and both
+report success while one write is silently lost. Only the in-process
+memory transport's `.match` remains genuinely non-atomic (single-fibre
+races), matching the row above.
 
 *Coordination with local worktree operations:* `<root>/.mkit/refs/.lock`
 by itself only serializes the file transport against concurrent instances

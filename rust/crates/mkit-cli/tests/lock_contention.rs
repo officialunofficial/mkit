@@ -1,10 +1,14 @@
 //! Fault injection — multi-process lock contention.
 //!
-//! mkit serialises worktree mutations under an `O_EXCL` lockfile + `flock`
-//! (`.mkit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). These
-//! tests assert that under concurrency the repo never corrupts, never
-//! deadlocks, and leaves no stale lock — and they pin the documented
-//! crash-leaves-stale-lock behavior.
+//! mkit serialises worktree mutations under a `flock`-backed lock file
+//! (`.mkit/worktree.lock`, 5s acquire timeout → exit `TEMPFAIL`/75). Per
+//! #635/INV-16, the lock's sentinel file is never unlinked and carries no
+//! meaning by itself — only the kernel lock does — so a lockfile left behind
+//! by a killed process does not block later commands (the kernel already
+//! released its lock when the dead process's descriptor closed). These tests
+//! assert that under concurrency the repo never corrupts, never deadlocks,
+//! and never leaves a *held* lock behind — and pin that a merely-present,
+//! unlocked sentinel does not wedge future acquires.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -75,33 +79,26 @@ fn concurrent_independent_mutators_serialize_cleanly() {
         }
     });
 
-    // No corruption, and the lockfile was released by every holder.
+    // No corruption, and the lock was released by every holder (the sentinel
+    // file itself is allowed to persist — see module doc — `check_invariants`
+    // asserts nobody still holds it).
     check_invariants(repo.path(), "post-contention").unwrap();
-    assert!(
-        !repo.mkit_dir().join("worktree.lock").exists(),
-        "a stale worktree.lock survived the contention run"
-    );
 }
 
 #[test]
-fn stale_lockfile_blocks_then_clears() {
-    // A crashed holder leaves `.mkit/worktree.lock` behind; mkit does NOT
-    // auto-reclaim it (git-like). Simulate it deterministically by creating the
-    // file directly — no SIGKILL needed.
+fn unlocked_stale_lockfile_does_not_block() {
+    // #635/INV-16: a lockfile left behind by a crashed holder must not
+    // permanently wedge future commands. The sentinel's mere on-disk
+    // presence is not the mutual-exclusion signal — the kernel `flock` is
+    // — so an inert leftover file (present, but nobody holds its lock, as
+    // a SIGKILL'd process's lock would be released by the kernel) must
+    // not block. Simulate the crashed-holder aftermath deterministically
+    // by creating the file directly, with no lock ever taken on it — no
+    // SIGKILL needed.
     let repo = repo_with_workers(0);
     let lock = repo.mkit_dir().join("worktree.lock");
     fs::write(&lock, b"").unwrap();
 
-    let out = repo.run(&["tag", "blocked"]);
-    assert_eq!(
-        out.status.code(),
-        Some(TEMPFAIL),
-        "mutating command should fail TEMPFAIL while a (stale) lock exists; stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // Removing the stale lock restores normal operation.
-    fs::remove_file(&lock).unwrap();
     repo.ok(&["tag", "blocked"]);
     check_invariants(repo.path(), "post-stale-lock").unwrap();
 }

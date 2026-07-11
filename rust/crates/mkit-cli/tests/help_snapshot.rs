@@ -81,6 +81,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "for-each-ref",
     "symbolic-ref",
     "update-ref",
+    "ref",
     "branch",
     "checkout",
     "clean",

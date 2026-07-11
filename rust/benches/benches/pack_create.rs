@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mkit_benches::{Sample, Unit, time_one};
+use mkit_benches::{Sample, Unit, time_one_with_setup};
 use mkit_core::layout::RepoLayout;
 use mkit_core::store::ObjectStore;
 
@@ -35,29 +35,65 @@ fn bench_pack(c: &mut Criterion) {
 
         // --- mkit: hash + atomic-write each blob via ObjectStore -------
         // Apples-to-apples with git2's odb.write below: real on-disk
-        // writes, not just hashing.
-        let mkit_dir = tempfile::tempdir().unwrap();
-        let store = ObjectStore::init(&RepoLayout::single(mkit_dir.path())).unwrap();
-        c.bench_function(&format!("pack/{axis}/mkit"), |b| {
-            b.iter(|| pack_via_mkit(&store, &blobs));
-        });
-        let t = time_one(1, 5, || pack_via_mkit(&store, &blobs));
-        samples.push(Sample {
-            category: "pack-create".into(),
-            axis: axis.into(),
-            library: "mkit (BLAKE3)".into(),
-            value: t * 1000.0,
-            unit: Unit::Millis,
-        });
+        // writes, not just hashing. Every measured iteration gets a
+        // fresh tempdir + store (like store_write.rs's
+        // iter_with_setup) so writes never dedup against a blob
+        // already staged by a prior iteration.
+        {
+            c.bench_function(&format!("pack/{axis}/mkit"), |b| {
+                b.iter_with_setup(
+                    || {
+                        let dir = tempfile::tempdir().unwrap();
+                        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                        (dir, store)
+                    },
+                    |(_dir, store)| pack_via_mkit(&store, &blobs),
+                );
+            });
+            let t = time_one_with_setup(
+                1,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+                    (dir, store)
+                },
+                |(_dir, store)| pack_via_mkit(&store, &blobs),
+            );
+            samples.push(Sample {
+                category: "pack-create".into(),
+                axis: axis.into(),
+                library: "mkit (BLAKE3)".into(),
+                value: t * 1000.0,
+                unit: Unit::Millis,
+            });
+        }
 
         // --- git2 odb.write per blob
+        // Same fresh-repo-per-iteration treatment: libgit2's odb.write
+        // is content-addressed too, so a reused repo would dedup from
+        // the second iteration onward exactly like mkit's store.
         {
-            let dir = tempfile::tempdir().unwrap();
-            let repo = git2::Repository::init(dir.path()).unwrap();
             c.bench_function(&format!("pack/{axis}/git2"), |b| {
-                b.iter(|| pack_via_git2(&repo, &blobs));
+                b.iter_with_setup(
+                    || {
+                        let dir = tempfile::tempdir().unwrap();
+                        let repo = git2::Repository::init(dir.path()).unwrap();
+                        (dir, repo)
+                    },
+                    |(_dir, repo)| pack_via_git2(&repo, &blobs),
+                );
             });
-            let t = time_one(1, 5, || pack_via_git2(&repo, &blobs));
+            let t = time_one_with_setup(
+                1,
+                5,
+                || {
+                    let dir = tempfile::tempdir().unwrap();
+                    let repo = git2::Repository::init(dir.path()).unwrap();
+                    (dir, repo)
+                },
+                |(_dir, repo)| pack_via_git2(&repo, &blobs),
+            );
             samples.push(Sample {
                 category: "pack-create".into(),
                 axis: axis.into(),
