@@ -98,6 +98,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Scoop bucket instead of `mkit self update` for now
   ([#714](https://github.com/officialunofficial/mkit/issues/714), part of
   [#676](https://github.com/officialunofficial/mkit/issues/676)).
+- **SLSA build provenance for release archives.** The `release` job in
+  `.github/workflows/release.yml` now generates a standard SLSA build
+  provenance attestation (`actions/attest-build-provenance`, GitHub/
+  Sigstore-native) over every `dist/*.tar.gz` and `dist/*.zip` archive
+  (including the Windows leg), staged alongside the existing cosign
+  signatures and the mkit-native DSSE attestation as
+  `mkit-X.Y.Z.provenance.jsonl`. This is additive — it does not replace
+  cosign or the mkit-native attestation — but gives downstream tooling
+  (`gh attestation verify`, `slsa-verifier`) a recognized, off-the-shelf
+  provenance format to check against instead of parsing mkit's bespoke DSSE
+  predicate. See `docs/RELEASE.md` ("Verify the SLSA build provenance
+  attestation").
 - **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
   `PackWriter`/`PackReader` transparently compress/decompress pack
   entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
