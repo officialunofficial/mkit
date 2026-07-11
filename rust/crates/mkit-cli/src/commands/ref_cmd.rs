@@ -16,7 +16,7 @@
 //!   matched" exit-1 convention is a git-inherited existence test, not
 //!   what a structured listing command should do). `--pattern <glob>`
 //!   filters to full ref names matching a shell glob (`*` spans `/`,
-//!   `?`/`[...]` supported — see [`super::branch::glob_match`]).
+//!   `?`/`[...]` supported — see `super::branch::glob_match`).
 //! - `ref cat <name>` prints the resolved hash for exactly one ref,
 //!   following `HEAD`'s symbolic indirection (`HEAD` is mkit's only
 //!   symbolic ref: it either names a branch or holds a detached hash).

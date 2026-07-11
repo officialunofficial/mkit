@@ -519,7 +519,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// For the journaled flavour, the underlying MMR is `sync`'d to
     /// disk before returning — survives a `SIGKILL` immediately after.
     ///
-    /// A thin wrapper over [`Self::append_no_sync`] + [`Self::sync`] —
+    /// A thin wrapper over `Self::append_no_sync` + `Self::sync` —
     /// see those for the split. Callers appending many leaves in one
     /// critical section (e.g. [`rebuild_from_chain`]'s backfill) should
     /// call the two halves directly instead, batching the fsync.
@@ -752,7 +752,7 @@ pub fn verify_inclusion(
 ///
 /// Batches all backfilled leaves into a single `journal.sync()` (fsync)
 /// for the whole chain, rather than one per commit — see
-/// [`CommitHistory::append_no_sync`]. Git adopted the same pattern
+/// `CommitHistory::append_no_sync`. Git adopted the same pattern
 /// (`core.fsyncMethod=batch`) for the same reason: fsync latency, not
 /// the MMR math, is what dominates a large backfill.
 ///

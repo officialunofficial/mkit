@@ -834,7 +834,7 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 ///
 /// Runs the read-check + journal-destroy + ref-delete sequence under
 /// the same per-branch `refs-history-<branch>.lock`
-/// [`update_ref_with_history_locked`] uses (found during code review
+/// `update_ref_with_history_locked` uses (found during code review
 /// after #638 landed: this function originally ran unlocked, which
 /// reopened exactly the race #638 closed one layer up — a concurrent
 /// ref-only writer that deliberately skips the worktree lock, e.g.
@@ -941,7 +941,7 @@ pub fn write_remote_ref(
 ///
 /// 1. [`Self::write`]s each ref durable-content-before-visible (fsyncs
 ///    the wire bytes, then renames — same invariant
-///    [`crate::atomic::write_content_synced`] gives object writes: a
+///    `crate::atomic::write_content_synced` gives object writes: a
 ///    reader can never observe a torn file), immediately, one call at a
 ///    time, deferring only the directory fsync that makes the RENAME
 ///    itself crash-durable;
