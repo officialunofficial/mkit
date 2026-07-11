@@ -20,6 +20,7 @@ pub mod chat;
 pub mod envelope;
 pub mod hashing;
 pub mod refs;
+pub mod write_quota;
 
 /// Generated buffa messages + ConnectRPC RepoService server stubs.
 pub mod commit_log;

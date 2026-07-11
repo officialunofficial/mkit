@@ -159,13 +159,16 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     }
 
     // Build the service fresh per request — `Env` is Send and cheap to clone;
-    // the service holds no cross-request state.
-    let router: Router = Arc::new(RepoServer::new(env)).register(Router::new());
+    // the service holds no cross-request state. The interceptor needs its own
+    // `Env` clone too: it addresses the room's RefStore DO directly for the
+    // write-quota check, ahead of (and independent of) the handler's own DO
+    // calls.
+    let router: Router = Arc::new(RepoServer::new(env.clone())).register(Router::new());
     // Default compression policy (gzip large responses). The wasm client now
     // re-asserts `content-encoding` from the gzip magic and decompresses, so the
     // earlier "browser strips the header → client decodes raw gzip" bug is fixed
     // at the source (see mkit-repo-client transport `is_gzip`).
-    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
+    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor::new(env));
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
     // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`
