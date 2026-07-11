@@ -1,11 +1,15 @@
 ---
-title: SPEC-MERKLE-OBJECTS
-status: stable
+spec: SPEC-MERKLE-OBJECTS
 version: 1
+status: stable-normative
 audience: implementers of compatible mkit object stores
 ---
 
-# SPEC-MERKLE-OBJECTS
+# SPEC-MERKLE-OBJECTS — merkelized Tree and ChunkedBlob identity
+
+Status: **Normative** for mkit v1.
+Scope: the Binary Merkle Tree construction used to compute `Tree` and
+`ChunkedBlob` object ids.
 
 mkit content-addresses two object types — `Tree` and `ChunkedBlob` — by a
 **Binary Merkle Tree (BMT) root** rather than by `BLAKE3` of their

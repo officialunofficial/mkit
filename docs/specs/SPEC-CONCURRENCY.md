@@ -98,8 +98,9 @@ never-before-journaled branch is written (a v0.1.x-era repo enabling
 SPEC-HISTORY-PROOF §4.5.
 
 The empty-journal check and the backfill loop MUST both run *inside*
-`refs-history-<branch>.lock`'s critical section (`mkit_core::refs
-::update_ref_with_history_and_backfill`), never before it. Only the
+`refs-history-<branch>.lock`'s critical section
+(`mkit_core::refs::update_ref_with_history_and_backfill`), never before
+it. Only the
 first writer to acquire the lock for a given branch may observe an
 empty journal and perform the backfill; every subsequent concurrent
 writer reopens the journal after acquiring the same lock and finds it

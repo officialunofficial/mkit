@@ -309,7 +309,3 @@ verification fails.
 The trailer detects accidental corruption; it is not a signature (§1).
 Authenticity rests on the caller-supplied content address (§7) and the
 per-object hash verification of §3.
-
----
-
-*~1600 words.*

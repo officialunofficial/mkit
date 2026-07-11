@@ -25,7 +25,7 @@ per-tree locks gc already holds are what serializes it, see §3.2).
 
 mkit's object store is append-only and never prunes, so unreachable
 objects accumulate (notably the commits superseded by `commit --amend`,
-`reset`, and `rebase`). `mkit gc` (#233) will reclaim them. Pruning is
+`reset`, and `rebase`). `mkit gc` (#233) reclaims them. Pruning is
 safe **only** against a complete, exact retention root set: anything
 reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object — silent corruption.

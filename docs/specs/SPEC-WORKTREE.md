@@ -1,13 +1,15 @@
 ---
 spec: SPEC-WORKTREE
 version: 1
-status: draft
+status: draft-normative
 audience: implementers of repository layout, discovery, and gc
 ---
 
 # SPEC-WORKTREE — linked working trees
 
-Status: **Normative** for mkit v1.
+Status: **Normative** for the state/locking/discovery model specified
+here; **Draft** because §5's out-of-scope surface (`worktree
+move`/`lock`/`repair`) is not yet covered by this document.
 Scope: the common-dir / per-worktree state split, the linked-tree
 pointer-file format, the `worktrees/` registry, repository discovery,
 cross-worktree locking, and gc root-collection semantics. Issue #493.

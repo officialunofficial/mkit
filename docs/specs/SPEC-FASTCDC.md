@@ -252,7 +252,7 @@ The vectors below are exercised by
 7. **Boundary stability under a 1-byte insert**: insert one byte at
    32 KiB into a 64 KiB pseudo-random file; ≤ 3 chunks differ
    (`boundary_stability_single_byte_insert`). The shifted-chunks
-   identity test from earlier drafts is subsumed by this regression.
+   identity test is subsumed by this regression.
 8. **Iterator total covers the input**: chunk lengths sum to the
    input length (`iterator_total_bytes_matches_input`,
    `fastcdc_iterator_total_equals_input_length`).
@@ -287,7 +287,3 @@ The vectors below are exercised by
 | Content-defined manifests are distinguishable from fixed-size ones | `chunk_size = 0` sentinel (§6; SPEC-OBJECTS §7) |
 | Any two conformant chunkers agree on chunk count, byte offsets, chunk hashes, and manifest hash | cross-implementation contract (§7); boundary goldens (§8 vectors 4–5) |
 | A build with the wrong seed or parameters cannot ship silently | gear-table-hash pin and boundary goldens fail loudly at test time (§8 vectors 9–10) |
-
----
-
-*~900 words.*

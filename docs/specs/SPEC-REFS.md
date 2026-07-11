@@ -263,7 +263,7 @@ races), matching the row above.
 by itself only serializes the file transport against concurrent instances
 of itself — it does not, on its own, coordinate against a `commit`,
 `checkout`, or `gc` running locally against the same directory via the
-`worktrees.lock`/`worktree.lock`/`refs-history.lock` path. **There is no
+`worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock` path. **There is no
 rule that closes this gap** — see SPEC-CONCURRENCY §3.1, which documents
 it as a real, currently unresolved coordination gap, and states mkit's
 supported deployment shape (a served root a worktree-owning process
@@ -418,7 +418,3 @@ file transport, is a read-then-write race (§5.1, test vector 5). The file
 transport's own `.match` is race-free (OS exclusive lock). Callers needing
 CAS under concurrency through a code path other than the file transport
 MUST use s3/http/ssh.
-
----
-
-*~1450 words.*

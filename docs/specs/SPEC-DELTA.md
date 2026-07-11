@@ -283,7 +283,3 @@ refuse unknown versions.
 The stream itself carries no integrity or signature (§6): tamper
 detection is transitive through the packfile trailer, the object-store
 hash check on the reconstructed object, and the commit signature.
-
----
-
-*~1000 words.*
