@@ -20,6 +20,14 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
 | `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`, issue #692). **Not** a framed protocol under §1/§4 below — it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
 
+`ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
+type (`RefEntry`) from
+[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto) at
+the repo root — a vocabulary shared with `mkit.repo.v1` (the
+`apps/repo-worker` multiplayer demo protocol), so the two wire
+protocols cannot desync on CAS semantics. See that file's header
+comment for its own versioning contract.
+
 Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) — the only
 value mkit currently speaks. Wire-breaking changes (renumbering or
 removing a field) are made by introducing a sibling `signer2.proto` /

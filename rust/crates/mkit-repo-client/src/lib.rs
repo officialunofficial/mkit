@@ -32,6 +32,7 @@ mod proto {
 }
 
 use ::connectrpc::client::{CallOptions, ClientConfig};
+use proto::mkit::common::v1::RefExpectation;
 use proto::mkit::repo::v1::*;
 use transport::{FetchTransport, SigningFetchTransport};
 use wasm_bindgen::prelude::*;

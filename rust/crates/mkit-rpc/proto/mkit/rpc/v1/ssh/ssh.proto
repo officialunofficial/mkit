@@ -67,6 +67,7 @@ edition = "2023";
 package mkit.rpc.v1.ssh;
 
 import "mkit/rpc/v1/common.proto";
+import "mkit/common/v1/refs.proto";
 
 // ----------------------------------------------------------------------------
 // SshFrame — the union of every control / data message on the wire.
@@ -130,11 +131,7 @@ message ListRefs {
 }
 
 message ListRefsResponse {
-  message RefEntry {
-    string name = 1;
-    bytes object_id = 2;  // raw 32-byte BLAKE3 digest
-  }
-  repeated RefEntry refs = 1;
+  repeated mkit.common.v1.RefEntry refs = 1;
 }
 
 message ReadRef {
@@ -148,9 +145,12 @@ message ReadRefResponse {
 }
 
 // How the client wants the server to interpret `UpdateRef.expected_id`.
-// SSH-local (not in common.proto): HTTP and S3 transports distinguish
-// the three CAS variants via standard If-Match / If-None-Match
-// headers, so this enum is only needed where the wire is protobuf.
+// The shared `mkit.common.v1.RefExpectation` enum (not in common.proto —
+// that file is mkit-rpc-specific; RefExpectation is shared with
+// mkit.repo.v1 too, see mkit/common/v1/refs.proto): HTTP and S3
+// transports distinguish the three CAS variants via standard If-Match /
+// If-None-Match headers, so this enum is only needed where the wire is
+// protobuf.
 //
 // REQUIRED on every `UpdateRef`. A server MUST reject
 // `REF_EXPECTATION_UNSPECIFIED` (the protobuf default, sent when a
@@ -159,23 +159,7 @@ message ReadRefResponse {
 // back-compat for the pre-`expectation` wire shape.
 //
 // Wire numbers are load-bearing. Do NOT renumber; new variants append.
-enum RefExpectation {
-  REF_EXPECTATION_UNSPECIFIED = 0;
-
-  // "Clobber" / last-writer-wins. `expected_id` MUST be empty.
-  REF_EXPECTATION_ANY = 1;
-
-  // "Create only". The ref MUST NOT exist on the server.
-  // `expected_id` MUST be empty. Distinct from ANY: ANY succeeds on
-  // an existing ref by overwriting it, MISSING fails with a CAS
-  // mismatch in the same situation.
-  REF_EXPECTATION_MISSING = 2;
-
-  // "Compare-and-swap against this exact hash". `expected_id` MUST
-  // be 32 bytes (raw BLAKE3 digest) and equal to the current ref
-  // value on the server.
-  REF_EXPECTATION_MATCH = 3;
-}
+// (Defined in mkit/common/v1/refs.proto; see that file's comment.)
 
 // Compare-and-swap ref update. `expectation` selects which CAS variant
 // applies; `expected_id` carries the value to match (for `MATCH`) and
@@ -184,7 +168,7 @@ message UpdateRef {
   string name = 1;
   bytes expected_id = 2;
   bytes new_id = 3;            // empty new_id deletes the ref
-  RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
+  mkit.common.v1.RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
 }
 
 message UpdateRefResponse {

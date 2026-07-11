@@ -1,4 +1,12 @@
 version: v2
+# Root buf v2 workspace: three modules covering all of mkit's proto
+# trees — rust/crates/mkit-rpc/proto (mkit.rpc.v1[.signer/.ssh/.verify]),
+# apps/repo-worker/proto (mkit.repo.v1), and proto (mkit.common.v1,
+# mkit.transport.v1). The mkit-rpc flat-to-`mkit/rpc/v1/`-path
+# restructuring and this workspace's general FILE-level lint/breaking
+# CI gate landed via #677/#678; #679 (mkit/common/v1/refs.proto
+# extraction) adds no new module — mkit.common.v1 lives inside the
+# existing `proto` module alongside mkit.transport.v1.
 modules:
   # mkit.rpc.v1 (+ .signer, .ssh, .verify) — external-signer, SSH-transport,
   # and object-signature-verification wire protocols. v1 is wire-frozen
@@ -32,13 +40,10 @@ modules:
         # `RefEvent` (a broadcast event, reused conceptually across the
         # stream), not `WatchRefsResponse`. Keep the spec'd name.
         - RPC_RESPONSE_STANDARD_NAME
-  # mkit.transport.v1 — the canonical Connect remote protocol, defined by
-  # #698 (SPEC-TRANSPORT-CONNECT). Now that a real .proto exists here,
-  # this lands as the workspace's third module.
+  # mkit.common.v1 (shared RefExpectation/RefEntry, #679) and
+  # mkit.transport.v1 (the canonical Connect remote protocol, #698 /
+  # SPEC-TRANSPORT-CONNECT) — the repo-root shared proto tree.
   - path: proto
-lint:
-  use:
-    - STANDARD
 breaking:
   use:
     - FILE

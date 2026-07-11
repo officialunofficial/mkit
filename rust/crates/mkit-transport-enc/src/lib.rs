@@ -1118,7 +1118,8 @@ mod tests {
         Error as EncryptedError, Receiver as EncReceiver, Sender as EncSender, dial, listen,
     };
     use commonware_utils::sync::Mutex as CwMutex;
-    use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, ListRefsResponse, list_refs_response};
+    use mkit_rpc::mkit::common::v1::RefEntry;
+    use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, ListRefsResponse};
     use std::sync::Arc;
 
     /// `Sink` wrapper that also stashes every chunk into a shared
@@ -1191,10 +1192,10 @@ mod tests {
         // ListRefs.
         let lr = recv_frame_init(&mut receiver).await?;
         assert!(matches!(lr.body, Some(ssh_frame::Body::ListRefs(_))));
-        let entries: Vec<list_refs_response::RefEntry> = refs_to_return
+        let entries: Vec<RefEntry> = refs_to_return
             .into_iter()
             .map(|(name, h)| {
-                list_refs_response::RefEntry::default()
+                RefEntry::default()
                     .with_name(name)
                     .with_object_id(h.to_vec())
             })

@@ -27,9 +27,17 @@ fn main() {
 
     if std::env::var_os("MKIT_REPO_CODEGEN").is_some() {
         println!("cargo:rerun-if-changed=proto/mkit/repo/v1/repo.proto");
+        // Shared ref types (mkit.common.v1.RefExpectation / RefEntry), two
+        // repo-root hops up from apps/repo-worker — see
+        // mkit/common/v1/refs.proto's header comment. Also used by
+        // rust/crates/mkit-rpc's ssh.proto.
+        println!("cargo:rerun-if-changed=../../proto/mkit/common/v1/refs.proto");
         connectrpc_build::Config::new()
-            .files(&["proto/mkit/repo/v1/repo.proto"])
-            .includes(&["proto/"])
+            .files(&[
+                "proto/mkit/repo/v1/repo.proto",
+                "../../proto/mkit/common/v1/refs.proto",
+            ])
+            .includes(&["proto/", "../../proto/"])
             .include_file("_connectrpc.rs")
             .compile()
             .expect("connectrpc-build codegen failed for repo.proto");

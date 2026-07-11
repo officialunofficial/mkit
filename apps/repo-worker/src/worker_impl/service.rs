@@ -25,13 +25,13 @@ use super::wire::{
     RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 use crate::hashing::object_id_matches;
+use crate::proto::mkit::common::v1::RefEntry;
 use crate::proto::mkit::repo::v1::{
     ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
     ListCommitsRequest, ListCommitsResponse, ListMessagesRequest, ListMessagesResponse,
     ListReactionsRequest, ListReactionsResponse, ListRefsRequest, ListRefsResponse,
     PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest,
-    ReactResponse, Reaction, RefEntry, RoomEvent, UpdateRefRequest, UpdateRefResponse,
-    WatchRefsRequest,
+    ReactResponse, Reaction, RoomEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
 };
 use crate::refs::{
     is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,

@@ -2,268 +2,6 @@
 // source: mkit/repo/v1/repo.proto
 
 #[derive(Clone, Debug, Default)]
-pub struct RefEntryView<'a> {
-    /// Field 1: `name`
-    pub name: ::core::option::Option<&'a str>,
-    /// Field 2: `object_id`
-    pub object_id: ::core::option::Option<&'a [u8]>,
-    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-}
-impl<'a> ::buffa::MessageView<'a> for RefEntryView<'a> {
-    type Owned = super::super::RefEntry;
-    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
-        <Self as ::buffa::MessageView>::decode_view_ctx(
-            buf,
-            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
-        )
-    }
-    fn decode_view_with_ctx(
-        buf: &'a [u8],
-        ctx: ::buffa::DecodeContext<'_>,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
-    }
-    fn merge_view_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        cur: &'a [u8],
-        before_tag: &'a [u8],
-        ctx: ::buffa::DecodeContext<'_>,
-    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
-        let _ = ctx;
-        #[allow(unused_variables)]
-        let view = self;
-        let mut cur = cur;
-        match tag.field_number() {
-            1u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                view.name = Some(::buffa::types::borrow_str(&mut cur)?);
-            }
-            2u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                view.object_id = Some(::buffa::types::borrow_bytes(&mut cur)?);
-            }
-            _ => {
-                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
-                let span_len = before_tag.len() - cur.len();
-                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
-            }
-        }
-        ::core::result::Result::Ok(cur)
-    }
-    fn to_owned_message(
-        &self,
-    ) -> ::core::result::Result<super::super::RefEntry, ::buffa::DecodeError> {
-        self.to_owned_from_source(None)
-    }
-    #[allow(clippy::useless_conversion, clippy::needless_update)]
-    fn to_owned_from_source(
-        &self,
-        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-    ) -> ::core::result::Result<super::super::RefEntry, ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::alloc::string::ToString as _;
-        let _ = __buffa_src;
-        ::core::result::Result::Ok(super::super::RefEntry {
-            name: self.name.map(|s| s.to_string()),
-            object_id: self.object_id.map(|b| (b).to_vec()),
-            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
-            ..::core::default::Default::default()
-        })
-    }
-}
-impl<'a> ::buffa::ViewEncode<'a> for RefEntryView<'a> {
-    #[allow(clippy::needless_borrow, clippy::let_and_return)]
-    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u32;
-        if let Some(ref v) = self.name {
-            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
-        }
-        if let Some(ref v) = self.object_id {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
-        }
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        size
-    }
-    #[allow(clippy::needless_borrow)]
-    fn write_to(
-        &self,
-        _cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::bytes::BufMut,
-    ) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        if let Some(ref v) = self.name {
-            ::buffa::types::put_string_field(1u32, v, buf);
-        }
-        if let Some(ref v) = self.object_id {
-            ::buffa::types::put_bytes_field(2u32, v, buf);
-        }
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-}
-/// Serializes this view as protobuf JSON.
-///
-/// Implicit-presence fields with default values are omitted, `required`
-/// fields are always emitted, explicit-presence (`optional`) fields are
-/// emitted only when set, bytes fields are base64-encoded, and enum
-/// values are their proto name strings.
-///
-/// This impl uses `serialize_map(None)` because the number of emitted
-/// fields depends on default-omission rules; serializers that require
-/// known map lengths (e.g. `bincode`) will return a runtime error.
-/// Use the owned message type for those formats.
-impl<'__a> ::serde::Serialize for RefEntryView<'__a> {
-    fn serialize<__S: ::serde::Serializer>(
-        &self,
-        __s: __S,
-    ) -> ::core::result::Result<__S::Ok, __S::Error> {
-        use ::serde::ser::SerializeMap as _;
-        let mut __map = __s.serialize_map(::core::option::Option::None)?;
-        if let ::core::option::Option::Some(__v) = self.name {
-            __map.serialize_entry("name", __v)?;
-        }
-        if let ::core::option::Option::Some(__v) = self.object_id {
-            __map.serialize_entry("objectId", &::buffa::json_helpers::BytesJson(__v))?;
-        }
-        __map.end()
-    }
-}
-impl<'a> ::buffa::MessageName for RefEntryView<'a> {
-    const PACKAGE: &'static str = "mkit.repo.v1";
-    const NAME: &'static str = "RefEntry";
-    const FULL_NAME: &'static str = "mkit.repo.v1.RefEntry";
-    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.RefEntry";
-}
-::buffa::impl_default_view_instance!(RefEntryView);
-::buffa::impl_view_reborrow!(RefEntryView);
-/** Self-contained, `'static` owned view of a `RefEntry` message.
-
- Wraps [`::buffa::OwnedView`]`<`[`RefEntryView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
-
- Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`RefEntryView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
-#[derive(Clone, Debug)]
-pub struct RefEntryOwnedView(::buffa::OwnedView<RefEntryView<'static>>);
-impl RefEntryOwnedView {
-    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
-    ///
-    /// The view borrows directly from the buffer's data; the buffer is
-    /// retained inside the returned handle.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
-    /// protobuf data.
-    pub fn decode(
-        bytes: ::buffa::bytes::Bytes,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        ::core::result::Result::Ok(RefEntryOwnedView(::buffa::OwnedView::decode(bytes)?))
-    }
-    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
-    /// max message size).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
-    /// exceeds the configured limits.
-    pub fn decode_with_options(
-        bytes: ::buffa::bytes::Bytes,
-        opts: &::buffa::DecodeOptions,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        ::core::result::Result::Ok(
-            RefEntryOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
-        )
-    }
-    /// Build from an owned message via an encode → decode round-trip.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
-    /// somehow invalid (should not happen for well-formed messages).
-    pub fn from_owned(
-        msg: &super::super::RefEntry,
-    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-        ::core::result::Result::Ok(
-            RefEntryOwnedView(::buffa::OwnedView::from_owned(msg)?),
-        )
-    }
-    /// Borrow the full [`RefEntryView`] with its lifetime tied to `&self`.
-    #[must_use]
-    pub fn view(&self) -> &RefEntryView<'_> {
-        self.0.reborrow()
-    }
-    /// Convert to the owned message type.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if re-materializing preserved unknown fields
-    /// fails (e.g. the unknown-field limit is exceeded).
-    pub fn to_owned_message(
-        &self,
-    ) -> ::core::result::Result<super::super::RefEntry, ::buffa::DecodeError> {
-        self.0.to_owned_message()
-    }
-    /// The underlying bytes buffer.
-    #[must_use]
-    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
-        self.0.bytes()
-    }
-    /// Consume the handle, returning the underlying bytes buffer.
-    #[must_use]
-    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
-        self.0.into_bytes()
-    }
-    /// Field 1: `name`
-    #[must_use]
-    pub fn name(&self) -> ::core::option::Option<&'_ str> {
-        self.0.reborrow().name
-    }
-    /// Field 2: `object_id`
-    #[must_use]
-    pub fn object_id(&self) -> ::core::option::Option<&'_ [u8]> {
-        self.0.reborrow().object_id
-    }
-}
-impl ::core::convert::From<::buffa::OwnedView<RefEntryView<'static>>>
-for RefEntryOwnedView {
-    fn from(inner: ::buffa::OwnedView<RefEntryView<'static>>) -> Self {
-        RefEntryOwnedView(inner)
-    }
-}
-impl ::core::convert::From<RefEntryOwnedView>
-for ::buffa::OwnedView<RefEntryView<'static>> {
-    fn from(wrapper: RefEntryOwnedView) -> Self {
-        wrapper.0
-    }
-}
-impl ::core::convert::AsRef<::buffa::OwnedView<RefEntryView<'static>>>
-for RefEntryOwnedView {
-    fn as_ref(&self) -> &::buffa::OwnedView<RefEntryView<'static>> {
-        &self.0
-    }
-}
-impl ::buffa::HasMessageView for super::super::RefEntry {
-    type View<'a> = RefEntryView<'a>;
-    type ViewHandle = RefEntryOwnedView;
-}
-impl ::serde::Serialize for RefEntryOwnedView {
-    fn serialize<__S: ::serde::Serializer>(
-        &self,
-        __s: __S,
-    ) -> ::core::result::Result<__S::Ok, __S::Error> {
-        ::serde::Serialize::serialize(&self.0, __s)
-    }
-}
-#[derive(Clone, Debug, Default)]
 pub struct PutObjectRequestView<'a> {
     /// Field 1: `room`
     pub room: ::core::option::Option<&'a str>,
@@ -2889,7 +2627,7 @@ pub struct UpdateRefRequestView<'a> {
     pub new_id: ::core::option::Option<&'a [u8]>,
     /// Field 4: `expectation`
     pub expectation: ::core::option::Option<
-        ::buffa::EnumValue<super::super::RefExpectation>,
+        ::buffa::EnumValue<super::super::super::super::common::v1::RefExpectation>,
     >,
     /// Field 5: `expected_id`
     pub expected_id: ::core::option::Option<&'a [u8]>,
@@ -3184,7 +2922,9 @@ impl UpdateRefRequestOwnedView {
     #[must_use]
     pub fn expectation(
         &self,
-    ) -> ::core::option::Option<::buffa::EnumValue<super::super::RefExpectation>> {
+    ) -> ::core::option::Option<
+        ::buffa::EnumValue<super::super::super::super::common::v1::RefExpectation>,
+    > {
         self.0.reborrow().expectation
     }
     /// Field 5: `expected_id`
@@ -3784,7 +3524,10 @@ impl ::serde::Serialize for ListRefsRequestOwnedView {
 #[derive(Clone, Debug, Default)]
 pub struct ListRefsResponseView<'a> {
     /// Field 1: `refs`
-    pub refs: ::buffa::RepeatedView<'a, super::super::__buffa::view::RefEntryView<'a>>,
+    pub refs: ::buffa::RepeatedView<
+        'a,
+        super::super::super::super::common::v1::__buffa::view::RefEntryView<'a>,
+    >,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
@@ -3823,7 +3566,7 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                 view.refs
                     .push(
-                        <super::super::__buffa::view::RefEntryView as ::buffa::MessageView>::decode_view_ctx(
+                        <super::super::super::super::common::v1::__buffa::view::RefEntryView as ::buffa::MessageView>::decode_view_ctx(
                             sub,
                             __sub_ctx,
                         )?,
@@ -4009,7 +3752,10 @@ impl ListRefsResponseOwnedView {
     #[must_use]
     pub fn refs(
         &self,
-    ) -> &::buffa::RepeatedView<'_, super::super::__buffa::view::RefEntryView<'_>> {
+    ) -> &::buffa::RepeatedView<
+        '_,
+        super::super::super::super::common::v1::__buffa::view::RefEntryView<'_>,
+    > {
         &self.0.reborrow().refs
     }
 }

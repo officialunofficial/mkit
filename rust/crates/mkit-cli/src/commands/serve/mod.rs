@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use clap::Parser;
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError};
+use mkit_rpc::mkit::common::v1::{RefEntry, RefExpectation};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, RefExpectation, SshFrame, UploadPack, UploadPackResponse,
-    list_refs_response::RefEntry, ssh_frame,
+    ReadRefResponse, SshFrame, UploadPack, UploadPackResponse, ssh_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
