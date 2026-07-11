@@ -15,7 +15,7 @@
 
 use std::io::Write;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Object};
@@ -32,7 +32,13 @@ use super::{advance_head, error as emit_err, load_tree_hash};
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject, json_string_array};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CherryPickFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit cherry-pick", about = "Apply a single commit onto HEAD.")]
@@ -53,8 +59,25 @@ struct CherryPickOpts {
     /// guess which side is the mainline) and rejected for a non-merge.
     #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
     mainline: Option<usize>,
+    /// Emit a machine-readable JSON result object to stdout describing
+    /// the outcome: a new commit, `--no-commit` staging, a conflict
+    /// pause (`"conflicts":[<path>,...]`), or an error.
+    #[arg(long, value_enum, default_value = "default")]
+    format: CherryPickFormat,
     /// Commit to replay: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 #[must_use]
@@ -63,6 +86,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, CherryPickFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -81,11 +105,11 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if opts.abort {
-        abort(&layout, &store)
+        abort(&layout, &store, json)
     } else if opts.cont {
-        cont(&layout, &store)
+        cont(&layout, &store, json)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&layout, &store, hex, opts.no_commit, opts.mainline)
+        start(&layout, &store, hex, opts.no_commit, opts.mainline, json)
     } else {
         super::usage_error("usage: mkit cherry-pick <commit> | --continue | --abort")
     }
@@ -98,7 +122,9 @@ fn start(
     hex: &str,
     no_commit: bool,
     mainline: Option<usize>,
+    json: bool,
 ) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
@@ -194,6 +220,20 @@ fn start(
             "hint: resolve the files above, `mkit add` them, then run \
              `mkit cherry-pick --continue` (or `mkit cherry-pick --abort`)"
         );
+        drop(stderr);
+        if json {
+            let paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", false)
+                .field_str("kind", "conflict")
+                .field_raw("conflicts", &json_string_array(&paths))
+                .field_str(
+                    "error",
+                    "cherry-pick conflict; resolve and continue or abort",
+                );
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{}", obj.finish());
+        }
         return exit::GENERAL_ERROR;
     }
 
@@ -222,6 +262,16 @@ fn start(
             "staged cherry-pick of {} (no commit; run `mkit commit` when ready)",
             format::short_hash(&target, 8),
         );
+        drop(stderr);
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_str("kind", "no-commit")
+                .field_hash("picked", &target)
+                .field_hash("tree", &result.tree_hash);
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{}", obj.finish());
+        }
         return exit::OK;
     }
 
@@ -267,10 +317,22 @@ fn start(
         Some(ours_tree),
         Some(result.tree_hash),
     );
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", "commit")
+            .field_hash("hash", &commit_hash)
+            .field_hash("picked", &target)
+            .field_hash("tree", &result.tree_hash);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 
-fn cont(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if !is_cherry_pick_in_progress(layout) {
         return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR);
     }
@@ -349,10 +411,22 @@ fn cont(layout: &RepoLayout, store: &ObjectStore) -> u8 {
         format::short_hash(&state.cherry_pick_head, 8),
         format::short_hash(&commit_hash, 8),
     );
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", "commit")
+            .field_hash("hash", &commit_hash)
+            .field_hash("picked", &state.cherry_pick_head)
+            .field_hash("tree", &tree_hash);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 
-fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if !is_cherry_pick_in_progress(layout) {
         return emit_err("no cherry-pick in progress", exit::GENERAL_ERROR);
     }
@@ -376,6 +450,15 @@ fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
     }
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "cherry-pick aborted; HEAD restored");
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", "aborted")
+            .field_hash("hash", &state.orig_head);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 

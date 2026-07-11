@@ -6,15 +6,21 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
 use crate::remote_dispatch;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FetchFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,6 +42,12 @@ struct FetchOpts {
     /// exclusive with an explicit `<remote>` argument.
     #[arg(long, conflicts_with = "remote")]
     all: bool,
+    /// Emit a machine-readable JSON result object to stdout:
+    /// `{"ok":true,"remote":"...","endpoint":"...","updated":[{"name":"...",
+    /// "old":"<hex>|null","new":"<hex>"}]}`. With `--all`, one JSON object
+    /// is printed per remote fetched.
+    #[arg(long, value_enum, default_value = "default")]
+    format: FetchFormat,
 }
 
 #[must_use]
@@ -44,6 +56,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, FetchFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -54,7 +67,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     let cfg = match config::read_layered(&layout) {
         Ok(c) => c,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+        Err(e) => return emit_err_json(&format!("config: {e}"), exit::CONFIG_ERROR, json),
     };
     // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
     // or the user-scoped `pull.require_signed = false` config opted out.
@@ -62,9 +75,10 @@ pub fn run(args: &[String]) -> u8 {
     if opts.all {
         let names = config::configured_remote_names(&cfg);
         if names.is_empty() {
-            return emit_err(
+            return emit_err_json(
                 "no remote configured — use `mkit remote add <url>`",
                 exit::CONFIG_ERROR,
+                json,
             );
         }
         // Fetch every remote in turn, continuing past a per-remote
@@ -72,7 +86,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = fetch_one(&cwd, &layout, &cfg, &name, require_signed);
+            let code = fetch_one(&cwd, &layout, &cfg, &name, require_signed, json);
             if code != exit::OK {
                 worst = code;
             }
@@ -85,6 +99,7 @@ pub fn run(args: &[String]) -> u8 {
         &cfg,
         opts.remote.as_deref().unwrap_or(""),
         require_signed,
+        json,
     )
 }
 
@@ -97,15 +112,17 @@ fn fetch_one(
     cfg: &config::LayeredConfig,
     remote: &str,
     require_signed: bool,
+    json: bool,
 ) -> u8 {
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
-        return emit_err(
+        return emit_err_json(
             &if remote.is_empty() {
                 "no remote configured — use `mkit remote add <url>`".to_owned()
             } else {
                 format!("unknown remote '{remote}'")
             },
             exit::CONFIG_ERROR,
+            json,
         );
     };
     let endpoint = resolved.endpoint.as_str();
@@ -119,22 +136,70 @@ fn fetch_one(
                 Ok(_) => {
                     let after = tracking_snapshot(layout, &resolved.name);
                     report_fetch(endpoint, &resolved.name, &before, &after);
+                    if json {
+                        emit_fetch_json(&resolved.name, endpoint, &before, &after);
+                    }
                     exit::OK
                 }
                 Err(remote_dispatch::DispatchError::Interrupted) => {
-                    emit_err("fetch: interrupted", exit::TEMPFAIL)
+                    emit_err_json("fetch: interrupted", exit::TEMPFAIL, json)
                 }
                 Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
-                    emit_err(&format!("fetch: {e}"), exit::DATAERR)
+                    emit_err_json(&format!("fetch: {e}"), exit::DATAERR, json)
                 }
-                Err(e) => emit_err(&format!("fetch: {e}"), exit::GENERAL_ERROR),
+                Err(e) => emit_err_json(&format!("fetch: {e}"), exit::GENERAL_ERROR, json),
             }
         }
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
-            emit_err(&msg, exit::CONFIG_ERROR)
+            emit_err_json(&msg, exit::CONFIG_ERROR, json)
         }
-        Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+        Err(e) => emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     }
+}
+
+/// Emit the `--format=json` success payload: the same changed-tracking-ref
+/// set `report_fetch` prints as text, as a JSON array.
+fn emit_fetch_json(
+    remote: &str,
+    endpoint: &str,
+    before: &HashMap<String, Hash>,
+    after: &HashMap<String, Hash>,
+) {
+    let mut changed: Vec<(&String, Option<Hash>, Hash)> = after
+        .iter()
+        .filter(|(name, new)| before.get(*name) != Some(*new))
+        .map(|(name, new)| (name, before.get(name).copied(), *new))
+        .collect();
+    changed.sort_by(|a, b| a.0.cmp(b.0));
+    let entries: Vec<String> = changed
+        .iter()
+        .map(|(name, old, new)| {
+            let mut obj = JsonObject::new();
+            obj.field_str("name", name)
+                .field_opt_hash("old", old.as_ref())
+                .field_hash("new", new);
+            obj.finish()
+        })
+        .collect();
+    let mut top = JsonObject::new();
+    top.field_bool("ok", true)
+        .field_str("remote", remote)
+        .field_str("endpoint", endpoint)
+        .field_raw("updated", &format!("[{}]", entries.join(",")));
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", top.finish());
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 /// Map of `refs/remotes/<remote>/<branch>` → tip, used to diff the

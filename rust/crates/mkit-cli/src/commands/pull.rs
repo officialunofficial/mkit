@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
@@ -12,8 +12,14 @@ use mkit_core::object::Object;
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
 use crate::remote_dispatch;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PullFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit pull", about = "Pull changes from the configured remote.")]
@@ -33,6 +39,12 @@ struct PullOpts {
     /// explicit `<remote>` argument.
     #[arg(long, conflicts_with = "remote")]
     all: bool,
+    /// Emit a machine-readable JSON result object to stdout:
+    /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
+    /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`. With
+    /// `--all`, one JSON object is printed per remote pulled.
+    #[arg(long, value_enum, default_value = "default")]
+    format: PullFormat,
 }
 
 #[must_use]
@@ -41,6 +53,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, PullFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -51,7 +64,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     let cfg = match config::read_layered(&layout) {
         Ok(c) => c,
-        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+        Err(e) => return emit_err_json(&format!("config: {e}"), exit::CONFIG_ERROR, json),
     };
     // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
     // or the user-scoped `pull.require_signed = false` config opted out.
@@ -59,9 +72,10 @@ pub fn run(args: &[String]) -> u8 {
     if opts.all {
         let names = config::configured_remote_names(&cfg);
         if names.is_empty() {
-            return emit_err(
+            return emit_err_json(
                 "no remote configured — use `mkit remote add <url>`",
                 exit::CONFIG_ERROR,
+                json,
             );
         }
         // Pull from every remote in turn, continuing past a per-remote
@@ -69,7 +83,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed);
+            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed, json);
             if code != exit::OK {
                 worst = code;
             }
@@ -82,6 +96,7 @@ pub fn run(args: &[String]) -> u8 {
         &cfg,
         opts.remote.as_deref().unwrap_or(""),
         require_signed,
+        json,
     )
 }
 
@@ -95,15 +110,17 @@ fn pull_one(
     cfg: &config::LayeredConfig,
     remote: &str,
     require_signed: bool,
+    json: bool,
 ) -> u8 {
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
-        return emit_err(
+        return emit_err_json(
             &if remote.is_empty() {
                 "no remote configured — use `mkit remote add <url>`".to_owned()
             } else {
                 format!("unknown remote '{remote}'")
             },
             exit::CONFIG_ERROR,
+            json,
         );
     };
     let endpoint = resolved.endpoint.as_str();
@@ -131,22 +148,46 @@ fn pull_one(
                         .as_deref()
                         .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
                     report_pull(layout, endpoint, old_tip, new_tip);
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_bool("ok", true)
+                            .field_str("remote", &resolved.name)
+                            .field_str("endpoint", endpoint)
+                            .field_opt_str("branch", branch.as_deref())
+                            .field_opt_hash("old", old_tip.as_ref())
+                            .field_opt_hash("new", new_tip.as_ref())
+                            .field_bool("up_to_date", old_tip == new_tip);
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    }
                     exit::OK
                 }
                 Err(remote_dispatch::DispatchError::Interrupted) => {
-                    emit_err("pull: interrupted", exit::TEMPFAIL)
+                    emit_err_json("pull: interrupted", exit::TEMPFAIL, json)
                 }
                 Err(e @ remote_dispatch::DispatchError::UnsignedOrInvalidObject { .. }) => {
-                    emit_err(&format!("pull: {e}"), exit::DATAERR)
+                    emit_err_json(&format!("pull: {e}"), exit::DATAERR, json)
                 }
-                Err(e) => emit_err(&format!("pull: {e}"), exit::GENERAL_ERROR),
+                Err(e) => emit_err_json(&format!("pull: {e}"), exit::GENERAL_ERROR, json),
             }
         }
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
-            emit_err(&msg, exit::CONFIG_ERROR)
+            emit_err_json(&msg, exit::CONFIG_ERROR, json)
         }
-        Err(e) => emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+        Err(e) => emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     }
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 /// Render git's post-pull summary on stderr: `Already up to date.` for a
