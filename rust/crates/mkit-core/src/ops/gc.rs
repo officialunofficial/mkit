@@ -682,17 +682,15 @@ mod tests {
         // Stage a blob no commit references — what `mkit add` leaves
         // behind: the object in the store + an index entry.
         let staged = write_blob(&s, b"staged-only");
-        let idx = index::Index {
-            entries: vec![index::IndexEntry {
-                path: "staged.txt".into(),
-                status: index::EntryStatus::Blob,
-                object_hash: staged,
-                mtime_ns: 0,
-                size: 0,
-                ino: 0,
-                ctime_ns: 0,
-            }],
-        };
+        let idx = index::Index::from_entries(vec![index::IndexEntry {
+            path: "staged.txt".into(),
+            status: index::EntryStatus::Blob,
+            object_hash: staged,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        }]);
         index::write_index(&md, &idx).unwrap();
 
         assert!(

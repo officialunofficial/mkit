@@ -3015,6 +3015,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "git2",
  "k256",
+ "mkit-cli",
  "mkit-core",
  "p256 0.13.2",
  "serde",

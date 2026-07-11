@@ -265,11 +265,7 @@ fn stage_ours(idx: &mut mkit_core::index::Index, store: &ObjectStore, c: &Confli
             ctime_ns: 0,
         },
     };
-    if let Some(pos) = idx.find_entry(&c.path) {
-        idx.entries[pos] = entry;
-    } else {
-        idx.entries.push(entry);
-    }
+    idx.upsert_entry(entry);
 }
 
 fn write_text_markers(abs: &Path, ours: &[u8], theirs: &[u8]) -> Result<(), String> {
@@ -702,11 +698,7 @@ pub fn reset_conflict_paths(
                 _ => write_blob_to_worktree(store, &abs, target_entry.object_hash, false)?,
             }
             let entry = (*target_entry).clone();
-            if let Some(pos) = idx.find_entry(path) {
-                idx.entries[pos] = entry;
-            } else {
-                idx.entries.push(entry);
-            }
+            idx.upsert_entry(entry);
         } else {
             // `path` is absent from the target tree as a FILE. But it may be a
             // DIRECTORY there (a file-vs-directory conflict records the path
@@ -719,9 +711,7 @@ pub fn reset_conflict_paths(
                 .keys()
                 .any(|k| k.starts_with(dir_prefix.as_str()))
             {
-                if let Some(pos) = idx.find_entry(path) {
-                    idx.entries.remove(pos);
-                }
+                idx.remove_path(path);
                 continue;
             }
             // Otherwise the path did not exist pre-op (the operation added it):
@@ -743,9 +733,7 @@ pub fn reset_conflict_paths(
             {
                 return Err(format!("remove {}: {e}", abs.display()));
             }
-            if let Some(pos) = idx.find_entry(path) {
-                idx.entries.remove(pos);
-            }
+            idx.remove_path(path);
         }
     }
     index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))?;

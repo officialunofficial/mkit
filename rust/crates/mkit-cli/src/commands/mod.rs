@@ -893,12 +893,12 @@ pub fn stage_removed_tombstones(
     }
     let mut idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     for path in removed {
-        match idx.entries.iter().position(|x| x.path == path) {
+        match idx.find_entry(&path) {
             Some(j) => {
                 idx.entries[j].status = EntryStatus::Removed;
                 idx.entries[j].object_hash = mkit_core::hash::ZERO;
             }
-            None => idx.entries.push(mkit_core::index::IndexEntry {
+            None => idx.upsert_entry(mkit_core::index::IndexEntry {
                 path,
                 status: EntryStatus::Removed,
                 object_hash: mkit_core::hash::ZERO,
@@ -1168,10 +1168,11 @@ pub(crate) fn collect_worktree_paths(
 }
 
 pub(crate) fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
-    index.entries.iter().any(|entry| {
-        entry.status != EntryStatus::Removed
-            && (entry.path == path || index_path_descends_from(&entry.path, path))
-    })
+    // Delegates to `Index::tracks_path_or_descendant`, which answers via
+    // the maintained `path -> position` map in `O(log n + k)` instead of
+    // this function's old `O(n)` full scan (issue #708) — `add_tree` calls
+    // this once per directory/file it walks.
+    index.tracks_path_or_descendant(path)
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {

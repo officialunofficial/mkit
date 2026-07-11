@@ -240,7 +240,7 @@ fn restore_staged(
 
         for path in affected {
             let source_entry =
-                restore_index.and_then(|src| src.entries.iter().find(|e| e.path == path).cloned());
+                restore_index.and_then(|src| src.find_entry(&path).map(|i| src.entries[i].clone()));
             apply_index_restore(idx, &path, source_entry);
         }
     }
@@ -255,17 +255,11 @@ fn restore_staged(
 /// Overwrite (or remove) the index entry for `path` from `source`.
 fn apply_index_restore(idx: &mut Index, path: &str, source: Option<IndexEntry>) {
     match source {
-        Some(src) => {
-            if let Some(pos) = idx.entries.iter().position(|e| e.path == path) {
-                idx.entries[pos] = src;
-            } else {
-                idx.entries.push(src);
-            }
-        }
+        Some(src) => idx.upsert_entry(src),
         None => {
             // Not present in the source: unstaging removes it from the
             // index entirely (it was a freshly-staged add).
-            idx.entries.retain(|e| e.path != path);
+            idx.remove_path(path);
         }
     }
 }
