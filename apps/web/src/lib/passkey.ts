@@ -16,7 +16,7 @@
 // the PRF eval and the WebAuthn assertion signature, so a single passkey and
 // a single prompt vouch for both the seed AND the Ed25519 pubkey it derived.
 
-import { p256 } from '@noble/curves/p256'
+import { p256 } from '@noble/curves/nist.js'
 import { bytesToHex, hexToBytes } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 
@@ -370,10 +370,14 @@ export async function attestIdentityBinding(
   // DER → 64-byte low-S compact. Parsed with `@noble/curves`'s P-256 curve
   // (not `ox`'s `Signature`, which is bound to secp256k1: it validates r/s
   // against the WRONG group order and never normalizes S, working on P-256 only
-  // by the accident that n_p256 < n_secp256k1). `normalizeS()` applies the
-  // low-S canonicalization mkit's Rust verifier enforces (`signer_p256::verify_p256`
-  // rejects any high-S signature), against the actual P-256 group order.
-  const sigCompact = p256.Signature.fromDER(new Uint8Array(response.signature)).normalizeS().toCompactRawBytes()
+  // by the accident that n_p256 < n_secp256k1). `normalizeS()` was removed in
+  // @noble/curves v2, so low-S canonicalization mkit's Rust verifier enforces
+  // (`signer_p256::verify_p256` rejects any high-S signature) is applied here
+  // by hand against the actual P-256 group order.
+  const derSig = p256.Signature.fromBytes(new Uint8Array(response.signature), 'der')
+  const order = p256.Point.Fn.ORDER
+  const lowSSig = derSig.hasHighS() ? new p256.Signature(derSig.r, order - derSig.s) : derSig
+  const sigCompact = lowSSig.toBytes('compact')
 
   // Throws a typed reason on failure; resolves on success.
   if (opts.policyJson !== undefined) {
