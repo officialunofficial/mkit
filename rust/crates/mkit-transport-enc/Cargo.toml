@@ -17,8 +17,8 @@ workspace = true
 [dependencies]
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them; this crate publishes (publish defaults to true).
-mkit-core = { version = "0.3", path = "../mkit-core" }
-mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+mkit-core = { version = "0.4", path = "../mkit-core" }
+mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 buffa = "0.8.1"
 thiserror = "2"
 

@@ -57,9 +57,9 @@ bls-threshold = [
 # also depends on mkit-core directly with default features on, so
 # their builds are unaffected — the union still includes `pack-zstd`
 # there via that direct edge.
-mkit-core = { version = "0.3", path = "../mkit-core", default-features = false }
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 # mkit-rpc owns signer.proto + framing helpers used by ExternalSigner.
-mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 buffa = "0.8.1"
 blake3 = "1"
 base64 = "0.22"

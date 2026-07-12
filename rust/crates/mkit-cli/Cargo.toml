@@ -52,28 +52,28 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-mkit-core = { version = "0.3", path = "../mkit-core" }
-mkit-attest = { version = "0.3", path = "../mkit-attest" }
-mkit-git-bridge = { version = "0.3", path = "../mkit-git-bridge", optional = true }
-mkit-keystore = { version = "0.3", path = "../mkit-keystore" }
+mkit-core = { version = "0.4", path = "../mkit-core" }
+mkit-attest = { version = "0.4", path = "../mkit-attest" }
+mkit-git-bridge = { version = "0.4", path = "../mkit-git-bridge", optional = true }
+mkit-keystore = { version = "0.4", path = "../mkit-keystore" }
 # `mkit-transport-memory` is a dev-only (test) dependency — see
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install mkit-cli`.
-mkit-transport-file = { version = "0.3", path = "../mkit-transport-file" }
-mkit-transport-http = { version = "0.3", path = "../mkit-transport-http" }
-mkit-transport-s3 = { version = "0.3", path = "../mkit-transport-s3" }
-mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
+mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
+mkit-transport-http = { version = "0.4", path = "../mkit-transport-http" }
+mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
+mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
 # baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
 # via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
 # Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
-mkit-transport-enc = { version = "0.3", path = "../mkit-transport-enc", optional = true }
+mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
 # Optional: `mkit serve --http`'s axum-hosted mkit.transport.v1 Connect
 # server (issue #700, SPEC-TRANSPORT-CONNECT). Off by default so the
 # baseline `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
 # `enc-transport`. Turn on via `--features http-transport`.
-mkit-transport-connect = { version = "0.3", path = "../mkit-transport-connect", optional = true }
+mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect", optional = true }
 # ConnectRPC + axum are pulled in directly (not just transitively through
 # mkit-transport-connect) so `commands/serve/http.rs` can build the
 # bearer-auth `Interceptor` and drive `axum::serve` itself. Feature set
@@ -104,7 +104,7 @@ subtle = { version = "2", optional = true }
 # HeaderMap/header names for the bearer-auth interceptor — already resolved
 # transitively (reqwest pulls it), not a new supply-chain root.
 http = { version = "1", optional = true }
-mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
+mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
 # `enc-transport` feature so the keystore-driven key-loading path in
@@ -162,13 +162,13 @@ libc = "0.2"
 signal-hook = { version = "0.4", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
+mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-macos-keychain"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
+mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
 
 [target.'cfg(windows)'.dependencies]
-mkit-keystore = { version = "0.3", path = "../mkit-keystore", features = ["backend-windows-credential"] }
+mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-windows-credential"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by

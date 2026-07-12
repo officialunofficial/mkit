@@ -22,7 +22,7 @@ all = { level = "warn", priority = -1 }
 [dependencies]
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
-mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-core = { version = "0.4", path = "../mkit-core" }
 
 # ConnectRPC server, hosted over axum (this crate's whole point — see
 # SPEC-TRANSPORT-CONNECT §7.2). `server` pulls hyper/hyper-util server
