@@ -100,9 +100,7 @@ use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Config as EncConfig, Receiver, Sender};
 
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{
-    BackoffIterator, PackKey, Transport, TransportError, TransportResult,
-};
+use mkit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError, TransportResult};
 // Aliased: `mkit_rpc::mkit::rpc::v1::ssh::PackChunk` (the wire protobuf
 // message) is imported unaliased below for the existing frame-building
 // code; `CorePackChunk` is the transport-agnostic streaming type the
