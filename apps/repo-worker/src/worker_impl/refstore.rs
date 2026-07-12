@@ -376,7 +376,11 @@ impl RefStore {
         sql.exec("DELETE FROM react_rate;", None)?;
         sql.exec("DELETE FROM commits;", None)?;
 
-        Response::from_json(&PurgeResp { refs_deleted, messages_deleted, reactions_deleted })
+        Response::from_json(&PurgeResp {
+            refs_deleted,
+            messages_deleted,
+            reactions_deleted,
+        })
     }
 
     /// `SELECT COUNT(*)` over one of this DO's own hardcoded table names
@@ -686,7 +690,10 @@ impl RefStore {
                     "DELETE FROM write_quota WHERE window_start < ?;",
                     vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
                 );
-                Response::from_json(&QuotaCheckResp { allowed: true, reason: None })
+                Response::from_json(&QuotaCheckResp {
+                    allowed: true,
+                    reason: None,
+                })
             }
             QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
                 allowed: false,

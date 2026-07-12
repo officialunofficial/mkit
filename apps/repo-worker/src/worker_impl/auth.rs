@@ -161,7 +161,10 @@ impl AuthInterceptor {
                 &env,
                 &room,
                 "/quota",
-                &QuotaCheckReq { author: author.clone(), bytes: incoming_bytes },
+                &QuotaCheckReq {
+                    author: author.clone(),
+                    bytes: incoming_bytes,
+                },
             )
             .await
             {
@@ -175,7 +178,8 @@ impl AuthInterceptor {
                 None
             } else {
                 Some(ConnectError::resource_exhausted(
-                    resp.reason.unwrap_or_else(|| "write quota exceeded".to_string()),
+                    resp.reason
+                        .unwrap_or_else(|| "write quota exceeded".to_string()),
                 ))
             }
         })
@@ -303,8 +307,9 @@ impl Interceptor for AuthInterceptor {
                 if let Some((room, incoming_bytes)) =
                     parse_write_target(&procedure, req.payload.bytes())
                     && is_valid_room(&room)
-                    && let Some(err) =
-                        self.enforce_write_quota(&room, &public_key, incoming_bytes).await
+                    && let Some(err) = self
+                        .enforce_write_quota(&room, &public_key, incoming_bytes)
+                        .await
                 {
                     return Err(err);
                 }

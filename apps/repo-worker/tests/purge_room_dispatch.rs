@@ -138,7 +138,10 @@ impl RepoService for FakeRepoService {
         request: ServiceRequest<'_, PurgeRoomRequest>,
     ) -> ServiceResult<PurgeRoomResponse> {
         let room = request.to_owned_message().room.unwrap_or_default();
-        assert_eq!(room, "demo707", "PurgeRoomRequest.room decoded off the wire");
+        assert_eq!(
+            room, "demo707",
+            "PurgeRoomRequest.room decoded off the wire"
+        );
         Ok(ConnectResponse::new(PurgeRoomResponse {
             purged: Some(true),
             objects_deleted: Some(3),
