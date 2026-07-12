@@ -209,3 +209,28 @@ pub struct RecordCommitsReq {
 pub struct RecordCommitsResp {
     pub recorded: u32,
 }
+
+// --- Write quota (auth interceptor -> DO) -----------------------------------
+//
+//   POST /quota  QuotaCheckReq -> QuotaCheckResp
+//
+// Called by `AuthInterceptor` (auth.rs) for PutObject/UpdateRef, BEFORE the
+// handler runs, so the per-author write budget
+// (`crate::write_quota::evaluate_quota`) is checked-and-consumed serially
+// inside the room's DO (`refstore::handle_quota_check`) rather than raced
+// from the stateless Worker. `author` is the envelope-verified 64-hex Ed25519
+// pubkey; `bytes` is the incoming payload size counted against the budget
+// (the `PutObject` `bytes` field length, or 0 for `UpdateRef`).
+
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckReq {
+    pub author: String,
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckResp {
+    pub allowed: bool,
+    /// Set (and safe to surface to the client) when `allowed` is false.
+    pub reason: Option<String>,
+}

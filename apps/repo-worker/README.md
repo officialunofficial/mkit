@@ -130,6 +130,21 @@ not authority. Be aware of:
   `prefix` follow SPEC-REFS §3; request bodies (and the PutObject `bytes`
   payload) are capped at 8 MiB. Invalid inputs are rejected with Connect
   `invalid_argument` before any storage I/O.
+- **Per-key write quota.** A valid Ed25519 signature proves a *distinct* key,
+  not a *throttled* one, and a fresh key is free to mint — so `PutObject`/
+  `UpdateRef` are additionally metered per `(author, room)`: at most
+  `WRITE_QUOTA_MAX_OPS` writes and `WRITE_QUOTA_MAX_BYTES` of `PutObject`
+  bytes per author per room in a rolling `WRITE_QUOTA_WINDOW_MS` window (see
+  [`src/write_quota.rs`](src/write_quota.rs)). `AuthInterceptor`
+  (`src/worker_impl/auth.rs`) checks-and-consumes the budget against the
+  room's RefStore DO (`POST /quota`, `src/worker_impl/refstore.rs`) BEFORE
+  the handler runs, so the counter lives in the DO's serial per-room state
+  rather than a Worker-global that would race across isolates. Over-quota
+  writes are rejected with Connect `resource_exhausted`. A DO-unreachable
+  quota check fails OPEN (logged, write proceeds) rather than turning a
+  transient infra hiccup into an outage for every writer. This is
+  application-layer defense; pair with a Cloudflare Rate Limiting rule keyed
+  on `X-Public-Key` at the edge for defense in depth (not configured here).
 
 ## Endpoints
 
@@ -164,9 +179,12 @@ this.
 One instance per `room` (`env.durable_object("REFSTORE").id_from_name(room)`).
 Stores refs in SQLite — `refs(path TEXT PRIMARY KEY, value TEXT)`, `value` =
 64-hex of the 32-byte object id. The worker reaches it over an internal JSON
-HTTP protocol (`POST /get | /update | /list`, `GET /watch`). The CAS decision
-is the pure `refs::evaluate_cas` shared with the unit tests, evaluated inside
-the DO's single-threaded `fetch`, so concurrent `UpdateRef`s can't race.
+HTTP protocol (`POST /get | /update | /list | /quota`, `GET /watch`). The CAS
+decision is the pure `refs::evaluate_cas` shared with the unit tests,
+evaluated inside the DO's single-threaded `fetch`, so concurrent `UpdateRef`s
+can't race. The same single-threaded serialization is why the per-author
+write-quota ledger (`write_quota` table, `POST /quota`) lives here too — see
+"Per-key write quota" above.
 
 ## Build & run
 
@@ -202,10 +220,12 @@ eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
 
 ## Layout
 
-- `src/envelope.rs`, `src/refs.rs`, `src/hashing.rs` — pure, target-independent
-  logic carrying the conformance contract; their `#[cfg(test)]` modules *are*
-  the conformance suite (no separate reference implementation is kept
-  elsewhere). Compiled on host *and* wasm.
+- `src/envelope.rs`, `src/refs.rs`, `src/hashing.rs`, `src/chat.rs`,
+  `src/write_quota.rs` — pure, target-independent logic carrying the
+  conformance contract (the `#[cfg(test)]` modules replay the TS vectors, or
+  for `write_quota` exercise the fixed-window budget decision directly).
+  Compiled on host *and* wasm; `cargo test --lib` runs them without a wasm32
+  target or a DO/SQLite harness.
 - `src/worker_impl.rs` + `src/worker_impl/{auth,refstore,service}.rs` —
   wasm32-only worker glue (the macros emit `#[wasm_bindgen]`).
 - `proto/` — the canonical `repo.proto`. `build.rs` runs `connectrpc-build` over

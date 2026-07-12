@@ -13,12 +13,32 @@
 //
 // The verified writer pubkey is stashed on `ctx.extensions` as `AuthorPubkey`
 // so UpdateRef can attribute the RefEvent without re-parsing headers.
+//
+// Once the envelope verifies, PutObject/UpdateRef ALSO consult the verified
+// author's per-room write quota (`crate::write_quota`) before the handler
+// runs, so a freely-minted Ed25519 key can't flood R2/DO storage for free —
+// a valid signature is proof of a distinct key, not a throttled one. The
+// budget itself is tracked inside the room's RefStore DO (`refstore.rs`
+// `/quota` op), NOT here: the DO's serial per-room execution is what makes
+// the check race-free, so this interceptor is only the caller + the
+// ConnectError translation, never the counter. PostMessage/React already
+// have their own DO-side rate limits (`chat::is_rate_limited`,
+// `REACT_MIN_INTERVAL_MS`) and are not additionally quota-checked here.
 
 use connectrpc::interceptor::{UnaryRequest, UnaryResponse};
 use connectrpc::{ConnectError, Interceptor, Next, async_trait};
 
+use buffa::Message as _;
+use worker::Env;
+use worker::send::SendFuture;
+
 use crate::envelope::{EnvelopeHeaders, VerifyEnvelope, verify_envelope};
 use crate::hashing::blake3_hex;
+use crate::proto::mkit::repo::v1::{PutObjectRequest, UpdateRefRequest};
+use crate::refs::is_valid_room;
+
+use super::service::do_call;
+use super::wire::{QuotaCheckReq, QuotaCheckResp};
 
 /// The verified Ed25519 writer pubkey (64-hex), placed on `ctx.extensions`
 /// by the interceptor for the handler to read.
@@ -57,7 +77,88 @@ fn normalize_hex(v: &str) -> String {
     v.to_ascii_lowercase()
 }
 
-pub struct AuthInterceptor;
+pub struct AuthInterceptor {
+    /// Needed to address the room's RefStore DO for the write-quota check.
+    /// Cheap to clone (see `worker::Env`'s doc note on `worker_impl.rs`).
+    env: Env,
+}
+
+impl AuthInterceptor {
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+
+    /// Check-and-consume `author`'s write budget for `room` against the
+    /// room's RefStore DO. Returns `Some(ConnectError::resource_exhausted)`
+    /// when the DO reports the budget exceeded; `None` to let the write
+    /// proceed — including when the DO round trip itself fails (a plumbing
+    /// error is logged and FAILS OPEN, matching the best-effort tolerance the
+    /// rest of the DO's ledgers use for their own housekeeping writes; a
+    /// throttle must not become an outage for every writer when the DO is
+    /// briefly unreachable).
+    async fn enforce_write_quota(
+        &self,
+        room: &str,
+        author: &str,
+        incoming_bytes: u64,
+    ) -> Option<ConnectError> {
+        let env = self.env.clone();
+        let room = room.to_owned();
+        let author = author.to_owned();
+        // The DO stub's `fetch_with_request` wraps a `!Send` JS future
+        // (`JsFuture`); wrap in `SendFuture` to satisfy the `Interceptor`
+        // trait's `Send` bound, exactly like every handler in `service.rs`
+        // does for its own DO/R2 calls (sound under single-threaded wasm).
+        SendFuture::new(async move {
+            let resp: QuotaCheckResp = match do_call(
+                &env,
+                &room,
+                "/quota",
+                &QuotaCheckReq { author: author.clone(), bytes: incoming_bytes },
+            )
+            .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    worker::console_error!("write-quota check failed open for {author}: {e}");
+                    return None;
+                }
+            };
+            if resp.allowed {
+                None
+            } else {
+                Some(ConnectError::resource_exhausted(
+                    resp.reason.unwrap_or_else(|| "write quota exceeded".to_string()),
+                ))
+            }
+        })
+        .await
+    }
+}
+
+/// For a write procedure that carries a per-room quota (`PutObject`,
+/// `UpdateRef`), decode just enough of the raw request body to learn the
+/// `room` and the payload size to charge against the budget (the `PutObject`
+/// `bytes` field length; `UpdateRef` carries no object bytes, so 0). Returns
+/// `None` for any other procedure, or when the body fails to decode as its
+/// expected message (malformed input the handler will reject on its own —
+/// nothing to charge a quota against yet).
+fn parse_write_target(procedure: &str, body: &bytes::Bytes) -> Option<(String, u64)> {
+    if procedure.ends_with("/PutObject") {
+        let mut buf = body.clone();
+        let msg = PutObjectRequest::decode(&mut buf).ok()?;
+        let room = msg.room?;
+        let len = msg.bytes.as_ref().map_or(0, |b| b.len() as u64);
+        Some((room, len))
+    } else if procedure.ends_with("/UpdateRef") {
+        let mut buf = body.clone();
+        let msg = UpdateRefRequest::decode(&mut buf).ok()?;
+        let room = msg.room?;
+        Some((room, 0))
+    } else {
+        None
+    }
+}
 
 #[async_trait]
 impl Interceptor for AuthInterceptor {
@@ -99,6 +200,20 @@ impl Interceptor for AuthInterceptor {
                 idempotency_key,
                 ..
             } => {
+                // Per-room write-quota check, PutObject/UpdateRef only. Skips
+                // cleanly (no check) when the body doesn't decode or carries
+                // an invalid room — the handler's own validation rejects
+                // those with a clean `invalid_argument`, so there is nothing
+                // for a quota to protect yet.
+                if let Some((room, incoming_bytes)) =
+                    parse_write_target(&procedure, req.payload.bytes())
+                    && is_valid_room(&room)
+                    && let Some(err) =
+                        self.enforce_write_quota(&room, &public_key, incoming_bytes).await
+                {
+                    return Err(err);
+                }
+
                 let mut req = req;
                 req.ctx.extensions_mut().insert(AuthorPubkey(public_key));
                 req.ctx

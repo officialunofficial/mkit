@@ -159,7 +159,9 @@ fn row_to_entry(row: CommitRowWire) -> CommitEntry {
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
-async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+/// `pub(crate)` so `auth.rs`'s write-quota check reuses the SAME DO-call
+/// plumbing (retry-free, one round trip) rather than a second copy.
+pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,
     room: &str,
     op: &str,

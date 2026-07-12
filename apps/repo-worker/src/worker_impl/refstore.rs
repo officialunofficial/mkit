@@ -15,6 +15,7 @@
 //   POST /update { "name", "new", "expectation", "expected"?, "author"?, "idem" }
 //                                                          -> { "committed", "conflict", "current"? }
 //   POST /list   { "prefix": "<prefix>" }                  -> { "refs": [ { "name", "value" } ] }
+//   POST /quota  { "author", "bytes" }                      -> { "allowed", "reason"? }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
 //
 // `expectation` is the proto wire number (1=ANY, 2=MISSING, 3=MATCH). The
@@ -35,13 +36,14 @@ use worker::{
 use crate::chat::{REACT_MIN_INTERVAL_MS, is_rate_limited};
 use crate::envelope::FRESHNESS_WINDOW_MS;
 use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
+use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::commit_index;
 use super::wire::{
     GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListEntry, ListReq, ListResp, MessagesReq,
-    MessagesResp, MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp,
-    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
+    MessagesResp, MsgEntry, PostReq, PostResp, QuotaCheckReq, QuotaCheckResp, ReactReq, ReactResp,
+    ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
@@ -237,6 +239,11 @@ impl DurableObject for RefStore {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
+            "/quota" => {
+                if let Err(e) = self.ensure_write_quota_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
             _ => {}
         }
 
@@ -282,6 +289,10 @@ impl DurableObject for RefStore {
             "/record-commits" => {
                 let body: RecordCommitsReq = req.json().await?;
                 self.handle_record_commits(body)
+            }
+            "/quota" => {
+                let body: QuotaCheckReq = req.json().await?;
+                self.handle_quota_check(body)
             }
             _ => Response::error("not found", 404),
         }
@@ -603,6 +614,98 @@ impl RefStore {
                 value: r.value,
             })
             .collect()
+    }
+
+    /// Idempotently create the `write_quota` table — the per-author
+    /// fixed-window write budget ledger for `PutObject`/`UpdateRef` (see
+    /// `crate::write_quota::evaluate_quota`). One row per author; the room
+    /// itself is implicit (this table lives in THIS room's DO instance).
+    fn ensure_write_quota_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS write_quota (\
+               author TEXT PRIMARY KEY, \
+               window_start INTEGER NOT NULL, \
+               ops INTEGER NOT NULL, \
+               bytes INTEGER NOT NULL);",
+            None,
+        )?;
+        // Seeks the stale tail so the opportunistic prune in
+        // `handle_quota_check` doesn't full-scan the whole per-room author
+        // set on every accepted write.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS write_quota_window ON write_quota(window_start);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Check-and-consume one author's write budget for this room, serially —
+    /// the DO's single-threaded execution makes this read-evaluate-write
+    /// atomic, so two writes from the same author can't both slip past the
+    /// cap (same requirement `handle_post`'s rate-limit check has). Called by
+    /// `AuthInterceptor` for `PutObject`/`UpdateRef` BEFORE the handler runs.
+    /// A rejected write leaves the persisted state untouched; an accepted one
+    /// persists the updated `(window_start, ops, bytes)` and prunes rows
+    /// whose window elapsed more than one window ago (bounded storage,
+    /// mirrors `idem_keys`/`react_idem`).
+    fn handle_quota_check(&self, req: QuotaCheckReq) -> Result<Response> {
+        let now = Date::now().as_millis() as i64;
+        let current = self.read_quota_state(&req.author);
+
+        match evaluate_quota(current, now, req.bytes) {
+            QuotaDecision::Allowed(state) => {
+                let sql = self.state.storage().sql();
+                sql.exec(
+                    "INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) \
+                     ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, \
+                       ops = excluded.ops, bytes = excluded.bytes;",
+                    vec![
+                        req.author.into(),
+                        state.window_start.into(),
+                        i64::from(state.ops).into(),
+                        (state.bytes as i64).into(),
+                    ],
+                )?;
+                let _ = sql.exec(
+                    "DELETE FROM write_quota WHERE window_start < ?;",
+                    vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
+                );
+                Response::from_json(&QuotaCheckResp { allowed: true, reason: None })
+            }
+            QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
+                allowed: false,
+                reason: Some(reason.to_string()),
+            }),
+        }
+    }
+
+    /// The author's persisted quota state in this room, or `None` if they've
+    /// never written here (or their row was pruned as stale) — the input to
+    /// `write_quota::evaluate_quota`.
+    fn read_quota_state(&self, author: &str) -> Option<QuotaState> {
+        #[derive(Deserialize)]
+        struct Row {
+            window_start: i64,
+            ops: i64,
+            bytes: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT window_start, ops, bytes FROM write_quota WHERE author = ? LIMIT 1;",
+                vec![author.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| QuotaState {
+            window_start: r.window_start,
+            ops: r.ops.max(0) as u32,
+            bytes: r.bytes.max(0) as u64,
+        })
     }
 
     /// Idempotently create the `messages` table — the room's chat log. `seq` is
