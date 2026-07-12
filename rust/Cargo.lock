@@ -1290,6 +1290,7 @@ checksum = "e269f3f40beac0c161e048847c0106f81eed9afb70ce35911f8ef9287cc209a1"
 dependencies = [
  "async-compression",
  "async-trait",
+ "axum",
  "base64",
  "buffa",
  "bytes",
@@ -1298,6 +1299,9 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
  "percent-encoding",
  "pin-project",
  "serde",
@@ -1306,6 +1310,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+ "tower-http",
  "tracing",
  "wasm-bindgen-futures",
 ]
@@ -3029,13 +3034,16 @@ dependencies = [
 name = "mkit-cli"
 version = "0.3.0"
 dependencies = [
+ "axum",
  "buffa",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "connectrpc",
  "ed25519-dalek 2.2.0",
  "flate2",
  "getrandom 0.4.2",
+ "http",
  "insta",
  "k256",
  "libc",
@@ -3045,6 +3053,7 @@ dependencies = [
  "mkit-keystore",
  "mkit-rpc",
  "mkit-test-util",
+ "mkit-transport-connect",
  "mkit-transport-enc",
  "mkit-transport-file",
  "mkit-transport-http",
@@ -3059,9 +3068,11 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "signal-hook",
+ "subtle",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "zeroize",
 ]
 
@@ -3197,6 +3208,29 @@ dependencies = [
 [[package]]
 name = "mkit-test-util"
 version = "0.3.0"
+
+[[package]]
+name = "mkit-transport-connect"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "buffa",
+ "buffa-types",
+ "bytes",
+ "connectrpc",
+ "connectrpc-build",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mkit-core",
+ "mkit-transport-file",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "mkit-transport-enc"
@@ -5205,10 +5239,12 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

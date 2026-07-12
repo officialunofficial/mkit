@@ -955,6 +955,26 @@ Remote / sync:
   default port advertised by `mkit+enc://` URLs when none is supplied
   is **9418**. Full keystore integration is deferred (see
   SPEC-TRANSPORT-ENC §6.2).
+- `mkit serve <path> --http <addr>` — self-hosted Connect remote: bind
+  `<addr>` (e.g. `0.0.0.0:8443`) and host `mkit.transport.v1.TransportService`
+  (SPEC-TRANSPORT-CONNECT) over axum/HTTP, instead of the SSH-frame
+  protocol. Requires building with `--features http-transport`. This is
+  a plaintext HTTP listener — put a TLS-terminating reverse proxy in
+  front for production use (or bind to loopback and tunnel).
+  **Fail-closed**, mirroring `--listen-enc`: refuses to bind unless one
+  of the following is supplied:
+  - `--http-token <TOKEN>` (or the `MKIT_API_TOKEN` environment variable
+    — the same variable `mkit+https://` clients already send as
+    `Authorization: Bearer <token>`, SPEC-TRANSPORT §5.2) — every RPC
+    (unary and streaming, including `UploadPack`/`DownloadPack`) is
+    rejected with `unauthenticated` unless it carries a matching bearer
+    token, checked in constant time.
+  - `--unsafe-allow-any-http-peer` — a development escape that accepts
+    ANY caller with no authentication at all. Prints a loud warning;
+    never use in production.
+  These two are mutually exclusive, and mutually exclusive with
+  `--listen-enc`. `Ctrl-C`/`SIGTERM` drain in-flight requests before
+  exiting (the same cooperative shutdown flag the rest of the CLI uses).
 - `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS

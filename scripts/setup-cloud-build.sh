@@ -111,7 +111,7 @@ mk_push mkit-ci-main --build-config=cloudbuild/ci.yaml \
 # output — protos, build.rs, the regen scripts, the committed generated/ trees,
 # AND the inputs that silently drive codegen: Cargo.lock (the buffa-build /
 # connectrpc-build crate versions) and Dockerfile.ci (the baked protoc version).
-CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/check-generated-fresh.sh','**/generated/**'
+CODEGEN_FILES='**/*.proto','**/build.rs','**/Cargo.lock','buf.yaml','cloudbuild/Dockerfile.ci','scripts/regen-rpc-proto.sh','scripts/regen-repo-proto.sh','scripts/regen-transport-proto.sh','scripts/check-generated-fresh.sh','**/generated/**'
 mk_pr   mkit-codegen-pr   --build-config=cloudbuild/codegen.yaml \
         --comment-control="$COL" --included-files="$CODEGEN_FILES"
 mk_push mkit-codegen-main --build-config=cloudbuild/codegen.yaml \

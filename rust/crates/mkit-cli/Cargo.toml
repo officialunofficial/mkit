@@ -69,6 +69,41 @@ mkit-transport-ssh = { version = "0.3", path = "../mkit-transport-ssh" }
 # Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
 mkit-transport-enc = { version = "0.3", path = "../mkit-transport-enc", optional = true }
+# Optional: `mkit serve --http`'s axum-hosted mkit.transport.v1 Connect
+# server (issue #700, SPEC-TRANSPORT-CONNECT). Off by default so the
+# baseline `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
+# `enc-transport`. Turn on via `--features http-transport`.
+mkit-transport-connect = { version = "0.3", path = "../mkit-transport-connect", optional = true }
+# ConnectRPC + axum are pulled in directly (not just transitively through
+# mkit-transport-connect) so `commands/serve/http.rs` can build the
+# bearer-auth `Interceptor` and drive `axum::serve` itself. Feature set
+# mirrors `mkit-transport-connect`'s own (server + axum), version-pinned
+# to the same "0.8" the rest of the workspace's connectrpc consumers use.
+connectrpc = { version = "0.8", default-features = false, features = [
+    "server",
+    "axum",
+    "gzip",
+    "json",
+], optional = true }
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "http2",
+    "tokio",
+], optional = true }
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "macros",
+], optional = true }
+# Constant-time bearer-token comparison for the `--http-token` auth gate —
+# already resolved transitively (ed25519-dalek pulls it), so this is not a
+# new supply-chain root.
+subtle = { version = "2", optional = true }
+# HeaderMap/header names for the bearer-auth interceptor — already resolved
+# transitively (reqwest pulls it), not a new supply-chain root.
+http = { version = "1", optional = true }
 mkit-rpc = { version = "0.3", path = "../mkit-rpc" }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
@@ -176,6 +211,13 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 # `mkit-transport-enc` with its `tcp` feature (tokio + governor +
 # rand). See SPEC-TRANSPORT-ENC §6 item 3.
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
+# Enables `mkit serve --http <addr>` (issue #700): hosts
+# `mkit.transport.v1.TransportService` over axum, backed by `FileTransport`.
+# Pulls in `mkit-transport-connect`, `connectrpc`'s server+axum features,
+# `axum`, and a multi-thread `tokio` runtime. Off by default so the baseline
+# `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
+# `enc-transport`. See SPEC-TRANSPORT-CONNECT.md.
+http-transport = ["dep:mkit-transport-connect", "dep:connectrpc", "dep:axum", "dep:tokio", "dep:subtle", "dep:http"]
 # The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's

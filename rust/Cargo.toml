@@ -17,6 +17,7 @@ members = [
     "crates/mkit-transport-s3",
     "crates/mkit-transport-ssh",
     "crates/mkit-transport-enc",
+    "crates/mkit-transport-connect",
     "crates/mkit-cli",
     "crates/mkit-rpc",
     # Internal release tooling (publish = false): signs/verifies the

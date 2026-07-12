@@ -14,10 +14,24 @@
 #
 # Trigger: mkit-codegen-{pr,main} — path-filtered to protos / build.rs /
 # scripts/regen-*.sh / **/generated/**.
+#
+# Also runs `buf lint` + `buf breaking` against every proto module registered
+# in the repo-root buf.yaml (today: mkit.transport.v1, SPEC-TRANSPORT-CONNECT
+# §1/§10 — mkit#677 folds mkit.rpc.v1/mkit.repo.v1 into the same workspace
+# later). `buf` isn't baked into _CI_IMAGE (a runtime download here is far
+# cheaper than a Dockerfile.ci rebuild+republish for one extra static
+# binary); bump BUF_VERSION deliberately, mirroring how PROTOC_VERSION is
+# pinned in Dockerfile.ci.
+#
+# `buf breaking` compares against the target branch's `buf.yaml` module tip
+# (`.git#branch=main,subdir=proto`) — a no-op the first time a module is
+# added (nothing to break against yet), then enforced on every following
+# proto change per `breaking.use: [FILE]` in buf.yaml.
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
   _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
+  _BUF_VERSION: "1.66.0"
 
 options:
   machineType: E2_HIGHCPU_8
@@ -42,3 +56,25 @@ steps:
         set -euo pipefail
         ./scripts/check-generated-fresh.sh
         sccache --show-stats
+
+  - name: ${_CI_IMAGE}
+    id: buf-lint-breaking
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        curl -sSL -o /usr/local/bin/buf \
+          "https://github.com/bufbuild/buf/releases/download/v${_BUF_VERSION}/buf-Linux-x86_64"
+        chmod +x /usr/local/bin/buf
+        buf --version
+        buf lint
+        # First commit of a module has nothing to compare against — buf
+        # errors "had no .proto files" rather than passing vacuously, so
+        # skip the check when the module is new on this branch relative to
+        # the merge target instead of treating that as a failure.
+        if git cat-file -e main:proto 2>/dev/null; then
+          buf breaking --against '.git#branch=main'
+        else
+          echo "proto/ does not exist on main yet — skipping buf breaking (nothing to compare)."
+        fi

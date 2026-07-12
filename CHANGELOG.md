@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`mkit serve --http <addr>`: self-hosted Connect remote (SPEC-TRANSPORT-CONNECT).**
+  `mkit serve` can now host `mkit.transport.v1.TransportService` over
+  axum/HTTP instead of the SSH-frame protocol, behind the new
+  `http-transport` cargo feature — an operator without SSH access or a
+  cloud object store can run a real, testable `mkit+https://` remote
+  against a local repository (new `mkit-transport-connect` crate,
+  generic over any `mkit_core::protocol::Transport` backend; instantiated
+  today over `FileTransport`). All seven wire RPCs
+  (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/
+  `UploadPack`/`DownloadPack`) run the underlying `Transport` call on a
+  blocking task so a synchronous CAS ref write never stalls the async
+  executor. `UploadPack`/`DownloadPack` validate the full header-then-chunks
+  stream (offset contiguity, declared-vs-received length, BLAKE3) before
+  ever touching storage, so a rejected upload never creates or overwrites
+  the destination pack, and a download either completes or fails before
+  any message is sent — never a partial stream. **Fail-closed**, mirroring
+  `--listen-enc`: refuses to bind unless `--http-token`/`MKIT_API_TOKEN`
+  (checked in constant time on every unary and streaming RPC) or the
+  explicit `--unsafe-allow-any-http-peer` development escape is supplied;
+  `Ctrl-C`/`SIGTERM` drain in-flight requests before exiting. The
+  `mkit.transport.v1` proto (`proto/mkit/transport/v1/transport.proto`) is
+  generated via `buffa`/`connectrpc-build`, vendored under `generated/`
+  the same way `mkit-repo-client`/`apps/repo-worker` already do — see
+  `docs/specs/SPEC-TRANSPORT-CONNECT.md`. The native CLI Connect client
+  and a hosted reference-Worker deployment are separate, later changes
+  ([#701](https://github.com/officialunofficial/mkit/issues/701),
+  [#699](https://github.com/officialunofficial/mkit/issues/699)).
 - **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
   / `download_pack_streaming`).** Two new opt-in trait methods move a
   pack as a sequence of bounded-size `PackChunk { offset, data, last }`

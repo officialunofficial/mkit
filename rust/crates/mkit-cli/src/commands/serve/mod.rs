@@ -96,6 +96,36 @@ struct ServeOpts {
         default_value_t = 60
     )]
     enc_handshake_timeout_secs: u64,
+
+    /// Host `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT)
+    /// over axum/HTTP on `addr` (e.g. `0.0.0.0:8443` or `127.0.0.1:7777`),
+    /// instead of speaking the SSH-frame protocol on stdin/stdout. Requires
+    /// the `http-transport` cargo feature. This is the self-hosted
+    /// `mkit+https://` remote (issue #700) — put a reverse proxy in front
+    /// for TLS in production; this listener speaks plaintext HTTP.
+    ///
+    /// FAIL-CLOSED, mirroring `--listen-enc`: refuses to bind unless
+    /// either a bearer token is configured (`--http-token` or the
+    /// `MKIT_API_TOKEN` env var — the same variable
+    /// `mkit-transport-http`'s client already sends, SPEC-TRANSPORT §5.2)
+    /// or `--unsafe-allow-any-http-peer` is passed.
+    #[arg(long = "http", value_name = "ADDR")]
+    http: Option<String>,
+
+    /// Bearer token required on every RPC's `Authorization: Bearer <token>`
+    /// header when `--http` is used. Falls back to the `MKIT_API_TOKEN`
+    /// environment variable when omitted. CLI-only/env-only — never read
+    /// from repo-local `.mkit/config`, matching the encrypted listener's
+    /// peer-authorization sourcing.
+    #[arg(long = "http-token", value_name = "TOKEN")]
+    http_token: Option<String>,
+
+    /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
+    /// check (fail-open). Prints a loud warning. Intended only for local
+    /// development — NEVER for production, since every RPC (including ref
+    /// writes and pack uploads) is unauthenticated.
+    #[arg(long = "unsafe-allow-any-http-peer", default_value_t = false)]
+    unsafe_allow_any_http_peer: bool,
 }
 
 // -- Per-connection resource caps -------------------------------------------
@@ -124,6 +154,10 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if let Some(addr) = opts.listen_enc.as_deref() {
+        if opts.http.is_some() {
+            eprintln!("mkit serve: --listen-enc and --http are mutually exclusive");
+            return exit::USAGE;
+        }
         return run_listen_enc(
             addr,
             repo_root,
@@ -132,6 +166,15 @@ pub fn run(args: &[String]) -> u8 {
             opts.unsafe_allow_any_enc_peer,
             opts.enc_idle_timeout_secs,
             opts.enc_handshake_timeout_secs,
+        );
+    }
+
+    if let Some(addr) = opts.http.as_deref() {
+        return http::run_listen_http(
+            addr,
+            repo_root,
+            opts.http_token.as_deref(),
+            opts.unsafe_allow_any_http_peer,
         );
     }
 
@@ -145,6 +188,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 mod enc;
+mod http;
 #[cfg(feature = "sparse-checkout")]
 mod sparse;
 

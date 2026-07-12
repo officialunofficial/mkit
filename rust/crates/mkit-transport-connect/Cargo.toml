@@ -1,0 +1,77 @@
+[package]
+name = "mkit-transport-connect"
+description = "mkit.transport.v1 Connect service: an axum-hosted TransportService server generic over any mkit_core::protocol::Transport backend (SPEC-TRANSPORT-CONNECT)"
+keywords = ["mkit", "vcs", "transport", "connectrpc", "axum"]
+categories = ["network-programming", "web-programming::http-server"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints.clippy]
+# Same rationale as mkit-rpc: the buffa/connectrpc-generated code (staged
+# into $OUT_DIR from generated/) inherits docstrings from transport.proto
+# and trips pedantic/nursery lints hundreds of times. Keep `clippy::all`
+# (correctness + style baseline); our own hand-written src/ code stays
+# under it.
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+# Inter-workspace deps need explicit version + path so `cargo publish`
+# accepts them.
+mkit-core = { version = "0.3", path = "../mkit-core" }
+
+# ConnectRPC server, hosted over axum (this crate's whole point — see
+# SPEC-TRANSPORT-CONNECT §7.2). `server` pulls hyper/hyper-util server
+# bits; `axum` gives Router::into_axum_router()/into_axum_service() so
+# `mkit serve --http` can hand the result straight to `axum::serve`.
+# `json` keeps the buffa-generated message types' serde derives (matches
+# every other connectrpc consumer in this workspace). `zstd` is dropped
+# (native binary, not wasm — but this server has no need for response
+# compression beyond gzip today; add it if a future issue asks for it).
+connectrpc = { version = "0.8", default-features = false, features = [
+    "server",
+    "axum",
+    "gzip",
+    "json",
+] }
+buffa = "0.8.1"
+buffa-types = "0.8"
+
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "macros"] }
+
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1.6"
+futures = "0.3"
+thiserror = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+connectrpc-build = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+mkit-transport-file = { path = "../mkit-transport-file" }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+# Native (non-wasm) ConnectRPC client, used ONLY by this crate's own
+# integration test to drive a real end-to-end round trip against the
+# axum server (SPEC-TRANSPORT-CONNECT-issue-700's testing decision). The
+# polished, public native CLI client crate is mkit#701's scope — this is
+# a minimal test-only client, not that crate.
+connectrpc = { version = "0.8", default-features = false, features = [
+    "client",
+    "gzip",
+    "json",
+] }
+
+[package.metadata.docs.rs]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true
