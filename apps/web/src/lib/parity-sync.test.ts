@@ -77,7 +77,7 @@ describe('parseDeferredFlags', () => {
     // This is the load-bearing sanity check: if PARITY.md's deferred-flags
     // list changes shape, this test documents exactly which commands the
     // sync check currently derives from it.
-    expect(entries.map((e) => e.command).toSorted()).toEqual(['add', 'branch', 'diff', 'log'])
+    expect(entries.map((e) => e.command).toSorted()).toEqual(['add', 'branch', 'log'])
   })
 })
 
