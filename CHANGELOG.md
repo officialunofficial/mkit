@@ -444,6 +444,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`clone`/`pull`/`fetch` now verify commit/remix/tag signatures and
+  fail closed by default.** Previously the only signature check was the
+  manual, single-revision `mkit verify <rev>` — a hostile remote
+  (THREAT-MODEL §3.1) could push an entirely unsigned or forged history
+  and every `clone`/`pull`/`fetch` would accept it with zero indication
+  anything was wrong. Every commit/remix/tag a fetch newly introduces is
+  now run through `mkit_core::sign::{verify_commit,verify_remix,verify_tag}`
+  — the exact check `mkit verify` runs manually — before the
+  remote-tracking ref is published; a structurally invalid or missing
+  signature aborts with exit 65 and leaves local refs/working tree
+  untouched. Only the newly-fetched delta is checked (bounded per-fetch
+  cost), and the new `DispatchError::UnsignedOrInvalidObject` is
+  deliberately excluded from the applied-pack self-heal retry. Opt out
+  per invocation with `--no-verify-signatures`, or persistently via the
+  **user-scoped** `pull.require_signed = false` config key (added to
+  `REPO_FORBIDDEN_KEYS` — a cloned repo's own config cannot disable the
+  check that protects the clone against exactly that repo). A new
+  message-only `mkit.rpc.v1.verify` proto (`verify.proto`, co-located
+  with `signer.proto`) documents the verification contract so a future
+  ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical
+  check instead of reimplementing it
+  ([#692](https://github.com/officialunofficial/mkit/issues/692)).
+
 - **SSH trust-pinning is now actually enforced.** The per-repo
   `ssh.strict_host_key_checking`, `ssh.user_known_hosts_file`, and
   `ssh.identity_file` keys were parsed into `Config` but never threaded

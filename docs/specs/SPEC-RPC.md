@@ -18,6 +18,7 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`, issue #692). **Not** a framed protocol under §1/§4 below — it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
 
 Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) — the only
 value mkit currently speaks. Wire-breaking changes (renumbering or

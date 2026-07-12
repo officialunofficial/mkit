@@ -153,6 +153,21 @@ pub enum DispatchError {
         "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
     )]
     ClosureTooLarge(usize),
+    /// A commit/remix/tag newly introduced by this fetch failed Ed25519
+    /// signature verification via [`mkit_core::sign::verify_commit`] /
+    /// `verify_remix` / `verify_tag` — the exact check `mkit verify <rev>`
+    /// runs manually (issue #692). A hostile remote (THREAT-MODEL §3.1) can
+    /// otherwise push an unsigned or forged history that `clone`/`pull`/
+    /// `fetch` would silently materialise. Deliberately distinct from
+    /// [`RemoteMissingObject`](Self::RemoteMissingObject) so it does NOT
+    /// feed the applied-pack self-heal retry (#409): an invalid signature
+    /// is not evidence of local staleness, and clearing the applied-packs
+    /// record would not make a hostile remote's history valid. Fails
+    /// closed by default; opt out with `--no-verify-signatures` or the
+    /// user-scoped `pull.require_signed = false` config (never settable
+    /// from repo-scoped config — see [`crate::config::REPO_FORBIDDEN_KEYS`]).
+    #[error("object {hash} failed signature verification: {reason}")]
+    UnsignedOrInvalidObject { hash: String, reason: String },
     /// A remote name passed to the applied-packs record (#409) is not a legal
     /// ref name (per [`mkit_core::refs::validate_ref_name`]). A remote name
     /// *is* a ref name, so this should never occur for a config-registered
@@ -697,18 +712,35 @@ pub fn push_branch_with_depth(
     advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip)
 }
 
+/// [`pull_all_with`] with signature verification on — the CLI's default
+/// (issue #692). Existing in-process callers (the integration-test suite)
+/// that construct only validly-signed histories are unaffected.
+pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+    pull_all_with(cwd, tx, remote, true)
+}
+
 /// Fetch remote refs, then fast-forward the current local branch from
 /// `refs/remotes/default/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
-pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+///
+/// `require_signed` gates the post-fetch commit/remix/tag signature check
+/// (issue #692) — `true` (the CLI's default, see [`pull_all`]) verifies
+/// every newly-fetched object and fails closed; `false` is the explicit
+/// `--no-verify-signatures` / `pull.require_signed = false` opt-out.
+pub fn pull_all_with(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     // Fetch phase: `fetch_objects` takes the repo lock itself, narrowly and
     // per branch, around only the local unpack + remote-ref-publish window
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
-    let n = fetch_objects(&store, &layout, tx, remote)?;
+    let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
     let remote_refs = refs::list_remote_refs(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -819,11 +851,25 @@ fn rollback_pull_ref(
     }
 }
 
+/// [`fetch_all_with`] with signature verification on — the CLI's default
+/// (issue #692). Existing in-process callers (the integration-test suite)
+/// that construct only validly-signed histories are unaffected.
+pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+    fetch_all_with(cwd, tx, remote, true)
+}
+
 /// `fetch` — `pull_all` without the HEAD update. Downloads every object
 /// reachable from each remote ref (via [`Transport::download_pack`] on
 /// the object's own digest) and writes the ref into
 /// `refs/remotes/default/<branch>`.
-pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+///
+/// See [`pull_all_with`] for the `require_signed` contract (issue #692).
+pub fn fetch_all_with(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     // No outer lock here (#642): `fetch_objects` takes the repo lock
     // itself, narrowly and per branch, around only the local unpack +
@@ -831,7 +877,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
     // network transfer. See `packmap::resolve_and_download_chain` /
     // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    fetch_objects(&store, &layout, tx, remote)
+    fetch_objects(&store, &layout, tx, remote, require_signed)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -912,9 +958,10 @@ fn fetch_objects(
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote);
-    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied);
+    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied, require_signed);
     persist_record(&mut applied, remote);
     result
 }
@@ -927,6 +974,7 @@ fn fetch_objects_inner(
     tx: &dyn Transport,
     remote: &str,
     applied: &mut AppliedPacks,
+    require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
@@ -976,49 +1024,58 @@ fn fetch_objects_inner(
             // correct (possibly re-acquired) guard is what's held at
             // `tracking.write` below — see the retry branch's comment for why
             // there are two guards, not one held across the whole match.
-            let (published_tip, _lock) =
-                match apply_fetched_chain(store, tx, remote, &r.name, fetched, h, applied) {
-                    Ok(()) => (h, lock),
-                    Err(e @ DispatchError::RemoteMissingObject(_)) => {
-                        // Re-read the branch's CURRENT tip + packmap. If either
-                        // is gone (branch deleted mid-fetch) the original error
-                        // stands. Otherwise retry the chain ONCE with the fresh
-                        // pair; a second failure propagates via `?`.
-                        let (Some(fresh_h), Some(fresh_head)) = (
-                            tx.read_ref(&format!("refs/heads/{}", r.name))?,
-                            tx.read_ref(&packmap_ref(&r.name))?,
-                        ) else {
-                            return Err(e);
-                        };
-                        // Release the lock for the retry's network
-                        // re-download too — mirrors phase 1's unlocked
-                        // download exactly, rather than the previously
-                        // "accepted trade" of holding the lock across a
-                        // second network round-trip on this rare
-                        // race-recovery path. Re-acquire before the
-                        // retry's local unpack + publish, which still
-                        // needs the same #267 protection phase 2 always
-                        // has.
-                        drop(lock);
-                        let fresh_fetched =
-                            resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
-                        let lock = mkit_core::repo_lock::acquire_default(
-                            layout.worktree_state_dir(),
-                            crate::commands::WORKTREE_LOCK,
-                        )?;
-                        apply_fetched_chain(
-                            store,
-                            tx,
-                            remote,
-                            &r.name,
-                            fresh_fetched,
-                            fresh_h,
-                            applied,
-                        )?;
-                        (fresh_h, lock)
-                    }
-                    Err(e) => return Err(e),
-                };
+            let (published_tip, _lock) = match apply_fetched_chain(
+                store,
+                tx,
+                remote,
+                &r.name,
+                fetched,
+                h,
+                applied,
+                require_signed,
+            ) {
+                Ok(()) => (h, lock),
+                Err(e @ DispatchError::RemoteMissingObject(_)) => {
+                    // Re-read the branch's CURRENT tip + packmap. If either
+                    // is gone (branch deleted mid-fetch) the original error
+                    // stands. Otherwise retry the chain ONCE with the fresh
+                    // pair; a second failure propagates via `?`.
+                    let (Some(fresh_h), Some(fresh_head)) = (
+                        tx.read_ref(&format!("refs/heads/{}", r.name))?,
+                        tx.read_ref(&packmap_ref(&r.name))?,
+                    ) else {
+                        return Err(e);
+                    };
+                    // Release the lock for the retry's network
+                    // re-download too — mirrors phase 1's unlocked
+                    // download exactly, rather than the previously
+                    // "accepted trade" of holding the lock across a
+                    // second network round-trip on this rare
+                    // race-recovery path. Re-acquire before the
+                    // retry's local unpack + publish, which still
+                    // needs the same #267 protection phase 2 always
+                    // has.
+                    drop(lock);
+                    let fresh_fetched =
+                        resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
+                    let lock = mkit_core::repo_lock::acquire_default(
+                        layout.worktree_state_dir(),
+                        crate::commands::WORKTREE_LOCK,
+                    )?;
+                    apply_fetched_chain(
+                        store,
+                        tx,
+                        remote,
+                        &r.name,
+                        fresh_fetched,
+                        fresh_h,
+                        applied,
+                        require_signed,
+                    )?;
+                    (fresh_h, lock)
+                }
+                Err(e) => return Err(e),
+            };
             // Still inside `_lock`'s scope (the original guard, or the
             // retry's re-acquired one — see above).
             tracking.write(&r.name, &published_tip)?;

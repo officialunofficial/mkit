@@ -20,6 +20,7 @@ fn main() {
         proto_dir.join("common.proto"),
         proto_dir.join("signer.proto"),
         proto_dir.join("ssh.proto"),
+        proto_dir.join("verify.proto"),
     ];
 
     // Re-run when a .proto, the vendored output, or the mode changes.
