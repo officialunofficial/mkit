@@ -61,6 +61,8 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_REACTIONS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__REACTION_JSON_ANY);
         reg.register_json_any(super::__LIST_REACTIONS_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__PURGE_ROOM_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__PURGE_ROOM_RESPONSE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -179,6 +181,14 @@ pub use self::__buffa::view::ReactionOwnedView;
 pub use self::__buffa::view::ListReactionsResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::ListReactionsResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.repo.v1.repo.__connect.rs");

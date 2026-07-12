@@ -234,3 +234,20 @@ pub struct QuotaCheckResp {
     /// Set (and safe to surface to the client) when `allowed` is false.
     pub reason: Option<String>,
 }
+
+// --- Room purge (worker -> DO) ----------------------------------------------
+//
+//   POST /purge (no body) -> PurgeResp
+//
+// Wipes every table row scoped to this DO instance (one instance per room):
+// refs, messages (+ idem_keys), reactions (+ react_idem/react_rate), and the
+// commits index. The worker purges the room's R2 prefixes (objects/,
+// messages/) separately — the DO owns none of R2. See service.rs
+// `purge_room` and refstore.rs `handle_purge`.
+
+#[derive(Serialize, Deserialize)]
+pub struct PurgeResp {
+    pub refs_deleted: u32,
+    pub messages_deleted: u32,
+    pub reactions_deleted: u32,
+}

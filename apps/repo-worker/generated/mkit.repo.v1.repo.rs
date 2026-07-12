@@ -5644,3 +5644,427 @@ pub const __LIST_REACTIONS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
     from_json: ::buffa::type_registry::any_from_json::<ListReactionsResponse>,
     is_wkt: false,
 };
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct PurgeRoomRequest {
+    /// Field 1: `room`
+    #[serde(rename = "room", skip_serializing_if = "::core::option::Option::is_none")]
+    pub room: ::core::option::Option<::buffa::alloc::string::String>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PurgeRoomRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PurgeRoomRequest").field("room", &self.room).finish()
+    }
+}
+impl PurgeRoomRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PurgeRoomRequest";
+}
+impl PurgeRoomRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::room`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_room(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.room = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(PurgeRoomRequest);
+impl ::buffa::MessageName for PurgeRoomRequest {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "PurgeRoomRequest";
+    const FULL_NAME: &'static str = "mkit.repo.v1.PurgeRoomRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PurgeRoomRequest";
+}
+impl ::buffa::Message for PurgeRoomRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.room {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.room {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.room.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.room = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PurgeRoomRequest {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.PurgeRoomRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for PurgeRoomRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __PURGE_ROOM_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.PurgeRoomRequest",
+    to_json: ::buffa::type_registry::any_to_json::<PurgeRoomRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<PurgeRoomRequest>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct PurgeRoomResponse {
+    /// Field 1: `purged`
+    #[serde(rename = "purged", skip_serializing_if = "::core::option::Option::is_none")]
+    pub purged: ::core::option::Option<bool>,
+    /// Field 2: `objects_deleted`
+    #[serde(
+        rename = "objectsDeleted",
+        alias = "objects_deleted",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub objects_deleted: ::core::option::Option<u32>,
+    /// Field 3: `message_bodies_deleted`
+    #[serde(
+        rename = "messageBodiesDeleted",
+        alias = "message_bodies_deleted",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub message_bodies_deleted: ::core::option::Option<u32>,
+    /// Field 4: `refs_deleted`
+    #[serde(
+        rename = "refsDeleted",
+        alias = "refs_deleted",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub refs_deleted: ::core::option::Option<u32>,
+    /// Field 5: `messages_deleted`
+    #[serde(
+        rename = "messagesDeleted",
+        alias = "messages_deleted",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub messages_deleted: ::core::option::Option<u32>,
+    /// Field 6: `reactions_deleted`
+    #[serde(
+        rename = "reactionsDeleted",
+        alias = "reactions_deleted",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub reactions_deleted: ::core::option::Option<u32>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PurgeRoomResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PurgeRoomResponse")
+            .field("purged", &self.purged)
+            .field("objects_deleted", &self.objects_deleted)
+            .field("message_bodies_deleted", &self.message_bodies_deleted)
+            .field("refs_deleted", &self.refs_deleted)
+            .field("messages_deleted", &self.messages_deleted)
+            .field("reactions_deleted", &self.reactions_deleted)
+            .finish()
+    }
+}
+impl PurgeRoomResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PurgeRoomResponse";
+}
+impl PurgeRoomResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::purged`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_purged(mut self, value: bool) -> Self {
+        self.purged = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::objects_deleted`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_objects_deleted(mut self, value: u32) -> Self {
+        self.objects_deleted = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::message_bodies_deleted`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_message_bodies_deleted(mut self, value: u32) -> Self {
+        self.message_bodies_deleted = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::refs_deleted`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_refs_deleted(mut self, value: u32) -> Self {
+        self.refs_deleted = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::messages_deleted`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_messages_deleted(mut self, value: u32) -> Self {
+        self.messages_deleted = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::reactions_deleted`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_reactions_deleted(mut self, value: u32) -> Self {
+        self.reactions_deleted = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(PurgeRoomResponse);
+impl ::buffa::MessageName for PurgeRoomResponse {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "PurgeRoomResponse";
+    const FULL_NAME: &'static str = "mkit.repo.v1.PurgeRoomResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PurgeRoomResponse";
+}
+impl ::buffa::Message for PurgeRoomResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// The result is a `u32`; the protobuf specification requires all
+    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
+    /// compliant message will never overflow this type.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if self.purged.is_some() {
+            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+        }
+        if let Some(v) = self.objects_deleted {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.message_bodies_deleted {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.refs_deleted {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.messages_deleted {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.reactions_deleted {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.purged {
+            ::buffa::types::put_bool_field(1u32, v, buf);
+        }
+        if let Some(v) = self.objects_deleted {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        if let Some(v) = self.message_bodies_deleted {
+            ::buffa::types::put_uint32_field(3u32, v, buf);
+        }
+        if let Some(v) = self.refs_deleted {
+            ::buffa::types::put_uint32_field(4u32, v, buf);
+        }
+        if let Some(v) = self.messages_deleted {
+            ::buffa::types::put_uint32_field(5u32, v, buf);
+        }
+        if let Some(v) = self.reactions_deleted {
+            ::buffa::types::put_uint32_field(6u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.purged = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.objects_deleted = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.message_bodies_deleted = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.refs_deleted = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.messages_deleted = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.reactions_deleted = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.purged = ::core::option::Option::None;
+        self.objects_deleted = ::core::option::Option::None;
+        self.message_bodies_deleted = ::core::option::Option::None;
+        self.refs_deleted = ::core::option::Option::None;
+        self.messages_deleted = ::core::option::Option::None;
+        self.reactions_deleted = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PurgeRoomResponse {
+    const PROTO_FQN: &'static str = "mkit.repo.v1.PurgeRoomResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for PurgeRoomResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __PURGE_ROOM_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.repo.v1.PurgeRoomResponse",
+    to_json: ::buffa::type_registry::any_to_json::<PurgeRoomResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<PurgeRoomResponse>,
+    is_wkt: false,
+};
