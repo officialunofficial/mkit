@@ -74,31 +74,33 @@ oversized allocations; the FastCDC chunker is fully deterministic
 
 ---
 
-## 3. Object identity: the merkelization break
+## 3. Merkle-root object identity
 
-Most object types keep flat content addressing: the object ID is
-BLAKE3 of the serialized bytes. `Tree` and `ChunkedBlob` are the
-exception. Their ID is the root of a domain-bound Binary Merkle Tree
-(BMT) built over their parts &mdash; one leaf per entry for a `Tree`, or a
-metadata leaf plus one leaf per chunk for a `ChunkedBlob`. The
-construction is normative in `docs/specs/SPEC-MERKLE-OBJECTS.md`; the
-decision record is `docs/adr/0001-merkelize-chunkedblob-and-tree.md`.
+Most object types are content-addressed by BLAKE3 of their serialized
+bytes. `Tree` and `ChunkedBlob` are the exception: their ID is the
+root of a domain-bound Binary Merkle Tree (BMT) built over their
+parts &mdash; one leaf per entry for a `Tree`, or a metadata leaf plus one
+leaf per chunk for a `ChunkedBlob`. The construction is normative in
+`docs/specs/SPEC-MERKLE-OBJECTS.md`.
 
-The payoff is proof, not just storage. Because the ID is a Merkle
-root, mkit can prove that one chunk or entry belongs to an object
-without shipping the whole object, and it can verify the
-completeness of a partial fetch structurally instead of by trust.
+Building an object's ID as a Merkle root over its own parts gives it
+two properties: inclusion of a part is provable, and completeness is
+verifiable structurally, not by trust. A caller can prove that one
+chunk belongs to a `ChunkedBlob`,
+or that one entry belongs to a `Tree`, without holding the whole
+object; a partial fetch's completeness follows from the same
+root-equals-id check the store already runs on every read.
 
-The cost is that a `Tree`'s ID feeds its `Commit`'s ID, which feeds
-every ref built on top of it. Changing how `Tree` and `ChunkedBlob`
-get their IDs re-addresses an entire history, not only the objects
-that use the new scheme. mkit shipped this change before 1.0 under a
-**no-migration** policy: `ObjectStore::open` checks a mandatory
-`.mkit/format` repo marker (`bmt-v1`) and rejects any repository
-written under the old flat-hash scheme with `IncompatibleRepoFormat`,
-rather than silently mis-reading its trees. mkit ships no tool that
-translates a pre-merkle repository forward; the wire format and
-`schema_version` did not change, only object identity did.
+Because a `Tree`'s ID feeds its `Commit`'s ID, and a `Commit`'s ID
+feeds every ref built on it, the same property extends up through an
+entire history: verifying a commit's root also verifies everything
+reachable from it. `ObjectStore::open` enforces addressing
+consistency through a `.mkit/format` repository marker (`bmt-v1`): a
+store whose marker doesn't match the addressing rule it expects
+rejects the repository with `IncompatibleRepoFormat` rather than
+misinterpreting its objects under the wrong rule. The wire format and
+`schema_version` are independent of this marker; only object identity
+depends on it.
 
 ---
 
@@ -169,12 +171,6 @@ Pick the closest match.
 Start at `rust/crates/mkit-core/src/serialize.rs`, then read
 `docs/specs/SPEC-OBJECTS.md`. Update the matching golden vector under
 `rust/tests/golden/`. If you change the wire shape, version it.
-
-### "I need to understand why `ObjectStore::open` rejects a repository."
-Read [§3, Object identity: the merkelization break](#3-object-identity-the-merkelization-break),
-then `docs/specs/SPEC-MERKLE-OBJECTS.md` for the exact construction. The
-rejection is deliberate: the `.mkit/format` marker gates a pre-1.0,
-no-migration break, not a bug.
 
 ### "I'm adding a new transport."
 Start at `rust/crates/mkit-core/src/protocol.rs` for the `Transport`
