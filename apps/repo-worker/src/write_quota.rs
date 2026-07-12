@@ -72,7 +72,11 @@ pub enum QuotaDecision {
 pub fn evaluate_quota(current: Option<QuotaState>, now: i64, incoming_bytes: u64) -> QuotaDecision {
     let base = match current {
         Some(s) if now - s.window_start < WRITE_QUOTA_WINDOW_MS => s,
-        _ => QuotaState { window_start: now, ops: 0, bytes: 0 },
+        _ => QuotaState {
+            window_start: now,
+            ops: 0,
+            bytes: 0,
+        },
     };
 
     let ops = base.ops + 1;
@@ -89,7 +93,11 @@ pub fn evaluate_quota(current: Option<QuotaState>, now: i64, incoming_bytes: u64
         };
     }
 
-    QuotaDecision::Allowed(QuotaState { window_start: base.window_start, ops, bytes })
+    QuotaDecision::Allowed(QuotaState {
+        window_start: base.window_start,
+        ops,
+        bytes,
+    })
 }
 
 #[cfg(test)]
@@ -101,41 +109,69 @@ mod tests {
         let d = evaluate_quota(None, 10_000, 1_000);
         assert_eq!(
             d,
-            QuotaDecision::Allowed(QuotaState { window_start: 10_000, ops: 1, bytes: 1_000 })
+            QuotaDecision::Allowed(QuotaState {
+                window_start: 10_000,
+                ops: 1,
+                bytes: 1_000
+            })
         );
     }
 
     #[test]
     fn under_the_op_cap_stays_allowed() {
-        let state = QuotaState { window_start: 0, ops: WRITE_QUOTA_MAX_OPS - 1, bytes: 0 };
+        let state = QuotaState {
+            window_start: 0,
+            ops: WRITE_QUOTA_MAX_OPS - 1,
+            bytes: 0,
+        };
         let d = evaluate_quota(Some(state), 100, 0);
         assert_eq!(
             d,
-            QuotaDecision::Allowed(QuotaState { window_start: 0, ops: WRITE_QUOTA_MAX_OPS, bytes: 0 })
+            QuotaDecision::Allowed(QuotaState {
+                window_start: 0,
+                ops: WRITE_QUOTA_MAX_OPS,
+                bytes: 0
+            })
         );
     }
 
     #[test]
     fn at_the_op_cap_is_rejected() {
         // Already AT the cap: one more op would push it over.
-        let state = QuotaState { window_start: 0, ops: WRITE_QUOTA_MAX_OPS, bytes: 0 };
+        let state = QuotaState {
+            window_start: 0,
+            ops: WRITE_QUOTA_MAX_OPS,
+            bytes: 0,
+        };
         let d = evaluate_quota(Some(state), 100, 0);
         assert!(matches!(d, QuotaDecision::Exhausted { .. }));
     }
 
     #[test]
     fn exactly_at_the_byte_cap_is_allowed() {
-        let state = QuotaState { window_start: 0, ops: 0, bytes: 0 };
+        let state = QuotaState {
+            window_start: 0,
+            ops: 0,
+            bytes: 0,
+        };
         let d = evaluate_quota(Some(state), 100, WRITE_QUOTA_MAX_BYTES);
         assert_eq!(
             d,
-            QuotaDecision::Allowed(QuotaState { window_start: 0, ops: 1, bytes: WRITE_QUOTA_MAX_BYTES })
+            QuotaDecision::Allowed(QuotaState {
+                window_start: 0,
+                ops: 1,
+                bytes: WRITE_QUOTA_MAX_BYTES
+            })
         );
     }
 
     #[test]
     fn one_byte_over_the_cap_is_rejected() {
-        let state = QuotaState { window_start: 0, ops: 0, bytes: WRITE_QUOTA_MAX_BYTES };
+        let state = QuotaState {
+            window_start: 0,
+            ops: 0,
+            bytes: WRITE_QUOTA_MAX_BYTES,
+        };
         let d = evaluate_quota(Some(state), 100, 1);
         assert!(matches!(d, QuotaDecision::Exhausted { .. }));
     }
@@ -143,7 +179,11 @@ mod tests {
     #[test]
     fn window_resets_after_it_elapses() {
         // Exhausted at the tail of a window...
-        let state = QuotaState { window_start: 0, ops: WRITE_QUOTA_MAX_OPS, bytes: 0 };
+        let state = QuotaState {
+            window_start: 0,
+            ops: WRITE_QUOTA_MAX_OPS,
+            bytes: 0,
+        };
         let still_current = evaluate_quota(Some(state), WRITE_QUOTA_WINDOW_MS - 1, 0);
         assert!(matches!(still_current, QuotaDecision::Exhausted { .. }));
         // ...but once the window has fully elapsed, a fresh window starts and
@@ -151,7 +191,11 @@ mod tests {
         let reset = evaluate_quota(Some(state), WRITE_QUOTA_WINDOW_MS, 0);
         assert_eq!(
             reset,
-            QuotaDecision::Allowed(QuotaState { window_start: WRITE_QUOTA_WINDOW_MS, ops: 1, bytes: 0 })
+            QuotaDecision::Allowed(QuotaState {
+                window_start: WRITE_QUOTA_WINDOW_MS,
+                ops: 1,
+                bytes: 0
+            })
         );
     }
 
@@ -167,7 +211,10 @@ mod tests {
             }
             now += 1;
         }
-        assert!(matches!(evaluate_quota(state, now, 1), QuotaDecision::Exhausted { .. }));
+        assert!(matches!(
+            evaluate_quota(state, now, 1),
+            QuotaDecision::Exhausted { .. }
+        ));
     }
 
     #[test]
@@ -175,9 +222,20 @@ mod tests {
         // Not modeled in this module (the DO keys the table by author), but
         // documented here: a fresh `current = None` for a distinct key always
         // starts a clean window regardless of any other key's state.
-        let exhausted = QuotaState { window_start: 0, ops: WRITE_QUOTA_MAX_OPS, bytes: WRITE_QUOTA_MAX_BYTES };
+        let exhausted = QuotaState {
+            window_start: 0,
+            ops: WRITE_QUOTA_MAX_OPS,
+            bytes: WRITE_QUOTA_MAX_BYTES,
+        };
         let _ = exhausted; // another author's state; irrelevant to a fresh `None`
         let d = evaluate_quota(None, 0, 1);
-        assert_eq!(d, QuotaDecision::Allowed(QuotaState { window_start: 0, ops: 1, bytes: 1 }));
+        assert_eq!(
+            d,
+            QuotaDecision::Allowed(QuotaState {
+                window_start: 0,
+                ops: 1,
+                bytes: 1
+            })
+        );
     }
 }
