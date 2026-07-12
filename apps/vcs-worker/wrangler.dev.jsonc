@@ -1,0 +1,14 @@
+// DEV-ONLY local config. Same as wrangler.jsonc but the build command is a
+// no-op: the wasm bundle is prebuilt with `worker-build --release`, and
+// letting wrangler re-run worker-build on its file-watcher causes an
+// infinite rebuild/reload loop (it watches the build/ dir it writes into).
+// Run with: wrangler dev -c wrangler.dev.jsonc
+{
+  "name": "mkit-vcs-worker",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": { "command": "true" },
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
+  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+}

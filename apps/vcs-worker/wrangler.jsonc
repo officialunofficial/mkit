@@ -1,0 +1,39 @@
+// Cloudflare Worker config for the mkit reference `mkit.transport.v1` server.
+// JSONC to match the org's Worker config convention + apps/repo-worker's
+// precedent. Build with worker-build (the workers-rs cross-platform build
+// command), which compiles the cdylib to wasm32 and emits the ES-module shim
+// into ./build.
+{
+  "name": "mkit-vcs-worker",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  // Same rationale as apps/repo-worker/wrangler.jsonc: the Cloudflare
+  // Workers Build image ships no Rust toolchain, so this installs rustup
+  // (pinned 1.95.0 + wasm32) and worker-build, guarded by `command -v` so
+  // it's a no-op wherever they already exist (local `wrangler deploy`).
+  "build": {
+    "command": "(command -v cargo >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0 -t wasm32-unknown-unknown) && . \"$HOME/.cargo/env\" && (command -v worker-build >/dev/null 2>&1 || cargo install -q worker-build) && worker-build --release"
+  },
+
+  "observability": { "enabled": true },
+
+  // Smart Placement: run the Worker close to its back-end (the RefStore DO +
+  // R2), not just at the edge nearest the client.
+  "placement": { "mode": "smart" },
+
+  // NOTE: no `routes`/`custom_domain` yet — this reference server has not
+  // been deployed. Add a route (and update any client's default endpoint)
+  // when a production deployment is provisioned; see README.md "Deploy".
+
+  // R2 object store for content-addressed packs. Key layout:
+  // packs/{hex(pack_id)}.
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
+
+  // The RefStore Durable Object — ONE global instance for the whole
+  // deployment (no per-room/per-project split; see README.md) — owns all
+  // mutable refs (serial CAS, including the two-ref AdvanceRefs
+  // transaction).
+  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+}

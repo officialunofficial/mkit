@@ -166,7 +166,7 @@ pub fn run(args: &[String]) -> u8 {
     // so a hostile remote cannot influence this via its own repo config —
     // there isn't one yet.
     let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();
-    let pull_outcome = match remote_dispatch::open_with_config(url, &merged) {
+    let pull_outcome = match remote_dispatch::open_with_config(url, &merged, &target_layout) {
         Ok(tx) => {
             let _progress = crate::progress::start(
                 "Unpacking objects",

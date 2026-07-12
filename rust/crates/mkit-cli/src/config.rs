@@ -127,6 +127,23 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
+    /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
+    /// (default) sends `MKIT_API_TOKEN` as a Bearer token, unchanged from
+    /// #700/#701. `"envelope"` ADDITIONALLY signs every write RPC
+    /// (`UpdateRef`/`AdvanceRefs`/`UploadPack`) with an Ed25519 write
+    /// envelope, reusing the exact SAME signer resolution as commit
+    /// signing — [`Self::signer`] / [`Self::signing_key`] /
+    /// [`KeyConfig::ed25519_ref`](KeyConfig::ed25519_ref) — see
+    /// `remote_dispatch::envelope_signer_from_config`. Repo-safe: this
+    /// selects a wire-auth MODE, the same class of connection-shape
+    /// metadata as `remote_type`; the actual signer IDENTITY selectors
+    /// (`signer`, `signing_key`, `key.*`) stay user-scoped-only
+    /// ([`REPO_FORBIDDEN_KEYS`], unchanged) so a hostile repo cannot
+    /// redirect which key or backend does the signing — only whether
+    /// the already-user-controlled commit-signing identity is also used
+    /// to authenticate pushes to this remote.
+    pub transport_auth: String,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
     /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
@@ -416,6 +433,14 @@ impl Config {
                 .as_str(),
             "false" | "0" | "no" | "off"
         )
+    }
+
+    /// `true` iff [`Self::transport_auth`] selects the Ed25519 write-envelope
+    /// auth mode (case-insensitive `"envelope"`). Empty (the default) and
+    /// any other value mean the unchanged bearer-token-only behavior.
+    #[must_use]
+    pub fn transport_auth_envelope(&self) -> bool {
+        self.transport_auth.trim().eq_ignore_ascii_case("envelope")
     }
 }
 
@@ -757,6 +782,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.strict_host_key_checking" => val.clone_into(&mut cfg.ssh_strict_host_key_checking),
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
+        "transport_auth" => val.clone_into(&mut cfg.transport_auth),
         "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
         "attest.signer" => val.clone_into(&mut cfg.attest.signer),
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
@@ -927,6 +953,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
+        ("transport_auth", cfg.transport_auth.as_str()),
     ] {
         if !v.is_empty() {
             out.push_str(k);

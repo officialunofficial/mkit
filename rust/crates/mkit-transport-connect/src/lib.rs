@@ -30,6 +30,7 @@
 //! [spec]: https://github.com/officialunofficial/mkit/blob/main/docs/specs/SPEC-TRANSPORT-CONNECT.md
 
 mod client;
+pub mod envelope;
 mod error;
 mod executor;
 #[cfg(feature = "server")]
@@ -53,6 +54,7 @@ pub mod proto {
 }
 
 pub use client::{ConnectTransport, DEFAULT_TIMEOUT, TOKEN_ENV};
+pub use envelope::EnvelopeSigner;
 #[cfg(feature = "server")]
 pub use error::map_transport_error;
 #[cfg(feature = "server")]

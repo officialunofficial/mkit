@@ -192,7 +192,12 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         return exit::OK;
     }
 
-    let tx = match remote_dispatch::open_trusted(&resolved.endpoint, resolved.repo_chosen, cfg) {
+    let tx = match remote_dispatch::open_trusted(
+        &resolved.endpoint,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+    ) {
         Ok(tx) => tx,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);
@@ -331,7 +336,12 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
         }
         return exit::OK;
     }
-    let tx = match remote_dispatch::open_trusted(&resolved.endpoint, resolved.repo_chosen, cfg) {
+    let tx = match remote_dispatch::open_trusted(
+        &resolved.endpoint,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+    ) {
         Ok(tx) => tx,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
             return emit_err_json(&msg, exit::CONFIG_ERROR, json);

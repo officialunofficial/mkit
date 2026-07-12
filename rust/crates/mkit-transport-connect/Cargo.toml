@@ -89,6 +89,12 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
+# — same crate/version mkit-core, mkit-cli, and mkit-keystore already pull in
+# for their own random-value needs (key generation, ephemeral enc-transport
+# keys).
+getrandom = "0.4"
+
 # Pure-Rust TLS root store for `HttpClient::with_tls` (Mozilla root program
 # via the `webpki-roots` crate) — no OS trust-store dependency.
 webpki-roots = "1"
@@ -109,6 +115,13 @@ connectrpc-build = "0.8"
 tempfile = "3"
 mkit-transport-file = { path = "../mkit-transport-file" }
 mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+# Test-only: `envelope::tests::parity` independently re-verifies the write
+# envelope headers `EnvelopeTransport` produces against a from-scratch
+# reimplementation of `apps/vcs-worker`'s server-side `verify_envelope` /
+# `verify_stream_envelope`, so a canonical-string or header regression is
+# caught here rather than only by a live `wrangler dev` run.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+hex = "0.4"
 # `tests/roundtrip.rs` builds its own in-process `TransportService` server
 # directly against `connectrpc::server`/`Router` (the client-side regression
 # gate — SPEC-TRANSPORT-CONNECT's testing decision) independent of this

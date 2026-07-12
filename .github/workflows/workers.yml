@@ -1,14 +1,17 @@
 name: "CI: Workers"
 
-# apps/repo-worker and apps/keys-worker are standalone Cargo packages (each
-# with its own [package]/[workspace]) — neither is a member of rust/Cargo.toml,
-# so cargo fmt/clippy/nextest in cloudbuild/ci.yaml never touches them. This
-# workflow is their dedicated gate: fmt, clippy, `cargo test --lib` for both
-# crates, a wasm32-unknown-unknown build for keys-worker (repo-worker already
-# gets an incidental wasm build via the codegen-freshness check in
+# apps/repo-worker, apps/keys-worker, and apps/vcs-worker are standalone
+# Cargo packages (each with its own [package]/[workspace]) — none is a
+# member of rust/Cargo.toml, so cargo fmt/clippy/nextest in
+# cloudbuild/ci.yaml never touches them. This workflow is their dedicated
+# gate: fmt, clippy, `cargo test --lib` for all three crates, a
+# wasm32-unknown-unknown build for keys-worker (repo-worker and vcs-worker
+# already get an incidental wasm build via the codegen-freshness check in
 # cloudbuild/codegen.yaml — not duplicated here), and `buf lint` against
 # apps/repo-worker/proto (apps/repo-worker/buf.yaml is otherwise dormant; no
-# CI surface runs it today).
+# CI surface runs it today). vcs-worker has no app-local buf.yaml — it
+# compiles against the repo-root `proto/` module, already covered by
+# buf.yml/proto.yml — so there is no per-app buf lint step for it here.
 #
 # Deploys live elsewhere (Cloudflare Workers Builds on merge to main, same
 # model as apps/web) — this workflow is validation only.
@@ -20,6 +23,8 @@ on:
       - '.github/workflows/workers.yml'
       - 'apps/repo-worker/**'
       - 'apps/keys-worker/**'
+      - 'apps/vcs-worker/**'
+      - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
   # on the in-workflow paths-filter below instead — this avoids the
@@ -62,6 +67,8 @@ jobs:
               - '.github/workflows/workers.yml'
               - 'apps/repo-worker/**'
               - 'apps/keys-worker/**'
+              - 'apps/vcs-worker/**'
+              - 'proto/mkit/transport/v1/**'
 
   ci:
     name: fmt, clippy, test, wasm build, buf lint
@@ -94,6 +101,7 @@ jobs:
           workspaces: |
             apps/repo-worker -> apps/repo-worker/target
             apps/keys-worker -> apps/keys-worker/target
+            apps/vcs-worker -> apps/vcs-worker/target
           prefix-key: "rust-ci-workers"
           cache-on-failure: false
           cache-bin: false
@@ -144,6 +152,25 @@ jobs:
       - name: keys-worker - wasm32 build
         working-directory: apps/keys-worker
         run: cargo build --target wasm32-unknown-unknown
+
+      - name: vcs-worker - Check formatting
+        working-directory: apps/vcs-worker
+        run: cargo fmt --check
+
+      - name: vcs-worker - Clippy
+        working-directory: apps/vcs-worker
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: vcs-worker - Clippy (wasm32)
+        working-directory: apps/vcs-worker
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # vcs-worker's wasm32 build is already exercised (incidentally) by the
+      # codegen-freshness check on Cloud Build (cloudbuild/codegen.yaml ->
+      # scripts/regen-transport-proto.sh) — not duplicated here.
+      - name: vcs-worker - Test (lib)
+        working-directory: apps/vcs-worker
+        run: cargo test --lib
 
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
