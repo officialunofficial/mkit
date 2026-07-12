@@ -134,7 +134,7 @@ fn fetch_one(
     // Snapshot the remote-tracking refs so we can report exactly which
     // ones moved (git prints nothing when nothing changed).
     let before = tracking_snapshot(layout, &resolved.name);
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg) {
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg, layout) {
         Ok(tx) => {
             let fetch_outcome = {
                 // Scoped tightly so the progress guard's final line

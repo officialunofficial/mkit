@@ -19,6 +19,7 @@ use mkit_core::protocol::{
 use mkit_core::refs::Ref;
 use url::{Host, Url};
 
+use crate::envelope::{EnvelopeSigner, EnvelopeTransport};
 use crate::error::{ErrorContext, map_connect_error};
 use crate::executor::TokioExecutor;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
@@ -60,7 +61,7 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// [`TransportError`], exactly as any other transport-agnostic caller
 /// would.
 pub struct ConnectTransport {
-    client: TransportServiceClient<HttpClient>,
+    client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
     executor: TokioExecutor,
     /// See [`Self::with_atomic_advance`].
     atomic_advance: bool,
@@ -166,6 +167,26 @@ impl ConnectTransport {
     /// - [`TransportError::ConnectionFailed`] — the local tokio runtime
     ///   could not be constructed (resource exhaustion).
     pub fn connect(url: &str) -> TransportResult<Self> {
+        Self::connect_with_signer(url, None)
+    }
+
+    /// Like [`Self::connect`], additionally signing every write RPC
+    /// (`UpdateRef`, `AdvanceRefs`, `UploadPack`) with a write envelope
+    /// (BLAKE3 digest + Ed25519 signature headers) when `signer` is
+    /// `Some` — see the [`envelope`](crate::envelope) module. This is an
+    /// ADDITIONAL auth mode alongside the bearer token read from
+    /// [`TOKEN_ENV`]: a deployment can require either, both, or neither.
+    /// `signer` is `None` behaves identically to [`Self::connect`] (reads
+    /// and, on a server that doesn't require it, writes too, go out
+    /// unsigned).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::connect`].
+    pub fn connect_with_signer(
+        url: &str,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+    ) -> TransportResult<Self> {
         let stripped = url
             .strip_prefix("mkit+")
             .ok_or(TransportError::InvalidResponse)?;
@@ -195,6 +216,7 @@ impl ConnectTransport {
         } else {
             HttpClient::plaintext()
         };
+        let transport = EnvelopeTransport::new(transport, signer);
 
         let mut config = ClientConfig::new(uri).with_default_timeout(DEFAULT_TIMEOUT);
         if let Some(token) = &token
@@ -218,9 +240,23 @@ impl ConnectTransport {
     #[doc(hidden)]
     #[must_use]
     pub fn connect_for_test(base_uri: Uri) -> Self {
+        Self::connect_for_test_with_signer(base_uri, None)
+    }
+
+    /// Like [`Self::connect_for_test`], with an optional envelope signer —
+    /// used by this crate's own envelope integration test.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn connect_for_test_with_signer(
+        base_uri: Uri,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+    ) -> Self {
         let config = ClientConfig::new(base_uri).with_default_timeout(Duration::from_secs(10));
         Self {
-            client: TransportServiceClient::new(HttpClient::plaintext(), config),
+            client: TransportServiceClient::new(
+                EnvelopeTransport::new(HttpClient::plaintext(), signer),
+                config,
+            ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
             atomic_advance: false,
         }

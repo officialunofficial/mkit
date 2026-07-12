@@ -110,6 +110,31 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     {
         let headers = http_req.headers_mut();
         for (k, v) in req.headers().entries() {
+            // Drop the Connect/gRPC client-deadline headers before they
+            // reach `connectrpc`'s dispatcher: parsing either into a
+            // `RequestContext::deadline` calls `std::time::Instant::now()`
+            // (`connectrpc-0.8.1/src/response.rs`), which panics with
+            // "time not implemented on this platform" on
+            // wasm32-unknown-unknown — this target has no OS clock and
+            // Rust's std `Instant`/`SystemTime` have no JS-Date fallback
+            // (unlike `worker::Date`, which this server already uses for
+            // its own envelope freshness check in `auth.rs`). Any real
+            // ConnectRPC client that asserts a per-call timeout — e.g.
+            // `mkit-transport-connect::ConnectTransport`'s
+            // `with_default_timeout` (#701), not just a hand-crafted
+            // request — hits this unconditionally and takes the whole
+            // Worker down (`workerd` reports it as a hung request, not a
+            // clean 5xx). Stripping the header here means this reference
+            // server simply never enforces a client-asserted deadline
+            // (`RequestContext::deadline()` sees `None`, matching the
+            // documented no-`DeadlinePolicy` behavior) — an accepted
+            // trade for a wasm32 target with no wall clock, not a change
+            // to the transport's write-auth contract.
+            if k.eq_ignore_ascii_case("connect-timeout-ms")
+                || k.eq_ignore_ascii_case("grpc-timeout")
+            {
+                continue;
+            }
             if let (Ok(name), Ok(val)) = (
                 http::header::HeaderName::try_from(k.as_str()),
                 http::header::HeaderValue::try_from(v.as_str()),

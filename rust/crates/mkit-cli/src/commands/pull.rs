@@ -139,7 +139,7 @@ fn pull_one(
     let old_tip = branch
         .as_deref()
         .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg) {
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg, layout) {
         Ok(tx) => {
             let pull_outcome = {
                 // Scoped tightly so the progress guard's final line

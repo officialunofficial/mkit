@@ -164,12 +164,33 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
+            // `do_call` needs an owned `prefix` for the wire request; keep a
+            // second owned copy to strip off each returned name below (the
+            // DO's `/list` returns full paths — see `RefStore::list` — and
+            // `mkit_core::protocol::Transport::list_refs`'s contract requires
+            // "returned names have `prefix` stripped" (SPEC-REFS §4). Every
+            // native `Transport` impl (file/s3/ssh/memory) honors this; the
+            // real `mkit-cli` fetch/pull/clone path
+            // (`remote_dispatch::fetch_objects_inner`) relies on it to
+            // compute each branch's packmap ref name
+            // (`refs/mkit/packmap/<bare-branch>`) from the LISTED name —
+            // returning the untouched full path there silently breaks that
+            // lookup (`packmap_ref("refs/heads/main")` != the real
+            // `refs/mkit/packmap/main`), surfacing as "no pack map to
+            // reconstruct it" on `mkit clone`/`fetch`/`pull`, not as an
+            // auth or wire-shape error.
+            let prefix_for_strip = prefix.clone();
             let resp: ListResp = do_call(&env, "/list", &ListReq { prefix }).await?;
             let refs = resp
                 .refs
                 .into_iter()
                 .map(|e| RefEntry {
-                    name: Some(e.name),
+                    name: Some(
+                        e.name
+                            .strip_prefix(prefix_for_strip.as_str())
+                            .unwrap_or(&e.name)
+                            .to_owned(),
+                    ),
                     object_id: Some(hex::decode(&e.value).unwrap_or_default()),
                     ..Default::default()
                 })

@@ -97,53 +97,93 @@ same-author, never authority.
   which this reference server does not implement — see
   SPEC-TRANSPORT-CONNECT §6.3.
 - **End-to-end RPC surface — manually VERIFIED (2026-07-12) against local
-  `wrangler dev`.** Every RPC was driven against a real local `wrangler dev`
-  instance (wrangler 4.110.0, `worker` 0.8.5, `connectrpc` 0.8.1) with real
-  R2 + Durable Object emulation, using hand-crafted Connect requests
-  (unary JSON for `ListRefs`/`ReadRef`/`PackExists`/`UpdateRef`/
-  `AdvanceRefs`, enveloped `application/connect+json` framing for the
-  streaming `UploadPack`/`DownloadPack`) signed with a real Ed25519 key
-  through the exact canonical-string construction `envelope.rs` implements:
-  `ListRefs` and `ReadRef` against an empty store; `UpdateRef` (ANY) then
-  `ReadRef` confirming the write landed; `UploadPack` then `PackExists` then
-  `DownloadPack` confirming the exact uploaded bytes round-tripped back
-  (header `totalBytes` + one `chunk` matching the source data byte-for-byte);
-  `AdvanceRefs` (ANY/ANY) committing both refs atomically, confirmed via
-  `ReadRef` on each; and a CAS conflict (`UpdateRef` with `MISSING` against
-  an already-existing ref) correctly returning Connect `failed_precondition`.
-  This is real coverage of the wasm-specific glue no host-side `cargo test`
-  can reach (the `SendFuture` shim, `Env::bucket`/`Env::durable_object`,
-  the internal DO JSON wire protocol, the `AuthInterceptor` wiring) — see
+  `wrangler dev`, TWICE, with two different clients.** Pass 1 drove every
+  RPC against a real local `wrangler dev` instance (wrangler 4.110.0,
+  `worker` 0.8.5, `connectrpc` 0.8.1) with real R2 + Durable Object
+  emulation, using hand-crafted Connect requests (unary JSON for
+  `ListRefs`/`ReadRef`/`PackExists`/`UpdateRef`/`AdvanceRefs`, enveloped
+  `application/connect+json` framing for the streaming
+  `UploadPack`/`DownloadPack`) signed with a real Ed25519 key through the
+  exact canonical-string construction `envelope.rs` implements. This is
+  real coverage of the wasm-specific glue no host-side `cargo test` can
+  reach (the `SendFuture` shim, `Env::bucket`/`Env::durable_object`, the
+  internal DO JSON wire protocol, the `AuthInterceptor` wiring) — see
   `apps/repo-worker/README.md`'s "WatchRefs / streaming" section for why
   this project verifies wasm-only Worker glue manually against `wrangler
-  dev` rather than trying to automate it in CI. **What was NOT verified:**
-  a real deployed Cloudflare Worker (this pass had no deploy authorization,
-  same caveat as repo-worker's own WatchRefs verification), and the
-  incremental-streaming `DownloadPack` bridge SPEC-TRANSPORT-CONNECT §6.3
-  flags as unresolved (this server deliberately doesn't attempt it — see
-  above).
-- **`mkit-transport-connect` (mkit#701, merged after this branch was
-  originally opened) cannot yet authenticate a write against this server.**
-  `ConnectTransport` — the real client `mkit-cli`'s `remote_dispatch`
-  constructs for `mkit+https://` — only supports `mkit-transport-http`'s
-  bearer-token scheme (`MKIT_API_TOKEN` → `Authorization: Bearer`,
-  SPEC-TRANSPORT §5.2). It has no support for this server's Ed25519
-  signed-envelope headers (`X-Public-Key`/`X-Signature`/`X-Digest`/
-  `X-Created-At`/`Idempotency-Key`), which is the ONLY write-auth this
-  server implements (see "Auth" above) — issue #699's Implementation Notes
-  prescribed reusing `repo-worker`'s envelope scheme verbatim, and that
-  predates #701's client landing with only bearer-token support. Reads
-  (`ListRefs`/`ReadRef`/`PackExists`/`DownloadPack`) are open and DO work
-  with the real client today (verified above via hand-crafted requests
-  exercising the identical wire dialect `ConnectTransport` speaks); `mkit
-  push` — which needs `UpdateRef`/`AdvanceRefs`/`UploadPack` — cannot
-  authenticate against this deployment until one side gains the other's
-  scheme (or both move to a shared interceptor, mkit#703). This is a
-  genuine, currently-open gap, not a resolved one — tracked as a fast-follow
-  from this pass, not fixed here (extending `ConnectTransport`'s auth is
-  arguably #701's/#703's scope, not #699's; extending this server to ALSO
-  accept a bearer token was considered but is a real auth-surface change
-  better done deliberately than folded into a rebase pass).
+  dev` rather than trying to automate it in CI.
+
+  Pass 2 (same day, closing the gap the paragraph below used to describe)
+  drove the SAME local `wrangler dev` instance with the REAL native
+  `mkit` CLI binary — `mkit init` / `keygen` / `commit` / `config
+  transport_auth envelope` / `push` / `clone` / `pull` — end to end, no
+  hand-crafted requests: `mkit push -u` (first push: `UploadPack` ×2 +
+  `AdvanceRefs`, signed with the new native envelope-signing
+  `ConnectTransport` auth mode), a second `mkit push` (fast-forward,
+  CAS-`Match` `AdvanceRefs`), `mkit clone` into a fresh directory
+  (`ListRefs` + `ReadRef` + `DownloadPack`, content byte-identical and the
+  commit hash round-tripping exactly), and `mkit pull` picking up a third
+  commit. Every RPC returned `200 OK`; `wrangler dev`'s own request log and
+  a `ReadRef`/`ListRefs` cross-check confirm the pushed commit hash landed
+  exactly. This pass exercises the FULL client stack the "newly-discovered
+  gap" paragraph below used to flag as untested: the real
+  `mkit-transport-connect::EnvelopeSigner` implementation, the real
+  `mkit-cli` config/signer resolution, and this server's `AuthInterceptor`
+  together, not a hand-rolled substitute for either side.
+
+  Getting Pass 2 running surfaced (and this pass fixes) two bugs neither
+  Pass 1 nor this crate's `cargo test --lib` could have caught, because
+  neither a hand-crafted curl request nor a host-side unit test exercises
+  them:
+  - **`worker_impl.rs`'s HTTP bridge now strips `Connect-Timeout-Ms` /
+    `grpc-timeout` before dispatch.** `connectrpc`'s server-side deadline
+    parsing (`response.rs`) calls `std::time::Instant::now()`
+    unconditionally when either header is present, which panics
+    ("time not implemented on this platform") on `wasm32-unknown-unknown`
+    — this target has no OS clock and `Instant`/`SystemTime` have no
+    JS-Date fallback (unlike `worker::Date`, which this server already
+    uses for its own envelope freshness check). A hand-crafted curl
+    request never sends a deadline header, so Pass 1 never hit this; the
+    real `ConnectTransport` (mkit#701) sets one on every call
+    (`with_default_timeout`), so it panicked the whole Worker on the
+    FIRST real RPC. This server now simply never enforces a
+    client-asserted deadline — the documented behavior of an unconfigured
+    `DeadlinePolicy` anyway — rather than crash.
+  - **`service.rs`'s `ListRefs` now strips the request `prefix` off each
+    returned ref name**, per `mkit_core::protocol::Transport::list_refs`'s
+    contract ("returned names have `prefix` stripped", SPEC-REFS §4) —
+    every other transport (file/S3/SSH/memory) already honors this. This
+    server previously returned the untouched full path
+    (`refs/heads/main`), which silently broke `mkit-cli`'s
+    `remote_dispatch::fetch_objects_inner` (it computes each branch's
+    packmap ref as `refs/mkit/packmap/<listed-name>`, so an unstripped
+    name produced `refs/mkit/packmap/refs/heads/main` — never the real
+    ref) — surfacing as "remote advertised branch 'refs/heads/main' but no
+    pack map to reconstruct it" on `mkit clone`/`fetch`/`pull`, not as an
+    auth or wire-shape error. Pass 1's hand-crafted requests only ever
+    inspected the raw JSON response, so a full but unstripped name looked
+    superficially fine.
+
+  **What was NOT verified:** a real deployed Cloudflare Worker (this pass
+  had no deploy authorization, same caveat as repo-worker's own WatchRefs
+  verification), and the incremental-streaming `DownloadPack` bridge
+  SPEC-TRANSPORT-CONNECT §6.3 flags as unresolved (this server
+  deliberately doesn't attempt it — see above).
+- **RESOLVED (2026-07-12): `mkit-transport-connect` can now authenticate a
+  write against this server.** `ConnectTransport` gained an ADDITIONAL
+  auth mode — `mkit_transport_connect::envelope::EnvelopeTransport`,
+  native (BLAKE3 + Ed25519, no wasm/JS) — alongside its existing
+  bearer-token mode (`mkit-transport-http`'s scheme, still used by #700's
+  `mkit serve --http`, unchanged). `mkit-cli` wires it in via a new
+  `transport_auth = envelope` config key (repo-safe, mirroring
+  `remote_type`); when set, `mkit push`/`fetch`/`pull`/`clone` sign every
+  write RPC (`UpdateRef`/`AdvanceRefs`/`UploadPack`) with the SAME Ed25519
+  identity that already signs commits — resolved via the exact commit-
+  signing signer resolution (`signer`/`signing_key`/`key.ed25519_ref`),
+  reusing `mkit_attest::RepoKeySigner` / `mkit_keystore::KeySigner` rather
+  than a parallel key path. See "End-to-end RPC surface" above for the
+  live `mkit push`/`clone`/`pull` proof against this exact server. Details:
+  `rust/crates/mkit-transport-connect/src/envelope.rs`,
+  `rust/crates/mkit-cli/src/remote_dispatch/{mod.rs,envelope_signer.rs}`.
 - No automated `cargo test` drives this end-to-end scenario (the manual
   verification above is not wired into CI) — this crate's automated tests
   remain the host-only unit tests for pure logic (envelope verification,

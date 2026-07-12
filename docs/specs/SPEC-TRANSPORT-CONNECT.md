@@ -15,10 +15,13 @@ and tested against a real (in-process, memory-backed) `TransportService`
 server; `mkit serve`'s HTTP mode (§7.2, mkit#700) hosts the same
 generated service over axum/hyper; and the reference Worker (§7.1,
 mkit#699, `apps/vcs-worker`) hosts it over `workers-rs` against R2 +
-a Durable Object. What is NOT yet verified is the client and the
-Worker talking to each other over a real `mkit+https://` deployment —
-see "Reference implementation" below and `apps/vcs-worker/README.md`
-"Known limitations".
+a Durable Object. The client and the Worker have now been verified
+talking to each other over a real local `mkit+https://`-equivalent
+deployment (`wrangler dev`, loopback `mkit+http://`) — including real
+`mkit push`/`clone`/`pull` — via `ConnectTransport`'s new envelope-signing
+auth mode; see "Reference implementation" below and
+`apps/vcs-worker/README.md` "Known limitations". A real DEPLOYED
+Cloudflare Worker (not just `wrangler dev`) remains unverified.
 Scope: the `mkit.transport.v1.TransportService` Connect service — its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 and pack-transfer streaming design — and how the three planned
@@ -52,13 +55,17 @@ limitations" — so §6.3's owned-mpsc-channel bridge and its unresolved
 end-to-end delivery risk remain unverified by that implementation. Every
 RPC has been manually verified against a real local `wrangler dev`
 instance (real R2/DO emulation, real Ed25519-signed envelopes) — see
-`apps/vcs-worker/README.md` "Known limitations" for the trial writeup —
-but no AUTOMATED test drives `mkit-transport-connect`'s client against
-`apps/vcs-worker`, and that client cannot yet authenticate a write
-against it at all: `ConnectTransport` only speaks the bearer-token scheme
-(SPEC-TRANSPORT §5.2), while this server's only write-auth is the Ed25519
-envelope §7.1 describes. The cross-target integration §7.1 calls for
-remains open on both the testing and the auth-interop axis. `apps/repo-worker`
+`apps/vcs-worker/README.md` "Known limitations" for the trial writeup,
+including a SECOND pass driving the real `mkit` CLI (`push`/`clone`/
+`pull`) end to end against this exact server through `ConnectTransport`'s
+new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
+BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
+`mkit serve --http`) and this server's Ed25519 write envelope (§7.1) as
+independent, additive auth modes — see §7.3. No AUTOMATED test drives
+this client/server pair yet (the `wrangler dev` verification above is
+manual, matching `apps/vcs-worker`'s existing testing posture for
+wasm-only glue) — that remains the open item on the testing axis.
+`apps/repo-worker`
 remains the closest OTHER existing analog (a Connect service on
 Cloudflare Workers) but implements the unrelated `mkit.repo.v1.RepoService`
 anonymous-demo contract, not this one; this document borrows its proven
@@ -388,9 +395,18 @@ canonical-string Ed25519 envelope `repo-worker`'s `Interceptor` already
 uses for its writes, not a bearer token — see `apps/vcs-worker/README.md`
 "Auth" for the client-streaming adaptation `UploadPack` needs). This is
 still an open-write / same-author-not-authority trust model, same as
-`repo-worker`'s; it does not implement `mkit-transport-http`'s
-`MKIT_API_TOKEN` bearer scheme (SPEC-TRANSPORT §5.2) — a production
-deployment wanting bearer-token gating would need a follow-up change.
+`repo-worker`'s; this server itself does not implement
+`mkit-transport-http`'s `MKIT_API_TOKEN` bearer scheme (SPEC-TRANSPORT
+§5.2) — a production deployment wanting bearer-token gating on THIS
+server would need a follow-up change (§7.3's client-side envelope auth
+mode does not add server-side bearer support). See
+`apps/vcs-worker/README.md` "Known limitations" for two bugs this
+envelope-auth verification pass found and fixed in this server's HTTP
+bridge (a wasm32 `Instant::now()` panic on any client-asserted deadline
+header, and `ListRefs` not stripping the request `prefix` from returned
+names per SPEC-REFS §4) — neither is an auth change; both were blocking
+any real Connect client, not just an envelope-signing one, from working
+against this server at all.
 
 ### 7.2 `mkit serve`
 
@@ -430,6 +446,39 @@ constructs for the `mkit+https://` scheme (and loopback-only
 itself is NOT deleted (its `sparse-checkout`/`pack-shards` extensions
 have no `mkit.transport.v1` equivalent yet, §8), so SPEC-TRANSPORT §5 is
 marked superseded rather than removed.
+
+**Auth modes** (mkit#699 follow-up, closing the gap this document
+originally flagged in "Reference implementation" above):
+`ConnectTransport` supports two independent, additive write-auth modes —
+a deployment can require either, both, or neither:
+
+- **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
+  the environment at `connect()` time, sent as `Authorization: Bearer
+  <token>` on every call. This is `mkit-transport-http`'s scheme
+  (SPEC-TRANSPORT §5.2) and is what `mkit serve --http` (§7.2) expects.
+- **Ed25519 write envelope** (new): a native, non-wasm reimplementation
+  of the SAME canonical-string envelope §7.1's reference Worker (and
+  `apps/repo-worker` before it) verify —
+  `rust/crates/mkit-transport-connect/src/envelope.rs`'s
+  `EnvelopeTransport<T: ClientTransport>` wraps the inner transport and,
+  for `UpdateRef`/`AdvanceRefs` (unary, body-bound digest) and
+  `UploadPack` (streaming, establishment-only, no body digest), attaches
+  `X-Public-Key`/`X-Signature`/`X-Digest`/`X-Created-At`/
+  `Idempotency-Key` headers signed via an `EnvelopeSigner`
+  implementation (BLAKE3 digest, raw Ed25519 sign — no SPEC-SIGNING
+  domain prefix, matching the server's plain-envelope contract exactly).
+  `mkit-cli` resolves the signer via a new `transport_auth = envelope`
+  config key (repo-safe, mirrors `remote_type`): when set, it reuses the
+  EXACT commit-signing signer resolution (`signer` = `""`/`"legacy"` →
+  the repo key file at `signing_key`, via `mkit_attest::RepoKeySigner`;
+  `signer = "keystore"` → `key.ed25519_ref` via `mkit_keystore::KeySigner`)
+  rather than a parallel key path — the write envelope authenticates
+  with the SAME Ed25519 identity that already signs the user's commits.
+  See `rust/crates/mkit-cli/src/remote_dispatch/{mod.rs,envelope_signer.rs}`.
+
+Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
+local `wrangler dev` instance of `apps/vcs-worker` — see
+`apps/vcs-worker/README.md` "Known limitations".
 
 One deliberate gap from full HTTP-transport parity: `ConnectTransport::
 supports_atomic_advance()` defaults to `false` (opt in via

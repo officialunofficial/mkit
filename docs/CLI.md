@@ -1492,6 +1492,7 @@ which routes them to the user scope automatically.
 | `remote_endpoint` | URL / path | empty | Set via `mkit remote add` |
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
+| `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
@@ -1561,6 +1562,10 @@ Accepted schemes:
 accepted (for shape-consistency with the other schemes) but currently
 has no wire effect: every RPC resolves to the fixed
 `/mkit.transport.v1.TransportService/<Method>` path regardless.
+Write RPCs against a deployment that requires the Ed25519 write envelope
+(e.g. `apps/vcs-worker`, the reference server) need
+`mkit config transport_auth envelope` — see the config table above and
+SPEC-TRANSPORT-CONNECT §7.3.
 
 See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
 protocols.

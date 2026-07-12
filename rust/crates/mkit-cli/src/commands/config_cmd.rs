@@ -235,6 +235,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
+        "transport_auth" => Ok(take_nonempty(&mut cfg.transport_auth)),
         k if config::is_core_section(k) => match config::core_allowed_suffix(k) {
             Some(suffix) => Ok(cfg.core.remove(&suffix).is_some()),
             None => Err(emit_err(
@@ -315,6 +316,23 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "remote_endpoint" => value.clone_into(&mut cfg.remote_endpoint),
         "remote_bucket" => value.clone_into(&mut cfg.remote_bucket),
         "remote_type" => value.clone_into(&mut cfg.remote_type),
+        // Write-auth mode for `mkit+https://`/`mkit+http://` remotes — see
+        // `Config::transport_auth`'s doc comment. Validated here (unlike
+        // the lenient config-load fallback in `config::apply_kv`, which
+        // tolerates unknown values for forward-compat with hand-edited
+        // files) so a typo doesn't silently leave `mkit push` on
+        // bearer-only auth when the user asked for signed envelopes.
+        "transport_auth" => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "bearer" | "envelope" => value.clone_into(&mut cfg.transport_auth),
+            _ => {
+                return Err(emit_err(
+                    &format!(
+                        "invalid value for transport_auth: `{value}` (expected `bearer` or `envelope`)"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+        },
         "author_mid" => {
             return Err(emit_err(
                 "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
@@ -382,6 +400,7 @@ const CONFIG_KEYS: &[&str] = &[
     "ssh.identity_file",
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
+    "transport_auth",
     "trusted_remote_endpoint",
     "user.email",
     "user.identity",
@@ -400,6 +419,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
+        "transport_auth" => Some(Cow::Borrowed(&cfg.transport_auth)),
         "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
         "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
         "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),
