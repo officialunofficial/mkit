@@ -149,12 +149,29 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
 /// tolerated as success — the directory only vanishes if a concurrent
 /// actor removed it, in which case there is nothing left to make
 /// durable. Mirrors `mkit_core::atomic::sync_parent_dir`.
+///
+/// Unix-only: opening a directory with a plain [`fs::File::open`] (no
+/// `FILE_FLAG_BACKUP_SEMANTICS`) fails on Windows with `ERROR_ACCESS_DENIED`
+/// (os error 5) — this crate's `write_atomic`/`write_create_new` were
+/// silently failing every ref/pack write on Windows through this path
+/// before the platform split below was added (caught by the `windows-smoke`
+/// CI job; `mkit_core::atomic::sync_parent_dir`, which this mirrors, already
+/// had this split). Directory-fsync is a POSIX durability idiom with no
+/// direct Windows equivalent reachable from safe `std::fs`, so the
+/// non-Unix arm is a deliberate no-op, not a partial implementation.
+#[cfg(unix)]
 fn sync_parent(dir: &Path) -> io::Result<()> {
     match fs::File::open(dir) {
         Ok(d) => d.sync_all(),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_parent(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,8 @@ GKE-deploy half**. These stay on GitHub Actions:
 - **Release / publish:** `release.yml`, `crates-publish.yml`, `mcp-release.yml`,
   `release-plz.yml` (CLI binaries, cosign, crates.io, npm).
 - **Cross-platform legs Cloud Build (Linux-only) can't run:** the macOS leg of
-  `build-and-test` and the `keystore-backends` matrix (macOS/Windows/Linux
-  native keystores) in `rust.yml`.
+  `build-and-test`, the `windows-smoke` build, and the `keystore-backends`
+  matrix (macOS/Windows/Linux native keystores) in `rust.yml`.
 - **TS/wasm app validation:** `web.yml`, `mcp.yml`, `actionlint.yml`.
 
 ## Layout

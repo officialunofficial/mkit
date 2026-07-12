@@ -105,6 +105,14 @@ fn split_host_port(hp: &str) -> (&str, Option<&str>) {
 }
 
 fn looks_like_dos_drive(dest: &str) -> bool {
+    // Strip Windows' `\\?\` extended-length-path prefix first: `Path::
+    // canonicalize` emits it on Windows (e.g. `\\?\C:\Users\...`), so a
+    // canonicalized path doesn't start with a bare drive letter. Without
+    // this strip, `remote_identity` misclassified such paths as an
+    // scp-style `[user@]host:path` remote (the literal `\\?\C` segment
+    // read as a "host"), corrupting local-path identity comparisons on
+    // Windows — caught by the `windows-smoke` CI job added in this PR.
+    let dest = dest.strip_prefix(r"\\?\").unwrap_or(dest);
     dest.len() >= 2
         && dest.as_bytes()[0].is_ascii_alphabetic()
         && dest.as_bytes()[1] == b':'
@@ -196,6 +204,15 @@ mod tests {
         );
         // DOS drives are paths, not scp remotes.
         assert!(!remote_identity("C:/repos/x").starts_with("ssh://"));
+        // Windows' `\\?\` extended-length-path prefix (what
+        // `Path::canonicalize` emits on Windows) must not defeat DOS-drive
+        // detection: a canonicalized Windows path is a local path, not an
+        // scp-style `host:path` remote. Platform-independent: this only
+        // exercises the string classifier, not real filesystem
+        // canonicalization, so it runs (and must pass) on every OS.
+        assert!(looks_like_dos_drive(r"C:\Users\x"));
+        assert!(looks_like_dos_drive(r"\\?\C:\Users\x"));
+        assert!(!remote_identity(r"\\?\C:\Users\x\repo").starts_with("ssh://"));
     }
 
     #[test]

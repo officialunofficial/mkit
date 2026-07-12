@@ -93,6 +93,12 @@ Run top to bottom. Do not skip steps.
       `keyserver.ubuntu.com` so the workflow can import it before
       `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
+- [ ] Manually dispatch `rust.yml`'s `keystore-backends` job
+      (`gh workflow run rust.yml --ref main`) and confirm all three legs
+      (macOS Keychain+YubiKey, Windows Credential Manager, Linux Secret
+      Service+systemd-creds+YubiKey) succeed. It stays `workflow_dispatch`-only
+      (3-OS matrix cost) and is not exercised by any automatic trigger, so this
+      is the only per-release check that native keystore backends still work.
 
 ### Wait for the release workflows
 
