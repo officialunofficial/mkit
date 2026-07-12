@@ -29,7 +29,7 @@
     "@cloudflare/vitest-pool-workers": "^0.18.4",
     "@cloudflare/workers-types": "^5.20260712.1",
     "@vitest/coverage-v8": "^4.1.10",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "wrangler": "^4.103.0"
   }
