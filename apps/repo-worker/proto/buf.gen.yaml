@@ -1,0 +1,42 @@
+version: v2
+# Reference codegen recipe for the mkit-repo BSR module
+# (buf.build/officialunofficial/mkit-repo, pushed by the `buf-push` job in
+# .github/workflows/crates-publish.yml on tagged releases — issue #719).
+# External clients of RepoService (mkit.repo.v1) run:
+#
+#   buf generate buf.build/officialunofficial/mkit-repo --template buf.gen.yaml
+#
+# against a pinned module ref (e.g.
+# buf.build/officialunofficial/mkit-repo:v0.4.0) to get typed TypeScript
+# message bindings without cloning the mkit monorepo.
+#
+# NOT the same file as ../buf.gen.yaml (apps/repo-worker/buf.gen.yaml, one
+# directory up): that one drives apps/web's own internal regen
+# (scripts/regen-repo-proto-ts.sh), uses a `local: protoc-gen-es` plugin
+# resolved from apps/web/node_modules/.bin, and commits its output under
+# apps/web/vendor/mkit-repo-proto/generated/. A local plugin only exists
+# inside a checkout of this repo, so it can't stand in for what an external
+# BSR consumer needs — this file uses a `remote:` plugin instead
+# specifically so `buf generate` against the published module ref works
+# with no mkit checkout and no local npm install, which is also what
+# crates-publish.yml's `buf-push` job smoke-tests against the just-pushed
+# ref.
+plugins:
+  # protobuf-es v2 message/enum types, edition-2023 aware. target=ts emits
+  # plain .ts sources (the default is compiled .js + .d.ts pairs).
+  - remote: buf.build/bufbuild/es
+    out: gen/ts
+    opt: target=ts
+  # NOT included yet: connectrpc/es (protoc-gen-connect-es) client/server
+  # stubs. As of this writing, buf.build/connectrpc/es and npm
+  # @connectrpc/protoc-gen-connect-es (latest 1.7.0, peer-deps on
+  # @bufbuild/protoc-gen-es ^1.x) both predate protobuf editions support and
+  # fail repo.proto's `edition = "2023"` with:
+  #   "plugin ... does not support feature 'supports editions'"
+  # apps/web works around this today via protoc-gen-es v2 alone (Connect-ES
+  # v2 dropped the separate connect-es plugin requirement — see
+  # ../buf.gen.yaml's comment). Add the connect-es remote plugin back here
+  # once it ships editions support; until then, an external consumer gets
+  # message types from this recipe and hand-writes a thin ConnectRPC client
+  # per apps/repo-worker/README.md's documented wire contract, the same way
+  # apps/web itself will until upstream catches up.

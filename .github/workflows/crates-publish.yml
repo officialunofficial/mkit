@@ -144,3 +144,116 @@ jobs:
       - name: Publish workspace to crates.io
         working-directory: rust
         run: cargo publish --workspace --locked
+
+  # Publish the mkit-rpc and mkit-repo proto modules — the two modules in the
+  # repo-root buf.yaml v2 workspace that carry a `name:` (issue #719) — to
+  # the Buf Schema Registry, on the same signed release tag as the
+  # crates.io publish above: a 4th decoupled channel alongside
+  # binaries/npm/docs (see docs/RELEASE.md "What gets published"). External
+  # signer integrators and RepoService clients then run `buf generate`
+  # against a pinned BSR ref instead of vendoring this repo or
+  # hand-writing generated code the way
+  # contrib/signers/mkit-sign-se's checked-in Generated/*.pb.swift used to.
+  #
+  # DORMANT until BUF_TOKEN is provisioned AND the BUF_PUBLISH_ENABLED
+  # repo/org variable is flipped to 'true' (see docs/RELEASE.md "One-time
+  # setup" / "BUF_TOKEN") — same gating pattern as release-plz.yml's
+  # RELEASE_PLZ_ENABLED. Merging this job before that setup is a clean skip,
+  # not a failure. (The `if:` here checks `vars`, not `secrets`, because
+  # job-level `if:` cannot read the `secrets` context — only
+  # `github`/`inputs`/`needs`/`vars` are available there.)
+  buf-push:
+    name: buf push (BSR)
+    runs-on: ubuntu-latest
+    if: ${{ vars.BUF_PUBLISH_ENABLED == 'true' }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      BUF_VERSION: "1.66.0"
+    steps:
+      - name: Validate tag input shape (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$RELEASE_TAG' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+
+      # Publish the TAG's tree, same as the crates.io publish job above.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Same pinned-version raw-binary install as .github/workflows/proto.yml,
+      # rather than a third-party setup-buf action, so both CI surfaces track
+      # one BUF_VERSION source of truth pattern.
+      - name: Install buf
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) buf_arch="x86_64" ;;
+            aarch64|arm64) buf_arch="aarch64" ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+          curl -sSL -o /usr/local/bin/buf \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-${buf_arch}"
+          chmod +x /usr/local/bin/buf
+          buf --version
+
+      - name: buf registry login
+        env:
+          BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
+        run: echo "$BUF_TOKEN" | buf registry login buf.build --token-stdin
+
+      # The repo-root buf.yaml workspace's lint/breaking checks already gate
+      # every PR (.github/workflows/buf.yml, #731); re-run lint here as a
+      # last-mile sanity check before anything goes out to the registry.
+      - name: buf lint (workspace)
+        run: buf lint .
+
+      # `--exclude-unnamed` pushes only the modules that carry a `name:` in
+      # the workspace buf.yaml (mkit-rpc, mkit-repo) and skips the unnamed
+      # `proto` module (mkit.common.v1/mkit.transport.v1) instead of
+      # erroring on it — that module is deliberately outside #719's BSR
+      # publishing scope. `--create`/`--create-visibility private` make the
+      # first-ever push self-service (no manual "create the BSR repository"
+      # step) and are no-ops once a module already exists. private:
+      # signer.proto is the security-critical external-signer contract
+      # (SPEC-EXTERNAL-SIGNER.md) and repo.proto is this repo's internal
+      # RepoService contract — org-scoped until there's a deliberate
+      # decision to make either public.
+      - name: buf push (workspace, named modules only)
+        run: |
+          buf push . \
+            --exclude-unnamed \
+            --label "${RELEASE_TAG}" \
+            --create --create-visibility private
+
+      # Smoke test (the issue's stated CI-passing bar): buf generate against
+      # the just-pushed mkit-repo BSR ref — not the local .proto files —
+      # using the module's own checked-in reference buf.gen.yaml recipe,
+      # proving the published module is self-contained and consumable by an
+      # integrator with no mkit checkout of their own. tsc --noEmit --strict
+      # proves the generated output actually compiles, not just that files
+      # were written.
+      - name: buf generate from the pushed mkit-repo ref
+        run: |
+          mkdir -p /tmp/bsr-smoke/mkit-repo
+          buf generate "buf.build/officialunofficial/mkit-repo:${RELEASE_TAG}" \
+            --template apps/repo-worker/proto/buf.gen.yaml \
+            -o /tmp/bsr-smoke/mkit-repo
+
+      - name: Install Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Typecheck the generated TypeScript
+        run: |
+          cd /tmp/bsr-smoke/mkit-repo
+          npm init -y >/dev/null
+          npm install --no-save typescript@5 @bufbuild/protobuf@2 >/dev/null
+          mapfile -t files < <(find gen/ts -name '*.ts')
+          npx tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 \
+            "${files[@]}"
+          echo "generated mkit-repo TypeScript typechecks cleanly"

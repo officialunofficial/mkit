@@ -448,6 +448,22 @@ takes no defensive posture against them.
 - Recovery from a compromised signing key. There is no on-chain or
   in-band revocation; the user's recourse is to publish a new key
   and re-sign forward history.
+- A `.mkit/` directory served from a network filesystem (NFS, SMB/CIFS,
+  or most FUSE-backed network mounts). Every fail-closed exclusion
+  guarantee that depends on `mkit-core::repo_lock` — including
+  `SPEC-GC.md`'s GC-vs-writer guarantee and every lock in
+  `SPEC-CONCURRENCY.md`'s inventory — assumes `flock`/`fcntl` advisory
+  locking is coherent across all lock holders. That assumption holds on
+  a local filesystem; it is **not guaranteed** on NFS (locking is
+  commonly offloaded to an absent or inconsistent `rpc.statd`/NLM side
+  channel under NFSv3, and even NFSv4's in-protocol locking depends on
+  server/client support mkit does not verify) or on SMB/CIFS. mkit
+  performs no detection of the underlying filesystem type and has no
+  fallback locking strategy. Repositories that must be shared across
+  hosts should use one of mkit's network transports
+  (`docs/specs/SPEC-TRANSPORT.md`) instead of a shared network-mounted
+  `.mkit/` directory. See `rust/crates/mkit-core/src/repo_lock.rs`'s
+  module doc for the full caveat.
 
 ---
 

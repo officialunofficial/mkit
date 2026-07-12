@@ -21,8 +21,8 @@ use worker::{Env, Method, Request as WorkerRequest, RequestInit, WebSocket, Webs
 use super::auth::{AuthorPubkey, IdempotencyKey};
 use super::wire::{
     CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
-    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
-    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
+    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, PurgeResp, ReactReq, ReactResp,
+    ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 use crate::hashing::object_id_matches;
 use crate::proto::mkit::common::v1::RefEntry;
@@ -30,8 +30,9 @@ use crate::proto::mkit::repo::v1::{
     ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
     ListCommitsRequest, ListCommitsResponse, ListMessagesRequest, ListMessagesResponse,
     ListReactionsRequest, ListReactionsResponse, ListRefsRequest, ListRefsResponse,
-    PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest,
-    ReactResponse, Reaction, RoomEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
+    PostMessageRequest, PostMessageResponse, PurgeRoomRequest, PurgeRoomResponse, PutObjectRequest,
+    PutObjectResponse, ReactRequest, ReactResponse, Reaction, RoomEvent, UpdateRefRequest,
+    UpdateRefResponse, WatchRefsRequest,
 };
 use crate::refs::{
     is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
@@ -277,6 +278,49 @@ async fn bridge_watch_socket(
     // Best-effort: the socket may already be closed (that's often why the
     // loop above exited), so a failure here is not itself an error.
     let _ = ws.close(None, None::<&str>);
+}
+
+/// Delete every R2 object under `prefix`, paging through R2's list cursor and
+/// batch-deleting each page with `delete_multiple` (capped at 1000 keys per
+/// call, which R2 also happens to cap `list()` at by default — one
+/// list-then-delete round-trip per page). Returns the total number of
+/// objects removed. Used by `PurgeRoom` for both the `{room}/objects/` and
+/// `{room}/messages/` prefixes.
+async fn purge_prefix(env: &Env, prefix: &str) -> Result<u32, connectrpc::ConnectError> {
+    let bucket = env
+        .bucket(STORAGE_BUCKET)
+        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+    let mut deleted = 0u32;
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut list = bucket.list().prefix(prefix).limit(1000);
+        if let Some(c) = cursor.take() {
+            list = list.cursor(c);
+        }
+        let page = list
+            .execute()
+            .await
+            .map_err(|e| ce_internal(format!("R2 list: {e}")))?;
+        let keys: Vec<String> = page.objects().into_iter().map(|o| o.key()).collect();
+        if !keys.is_empty() {
+            bucket
+                .delete_multiple(keys.clone())
+                .await
+                .map_err(|e| ce_internal(format!("R2 delete_multiple: {e}")))?;
+            deleted = deleted.saturating_add(keys.len() as u32);
+        }
+        if !page.truncated() {
+            break;
+        }
+        // Defensive: `truncated=true` with no cursor should not happen per the
+        // R2 contract, but looping forever on a malformed page is worse than
+        // stopping one page early.
+        match page.cursor() {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(deleted)
 }
 
 // DO wire types are declared once in `super::wire` and shared with refstore.rs.
@@ -931,6 +975,55 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             Ok(Response::new(ListCommitsResponse {
                 commits,
                 next_cursor: Some(next_cursor),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn purge_room(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, PurgeRoomRequest>,
+    ) -> ServiceResult<PurgeRoomResponse> {
+        // `_ctx` is unused: the `AuthInterceptor` already rejected this call
+        // before it reached the handler unless `X-Admin-Token` matched the
+        // server's `ADMIN_TOKEN` secret (see worker_impl/auth.rs). There is
+        // no per-caller identity to extract here, unlike UpdateRef/PostMessage/
+        // React's `AuthorPubkey` — a purge has no room-participant author.
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // R2 first, DO second: if the worker dies between the two, the
+            // room is left with objects gone but refs/messages still present
+            // rather than the reverse — a re-run of PurgeRoom is idempotent
+            // either way (an empty prefix / already-empty tables just yield
+            // zero counts on the retried half).
+            let objects_deleted = purge_prefix(&env, &format!("{room}/objects/")).await?;
+            let message_bodies_deleted = purge_prefix(&env, &format!("{room}/messages/")).await?;
+            let resp: PurgeResp = do_call(&env, &room, "/purge", &()).await?;
+
+            // `purged` reflects the proto contract ("true unless the room
+            // already had nothing to purge") rather than always `true` — a
+            // PurgeRoom against an already-empty/nonexistent room is a
+            // harmless no-op, and the response should say so instead of
+            // falsely claiming something was removed.
+            let purged = objects_deleted > 0
+                || message_bodies_deleted > 0
+                || resp.refs_deleted > 0
+                || resp.messages_deleted > 0
+                || resp.reactions_deleted > 0;
+
+            Ok(Response::new(PurgeRoomResponse {
+                purged: Some(purged),
+                objects_deleted: Some(objects_deleted),
+                message_bodies_deleted: Some(message_bodies_deleted),
+                refs_deleted: Some(resp.refs_deleted),
+                messages_deleted: Some(resp.messages_deleted),
+                reactions_deleted: Some(resp.reactions_deleted),
                 ..Default::default()
             }))
         })

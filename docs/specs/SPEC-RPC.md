@@ -35,6 +35,17 @@ removing a field) are made by introducing a sibling `signer2.proto` /
 never by silently reinterpreting `PROTOCOL_VERSION_1`'s existing wire
 shape (see §2).
 
+**Distribution.** These schemas are published as the
+`buf.build/officialunofficial/mkit-rpc` module on the Buf Schema
+Registry on every tagged release (the named module at
+`rust/crates/mkit-rpc/proto` in the repo-root `buf.yaml` workspace,
+pushed by the `buf-push` job in `.github/workflows/crates-publish.yml`;
+see [docs/RELEASE.md](../RELEASE.md#buf_token)). Integrators generate
+typed bindings in their own language with `buf generate` against a
+pinned module ref instead of vendoring this repo — the checked-in
+`rust/crates/mkit-rpc/proto/buf.gen.yaml` is the reference codegen
+recipe (Swift today; add other languages the same way).
+
 ---
 
 ## 1. Wire framing
