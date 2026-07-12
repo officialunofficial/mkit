@@ -9,10 +9,16 @@ audience: implementers of mkit.transport.v1 Connect servers and clients (referen
 
 Status: **Draft** for mkit v1. This document has not yet had maintainer
 sign-off on the RPC shapes it defines (the acceptance gate for the
-issue that produced it). The native CLI Connect client (§7.3, mkit#701)
-is implemented and tested against a real (in-process, memory-backed)
-`TransportService` server; the reference Worker (§7.1, mkit#699) and
-`mkit serve`'s HTTP mode (§7.2, mkit#700) do not exist yet.
+issue that produced it). All three deployment targets §7 describes now
+exist: the native CLI Connect client (§7.3, mkit#701) is implemented
+and tested against a real (in-process, memory-backed) `TransportService`
+server; `mkit serve`'s HTTP mode (§7.2, mkit#700) hosts the same
+generated service over axum/hyper; and the reference Worker (§7.1,
+mkit#699, `apps/vcs-worker`) hosts it over `workers-rs` against R2 +
+a Durable Object. What is NOT yet verified is the client and the
+Worker talking to each other over a real `mkit+https://` deployment —
+see "Reference implementation" below and `apps/vcs-worker/README.md`
+"Known limitations".
 Scope: the `mkit.transport.v1.TransportService` Connect service — its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 and pack-transfer streaming design — and how the three planned
@@ -35,10 +41,22 @@ Reference implementation: `mkit-transport-connect` (the native CLI
 client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
 in-process server — real HTTP, real protobuf framing, real Connect
 streaming, backed by `mkit-transport-memory` rather than R2/a Durable
-Object. `apps/repo-worker` remains the closest production-shaped analog
-(a Connect service on Cloudflare Workers) but implements the unrelated
-`mkit.repo.v1.RepoService` anonymous-demo contract, not this one; this
-document borrows its proven patterns (§1, §7) without sharing its proto.
+Object; this is also the implementation `mkit serve --http` (§7.2)
+hosts directly. [`apps/vcs-worker`](../../apps/vcs-worker) (mkit#699)
+implements the unary and client-streaming RPCs
+(`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
+against this proto over R2 + a Durable Object; `DownloadPack`
+(server-streaming) conforms to the wire shape but whole-pack-buffers
+rather than incrementally streaming — see its README "Known
+limitations" — so §6.3's owned-mpsc-channel bridge and its unresolved
+end-to-end delivery risk remain unverified by that implementation. No
+test yet drives `mkit-transport-connect`'s client against a real
+`apps/vcs-worker` deployment (or a `wrangler dev` instance of it) — the
+cross-target integration §7.1 calls for is still open. `apps/repo-worker`
+remains the closest OTHER existing analog (a Connect service on
+Cloudflare Workers) but implements the unrelated `mkit.repo.v1.RepoService`
+anonymous-demo contract, not this one; this document borrows its proven
+patterns (§1, §7) without sharing its proto.
 
 The proto lives at
 [`proto/mkit/transport/v1/transport.proto`](../../proto/mkit/transport/v1/transport.proto).
@@ -348,18 +366,25 @@ dialect:
 
 ### 7.1 Reference Worker
 
-A `connectrpc` + `workers-rs` service (mkit#699), reusing
+A `connectrpc` + `workers-rs` service
+([`apps/vcs-worker`](../../apps/vcs-worker), mkit#699), reusing
 `apps/repo-worker`'s proven patterns: vendored `generated/` staged by
-`build.rs` (`MKIT_REPO_CODEGEN=1` to regenerate via `connectrpc-build`
-against the canonical `proto/mkit/transport/v1/transport.proto`, no
-protoc dependency on the default build path — Cloudflare Workers
-Builds and CI images lack a protoc new enough for `edition = "2023"`),
-R2 for pack/blob storage, and a Durable Object for ref CAS. Unlike
-`repo-worker`'s open-write demo, this deployment is auth-gated
-(bearer token or an allow-list — mkit#699 decides the exact
-mechanism), matching the trust model `mkit-transport-http`'s
-`MKIT_API_TOKEN` bearer scheme already assumes for a "real" VCS
-Worker (SPEC-TRANSPORT §5.2).
+`build.rs` (`MKIT_TRANSPORT_CODEGEN=1` to regenerate via
+`connectrpc-build` against the canonical
+`proto/mkit/transport/v1/transport.proto`, no protoc dependency on the
+default build path — Cloudflare Workers Builds and CI images lack a
+protoc new enough for `edition = "2023"`), R2 for pack storage, and a
+single global Durable Object for ref CAS (one Worker deployment = one
+repository — no per-project room split). Unlike `repo-worker`'s
+open-write demo, `UpdateRef`/`AdvanceRefs`/`UploadPack` are gated behind
+a signed write envelope (mkit#699's chosen mechanism: the SAME
+canonical-string Ed25519 envelope `repo-worker`'s `Interceptor` already
+uses for its writes, not a bearer token — see `apps/vcs-worker/README.md`
+"Auth" for the client-streaming adaptation `UploadPack` needs). This is
+still an open-write / same-author-not-authority trust model, same as
+`repo-worker`'s; it does not implement `mkit-transport-http`'s
+`MKIT_API_TOKEN` bearer scheme (SPEC-TRANSPORT §5.2) — a production
+deployment wanting bearer-token gating would need a follow-up change.
 
 ### 7.2 `mkit serve`
 
