@@ -341,13 +341,14 @@ fn add_one(
     if !index::validate_index_path(&rel_str) {
         return Err(emit_err(&format!("invalid path: {rel_str}"), exit::DATAERR));
     }
-    let previous_status = idx
-        .find_entry(&rel_str)
-        .map_or(EntryStatus::Blob, |existing| idx.entries[existing].status);
+    // One O(log n) lookup shared by every check below (issue #708 —
+    // `find_entry` used to be an O(n) scan, and this path once ran it
+    // three times per file, making bulk staging O(N^2)).
+    let existing_pos = idx.find_entry(&rel_str);
+    let previous_status = existing_pos.map_or(EntryStatus::Blob, |i| idx.entries[i].status);
     // An ignored path named explicitly is refused unless `-f` — but a path
     // that is *already tracked* is never subject to ignore (git parity).
-    let already_tracked =
-        previous_status != EntryStatus::Removed && idx.find_entry(&rel_str).is_some();
+    let already_tracked = previous_status != EntryStatus::Removed && existing_pos.is_some();
     if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
         return Err(emit_err(
             &format!("path '{rel_str}' is ignored; use -f to add it anyway"),
@@ -357,7 +358,7 @@ fn add_one(
     // Stat cache: a tracked file whose mtime+size+exec class match the
     // index entry is already staged byte-for-byte — skip the read, the
     // hash, and the store write entirely.
-    if let Some(existing) = idx.find_entry(&rel_str)
+    if let Some(existing) = existing_pos
         && worktree::stat_matches(&idx.entries[existing], &meta)
     {
         return Ok(rel_str);
@@ -415,21 +416,9 @@ fn add_one(
         ino: stat.2,
         ctime_ns: stat.3,
     };
-    remove_file_directory_conflicts(idx, &entry.path);
-    if let Some(existing) = idx.find_entry(&entry.path) {
-        idx.entries[existing] = entry;
-    } else {
-        idx.entries.push(entry);
-    }
+    idx.remove_directory_conflicts(&entry.path);
+    idx.upsert_entry(entry);
     Ok(rel_str)
-}
-
-fn remove_file_directory_conflicts(idx: &mut Index, path: &str) {
-    idx.entries.retain(|entry| {
-        entry.path == path
-            || (!super::index_path_descends_from(&entry.path, path)
-                && !super::index_path_descends_from(path, &entry.path))
-    });
 }
 
 fn add_tree(
@@ -656,12 +645,8 @@ fn patch_one_file(
         ino: 0,
         ctime_ns: 0,
     };
-    remove_file_directory_conflicts(idx, &entry.path);
-    if let Some(existing) = idx.find_entry(&entry.path) {
-        idx.entries[existing] = entry;
-    } else {
-        idx.entries.push(entry);
-    }
+    idx.remove_directory_conflicts(&entry.path);
+    idx.upsert_entry(entry);
     eprintln!(
         "{rel_str}: staged {} of {} hunks",
         selected.len(),

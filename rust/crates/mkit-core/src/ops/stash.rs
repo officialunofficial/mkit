@@ -910,28 +910,26 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
 
         // Stage `a.txt` (present) and a deletion of `b.txt` (Removed).
-        let staged = Index {
-            entries: vec![
-                index::IndexEntry {
-                    path: "a.txt".to_string(),
-                    status: index::EntryStatus::Blob,
-                    object_hash: blob_a,
-                    mtime_ns: 0,
-                    size: 0,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-                index::IndexEntry {
-                    path: "b.txt".to_string(),
-                    status: index::EntryStatus::Removed,
-                    object_hash: ZERO,
-                    mtime_ns: 0,
-                    size: 0,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-            ],
-        };
+        let staged = Index::from_entries(vec![
+            index::IndexEntry {
+                path: "a.txt".to_string(),
+                status: index::EntryStatus::Blob,
+                object_hash: blob_a,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            },
+            index::IndexEntry {
+                path: "b.txt".to_string(),
+                status: index::EntryStatus::Removed,
+                object_hash: ZERO,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            },
+        ]);
         index::write_index(&layout, &staged).unwrap();
 
         save(&store, &layout, "wip").unwrap();
