@@ -74,7 +74,45 @@ oversized allocations; the FastCDC chunker is fully deterministic
 
 ---
 
-## 3. Attestation flow
+## 3. Merkle-root object identity
+
+`Blob`, `Commit`, `Remix`, and `Tag` take their object ID from a flat
+BLAKE3 digest of their canonical bytes. `Tree` and `ChunkedBlob` do
+not: their ID is the domain-bound root of a Binary Merkle Tree (BMT)
+built over their parts &mdash; one leaf per entry for a `Tree`, and a
+metadata leaf plus one leaf per chunk for a `ChunkedBlob`. The
+construction is normative in `docs/specs/SPEC-MERKLE-OBJECTS.md`; the
+vendored BMT lives in `rust/crates/mkit-core/src/merkle.rs`.
+
+A flat digest names exact bytes and nothing more. Deriving the ID
+from a Merkle root over the object's parts adds two properties.
+Inclusion is provable: a caller holding one chunk of a `ChunkedBlob`,
+or one entry of a `Tree`, can prove it belongs to the object without
+fetching the rest. Completeness is structural: the store verifies
+these two types on read by decoding, recomputing the root, and
+comparing it to the ID, so "every child is present, unmodified, and
+in order" falls out of the check that already runs on each read
+&mdash; no trusted manifest involved. The root is also wrapped in a
+per-type domain, so identical leaf streams &mdash; an empty `Tree`
+and an empty `ChunkedBlob`, for example &mdash; never share an ID.
+
+The guarantee composes up the object graph. A `Tree`'s entry leaves
+bind the IDs of its children, a `Commit` binds its root tree, and
+every ref resolves to a commit. Verifying a commit against its ID
+therefore verifies every tree, entry, and chunk reachable from it.
+
+`ObjectStore::open` enforces addressing consistency through the
+`.mkit/format` repository marker. `ObjectStore::init` writes the
+marker with the value `bmt-v1`; `open` requires that same value and
+rejects the repository with `IncompatibleRepoFormat` when the marker
+is missing or different, rather than misreading objects under the
+wrong addressing rule. The marker governs object identity only: the
+serialized wire format and the `schema_version` field are independent
+of it.
+
+---
+
+## 4. Attestation flow
 
 Attestations are a separate resource class from objects. A commit
 without attestations and a commit with five are indistinguishable
@@ -114,7 +152,7 @@ to a verifier keyed on `keyid`, and consults trust roots from
 
 ---
 
-## 4. External signer protocol
+## 5. External signer protocol
 
 The contract is `docs/specs/SPEC-EXTERNAL-SIGNER.md` (Protocol v1, v1.1
 adds optional WebAuthn wrapping). Shape:
@@ -133,7 +171,7 @@ contract.
 
 ---
 
-## 5. Where to start reading
+## 6. Where to start reading
 
 Pick the closest match.
 
@@ -167,9 +205,10 @@ the change affects.
 
 ---
 
-## 6. Cross-references
+## 7. Cross-references
 
 - `specs/SPEC-OBJECTS.md` — on-disk object format
+- `specs/SPEC-MERKLE-OBJECTS.md` &mdash; `Tree`/`ChunkedBlob` BMT-root addressing
 - `specs/SPEC-PACKFILE.md` — packfile wire format
 - `specs/SPEC-DELTA.md` — delta encoding
 - `specs/SPEC-FASTCDC.md` — content-defined chunking
