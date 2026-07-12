@@ -3229,6 +3229,7 @@ dependencies = [
 name = "mkit-transport-http"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "mkit-core",
  "mockito",
  "reqwest",

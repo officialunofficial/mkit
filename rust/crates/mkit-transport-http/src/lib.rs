@@ -44,6 +44,7 @@ use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use mkit_core::hash::{Hash, from_hex};
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
@@ -500,7 +501,15 @@ fn map_status(status: StatusCode, on_not_found: TransportError) -> TransportErro
 impl Transport for HttpTransport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         let url = self.packs_collection_url()?;
-        let body = bytes.to_vec();
+        // `Bytes` (Arc-backed, refcounted) rather than `Vec<u8>`: the
+        // retry closure below runs once per attempt (up to
+        // `BACKOFF_MAX_ATTEMPTS`), and `reqwest::blocking::Body::from`
+        // has no `TryClone` for a `Vec<u8>`-backed body, so the old code
+        // called `body.clone()` — a full N-byte copy — on every retry,
+        // multiplying peak memory on a large pack. `Bytes::clone()` is a
+        // refcount bump; the underlying buffer is shared across every
+        // attempt (mkit#702).
+        let body = Bytes::copy_from_slice(bytes);
         let resp = self.retrying(|| {
             let mut r = self
                 .client
