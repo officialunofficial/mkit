@@ -28,13 +28,13 @@ use serde::{Deserialize, Serialize};
 // `wasm_bindgen` must be in scope: the `#[durable_object]` macro emits glue
 // that references it by name. `DurableObject` is the trait we implement.
 use worker::{
-    durable_object, wasm_bindgen, Date, DurableObject, Env, Request, Response, ResponseBuilder,
-    Result, State, WebSocket, WebSocketIncomingMessage, WebSocketPair,
+    Date, DurableObject, Env, Request, Response, ResponseBuilder, Result, State, WebSocket,
+    WebSocketIncomingMessage, WebSocketPair, durable_object, wasm_bindgen,
 };
 
-use crate::chat::{is_rate_limited, REACT_MIN_INTERVAL_MS};
+use crate::chat::{REACT_MIN_INTERVAL_MS, is_rate_limited};
 use crate::envelope::FRESHNESS_WINDOW_MS;
-use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
+use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::commit_index;
@@ -73,12 +73,12 @@ const REACTIONS_RETAINED: i64 = 5_000;
 pub enum WatchFrame {
     Commit {
         name: String,
-        object_id: String,                 // 64-hex
-        author_pubkey: Option<String>,     // 64-hex
+        object_id: String,             // 64-hex
+        author_pubkey: Option<String>, // 64-hex
     },
     Chat {
-        message_id: String,                // 64-hex content address
-        author_pubkey: String,             // 64-hex
+        message_id: String,    // 64-hex content address
+        author_pubkey: String, // 64-hex
         text: String,
         created_at: i64,
         seq: u64,
@@ -86,7 +86,7 @@ pub enum WatchFrame {
     Reaction {
         target_id: String,
         emoji: String,
-        author_pubkey: String,             // 64-hex
+        author_pubkey: String, // 64-hex
         active: bool,
         count: u32,
     },
@@ -147,7 +147,9 @@ struct PresenceMember {
 /// A 64-char lowercase-hex Ed25519 pubkey. Shared with the worker so an invalid
 /// `?pubkey=` is treated as a viewer rather than trusted.
 pub(crate) fn is_valid_pubkey(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[durable_object]
@@ -379,7 +381,10 @@ impl RefStore {
             .state
             .storage()
             .sql()
-            .exec("SELECT value FROM refs WHERE path = ? LIMIT 1;", vec![name.into()])
+            .exec(
+                "SELECT value FROM refs WHERE path = ? LIMIT 1;",
+                vec![name.into()],
+            )
             .ok()?
             .to_array()
             .ok()?;
@@ -593,7 +598,10 @@ impl RefStore {
         .map(|r| r.to_array().unwrap_or_default())
         .unwrap_or_default();
         rows.into_iter()
-            .map(|r| ListEntry { name: r.path, value: r.value })
+            .map(|r| ListEntry {
+                name: r.path,
+                value: r.value,
+            })
             .collect()
     }
 
@@ -701,7 +709,9 @@ impl RefStore {
             // here means the SELECT itself failed — surface it rather than
             // silently shipping a seq=0 that downstream can't order.
             None => {
-                worker::console_error!("post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0");
+                worker::console_error!(
+                    "post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0"
+                );
                 0
             }
         };
@@ -766,7 +776,9 @@ impl RefStore {
             .ok()?
             .to_array()
             .ok()?;
-        rows.into_iter().next().map(|r| (r.seq as u64, r.created_at))
+        rows.into_iter()
+            .next()
+            .map(|r| (r.seq as u64, r.created_at))
     }
 
     /// Idempotently create the `reactions` table. One row per
@@ -857,7 +869,11 @@ impl RefStore {
         if had {
             sql.exec(
                 "DELETE FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
-                vec![req.target.clone().into(), req.emoji.clone().into(), req.author.clone().into()],
+                vec![
+                    req.target.clone().into(),
+                    req.emoji.clone().into(),
+                    req.author.clone().into(),
+                ],
             )?;
         } else {
             sql.exec(
@@ -982,7 +998,9 @@ impl RefStore {
             .ok()?
             .to_array()
             .ok()?;
-        rows.into_iter().next().map(|r| (r.active != 0, r.count.max(0) as u32))
+        rows.into_iter()
+            .next()
+            .map(|r| (r.active != 0, r.count.max(0) as u32))
     }
 
     /// The author's most recent React time (epoch-ms) — the rate-limit input.
@@ -1025,7 +1043,11 @@ impl RefStore {
             .map(|r| r.to_array().unwrap_or_default())
             .unwrap_or_default();
         rows.into_iter()
-            .map(|r| ReactionEntry { target: r.target, emoji: r.emoji, author: r.author })
+            .map(|r| ReactionEntry {
+                target: r.target,
+                emoji: r.emoji,
+                author: r.author,
+            })
             .collect()
     }
 

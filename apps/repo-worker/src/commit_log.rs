@@ -130,7 +130,10 @@ mod tests {
         let r = Remix {
             tree_hash: [1u8; 32],
             parents: vec![[9u8; 32]],
-            sources: vec![RemixSource { upstream_id: [0xaa; 32], commit_hash: [0xbb; 32] }],
+            sources: vec![RemixSource {
+                upstream_id: [0xaa; 32],
+                commit_hash: [0xbb; 32],
+            }],
             author: Identity::ed25519(signer),
             signer,
             message: b"remix".to_vec(),
@@ -156,8 +159,14 @@ mod tests {
             tree_hash: [1u8; 32],
             parents: vec![[9u8; 32]],
             sources: vec![
-                RemixSource { upstream_id: [0xaa; 32], commit_hash: [0xbb; 32] },
-                RemixSource { upstream_id: [0xcc; 32], commit_hash: [0xdd; 32] },
+                RemixSource {
+                    upstream_id: [0xaa; 32],
+                    commit_hash: [0xbb; 32],
+                },
+                RemixSource {
+                    upstream_id: [0xcc; 32],
+                    commit_hash: [0xdd; 32],
+                },
             ],
             author: Identity::ed25519(signer),
             signer,
@@ -168,13 +177,22 @@ mod tests {
         let m = extract_commit_meta(&serialize(&Object::Remix(r)).unwrap()).unwrap();
         assert_eq!(
             m.sources_json(),
-            format!("[[\"{}\",\"{}\"],[\"{}\",\"{}\"]]", "aa".repeat(32), "bb".repeat(32), "cc".repeat(32), "dd".repeat(32))
+            format!(
+                "[[\"{}\",\"{}\"],[\"{}\",\"{}\"]]",
+                "aa".repeat(32),
+                "bb".repeat(32),
+                "cc".repeat(32),
+                "dd".repeat(32)
+            )
         );
     }
 
     #[test]
     fn rejects_non_commit_object() {
-        let blob = serialize(&Object::Blob(Blob { data: b"x".to_vec() })).unwrap();
+        let blob = serialize(&Object::Blob(Blob {
+            data: b"x".to_vec(),
+        }))
+        .unwrap();
         assert!(extract_commit_meta(&blob).is_none());
     }
 }

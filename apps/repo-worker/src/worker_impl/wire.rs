@@ -39,8 +39,8 @@ pub struct GetResp {
 /// (see `commit_log::extract_commit_meta`) and passes the fields here.
 #[derive(Serialize, Deserialize, Default)]
 pub struct CommitMetaWire {
-    pub parent: String,  // 64-hex first parent, empty if root
-    pub signer: String,  // 64-hex author pubkey
+    pub parent: String, // 64-hex first parent, empty if root
+    pub signer: String, // 64-hex author pubkey
     pub message: String,
     pub timestamp: i64,  // unix seconds
     pub kind: String,    // "commit" | "remix"
@@ -103,7 +103,7 @@ pub struct PostReq {
     pub id: String,     // 64-hex BLAKE3 message id (content address)
     pub author: String, // 64-hex Ed25519 pubkey of the verified signer
     pub text: String,
-    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
+    pub idem: String, // request Idempotency-Key — replay dedupe (empty if none)
 }
 
 #[derive(Serialize, Deserialize)]

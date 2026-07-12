@@ -64,10 +64,10 @@ pub fn envelope_signing_digest(
 /// normalized (0x-stripped, lowercased) by the caller.
 #[derive(Debug, Default, Clone)]
 pub struct EnvelopeHeaders {
-    pub public_key: Option<String>,    // X-Public-Key (64-hex)
-    pub signature: Option<String>,     // X-Signature (128-hex)
-    pub digest: Option<String>,        // X-Digest (client-claimed raw-body digest, 64-hex)
-    pub created_at: Option<String>,    // X-Created-At (decimal epoch-ms)
+    pub public_key: Option<String>,      // X-Public-Key (64-hex)
+    pub signature: Option<String>,       // X-Signature (128-hex)
+    pub digest: Option<String>,          // X-Digest (client-claimed raw-body digest, 64-hex)
+    pub created_at: Option<String>,      // X-Created-At (decimal epoch-ms)
     pub idempotency_key: Option<String>, // Idempotency-Key
 }
 
@@ -80,11 +80,16 @@ pub enum VerifyEnvelope {
         body_digest: String,
         idempotency_key: String,
     },
-    Err { status: u16, error: &'static str },
+    Err {
+        status: u16,
+        error: &'static str,
+    },
 }
 
 fn is_hex(s: &str, len: usize) -> bool {
-    s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == len
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Verify a write envelope. Pure given `now` (epoch-ms) and the
@@ -103,22 +108,37 @@ pub fn verify_envelope(
         headers.digest.as_deref(),
         headers.created_at.as_deref(),
     ) else {
-        return VerifyEnvelope::Err { status: 401, error: "missing signature headers" };
+        return VerifyEnvelope::Err {
+            status: 401,
+            error: "missing signature headers",
+        };
     };
 
     if !is_hex(public_key, 64) || !is_hex(digest, 64) || !is_hex(signature, 128) {
-        return VerifyEnvelope::Err { status: 400, error: "malformed signature headers" };
+        return VerifyEnvelope::Err {
+            status: 400,
+            error: "malformed signature headers",
+        };
     }
 
     if digest != actual_body_digest {
-        return VerifyEnvelope::Err { status: 400, error: "body digest mismatch" };
+        return VerifyEnvelope::Err {
+            status: 400,
+            error: "body digest mismatch",
+        };
     }
 
     let Ok(created_at_ms) = created_at.parse::<i64>() else {
-        return VerifyEnvelope::Err { status: 401, error: "stale or future signature" };
+        return VerifyEnvelope::Err {
+            status: 401,
+            error: "stale or future signature",
+        };
     };
     if (now - created_at_ms).abs() > FRESHNESS_WINDOW_MS {
-        return VerifyEnvelope::Err { status: 401, error: "stale or future signature" };
+        return VerifyEnvelope::Err {
+            status: 401,
+            error: "stale or future signature",
+        };
     }
 
     let idempotency_key = headers.idempotency_key.clone().unwrap_or_default();
@@ -126,7 +146,10 @@ pub fn verify_envelope(
         envelope_signing_digest(procedure, digest, created_at_ms, &idempotency_key);
 
     if !ed25519_verify_strict(public_key, signature, &signing_digest) {
-        return VerifyEnvelope::Err { status: 401, error: "invalid signature" };
+        return VerifyEnvelope::Err {
+            status: 401,
+            error: "invalid signature",
+        };
     }
 
     VerifyEnvelope::Ok {
@@ -142,9 +165,15 @@ pub fn verify_envelope(
 /// the same line mkit-core::sign::verify holds.
 #[must_use]
 pub fn ed25519_verify_strict(public_key_hex: &str, signature_hex: &str, message: &[u8]) -> bool {
-    let Ok(pk_bytes) = hex_to_32(public_key_hex) else { return false };
-    let Ok(sig_bytes) = hex_to_64(signature_hex) else { return false };
-    let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes) else { return false };
+    let Ok(pk_bytes) = hex_to_32(public_key_hex) else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex_to_64(signature_hex) else {
+        return false;
+    };
+    let Ok(vk) = VerifyingKey::from_bytes(&pk_bytes) else {
+        return false;
+    };
     let sig = Signature::from_bytes(&sig_bytes);
     vk.verify_strict(message, &sig).is_ok()
 }
@@ -205,7 +234,11 @@ mod tests {
             signature: Some(sign(sk, procedure, bd, created, idem)),
             digest: Some(bd.to_owned()),
             created_at: Some(created.to_string()),
-            idempotency_key: if idem.is_empty() { None } else { Some(idem.to_owned()) },
+            idempotency_key: if idem.is_empty() {
+                None
+            } else {
+                Some(idem.to_owned())
+            },
         }
     }
 
@@ -232,14 +265,25 @@ mod tests {
         let a = envelope_signing_digest(PROCEDURE, &body_digest(), NOW, "abc-123");
         assert_ne!(
             a,
-            envelope_signing_digest("/mkit.repo.v1.RepoService/PutObject", &body_digest(), NOW, "abc-123")
+            envelope_signing_digest(
+                "/mkit.repo.v1.RepoService/PutObject",
+                &body_digest(),
+                NOW,
+                "abc-123"
+            )
         );
         assert_ne!(
             a,
             envelope_signing_digest(PROCEDURE, &crate::hashing::blake3_hex(b"x"), NOW, "abc-123")
         );
-        assert_ne!(a, envelope_signing_digest(PROCEDURE, &body_digest(), NOW + 1, "abc-123"));
-        assert_ne!(a, envelope_signing_digest(PROCEDURE, &body_digest(), NOW, "different"));
+        assert_ne!(
+            a,
+            envelope_signing_digest(PROCEDURE, &body_digest(), NOW + 1, "abc-123")
+        );
+        assert_ne!(
+            a,
+            envelope_signing_digest(PROCEDURE, &body_digest(), NOW, "different")
+        );
     }
 
     #[test]
@@ -248,7 +292,11 @@ mod tests {
         let bd = body_digest();
         let h = headers_for(&sk, PROCEDURE, &bd, NOW, "abc-123");
         match verify_envelope(PROCEDURE, &bd, NOW, &h) {
-            VerifyEnvelope::Ok { public_key, body_digest, idempotency_key } => {
+            VerifyEnvelope::Ok {
+                public_key,
+                body_digest,
+                idempotency_key,
+            } => {
                 assert_eq!(public_key, pubkey_hex(&sk));
                 assert_eq!(body_digest, bd);
                 assert_eq!(idempotency_key, "abc-123");
@@ -265,7 +313,10 @@ mod tests {
         let actual = crate::hashing::blake3_hex(b"tampered");
         assert_eq!(
             verify_envelope(PROCEDURE, &actual, NOW, &h),
-            VerifyEnvelope::Err { status: 400, error: "body digest mismatch" }
+            VerifyEnvelope::Err {
+                status: 400,
+                error: "body digest mismatch"
+            }
         );
     }
 
@@ -277,7 +328,10 @@ mod tests {
         let h = headers_for(&sk, PROCEDURE, &bd, NOW, "abc-123");
         assert_eq!(
             verify_envelope("/mkit.repo.v1.RepoService/PutObject", &bd, NOW, &h),
-            VerifyEnvelope::Err { status: 401, error: "invalid signature" }
+            VerifyEnvelope::Err {
+                status: 401,
+                error: "invalid signature"
+            }
         );
     }
 
@@ -289,12 +343,18 @@ mod tests {
         // stale (> 5 min old)
         assert_eq!(
             verify_envelope(PROCEDURE, &bd, NOW + FRESHNESS_WINDOW_MS + 1, &h),
-            VerifyEnvelope::Err { status: 401, error: "stale or future signature" }
+            VerifyEnvelope::Err {
+                status: 401,
+                error: "stale or future signature"
+            }
         );
         // future (> 5 min ahead)
         assert_eq!(
             verify_envelope(PROCEDURE, &bd, NOW - FRESHNESS_WINDOW_MS - 1, &h),
-            VerifyEnvelope::Err { status: 401, error: "stale or future signature" }
+            VerifyEnvelope::Err {
+                status: 401,
+                error: "stale or future signature"
+            }
         );
         // exactly at boundary -> accepted
         assert!(matches!(
@@ -311,7 +371,10 @@ mod tests {
         h.signature = None;
         assert_eq!(
             verify_envelope(PROCEDURE, &bd, NOW, &h),
-            VerifyEnvelope::Err { status: 401, error: "missing signature headers" }
+            VerifyEnvelope::Err {
+                status: 401,
+                error: "missing signature headers"
+            }
         );
     }
 
@@ -323,7 +386,10 @@ mod tests {
         h.public_key = Some("nothex".to_owned());
         assert_eq!(
             verify_envelope(PROCEDURE, &bd, NOW, &h),
-            VerifyEnvelope::Err { status: 400, error: "malformed signature headers" }
+            VerifyEnvelope::Err {
+                status: 400,
+                error: "malformed signature headers"
+            }
         );
     }
 
@@ -337,7 +403,10 @@ mod tests {
         h.public_key = Some(pubkey_hex(&other));
         assert_eq!(
             verify_envelope(PROCEDURE, &bd, NOW, &h),
-            VerifyEnvelope::Err { status: 401, error: "invalid signature" }
+            VerifyEnvelope::Err {
+                status: 401,
+                error: "invalid signature"
+            }
         );
     }
 
