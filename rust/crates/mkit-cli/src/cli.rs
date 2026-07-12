@@ -261,7 +261,11 @@ commands:
                     forward, <rev> blames as of a revision (default HEAD; JSONL
                     with --format=json, or git-shaped
                     --porcelain/--line-porcelain)
-  verify <rev>      Verify the signature on a commit, remix, or signed tag
+  verify <rev> [--trusted] [--trust-roots <path>]
+                    Verify the signature on a commit, remix, or signed tag;
+                    --trusted (or --trust-roots) also cross-checks the
+                    signer against the trust-roots registry, failing
+                    closed on an unlisted signer
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]... [--external-signer-arg <V>]...
                     Produce a signed DSSE attestation for a commit
@@ -269,6 +273,11 @@ commands:
                     replaces attest.external_signer_args from config)
   verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
                     Verify every attestation attached to a commit
+  trust add <keyid> <pubkey-hex> [--kind <kind>] [--trust-roots <path>] [--force]
+  trust list [--trust-roots <path>] [--json]
+  trust remove <keyid> [--trust-roots <path>] --yes
+                    Manage the trust-roots registry `verify --trusted` and
+                    `verify-attest` read from
   self update [--version <tag>] [--check] [--allow-downgrade] [--format human|json]
                     Update this binary in place from a signed GitHub
                     Release, verifying the mkit-native release
@@ -366,6 +375,7 @@ mod tests {
             "pack-shard",
             "blame",
             "verify",
+            "trust",
             "version",
             "worktree",
         ];

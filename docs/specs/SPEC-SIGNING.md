@@ -297,6 +297,25 @@ independent fields. Identity is an attribution claim; `signer` is the
 verification key. Pairing is adapter/application policy, not a core
 invariant.
 
+### 6.1 Trust binding (application policy)
+
+The algorithm above proves only that `signer` produced `C.signature` —
+it says nothing about whether `signer` is a key the caller has any
+reason to accept. `mkit verify <rev>` implements exactly the five steps
+above and nothing more: a signature from a freshly generated,
+never-seen-before key verifies identically to one from a key the caller
+actually trusts.
+
+`mkit verify --trusted` (and the equivalent `--trust-roots <path>`
+form) is the shipped instance of the "application policy" this section
+defers to: it runs the algorithm above unchanged, then additionally
+looks up `signer` in a caller-supplied trust-roots registry (the same
+`[[trust_root]]` TOML format `mkit verify-attest` reads, managed via
+`mkit trust add/list/remove`) and fails closed — a nonzero exit, distinct
+from a bad-signature failure — when `signer` is not a registered
+Ed25519 key. See `rust/crates/mkit-cli/src/commands/verify.rs` and
+`docs/THREAT-MODEL.md` §5.
+
 
 ---
 

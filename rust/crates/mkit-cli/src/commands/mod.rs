@@ -67,6 +67,8 @@ pub mod switch;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod tree;
+pub mod trust;
+pub mod trust_roots;
 pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;

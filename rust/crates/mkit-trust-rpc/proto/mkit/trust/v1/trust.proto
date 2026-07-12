@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// mkit commit-history trust registry — ConnectRPC wire protocol v1.
+//
+// Schema for the `TrustRegistry` surface: `mkit trust add/list/remove`
+// (rust/crates/mkit-cli/src/commands/trust.rs) and the `--trusted`/
+// `--trust-roots` cross-check in `mkit verify`
+// (rust/crates/mkit-cli/src/commands/verify.rs) both read/write the
+// same on-disk TOML registry this message shape mirrors field-for-field
+// (see commands/trust_roots.rs). Today this proto is a schema-checked
+// contract only — the CLI operates on the TOML file directly and does
+// NOT (yet) run generated ConnectRPC client/server code against it. A
+// future hosted trust-distribution endpoint (tracked under epic #676)
+// implements this SAME `TrustRegistry` service over HTTP so the CLI,
+// `mkit mcp`, and that endpoint share one wire contract instead of each
+// growing their own.
+//
+// Conventions mirror mkit.repo.v1 (apps/repo-worker/proto/mkit/repo/v1/repo.proto):
+//   - edition 2023.
+//   - keys are raw `bytes` on the wire (never hex) — the CLI's TOML
+//     file stores `pubkey_hex`; conversion is the adapter's job.
+//   - package path matches the proto's directory (buf's
+//     PACKAGE_DIRECTORY_MATCH lint rule).
+
+edition = "2023";
+
+package mkit.trust.v1;
+
+// What kind of credential a trust root's `pubkey` bytes decode as.
+// Commit/remix/tag signing is Ed25519-only today (SPEC-SIGNING.md §6);
+// the other kinds only matter to `mkit verify-attest`'s DSSE
+// verification, which already accepts them via `mkit-attest::TrustRoot`.
+// Keeping one enum (rather than a parallel commit-only type) means a
+// future signing-algorithm addition doesn't need a second trust type
+// (issue #693 implementation notes).
+enum TrustRootKind {
+  TRUST_ROOT_KIND_UNSPECIFIED = 0;
+  TRUST_ROOT_KIND_ED25519 = 1;
+  TRUST_ROOT_KIND_P256_SEC1 = 2;
+  TRUST_ROOT_KIND_SECP256K1_SEC1 = 3;
+  TRUST_ROOT_KIND_BLS12381_THR = 4;
+}
+
+// One trusted signer. `keyid` is free-form (a human label or the
+// canonical `<algorithm>:<hex-pubkey>` / `blake3:<hex-digest>` shape
+// `mkit trust add` cross-checks against `pubkey` when the keyid embeds
+// one — see `commands/trust_roots.rs::keyid_matches_pubkey`).
+message TrustRootEntry {
+  string keyid = 1;
+  TrustRootKind kind = 2;
+  bytes pubkey = 3;
+}
+
+message AddRequest {
+  TrustRootEntry entry = 1;
+  // Replace an existing entry for the same keyid instead of failing.
+  bool force = 2;
+}
+
+message AddResponse {
+  TrustRootEntry entry = 1;
+}
+
+message ListRequest {}
+
+message ListResponse {
+  repeated TrustRootEntry entries = 1;
+}
+
+message RemoveRequest {
+  string keyid = 1;
+}
+
+message RemoveResponse {
+  bool removed = 1;
+}
+
+// Cross-check a commit/remix/tag's embedded `signer` public key
+// against the registry. `mkit verify --trusted` is the CLI caller.
+message VerifyRequest {
+  bytes signer_pubkey = 1;
+  TrustRootKind kind = 2;
+}
+
+message VerifyResponse {
+  bool trusted = 1;
+  // The matching entry's keyid. Empty when `trusted` is false.
+  string keyid = 2;
+}
+
+service TrustRegistryService {
+  rpc Add(AddRequest) returns (AddResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+}

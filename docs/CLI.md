@@ -398,9 +398,20 @@ History / commits:
   `-L` compose with `--reverse`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
-- `mkit verify <rev>` — verify the signature on a commit, remix, or
-  signed tag. `<rev>` is an object hash, a branch/tag name, or `HEAD`; a
-  tag name resolves to its annotated-tag object when one exists.
+- `mkit verify <rev> [--trusted] [--trust-roots <path>]` — verify the
+  signature on a commit, remix, or signed tag. `<rev>` is an object
+  hash, a branch/tag name, or `HEAD`; a tag name resolves to its
+  annotated-tag object when one exists. By itself this only proves the
+  object's own embedded `signer` produced the signature — it does NOT
+  check `signer` against any allow-list, so a signature from an
+  unrecognized key verifies identically to one from a key you actually
+  trust. Pass `--trusted` (or `--trust-roots <path>`) to additionally
+  cross-check `signer` against the trust-roots registry `mkit trust`
+  manages, failing closed (nonzero exit, distinct from a bad-signature
+  failure) on an unlisted signer. `--trust-roots` defaults to
+  `$XDG_CONFIG_HOME/mkit/trust-roots.toml`; an in-repo path is refused
+  unless passed explicitly (see `mkit trust` below and
+  `docs/THREAT-MODEL.md` §5).
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
@@ -590,6 +601,30 @@ Attestations:
 
   ```sh
   mkit verify-attest --trust-roots ~/.config/mkit/trust-roots.toml
+  ```
+
+- `mkit trust add <keyid> <pubkey-hex> [--kind <kind>] [--trust-roots <path>] [--force]` /
+  `mkit trust list [--trust-roots <path>] [--json]` /
+  `mkit trust remove <keyid> [--trust-roots <path>] --yes` — manage the
+  trust-roots registry `mkit verify --trusted` and `mkit verify-attest`
+  read (same `[[trust_root]]` TOML file, same default path). `add`
+  validates `pubkey-hex` decodes and, if `keyid` embeds a hex/digest
+  body (the `<algorithm>:<hex>` or `blake3:<hex>` shapes), that it
+  matches the given pubkey — a mismatch is rejected, not silently
+  dropped. `--kind` defaults to `ed25519` (commit/remix/tag signing is
+  Ed25519-only today); `p256-sec1`, `secp256k1`, and `bls12381-thr`
+  (with the `bls-threshold` feature) only matter to `verify-attest`.
+  `add` refuses to overwrite an existing keyid without `--force`;
+  `remove` requires `--yes` and fails if the keyid isn't registered.
+  `list --json` emits a JSON array of `{keyid, kind, pubkey_hex}`.
+
+  Example:
+
+  ```sh
+  mkit keygen --print-pubkey                     # ed25519:<hex>
+  mkit trust add ed25519:<hex> <hex>              # trust your own key
+  mkit trust list
+  mkit verify --trusted HEAD
   ```
 
 Branches / refs:
