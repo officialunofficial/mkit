@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   axum/HTTP instead of the SSH-frame protocol, behind the new
   `http-transport` cargo feature — an operator without SSH access or a
   cloud object store can run a real, testable `mkit+https://` remote
-  against a local repository (new `mkit-transport-connect` crate,
-  generic over any `mkit_core::protocol::Transport` backend; instantiated
-  today over `FileTransport`). All seven wire RPCs
+  against a local repository (server-side half of the `mkit-transport-connect`
+  crate, behind that crate's own `server` cargo feature; generic over any
+  `mkit_core::protocol::Transport` backend; instantiated today over
+  `FileTransport`). All seven wire RPCs
   (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/
   `UploadPack`/`DownloadPack`) run the underlying `Transport` call on a
   blocking task so a synchronous CAS ref write never stalls the async
@@ -32,10 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit.transport.v1` proto (`proto/mkit/transport/v1/transport.proto`) is
   generated via `buffa`/`connectrpc-build`, vendored under `generated/`
   the same way `mkit-repo-client`/`apps/repo-worker` already do — see
-  `docs/specs/SPEC-TRANSPORT-CONNECT.md`. The native CLI Connect client
-  and a hosted reference-Worker deployment are separate, later changes
-  ([#701](https://github.com/officialunofficial/mkit/issues/701),
-  [#699](https://github.com/officialunofficial/mkit/issues/699)).
+  `docs/specs/SPEC-TRANSPORT-CONNECT.md`. A hosted reference-Worker
+  deployment is a separate, later change
+  ([#699](https://github.com/officialunofficial/mkit/issues/699)).
 - **Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
   ([#711](https://github.com/officialunofficial/mkit/issues/711)).**
   These commands now stream a live progress line on stderr while the
@@ -50,6 +50,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--quiet` flag on all four commands forces it off, and
   `MKIT_PROGRESS=always`/`never` overrides the tty auto-detection
   explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
+- **Native ConnectRPC client for `mkit+https://` (SPEC-TRANSPORT-CONNECT,
+  [#701](https://github.com/officialunofficial/mkit/issues/701)).**
+  The `mkit-transport-connect` crate's mandatory baseline (always compiled,
+  independent of its `server` feature above) is now a non-wasm ConnectRPC
+  client for `mkit.transport.v1.TransportService`, generated from
+  `proto/mkit/transport/v1/transport.proto` via the same vendored-codegen
+  pattern `mkit-repo-client`/`apps/repo-worker` use (no `protoc` needed on
+  the default build path; `MKIT_REPO_CODEGEN=1` +
+  `scripts/regen-transport-proto.sh` to regenerate). `mkit-cli`'s
+  `remote_dispatch` now constructs this transport for `mkit+https://` /
+  loopback `mkit+http://`, replacing `mkit-transport-http`'s bespoke JSON
+  dialect there. TLS trust is pure-Rust (`webpki-roots`, no OS trust
+  store); the synchronous `Transport` trait is bridged to the async
+  generated client via a dedicated per-instance tokio runtime, mirroring
+  `mkit-transport-enc`'s `TokioExecutor`. `ConnectTransport::
+  supports_atomic_advance()` defaults to `false` (opt in via
+  `with_atomic_advance(true)`) until a confirmed-transactional reference
+  deployment exists. `mkit-transport-http` is NOT removed: its
+  `sparse-checkout`/`pack-shards` extensions have no `mkit.transport.v1`
+  equivalent yet.
 - **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
   / `download_pack_streaming`).** Two new opt-in trait methods move a
   pack as a sequence of bounded-size `PackChunk { offset, data, last }`

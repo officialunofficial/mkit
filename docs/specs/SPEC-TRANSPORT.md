@@ -343,6 +343,18 @@ redoes the application `Hello` before retrying. See
 
 ## 5. HTTP transport
 
+**Superseded as the active `mkit+https://` implementation.** As of
+mkit#701, `mkit-cli`'s `mkit+https://` / `mkit+http://` dispatch uses
+[`mkit-transport-connect`](../../rust/crates/mkit-transport-connect/) — a
+native ConnectRPC client for `mkit.transport.v1.TransportService` — not
+this JSON dialect. See
+[SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) for the canonical
+protocol. This section remains accurate documentation of the
+`mkit-transport-http` crate, which is still in the tree (its
+`sparse-checkout` §5.6 and `pack-shards` extensions are not yet covered by
+`mkit.transport.v1` — see SPEC-TRANSPORT-CONNECT §8) but is no longer
+constructed by `mkit-cli`'s remote dispatch for either scheme.
+
 The HTTP transport ([`mkit-transport-http`](../../rust/crates/mkit-transport-http/))
 speaks a simple JSON REST dialect against an mkit VCS Worker
 (Cloudflare Worker + R2 is the reference deployment).

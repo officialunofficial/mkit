@@ -1550,12 +1550,20 @@ Accepted schemes:
 | Scheme | Form | Use |
 |--------|------|-----|
 | `mkit+file` | `mkit+file:///abs/path` | local filesystem mirror |
-| `mkit+https` | `mkit+https://host[:port]/path` | HTTP gateway (e.g. VCS Worker) |
+| `mkit+https` | `mkit+https://host[:port][/path]` | ConnectRPC gateway (e.g. VCS Worker) |
 | `mkit+s3` | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 
-See `docs/specs/SPEC-TRANSPORT.md` for the wire protocol.
+`mkit+https` (and loopback-only `mkit+http`) speaks
+`mkit.transport.v1.TransportService` over ConnectRPC — see
+`docs/specs/SPEC-TRANSPORT-CONNECT.md`. Any `/path` on the URL is
+accepted (for shape-consistency with the other schemes) but currently
+has no wire effect: every RPC resolves to the fixed
+`/mkit.transport.v1.TransportService/<Method>` path regardless.
+
+See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
+protocols.
 
 ## Version output contract
 

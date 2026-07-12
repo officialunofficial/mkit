@@ -9,7 +9,10 @@ audience: implementers of mkit.transport.v1 Connect servers and clients (referen
 
 Status: **Draft** for mkit v1. This document has not yet had maintainer
 sign-off on the RPC shapes it defines (the acceptance gate for the
-issue that produced it); no server or client implements it yet.
+issue that produced it). The native CLI Connect client (§7.3, mkit#701)
+is implemented and tested against a real (in-process, memory-backed)
+`TransportService` server; the reference Worker (§7.1, mkit#699) and
+`mkit serve`'s HTTP mode (§7.2, mkit#700) do not exist yet.
 Scope: the `mkit.transport.v1.TransportService` Connect service — its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 and pack-transfer streaming design — and how the three planned
@@ -18,18 +21,24 @@ consume one generated codebase. It does not cover S3 multipart, the
 `WatchRefs` live-feed migration, or any server/client implementation;
 those are separate, later changes (§8).
 
-Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport").
-Once a Connect server/client reach verb parity with the JSON REST
-dialect §5 describes, `mkit-transport-http`'s bespoke dialect is
-retired and SPEC-TRANSPORT §5 is deleted in favor of this document.
-Until then, both describe real (or planned) wire behavior and neither
-is authoritative over the other's transport.
+Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
+the ACTIVE implementation behind `mkit+https://` / `mkit+http://` in
+`mkit-cli` — `mkit-transport-connect` is what `remote_dispatch` now
+constructs for those schemes. SPEC-TRANSPORT §5 is not yet deleted: the
+`mkit-transport-http` crate remains in the tree (unused by `mkit-cli`'s
+dispatch) because its `sparse-checkout` and `pack-shards` extensions
+(SPEC-TRANSPORT §5.6 and the `pack-shards` cargo feature) have no
+`mkit.transport.v1` equivalent yet — full retirement waits on that gap
+being resolved, not just core-verb parity.
 
-Reference implementation: none yet. `apps/repo-worker` is the closest
-existing analog (a Connect service on Cloudflare Workers) but
-implements the unrelated `mkit.repo.v1.RepoService` anonymous-demo
-contract, not this one; this document borrows its proven patterns
-(§1, §7) without sharing its proto.
+Reference implementation: `mkit-transport-connect` (the native CLI
+client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
+in-process server — real HTTP, real protobuf framing, real Connect
+streaming, backed by `mkit-transport-memory` rather than R2/a Durable
+Object. `apps/repo-worker` remains the closest production-shaped analog
+(a Connect service on Cloudflare Workers) but implements the unrelated
+`mkit.repo.v1.RepoService` anonymous-demo contract, not this one; this
+document borrows its proven patterns (§1, §7) without sharing its proto.
 
 The proto lives at
 [`proto/mkit/transport/v1/transport.proto`](../../proto/mkit/transport/v1/transport.proto).
@@ -366,25 +375,61 @@ existing SSH-frame stdio and `--listen-enc` modes
 
 ### 7.3 Native CLI Connect client
 
-A new, non-wasm Rust crate (mkit#701) mirroring
+**Implemented** (mkit#701):
+[`mkit-transport-connect`](../../rust/crates/mkit-transport-connect/), a
+non-wasm Rust crate mirroring
 [`mkit-repo-client`](../../rust/crates/mkit-repo-client/Cargo.toml)'s
 "zero-duplication" codegen approach: compiled directly from the
 canonical `proto/mkit/transport/v1/transport.proto` via a
 workspace-relative path in `build.rs`, never a hand-copied proto or a
 hand-rolled URL builder. It differs from `mkit-repo-client` only in
 target: native (Tokio, `connectrpc`'s HTTP/native-TLS client
-transport) rather than wasm (Fetch API, `wasm-bindgen`), so it drops
-the wasm-only dependencies (`wasm-bindgen`, `web-sys`,
-`send_wrapper`) and enables `connectrpc`'s native client features
-instead. This crate becomes the implementation behind the
-`mkit+https://` scheme, retiring `mkit-transport-http`'s hand-rolled
-JSON DTOs once it reaches verb parity (SPEC-TRANSPORT §5 is then
-deleted). Retry/backoff for this transport is expected to move into a
-shared Connect interceptor (mkit#703) that wraps the generated client,
-rather than a fourth from-scratch backoff ladder — the same
-`is_retryable` classification and `BackoffIterator` ladder
-(SPEC-TRANSPORT §7) apply, just translated through §5's Connect-code
-mapping instead of read directly off an HTTP status or `TransportError`.
+transport, TLS trust via `webpki-roots`) rather than wasm (Fetch API,
+`wasm-bindgen`), so it drops the wasm-only dependencies
+(`wasm-bindgen`, `web-sys`, `send_wrapper`) and enables `connectrpc`'s
+native client features instead. `ConnectTransport` bridges the
+synchronous `Transport` trait to the async generated client via
+`mkit_core::protocol::async_shim::Executor` (a dedicated tokio runtime
+per instance), mirroring `mkit-transport-enc`'s `TokioExecutor`.
+
+This crate is now the implementation `mkit-cli`'s `remote_dispatch`
+constructs for the `mkit+https://` scheme (and loopback-only
+`mkit+http://`), replacing `mkit-transport-http` there — see
+`rust/crates/mkit-cli/src/remote_dispatch/mod.rs`. `mkit-transport-http`
+itself is NOT deleted (its `sparse-checkout`/`pack-shards` extensions
+have no `mkit.transport.v1` equivalent yet, §8), so SPEC-TRANSPORT §5 is
+marked superseded rather than removed.
+
+One deliberate gap from full HTTP-transport parity: `ConnectTransport::
+supports_atomic_advance()` defaults to `false` (opt in via
+`with_atomic_advance(true)`), where `HttpTransport::
+supports_atomic_advance()` always returned `true`. SPEC-TRANSPORT-CONNECT
+§4 requires a client to only claim atomicity a deployment has actually
+documented; since no reference Connect server (mkit#699) exists yet to
+confirm a transactional `AdvanceRefs`, the safe default means pushes over
+`mkit+https://` take the ordered (non-atomic) `advance_refs` fallback and
+do not re-baseline/reset the packmap chain — `remote_dispatch::
+push_branch`'s re-baseline gate already requires `supports_atomic_advance()
+== true` before resetting (mkit#521), so this is a (temporary) loss of
+the packmap-compaction optimization, not a correctness gap. Revisit once
+mkit#699 ships a confirmed-transactional backend.
+
+Retry/backoff for this transport is deliberately NOT implemented as a
+from-scratch ladder (unlike `mkit-transport-http`'s built-in one): every
+call is a single attempt. SPEC-TRANSPORT-CONNECT §7.3 defers retry to a
+shared Connect interceptor (mkit#703) that wraps the generated client —
+the same `is_retryable` classification and `BackoffIterator` ladder
+(SPEC-TRANSPORT §7) still apply, just translated through §5's
+Connect-code mapping instead of read directly off an HTTP status or
+`TransportError`, once that interceptor lands.
+
+The regression test
+(`rust/crates/mkit-transport-connect/tests/roundtrip.rs`) drives every
+`Transport` verb — including multi-chunk `UploadPack`/`DownloadPack`
+streaming and all three `AdvanceOutcome` variants — through a real
+in-process `TransportService` server (memory-backed, not R2/DO), per
+this issue's testing decision: a real server, not a mock standing in for
+one.
 
 ---
 
@@ -395,9 +440,10 @@ Explicitly deferred to sibling issues:
 
 - The reference Worker implementation (mkit#699).
 - `mkit serve`'s HTTP mode (mkit#700).
-- The native CLI Connect client (mkit#701).
-- Retiring `mkit-transport-http` and deleting SPEC-TRANSPORT §5 (waits
-  on verb parity between the new client and the old dialect).
+- ~~The native CLI Connect client (mkit#701).~~ Implemented — see §7.3.
+- Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
+  `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`
+  extensions, not just core-verb parity — see §7.3).
 - The shared retry/backoff Connect interceptor (mkit#703).
 - S3 multipart upload (unrelated transport; not superseded by this
   document at all).
@@ -422,18 +468,21 @@ Explicitly deferred to sibling issues:
 
 ## 10. Test anchors
 
-There is no runtime to test against yet (§8) — the acceptance gate
-for this document is static, not behavioral:
+The acceptance gate for this document itself is static, not behavioral:
 
 - `buf lint` (`STANDARD` category) against `proto/mkit/transport/v1/transport.proto` — zero errors, zero lint exceptions.
 - `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
 - The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) — verified by generating and compiling the full client + server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.8.1` / `connectrpc 0.8` / `connectrpc-build 0.8`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
-- Explicit maintainer sign-off on the RPC shapes in this document, per the originating issue's Testing Decisions — not automated test coverage, since no server or client exists to test.
+- Explicit maintainer sign-off on the RPC shapes in this document, per the originating issue's Testing Decisions.
 
-Once mkit#699/#700/#701 build real implementations against this
-proto, each of those issues owns its own runtime test anchors
-(integration tests against a real or locally-hosted server); this
-document is not amended to list them.
+mkit#699/#700/#701 each own their own runtime test anchors (integration
+tests against a real or locally-hosted server); this document is not
+amended to list them. mkit#701 (§7.3) is the first to land one:
+`rust/crates/mkit-transport-connect/tests/roundtrip.rs` runs a real
+in-process `TransportService` server and drives every `Transport` verb
+through it via the generated client — see §7.3 for what it does and
+does not prove (a memory-backed in-process server, not the R2/DO
+reference Worker).
 
 ---
 
