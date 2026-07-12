@@ -195,7 +195,7 @@ pub enum DispatchError {
 ///
 /// `layout` is needed only to resolve a repo-key-file envelope signer
 /// when `cfg.merged.transport_auth == "envelope"` (see
-/// [`envelope_signer_from_config`]) — every caller already has it at
+/// `envelope_signer_from_config`) — every caller already has it at
 /// hand (it discovered the repo before building `cfg`).
 pub fn open_trusted(
     endpoint: &str,
