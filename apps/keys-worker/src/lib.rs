@@ -15,9 +15,9 @@ mod audit;
 mod envelope;
 mod names;
 
-use audit::{WriteAudit, audit_for};
-use envelope::{EnvelopeHeaders, VerifyEnvelope, blake3_hex, verify_envelope};
-use names::{NameRecord, ResolveBody, SetNameBody, is_pubkey_hex, normalize_name};
+use audit::{audit_for, WriteAudit};
+use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
+use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
 
 /// KV namespace binding (declared in wrangler.jsonc).
 const KV_BINDING: &str = "NAMES";
