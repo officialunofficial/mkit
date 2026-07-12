@@ -30,8 +30,9 @@ use mkit_repo_worker::proto::mkit::repo::v1::{
     GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse, ListCommitsRequest,
     ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
     ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
-    PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse,
-    RepoService, RepoServiceExt, RoomEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
+    PostMessageResponse, PurgeRoomRequest, PurgeRoomResponse, PutObjectRequest, PutObjectResponse,
+    ReactRequest, ReactResponse, RepoService, RepoServiceExt, RoomEvent, UpdateRefRequest,
+    UpdateRefResponse, WatchRefsRequest,
 };
 use mkit_repo_worker::room_event;
 use std::sync::Arc;
@@ -155,6 +156,13 @@ impl RepoService for FakeRepoService {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, ListCommitsRequest>,
     ) -> ServiceResult<ListCommitsResponse> {
+        unimplemented()
+    }
+    async fn purge_room(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, PurgeRoomRequest>,
+    ) -> ServiceResult<PurgeRoomResponse> {
         unimplemented()
     }
 }

@@ -16,6 +16,7 @@
 //                                                          -> { "committed", "conflict", "current"? }
 //   POST /list   { "prefix": "<prefix>" }                  -> { "refs": [ { "name", "value" } ] }
 //   POST /quota  { "author", "bytes" }                      -> { "allowed", "reason"? }
+//   POST /purge  (no body)                                 -> { "refs_deleted", "messages_deleted", "reactions_deleted" }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
 //
 // `expectation` is the proto wire number (1=ANY, 2=MISSING, 3=MATCH). The
@@ -42,8 +43,9 @@ use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evalu
 use super::commit_index;
 use super::wire::{
     GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListEntry, ListReq, ListResp, MessagesReq,
-    MessagesResp, MsgEntry, PostReq, PostResp, QuotaCheckReq, QuotaCheckResp, ReactReq, ReactResp,
-    ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
+    MessagesResp, MsgEntry, PostReq, PostResp, PurgeResp, QuotaCheckReq, QuotaCheckResp, ReactReq,
+    ReactResp, ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq,
+    UpdateResp,
 };
 // `/watch` wire encoding: declared once (host+wasm target-independent) in
 // `crate::room_event` and shared with the WatchRefs Connect-streaming bridge
@@ -199,6 +201,23 @@ impl DurableObject for RefStore {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
+            "/purge" => {
+                // A purge touches every table this DO owns, including ones a
+                // brand-new room may never have created — ensure all four so
+                // the DELETEs below are never against a missing table.
+                if let Err(e) = self.ensure_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                if let Err(e) = self.ensure_messages_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                if let Err(e) = self.ensure_reactions_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
             _ => {}
         }
 
@@ -249,6 +268,7 @@ impl DurableObject for RefStore {
                 let body: QuotaCheckReq = req.json().await?;
                 self.handle_quota_check(body)
             }
+            "/purge" => self.handle_purge(),
             _ => Response::error("not found", 404),
         }
     }
@@ -335,6 +355,46 @@ impl RefStore {
         let recorded =
             commit_index::record_batch(&self.state.storage().sql(), &req.r#ref, &req.commits);
         Response::from_json(&RecordCommitsResp { recorded })
+    }
+
+    /// Wipe every table row this DO instance owns — the mutable-state half of
+    /// `PurgeRoom` (the worker purges the room's R2 prefixes separately, since
+    /// this DO owns no R2 access). Irreversible: there is no soft-delete or
+    /// undo. Counts are taken BEFORE the deletes so the response reports what
+    /// was actually removed, not zero.
+    fn handle_purge(&self) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        let refs_deleted = Self::count_rows(&sql, "refs");
+        let messages_deleted = Self::count_rows(&sql, "messages");
+        let reactions_deleted = Self::count_rows(&sql, "reactions");
+
+        sql.exec("DELETE FROM refs;", None)?;
+        sql.exec("DELETE FROM messages;", None)?;
+        sql.exec("DELETE FROM idem_keys;", None)?;
+        sql.exec("DELETE FROM reactions;", None)?;
+        sql.exec("DELETE FROM react_idem;", None)?;
+        sql.exec("DELETE FROM react_rate;", None)?;
+        sql.exec("DELETE FROM commits;", None)?;
+
+        Response::from_json(&PurgeResp { refs_deleted, messages_deleted, reactions_deleted })
+    }
+
+    /// `SELECT COUNT(*)` over one of this DO's own hardcoded table names
+    /// (never user input — every call site passes a literal), so
+    /// string-formatting the identifier into the query is safe. Returns 0 on
+    /// any query failure rather than propagating an error, since this is only
+    /// used for a best-effort "how many rows did the purge remove" count.
+    fn count_rows(sql: &worker::SqlStorage, table: &str) -> u32 {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        sql.exec(&format!("SELECT COUNT(*) AS n FROM {table};"), None)
+            .and_then(|r| r.to_array::<Count>())
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|c| c.n.max(0) as u32)
+            .unwrap_or(0)
     }
 
     /// Read a ref's current hex value, or None if absent.
