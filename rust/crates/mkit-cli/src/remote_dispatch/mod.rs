@@ -38,8 +38,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
+use mkit_transport_connect::ConnectTransport;
 use mkit_transport_file::FileTransport;
-use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
@@ -275,9 +275,12 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
-        // HttpTransport::connect strips the `mkit+` prefix itself and
-        // reads MKIT_API_TOKEN from the environment.
-        let tx = HttpTransport::connect(url)?;
+        // ConnectTransport::connect strips the `mkit+` prefix itself and
+        // reads MKIT_API_TOKEN from the environment (mkit#701 — the native
+        // mkit.transport.v1 ConnectRPC client, replacing the retired
+        // mkit-transport-http JSON dialect as of SPEC-TRANSPORT-CONNECT
+        // verb parity).
+        let tx = ConnectTransport::connect(url)?;
         return Ok(Arc::new(tx));
     }
     if url.starts_with("mkit+s3://") {

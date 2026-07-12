@@ -1265,6 +1265,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -1300,19 +1302,24 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "libc",
  "percent-encoding",
  "pin-project",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
  "tracing",
  "wasm-bindgen-futures",
+ "zstd",
 ]
 
 [[package]]
@@ -3042,6 +3049,7 @@ dependencies = [
  "connectrpc",
  "ed25519-dalek 2.2.0",
  "flate2",
+ "futures",
  "getrandom 0.4.2",
  "http",
  "insta",
@@ -3225,11 +3233,15 @@ dependencies = [
  "http-body-util",
  "mkit-core",
  "mkit-transport-file",
+ "mkit-transport-memory",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4423,6 +4435,8 @@ version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4447,6 +4461,7 @@ version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",
