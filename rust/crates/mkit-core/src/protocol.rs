@@ -1,6 +1,10 @@
 //! Cross-transport types: error taxonomy, the [`Transport`] trait, the
 //! [`PackKey`] digest wrapper, and the retry/backoff helpers used by
-//! every transport implementation (memory, file, HTTP, S3, SSH).
+//! every transport implementation (memory, file, HTTP, S3, SSH, enc).
+//! [`retrying`] is the single shared driver of the SPEC-TRANSPORT §7
+//! ladder — every transport's `retrying`/`with_retry` method is a thin
+//! wrapper around it, so the backoff/classification policy lives in
+//! exactly one place instead of being reimplemented per crate.
 //!
 //! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
 //! lives in `mkit_rpc::mkit::rpc::v1::ssh`; transport-ssh consumes
@@ -274,6 +278,52 @@ impl Iterator for BackoffIterator {
             doubled
         };
         Some(current)
+    }
+}
+
+/// Transport-agnostic retry driver shared by every [`Transport`]
+/// implementation, so the SPEC-TRANSPORT §7 ladder lives in exactly one
+/// place instead of being reimplemented per crate. Extracted from what
+/// was `HttpTransport::retrying` in `mkit-transport-http`.
+///
+/// `op` is re-invoked from scratch on every attempt — it MUST perform a
+/// fresh, self-contained unit of work each call (a new HTTP request on
+/// the existing connection pool, a freshly-reconnected SSH child, a
+/// redialed encrypted session, …) rather than assuming any state left
+/// over from a failed prior attempt is still valid. This matters most
+/// for connection-oriented transports: a frame-level failure can leave
+/// a stream mid-message-desynced, so `op` reconnecting before retrying
+/// (rather than resuming on the same broken handle) is what makes the
+/// retry safe, not just present.
+///
+/// `backoff` is a ladder *factory* (not a live iterator) so a fresh
+/// ladder starts on every call to `retrying` — production uses
+/// [`BackoffIterator::new`], tests inject a short/deterministic ladder.
+/// `sleep` is the delay hook between attempts; production sleeps for
+/// the full duration, tests typically inject a no-op or recorder.
+///
+/// Retries only the classes [`is_retryable`] accepts
+/// (`ConnectionFailed`, `ServerError{5xx}`, `ServerError{429}`); every
+/// other error returns immediately on the first attempt.
+pub fn retrying<T>(
+    mut op: impl FnMut() -> TransportResult<T>,
+    backoff: fn() -> BackoffIterator,
+    sleep: fn(Duration),
+) -> TransportResult<T> {
+    let mut ladder = backoff();
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                if is_retryable(&err)
+                    && let Some(delay) = ladder.next()
+                {
+                    sleep(delay);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -851,5 +901,104 @@ mod tests {
             Err(other) => panic!("expected PackNotFound, got {other:?}"),
             Ok(_) => panic!("missing pack must fail before any chunk is produced"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // retrying() driver
+    // -----------------------------------------------------------------
+
+    fn test_backoff() -> BackoffIterator {
+        BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
+    }
+
+    fn no_sleep(_delay: Duration) {}
+
+    #[test]
+    fn retrying_succeeds_on_first_try_without_sleeping() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        fn record_sleep(_delay: Duration) {
+            SLEEPS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static SLEEPS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+        SLEEPS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            },
+            test_backoff,
+            record_sleep,
+        );
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SLEEPS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn retrying_recovers_after_transient_connection_failures() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                let n = CALLS.fetch_add(1, Ordering::SeqCst);
+                if n < 3 {
+                    Err(TransportError::ConnectionFailed)
+                } else {
+                    Ok(42)
+                }
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn retrying_gives_up_after_ladder_exhausts() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Err(TransportError::ConnectionFailed)
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert!(matches!(result, Err(TransportError::ConnectionFailed)));
+        // 5-attempt ladder => 1 initial + 5 retries = 6 total calls.
+        assert_eq!(CALLS.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn retrying_does_not_retry_non_retryable_errors() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Err(TransportError::PackNotFound)
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert!(matches!(result, Err(TransportError::PackNotFound)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
 }

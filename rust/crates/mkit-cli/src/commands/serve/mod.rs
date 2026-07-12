@@ -229,6 +229,19 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
     if !handshake(r, w) {
         return exit::PROTOCOL_ERROR;
     }
+
+    // Test-only fault injection for the mkit#703 SSH retry regression
+    // test (`tests/ssh_retry_e2e.rs`): return immediately after a
+    // successful `Hello`/`HelloResponse`, before answering any verb,
+    // so the process exits and the child pipe closes — simulating a
+    // mid-session connection drop that the client's `SshTransport`
+    // retry/reconnect path (SPEC-TRANSPORT §7) must recover from. A
+    // no-op — and never read — unless the hermetic harness explicitly
+    // sets this env var; production `mkit serve` never sets it.
+    if std::env::var_os("MKIT_SERVE_TEST_DIE_AFTER_HELLO").is_some() {
+        return exit::OK;
+    }
+
     let mut frame_count: u32 = 0;
     let mut byte_count: u64 = 0;
 

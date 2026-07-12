@@ -311,6 +311,31 @@ read mid-stream rather than letting the `Vec` grow without bound.
 Both paths surface as `TransportError::RemoteError` with a message
 mentioning the client cap.
 
+### 4.5 Retry / reconnect
+
+`SshTransport` is connection-oriented (a single long-lived `ssh(1)`
+child), so honoring the §7 retry ladder for `ConnectionFailed` takes
+more than re-issuing the same request the way the HTTP transport does:
+a frame-level I/O failure can leave the child's stdin/stdout pipe
+mid-message, so the transport marks that connection `closed` and
+resuming writes/reads on it would desync every subsequent frame.
+`SshTransport` therefore reconnects before it retries — every verb is
+driven through [`mkit_core::protocol::retrying`], and each attempt
+that finds the connection `closed` first respawns `ssh` from the
+original `target`/`options` and redoes the `Hello` handshake before
+re-issuing the verb against the fresh child. `upload_pack` is
+content-addressed and safe to resend in full on the new connection;
+`update_ref` is not idempotent across retries per §7, so a retried CAS
+write that returns `RefConflict` still requires the caller's `read_ref`
+disambiguation.
+
+The encrypted transport (`mkit-transport-enc`) applies the identical
+pattern: `EncTransport` collapses every cipher-layer I/O failure to
+`ConnectionFailed`, marks the session dead, and (when the concrete
+transport wired a redial hook — `tcp::connect_tcp` does) reconnects and
+redoes the application `Hello` before retrying. See
+[SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) for its retry section.
+
 ---
 
 ## 5. HTTP transport
@@ -570,8 +595,15 @@ backoff: `ConnectionFailed`, `ServerError{status >= 500}`, and
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s,
 8s, 16s` (5 attempts), with subsequent delays doubling and capped
 at 300 s. The ladder is exposed via
-[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs) and the
-classifier as [`is_retryable`].
+[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs), the
+classifier as [`is_retryable`], and the retry loop itself as
+[`retrying`](../../rust/crates/mkit-core/src/protocol.rs) — a single
+transport-agnostic driver every transport's client wraps, so the
+ladder/classification policy is defined once instead of per crate.
+Request-oriented transports (HTTP, S3) satisfy this by re-issuing a
+fresh request per attempt; connection-oriented transports (SSH, enc)
+MUST reconnect before re-attempting once a prior attempt has left the
+connection in a possibly-desynced state — see §4.5.
 
 `update_ref` with `Missing` or `Match` is NOT idempotent across
 retries: a network timeout after the server applied the write looks
