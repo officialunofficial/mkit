@@ -54,7 +54,7 @@ updates:
           - "patch"
 
   - package-ecosystem: "npm"
-    directory: "/web"
+    directory: "/apps/web"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -73,7 +73,7 @@ updates:
           - "patch"
 
   - package-ecosystem: "npm"
-    directory: "/mcp"
+    directory: "/apps/mcp"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -85,6 +85,25 @@ updates:
       - "mcp"
     commit-message:
       prefix: "deps(mcp)"
+    groups:
+      npm-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/og"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "og"
+    commit-message:
+      prefix: "deps(og)"
     groups:
       npm-minor:
         update-types:
