@@ -2,8 +2,8 @@
 //
 // Worker-specific ref helpers: the `room` allow-list plus thin wrappers over
 // the canonical SPEC-REFS §3 validators in `mkit_core::refs`, and the CAS state
-// machine for UpdateRef. The CAS unit tests below replay the TS conformance
-// vectors verbatim.
+// machine for UpdateRef. The CAS unit tests below are the conformance suite
+// for this state machine.
 
 /// Validate a ref name against the mkit SPEC-REFS §3 grammar. Delegates to the
 /// canonical [`mkit_core::refs::validate_ref_name`] so the worker and the core
@@ -92,8 +92,7 @@ pub enum CasDecision {
 
 /// Pure CAS decision. `current` is the ref's present value (None = absent);
 /// `expected` is the MATCH target (must be None for ANY/MISSING). Ids are
-/// compared as opaque byte slices. Mirrors `evaluateCas` in
-/// reference-ts/lib/refs.ts.
+/// compared as opaque byte slices.
 ///
 ///   ANY      -> always commit (clobber); expected MUST be empty.
 ///   MISSING  -> commit iff current is None (else conflict Exists); expected MUST be empty.
@@ -143,7 +142,7 @@ mod tests {
     const ID_A: &[u8] = &[0xaa; 32];
     const ID_B: &[u8] = &[0xbb; 32];
 
-    // --- evaluate_cas, replaying reference-ts/test/refs.test.ts -------------
+    // --- evaluate_cas conformance vectors ------------------------------------
     #[test]
     fn any_clobbers() {
         assert_eq!(evaluate_cas(Some(ID_A), RefExpectation::Any, None), CasDecision::Committed);

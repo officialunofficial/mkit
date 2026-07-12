@@ -2,7 +2,7 @@
 //
 // BLAKE3 content-addressing helpers, backed by mkit-core::hash (the SAME
 // BLAKE3 the Rust node uses), so object ids computed here are byte-for-byte
-// identical to the rest of mkit. Mirrors reference-ts/lib/crypto.ts.
+// identical to the rest of mkit.
 
 use mkit_core::hash::{hash, to_hex};
 
@@ -21,8 +21,7 @@ pub fn blake3_hex(data: &[u8]) -> String {
 /// Content-addressing check: `BLAKE3(bytes) == object_id`.
 ///
 /// `object_id` is the raw 32-byte id (proto wire form). Returns false on any
-/// length mismatch rather than panicking. Mirrors `objectIdMatches` in
-/// reference-ts/lib/crypto.ts.
+/// length mismatch rather than panicking.
 #[must_use]
 pub fn object_id_matches(bytes: &[u8], object_id: &[u8]) -> bool {
     if object_id.len() != 32 {
@@ -35,8 +34,7 @@ pub fn object_id_matches(bytes: &[u8], object_id: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    // Conformance vector from reference-ts/test/crypto.test.ts: BLAKE3 of the
-    // empty input.
+    // Conformance vector: BLAKE3 of the empty input.
     #[test]
     fn empty_input_vector() {
         assert_eq!(

@@ -201,14 +201,13 @@ eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
 ## Layout
 
 - `src/envelope.rs`, `src/refs.rs`, `src/hashing.rs` — pure, target-independent
-  logic carrying the conformance contract (the `#[cfg(test)]` modules replay the
-  TS vectors). Compiled on host *and* wasm.
+  logic carrying the conformance contract; their `#[cfg(test)]` modules *are*
+  the conformance suite (no separate reference implementation is kept
+  elsewhere). Compiled on host *and* wasm.
 - `src/worker_impl.rs` + `src/worker_impl/{auth,refstore,service}.rs` —
   wasm32-only worker glue (the macros emit `#[wasm_bindgen]`).
 - `proto/` — the canonical `repo.proto`. `build.rs` runs `connectrpc-build` over
   it into `$OUT_DIR`, included via `connectrpc::include_generated!()`.
-- `reference-ts/` — the original TypeScript pure-logic + tests, kept as the
-  conformance reference the Rust ports mirror.
 
 ## Deploy (go live)
 
