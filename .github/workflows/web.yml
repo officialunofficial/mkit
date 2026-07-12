@@ -114,9 +114,9 @@ jobs:
         working-directory: apps/web
         run: bun run typecheck
 
-      - name: Test
+      - name: Test (coverage-enforced)
         working-directory: apps/web
-        run: bun run test
+        run: bun run test --coverage
 
       - name: Lint
         working-directory: apps/web

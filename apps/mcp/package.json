@@ -11,6 +11,7 @@
     "build": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --project unit --coverage",
     "cf-typegen": "wrangler types",
     "db:create": "wrangler d1 create mkit-mcp-search",
     "db:migrate": "wrangler d1 migrations apply mkit-mcp-search --remote",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.18",
     "@cloudflare/workers-types": "^4.20260621.1",
+    "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9",
     "wrangler": "^4.103.0"

@@ -89,7 +89,10 @@ npm run db:migrate:local
 npm run db:seed:local
 npm run dev    # MCP inspector: npx @modelcontextprotocol/inspector@latest → Streamable HTTP → http://localhost:8787
 
-npm run ci     # typecheck + tests
+npm run ci               # typecheck + tests
+npm run test:coverage    # unit-project coverage, CI-enforced thresholds (vitest.config.ts) —
+                         # scoped to the "unit" project only; the "integration" project runs
+                         # inside the real Workers runtime, which doesn't support v8 coverage.
 ./scripts/itest.sh   # optional: load schema+seed into a throwaway SQLite DB and
                      # run the Worker's exact queries (needs sqlite3 w/ FTS5)
 ```
@@ -104,7 +107,7 @@ Actions workflows plus Cloudflare Workers Builds:
 
 | Path | Trigger | Does |
 |---|---|---|
-| `mcp.yml` | PR / push touching mcp or docs | Validate only (index + typecheck + test). |
+| `mcp.yml` | PR / push touching mcp or docs | Validate only (index + typecheck + test + unit-project coverage). |
 | Cloudflare **Workers Builds** (CF dashboard git integration) | Merge to `main` | Build + deploy the Worker **code** only — never seeds. Tool/`instructions` fixes reach agents without waiting for a release. Same model the web app uses; configured in the Cloudflare dashboard, not in this repo. |
 | `mcp-release.yml` | Release tag `v*.*.*` (or dispatch) | Check out the **tag**, guard tag == workspace version, **seed that version into D1 if not already indexed**. Already-indexed versions are never touched; `workflow_dispatch` with `force: true` re-seeds a version *from its own tag* (indexer-fix escape hatch). Does **not** deploy the Worker — Workers Builds already shipped the code from `main`. |
 

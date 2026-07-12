@@ -87,6 +87,14 @@ jobs:
         working-directory: apps/mcp
         run: npm run test
 
+      # Coverage-enforced, but scoped to the "unit" project only — the
+      # "integration" project runs inside the real Workers runtime via
+      # @cloudflare/vitest-pool-workers, whose isolate doesn't support the v8
+      # coverage provider (see vitest.config.ts).
+      - name: Test coverage (unit project)
+        working-directory: apps/mcp
+        run: npm run test:coverage
+
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
   # "required-but-skipped" trap. Passes when the `ci` job succeeded OR was

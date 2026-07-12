@@ -27,6 +27,12 @@ bun run test
 bun run build
 ```
 
+`bun run test --coverage` runs the same suite under `@vitest/coverage-v8`,
+enforcing the thresholds in `vitest.config.ts` (CI's gate). Component tests
+(`src/components/*-demo.test.tsx`) opt into the `jsdom` environment per-file
+via a `// @vitest-environment jsdom` docblock; everything else stays on the
+faster `node` default.
+
 `mkit-wasm` resolves through `vendor/mkit-wasm`, a checked-in package shell
 declared as a Bun workspace (Bun has no relative `link:` protocol, so the
 workspace symlink replaces pnpm's `link:vendor/mkit-wasm`). `bun run
