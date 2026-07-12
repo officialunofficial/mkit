@@ -1,0 +1,25 @@
+version: v2
+# TypeScript codegen for mkit.repo.v1 — message types AND the typed
+# `RepoService` client descriptor, both from `protoc-gen-es` alone.
+# Connect-ES v2 dropped the separate `protoc-gen-connect-es` plugin
+# requirement: `@bufbuild/protoc-gen-es` now emits a `GenService` const
+# (service + per-RPC method descriptors) straight into the `_pb.ts` file,
+# which `@connectrpc/connect`'s `createClient()` consumes directly.
+#
+# NOTE: `@connectrpc/protoc-gen-connect-es` (latest published: 1.7.0) is NOT
+# used here — it still depends on `@bufbuild/protoplugin@^1.10.0`, which
+# predates Protobuf Editions support, so `buf`/`protoc` refuse to run it
+# against `repo.proto`'s `edition = "2023"` (error: "hasn't been updated to
+# support editions yet"). `protoc-gen-es` (>=2.x, `@bufbuild/protoplugin@^2`)
+# supports editions and is sufficient on its own for Connect-ES v2 clients.
+#
+# Output is committed under apps/web/vendor/mkit-repo-proto/generated (mirrors
+# rust/crates/mkit-repo-client's vendored-codegen pattern: consumers never
+# need buf/protoc, only `scripts/regen-repo-proto-ts.sh` after editing
+# repo.proto). Run via that script, which puts apps/web's locally-installed
+# `protoc-gen-es` binary on PATH first.
+plugins:
+  - local: protoc-gen-es
+    out: ../web/vendor/mkit-repo-proto/generated
+    opt:
+      - target=ts

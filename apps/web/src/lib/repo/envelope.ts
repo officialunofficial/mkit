@@ -3,23 +3,36 @@
 // Moved verbatim out of the former monolithic `repo-api.ts`; re-exported by the
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
+import type { DescMethod } from '@bufbuild/protobuf'
+import { RepoService } from 'mkit-repo-proto'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import type { MkitApi } from '../mkit'
 
 const TEXT_ENCODER = new TextEncoder()
 
+/**
+ * Fully-qualified Connect procedure path for a generated RPC method — `/{service.typeName}/{method.name}`, the exact
+ * string the Connect protocol puts on the wire and the server reconstructs into its canonical signed string (see README
+ * §"The write envelope"). Derived from the generated `RepoService` descriptor (not hand-listed) so a `repo.proto`
+ * rename is a compile error here, not a silent signature mismatch.
+ */
+function procedurePath(method: DescMethod): string {
+  return `/${method.parent.typeName}/${method.name}`
+}
+
 /** Fully-qualified Connect procedure paths — also the `procedure` field of the envelope. */
 export const procedures = {
-  PutObject: '/mkit.repo.v1.RepoService/PutObject',
-  GetObject: '/mkit.repo.v1.RepoService/GetObject',
-  GetRef: '/mkit.repo.v1.RepoService/GetRef',
-  UpdateRef: '/mkit.repo.v1.RepoService/UpdateRef',
-  ListRefs: '/mkit.repo.v1.RepoService/ListRefs',
-  WatchRefs: '/mkit.repo.v1.RepoService/WatchRefs',
-  PostMessage: '/mkit.repo.v1.RepoService/PostMessage',
-  ListMessages: '/mkit.repo.v1.RepoService/ListMessages',
-  React: '/mkit.repo.v1.RepoService/React',
-  ListReactions: '/mkit.repo.v1.RepoService/ListReactions',
+  PutObject: procedurePath(RepoService.method.putObject),
+  GetObject: procedurePath(RepoService.method.getObject),
+  GetRef: procedurePath(RepoService.method.getRef),
+  UpdateRef: procedurePath(RepoService.method.updateRef),
+  ListRefs: procedurePath(RepoService.method.listRefs),
+  WatchRefs: procedurePath(RepoService.method.watchRefs),
+  PostMessage: procedurePath(RepoService.method.postMessage),
+  ListMessages: procedurePath(RepoService.method.listMessages),
+  React: procedurePath(RepoService.method.react),
+  ListReactions: procedurePath(RepoService.method.listReactions),
+  ListCommits: procedurePath(RepoService.method.listCommits),
 } as const
 
 // ---------------------------------------------------------------------------

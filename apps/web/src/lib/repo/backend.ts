@@ -6,14 +6,21 @@
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
 import { TEXT_ENCODER, bytesToHex, hexToBytes } from '../../components/use-mkit'
+import * as repoClient from './connect-client'
 import type { MkitApi } from '../mkit'
 import { type RepoSignFn, makeSignFn, procedures } from './envelope'
 
 // ---------------------------------------------------------------------------
-// Service shapes (mirror mkit.repo.v1.RepoService)
+// Service shapes — ergonomic (hex-string) projections of the generated
+// `mkit.repo.v1` proto messages (`mkit-repo-proto`, vendored under
+// apps/web/vendor/mkit-repo-proto/generated from repo.proto via
+// `scripts/regen-repo-proto-ts.sh`). The wire types use raw `bytes` fields
+// and `bigint` for the 64-bit integer fields; these shapes decode both to
+// hex strings / `number` for the UI, matching every other id in this file.
+// `connect-client.ts` is the ONLY place that converts between the two.
 // ---------------------------------------------------------------------------
 
-/** CAS precondition carried inside UpdateRefRequest (proto enum RefExpectation). */
+/** CAS precondition carried inside UpdateRefRequest (proto enum `RefExpectation`). */
 export type RefExpectation = 'ANY' | 'MISSING' | 'MATCH'
 
 export type RefEntry = { name: string; objectIdHex: string }
@@ -810,11 +817,14 @@ export class MockRepoBackend implements RepoBackend {
 // WASM-backed backend (real ConnectRPC client over Fetch)
 // ---------------------------------------------------------------------------
 
-/** The subset of the wasm client this backend drives (matches `repo-client.ts`). */
+/**
+ * The subset of the wasm client this backend drives (matches `repo-client.ts`) — WRITES ONLY. Every unauthenticated
+ * read (GetRef, ListRefs, GetObject, ListCommits, ListMessages, ListReactions) goes through
+ * {@link repoClient.RepoConnectClient} instead (`connect-client.ts`, generated types, plain fetch) — no wasm round-trip,
+ * since those calls carry no signed envelope. Only a write needs the wasm client's BLAKE3-digest + Ed25519-sign
+ * capability.
+ */
 export interface RepoWasmClient {
-  get_ref(baseUrl: string, room: string, name: string): Promise<string | undefined>
-  get_object(baseUrl: string, room: string, objectIdHex: string): Promise<Uint8Array | undefined>
-  list_refs(baseUrl: string, room: string, prefix: string): Promise<Array<{ name: string; objectIdHex: string }>>
   put_object(
     baseUrl: string,
     room: string,
@@ -837,7 +847,6 @@ export interface RepoWasmClient {
     text: string,
     sign: RepoSignFn,
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }>
-  list_messages(baseUrl: string, room: string, limit: number): Promise<ChatMessageEntry[]>
   react(
     baseUrl: string,
     room: string,
@@ -845,29 +854,6 @@ export interface RepoWasmClient {
     emoji: string,
     sign: RepoSignFn,
   ): Promise<{ active: boolean; count: number }>
-  list_reactions(baseUrl: string, room: string): Promise<ReactionEntry[]>
-  /**
-   * ListCommits — server-side first-parent walk; one round-trip returns a page of denormalized commit metadata (already
-   * decoded server-side, no object bytes) plus a continuation cursor. The client renders it directly.
-   */
-  list_commits(
-    baseUrl: string,
-    room: string,
-    ref: string,
-    startIdHex: string,
-    pageSize: number,
-  ): Promise<{
-    commits: Array<{
-      hash: string
-      parent: string
-      authorPubkeyHex: string
-      message: string
-      createdAtUnix: number
-      kind: string
-      sourcesJson: string
-    }>
-    nextCursorHex: string
-  }>
 }
 
 /**
@@ -968,12 +954,18 @@ export class WasmRepoBackend implements RepoBackend {
   /** Safety cap on how far back the ref walk follows first-parents. */
   private static readonly WALK_CAP = 100
 
+  /** The Connect client every unauthenticated read goes through (see {@link RepoWasmClient}'s doc comment). */
+  private client: repoClient.RepoConnectClient
+
   constructor(
     private wasm: RepoWasmClient,
     private api: MkitApi,
     private seedHex: () => string | null,
     private baseUrl: string,
-  ) {}
+    connectClient?: repoClient.RepoConnectClient,
+  ) {
+    this.client = connectClient ?? repoClient.createRepoConnectClient(baseUrl)
+  }
 
   private requireSeed(): string {
     const s = this.seedHex()
@@ -993,20 +985,20 @@ export class WasmRepoBackend implements RepoBackend {
   /**
    * Fetch an object, serving from {@link WasmRepoBackend.objectCache} when present. Safe because objects are
    * content-addressed (immutable): the bytes behind a hash never change, so a cache hit is always correct. Misses hit
-   * the wasm client once and populate the cache for every later read (the post-commit re-walk, the detail view, a
-   * peer's re-walk).
+   * the Connect client once (a plain unauthenticated GetObject) and populate the cache for every later read (the
+   * post-commit re-walk, the detail view, a peer's re-walk).
    */
   private async cachedObject(room: string, objectIdHex: string): Promise<Uint8Array | null> {
     const ck = `${room}::${objectIdHex}`
     const hit = this.objectCache.get(ck)
     if (hit) return hit
-    const bytes = (await this.wasm.get_object(this.baseUrl, room, objectIdHex)) ?? null
+    const bytes = await repoClient.getObject(this.client, room, objectIdHex)
     if (bytes) this.objectCache.set(ck, bytes)
     return bytes
   }
 
   async getRef(room: string, name: string): Promise<string | null> {
-    return (await this.wasm.get_ref(this.baseUrl, room, name)) ?? null
+    return repoClient.getRef(this.client, room, name)
   }
 
   async updateRef(
@@ -1022,7 +1014,7 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async listRefs(room: string, prefix?: string): Promise<RefEntry[]> {
-    return await this.wasm.list_refs(this.baseUrl, room, prefix ?? '')
+    return repoClient.listRefs(this.client, room, prefix ?? '')
   }
 
   async postMessage(
@@ -1036,7 +1028,7 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async listMessages(room: string, limit = 50): Promise<ChatMessageEntry[]> {
-    return await this.wasm.list_messages(this.baseUrl, room, limit)
+    return repoClient.listMessages(this.client, room, limit)
   }
 
   async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
@@ -1045,7 +1037,7 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async listReactions(room: string): Promise<ReactionEntry[]> {
-    return await this.wasm.list_reactions(this.baseUrl, room)
+    return repoClient.listReactions(this.client, room)
   }
 
   /**
@@ -1107,7 +1099,7 @@ export class WasmRepoBackend implements RepoBackend {
     // ask for fewer so a cold load isn't N sequential object round-trips deep.
     const cap = Math.min(opts?.limit ?? WasmRepoBackend.WALK_CAP, WasmRepoBackend.WALK_CAP)
 
-    const head = await this.wasm.get_ref(this.baseUrl, room, ref)
+    const head = await repoClient.getRef(this.client, room, ref)
     if (!head) return []
 
     const cacheKey = `${room}::${ref}`
@@ -1143,7 +1135,7 @@ export class WasmRepoBackend implements RepoBackend {
     let done = false
 
     while (!done && fresh.length < cap) {
-      const page = await this.wasm.list_commits(this.baseUrl, room, ref, cursor, cap - fresh.length)
+      const page = await repoClient.listCommits(this.client, room, ref, cursor, cap - fresh.length)
       if (page.commits.length === 0) break
       for (const c of page.commits) {
         const tailIdx = tailByHash.get(c.hash)

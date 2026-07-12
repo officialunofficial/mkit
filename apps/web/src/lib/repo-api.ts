@@ -5,12 +5,16 @@
 // `./repo/*`, and everything is re-exported here so every existing
 // `from '../lib/repo-api'` import keeps working unchanged.
 //
-//   repo/envelope.ts — the Connect-flavored signed envelope + sign callback.
-//   repo/backend.ts  — service shapes, fork-ref scheme, the RepoBackend
-//                      interface, decodeLogObject, typed errors, MockRepoBackend
-//                      (incl. seedDemo) and WasmRepoBackend.
-//   repo/store.tsx   — the RepoBackend context (provider + useRepoBackend hook).
-//   repo/hooks.ts    — query keys, query hooks, the push mutation, useRepoEvents.
+//   repo/envelope.ts       — the Connect-flavored signed envelope + sign callback.
+//   repo/backend.ts        — service shapes, fork-ref scheme, the RepoBackend
+//                            interface, decodeLogObject, typed errors, MockRepoBackend
+//                            (incl. seedDemo) and WasmRepoBackend.
+//   repo/connect-client.ts — the generated-client wrappers WasmRepoBackend's
+//                            unauthenticated reads use (GetRef, ListRefs,
+//                            GetObject, ListCommits, ListMessages,
+//                            ListReactions), over @connectrpc/connect-web.
+//   repo/store.tsx         — the RepoBackend context (provider + useRepoBackend hook).
+//   repo/hooks.ts          — query keys, query hooks, the push mutation, useRepoEvents.
 //
 // Service contract (unary unless noted):
 //   PutObject(room, object_id, bytes)            getObject(room, object_id)
@@ -23,6 +27,7 @@
 
 export * from './repo/envelope'
 export * from './repo/backend'
+export * from './repo/connect-client'
 export * from './repo/store'
 export * from './repo/hooks'
 export * from './repo/use-resolved-backend'
