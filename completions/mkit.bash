@@ -51,7 +51,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
             ;;
         diff)
-            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -w --ignore-all-space -b --ignore-space-change -U --unified -z --help" -- "$cur") )
             ;;
         cat-file)
             COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
@@ -90,7 +90,7 @@ _mkit_complete() {
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --graph --author --grep --since --until --no-merges --first-parent -n --help" -- "$cur") )
             ;;
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )

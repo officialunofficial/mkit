@@ -150,6 +150,9 @@ _mkit() {
                         '(--exit-code --quiet)--quiet[like --exit-code but print nothing]' \
                         '(--color --no-color)--color[colorize patch: always|auto|never]::when:(always auto never)' \
                         '(--color --no-color)--no-color[disable colorized output]' \
+                        '(-w --ignore-all-space)'{-w,--ignore-all-space}'[ignore whitespace when comparing lines]' \
+                        '(-b --ignore-space-change)'{-b,--ignore-space-change}'[ignore changes in the amount of whitespace]' \
+                        '(-U --unified)'{-U,--unified}'[context lines around each hunk (default 3)]:n:' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
                         '--help[show help]' \
                         '*:file:_files'
@@ -285,6 +288,12 @@ _mkit() {
                         '--abbrev[set abbreviation length]:length:' \
                         '--format[output format]:format:(json)' \
                         '--graph[include ASCII graph]' \
+                        '--author[filter by author substring]:pattern:' \
+                        '--grep[filter by message substring]:pattern:' \
+                        '--since[only commits at or after this date]:date:' \
+                        '--until[only commits at or before this date]:date:' \
+                        '--no-merges[hide merge commits from the output]' \
+                        '--first-parent[follow only first parents]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;

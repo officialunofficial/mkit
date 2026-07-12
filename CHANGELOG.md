@@ -59,6 +59,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `Vec<u8>`, so a retried upload shares the same buffer across every
   attempt instead of copying it again per retry
   ([#702](https://github.com/officialunofficial/mkit/issues/702)).
+- **`log --author`/`--grep`/`--since`/`--until`/`--no-merges`/`--first-parent`
+  and `diff -w`/`-b`/`-U<n>` (#712).** `mkit log` filters commits by a
+  substring match on the author identity (`--author`) or commit message
+  (`--grep`), by a `--since`/`--until` timestamp bound (accepting
+  `@<unix-seconds>`, `now`/`today`/`yesterday`, `<N> <unit> ago`, or
+  `YYYY-MM-DD[ HH:MM:SS]`), hides merge commits from the output
+  (`--no-merges`), or walks only first parents so a merged side branch
+  never enters the walk at all (`--first-parent`, stronger than
+  `--no-merges`). All filters apply before `-n`'s limit. `mkit diff`
+  gains `-w`/`--ignore-all-space` and `-b`/`--ignore-space-change`
+  (whitespace-insensitive line comparison; `-w` wins if both are given)
+  and `-U<n>`/`--unified=<n>` (context-line count, default 3). Both
+  `--author`/`--grep` are plain substring matches rather than regexes
+  (mkit identities are opaque, not free-text names) and `--since`/
+  `--until` use a small explicit date grammar rather than git's
+  `approxidate` — documented divergences, not gaps.
 - **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
   `PackWriter`/`PackReader` transparently compress/decompress pack
   entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,

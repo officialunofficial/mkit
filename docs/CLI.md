@@ -126,7 +126,7 @@ Working-tree commands:
   porcelain) NUL-terminates records and emits **raw, unquoted** paths —
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean.
-- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
+- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
@@ -169,6 +169,15 @@ Working-tree commands:
   green additions, red deletions); the default `auto` colorizes only on a
   tty (honoring `NO_COLOR`/`CLICOLOR_FORCE`), and `--no-color` forces it
   off. (Color for `status`/`log`/`branch` is a tracked follow-up.)
+  `-w`/`--ignore-all-space` ignores whitespace when comparing lines (a
+  line that differs from its counterpart only in whitespace shows as
+  unchanged context — like git); `-b`/`--ignore-space-change` is the
+  weaker form, where differing *amounts* of whitespace compare equal but a
+  line with whitespace where the other side has none still differs. `-w`
+  wins if both are given. Either way the printed hunk lines show their own
+  real (unmodified) bytes — only line *comparison* changes. `-U<n>` /
+  `--unified=<n>` sets the number of unchanged context lines around each
+  hunk (default 3, matching git's `-U3`).
 - `mkit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
   `remove [--force] <path>` / `prune [--dry-run]` — manage linked working
   trees (git-worktree parity, #493). Linked trees share the one object
@@ -247,7 +256,7 @@ History / commits:
   `-q`/`--quiet` suppresses it. `-S`/`--gpg-sign[=<keyid>]` and
   `--no-verify` are accepted **no-ops** (mkit always signs and has no
   hooks); `--no-edit` matches mkit's default amend behavior.
-- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
+- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -271,6 +280,23 @@ History / commits:
   Unix-seconds integer for machine consumption. **`--graph` is accepted
   for compatibility but is currently a no-op** (no ASCII graph is drawn);
   see "Divergences from Git" below.
+  `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
+  **substring** match — `--author` against both the short display form
+  (the `Author:` line) and the full `kind:hex`/`mid:N` form
+  (`--format=json`'s `author` field); `--grep` against the full commit
+  message (title + body). This is intentionally not a regex: unlike git,
+  mkit identities are opaque (Ed25519 keys, `mid:N` numbers, DID keys),
+  not free-text `Name <email>`. `--since <date>`/`--until <date>` bound
+  the commit timestamp; accepted forms are `@<unix-seconds>`,
+  `now`/`today`/`yesterday`, `<N> <unit> ago`
+  (second/minute/hour/day/week/month/year), `YYYY-MM-DD` (midnight UTC),
+  and `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` — a small, explicit
+  grammar, not git's full natural-language `approxidate`. `--no-merges`
+  hides merge commits (more than one parent) from the output without
+  changing the walk; `--first-parent` is stronger — it follows only each
+  commit's first parent, so a merged side branch never enters the walk at
+  all. All of these filters apply **before** `-n <limit>`, so `-n` caps
+  the filtered result, matching git.
 - `mkit reflog [<ref>] [--format=json] [-n N]` — **read-only** view of a
   branch's recorded movement history. Defaults to the branch `HEAD`
   points at (a detached `HEAD` needs an explicit `<ref>`, since the
@@ -1327,6 +1353,17 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   `log` body already diverges from git's `commit/Author/Date` (mkit
   `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
   linear/DAG case is a tracked post-v1 follow-up, not a v1 blocker.
+- **`mkit log --author`/`--grep` are plain substring matches, not
+  regexes.** git's `--author`/`--grep` default to POSIX extended-regex
+  matching against a free-text `Name <email>` header; mkit identities are
+  opaque (Ed25519 keys, `mid:N` numbers, DID keys), so a regex engine
+  would buy little for the common case. A literal substring (the typical
+  `--author=me` / `--grep=fix:` usage) behaves the same either way.
+- **`mkit log --since`/`--until` use a small, explicit date grammar, not
+  git's `approxidate`.** Accepted forms: `@<unix-seconds>`,
+  `now`/`today`/`yesterday`, `<N> <unit> ago`, `YYYY-MM-DD`, and
+  `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` (UTC). git's fuzzier
+  natural-language forms (`last Tuesday`, `3am`, `noon`) are not accepted.
 - **`mkit status --porcelain=v2`** matches git's format except that object
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
   `2` record (`R100`); `--branch` header lines are not emitted.
