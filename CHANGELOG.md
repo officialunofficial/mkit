@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
+  / `download_pack_streaming`).** Two new opt-in trait methods move a
+  pack as a sequence of bounded-size `PackChunk { offset, data, last }`
+  segments instead of one `Vec<u8>`, reusing the same chunk shape
+  `mkit-rpc`'s `ssh.proto` already defines. Both have default
+  implementations expressed in terms of the existing whole-buffer
+  `upload_pack`/`download_pack` (buffer-then-delegate for upload,
+  delegate-then-wrap-as-one-chunk for download), so every transport
+  gets a working implementation with zero code and none is forced to
+  change. `mkit-transport-ssh` and `mkit-transport-enc` override both
+  to forward chunks straight to the `PackChunk` frame loop they already
+  ran internally, so a multi-GB pack streamed from disk over SSH/enc
+  now stays in bounded memory (roughly one chunk at a time) regardless
+  of total pack size, instead of requiring the whole pack materialized
+  up front. `mkit-transport-http` keeps the default buffer-then-delegate
+  behavior for now — real HTTP pack streaming arrives via the
+  `mkit.transport.v1` Connect service's client-/server-streaming
+  `UploadPack`/`DownloadPack` RPCs (SPEC-TRANSPORT-CONNECT §6, pending
+  #698/#701) — but its per-retry full-body clone in `upload_pack` is
+  fixed separately: the request body is now `Bytes` (refcounted) instead
+  of `Vec<u8>`, so a retried upload shares the same buffer across every
+  attempt instead of copying it again per retry
+  ([#702](https://github.com/officialunofficial/mkit/issues/702)).
 - **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
   `PackWriter`/`PackReader` transparently compress/decompress pack
   entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,

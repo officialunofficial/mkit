@@ -100,6 +100,13 @@ use commonware_stream::encrypted::{Config as EncConfig, Receiver, Sender};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
+// Aliased: `mkit_rpc::mkit::rpc::v1::ssh::PackChunk` (the wire protobuf
+// message) is imported unaliased below for the existing frame-building
+// code; `CorePackChunk` is the transport-agnostic streaming type the
+// `Transport::upload_pack_streaming`/`download_pack_streaming` trait
+// methods speak. Same alias `mkit-transport-ssh` uses, for the same
+// reason.
+use mkit_core::protocol::PackChunk as CorePackChunk;
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
@@ -502,6 +509,106 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         Ok(out)
     }
 
+    fn upload_pack_streaming(
+        &self,
+        key: &PackKey,
+        total_bytes: u64,
+        chunks: &mut dyn Iterator<Item = TransportResult<CorePackChunk>>,
+    ) -> TransportResult<()> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::UploadPack(Box::new(
+                UploadPack::default()
+                    .with_pack_id(key.as_bytes().to_vec())
+                    .with_total_bytes(total_bytes),
+            ))),
+            ..Default::default()
+        };
+        self.executor
+            .block_on(send_frame(&mut session.sender, &header))?;
+
+        // Forward each caller-supplied chunk straight to the wire — see
+        // `mkit-transport-ssh`'s identical shape for the memory-bound
+        // rationale (both transports share the same `SshFrame` wire).
+        let mut sent_last = false;
+        for chunk in chunks {
+            let c = chunk?;
+            let last = c.last;
+            let frame = SshFrame {
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_offset(c.offset)
+                        .with_data(c.data)
+                        .with_last(last),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &frame))?;
+            if last {
+                sent_last = true;
+                break;
+            }
+        }
+        if !sent_last {
+            // The caller's iterator ended without ever yielding a
+            // `last = true` chunk — a protocol-level caller bug per the
+            // trait contract, not a transport failure.
+            return Err(TransportError::ProtocolError);
+        }
+
+        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+        match resp.body {
+            Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
+            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+            other => Err(unexpected_frame("enc", "UploadPackResponse", other)),
+        }
+    }
+
+    fn download_pack_streaming(
+        &self,
+        key: &PackKey,
+    ) -> TransportResult<Box<dyn Iterator<Item = TransportResult<CorePackChunk>> + '_>> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPack(Box::new(
+                DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
+            ))),
+            ..Default::default()
+        };
+        self.executor
+            .block_on(send_frame(&mut session.sender, &req))?;
+
+        let header = self.executor.block_on(recv_frame(&mut session.receiver))?;
+        let total = match header.body {
+            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "enc")),
+            other => return Err(unexpected_frame("enc", "DownloadPackHeader", other)),
+        };
+        if total > PACK_BODY_LIMIT {
+            return Err(TransportError::RemoteError(
+                "server-advertised pack size exceeds client cap".into(),
+            ));
+        }
+
+        Ok(Box::new(EncDownloadPackChunks {
+            session,
+            executor: &self.executor,
+            remaining_budget: core::cmp::min(total, PACK_BODY_LIMIT) as usize,
+            done: false,
+            errored: false,
+        }))
+    }
+
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
         let mut session = self
             .session
@@ -633,6 +740,73 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
                 .collect::<TransportResult<Vec<_>>>(),
             Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
             other => Err(unexpected_frame("enc", "ListRefsResponse", other)),
+        }
+    }
+}
+
+/// Lazy [`Iterator`] over the response side of `download_pack_streaming`
+/// — the streaming counterpart to `download_pack`'s whole-buffer loop.
+/// Holds the [`EncSession`]'s lock for its entire lifetime (the same
+/// single-pipelined-stream posture `EncTransport`'s other verbs already
+/// have), reading exactly one `PackChunk` frame per [`Iterator::next`]
+/// call so memory stays bounded to roughly one chunk regardless of
+/// total pack size.
+struct EncDownloadPackChunks<'a, I: Stream, O: Sink, E: Executor> {
+    session: std::sync::MutexGuard<'a, EncSession<I, O>>,
+    executor: &'a E,
+    /// Bytes still allowed before the running total would exceed
+    /// [`PACK_BODY_LIMIT_USIZE`] — mirrors `mkit-transport-ssh`'s
+    /// `DownloadPackChunks` budget check.
+    remaining_budget: usize,
+    done: bool,
+    errored: bool,
+}
+
+impl<I: Stream, O: Sink, E: Executor> Iterator for EncDownloadPackChunks<'_, I, O, E> {
+    type Item = TransportResult<CorePackChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.errored {
+            return None;
+        }
+        let frame = match self
+            .executor
+            .block_on(recv_frame(&mut self.session.receiver))
+        {
+            Ok(f) => f,
+            Err(e) => {
+                self.errored = true;
+                return Some(Err(e));
+            }
+        };
+        match frame.body {
+            Some(ssh_frame::Body::PackChunk(c)) => {
+                let data = c.data.unwrap_or_default();
+                if data.len() > self.remaining_budget {
+                    self.errored = true;
+                    return Some(Err(TransportError::RemoteError(
+                        "server-streamed pack body exceeds client cap".into(),
+                    )));
+                }
+                self.remaining_budget -= data.len();
+                let last = c.last.unwrap_or(false);
+                if last {
+                    self.done = true;
+                }
+                Some(Ok(CorePackChunk {
+                    offset: c.offset.unwrap_or(0),
+                    data,
+                    last,
+                }))
+            }
+            Some(ssh_frame::Body::Error(e)) => {
+                self.errored = true;
+                Some(Err(rpc_error_to_transport(*e, "enc")))
+            }
+            other => {
+                self.errored = true;
+                Some(Err(unexpected_frame("enc", "PackChunk", other)))
+            }
         }
     }
 }

@@ -19,6 +19,13 @@ workspace = true
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
 mkit-core = { version = "0.3", path = "../mkit-core" }
+# `Bytes` backs `upload_pack`'s request body: reqwest already depends on
+# `bytes` transitively (`reqwest::blocking::Body: From<Bytes>`), so this
+# names it explicitly rather than relying on an unstated transitive
+# version. `Bytes::clone()` is a refcount bump (not a copy), which is
+# the fix for the per-retry full-body clone this crate used to do
+# (mkit#702).
+bytes = "1"
 # rustls-only — the whole point of this crate is no system TLS baggage.
 # default-features = false drops default-tls (native-tls on desktop).
 reqwest = { version = "0.12", default-features = false, features = [

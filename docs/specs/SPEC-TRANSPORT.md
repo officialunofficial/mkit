@@ -48,6 +48,34 @@ internal `Mutex` so the trait object remains object-safe.
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
 
+### 1.1 Streaming pack transfer (additive, opt-in)
+
+`upload_pack_streaming(key, total_bytes, chunks)` and
+`download_pack_streaming(key)` are additive verbs alongside
+`upload_pack`/`download_pack`: they move a pack as a sequence of
+bounded-size `PackChunk { offset, data, last }` segments (the same
+shape `ssh.proto`'s `PackChunk` already defines) instead of one
+`Vec<u8>`, so a transport that forwards chunks straight to its own
+wire never holds more than roughly one chunk in memory regardless of
+total pack size. Both have default trait implementations expressed in
+terms of the whole-buffer verbs — buffer-then-delegate for upload,
+delegate-then-wrap-as-one-chunk for download — so **no transport is
+required to change**; a caller may always use the streaming entry
+point, even against a transport that has not opted into real
+streaming.
+
+The SSH and enc transports override both methods to expose the
+`PackChunk` frame loop they already ran internally for the
+whole-buffer path (§4.2, §6). HTTP does not yet override
+either — its JSON REST dialect (§5) has no chunked-body wire format,
+and inventing a bespoke one is explicitly out of scope: real HTTP
+pack streaming is planned to arrive via a client-streaming
+`UploadPack` / server-streaming `DownloadPack` RPC on the
+`mkit.transport.v1` Connect service
+([SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) §6), which reuses
+this same `PackChunk` shape on the wire. Until a Connect client lands,
+`HttpTransport` runs the default buffer-then-delegate implementation.
+
 `update_ref`'s condition is one of:
 
 - `Any` — clobber the ref unconditionally.
@@ -566,6 +594,8 @@ These hold for every conformant transport, regardless of scheme:
 | A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
 | A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` shared by the SSH and enc-listener frame loops (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
+| `*_streaming` is additive — no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |
+| A `PackChunk` stream never ends silently without a `last = true` item | `upload_pack_streaming` (all overrides) rejects a stream that ends without one; `download_pack_streaming` overrides read the server's own `last` flag (§1.1, §4.2, §6) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 | A proxy cannot substitute a sparse-checkout filter | `?sparse=<filter-hex>` MUST equal `BLAKE3` of the canonicalised filter; server re-canonicalises and rejects with `409` (§5.6) |
 
