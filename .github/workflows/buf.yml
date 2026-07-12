@@ -1,0 +1,77 @@
+name: "CI: Buf"
+
+# Schema gate for mkit's two proto trees (apps/repo-worker/proto and
+# rust/crates/mkit-rpc/proto). This is the ONLY place buf lint / buf
+# breaking run — cloudbuild/codegen.yaml (Cloud Build) covers vendored-
+# codegen freshness via scripts/check-generated-fresh.sh, which is a
+# separate, additive concern (and not a required status for external
+# fork PRs the way this native GitHub Actions check is).
+#
+# Deliberately unconditional: no `paths:` filter on the trigger and no
+# SHOULD_RUN/workflow_dispatch skip gate (contrast rust.yml's
+# build-and-test / keystore-backends, or web.yml/mcp.yml's paths-filter
+# + always-on-gate dance). A wire-breaking or lint-violating proto
+# change must fail this check on every PR, full stop — "skipped" must
+# never read as green here.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per PR; newer pushes cancel superseded runs. Pushes to main are
+# never cancelled (key the guard off the event name, not github.ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  buf:
+    name: buf lint + buf breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      # apps/repo-worker/proto: full lint + breaking coverage per
+      # apps/repo-worker/buf.yaml's STANDARD lint policy (with its three
+      # documented exceptions) and `breaking: use: [FILE]` policy.
+      #
+      # breaking_against is deliberately left unset: buf-action's own
+      # default ("base branch of the pull request, or the commit before
+      # the push") is exactly what we want for both trigger types and
+      # avoids hardcoding a ref that would resolve to a same-commit
+      # (no-op) comparison on `push` events. See buf-action's MIGRATION.md
+      # ("We recommend not setting this parameter and instead relying on
+      # the default behavior.").
+      - name: buf (apps/repo-worker/proto)
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
+        with:
+          version: "1.66.0"
+          input: apps/repo-worker
+          lint: true
+          format: false
+          breaking: true
+          push: false
+          archive: false
+          pr_comment: false
+
+      # rust/crates/mkit-rpc/proto: lint only. No breaking policy is
+      # configured here (out of scope for this check — see
+      # rust/crates/mkit-rpc/proto/buf.yaml) so `breaking` stays disabled
+      # for this module rather than silently no-op'ing against an unset
+      # policy.
+      - name: buf (rust/crates/mkit-rpc/proto)
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
+        with:
+          version: "1.66.0"
+          input: rust/crates/mkit-rpc/proto
+          lint: true
+          format: false
+          breaking: false
+          push: false
+          archive: false
+          pr_comment: false
