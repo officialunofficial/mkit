@@ -28,6 +28,12 @@ pub mod proto {
     connectrpc::include_generated!();
 }
 
+/// The `/watch` wire encoding — a `RoomEvent` proto-JSON payload — shared by
+/// the RefStore DO (producer) and the WatchRefs Connect-streaming bridge
+/// (consumer). See the module doc for why this lives outside `worker_impl`
+/// (host-testable, no wasm32 target required).
+pub mod room_event;
+
 // Worker glue (R2 / Durable Object / fetch event) is wasm32-only: the
 // `#[durable_object]` and `#[event(fetch)]` macros emit `#[wasm_bindgen]`
 // exports that only build for the worker target.

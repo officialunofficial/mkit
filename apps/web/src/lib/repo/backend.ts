@@ -124,10 +124,30 @@ export type ActivityFrame =
   | { kind: 'reaction'; reaction: ReactionUpdate }
 
 /**
- * Parse one raw `/watch` WebSocket frame. Accepts the server's snake_case fields and camelCase, dispatches on the
- * `kind` discriminator, and stays back-compatible with legacy untagged ref frames (no `kind` → inferred from the
- * presence of `object_id`/`message_id`). Returns null for non-strings, malformed JSON, or frames missing their required
- * ids.
+ * Decode a proto3-JSON `bytes` field (standard base64, e.g. `objectId`/`authorPubkey`) into lowercase hex, matching the
+ * rest of the codebase's hex-first convention so callers don't need to know the wire used base64. Returns `''` for
+ * anything that isn't a decodable base64 string (absent field, malformed input) — callers treat an empty hex id as
+ * "missing", same as before.
+ */
+function protoBytesToHex(b64: unknown): string {
+  if (typeof b64 !== 'string' || b64 === '') return ''
+  try {
+    const bin = atob(b64)
+    let hex = ''
+    for (let i = 0; i < bin.length; i++) hex += bin.charCodeAt(i).toString(16).padStart(2, '0')
+    return hex
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Parse one raw `/watch` WebSocket frame. The wire format is the canonical proto3-JSON encoding of
+ * `mkit.repo.v1.RoomEvent` (a `oneof` of `commit`/`chat`/`reaction`/`presence` — see `repo.proto`), the SAME message
+ * the Connect `WatchRefs` RPC streams, so this socket and a Connect client see one schema instead of two hand-parsed
+ * dialects (see mkit#705). The oneof serializes as a single-key object at the top level (`{"commit": {...}}` etc, per
+ * proto3 JSON's oneof mapping) and `bytes` fields (`objectId`, `authorPubkey`, `messageId`) are base64, not hex —
+ * decoded via {@link protoBytesToHex}. Returns null for non-strings, malformed JSON, or a frame missing its required id.
  */
 export function parseActivityFrame(data: unknown): ActivityFrame | null {
   if (typeof data !== 'string') return null
@@ -139,54 +159,59 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
   }
   if (!f || typeof f !== 'object') return null
 
-  const kind = f.kind
-  if (kind === 'presence') {
-    const raw = Array.isArray(f.members) ? f.members : []
+  if (f.presence && typeof f.presence === 'object') {
+    const p = f.presence as Record<string, unknown>
+    const raw = Array.isArray(p.members) ? p.members : []
     const members: PresenceMember[] = raw
       .map((m) => {
         const o = (m ?? {}) as Record<string, unknown>
-        return { pubkeyHex: String(o.pubkey ?? o.pubkeyHex ?? ''), since: Number(o.since ?? 0) }
+        return { pubkeyHex: protoBytesToHex(o.authorPubkey), since: Number(o.since ?? 0) }
       })
       .filter((m) => m.pubkeyHex)
-    return { kind: 'presence', presence: { members, viewers: Number(f.viewers ?? 0) } }
+    return { kind: 'presence', presence: { members, viewers: Number(p.viewers ?? 0) } }
   }
-  if (kind === 'reaction') {
-    const targetIdHex = (f.targetIdHex ?? f.target_id) as string | undefined
+
+  if (f.reaction && typeof f.reaction === 'object') {
+    const r = f.reaction as Record<string, unknown>
+    const targetIdHex = r.targetId as string | undefined
     if (!targetIdHex) return null
     return {
       kind: 'reaction',
       reaction: {
         targetIdHex,
-        emoji: (f.emoji ?? '') as string,
-        authorPubkeyHex: (f.authorPubkeyHex ?? f.author_pubkey ?? '') as string,
-        active: f.active === true,
-        count: Number(f.count ?? 0),
+        emoji: (r.emoji ?? '') as string,
+        authorPubkeyHex: protoBytesToHex(r.authorPubkey),
+        active: r.active === true,
+        count: Number(r.count ?? 0),
       },
     }
   }
 
-  const messageIdHex = (f.messageIdHex ?? f.message_id) as string | undefined
-  if (kind === 'chat' || (kind === undefined && messageIdHex)) {
+  if (f.chat && typeof f.chat === 'object') {
+    const c = f.chat as Record<string, unknown>
+    const messageIdHex = protoBytesToHex(c.messageId)
     if (!messageIdHex) return null
     return {
       kind: 'chat',
       message: {
         messageIdHex,
-        authorPubkeyHex: (f.authorPubkeyHex ?? f.author_pubkey ?? '') as string,
-        text: (f.text ?? '') as string,
-        createdAt: Number(f.createdAt ?? f.created_at ?? 0),
-        seq: Number(f.seq ?? 0),
+        authorPubkeyHex: protoBytesToHex(c.authorPubkey),
+        text: (c.text ?? '') as string,
+        createdAt: Number(c.createdAt ?? 0),
+        seq: Number(c.seq ?? 0),
       },
     }
   }
 
-  const name = f.name as string | undefined
-  const objectIdHex = (f.objectIdHex ?? f.object_id) as string | undefined
-  if (!name || !objectIdHex) return null
-  return {
-    kind: 'commit',
-    ref: { name, objectIdHex, authorPubkeyHex: (f.authorPubkeyHex ?? f.author_pubkey ?? '') as string },
+  if (f.commit && typeof f.commit === 'object') {
+    const rc = f.commit as Record<string, unknown>
+    const name = rc.name as string | undefined
+    const objectIdHex = protoBytesToHex(rc.objectId)
+    if (!name || !objectIdHex) return null
+    return { kind: 'commit', ref: { name, objectIdHex, authorPubkeyHex: protoBytesToHex(rc.authorPubkey) } }
   }
+
+  return null
 }
 
 /** One upstream commit a remix/fork derives from. */

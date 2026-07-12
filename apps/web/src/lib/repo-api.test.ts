@@ -1072,32 +1072,64 @@ describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () =
   })
 })
 
-describe('parseActivityFrame dispatches commit vs chat frames', () => {
-  it('parses a server commit frame (kind=commit, snake_case)', () => {
+/** Hex -> standard base64, matching the proto3-JSON `bytes` field encoding `parseActivityFrame` now expects. */
+function hexToB64(hex: string): string {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin)
+}
+
+describe('parseActivityFrame decodes the RoomEvent proto3-JSON oneof (mkit#705)', () => {
+  it('parses a commit frame ({"commit": {...}})', () => {
     const f = parseActivityFrame(
-      JSON.stringify({ kind: 'commit', name: 'main', object_id: 'abc', author_pubkey: 'pk' }),
+      JSON.stringify({ commit: { name: 'main', objectId: hexToB64('ab'), authorPubkey: hexToB64('cd') } }),
     )
-    expect(f).toEqual({ kind: 'commit', ref: { name: 'main', objectIdHex: 'abc', authorPubkeyHex: 'pk' } })
+    expect(f).toEqual({ kind: 'commit', ref: { name: 'main', objectIdHex: 'ab', authorPubkeyHex: 'cd' } })
   })
 
-  it('parses a legacy commit frame with no kind (back-compat with deployed clients)', () => {
-    const f = parseActivityFrame(JSON.stringify({ name: 'main', object_id: 'abc' }))
-    expect(f?.kind).toBe('commit')
-  })
-
-  it('parses a chat frame (kind=chat, snake_case)', () => {
+  it('parses a chat frame ({"chat": {...}})', () => {
     const f = parseActivityFrame(
-      JSON.stringify({ kind: 'chat', message_id: 'mid', author_pubkey: 'pk', text: 'gm', created_at: 123, seq: 7 }),
+      JSON.stringify({
+        chat: {
+          messageId: hexToB64('ab'),
+          authorPubkey: hexToB64('cd'),
+          text: 'gm',
+          createdAt: 123,
+          seq: 7,
+        },
+      }),
     )
     expect(f).toEqual({
       kind: 'chat',
-      message: { messageIdHex: 'mid', authorPubkeyHex: 'pk', text: 'gm', createdAt: 123, seq: 7 },
+      message: { messageIdHex: 'ab', authorPubkeyHex: 'cd', text: 'gm', createdAt: 123, seq: 7 },
     })
+  })
+
+  it('parses a reaction frame ({"reaction": {...}})', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({
+        reaction: { targetId: 'targethex', emoji: '👍', authorPubkey: hexToB64('cd'), active: true, count: 3 },
+      }),
+    )
+    expect(f).toEqual({
+      kind: 'reaction',
+      reaction: { targetIdHex: 'targethex', emoji: '👍', authorPubkeyHex: 'cd', active: true, count: 3 },
+    })
+  })
+
+  it('parses a presence frame ({"presence": {...}})', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({ presence: { members: [{ authorPubkey: hexToB64('ab'), since: 100 }], viewers: 2 } }),
+    )
+    expect(f).toEqual({ kind: 'presence', presence: { members: [{ pubkeyHex: 'ab', since: 100 }], viewers: 2 } })
   })
 
   it('returns null for malformed or incomplete frames', () => {
     expect(parseActivityFrame('not json')).toBeNull()
-    expect(parseActivityFrame(JSON.stringify({ name: 'main' }))).toBeNull() // commit missing object id
+    expect(parseActivityFrame(JSON.stringify({ commit: { name: 'main' } }))).toBeNull() // commit missing object id
+    expect(parseActivityFrame(JSON.stringify({}))).toBeNull() // no recognized oneof key
     expect(parseActivityFrame(42 as unknown)).toBeNull()
   })
 })

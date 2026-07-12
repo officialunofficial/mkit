@@ -42,9 +42,9 @@ pub type OwnedListRefsResponseView = ::buffa::view::OwnedView<
 pub type OwnedWatchRefsRequestView = ::buffa::view::OwnedView<
     __buffa::view::WatchRefsRequestView<'static>,
 >;
-///Shorthand for `OwnedView<RefEventView<'static>>`.
-pub type OwnedRefEventView = ::buffa::view::OwnedView<
-    __buffa::view::RefEventView<'static>,
+///Shorthand for `OwnedView<RoomEventView<'static>>`.
+pub type OwnedRoomEventView = ::buffa::view::OwnedView<
+    __buffa::view::RoomEventView<'static>,
 >;
 ///Shorthand for `OwnedView<PostMessageRequestView<'static>>`.
 pub type OwnedPostMessageRequestView = ::buffa::view::OwnedView<
@@ -175,7 +175,7 @@ for ::buffa::view::OwnedView<__buffa::view::ListRefsResponseView<'static>> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
 }
-impl ::connectrpc::Encodable<RefEvent> for __buffa::view::RefEventView<'_> {
+impl ::connectrpc::Encodable<RoomEvent> for __buffa::view::RoomEventView<'_> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -183,8 +183,8 @@ impl ::connectrpc::Encodable<RefEvent> for __buffa::view::RefEventView<'_> {
         ::connectrpc::__codegen::encode_view_body(self, codec)
     }
 }
-impl ::connectrpc::Encodable<RefEvent>
-for ::buffa::view::OwnedView<__buffa::view::RefEventView<'static>> {
+impl ::connectrpc::Encodable<RoomEvent>
+for ::buffa::view::OwnedView<__buffa::view::RoomEventView<'static>> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -537,7 +537,7 @@ pub trait RepoService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             ::connectrpc::ServiceStream<
-                impl ::connectrpc::Encodable<RefEvent> + Send + use<Self>,
+                impl ::connectrpc::Encodable<RoomEvent> + Send + use<Self>,
             >,
         >,
     > + Send;
@@ -791,7 +791,7 @@ impl<S: RepoService> RepoServiceExt for S {
             .route_view_server_stream::<
                 _,
                 _,
-                RefEvent,
+                RoomEvent,
             >(
                 REPO_SERVICE_SERVICE_NAME,
                 "WatchRefs",
@@ -1261,7 +1261,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     Ok(
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
-                                RefEvent,
+                                RoomEvent,
                                 _,
                                 _,
                             >(s, format)),
@@ -1570,7 +1570,7 @@ where
     ) -> Result<
         ::connectrpc::client::ServerStream<
             T::ResponseBody,
-            __buffa::view::RefEventView<'static>,
+            __buffa::view::RoomEventView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -1588,7 +1588,7 @@ where
     ) -> Result<
         ::connectrpc::client::ServerStream<
             T::ResponseBody,
-            __buffa::view::RefEventView<'static>,
+            __buffa::view::RoomEventView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {

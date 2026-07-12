@@ -19,6 +19,16 @@ pub mod __buffa {
         #[allow(unused_imports)]
         use super::*;
         include!("mkit.repo.v1.repo.__view.rs");
+        pub mod oneof {
+            #[allow(unused_imports)]
+            use super::*;
+            include!("mkit.repo.v1.repo.__view_oneof.rs");
+        }
+    }
+    pub mod oneof {
+        #[allow(unused_imports)]
+        use super::*;
+        include!("mkit.repo.v1.repo.__oneof.rs");
     }
     /// Register this package's `Any` type entries and extension entries.
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
@@ -38,6 +48,10 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__WATCH_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__REF_EVENT_JSON_ANY);
+        reg.register_json_any(super::__ROOM_EVENT_JSON_ANY);
+        reg.register_json_any(super::__REACTION_EVENT_JSON_ANY);
+        reg.register_json_any(super::__PRESENCE_EVENT_JSON_ANY);
+        reg.register_json_any(super::__PRESENCE_MEMBER_JSON_ANY);
         reg.register_json_any(super::__POST_MESSAGE_REQUEST_JSON_ANY);
         reg.register_json_any(super::__POST_MESSAGE_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__LIST_MESSAGES_REQUEST_JSON_ANY);
@@ -114,6 +128,22 @@ pub use self::__buffa::view::WatchRefsRequestOwnedView;
 pub use self::__buffa::view::RefEventView;
 #[doc(inline)]
 pub use self::__buffa::view::RefEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::RoomEventView;
+#[doc(inline)]
+pub use self::__buffa::view::RoomEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionEventView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceEventView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceMemberView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceMemberOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PostMessageRequestView;
 #[doc(inline)]

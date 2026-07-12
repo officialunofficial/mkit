@@ -81,9 +81,12 @@ service RepoService {
   // List refs under an optional prefix.
   rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
 
-  // Server-streaming live ref advances for the room — one RefEvent per
-  // successful UpdateRef, to every subscriber.
-  rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);
+  // Server-streaming live room activity — one RoomEvent per successful
+  // UpdateRef/PostMessage/React, plus presence roster changes, to every
+  // subscriber. RoomEvent is a oneof of the four kinds (commit/chat/
+  // reaction/presence) so the stream is one schema-validated feed instead of
+  // requiring a second, hand-parsed channel for chat/reactions/presence.
+  rpc WatchRefs(WatchRefsRequest) returns (stream RoomEvent);
 
   // Post a signed chat message to the room. The write envelope (request
   // metadata) authenticates the author exactly like UpdateRef — the verified
@@ -215,6 +218,45 @@ message RefEvent {
   string name = 1;
   bytes object_id = 2;
   bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the writer
+}
+
+// A discriminated union of everything the room's live subscribers can
+// receive over WatchRefs (and, during migration, the raw `/watch/<room>`
+// WebSocket fallback described in repo-worker's README — both carry the SAME
+// RoomEvent proto3-JSON encoding so there is one source of truth for the
+// wire shape): a ref advance, a chat post, a reaction toggle, or a presence
+// roster update. Replaces the old ad hoc, hand-parsed `WatchFrame` JSON enum
+// + separate untyped `PresenceJson` shape — see mkit#705.
+message RoomEvent {
+  oneof event {
+    RefEvent commit = 1;
+    ChatMessage chat = 2;
+    ReactionEvent reaction = 3;
+    PresenceEvent presence = 4;
+  }
+}
+
+// A live reaction TOGGLE — the new on/off state for one (target, emoji,
+// author) tuple after a React call, broadcast to every room subscriber.
+// Distinct from `Reaction` (the stored row shape ListReactionsResponse
+// returns, which carries no `active`/`count`).
+message ReactionEvent {
+  string target_id = 1;         // hex id of the feed item (message_id or commit hash)
+  string emoji = 2;
+  bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the reactor
+  bool active = 4;              // true if the reaction is now ON for this author
+  uint32 count = 5;             // total reactors for (target, emoji) after the toggle
+}
+
+// Live room presence, broadcast to every subscriber on join/leave.
+message PresenceEvent {
+  repeated PresenceMember members = 1;  // distinct online keys, deduped by pubkey across tabs
+  uint32 viewers = 2;                   // connections with no identity yet ("N viewers")
+}
+
+message PresenceMember {
+  bytes author_pubkey = 1;      // 32-byte Ed25519 pubkey
+  int64 since = 2;              // epoch-ms the (earliest) connection joined
 }
 
 // ----------------------------------------------------------------------------

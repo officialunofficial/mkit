@@ -4576,6 +4576,1391 @@ impl ::serde::Serialize for RefEventOwnedView {
     }
 }
 #[derive(Clone, Debug, Default)]
+pub struct RoomEventView<'a> {
+    pub event: ::core::option::Option<
+        super::super::__buffa::view::oneof::room_event::Event<'a>,
+    >,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for RoomEventView<'a> {
+    type Owned = super::super::RoomEvent;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::room_event::Event::Commit(
+                        ref mut existing,
+                    ),
+                ) = view.event
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.event = Some(
+                        super::super::__buffa::view::oneof::room_event::Event::Commit(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::RefEventView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::room_event::Event::Chat(
+                        ref mut existing,
+                    ),
+                ) = view.event
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.event = Some(
+                        super::super::__buffa::view::oneof::room_event::Event::Chat(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::ChatMessageView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::room_event::Event::Reaction(
+                        ref mut existing,
+                    ),
+                ) = view.event
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.event = Some(
+                        super::super::__buffa::view::oneof::room_event::Event::Reaction(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::ReactionEventView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::room_event::Event::Presence(
+                        ref mut existing,
+                    ),
+                ) = view.event
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.event = Some(
+                        super::super::__buffa::view::oneof::room_event::Event::Presence(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::PresenceEventView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::RoomEvent, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::RoomEvent, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::RoomEvent {
+            event: match self.event.as_ref() {
+                ::core::option::Option::Some(v) => {
+                    ::core::option::Option::Some(
+                        match v {
+                            super::super::__buffa::view::oneof::room_event::Event::Commit(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::room_event::Event::Commit(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::room_event::Event::Chat(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::room_event::Event::Chat(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::room_event::Event::Reaction(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::room_event::Event::Reaction(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::room_event::Event::Presence(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::room_event::Event::Presence(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                        },
+                    )
+                }
+                ::core::option::Option::None => ::core::option::Option::None,
+            },
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for RoomEventView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let ::core::option::Option::Some(ref v) = self.event {
+            match v {
+                super::super::__buffa::view::oneof::room_event::Event::Commit(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Chat(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Reaction(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Presence(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u32 + ::buffa::encoding::varint_len(inner as u64) as u32
+                            + inner;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.event {
+            match v {
+                super::super::__buffa::view::oneof::room_event::Event::Commit(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        __cache.consume_next(),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Chat(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        __cache.consume_next(),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Reaction(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        __cache.consume_next(),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Presence(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        4u32,
+                        __cache.consume_next(),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for RoomEventView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(ref __ov) = self.event {
+            match __ov {
+                super::super::__buffa::view::oneof::room_event::Event::Commit(v) => {
+                    __map.serialize_entry("commit", v)?;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Chat(v) => {
+                    __map.serialize_entry("chat", v)?;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Reaction(v) => {
+                    __map.serialize_entry("reaction", v)?;
+                }
+                super::super::__buffa::view::oneof::room_event::Event::Presence(v) => {
+                    __map.serialize_entry("presence", v)?;
+                }
+            }
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for RoomEventView<'a> {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "RoomEvent";
+    const FULL_NAME: &'static str = "mkit.repo.v1.RoomEvent";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.RoomEvent";
+}
+::buffa::impl_default_view_instance!(RoomEventView);
+::buffa::impl_view_reborrow!(RoomEventView);
+/** Self-contained, `'static` owned view of a `RoomEvent` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`RoomEventView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`RoomEventView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct RoomEventOwnedView(::buffa::OwnedView<RoomEventView<'static>>);
+impl RoomEventOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RoomEventOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RoomEventOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::RoomEvent,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RoomEventOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`RoomEventView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &RoomEventView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if re-materializing preserved unknown fields
+    /// fails (e.g. the unknown-field limit is exceeded).
+    pub fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::RoomEvent, ::buffa::DecodeError> {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Oneof `event`.
+    #[must_use]
+    pub fn event(
+        &self,
+    ) -> ::core::option::Option<
+        &super::super::__buffa::view::oneof::room_event::Event<'_>,
+    > {
+        self.0.reborrow().event.as_ref()
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<RoomEventView<'static>>>
+for RoomEventOwnedView {
+    fn from(inner: ::buffa::OwnedView<RoomEventView<'static>>) -> Self {
+        RoomEventOwnedView(inner)
+    }
+}
+impl ::core::convert::From<RoomEventOwnedView>
+for ::buffa::OwnedView<RoomEventView<'static>> {
+    fn from(wrapper: RoomEventOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<RoomEventView<'static>>>
+for RoomEventOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<RoomEventView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::RoomEvent {
+    type View<'a> = RoomEventView<'a>;
+    type ViewHandle = RoomEventOwnedView;
+}
+impl ::serde::Serialize for RoomEventOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct ReactionEventView<'a> {
+    /// Field 1: `target_id`
+    pub target_id: ::core::option::Option<&'a str>,
+    /// Field 2: `emoji`
+    pub emoji: ::core::option::Option<&'a str>,
+    /// Field 3: `author_pubkey`
+    pub author_pubkey: ::core::option::Option<&'a [u8]>,
+    /// Field 4: `active`
+    pub active: ::core::option::Option<bool>,
+    /// Field 5: `count`
+    pub count: ::core::option::Option<u32>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for ReactionEventView<'a> {
+    type Owned = super::super::ReactionEvent;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.target_id = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.emoji = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.author_pubkey = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.active = Some(::buffa::types::decode_bool(&mut cur)?);
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.count = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::ReactionEvent, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::ReactionEvent, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::ReactionEvent {
+            target_id: self.target_id.map(|s| s.to_string()),
+            emoji: self.emoji.map(|s| s.to_string()),
+            author_pubkey: self.author_pubkey.map(|b| (b).to_vec()),
+            active: self.active,
+            count: self.count,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for ReactionEventView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.target_id {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.emoji {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(ref v) = self.author_pubkey {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if self.active.is_some() {
+            size += 1u32 + ::buffa::types::BOOL_ENCODED_LEN as u32;
+        }
+        if let Some(v) = self.count {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.target_id {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(ref v) = self.emoji {
+            ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.author_pubkey {
+            ::buffa::types::put_bytes_field(3u32, v, buf);
+        }
+        if let Some(v) = self.active {
+            ::buffa::types::put_bool_field(4u32, v, buf);
+        }
+        if let Some(v) = self.count {
+            ::buffa::types::put_uint32_field(5u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for ReactionEventView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.target_id {
+            __map.serialize_entry("targetId", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.emoji {
+            __map.serialize_entry("emoji", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.author_pubkey {
+            __map
+                .serialize_entry(
+                    "authorPubkey",
+                    &::buffa::json_helpers::BytesJson(__v),
+                )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.active {
+            __map.serialize_entry("active", &__v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.count {
+            __map.serialize_entry("count", &::buffa::json_helpers::ProtoJson(&__v))?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for ReactionEventView<'a> {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "ReactionEvent";
+    const FULL_NAME: &'static str = "mkit.repo.v1.ReactionEvent";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.ReactionEvent";
+}
+::buffa::impl_default_view_instance!(ReactionEventView);
+::buffa::impl_view_reborrow!(ReactionEventView);
+/** Self-contained, `'static` owned view of a `ReactionEvent` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ReactionEventView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ReactionEventView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct ReactionEventOwnedView(::buffa::OwnedView<ReactionEventView<'static>>);
+impl ReactionEventOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            ReactionEventOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            ReactionEventOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::ReactionEvent,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            ReactionEventOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`ReactionEventView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &ReactionEventView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if re-materializing preserved unknown fields
+    /// fails (e.g. the unknown-field limit is exceeded).
+    pub fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::ReactionEvent, ::buffa::DecodeError> {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `target_id`
+    #[must_use]
+    pub fn target_id(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().target_id
+    }
+    /// Field 2: `emoji`
+    #[must_use]
+    pub fn emoji(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().emoji
+    }
+    /// Field 3: `author_pubkey`
+    #[must_use]
+    pub fn author_pubkey(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().author_pubkey
+    }
+    /// Field 4: `active`
+    #[must_use]
+    pub fn active(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().active
+    }
+    /// Field 5: `count`
+    #[must_use]
+    pub fn count(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().count
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<ReactionEventView<'static>>>
+for ReactionEventOwnedView {
+    fn from(inner: ::buffa::OwnedView<ReactionEventView<'static>>) -> Self {
+        ReactionEventOwnedView(inner)
+    }
+}
+impl ::core::convert::From<ReactionEventOwnedView>
+for ::buffa::OwnedView<ReactionEventView<'static>> {
+    fn from(wrapper: ReactionEventOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<ReactionEventView<'static>>>
+for ReactionEventOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<ReactionEventView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::ReactionEvent {
+    type View<'a> = ReactionEventView<'a>;
+    type ViewHandle = ReactionEventOwnedView;
+}
+impl ::serde::Serialize for ReactionEventOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct PresenceEventView<'a> {
+    /// Field 1: `members`
+    pub members: ::buffa::RepeatedView<
+        'a,
+        super::super::__buffa::view::PresenceMemberView<'a>,
+    >,
+    /// Field 2: `viewers`
+    pub viewers: ::core::option::Option<u32>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for PresenceEventView<'a> {
+    type Owned = super::super::PresenceEvent;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.viewers = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                view.members
+                    .push(
+                        <super::super::__buffa::view::PresenceMemberView as ::buffa::MessageView>::decode_view_ctx(
+                            sub,
+                            __sub_ctx,
+                        )?,
+                    );
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::PresenceEvent, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::PresenceEvent, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::PresenceEvent {
+            members: self
+                .members
+                .iter()
+                .map(|v| v.to_owned_from_source(__buffa_src))
+                .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+            viewers: self.viewers,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for PresenceEventView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        for v in &self.members {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
+                    + inner_size;
+        }
+        if let Some(v) = self.viewers {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.members {
+            ::buffa::types::put_len_delimited_header(1u32, __cache.consume_next(), buf);
+            v.write_to(__cache, buf);
+        }
+        if let Some(v) = self.viewers {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for PresenceEventView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if !self.members.is_empty() {
+            __map.serialize_entry("members", &*self.members)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.viewers {
+            __map.serialize_entry("viewers", &::buffa::json_helpers::ProtoJson(&__v))?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for PresenceEventView<'a> {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "PresenceEvent";
+    const FULL_NAME: &'static str = "mkit.repo.v1.PresenceEvent";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PresenceEvent";
+}
+::buffa::impl_default_view_instance!(PresenceEventView);
+::buffa::impl_view_reborrow!(PresenceEventView);
+/** Self-contained, `'static` owned view of a `PresenceEvent` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`PresenceEventView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`PresenceEventView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct PresenceEventOwnedView(::buffa::OwnedView<PresenceEventView<'static>>);
+impl PresenceEventOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceEventOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceEventOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::PresenceEvent,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceEventOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`PresenceEventView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &PresenceEventView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if re-materializing preserved unknown fields
+    /// fails (e.g. the unknown-field limit is exceeded).
+    pub fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::PresenceEvent, ::buffa::DecodeError> {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `members`
+    #[must_use]
+    pub fn members(
+        &self,
+    ) -> &::buffa::RepeatedView<
+        '_,
+        super::super::__buffa::view::PresenceMemberView<'_>,
+    > {
+        &self.0.reborrow().members
+    }
+    /// Field 2: `viewers`
+    #[must_use]
+    pub fn viewers(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().viewers
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<PresenceEventView<'static>>>
+for PresenceEventOwnedView {
+    fn from(inner: ::buffa::OwnedView<PresenceEventView<'static>>) -> Self {
+        PresenceEventOwnedView(inner)
+    }
+}
+impl ::core::convert::From<PresenceEventOwnedView>
+for ::buffa::OwnedView<PresenceEventView<'static>> {
+    fn from(wrapper: PresenceEventOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<PresenceEventView<'static>>>
+for PresenceEventOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<PresenceEventView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::PresenceEvent {
+    type View<'a> = PresenceEventView<'a>;
+    type ViewHandle = PresenceEventOwnedView;
+}
+impl ::serde::Serialize for PresenceEventOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct PresenceMemberView<'a> {
+    /// Field 1: `author_pubkey`
+    pub author_pubkey: ::core::option::Option<&'a [u8]>,
+    /// Field 2: `since`
+    pub since: ::core::option::Option<i64>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for PresenceMemberView<'a> {
+    type Owned = super::super::PresenceMember;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.author_pubkey = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.since = Some(::buffa::types::decode_int64(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::PresenceMember, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::PresenceMember, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::PresenceMember {
+            author_pubkey: self.author_pubkey.map(|b| (b).to_vec()),
+            since: self.since,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for PresenceMemberView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u32;
+        if let Some(ref v) = self.author_pubkey {
+            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.since {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u32;
+        size
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::bytes::BufMut,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.author_pubkey {
+            ::buffa::types::put_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.since {
+            ::buffa::types::put_int64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for PresenceMemberView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.author_pubkey {
+            __map
+                .serialize_entry(
+                    "authorPubkey",
+                    &::buffa::json_helpers::BytesJson(__v),
+                )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.since {
+            __map.serialize_entry("since", &::buffa::json_helpers::ProtoJson(&__v))?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for PresenceMemberView<'a> {
+    const PACKAGE: &'static str = "mkit.repo.v1";
+    const NAME: &'static str = "PresenceMember";
+    const FULL_NAME: &'static str = "mkit.repo.v1.PresenceMember";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.repo.v1.PresenceMember";
+}
+::buffa::impl_default_view_instance!(PresenceMemberView);
+::buffa::impl_view_reborrow!(PresenceMemberView);
+/** Self-contained, `'static` owned view of a `PresenceMember` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`PresenceMemberView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`PresenceMemberView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct PresenceMemberOwnedView(::buffa::OwnedView<PresenceMemberView<'static>>);
+impl PresenceMemberOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceMemberOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceMemberOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::PresenceMember,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            PresenceMemberOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`PresenceMemberView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &PresenceMemberView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if re-materializing preserved unknown fields
+    /// fails (e.g. the unknown-field limit is exceeded).
+    pub fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::PresenceMember, ::buffa::DecodeError> {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `author_pubkey`
+    #[must_use]
+    pub fn author_pubkey(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().author_pubkey
+    }
+    /// Field 2: `since`
+    #[must_use]
+    pub fn since(&self) -> ::core::option::Option<i64> {
+        self.0.reborrow().since
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<PresenceMemberView<'static>>>
+for PresenceMemberOwnedView {
+    fn from(inner: ::buffa::OwnedView<PresenceMemberView<'static>>) -> Self {
+        PresenceMemberOwnedView(inner)
+    }
+}
+impl ::core::convert::From<PresenceMemberOwnedView>
+for ::buffa::OwnedView<PresenceMemberView<'static>> {
+    fn from(wrapper: PresenceMemberOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<PresenceMemberView<'static>>>
+for PresenceMemberOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<PresenceMemberView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::PresenceMember {
+    type View<'a> = PresenceMemberView<'a>;
+    type ViewHandle = PresenceMemberOwnedView;
+}
+impl ::serde::Serialize for PresenceMemberOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
 pub struct PostMessageRequestView<'a> {
     /// Field 1: `room`
     pub room: ::core::option::Option<&'a str>,
