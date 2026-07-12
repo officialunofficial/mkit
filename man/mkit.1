@@ -889,6 +889,29 @@ write an object before publishing its ref), so
 must be run only when no other mkit process is operating on the repo (gc prints
 a warning). Fails closed: a corrupt root or unreadable ref aborts with nothing
 removed.
+.It Cm export-legacy Oo Fl Fl key Ar path Oc Oo Fl Fl json Oc Ar src Ar dst
+Translate a pre-merkle (incompatible-format) repository at
+.Ar src
+into a fresh current-format repository at
+.Ar dst .
+.Ar src
+is never written to;
+.Ar dst
+must not already exist. Every object reachable from
+.Ar src Ns 's
+local branches, tags, and HEAD is re-addressed under the current merkle-aware
+id rule; translated
+.Cm commit , remix ,
+and
+.Cm tag
+objects are re-signed with a dedicated export key
+.Pq Pa dst/.mkit/keys/export-legacy.key No by default, Fl Fl key No overrides
+since the original signature cannot be reproduced over the changed bytes.
+Each translated branch/tag head gets an
+.Ar export-legacy/v1
+attestation recording the old
+.No -> No
+new commit id mapping.
 .It Cm worktree Oo Cm add Ar path Op Ar commit-ish | Cm list Op Fl Fl porcelain | Cm remove Oo Fl Fl force Oc Ar path | Cm prune Op Fl Fl dry-run Oc
 Manage linked working trees.
 Linked trees share the one object store and the shared refs; each tree

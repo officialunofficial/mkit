@@ -5,10 +5,59 @@ All notable changes to mkit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!--
+Breaking on-disk/wire format change template (issue #713). Any entry
+that changes what bytes on disk or on the wire MEAN — not just an API
+signature — MUST answer all four of these, in the entry itself:
+
+1. **What breaks.** Precisely which object/index/pack/transport bytes
+   change meaning, and what downstream is affected (a ref? every
+   commit reachable through one? a single command's output format?).
+2. **How it's detected.** The mandatory marker/version byte/magic that
+   makes an incompatible reader/repo fail CLOSED (a typed error) rather
+   than silently mis-read or mis-write. Name the error variant.
+3. **What an affected user does about it.** Either "nothing — old data
+   keeps working" (compat path exists), or the explicit escape hatch:
+   for repo-format breaks, that is `mkit export-legacy` (see
+   `docs/RELEASE.md` "Upgrading past a breaking on-disk format
+   change"); for something else, link the analogous tool or say
+   plainly that no migration exists and why that's an acceptable
+   pre-1.0 tradeoff.
+4. **Where the spec lives.** The `docs/specs/SPEC-*.md` (and ADR, if
+   the tradeoff needs justifying) that normatively pins the new
+   format — required by the CONTRIBUTING review bar for any format
+   change.
+
+See the "Merkle object addressing" entry below for a worked example.
+-->
+
 ## [Unreleased]
 
 ### Added
 
+- **`mkit export-legacy` — escape hatch for pre-merkle repositories
+  (#713).** The merkle-object-addressing break (#414, below) left
+  pre-merkle repositories with no documented path forward: `open`
+  correctly refuses them, but nothing told an affected user what to do
+  about it. `mkit export-legacy [--key <path>] [--json] <src> <dst>`
+  walks a `<src>` repository lacking (or declaring an unrecognised)
+  `.mkit/format` marker using the historical flat-BLAKE3 addressing
+  rule, re-addresses every object reachable from its refs under the
+  current merkle-aware rule, and writes the translated history into a
+  fresh current-format repository at `<dst>` — `<src>` is read-only
+  throughout. Re-addressing a `Tree`/`ChunkedBlob` changes the bytes
+  (and therefore the Ed25519 signature) of every `Commit`/`Remix`/`Tag`
+  that references it, so translated objects are **re-signed** with a
+  dedicated export key rather than the unreproducible original
+  signature; the original `author`/`tagger` identity is preserved as
+  informational provenance. Each translated branch/tag head gets an
+  `export-legacy/v1` attestation recording the old->new commit id
+  mapping. See `mkit_core::ops::legacy_export` and the "Upgrading past a
+  breaking on-disk format change" section of
+  [`docs/RELEASE.md`](docs/RELEASE.md). This does not reopen the
+  `open`-time gate — see ADR
+  [`docs/adr/0001-merkelize-chunkedblob-and-tree.md`](docs/adr/0001-merkelize-chunkedblob-and-tree.md),
+  which this tool is an escape hatch alongside, not a reversal of.
 - **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
   / `download_pack_streaming`).** Two new opt-in trait methods move a
   pack as a sequence of bounded-size `PackChunk { offset, data, last }`
@@ -384,7 +433,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.mkit/format` repo marker** (`bmt-v1`): a pre-merkle repository is
   rejected at open (`IncompatibleRepoFormat`) instead of silently
   mis-reading every `Tree`/`ChunkedBlob`. Pre-1.0 API/format break, no
-  migration. New normative spec
+  in-place migration — `open` keeps refusing pre-merkle repositories by
+  design, but an affected user is not stuck: `mkit export-legacy`
+  (added below, #713) translates a pre-merkle repository into a fresh
+  current-format one. New normative spec
   [`docs/specs/SPEC-MERKLE-OBJECTS.md`](docs/specs/SPEC-MERKLE-OBJECTS.md) pins the
   construction; see also ADR
   [`docs/adr/0001-merkelize-chunkedblob-and-tree.md`](docs/adr/0001-merkelize-chunkedblob-and-tree.md)

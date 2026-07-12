@@ -10,6 +10,7 @@ pub mod conflict_state;
 pub mod diff;
 pub mod gc;
 pub mod graph;
+pub mod legacy_export;
 pub mod merge;
 pub mod revert;
 
@@ -35,6 +36,9 @@ pub use diff::{
 pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
 pub use graph::{
     collect_ancestor_set, reachable_closure, reachable_closure_checked, reachable_objects,
+};
+pub use legacy_export::{
+    ExportReport, HeadOutcome, LegacyExportError, LegacyFormatStatus, classify, export_legacy_repo,
 };
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};

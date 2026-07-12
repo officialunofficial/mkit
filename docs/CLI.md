@@ -767,6 +767,32 @@ Branches / refs:
   malformed ref, or the reachability cap aborts the run with nothing
   deleted, and an object whose age can't be read is kept. See
   [`docs/specs/SPEC-GC.md`](specs/SPEC-GC.md).
+- `mkit export-legacy [--key <path>] [--json] <src> <dst>` — translate a
+  **pre-merkle (incompatible-format)** repository at `<src>` into a fresh
+  current-format repository at `<dst>`. `ObjectStore::open` permanently
+  refuses a repository whose `.mkit/format` marker isn't `bmt-v1`
+  ([SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §7); that gate is
+  deliberate and this command does not reopen it — it is the documented
+  escape hatch instead (see the [Upgrading past a breaking on-disk format
+  change](RELEASE.md#upgrading-past-a-breaking-on-disk-format-change)
+  section of `docs/RELEASE.md`). `<src>` must have no `.mkit/format`
+  marker (assumed to predate the marker's introduction) or a marker this
+  exporter recognises as legacy; a marker declaring some OTHER format is
+  refused rather than guessed at. `<dst>` must not already exist. Every
+  object reachable from `<src>`'s local branches (`refs/heads/*`), tags
+  (`refs/tags/*`), and `HEAD` is re-addressed under the current
+  merkle-aware id rule; because that changes a translated `Tree`'s id,
+  every `Commit`/`Remix`/`Tag` that (transitively) references it gets new
+  bytes, which invalidates its original signature — translated objects
+  are therefore **re-signed** with a dedicated export key
+  (`<dst>/.mkit/keys/export-legacy.key` by default, `--key` overrides),
+  not the original author's key. The original `author`/`tagger` identity
+  is preserved as informational provenance even though the cryptographic
+  signer changes. Each translated branch/tag head gets an
+  `export-legacy/v1` attestation recording the old->new commit id mapping.
+  `<src>` is **never written to**. Remote-tracking refs
+  (`refs/remotes/*`) are out of scope — they are cached copies of another
+  repository's heads and would need their own export.
 
 ### Resolving conflicts
 

@@ -1,0 +1,6 @@
+# issue #713 legacy-export fixture. Pre-merkle (flat-BLAKE3) repo, fixed author seed [0x37;32], fixed timestamp 1700000000.
+# Regenerate with: UPDATE_GOLDEN=1 cargo test -p mkit-cli --test export_legacy_command
+blob 4f0134c891c28de9e694e308c5358918c213811d191184c8c05a59b240a62aef
+inner_tree 5c83c0c1d44c6d989c3ca62354af1b312d18c722e793fab430aab1ba81909881
+root_tree 4e296dcb233e6eab866a532316c2f9637396460b71e47c1c61b6d9301f54c5b5
+commit d11715201fdff896557fe3b49e6fc0eac907f72c02506241e081f229bd56f1ac

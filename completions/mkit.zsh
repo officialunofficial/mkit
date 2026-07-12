@@ -59,6 +59,7 @@ _mkit() {
         'rebase:Replay commits onto a different base'
         'bisect:Binary search for a bad commit'
         'gc:Reclaim unreachable objects'
+        'export-legacy:Translate a pre-merkle repository into a fresh current-format repository'
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
         'mcp:Start a Model Context Protocol server on stdio for LLM agents'
@@ -406,6 +407,12 @@ _mkit() {
                     _arguments \
                         '(-n --dry-run)'{-n,--dry-run}'[preview without deleting]' \
                         '--grace-secs[keep unreachable objects younger than SECS]:secs:' \
+                        '--help[show help]'
+                    ;;
+                export-legacy)
+                    _arguments \
+                        '--key[re-signing key path]:path:_files' \
+                        '--json[machine-readable JSON output]' \
                         '--help[show help]'
                     ;;
                 worktree)

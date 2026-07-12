@@ -217,6 +217,11 @@ commands:
   gc [-n] [--grace-secs SECS]
                     Reclaim unreachable objects older than the grace
                     window (default 14d); -n/--dry-run previews
+  export-legacy [--key <path>] [--json] <src> <dst>
+                    Translate a pre-merkle (incompatible-format) repository
+                    at <src> into a fresh current-format repository at
+                    <dst>, re-signing translated commits/tags with a
+                    dedicated export key; <src> is read-only
   sparse-checkout    Manage sparse checkout patterns
   serve <path>       Start SSH transport server (internal)
   mcp [--repository <path>]

@@ -419,6 +419,54 @@ Notarization is future work: `release.yml` has no notarization step today
 notarized macOS releases ever ship, the release notes and this document will
 say so explicitly.
 
+## Upgrading past a breaking on-disk format change
+
+mkit is pre-1.0 and occasionally ships a breaking **on-disk repository
+format** change — most notably merkle object addressing (#414, see the
+CHANGELOG "BREAKING (`mkit-core`)" entry and
+[SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §7). `ObjectStore::open`
+enforces this with a mandatory `.mkit/format` repository marker: a
+repository written under an older, incompatible addressing scheme is
+**rejected at open** (`IncompatibleRepoFormat`) rather than silently
+mis-read. This is deliberate and permanent — see ADR
+[0001-merkelize-chunkedblob-and-tree](adr/0001-merkelize-chunkedblob-and-tree.md)
+for why pre-1.0 mkit does not attempt in-place migration.
+
+That gate collides with [SECURITY.md](../SECURITY.md)'s support policy
+(only the latest minor line gets fixes): a user stuck on an old minor
+purely for repo compatibility gets no security fixes, while a user who
+upgrades loses read access to their own history. The escape hatch is
+**`mkit export-legacy`**, not a reversal of the gate:
+
+```sh
+mkit export-legacy /path/to/old-repo /path/to/new-repo
+```
+
+This walks `/path/to/old-repo` (read-only — nothing there is ever
+modified) using the historical addressing rule that repository's
+`.mkit/format` marker implies, re-addresses every object reachable from
+its branches/tags/HEAD under the CURRENT rule, and writes the translated
+history into a fresh `/path/to/new-repo` that opens normally. Because
+re-addressing a `Tree`/`ChunkedBlob` changes the bytes (and therefore the
+Ed25519 signature) of every `Commit`/`Remix`/`Tag` that references it,
+translated objects are **re-signed** with a dedicated export key
+(`<new-repo>/.mkit/keys/export-legacy.key` by default) — the original
+per-commit signature cannot be reproduced without the original author's
+private key. The original `author`/`tagger` identity is preserved as
+informational provenance even though the cryptographic signer changes,
+and each translated branch/tag head gets an `export-legacy/v1`
+attestation recording the old -> new commit id mapping, so the
+translation is auditable rather than a silent reattribution. See
+`mkit_core::ops::legacy_export` (rustdoc) and `mkit export-legacy --help`
+for the full contract, including what counts as "legacy" (no
+`.mkit/format` marker at all — assumed to predate the marker's
+introduction — vs. a marker declaring some other, unrecognised format,
+which is refused rather than guessed at).
+
+Every future breaking on-disk/wire format change MUST ship with an
+equivalent answer to "what does an affected user do" — see the template
+comment at the top of [`CHANGELOG.md`](../CHANGELOG.md).
+
 ## Supply-chain policy
 
 mkit's supply chain is intentionally narrow. The binary users run traces back to

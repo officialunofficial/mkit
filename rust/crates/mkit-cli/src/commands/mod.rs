@@ -20,6 +20,7 @@ pub mod commit;
 pub mod config_cmd;
 pub mod conflict;
 pub mod diff;
+pub mod export_legacy;
 pub mod fetch;
 pub mod for_each_ref;
 pub mod gc;

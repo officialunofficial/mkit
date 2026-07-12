@@ -92,6 +92,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "rebase",
     "bisect",
     "gc",
+    "export-legacy",
     "remote",
     "clone",
     "fetch",

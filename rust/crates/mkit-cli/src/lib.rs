@@ -129,6 +129,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
         "gc" => commands::gc::run(&rest),
+        "export-legacy" => commands::export_legacy::run(&rest),
         "stash" => commands::stash::run(&rest),
         "worktree" => commands::worktree::run(&rest),
         "blame" => commands::blame::run(&rest),

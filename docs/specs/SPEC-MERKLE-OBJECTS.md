@@ -157,6 +157,14 @@ these two types. `schema_version` therefore stays `0x01`. A repository
 written under the all-flat-hash scheme is **not** readable by a
 merkle-addressing implementation: every `Tree`/`ChunkedBlob` (and thus
 every `Commit` and ref reachable through one) re-addresses. Pre-1.0 there
-is no migration; a conformant store MUST refuse to open a repository whose
-on-disk format marker does not declare merkle addressing rather than
-silently mis-reading it (SPEC-OBJECTS §10).
+is no in-place migration; a conformant store MUST refuse to open a
+repository whose on-disk format marker does not declare merkle addressing
+rather than silently mis-reading it (SPEC-OBJECTS §10). This refusal is
+permanent by design (see ADR
+[0001-merkelize-chunkedblob-and-tree](../adr/0001-merkelize-chunkedblob-and-tree.md)),
+not an oversight — an affected repository is not unrecoverable, though:
+`mkit export-legacy` (`mkit_core::ops::legacy_export`) is the documented,
+opt-in, read-only-of-the-source escape hatch that re-addresses a
+pre-merkle repository's history into a fresh conformant one, out-of-band
+from `open`. See `docs/RELEASE.md` "Upgrading past a breaking on-disk
+format change".
