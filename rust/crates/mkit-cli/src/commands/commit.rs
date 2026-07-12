@@ -21,9 +21,10 @@
 //! reasoning by analogy from git. Post-#102, the staging area is
 //! load-bearing: only paths in the index land in the commit's tree.
 
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::index;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
@@ -39,7 +40,13 @@ use crate::clap_shim;
 use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CommitFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -103,6 +110,12 @@ struct CommitOptions {
     /// default; accepted for compatibility.
     #[arg(long = "no-edit")]
     no_edit: bool,
+    /// Emit a machine-readable JSON result object to stdout on success:
+    /// `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
+    /// "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
+    /// "is_merge":<bool>,"is_root":<bool>}`.
+    #[arg(long, value_enum, default_value = "default")]
+    format: CommitFormat,
 }
 
 #[must_use]
@@ -118,6 +131,7 @@ pub fn run(args: &[String]) -> u8 {
     // Accepted-for-compatibility no-ops: mkit always signs (`-S`) and has
     // no hooks (`--no-verify`); `--no-edit` matches mkit's default amend.
     let _ = (&opts.gpg_sign, opts.no_verify, opts.no_edit);
+    let json = matches!(opts.format, CommitFormat::Json);
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -426,10 +440,12 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
     // Capture parent shape before `parents` is moved into the commit, for
-    // the git-shaped summary (root = no parents, merge = >=2 parents).
+    // the git-shaped summary (root = no parents, merge = >=2 parents) and
+    // the `--format=json` payload.
     let is_root = parents.is_empty();
     let is_merge = parents.len() >= 2;
     let first_parent = parents.first().copied();
+    let parents_for_json = parents.clone();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -543,6 +559,27 @@ pub fn run(args: &[String]) -> u8 {
             old_tree,
             Some(tree_hash),
         );
+    }
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_hash("hash", &commit_hash)
+            .field_opt_str("branch", branch_name.as_deref())
+            .field_raw(
+                "parents",
+                &format::json_string_array(
+                    &parents_for_json
+                        .iter()
+                        .map(format::hex_hash)
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .field_hash("tree", &tree_hash)
+            .field_str("subject", msg.lines().next().unwrap_or(""))
+            .field_bool("is_merge", is_merge)
+            .field_bool("is_root", is_root);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
     }
     exit::OK
 }

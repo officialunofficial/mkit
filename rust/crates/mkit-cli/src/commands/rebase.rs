@@ -45,13 +45,19 @@ use mkit_core::serialize;
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::clap_shim;
 use crate::config;
 use crate::editor;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject, json_string_array};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RebaseFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit rebase", about = "Replay commits onto a different base.")]
@@ -72,9 +78,28 @@ struct RebaseOpts {
     /// (`edit` is not yet supported.)
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
+    /// Emit a machine-readable JSON result object to stdout describing
+    /// the outcome: a finished rebase, a conflict pause
+    /// (`"conflicts":[<path>,...]`), or an error. Best-effort on the
+    /// interactive (`-i`) editing path, which is inherently
+    /// human-in-the-loop.
+    #[arg(long, value_enum, default_value = "default")]
+    format: RebaseFormat,
     /// Branch, tag, or revision (e.g. `HEAD~2`, a full/short hash) to
     /// replay commits onto. Resolved through the shared revspec resolver.
     branch: Option<String>,
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 #[must_use]
@@ -83,6 +108,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, RebaseFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -101,19 +127,26 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if opts.abort {
-        abort(&layout, &store)
+        abort(&layout, &store, json)
     } else if opts.cont {
-        resume(&layout, &store, false)
+        resume(&layout, &store, false, json)
     } else if opts.skip {
-        resume(&layout, &store, true)
+        resume(&layout, &store, true, json)
     } else if let Some(branch) = opts.branch.as_deref() {
-        start(&layout, &store, branch, opts.interactive)
+        start(&layout, &store, branch, opts.interactive, json)
     } else {
         super::usage_error("usage: mkit rebase [-i] <revspec> | --continue | --abort | --skip")
     }
 }
 
-fn start(layout: &RepoLayout, store: &ObjectStore, branch: &str, interactive: bool) -> u8 {
+fn start(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    branch: &str,
+    interactive: bool,
+    json: bool,
+) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if let Some(op) = in_progress_op_name(layout) {
         return emit_err(
             &format!("a {op} is already in progress (use --continue or --abort)"),
@@ -158,6 +191,15 @@ fn start(layout: &RepoLayout, store: &ObjectStore, branch: &str, interactive: bo
     if orig_head == onto {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Current branch {head_name} is up to date.");
+        drop(stderr);
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_str("kind", "up-to-date")
+                .field_hash("hash", &orig_head);
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{}", obj.finish());
+        }
         return exit::OK;
     }
 
@@ -205,13 +247,14 @@ fn start(layout: &RepoLayout, store: &ObjectStore, branch: &str, interactive: bo
     if let Err(e) = refs::write_head_detached(layout, &onto) {
         return emit_err(&format!("detach HEAD: {e}"), exit::CANTCREAT);
     }
-    replay(layout, store, Some(signing))
+    replay(layout, store, Some(signing), json)
 }
 
 /// Resume after a pause. When `skip` is set, drop the paused `todo[0]`
 /// with no replacement commit; otherwise create the rewritten commit
 /// for `todo[0]` from the resolved index, then keep replaying.
-fn resume(layout: &RepoLayout, store: &ObjectStore, skip: bool) -> u8 {
+fn resume(layout: &RepoLayout, store: &ObjectStore, skip: bool, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if !is_rebase_in_progress(layout) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
@@ -236,7 +279,7 @@ fn resume(layout: &RepoLayout, store: &ObjectStore, skip: bool) -> u8 {
     }
     // Either nothing was paused (plain resume) or we just consumed the
     // paused commit; keep replaying the remaining todo.
-    replay(layout, store, None)
+    replay(layout, store, None, json)
 }
 
 /// `--skip`: drop the paused `todo[0]` with no replacement, discarding
@@ -364,7 +407,8 @@ fn persist_after_consume(
     Ok(())
 }
 
-fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
+fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     if !is_rebase_in_progress(layout) {
         return emit_err("no rebase in progress", exit::GENERAL_ERROR);
     }
@@ -442,11 +486,26 @@ fn abort(layout: &RepoLayout, store: &ObjectStore) -> u8 {
         "rebase aborted; HEAD restored to {}",
         &state.head_name
     );
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", "aborted")
+            .field_hash("hash", &state.orig_head);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 
 #[allow(clippy::too_many_lines)]
-fn replay(layout: &RepoLayout, store: &ObjectStore, signing: Option<RebaseSigning>) -> u8 {
+fn replay(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    signing: Option<RebaseSigning>,
+    json: bool,
+) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     let mut state = match read_state(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("read state: {e}"), exit::GENERAL_ERROR),
@@ -545,6 +604,18 @@ fn replay(layout: &RepoLayout, store: &ObjectStore, signing: Option<RebaseSignin
                 "resolve the files above, `mkit add` them, then run `mkit rebase --continue` \
                  (or `--skip` to drop this commit, or `--abort`)"
             );
+            drop(stderr);
+            if json {
+                let paths: Vec<&str> = records.iter().map(|r| r.path.as_str()).collect();
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", false)
+                    .field_str("kind", "conflict")
+                    .field_hash("replaying", &target)
+                    .field_raw("conflicts", &json_string_array(&paths))
+                    .field_str("error", "rebase paused: conflict while replaying");
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{}", obj.finish());
+            }
             return exit::GENERAL_ERROR;
         }
         if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
@@ -628,6 +699,18 @@ fn replay(layout: &RepoLayout, store: &ObjectStore, signing: Option<RebaseSignin
         "Successfully rebased and updated refs/heads/{}.",
         state.head_name
     );
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", "rebased")
+            .field_str("branch", &state.head_name)
+            .field_hash("old", &state.orig_head)
+            .field_hash("new", &final_head)
+            .field_u64("commits_replayed", state.done.len() as u64);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 
