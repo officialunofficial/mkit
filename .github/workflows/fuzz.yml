@@ -8,7 +8,7 @@ name: "Nightly: Fuzz"
 # persistence. Tighten `continue-on-error` once the harness is stable.
 #
 # Manual repro:
-#   cd rust/fuzz && cargo +nightly fuzz run delta -- -max_total_time=60
+#   cd rust/fuzz && cargo +nightly fuzz run delta --features libfuzzer -- -max_total_time=60
 
 on:
   schedule:
@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse]
+        target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse, merkle_packlist, merkle_proof, sparse_verify]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -57,7 +57,13 @@ jobs:
       - name: Run fuzz target (${{ matrix.target }}, 60s)
         working-directory: rust/fuzz
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+          # libfuzzer-sys is gated behind the `libfuzzer` feature (see
+          # rust/fuzz/Cargo.toml) so a plain `cargo build`/`cargo test`
+          # never pulls the nightly-only crate into stable builds.
+          # cargo-fuzz does not infer required-features on its own, so
+          # this must be passed explicitly or every target fails at the
+          # build step with "requires the features: libfuzzer".
+          cargo +nightly fuzz run ${{ matrix.target }} --features libfuzzer -- -max_total_time=60
 
       - name: Upload crash artifacts on failure
         if: failure()

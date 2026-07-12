@@ -28,10 +28,11 @@ rust/
 │   ├── mkit-rpc/               # protobuf wire schemas + stdio framing
 │   ├── mkit-wasm/              # wasm-bindgen surface for browsers / Workers
 │   └── mkit-cli/               # bin "mkit"
-└── fuzz/                       # 8 cargo-fuzz targets (delta, pack, tree,
+└── fuzz/                       # 11 cargo-fuzz targets (delta, pack, tree,
                                 #   software_key_record, rpc_decode,
                                 #   git_commit_parse, git_tag_parse,
-                                #   git_tree_parse)
+                                #   git_tree_parse, merkle_packlist,
+                                #   merkle_proof, sparse_verify)
 ```
 
 ## Gates
