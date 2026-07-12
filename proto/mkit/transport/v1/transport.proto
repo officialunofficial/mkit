@@ -1,0 +1,244 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// mkit.transport.v1 — the canonical Connect remote protocol.
+//
+// TransportService is the single Connect service every remote mkit
+// deployment target implements: the reference Worker, `mkit serve`
+// (self-hosted, over axum/hyper), and the native (non-wasm) CLI client
+// all compile against this one proto — no per-target dialect. It maps
+// one-to-one onto the verbs of the
+// `Transport` trait (rust/crates/mkit-core/src/protocol.rs), the same
+// trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` already implement.
+// See docs/specs/SPEC-TRANSPORT-CONNECT.md for the full normative
+// contract (error-code mapping, CAS semantics, streaming design,
+// deployment-target consumption).
+//
+// Design lineage: Gitaly-style resource RPCs (unary verbs stay unary;
+// only pack transfer streams). `PackChunk` is a byte-for-byte
+// duplicate of `mkit.rpc.v1.ssh.PackChunk` (same field numbers, same
+// types) so the wire bytes a client streams are identical regardless
+// of which transport carries them — SSH, enc, or Connect. This is the
+// same "duplicate now, wire-numbers pinned, extract later" pattern
+// `mkit.repo.v1.RefExpectation` already uses against `ssh.proto`
+// (apps/repo-worker/proto/mkit/repo/v1/repo.proto); a future issue
+// (tracked as mkit#679) extracts both into a shared
+// `mkit/common/v1/refs.proto` once the buf workspace exists
+// (mkit#677) to import across module boundaries.
+//
+// This proto does not yet have a Rust service implementation anywhere
+// in the tree — it is the design artifact reviewed before the
+// reference Worker / `mkit serve` / CLI client issues (mkit#699-#707)
+// build against it.
+
+edition = "2023";
+
+package mkit.transport.v1;
+
+// ----------------------------------------------------------------------------
+// CAS semantics for UpdateRef / AdvanceRefs. Wire numbers are load-bearing
+// and match mkit.rpc.v1.ssh.RefExpectation (rust/crates/mkit-rpc/proto/
+// ssh.proto) and mkit.repo.v1.RefExpectation (apps/repo-worker/proto/mkit/
+// repo/v1/repo.proto) byte-for-byte — do NOT renumber; new variants append.
+
+enum RefExpectation {
+  // Protocol error if sent (the proto default). Servers MUST reject with
+  // Connect code `invalid_argument`.
+  REF_EXPECTATION_UNSPECIFIED = 0;
+
+  // "Clobber" / last-writer-wins — Transport::RefWriteCondition::Any.
+  // `expected_id` MUST be empty.
+  REF_EXPECTATION_ANY = 1;
+
+  // "Create only" — Transport::RefWriteCondition::Missing. The ref MUST
+  // NOT already exist. `expected_id` MUST be empty.
+  REF_EXPECTATION_MISSING = 2;
+
+  // Compare-and-swap — Transport::RefWriteCondition::Match(expected).
+  // `expected_id` MUST be the 32-byte current value.
+  REF_EXPECTATION_MATCH = 3;
+}
+
+// A single ref and the object it points at. Matches ssh.proto /
+// repo.proto RefEntry byte-for-byte.
+message RefEntry {
+  string name = 1;      // e.g. "refs/heads/main" (SPEC-REFS §3 grammar)
+  bytes object_id = 2;  // raw 32-byte BLAKE3 digest
+}
+
+// Outcome of a two-ref AdvanceRefs call. Mirrors
+// mkit_core::protocol::AdvanceOutcome exactly (three variants, no
+// zero/UNSPECIFIED — a call either completes or returns a Connect error,
+// so there is no "unset" outcome on the wire).
+enum AdvanceOutcome {
+  ADVANCE_OUTCOME_UNSPECIFIED = 0;
+
+  // Both refs were updated (transactionally, if the server advertises
+  // atomic advance; packmap-then-head otherwise — see SPEC-TRANSPORT-CONNECT
+  // §4).
+  ADVANCE_OUTCOME_COMMITTED = 1;
+
+  // The head precondition did not hold (the branch moved under us).
+  ADVANCE_OUTCOME_HEAD_CONFLICT = 2;
+
+  // The packmap precondition did not hold (a concurrent pusher advanced
+  // the chain first).
+  ADVANCE_OUTCOME_PACKMAP_CONFLICT = 3;
+}
+
+// ----------------------------------------------------------------------------
+// Pack transfer. PackChunk duplicates mkit.rpc.v1.ssh.PackChunk's field
+// layout exactly (same field numbers 1-4, same types) so chunk bytes are
+// wire-identical to the SSH/enc framing — no new chunking format.
+
+message PackChunk {
+  bytes pack_id = 1;  // raw 32-byte BLAKE3 digest
+  uint64 offset = 2;  // MUST equal the next expected byte offset (no gaps)
+  bytes data = 3;      // chunk payload
+  bool last = 4;        // true on the final chunk of the stream
+}
+
+// ----------------------------------------------------------------------------
+// TransportService — the full remote surface, Connect over HTTP.
+//
+// Endpoint paths follow the Connect convention
+// POST /mkit.transport.v1.TransportService/<Method>. `upload_blob` /
+// `download_blob` / `write_ref` are NOT separate RPCs: they are
+// Transport-trait-level default methods that delegate to UploadPack /
+// DownloadPack / UpdateRef(ANY) before any transport is invoked (see
+// rust/crates/mkit-core/src/protocol.rs), so the wire never distinguishes
+// "pack" from "auxiliary blob", or "unconditional write" from "CAS write
+// with expectation=ANY".
+
+service TransportService {
+  // List refs whose full name starts with `prefix`. Returned names have
+  // `prefix` stripped, per SPEC-REFS §4. An empty prefix lists every ref.
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+
+  // Read a ref's current value. `exists = false` if absent.
+  rpc ReadRef(ReadRefRequest) returns (ReadRefResponse);
+
+  // CAS ref write. Connect code `failed_precondition` on a CAS mismatch
+  // (`MISSING` on an existing ref, or `MATCH` on a different current
+  // value); `invalid_argument` on `REF_EXPECTATION_UNSPECIFIED`. See
+  // SPEC-TRANSPORT-CONNECT §3 — the response never carries the current
+  // ref value; a client that needs to disambiguate MUST follow up with
+  // ReadRef.
+  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+
+  // Atomically advance a branch's head ref and packmap ref together,
+  // each under its own CAS precondition. See SPEC-TRANSPORT-CONNECT §4.
+  rpc AdvanceRefs(AdvanceRefsRequest) returns (AdvanceRefsResponse);
+
+  // HEAD-check a pack by digest.
+  rpc PackExists(PackExistsRequest) returns (PackExistsResponse);
+
+  // Client-streaming pack upload. The first message on the stream MUST be
+  // `header`; every subsequent message MUST be `chunk`, in ascending
+  // contiguous `offset` order, ending with a `chunk.last = true` message.
+  // The server MUST reject a stream whose received byte count does not
+  // equal `header.total_bytes` or whose BLAKE3 does not equal
+  // `header.pack_id`, and MUST NOT store partial bytes on rejection. See
+  // SPEC-TRANSPORT-CONNECT §6.
+  rpc UploadPack(stream UploadPackRequest) returns (UploadPackResponse);
+
+  // Server-streaming pack download. The first message on the stream MUST
+  // be `header`; every subsequent message MUST be `chunk`, ending with a
+  // `chunk.last = true` message. Connect code `not_found` (raised before
+  // any message is sent) if the digest is absent. See
+  // SPEC-TRANSPORT-CONNECT §6.
+  rpc DownloadPack(DownloadPackRequest) returns (stream DownloadPackResponse);
+}
+
+// ----------------------------------------------------------------------------
+// Refs.
+
+message ListRefsRequest {
+  string prefix = 1;
+}
+
+message ListRefsResponse {
+  repeated RefEntry refs = 1;
+}
+
+message ReadRefRequest {
+  string name = 1;
+}
+
+message ReadRefResponse {
+  bool exists = 1;
+  bytes object_id = 2;  // 32-byte BLAKE3 digest; meaningful only when exists
+}
+
+message UpdateRefRequest {
+  string name = 1;
+  RefExpectation expectation = 2;  // REQUIRED; UNSPECIFIED is a protocol error
+  bytes expected_id = 3;            // 32 bytes for MATCH; empty for ANY/MISSING
+  bytes new_id = 4;                  // 32-byte BLAKE3 digest to write
+}
+
+message UpdateRefResponse {
+  // Empty body is success. CAS failure and validation failure are surfaced
+  // as Connect errors, not response fields — see SPEC-TRANSPORT-CONNECT §3.
+}
+
+message AdvanceRefsRequest {
+  string head_ref = 1;
+  RefExpectation head_expectation = 2;
+  bytes head_expected_id = 3;
+  bytes head_new_id = 4;
+
+  string packmap_ref = 5;
+  RefExpectation packmap_expectation = 6;
+  bytes packmap_expected_id = 7;
+  bytes packmap_new_id = 8;
+}
+
+message AdvanceRefsResponse {
+  AdvanceOutcome outcome = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Packs.
+
+message PackExistsRequest {
+  bytes pack_id = 1;
+}
+
+message PackExistsResponse {
+  bool exists = 1;
+}
+
+// Announces an upload before any PackChunk. `total_bytes` is required: the
+// server uses it to reject oversized uploads before storage and to verify
+// the following PackChunk stream ends exactly at the declared byte count.
+message UploadPackHeader {
+  bytes pack_id = 1;
+  uint64 total_bytes = 2;
+}
+
+message UploadPackRequest {
+  oneof body {
+    UploadPackHeader header = 1;
+    PackChunk chunk = 2;
+  }
+}
+
+message UploadPackResponse {
+  // Empty body is success.
+}
+
+message DownloadPackRequest {
+  bytes pack_id = 1;
+}
+
+// Sent once before the first chunk on a download.
+message DownloadPackHeader {
+  uint64 total_bytes = 1;
+}
+
+message DownloadPackResponse {
+  oneof body {
+    DownloadPackHeader header = 1;
+    PackChunk chunk = 2;
+  }
+}
