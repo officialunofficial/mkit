@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **BSR-published proto modules for external integrators.** The `mkit-rpc`
+  schemas (`common.proto`/`signer.proto`/`ssh.proto`/`verify.proto`) and
+  `apps/repo-worker`'s `repo.proto` (`RepoService`) are now named modules in
+  the repo-root `buf.yaml` v2 workspace, pushed to the Buf Schema Registry as
+  `buf.build/officialunofficial/mkit-rpc` and
+  `buf.build/officialunofficial/mkit-repo` on every tagged release (new
+  `buf-push` job in `crates-publish.yml`, dormant until `BUF_TOKEN` /
+  `BUF_PUBLISH_ENABLED` are provisioned — see `docs/RELEASE.md`). Third-party
+  signer integrators (HSM/TPM vendors, custodial signing services) and
+  `RepoService` clients can now `buf generate` typed bindings from a pinned
+  tag instead of vendoring this repo — see the checked-in `buf.gen.yaml`
+  reference recipes in each module's proto directory.
+  `contrib/signers/mkit-sign-se`'s checked-in Swift bindings are now
+  regenerated via `scripts/regen-mkit-sign-se-swift.sh` (`buf generate`, not
+  raw `protoc`) and refreshed to include the previously-missing
+  `ALGORITHM_BLS12381_THRESHOLD` case.
 - **`mkit serve --http <addr>`: self-hosted Connect remote (SPEC-TRANSPORT-CONNECT).**
   `mkit serve` can now host `mkit.transport.v1.TransportService` over
   axum/HTTP instead of the SSH-frame protocol, behind the new

@@ -1,0 +1,30 @@
+version: v2
+# Reference codegen recipe for the mkit-rpc BSR module
+# (buf.build/officialunofficial/mkit-rpc, pushed by the `buf-push` job in
+# .github/workflows/crates-publish.yml on tagged releases — issue #719).
+# Third-party signer integrators (HSM/TPM vendors, custodial signing
+# services) run:
+#
+#   buf generate buf.build/officialunofficial/mkit-rpc --template buf.gen.yaml
+#
+# against a pinned module ref (e.g.
+# buf.build/officialunofficial/mkit-rpc:v0.4.0) to get typed Swift bindings
+# for common.proto/signer.proto/ssh.proto/verify.proto, without vendoring
+# this repo or hand-writing generated code — see
+# contrib/signers/mkit-sign-se/Sources/mkit-sign-se/Generated/{signer,common}.pb.swift
+# for the checked-in-by-hand pattern this recipe replaces (that copy is now
+# refreshed via scripts/regen-mkit-sign-se-swift.sh, which runs this same
+# template).
+#
+# The mkit-rpc Rust crate itself does NOT consume this file — mkit-rpc
+# compiles via buffa-build (see build.rs and scripts/regen-rpc-proto.sh), a
+# separate, unrelated build-time codegen path this file must never be wired
+# into (see the module's buf.yaml comment in the repo-root buf.yaml).
+plugins:
+  # Swift bindings via SwiftProtobuf's protoc-gen-swift, executed as a buf
+  # remote plugin — no local protoc-gen-swift/Swift toolchain needed to run
+  # this command. Output mirrors each .proto's path under the module root
+  # (e.g. gen/swift/mkit/rpc/v1/common.pb.swift,
+  # gen/swift/mkit/rpc/v1/signer/signer.pb.swift).
+  - remote: buf.build/apple/swift
+    out: gen/swift
