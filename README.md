@@ -71,6 +71,13 @@ installs `mkit` into `~/.local/bin`. Equivalent explicit form:
 `curl -sSfL https://mkit.sh/install.sh | sh`; append
 `-s -- --version v0.3.0` to pin an exact release.
 
+On native Windows (PowerShell, no WSL/Git-Bash), use the PowerShell
+installer instead:
+
+```powershell
+irm https://mkit.sh/install.ps1 | iex
+```
+
 ### From source
 
 ```sh
@@ -88,8 +95,8 @@ on first build). Drops `mkit` into `~/.cargo/bin/`.
 
 ### From GitHub Releases
 
-Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +
-arm64) on every `v*.*.*` tag:
+Cosign-signed archives for macOS (arm64 + x86_64), Linux (x86_64 +
+arm64), and Windows (x86_64) on every `v*.*.*` tag:
 
 ```sh
 VERSION=0.3.0

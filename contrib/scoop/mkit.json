@@ -1,0 +1,31 @@
+{
+  "version": "0.3.0",
+  "description": "Content-addressed VCS for creative work (with pluggable notary adapters)",
+  "homepage": "https://github.com/officialunofficial/mkit",
+  "license": "MIT OR Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/officialunofficial/mkit/releases/download/v0.3.0/mkit-0.3.0-x86_64-pc-windows-msvc.zip",
+      "hash": "PLACEHOLDER_SHA_X86_64_PC_WINDOWS_MSVC",
+      "extract_dir": "mkit-0.3.0-x86_64-pc-windows-msvc"
+    }
+  },
+  "bin": "mkit.exe",
+  "checkver": {
+    "github": "https://github.com/officialunofficial/mkit"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/officialunofficial/mkit/releases/download/v$version/mkit-$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "mkit-$version-x86_64-pc-windows-msvc"
+      }
+    }
+  },
+  "notes": [
+    "mkit.exe is not Authenticode-signed. Its trust anchor is the cosign",
+    "keyless signature attached to the GitHub Release — verify manually",
+    "with the steps in docs/RELEASE.md if you need to confirm provenance",
+    "beyond this manifest's SHA256 pin."
+  ]
+}

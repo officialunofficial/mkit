@@ -75,6 +75,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (mkit identities are opaque, not free-text names) and `--since`/
   `--until` use a small explicit date grammar rather than git's
   `approxidate` — documented divergences, not gaps.
+- **Windows release target (`x86_64-pc-windows-msvc`) and PowerShell
+  installer.** `release.yml`'s build matrix now ships a fifth leg —
+  `windows-latest`, `.zip` archive instead of `.tar.gz`, `mkit.exe` — built
+  with the `backend-windows-credential` keystore feature (already the
+  default on Windows via `mkit-cli`'s `[target.'cfg(windows)'.dependencies]`
+  stanza), matching parity with the already-tested `windows-credential` leg
+  of `rust.yml`'s manual-only `keystore-backends` matrix. The Windows
+  archive goes through the same cosign keyless signing and mkit-native DSSE
+  release attestation as every other target. New `install.ps1` at the repo
+  root is the native-Windows counterpart to `install.sh` (same trust model:
+  cosign-required by default, downgrade guard, atomic install) — served at
+  `https://mkit.sh/install.ps1` alongside the existing `install.sh`. New
+  `contrib/scoop/mkit.json` manifest template (mirrors
+  `contrib/homebrew/mkit.rb`) un-defers the Scoop-manifest checklist item in
+  `docs/RELEASE.md`. `install.sh` itself still targets Darwin/Linux only —
+  it now points MINGW/MSYS/Cygwin users at `install.ps1` instead of failing
+  with an unsupported-OS error. Known gap: `mkit self update` does not yet
+  support the Windows install (it hardcodes `.tar.gz`/tar+gzip extraction
+  and resolves its state dir via `$HOME`, which is commonly unset on native
+  Windows) — Windows users should reinstall via `install.ps1` or a future
+  Scoop bucket instead of `mkit self update` for now
+  ([#714](https://github.com/officialunofficial/mkit/issues/714), part of
+  [#676](https://github.com/officialunofficial/mkit/issues/676)).
 - **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
   `PackWriter`/`PackReader` transparently compress/decompress pack
   entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
