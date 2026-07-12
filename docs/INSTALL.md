@@ -19,7 +19,8 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine                  | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine (macOS/Linux)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine (Windows)        | Release archive (PowerShell installer) | `irm https://mkit.sh/install.ps1 \| iex` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
@@ -79,9 +80,9 @@ strict-semver `v*.*.*` tags after verifying the tag is an annotated GPG-signed
 tag from an allowlisted release signer and points at a commit reachable from
 `main`. It then produces a per-target archive plus signing material:
 
-- `mkit-<version>-<target>.tar.gz` — the archive (binary, licenses,
-  README, optional changelog, `share/man/man1/mkit.1`, shell completions,
-  and per-archive `SHA256SUMS`).
+- `mkit-<version>-<target>.tar.gz` (or `.zip` for Windows) — the archive
+  (binary, licenses, README, optional changelog, `share/man/man1/mkit.1`,
+  shell completions, and per-archive `SHA256SUMS`).
 - `mkit-<version>-<target>.tar.gz.sha256` — archive-level checksum.
 - `mkit-<version>-<target>.tar.gz.cosign.bundle` — keyless OIDC
   signature (Sigstore Fulcio + Rekor).
@@ -92,20 +93,27 @@ Targets shipped today:
 - `x86_64-apple-darwin` (macOS, Intel)
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
+- `x86_64-pc-windows-msvc` (Windows x86_64) — `.zip` archive, `mkit.exe`,
+  built with the `backend-windows-credential` keystore backend (Windows
+  Credential Manager) enabled.
 
-If you want "latest", use the hosted installer — `curl mkit.sh | sh` (or
-the explicit `curl -sSfL https://mkit.sh/install.sh | sh`). It resolves
-the current tag, fetches the matching archive for your platform, and
-verifies cosign by default. Direct release URLs are best when you want a
-pinned artifact.
+If you want "latest", use the hosted installer for your platform:
+`curl mkit.sh | sh` (macOS/Linux; or the explicit
+`curl -sSfL https://mkit.sh/install.sh | sh`), or
+`irm https://mkit.sh/install.ps1 | iex` (native Windows PowerShell). Either
+resolves the current tag, fetches the matching archive for your platform,
+and verifies cosign by default. Direct release URLs are best when you want
+a pinned artifact.
 
 > [!NOTE]
-> Like any `curl | sh`, the *installer script* is trusted on download —
-> cosign verifies the downloaded **binary**, not the script itself. The
-> script is served over HTTPS from `mkit.sh`; `https://mkit.sh/install.sh`
-> and the byte-identical
-> [`raw.githubusercontent.com/.../main/install.sh`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh)
-> are the same file. If you'd rather not trust the hosted script, read it
+> Like any `curl | sh` (or `irm | iex`), the *installer script* is trusted
+> on download — cosign verifies the downloaded **binary**, not the script
+> itself. Both scripts are served over HTTPS from `mkit.sh`;
+> `https://mkit.sh/install.sh` / `https://mkit.sh/install.ps1` and the
+> byte-identical
+> [`raw.githubusercontent.com/.../main/install.sh`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.sh) /
+> [`raw.githubusercontent.com/.../main/install.ps1`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.ps1)
+> are the same files. If you'd rather not trust the hosted script, read it
 > first (`curl -sSfL https://mkit.sh/install.sh | less`) or skip it and use
 > the pinned release + cosign steps below.
 
@@ -327,6 +335,7 @@ Installs it does **not** manage are refused with pointers to the right
 channel instead:
 
 - Homebrew: `brew upgrade mkit`
+- Scoop: `scoop update mkit`
 - cargo: `cargo install --locked mkit-cli` (or `cargo binstall mkit-cli`)
 
 mkit never checks for updates in the background; `self update` acts

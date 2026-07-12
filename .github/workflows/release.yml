@@ -3,8 +3,9 @@ name: "Release: Artifacts"
 # Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
 #
 # This workflow:
-#   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64)
-#      with a pinned Rust toolchain (see rust/rust-toolchain.toml).
+#   1. Builds static mkit binaries for macOS (arm64/x86_64), Linux
+#      (x86_64/arm64), and Windows (x86_64) with a pinned Rust toolchain
+#      (see rust/rust-toolchain.toml).
 #   2. Produces a CycloneDX SBOM (sbom.cdx.json).
 #   3. Signs every archive with cosign OIDC keyless (transparency log: Rekor)
 #      and signs the aggregated SHA256SUMS the same way.
@@ -15,6 +16,14 @@ name: "Release: Artifacts"
 # signatures, which are verified by `install.sh` and documented in
 # docs/RELEASE.md. Users who launch the binary by double-clicking
 # in Finder will hit Gatekeeper; running from a terminal works.
+#
+# The Windows archive is a `.zip` (not `.tar.gz`) and ships `mkit.exe` built
+# with the `backend-windows-credential` keystore feature — mkit-cli's
+# `[target.'cfg(windows)'.dependencies]` stanza (rust/crates/mkit-cli/Cargo.toml)
+# already enables that feature unconditionally for any Windows target build,
+# so no extra `--features` flag is needed here. It is not codesigned either
+# (no Authenticode certificate); trust is the same cosign keyless signature
+# as every other target.
 #
 # Cache safety: every Swatinem/rust-cache invocation here uses a release-
 # specific `prefix-key`, partitioned away from the keys that PR-event
@@ -211,6 +220,14 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             archive_ext: tar.gz
+          # Windows can't cross-compile the `backend-windows-credential`
+          # keystore leg (windows-native-keyring-store is cfg(windows)-gated,
+          # same reasoning as rust.yml's keystore-backends matrix), so this
+          # runs on a real windows-latest runner rather than cross-compiling
+          # from another host the way x86_64-apple-darwin does above.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive_ext: zip
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
@@ -307,11 +324,26 @@ jobs:
           fi
           cat SHA256SUMS
 
-      - name: Create archive
+      - name: Create archive (tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
         shell: bash
         run: |
           tar -czf "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.stage }}"
           ls -la "${{ steps.meta.outputs.archive }}"
+
+      # Windows gets a .zip instead of .tar.gz — Compress-Archive is built
+      # into PowerShell 5.1+ (present on every windows-latest runner), so no
+      # extra tool install is needed. `tar` IS present on windows-latest too
+      # (bsdtar, via Windows' own tar.exe), but it produces a zip with
+      # backslash-separated internal paths there, which unzip/Expand-Archive
+      # on other platforms handle inconsistently — Compress-Archive avoids
+      # that ambiguity.
+      - name: Create archive (zip)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ steps.meta.outputs.stage }}" -DestinationPath "${{ steps.meta.outputs.archive }}"
+          Get-Item "${{ steps.meta.outputs.archive }}" | Format-List Name, Length
 
       - name: Compute archive-level SHA256
         shell: bash
@@ -502,11 +534,15 @@ jobs:
             exit 1
           fi
           cargo build --release --locked -p mkit-release-attest
+          # Covers every archive extension we ship (tar.gz for macOS/Linux,
+          # zip for Windows) — mkit-release-attest hashes raw bytes and keys
+          # subjects on basename, so it's extension-agnostic; this glob list
+          # is the only place that needs to know about a new archive format.
           ./target/release/mkit-release-attest sign \
             --tag "${{ steps.meta.outputs.tag }}" \
             --key-env MKIT_RELEASE_ATTEST_KEY \
             --out "../dist/mkit-${{ steps.meta.outputs.version }}.release.dsse" \
-            ../dist/*.tar.gz
+            ../dist/*.tar.gz ../dist/*.zip
 
       # Post-sign sanity check against the CHECKED-IN public key: a
       # rotated-but-not-committed (or corrupted) secret fails the
@@ -519,14 +555,14 @@ jobs:
             --pubkeys ../docs/keys/release-attest.pub \
             --dsse "../dist/mkit-${{ steps.meta.outputs.version }}.release.dsse" \
             --tag "${{ steps.meta.outputs.tag }}" \
-            ../dist/*.tar.gz
+            ../dist/*.tar.gz ../dist/*.zip
 
       - name: Compute top-level SHA256SUMS
         shell: bash
         working-directory: dist
         run: |
-          sha256sum *.tar.gz *.release.dsse sbom.cdx.json > SHA256SUMS || \
-            shasum -a 256 *.tar.gz *.release.dsse sbom.cdx.json > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.release.dsse sbom.cdx.json > SHA256SUMS || \
+            shasum -a 256 *.tar.gz *.zip *.release.dsse sbom.cdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -561,6 +597,11 @@ jobs:
             dist/*.tar.gz.sig
             dist/*.tar.gz.crt
             dist/*.tar.gz.cosign.bundle
+            dist/*.zip
+            dist/*.zip.sha256
+            dist/*.zip.sig
+            dist/*.zip.crt
+            dist/*.zip.cosign.bundle
             dist/*.release.dsse
             dist/sbom.cdx.json
             dist/SHA256SUMS
@@ -605,6 +646,13 @@ jobs:
             macOS binaries are **not codesigned or notarized**. Trust is
             established via the cosign signature above. Running from a
             terminal works; double-clicking in Finder hits Gatekeeper.
+
+            The Windows binary (`mkit.exe`, in the `.zip` archive) is
+            similarly **not Authenticode-signed**; the same cosign
+            signature is the trust anchor. It ships with the
+            `backend-windows-credential` keystore backend (Windows
+            Credential Manager) enabled. SmartScreen may warn on first run
+            since the binary is unsigned.
 
             ### SBOM
 

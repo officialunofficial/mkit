@@ -1492,9 +1492,20 @@ et al. for the on-disk format.
 Report issues at the project's source repository. Known limitations:
 .Bl -bullet
 .It
-Windows is not supported.
+Windows support is newer and less battle-tested than macOS/Linux: a
+prebuilt
+.Pa mkit.exe
+ships on every release (built with the
+.Cm backend-windows-credential
+keystore feature), but
 .Nm
-is POSIX-only; macOS and Linux are tier-1 platforms.
+started as POSIX-only, so macOS and Linux remain the most exercised
+platforms. Install via the PowerShell installer
+.Pq Sy irm https://mkit.sh/install.ps1 | iex
+documented in
+.Pa docs/INSTALL.md ;
+.Nm mkit self update
+does not yet support Windows installs.
 .It
 Per-subcommand man pages
 .Po Nm mkit-commit 1 Pc
