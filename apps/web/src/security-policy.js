@@ -49,9 +49,14 @@ export const CSP_DIRECTIVES = [
   // `keys.mkit.sh` is the production pubkey→handle registry (apps/keys-worker);
   // it's plain HTTPS (no WebSocket), driven by `VITE_KEYS_URL`. `localhost:8788`
   // is its local-dev port.
+  // `staging-api.mkit.sh` / `staging-keys.mkit.sh` are the `env.staging`
+  // deployments of the same two Workers (see apps/repo-worker/wrangler.jsonc
+  // and apps/keys-worker/wrangler.jsonc) — allowed here so the web app can be
+  // pointed at staging for end-to-end checks by setting `VITE_REPO_BACKEND_URL`
+  // / `VITE_KEYS_URL` to the staging hosts; they are never the default.
   // `localhost:4747` is the local agentation MCP server (dev-only annotation
   // toolbar); the toolbar polls it over fetch and opens an SSE/WebSocket stream.
-  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev http://localhost:8788 https://keys.mkit.sh http://localhost:4747 ws://localhost:4747",
+  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://staging-api.mkit.sh wss://staging-api.mkit.sh http://localhost:8788 https://keys.mkit.sh https://staging-keys.mkit.sh http://localhost:4747 ws://localhost:4747",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]
