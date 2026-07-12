@@ -18,6 +18,14 @@
 //! [`mkit_core::protocol::BackoffIterator`]: 5xx and HTTP 429 retry up to
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
+//!
+//! Packs whose byte length exceeds [`S3_SINGLE_PUT_MAX`] go through true
+//! S3/R2 multipart upload (`CreateMultipartUpload` -> `UploadPart` per
+//! fixed-size part, each independently retried -> `CompleteMultipartUpload`)
+//! instead of a single `PUT`. Any terminal failure aborts the multipart
+//! upload so a transient error can't leak orphaned parts in the bucket.
+//! See SPEC-TRANSPORT §6.4/§6.7 and §7.1 for the wire contract and the
+//! resulting CAS-guarantee downgrade for large packs.
 
 // This crate contains zero `unsafe` — enforce that it stays that way.
 #![forbid(unsafe_code)]
@@ -45,9 +53,37 @@ use reqwest::blocking::{Client, Response};
 
 use crate::sigv4::{Credentials, SignedRequest, sign_request};
 
-/// Per SPEC-TRANSPORT §6.4, a single PUT is capped at 5 GiB; anything
-/// larger requires multipart upload (deferred).
+/// Per SPEC-TRANSPORT §6.4, a single `PUT` is capped at 5 GiB; anything
+/// larger goes through multipart upload (§6.7) instead of the early-413
+/// rejection this crate used before issue #704.
+///
+/// Test-only override: under the `test-small-multipart-caps` feature this
+/// shrinks to a few MiB so the multipart integration test
+/// (`tests/transport_multipart.rs`) doesn't need to move a multi-GiB
+/// buffer through a mockito server. That shrunk value is NOT a valid S3/R2
+/// API limit — the feature must never be enabled in a production build
+/// (see the feature's doc comment in `Cargo.toml`).
+#[cfg(not(feature = "test-small-multipart-caps"))]
 pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
+#[cfg(feature = "test-small-multipart-caps")]
+pub const S3_SINGLE_PUT_MAX: u64 = 8 * 1024 * 1024;
+
+/// Fixed size of every multipart part except the last, which carries the
+/// remainder. S3/R2 require every non-last part to be at least 5 MiB;
+/// 64 MiB keeps retry granularity and peak per-part memory bounded while
+/// staying well under the 10,000-parts-per-upload ceiling for any pack
+/// under [`mkit_core::protocol::PACK_BODY_LIMIT`].
+///
+/// Test-only override: shrinks to the S3/R2-mandated minimum (5 MiB) so
+/// the multipart integration test moves single-digit-MiB bodies instead
+/// of tens of MiB. See [`S3_SINGLE_PUT_MAX`]'s doc comment.
+#[cfg(not(feature = "test-small-multipart-caps"))]
+const MULTIPART_PART_SIZE: usize = 64 * 1024 * 1024;
+// `pub` only under the test feature: `tests/transport_multipart.rs` needs
+// the exact value to build its mocks' expected part counts and query
+// strings. Not part of the crate's real public API surface.
+#[cfg(feature = "test-small-multipart-caps")]
+pub const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 
 // Body-size cap for a pack download. Canonical value lives in mkit-core.
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
@@ -392,6 +428,11 @@ impl S3Transport {
 struct HttpResponse {
     status: u16,
     body: Vec<u8>,
+    /// The `ETag` response header, if present. Only consulted by the
+    /// multipart-upload path (`UploadPart` needs each part's ETag to
+    /// build the `CompleteMultipartUpload` manifest); every other call
+    /// site ignores it.
+    etag: Option<String>,
 }
 
 fn extract_response(
@@ -400,6 +441,11 @@ fn extract_response(
     is_head: bool,
 ) -> TransportResult<HttpResponse> {
     let status = resp.status().as_u16();
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let body = if is_head {
         Vec::new()
     } else if let Some(limit) = body_limit {
@@ -419,7 +465,7 @@ fn extract_response(
         // the status is retryable and the caller discards).
         Vec::new()
     };
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse { status, body, etag })
 }
 
 fn method_to_str(m: &Method) -> &'static str {
@@ -531,15 +577,233 @@ fn quoted_md5(wire: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Multipart upload (SPEC-TRANSPORT §6.7) — packs above S3_SINGLE_PUT_MAX
+// ---------------------------------------------------------------------------
+
+/// Build the canonical query string that initiates a multipart upload:
+/// `POST <key>?uploads`.
+fn multipart_init_query() -> String {
+    sigv4::canonical_query_string(&[("uploads", "")])
+}
+
+/// Build the canonical query string for one `UploadPart` call.
+fn multipart_part_query(part_number: u32, upload_id: &str) -> String {
+    sigv4::canonical_query_string(&[
+        ("partNumber", &part_number.to_string()),
+        ("uploadId", upload_id),
+    ])
+}
+
+/// Build the canonical query string for `CompleteMultipartUpload` /
+/// `AbortMultipartUpload`: both address the upload solely by `uploadId`.
+fn multipart_upload_id_query(upload_id: &str) -> String {
+    sigv4::canonical_query_string(&[("uploadId", upload_id)])
+}
+
+/// Build the `CompleteMultipartUpload` request body from the parts
+/// collected during upload, in ascending part-number order.
+///
+/// Each `etag` is the verbatim `ETag` header value the server returned
+/// for that part (typically already double-quoted, e.g. `"<md5-hex>"`);
+/// callers MUST reject any value containing `<` or `&` before calling
+/// this (see [`S3Transport::upload_one_part`]) so a malicious or buggy
+/// server can't inject XML through the ETag.
+fn build_complete_multipart_body(parts: &[(u32, String)]) -> Vec<u8> {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("<CompleteMultipartUpload>");
+    for (part_number, etag) in parts {
+        // `String::write_fmt` never fails.
+        let _ = write!(
+            out,
+            "<Part><PartNumber>{part_number}</PartNumber><ETag>{etag}</ETag></Part>"
+        );
+    }
+    out.push_str("</CompleteMultipartUpload>");
+    out.into_bytes()
+}
+
+impl S3Transport {
+    /// Upload `bytes` (already confirmed `> S3_SINGLE_PUT_MAX`) as a
+    /// multipart object: `CreateMultipartUpload` -> `UploadPart` per
+    /// [`MULTIPART_PART_SIZE`]-sized chunk (each independently retried
+    /// through the existing [`Self::http_request`] backoff ladder) ->
+    /// `CompleteMultipartUpload`. Any terminal failure aborts the
+    /// multipart upload so a partial attempt doesn't leak orphaned parts
+    /// in the bucket (SPEC-TRANSPORT §6.7).
+    fn upload_pack_multipart(&self, bytes: &[u8], object_key: &str) -> TransportResult<()> {
+        let upload_id = self.create_multipart_upload(object_key)?;
+
+        let mut parts: Vec<(u32, String)> = Vec::new();
+        for (i, chunk) in bytes.chunks(MULTIPART_PART_SIZE).enumerate() {
+            // Bounded by PACK_BODY_LIMIT / MULTIPART_PART_SIZE, always
+            // far under both `u32::MAX` and S3's 10,000-parts-per-upload
+            // ceiling; the fallback is defensive, not expected to fire.
+            let part_number = u32::try_from(i + 1).unwrap_or(u32::MAX);
+            match self.upload_one_part(object_key, &upload_id, part_number, chunk) {
+                Ok(etag) => parts.push((part_number, etag)),
+                Err(e) => {
+                    self.abort_multipart_upload(object_key, &upload_id);
+                    return Err(e);
+                }
+            }
+        }
+
+        match self.complete_multipart_upload(object_key, &upload_id, &parts) {
+            Ok(()) => Ok(()),
+            // 412: an object already exists at this content-addressed
+            // key. Packs are immutable and addressed by the hash of
+            // their bytes, so an existing object at this exact key is
+            // guaranteed to hold identical content — treat this as the
+            // idempotent no-op SPEC-TRANSPORT §7 requires of
+            // `upload_pack`, matching the unconditional-overwrite
+            // single-PUT path's idempotent behaviour. The multipart
+            // upload itself was never materialized (the conditional
+            // failed before the object was created), so it still needs
+            // an explicit abort.
+            Err(TransportError::ServerError { status: 412 }) => {
+                self.abort_multipart_upload(object_key, &upload_id);
+                Ok(())
+            }
+            Err(e) => {
+                self.abort_multipart_upload(object_key, &upload_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// `POST <key>?uploads` — initiate a multipart upload and return the
+    /// server-assigned `UploadId`.
+    fn create_multipart_upload(&self, object_key: &str) -> TransportResult<String> {
+        let query = multipart_init_query();
+        let resp = self.http_request(
+            &Method::POST,
+            object_key,
+            &query,
+            None,
+            &[],
+            Some(SMALL_RESPONSE_LIMIT),
+        )?;
+        match resp.status {
+            200 => {
+                let body =
+                    std::str::from_utf8(&resp.body).map_err(|_| TransportError::InvalidResponse)?;
+                extract_element(body, "UploadId").ok_or(TransportError::InvalidResponse)
+            }
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    /// `PUT <key>?partNumber=<n>&uploadId=<id>` — upload one part and
+    /// return its `ETag`. Retried transparently by
+    /// [`Self::http_request`]'s backoff ladder on 5xx/429/connection
+    /// failure, so a transient failure on one part never requires
+    /// restarting the whole multipart upload from part one.
+    fn upload_one_part(
+        &self,
+        object_key: &str,
+        upload_id: &str,
+        part_number: u32,
+        chunk: &[u8],
+    ) -> TransportResult<String> {
+        let query = multipart_part_query(part_number, upload_id);
+        let resp = self.http_request(
+            &Method::PUT,
+            object_key,
+            &query,
+            Some(chunk),
+            &[],
+            Some(SMALL_RESPONSE_LIMIT),
+        )?;
+        match resp.status {
+            200 | 201 => {
+                let etag = resp.etag.ok_or(TransportError::InvalidResponse)?;
+                if etag.is_empty() || etag.contains(['<', '&']) {
+                    return Err(TransportError::InvalidResponse);
+                }
+                Ok(etag)
+            }
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    /// `POST <key>?uploadId=<id>` with the part manifest as the body —
+    /// commit the multipart upload into a single object.
+    ///
+    /// Carries `If-None-Match: *` (`PutIfAbsent` semantics) rather than
+    /// the single-PUT path's `Match(h)`-via-`If-Match` CAS trick: a
+    /// multipart `ETag` is not the body MD5 (it's derived from the parts'
+    /// ETags), so [`quoted_md5`]'s equivalence does not hold for
+    /// multipart objects. See SPEC-TRANSPORT §6.3/§7.1 for the resulting
+    /// CAS-guarantee note.
+    fn complete_multipart_upload(
+        &self,
+        object_key: &str,
+        upload_id: &str,
+        parts: &[(u32, String)],
+    ) -> TransportResult<()> {
+        let query = multipart_upload_id_query(upload_id);
+        let body = build_complete_multipart_body(parts);
+        let resp = self.http_request(
+            &Method::POST,
+            object_key,
+            &query,
+            Some(&body),
+            &[("If-None-Match", "*".to_owned())],
+            Some(SMALL_RESPONSE_LIMIT),
+        )?;
+        match resp.status {
+            200 | 201 => Ok(()),
+            409 | 412 => Err(TransportError::ServerError { status: 412 }),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    /// `DELETE <key>?uploadId=<id>` — best-effort cleanup after any
+    /// terminal multipart failure, so a transient error or a lost CAS
+    /// race doesn't leave orphaned parts (and their storage cost)
+    /// sitting in the bucket forever. Deliberately swallows its own
+    /// error: this crate has no logging facility, and a failed abort
+    /// must never mask the real error that triggered it (R2/S3 also
+    /// garbage-collect incomplete multipart uploads after a bucket
+    /// lifecycle policy window, so a failed abort here is not the only
+    /// backstop).
+    fn abort_multipart_upload(&self, object_key: &str, upload_id: &str) {
+        let query = multipart_upload_id_query(upload_id);
+        let _ = self.http_request(
+            &Method::DELETE,
+            object_key,
+            &query,
+            None,
+            &[],
+            Some(SMALL_RESPONSE_LIMIT),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Transport impl
 // ---------------------------------------------------------------------------
 
 impl Transport for S3Transport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        if bytes.len() as u64 > S3_SINGLE_PUT_MAX || bytes.len() as u64 > PACK_BODY_LIMIT {
+        // PACK_BODY_LIMIT is the absolute pack-body ceiling enforced on
+        // every transport (it bounds `download_pack`'s in-memory buffer
+        // too — see mkit-core::protocol's doc comment); multipart upload
+        // does not touch it, so an oversized pack still fails closed
+        // here rather than uploading something that can never be read
+        // back. This is unconditional and independent of
+        // S3_SINGLE_PUT_MAX below.
+        if bytes.len() as u64 > PACK_BODY_LIMIT {
             return Err(TransportError::ServerError { status: 413 });
         }
         let object_key = Self::pack_object_key(key.as_bytes());
+        if bytes.len() as u64 > S3_SINGLE_PUT_MAX {
+            return self.upload_pack_multipart(bytes, &object_key);
+        }
         let resp = self.http_request(
             &Method::PUT,
             &object_key,

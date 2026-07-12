@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use mkit_core::hash::{Hash, to_hex};
-use mkit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError};
+use mkit_core::protocol::{BackoffIterator, PACK_BODY_LIMIT, PackKey, Transport, TransportError};
 use mkit_core::refs::RefWriteCondition;
+use mkit_transport_s3::S3Transport;
 use mkit_transport_s3::sigv4::Credentials;
-use mkit_transport_s3::{S3_SINGLE_PUT_MAX, S3Transport};
 
 fn demo_creds() -> Credentials {
     Credentials {
@@ -152,9 +152,17 @@ fn upload_pack_5xx_then_200_succeeds() {
 }
 
 #[test]
-fn upload_pack_rejects_over_5gib() {
-    // A REAL over-cap body: `vec![0u8; S3_SINGLE_PUT_MAX + 1]` is
-    // allocated with `alloc_zeroed`, so the > 5 GiB body costs lazily
+fn upload_pack_rejects_over_pack_body_limit() {
+    // PACK_BODY_LIMIT (the absolute pack-body ceiling shared with
+    // `download_pack`, per mkit-core::protocol's doc comment) is
+    // unconditional and independent of the multipart path added in
+    // issue #704 — deliberately probed via PACK_BODY_LIMIT rather than
+    // S3_SINGLE_PUT_MAX so this test's outcome doesn't depend on
+    // whether the `test-small-multipart-caps` feature (which shrinks
+    // S3_SINGLE_PUT_MAX) is enabled for this build.
+    //
+    // A REAL over-cap body: `vec![0u8; PACK_BODY_LIMIT + 1]` is
+    // allocated with `alloc_zeroed`, so the > 4 GiB body costs lazily
     // mapped zero pages (virtual address space), not RSS — and the
     // size guard fires before anything reads the bytes.
     //
@@ -163,13 +171,23 @@ fn upload_pack_rejects_over_5gib() {
     // fail the exact-status assertion below.
     let server = mockito::Server::new();
     let t = build_transport(&server.url());
-    let over_cap = usize::try_from(S3_SINGLE_PUT_MAX).unwrap() + 1;
+    let over_cap = usize::try_from(PACK_BODY_LIMIT).unwrap() + 1;
     let body = vec![0u8; over_cap];
     match t.upload_pack(&body, &sample_key()) {
         Err(TransportError::ServerError { status: 413 }) => {}
         other => panic!("expected the 413 oversize guard, got {other:?}"),
     }
 }
+
+// The branch decision (above S3_SINGLE_PUT_MAX -> multipart), the
+// byte-exact round-trip, the abort-on-part-failure cleanup, and the
+// idempotent-412-on-complete behaviour are all covered by the dedicated
+// `tests/transport_multipart.rs` integration test. That file requires
+// the `test-small-multipart-caps` feature specifically so it can drive
+// the real multipart flow with single-digit-MiB bodies; duplicating an
+// multipart-path test here (in a file compiled without that feature by
+// default) would otherwise move a real multi-GiB body through mockito
+// on every plain `cargo test` run.
 
 // -- downloadPack ------------------------------------------------------------
 
