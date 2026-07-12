@@ -209,7 +209,6 @@ the change affects.
 
 - `specs/SPEC-OBJECTS.md` — on-disk object format
 - `specs/SPEC-MERKLE-OBJECTS.md` &mdash; `Tree`/`ChunkedBlob` BMT-root addressing
-- `adr/0001-merkelize-chunkedblob-and-tree.md` &mdash; why object identity moved to a Merkle root
 - `specs/SPEC-PACKFILE.md` — packfile wire format
 - `specs/SPEC-DELTA.md` — delta encoding
 - `specs/SPEC-FASTCDC.md` — content-defined chunking
