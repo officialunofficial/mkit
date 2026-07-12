@@ -111,17 +111,19 @@ This is a DEMO server; the envelope proves request integrity + same-author,
 not authority. Be aware of:
 
 - **Replay within the freshness window.** A captured signed write is replayable
-  for as long as it stays fresh (the **±5 min** `X-Created-At` window). The
-  `Idempotency-Key` is *signed* but **not deduplicated** server-side, so a
-  replay is accepted again. For content-addressed `PutObject` a replay is inert
-  (same `object_id` → `duplicate=true`). The materially affected case is
-  `UpdateRef` with `REF_EXPECTATION_ANY` (the ANY-clobber): a replayed
-  ANY-update can re-clobber a ref to a stale value inside the window.
-  `MISSING`/`MATCH` updates are self-limiting (the precondition fails on
-  replay). Mitigation for the demo is the short window; a production deployment
-  would persist `(public_key, idempotency_key)` in the DO with a TTL and reject
-  duplicates (cheap to add, deferred here — documenting is sufficient for the
-  demo).
+  for as long as it stays fresh (the **±5 min** `X-Created-At` window), but the
+  `Idempotency-Key` IS deduplicated server-side for the writes where a replay
+  would otherwise be observable: `PostMessage` and `React` dedupe on
+  `(author, idem)`, and `UpdateRef` dedupes on `(author, name, idem)` — a
+  replayed request returns the ORIGINAL result instead of re-applying (see
+  `idem_keys` / `react_idem` / `update_idem` in `refstore.rs`). This closes the
+  `REF_EXPECTATION_ANY` ANY-clobber: a replayed ANY-update, resubmitted inside
+  the freshness window, returns its first result rather than re-running the CAS
+  against whatever the ref holds now. `MISSING`/`MATCH` updates were already
+  self-limiting (the precondition fails on replay) and remain so. For
+  content-addressed `PutObject` a replay is inert regardless (same `object_id`
+  → `duplicate=true`), so it has no dedupe table. Each ledger is pruned on the
+  same freshness-window schedule so it can't grow unbounded.
 - **Open write.** Any valid Ed25519 key may write any ref in any room; there is
   no allow-list. The signature is integrity + attribution, never authorization.
 - **Input bounds.** `room` is validated `^[A-Za-z0-9._-]{1,64}$`; ref `name`/

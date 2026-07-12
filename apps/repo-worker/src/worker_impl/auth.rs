@@ -27,9 +27,12 @@ pub struct AuthorPubkey(pub String);
 
 /// The request's `Idempotency-Key` (verified as part of the signed envelope),
 /// placed on `ctx.extensions` for handlers that need replay protection. Empty
-/// when the request carried no key. PostMessage uses it to dedupe replays of a
-/// captured signature (UpdateRef/PutObject are naturally idempotent and ignore
-/// it).
+/// when the request carried no key. PostMessage and React use it (keyed on
+/// `author`) to dedupe replays of a captured signature. UpdateRef uses it too
+/// (keyed on `author` + ref `name`) to close the `REF_EXPECTATION_ANY`
+/// replay-clobber hole: a replayed signed ANY-update returns its original
+/// result instead of re-running the CAS. PutObject remains naturally
+/// idempotent (content-addressed) and ignores it.
 #[derive(Clone)]
 pub struct IdempotencyKey(pub String);
 

@@ -334,6 +334,15 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .extensions()
             .get::<AuthorPubkey>()
             .map(|a| a.0.clone());
+        // The request's Idempotency-Key (verified in the envelope) — the DO
+        // uses it, together with `author` and `name`, to dedupe a replayed
+        // signed UpdateRef into its original result instead of re-running the
+        // CAS (closes the REF_EXPECTATION_ANY replay-clobber hole).
+        let idem = ctx
+            .extensions()
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
 
         let env = self.env.clone();
         SendFuture::new(async move {
@@ -350,6 +359,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 },
                 author,
                 commit,
+                idem,
             };
             let resp: UpdateResp = do_call(&env, &room, "/update", &body).await?;
             let current = hex_to_bytes_opt(&resp.current).unwrap_or_default();

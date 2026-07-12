@@ -58,6 +58,11 @@ pub struct UpdateReq {
     /// non-commit/remix target, or from an older worker — `default` = None).
     #[serde(default)]
     pub commit: Option<CommitMetaWire>,
+    /// Request Idempotency-Key — replay dedupe, keyed together with `author`
+    /// and `name` (empty if none). Closes the `REF_EXPECTATION_ANY` replay
+    /// hole: a replayed signed UpdateRef returns its original
+    /// (committed, conflict, current) result instead of re-running the CAS.
+    pub idem: String,
 }
 
 #[derive(Serialize, Deserialize)]
