@@ -35,11 +35,28 @@ sparse-checkout = ["mkit-core/sparse-checkout"]
 # the same feature in mkit-core (which in turn pulls the commonware
 # dep stack).
 pack-shards = ["mkit-core/pack-shards"]
+# Test-only (issue #704): shrinks `S3_SINGLE_PUT_MAX` and the internal
+# multipart part size to small values (single-digit MiB) so the
+# multipart-upload integration test can drive the real
+# CreateMultipartUpload -> UploadPart -> CompleteMultipartUpload flow
+# against a mockito server without allocating or transferring
+# multi-GiB buffers. MUST NOT be enabled in a production build — the
+# shrunk `S3_SINGLE_PUT_MAX` is not a valid S3/R2 API limit. Excluded
+# from the docs.rs feature set below for that reason.
+test-small-multipart-caps = []
 
 [dev-dependencies]
 mockito = "1"
 serde_json = "1"
 
+# Multipart-upload round-trip test, gated behind `test-small-multipart-caps`
+# (see that feature's doc comment above) so a plain `cargo test` doesn't
+# need to move real multi-GiB buffers to exercise the multipart path.
+[[test]]
+name = "transport_multipart"
+required-features = ["test-small-multipart-caps"]
+
 [package.metadata.docs.rs]
-# Build docs with every feature so docs.rs renders the feature-gated API.
-all-features = true
+# Build docs with the real (non-test) feature set so docs.rs renders the
+# feature-gated API without advertising the test-only shrunk caps.
+features = ["sparse-checkout", "pack-shards"]

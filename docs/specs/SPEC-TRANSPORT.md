@@ -426,15 +426,34 @@ surfaces `TransportError::AccessDenied`.
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
 | `Missing`    | `If-None-Match: *` | R2 honours this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how we get CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too — but multipart uploads break the equivalence, which is why §6.4 caps single-PUT size. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how we get CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too — but multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
 
 `409` and `412` → `RefConflict`; never retried.
 
+`upload_pack` carries no `RefWriteCondition` — packs are content-addressed
+and every write is either a plain unconditional `PUT` (below the
+single-PUT cap) or the multipart path of §6.7, which uses
+`If-None-Match: *` on `CompleteMultipartUpload` rather than any
+`Match(h)`-style condition. See §7.1 for the resulting CAS-guarantee
+note on large packs.
+
 ### 6.4 Limits
 
-- `S3_SINGLE_PUT_MAX = 5 GiB` — anything larger requires multipart
-  upload, deferred to a future revision.
-- `PACK_BODY_LIMIT = 4 GiB` for `download_pack`.
+- `S3_SINGLE_PUT_MAX = 5 GiB` — packs at or below this go through a
+  single `PUT`; anything larger goes through the multipart path (§6.7).
+- `PACK_BODY_LIMIT = 4 GiB` — the absolute pack-body ceiling enforced
+  on both `upload_pack` and `download_pack` (every transport that
+  ingests or emits pack bytes shares this limit; see
+  [`mkit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/mkit-core/src/protocol.rs)).
+  On a 64-bit target this is smaller than `S3_SINGLE_PUT_MAX`, so in
+  today's builds it — not the single-PUT cap — is what actually bounds
+  a pack's size; §6.7's multipart path exists for API correctness and
+  for targets/future revisions where `PACK_BODY_LIMIT` is raised or
+  not the binding constraint (e.g. a 32-bit target, where
+  `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
+  becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
+  streaming/constant-memory `Transport` redesign tracked elsewhere in
+  the production-readiness epic, out of scope here.
 - `REF_BODY_LIMIT = 256` bytes (a ref is 64 hex + newline; the
   256-byte ceiling accommodates trailing whitespace and trivial
   S3 metadata).
@@ -475,6 +494,45 @@ The `?sparse=<filter-hex>` URL query that HTTP uses (§5.6) is a no-op
 on S3 because the object key already encodes the filter hash. The
 client omits it so the SigV4 canonical request stays tight.
 
+### 6.7 Multipart upload
+
+`upload_pack` for a pack larger than `S3_SINGLE_PUT_MAX` (§6.4) uses
+the standard S3 multipart-upload API instead of a single `PUT`:
+
+1. `POST <key>?uploads` — `CreateMultipartUpload`. The response body's
+   `<UploadId>` addresses the rest of the sequence.
+2. `PUT <key>?partNumber=<n>&uploadId=<id>` once per fixed-size part
+   (`n` starting at 1), body = that part's raw bytes. The response
+   `ETag` header is recorded for step 3. Each part is retried
+   independently through the same backoff ladder as every other S3
+   call (§6.5/§7) — a transient failure on one part does not require
+   restarting the upload from part one.
+3. `POST <key>?uploadId=<id>` — `CompleteMultipartUpload`, body a
+   `<CompleteMultipartUpload>` manifest listing every part number and
+   its `ETag`. Carries `If-None-Match: *` (see §6.3's note on why
+   `Match(h)` doesn't apply here).
+4. On any terminal failure in steps 2–3 — a part exhausting its
+   retries, or `CompleteMultipartUpload` failing for a reason other
+   than `409`/`412` — `DELETE <key>?uploadId=<id>` (`AbortMultipartUpload`)
+   before returning the error, so a partial attempt does not leave
+   orphaned parts (and their storage cost) in the bucket. `409`/`412`
+   on `CompleteMultipartUpload` also triggers the abort (the object
+   was never materialized), but is not itself an error — see below.
+
+Every part except the last MUST be at least 5 MiB (an S3/R2 API
+requirement); the implementation's fixed part size (64 MiB in
+production) satisfies this for any part but the last.
+
+**Idempotency and the `409`/`412` case:** because pack objects are
+content-addressed and immutable, an existing object at the target key
+is guaranteed to hold identical bytes to whatever this upload would
+have produced. A `409`/`412` on `CompleteMultipartUpload` (the
+`If-None-Match: *` precondition losing a race against an earlier,
+identical upload of the same digest) is therefore treated as the
+idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
+not a caller-visible error — matching the single-PUT path's
+unconditional-overwrite behavior for the same scenario.
+
 ---
 
 ## 7. Retry / idempotency
@@ -509,6 +567,20 @@ concerns.
 | HTTP   | `If-None-Match: *` enforced by the Worker | `If-Match: "<hex>"` enforced by the Worker | Yes |
 | S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` — see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` + 32-byte `expected_id` | Depends on server-side ref-store atomicity |
+
+`upload_pack` itself carries no `RefWriteCondition` (it addresses
+content by digest, not by a caller-supplied CAS condition), so the
+table above — `Missing` / `Match(h)` — describes `update_ref` only.
+For packs large enough to cross `S3_SINGLE_PUT_MAX` (§6.4), the S3
+transport's multipart path (§6.7) downgrades even the informal
+CAS-adjacent guarantee the single-PUT path gets for free: a plain
+`PUT` is atomic (the object either fully exists with the uploaded
+bytes or doesn't exist at all), while a multipart upload's
+`CompleteMultipartUpload` only supports `If-None-Match: *`
+(existence-only) — never `If-Match(h)` — because a multipart `ETag`
+is not the body MD5. This is an accepted downgrade specific to large
+S3/R2 packs; content-addressing (§8) makes it safe (see §6.7's
+idempotency note).
 
 ---
 
@@ -546,8 +618,7 @@ versioning.
 
 A native SSH implementation (with in-process host-key pinning) is a
 future enhancement; [`SSH-SECURITY.md`](../SSH-SECURITY.md) tracks the
-gaps inherited from delegating to `ssh(1)`. S3 multipart upload
-(for packs above the 5 GiB single-PUT cap) is similarly deferred.
+gaps inherited from delegating to `ssh(1)`.
 
 ---
 
