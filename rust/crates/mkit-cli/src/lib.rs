@@ -27,6 +27,7 @@ pub mod config;
 pub mod editor;
 pub mod exit;
 pub mod format;
+pub mod progress;
 pub mod remote_dispatch;
 pub mod signal;
 #[cfg(feature = "sparse-checkout")]

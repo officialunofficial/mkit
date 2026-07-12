@@ -36,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a hosted reference-Worker deployment are separate, later changes
   ([#701](https://github.com/officialunofficial/mkit/issues/701),
   [#699](https://github.com/officialunofficial/mkit/issues/699)).
+- **Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
+  ([#711](https://github.com/officialunofficial/mkit/issues/711)).**
+  These commands now stream a live progress line on stderr while the
+  network transfer runs — `Writing objects: N objects, B bytes` while
+  building/uploading the outgoing pack, `Unpacking objects: N objects`
+  while applying a downloaded one — using only real counts (objects
+  actually staged/unpacked, bytes actually handed to the transport).
+  mkit still never fabricates git's `Enumerating/Counting/Compressing
+  objects` or `Total N (delta D)` lines, per `docs/PARITY.md`: mkit's
+  transport is one-object-per-pack and computes no cross-branch delta
+  graph. Progress shows only when stderr is a tty; the new `-q`/
+  `--quiet` flag on all four commands forces it off, and
+  `MKIT_PROGRESS=always`/`never` overrides the tty auto-detection
+  explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
   / `download_pack_streaming`).** Two new opt-in trait methods move a
   pack as a sequence of bounded-size `PackChunk { offset, data, last }`
