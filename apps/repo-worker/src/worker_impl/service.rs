@@ -1006,8 +1006,19 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             let message_bodies_deleted = purge_prefix(&env, &format!("{room}/messages/")).await?;
             let resp: PurgeResp = do_call(&env, &room, "/purge", &()).await?;
 
+            // `purged` reflects the proto contract ("true unless the room
+            // already had nothing to purge") rather than always `true` — a
+            // PurgeRoom against an already-empty/nonexistent room is a
+            // harmless no-op, and the response should say so instead of
+            // falsely claiming something was removed.
+            let purged = objects_deleted > 0
+                || message_bodies_deleted > 0
+                || resp.refs_deleted > 0
+                || resp.messages_deleted > 0
+                || resp.reactions_deleted > 0;
+
             Ok(Response::new(PurgeRoomResponse {
-                purged: Some(true),
+                purged: Some(purged),
                 objects_deleted: Some(objects_deleted),
                 message_bodies_deleted: Some(message_bodies_deleted),
                 refs_deleted: Some(resp.refs_deleted),
