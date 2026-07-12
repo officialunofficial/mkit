@@ -30,13 +30,13 @@ use crate::proto::mkit::repo::v1::{
     ListCommitsRequest, ListCommitsResponse, ListMessagesRequest, ListMessagesResponse,
     ListReactionsRequest, ListReactionsResponse, ListRefsRequest, ListRefsResponse,
     PostMessageRequest, PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest,
-    ReactResponse, Reaction, RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse,
+    ReactResponse, Reaction, RefEntry, RoomEvent, UpdateRefRequest, UpdateRefResponse,
     WatchRefsRequest,
 };
 use crate::refs::{
     is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
 };
-use crate::watch_frame::WatchFrame;
+use crate::room_event;
 use std::collections::HashSet;
 
 const STORAGE_BUCKET: &str = "STORAGE";
@@ -124,7 +124,7 @@ async fn put_addressed(
 async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<CommitMetaWire> {
     let bucket = env.bucket(STORAGE_BUCKET).ok()?;
     let obj = bucket
-        .get(&object_key(room, new_id))
+        .get(object_key(room, new_id))
         .execute()
         .await
         .ok()??;
@@ -233,15 +233,16 @@ async fn open_watch_socket(env: Env, room: String) -> Result<WebSocket, connectr
 }
 
 /// Own `ws` end-to-end and drain its (borrowed-from-`ws`, never escaping this
-/// function) `EventStream` onto `tx`, translating each `Commit` frame into a
-/// `RefEvent`. Runs inside `wasm_bindgen_futures::spawn_local` — see the
-/// `watch_refs` doc comment for why that, and not a `Send`-bounded spawn, is
-/// what makes this sound. `Chat`/`Reaction`/malformed/unrecognized frames are
-/// silently skipped (`WatchFrame::decode_ref_event`'s contract) rather than
-/// failing the stream; only a genuine socket error or close ends it.
+/// function) `EventStream` onto `tx`, forwarding EVERY `RoomEvent` kind the DO
+/// broadcasts (commit/chat/reaction/presence — see `crate::room_event`) onto
+/// the Connect stream. Runs inside `wasm_bindgen_futures::spawn_local` — see
+/// the `watch_refs` doc comment for why that, and not a `Send`-bounded spawn,
+/// is what makes this sound. A malformed/unparseable frame is silently
+/// skipped (`room_event::decode`'s contract) rather than failing the stream;
+/// only a genuine socket error or close ends it.
 async fn bridge_watch_socket(
     ws: WebSocket,
-    tx: futures_channel::mpsc::UnboundedSender<Result<RefEvent, connectrpc::ConnectError>>,
+    tx: futures_channel::mpsc::UnboundedSender<Result<RoomEvent, connectrpc::ConnectError>>,
 ) {
     let mut events = match ws.events() {
         Ok(events) => events,
@@ -254,7 +255,7 @@ async fn bridge_watch_socket(
         match item {
             Ok(WebsocketEvent::Message(msg)) => {
                 let Some(text) = msg.text() else { continue };
-                if let Some(event) = WatchFrame::decode_ref_event(&text) {
+                if let Some(event) = room_event::decode(&text) {
                     // The receiver end (`rx`, the ServiceStream) is dropped
                     // when the Connect client disconnects and the dispatcher
                     // stops polling the stream; a failed send means exactly
@@ -503,7 +504,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
     // `EventStream<'ws>`, which BORROWS the socket, so a struct holding both
     // the `WebSocket` and its own `EventStream<'_>` is self-referential and
     // can't be built in safe Rust — which blocked returning it as the
-    // `'static + Send` `ServiceStream<RefEvent>` the generated trait requires
+    // `'static + Send` `ServiceStream<RoomEvent>` the generated trait requires
     // (see git history / apps/repo-worker/README.md before this change for
     // the previous `unimplemented` stub and its full rationale).
     //
@@ -516,29 +517,35 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
     // inside `wasm_bindgen_futures::spawn_local` — the one Cloudflare-Workers
     // task primitive that does NOT require its future to be `Send` (matching
     // the Router's own internal spawn per the module doc in worker_impl.rs).
-    // Each event is translated into a fully-owned `RefEvent` (or dropped, or
+    // Each event is translated into a fully-owned `RoomEvent` (or dropped, or
     // turned into an owned `ConnectError`) and pushed onto a
     // `futures_channel::mpsc::unbounded` sender. The receiver end — the
     // "owned channel" — holds no borrow into the spawned task or the
-    // WebSocket: it is `Send` because `Result<RefEvent, ConnectError>` is
+    // WebSocket: it is `Send` because `Result<RoomEvent, ConnectError>` is
     // `Send` (plain owned data, no JsValue), and `'static` because it has no
     // lifetime parameters at all. That receiver, not the WebSocket or its
-    // event stream, is what crosses the `ServiceStream<RefEvent>` boundary.
+    // event stream, is what crosses the `ServiceStream<RoomEvent>` boundary.
     //
-    // VERIFIED (2026-07-11, `wrangler dev` + a hand-rolled Connect-streaming
-    // client): the bridge itself works end-to-end. A live `wrangler dev`
-    // instance showed the worker opening the DO `/watch` WebSocket
-    // (`101 Switching Protocols`), `ws.events()` yielding real events, and
-    // this code correctly translating a `Commit` frame from a concurrent
-    // `UpdateRef` into a `RefEvent`. NOT yet verified: a Connect client
-    // actually receiving that `RefEvent` over the wire — see README
-    // "WatchRefs / streaming" for the separate, still-open gap this
-    // surfaced in the generic HTTP response adapter (`worker_impl.rs`).
+    // VERIFIED end-to-end (2026-07-11, issue #705): the bridge AND response
+    // delivery both work. PR #738 (the #697 spike) proved the bridge itself
+    // but reported delivery to a Connect client as an unverified/failing gap
+    // ("zero bytes, not even headers") under local `wrangler dev`. Re-running
+    // that exact scenario in this pass — repeated trials against a fresh
+    // local `wrangler dev` instance (wrangler 4.110.0 / worker-rs 0.8.5 /
+    // connectrpc 0.8.0), including incremental multi-event delivery and
+    // `Accept-Encoding: gzip` negotiation like a real browser client — did
+    // NOT reproduce that gap: headers and body both arrive, and each
+    // broadcast event is pushed to the client within tens of milliseconds of
+    // the triggering RPC, not buffered until stream end. See the README
+    // "WatchRefs / streaming" section for the full writeup, repro script, and
+    // the one verification this pass could NOT complete (a real `wrangler
+    // deploy`/custom-domain edge deployment — blocked by this session's
+    // production-deploy guardrail, not by anything in the code).
     async fn watch_refs(
         &self,
         _ctx: RequestContext,
         request: ServiceRequest<'_, WatchRefsRequest>,
-    ) -> ServiceResult<ServiceStream<RefEvent>> {
+    ) -> ServiceResult<ServiceStream<RoomEvent>> {
         let msg = request.to_owned_message();
         let room = msg.room.unwrap_or_default();
         check_room(&room)?;
@@ -552,7 +559,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         let ws = SendFuture::new(open_watch_socket(env, room_for_open)).await?;
 
         let (tx, rx) =
-            futures_channel::mpsc::unbounded::<Result<RefEvent, connectrpc::ConnectError>>();
+            futures_channel::mpsc::unbounded::<Result<RoomEvent, connectrpc::ConnectError>>();
         // `spawn_local`, not `SendFuture` + an ordinary `.await`: this task
         // must keep running to feed `rx` for the lifetime of the stream,
         // independent of `watch_refs` having already returned. It has no
@@ -868,7 +875,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 if !seen.insert(current.clone()) {
                     break;
                 }
-                let bytes = match bucket.get(&object_key(&room, &current)).execute().await {
+                let bytes = match bucket.get(object_key(&room, &current)).execute().await {
                     Ok(Some(obj)) => obj
                         .body()
                         .ok_or_else(|| ce_internal("R2 object had no body"))?

@@ -43,10 +43,10 @@ use super::wire::{
     MessagesResp, MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp,
     RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
-// `/watch` frame: declared once (host+wasm target-independent) in
-// `crate::watch_frame` and shared with the WatchRefs Connect-streaming
-// bridge in `service.rs`, so a field rename can't desync producer/consumer.
-use crate::watch_frame::WatchFrame;
+// `/watch` wire encoding: declared once (host+wasm target-independent) in
+// `crate::room_event` and shared with the WatchRefs Connect-streaming bridge
+// in `service.rs`, so a field rename can't desync producer/consumer.
+use crate::room_event;
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
 /// `limit=0` gets the default; anything above the max is clamped.
@@ -96,24 +96,6 @@ struct PresenceAttachment {
     /// 64-hex Ed25519 pubkey, or `None` for a signed-out viewer.
     pubkey: Option<String>,
     /// Epoch-ms the socket joined.
-    since: i64,
-}
-
-/// Live presence roster, broadcast to every `/watch` subscriber on join/leave.
-/// `kind: "presence"` distinguishes it from `"commit"` / `"chat"` frames so the
-/// one socket can carry all three.
-#[derive(Serialize)]
-struct PresenceJson {
-    kind: &'static str,
-    /// Distinct online keys (deduped by pubkey across tabs), earliest `since`.
-    members: Vec<PresenceMember>,
-    /// Connections with no identity yet — the "N viewers" count.
-    viewers: u32,
-}
-
-#[derive(Serialize)]
-struct PresenceMember {
-    pubkey: String,
     since: i64,
 }
 
@@ -410,16 +392,16 @@ impl RefStore {
                 // Dual-write the denormalized commit index. Best-effort: a record
                 // failure must NOT fail the (already-committed) ref update — the
                 // index is rebuildable by backfill from R2.
-                if let Some(m) = &req.commit {
-                    if let Err(e) = commit_index::record(&sql, &req.new, &req.name, m) {
-                        worker::console_error!("record_commit failed for {}: {e}", req.name);
-                    }
+                if let Some(m) = &req.commit
+                    && let Err(e) = commit_index::record(&sql, &req.new, &req.name, m)
+                {
+                    worker::console_error!("record_commit failed for {}: {e}", req.name);
                 }
-                self.broadcast(&WatchFrame::Commit {
-                    name: req.name.clone(),
-                    object_id: req.new.clone(),
-                    author_pubkey: req.author.clone(),
-                });
+                self.broadcast(&room_event::commit_event(
+                    req.name.clone(),
+                    &req.new,
+                    req.author.as_deref(),
+                ));
                 let resp = UpdateResp {
                     committed: true,
                     conflict: false,
@@ -635,15 +617,15 @@ impl RefStore {
         // request (same author + idempotency-key) returns the ORIGINAL result,
         // so a captured signature can't be amplified into duplicate messages and
         // a client retry is idempotent. A genuinely new post carries a fresh key.
-        if !req.idem.is_empty() {
-            if let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem) {
-                return Response::from_json(&PostResp {
-                    accepted: true,
-                    rate_limited: false,
-                    seq,
-                    created_at,
-                });
-            }
+        if !req.idem.is_empty()
+            && let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem)
+        {
+            return Response::from_json(&PostResp {
+                accepted: true,
+                rate_limited: false,
+                seq,
+                created_at,
+            });
         }
 
         let last = self.last_post_ms(&req.author);
@@ -713,13 +695,13 @@ impl RefStore {
 
         // Use the typed `broadcast` helper (like the Commit path) so a serialize
         // failure SKIPS the frame rather than fanning out an empty string "".
-        self.broadcast(&WatchFrame::Chat {
-            message_id: req.id.clone(),
-            author_pubkey: req.author.clone(),
-            text: req.text.clone(),
-            created_at: now,
+        self.broadcast(&room_event::chat_event(
+            &req.id,
+            &req.author,
+            req.text.clone(),
+            now,
             seq,
-        });
+        ));
 
         Response::from_json(&PostResp {
             accepted: true,
@@ -821,10 +803,10 @@ impl RefStore {
 
         // 1) Replay dedupe: a re-submitted signed React (same author + idem)
         // returns the ORIGINAL result instead of toggling state again.
-        if !req.idem.is_empty() {
-            if let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem) {
-                return Response::from_json(&ReactResp { active, count });
-            }
+        if !req.idem.is_empty()
+            && let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem)
+        {
+            return Response::from_json(&ReactResp { active, count });
         }
 
         let had = self.reaction_exists(&req.target, &req.emoji, &req.author);
@@ -902,13 +884,13 @@ impl RefStore {
 
         // 5) Broadcast + respond. Typed `broadcast` (like Commit/Chat) so a
         // serialize failure skips the frame rather than fanning out "".
-        self.broadcast(&WatchFrame::Reaction {
-            target_id: req.target.clone(),
-            emoji: req.emoji.clone(),
-            author_pubkey: req.author.clone(),
+        self.broadcast(&room_event::reaction_event(
+            req.target.clone(),
+            req.emoji.clone(),
+            &req.author,
             active,
             count,
-        });
+        ));
 
         Response::from_json(&ReactResp { active, count })
     }
@@ -1084,11 +1066,11 @@ impl RefStore {
             .collect()
     }
 
-    /// Serialize a `WatchFrame` and fan it out to every `/watch` subscriber.
-    fn broadcast(&self, frame: &WatchFrame) {
-        match serde_json::to_string(frame) {
-            Ok(payload) => self.broadcast_str(&payload),
-            Err(e) => worker::console_error!("broadcast: failed to serialize WatchFrame: {e}"),
+    /// Serialize a `RoomEvent` and fan it out to every `/watch` subscriber.
+    fn broadcast(&self, event: &crate::proto::mkit::repo::v1::RoomEvent) {
+        match room_event::to_json(event) {
+            Some(payload) => self.broadcast_str(&payload),
+            None => worker::console_error!("broadcast: failed to serialize RoomEvent"),
         }
     }
 
@@ -1149,16 +1131,7 @@ impl RefStore {
                 None => viewers = viewers.saturating_add(1),
             }
         }
-        let members = by_key
-            .into_iter()
-            .map(|(pubkey, since)| PresenceMember { pubkey, since })
-            .collect();
-        if let Ok(payload) = serde_json::to_string(&PresenceJson {
-            kind: "presence",
-            members,
-            viewers,
-        }) {
-            self.broadcast_str(&payload);
-        }
+        let members = by_key.into_iter().collect();
+        self.broadcast(&room_event::presence_event(members, viewers));
     }
 }

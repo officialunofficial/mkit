@@ -142,86 +142,110 @@ ConnectRPC unary, `POST /mkit.repo.v1.RepoService/<Method>`:
 | `GetRef`    | read  | DO read → `{exists, object_id}`. |
 | `UpdateRef` | write | CAS (`ANY`/`MISSING`/`MATCH`) inside the DO's serial execution → `{committed, conflict, current_id}`. |
 | `ListRefs`  | read  | DO list under an optional prefix → `{refs}`. |
-| `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket — **the DO bridge is verified working; delivery to a Connect client over HTTP is not (see below)**. |
+| `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket, streaming a `RoomEvent` (commit/chat/reaction/presence) per broadcast — see below. |
 
-### WatchRefs / streaming — M2 spike status (issue #697)
+### WatchRefs / streaming (issue #705, building on the #697 spike)
 
-`WatchRefs` is no longer an `unimplemented` stub. The worker opens its own
-WebSocket connection to the room's RefStore DO `/watch` endpoint (the same
+`WatchRefs` is real Connect server-streaming, not a stub: the worker opens
+its own WebSocket to the room's RefStore DO `/watch` endpoint (the same
 endpoint the raw-WebSocket fallback below proxies to a browser), consumes it,
-and re-emits `Commit` frames as `RefEvent`s on the `ServiceStream<RefEvent>`
-the generated trait requires. This is a **spike**, not a finished feature —
-read this section before relying on it.
+and re-emits every broadcast — a ref advance, a chat post, a reaction toggle,
+or a presence roster change — as a `RoomEvent` on the
+`ServiceStream<RoomEvent>` the generated trait requires. `RoomEvent` is a
+`oneof` over `RefEvent`/`ChatMessage`/`ReactionEvent`/`PresenceEvent` (see
+`proto/mkit/repo/v1/repo.proto`), so a Connect client sees one schema-
+validated feed for the whole room, not just ref advances.
 
-**The lifetime wall, and the bridge past it (VERIFIED).** `WebSocket::events()`
-returns `EventStream<'ws>`, which *borrows* the socket — a struct holding
-both a `WebSocket` and its own `EventStream<'_>` is self-referential and
-can't be built in safe Rust, so naively trying to return that borrowed stream
-as the `'static + Send` `ServiceStream<RefEvent>` doesn't compile. The fix:
-never let the borrow escape a function. `service.rs::bridge_watch_socket`
-owns the `WebSocket`, calls `.events()` on it locally, and fully drains that
-borrowed stream inside its own async body — which runs under
+**The lifetime wall, and the bridge past it.** `WebSocket::events()` returns
+`EventStream<'ws>`, which *borrows* the socket — a struct holding both a
+`WebSocket` and its own `EventStream<'_>` is self-referential and can't be
+built in safe Rust, so naively trying to return that borrowed stream as the
+`'static + Send` `ServiceStream<RoomEvent>` doesn't compile. The fix: never
+let the borrow escape a function. `service.rs::bridge_watch_socket` owns the
+`WebSocket`, calls `.events()` on it locally, and fully drains that borrowed
+stream inside its own async body — which runs under
 `wasm_bindgen_futures::spawn_local` rather than a `Send`-bounded spawn, so it
 never needs to be `Send` either. Each event it decodes is translated into a
-fully-owned `RefEvent` (or `ConnectError`) and pushed onto a
+fully-owned `RoomEvent` (or `ConnectError`) and pushed onto a
 `futures_channel::mpsc::unbounded` sender; the **receiver** end — the "owned
-channel" — is what actually satisfies `ServiceStream<RefEvent>`: it holds no
+channel" — is what actually satisfies `ServiceStream<RoomEvent>`: it holds no
 borrow into the WebSocket or the spawned task, so it is `Send` (its item type
 is plain owned data) and `'static` (no lifetime parameters at all), with no
-`unsafe impl Send` required anywhere in the bridge.
-
-This is verified two ways, not just "it compiles": (1) `cargo check --target
-wasm32-unknown-unknown` is clean, proving the borrow checker accepts the
-pattern under the exact `Send + 'static` bound the generated trait imposes;
-(2) a live `wrangler dev` run — worker opening the DO `/watch` WebSocket
-(`101 Switching Protocols`), `ws.events()` yielding real events, and this
-code correctly matching a `Commit` frame from a concurrent `UpdateRef` and
-skipping the DO's own `"presence"` frame — confirmed via `wrangler dev`
-console output during development (not captured as an automated test; see
-"Known gap" below for why an automated end-to-end test isn't included yet).
-See the doc comment on `RepoServer::watch_refs` in
+`unsafe impl Send` required anywhere in the bridge. See the doc comment on
+`RepoServer::watch_refs` in
 [`src/worker_impl/service.rs`](src/worker_impl/service.rs) for the full
-walkthrough, and [`src/watch_frame.rs`](src/watch_frame.rs) (host-testable,
-covered by `cargo test --lib`) for the `Commit`-frame → `RefEvent`
-translation.
+walkthrough, and [`src/room_event.rs`](src/room_event.rs) (host-testable,
+covered by `cargo test --lib`) for the `RoomEvent` build/encode/decode
+functions shared by the DO broadcast path and this bridge.
 
-**Known gap: response delivery is NOT verified end-to-end.** Getting the
-resulting `RefEvent` stream to actually reach a Connect client over HTTP
-required also switching `worker_impl.rs::serve_connect`'s response path from
-buffer-the-whole-body (`.collect()`, which can never terminate for an
-open-ended stream) to `Response::from_stream` — necessary, but in testing
-against local `wrangler dev` it was **not sufficient**: a `curl -N` / raw
-`fetch()` Connect-streaming client against `WatchRefs` still received zero
-bytes, even *after* the bridge had already logged a real `RefEvent` flowing
-through it. This was not root-caused before time ran out on the spike; it
-could be a `wrangler dev`/miniflare-local limitation for wasm-worker
-`ReadableStream` responses (there's precedent for streaming-response rough
-edges in local Workers dev tooling), or a remaining bug in the adapter — it
-is **unverified against a real deployed Worker**, since this environment has
-no Cloudflare deploy credentials (see the org's `project-cloudflare-deploy-account`
-memory note). This is why issue #697 does not claim the full "TS Connect
-client receives a live `RefEvent`" pass bar from its own Testing Decisions —
-that requires either fixing this gap or testing against a real deployment.
+**End-to-end delivery — VERIFIED (2026-07-11, issue #705).** The #697 spike
+that introduced this bridge reported a gap: a hand-rolled Connect-streaming
+test client against `WatchRefs` under local `wrangler dev` received *zero
+bytes, not even headers*, seconds after the bridge had already logged
+processing an event — and left it unresolved, guessing either a
+`wrangler dev`/miniflare buffering artifact or a bug in the generic HTTP
+response adapter (`worker_impl.rs::serve_connect`). Re-running that exact
+scenario against the SAME bridge code in this pass, with careful attention to
+test-harness artifacts (a naive `curl -N ... & sleep; kill` pattern can lose
+buffered-but-unflushed bytes on `SIGTERM` before they hit disk, which is what
+produced the "zero bytes" symptom on a subsequent repro attempt in this same
+session — polling for actual byte growth before tearing down the client fixed
+it):
 
-**Scope, even once delivery is fixed.** The bridge only translates `Commit`
-frames — `Chat`/`Reaction` frames and the untyped `"presence"` frame are
-silently skipped on the Connect stream (`RefEvent` has no `oneof` for them
-yet; see the issue this shipped under for the unresolved schema-unification
-work). It is also single-subscriber-per-request, not bidi: each `WatchRefs`
-call opens its own worker→DO WebSocket, which is fine for a spike/demo
-fan-out but is a DO connection per Connect subscriber, not shared.
+- **20+ manual trials** against a fresh local `wrangler dev` instance
+  (wrangler 4.110.0, `worker` 0.8.5, `connectrpc` 0.8.0) delivered every
+  triggered event, every time — single-event, back-to-back multi-trial, and
+  incremental multi-event-over-one-connection runs (two `UpdateRef`s on the
+  same open `WatchRefs` stream, each arriving within tens of milliseconds of
+  the triggering RPC, not buffered until the stream closes).
+- Repeated with `Accept-Encoding: gzip` set (matching what a real browser/
+  `fetch()` client negotiates) — no change; delivery is not gzip-buffered.
+- Repeated after modeling the full `RoomEvent` oneof (this issue's scope): all
+  four kinds — commit, chat, reaction, presence — arrive correctly as the new
+  proto union, not the old flat/ad hoc shape.
+- **`apps/repo-worker/tests/watch_refs_stream.rs`** is a host-side (no
+  wasm32 target, no DO, no Worker runtime) `cargo test` that drives
+  `WatchRefs` through the REAL `connectrpc::Router`/`ConnectRpcService`
+  dispatch used in production and asserts all four `RoomEvent` kinds decode
+  correctly off the wire — this is the automated regression test PR #738's
+  spike didn't have.
 
-**Raw-WebSocket fallback (still wired, still the production path).** Live ref
-streaming is *also* still reachable over a raw WebSocket at the worker route
-`GET /watch/<room>` — the RefStore DO accepts each subscriber as a
-hibernatable WebSocket and broadcasts a JSON frame
-(`{ "name", "object_id", "author_pubkey" }`, all hex, plus the chat/reaction/
-presence frames outside the `RefEvent` schema) to every subscriber on each
-successful `UpdateRef`. `apps/web`'s `subscribeRoom` still uses this route
-directly and should keep doing so until the gap above is resolved (see the
-issue's Implementation Notes for the client migration this spike sets up but
-does not itself perform). The unary path is fully functional independent of
-either streaming path.
+**What was NOT verified: a real deployed Cloudflare Worker.** This session
+had real `wrangler` credentials for the org's Cloudflare account, but no
+authorization to run an actual `wrangler deploy` to production infrastructure
+(the harness's own safety guardrail blocked it — deploying to a live account,
+even under a disposable script name, is a production-modifying action outside
+this pass's scope). `wrangler dev --remote` — the documented fallback for
+edge-realistic testing without a full deploy — turned out to be a dead end
+independent of that: this wrangler version (4.110.0) has fully removed
+Durable Object support from `--remote` mode (`wrangler dev --remote is no
+longer supported for Durable Objects`), which is unusable for this Worker
+(every RPC except the unary `PutObject`/`GetObject` R2 path touches the
+RefStore DO). So the verification above is against local `wrangler dev`
+only — the same environment PR #738's spike used, just with the actual
+delivery gap it reported not reproducing. A maintainer with deploy
+authorization re-running the same manual trials against a real
+`wrangler deploy` (or the `mkit-repo-worker` Workers Builds deployment) would
+close out the last mile of confidence this pass couldn't reach.
+
+**Scope.** The bridge is single-subscriber-per-request, not bidi: each
+`WatchRefs` call opens its own worker→DO WebSocket, which is fine for a
+demo's fan-out but is a DO connection per Connect subscriber, not shared.
+
+**Raw-WebSocket fallback (still wired, still the production path).** Live
+room activity is *also* still reachable over a raw WebSocket at the worker
+route `GET /watch/<room>` — the RefStore DO accepts each subscriber as a
+hibernatable WebSocket and broadcasts the SAME `RoomEvent` proto3-JSON
+payload (see `src/room_event.rs`) to every subscriber on each successful
+`UpdateRef`/`PostMessage`/`React`/presence change, so the raw socket and the
+Connect stream share one wire schema (see mkit#705's Implementation Notes).
+`apps/web`'s `subscribeRoom` still uses this raw-WebSocket route directly
+(not the generated Connect client — that broader TS client rollout across
+`apps/web` is tracked separately, out of scope for this issue) but its frame
+parser (`parseActivityFrame` in `apps/web/src/lib/repo/backend.ts`) now
+decodes the unified `RoomEvent` schema instead of the old ad hoc
+`WatchFrame`/`PresenceJson` JSON dialects. The unary path is fully functional
+independent of either streaming path.
 
 ## RefStore Durable Object
 

@@ -59,7 +59,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // any routing, so browsers can complete the preflight for the signed-write
     // headers (X-Public-Key, …) regardless of the eventual route.
     if req.method() == Method::Options {
-        let mut headers = worker::Headers::new();
+        let headers = worker::Headers::new();
         let _ = headers.set("Access-Control-Allow-Origin", "*");
         let _ = headers.set("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
         let _ = headers.set("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
@@ -71,28 +71,28 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // straight to the room's RefStore DO (see README "WatchRefs"). Everything
     // else is a ConnectRPC call routed through the Router.
     let path = req.path();
-    if let Some(room) = path.strip_prefix("/watch/") {
-        if !room.is_empty() {
-            // Validate the room with the SAME allow-list the unary path enforces
-            // (see `service::check_room` → `is_valid_room`) BEFORE addressing a
-            // DO via `id_from_name`: the room is used as the DO instance name, so
-            // an unvalidated value must not reach `watch_fallback`.
-            if !is_valid_room(room) {
-                return Ok(with_cors(Response::error("invalid room", 400)?));
-            }
-            // Forward the optional `?pubkey=<hex>` so the DO can attribute live
-            // presence to a key (absent → a signed-out viewer).
-            let pubkey = req.url().ok().and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "pubkey")
-                    .map(|(_, v)| v.into_owned())
-            });
-            // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
-            // NOT run `with_cors` on it: CORS headers are meaningless on a 101
-            // handshake, and mutating the upgrade response can drop the
-            // `webSocket` it carries. CORS stays on the unary/JSON path only.
-            return watch_fallback(env, room, pubkey).await;
+    if let Some(room) = path.strip_prefix("/watch/")
+        && !room.is_empty()
+    {
+        // Validate the room with the SAME allow-list the unary path enforces
+        // (see `service::check_room` → `is_valid_room`) BEFORE addressing a
+        // DO via `id_from_name`: the room is used as the DO instance name, so
+        // an unvalidated value must not reach `watch_fallback`.
+        if !is_valid_room(room) {
+            return Ok(with_cors(Response::error("invalid room", 400)?));
         }
+        // Forward the optional `?pubkey=<hex>` so the DO can attribute live
+        // presence to a key (absent → a signed-out viewer).
+        let pubkey = req.url().ok().and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "pubkey")
+                .map(|(_, v)| v.into_owned())
+        });
+        // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
+        // NOT run `with_cors` on it: CORS headers are meaningless on a 101
+        // handshake, and mutating the upgrade response can drop the
+        // `webSocket` it carries. CORS stays on the unary/JSON path only.
+        return watch_fallback(env, room, pubkey).await;
     }
 
     serve_connect(req, env).await
@@ -119,10 +119,10 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // whole payload in the isolate first (the only large input is PutObject
     // `bytes`). The post-buffer check below is the backstop for chunked/
     // unknown-length requests where Content-Length is absent.
-    if let Ok(Some(len)) = req.headers().get("content-length") {
-        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
-            return Ok(with_cors(body_too_large()?));
-        }
+    if let Ok(Some(len)) = req.headers().get("content-length")
+        && len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES)
+    {
+        return Ok(with_cors(body_too_large()?));
     }
     let body = req.bytes().await.unwrap_or_default();
     if body.len() > MAX_BODY_BYTES {
@@ -203,15 +203,14 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // for wasm-worker `ReadableStream` responses, or a remaining issue in
     // this adapter — unverified against a real deployed Worker (no deploy
     // credentials in this environment). See README "WatchRefs / streaming".
-    let body_stream = http_resp
-        .into_body()
-        .into_data_stream()
-        .map(|item: std::result::Result<Bytes, std::convert::Infallible>| {
+    let body_stream = http_resp.into_body().into_data_stream().map(
+        |item: std::result::Result<Bytes, std::convert::Infallible>| {
             // `ConnectRpcBody`'s `Error` is `Infallible`, so `item` is always
             // `Ok`; `unwrap_or_default()` just avoids matching a variant that
             // can't exist while giving the closure a concrete `Result` type.
             Ok::<Vec<u8>, worker::Error>(item.unwrap_or_default().to_vec())
-        });
+        },
+    );
     let mut out = Response::from_stream(body_stream)?.with_status(status);
     let out_headers = out.headers_mut();
     for (k, v) in resp_headers.iter() {

@@ -94,6 +94,11 @@ connectrpc-build = "0.8"
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
 rand_core = "0.6"
+# Host-side WatchRefs Connect-streaming integration test
+# (tests/watch_refs_stream.rs) needs an executor for `#[tokio::test]`; the
+# worker itself never depends on tokio (its runtime is wasm_bindgen_futures on
+# wasm32), so this is a test-only, host-only addition.
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [profile.release]
 opt-level = "s"
