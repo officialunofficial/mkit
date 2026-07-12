@@ -2,6 +2,7 @@
 //! (named, or the flat default) and fast-forward the current branch.
 
 use std::io::Write;
+use std::path::Path;
 
 use clap::Parser;
 use mkit_core::hash::Hash;
@@ -26,6 +27,12 @@ struct PullOpts {
     /// to opt out. Not settable from repo-scoped config.
     #[arg(long = "no-verify-signatures")]
     no_verify_signatures: bool,
+    /// Pull from every configured remote (the flat default plus every
+    /// named `remote.<name>.url`) instead of just one, fast-forwarding
+    /// the current branch from each in turn. Mutually exclusive with an
+    /// explicit `<remote>` argument.
+    #[arg(long, conflicts_with = "remote")]
+    all: bool,
 }
 
 #[must_use]
@@ -46,11 +53,55 @@ pub fn run(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
-    let Some(resolved) = config::resolve_remote(&cfg, opts.remote.as_deref().unwrap_or("")) else {
+    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
+    // or the user-scoped `pull.require_signed = false` config opted out.
+    let require_signed = !opts.no_verify_signatures && cfg.merged.pull_require_signed_or_default();
+    if opts.all {
+        let names = config::configured_remote_names(&cfg);
+        if names.is_empty() {
+            return emit_err(
+                "no remote configured — use `mkit remote add <url>`",
+                exit::CONFIG_ERROR,
+            );
+        }
+        // Pull from every remote in turn, continuing past a per-remote
+        // failure so one broken remote doesn't block the others; the
+        // worst exit code observed is returned at the end.
+        let mut worst = exit::OK;
+        for name in names {
+            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed);
+            if code != exit::OK {
+                worst = code;
+            }
+        }
+        return worst;
+    }
+    pull_one(
+        &cwd,
+        &layout,
+        &cfg,
+        opts.remote.as_deref().unwrap_or(""),
+        require_signed,
+    )
+}
+
+/// Pull from a single named remote (or the flat default when `remote`
+/// is empty), fast-forwarding the current branch and reporting a
+/// git-style summary. Shared by the single-remote path and the `--all`
+/// loop.
+fn pull_one(
+    cwd: &Path,
+    layout: &RepoLayout,
+    cfg: &config::LayeredConfig,
+    remote: &str,
+    require_signed: bool,
+) -> u8 {
+    let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err(
-            &match opts.remote.as_deref() {
-                Some(name) => format!("unknown remote '{name}'"),
-                None => "no remote configured — use `mkit remote add <url>`".to_owned(),
+            &if remote.is_empty() {
+                "no remote configured — use `mkit remote add <url>`".to_owned()
+            } else {
+                format!("unknown remote '{remote}'")
             },
             exit::CONFIG_ERROR,
         );
@@ -59,25 +110,27 @@ pub fn run(args: &[String]) -> u8 {
     // Snapshot the current branch tip so we can report a git-style
     // `Updating <old>..<new>` / `Fast-forward` block (or `Already up to
     // date.`) once the fast-forward completes.
-    let branch = match mkit_core::refs::read_head(&layout) {
+    let branch = match mkit_core::refs::read_head(layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => Some(b),
         _ => None,
     };
     let old_tip = branch
         .as_deref()
-        .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
-    // Fail closed by default (issue #692): verify unless `--no-verify-signatures`
-    // or the user-scoped `pull.require_signed = false` config opted out.
-    let require_signed = !opts.no_verify_signatures && cfg.merged.pull_require_signed_or_default();
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, &cfg) {
+        .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg) {
         Ok(tx) => {
-            match remote_dispatch::pull_all_with(&cwd, tx.as_ref(), &resolved.name, require_signed)
-            {
+            match remote_dispatch::pull_all_with(
+                cwd,
+                tx.as_ref(),
+                &resolved.name,
+                None,
+                require_signed,
+            ) {
                 Ok(_) => {
                     let new_tip = branch
                         .as_deref()
-                        .and_then(|b| mkit_core::refs::read_ref(&layout, b).ok().flatten());
-                    report_pull(&layout, endpoint, old_tip, new_tip);
+                        .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
+                    report_pull(layout, endpoint, old_tip, new_tip);
                     exit::OK
                 }
                 Err(remote_dispatch::DispatchError::Interrupted) => {

@@ -200,7 +200,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'push / pull / fetch / clone',
         status: 'parity',
-        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. They speak mkit's protocol, not git's wire protocol.",
+        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>. They speak mkit's protocol, not git's wire protocol.",
       },
       {
         cmd: 'git import',
@@ -227,6 +227,11 @@ export const categories: ParityCategory[] = [
         cmd: 'config user.name / user.email',
         status: 'parity',
         note: 'Accepted and round-tripped, but non-authoritative: they never feed the signed identity.',
+      },
+      {
+        cmd: 'config --unset / --local / --global',
+        status: 'parity',
+        note: 'Removes a key from whichever scope a set of it would use (repo vs. user-scoped), or the scope forced by --local/--global. Idempotent on an already-unset key.',
       },
       {
         cmd: 'config core.*',

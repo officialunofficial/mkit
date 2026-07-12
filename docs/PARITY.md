@@ -153,7 +153,9 @@ people and agents who learned git's surface aren't surprised:
   (`* [new branch]`, `<old>..<new>`, `+ …(forced update)`, `! [rejected] …`);
   `pull`: `Already up to date.` / `Updating <a>..<b>` + `Fast-forward` +
   diffstat; `fetch`: `From <url>` + per-ref summary (silent on no-op);
-  `clone`: `Cloning into '<dir>'...`. The git object-count / delta-compression
+  `clone`: `Cloning into '<dir>'...`. `fetch --all` / `pull --all` repeat the
+  same per-remote summary once per configured remote rather than inventing a
+  combined format. The git object-count / delta-compression
   **progress lines** (`Enumerating/Counting/Compressing/Writing objects`,
   `Total N (delta D)`) are a deliberate **follow-up** — mkit's transport is
   one-object-per-pack and computes no deltas, so those numbers would be

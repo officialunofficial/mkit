@@ -359,7 +359,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     let tx = AtomicTransport::new();
     alice.commit_file("f.txt", b"0", "base");
     push_all(alice.path(), &tx).expect("alice base push");
-    pull_all(bob.path(), &tx, "default").expect("bob clones base");
+    pull_all(bob.path(), &tx, "default", None).expect("bob clones base");
     let shared_tip = head_hash(alice.path());
 
     // The base push above already contributed the chain's first node;
@@ -393,7 +393,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(alice_tip));
     assert_eq!(packmap_chain(&tx, "main").len(), TEST_DEPTH);
     let carol = Repo::new();
-    pull_all(carol.path(), &tx, "default")
+    pull_all(carol.path(), &tx, "default", None)
         .expect("remote must stay clonable after the loser's blocked re-baseline");
     assert_eq!(
         fs::read(carol.path().join("f.txt")).unwrap(),
@@ -430,7 +430,7 @@ fn divergent_push_that_would_rebaseline_blocks_then_retry_stays_clonable() {
     // TEST_DEPTH - 1 appending commits, plus bob's retried commit) present
     // and hash-verified.
     let dave = Repo::new();
-    pull_all(dave.path(), &tx, "default").expect("clone after the retry re-baseline");
+    pull_all(dave.path(), &tx, "default", None).expect("clone after the retry re-baseline");
     assert_eq!(fs::read(dave.path().join("f.txt")).unwrap(), b"bob-retry");
     let dave_tip = head_hash(dave.path());
     assert_eq!(dave_tip, bob_retry_tip);
@@ -513,7 +513,7 @@ fn force_push_at_threshold_appends_and_never_resets() {
 
     // The remote stays clonable with the full history intact.
     let bob = Repo::new();
-    pull_all(bob.path(), &tx, "default").expect("clone after the force-push append");
+    pull_all(bob.path(), &tx, "default", None).expect("clone after the force-push append");
     assert_eq!(fs::read(bob.path().join("f.txt")).unwrap(), b"forced");
     assert_eq!(head_hash(bob.path()), forced_tip);
     let bob_store = ObjectStore::open(&RepoLayout::single(bob.path())).unwrap();

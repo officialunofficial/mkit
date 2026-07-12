@@ -1030,6 +1030,23 @@ pub fn resolve_remote(cfg: &LayeredConfig, name: &str) -> Option<ResolvedRemote>
     })
 }
 
+/// Every remote name resolvable via [`resolve_remote`]: the flat
+/// `default` remote (when the flat `remote_endpoint` is set) plus every
+/// named `remote.<name>.url` entry. Sorted and deduplicated (a
+/// `BTreeSet` cannot contain a name twice), which is what makes `fetch
+/// --all` / `pull --all`'s iteration order deterministic. Used by
+/// `mkit fetch --all` / `mkit pull --all` to enumerate the remotes to
+/// sync in one invocation.
+#[must_use]
+pub fn configured_remote_names(cfg: &LayeredConfig) -> Vec<String> {
+    let mut names: std::collections::BTreeSet<String> =
+        cfg.merged.remotes.keys().cloned().collect();
+    if !cfg.merged.remote_endpoint.trim().is_empty() {
+        names.insert(DEFAULT_REMOTE_NAME.to_owned());
+    }
+    names.into_iter().collect()
+}
+
 /// Resolve the upstream (remote name, remote branch) for a local branch.
 /// Falls back to the `default` remote tracking the same-named branch
 /// when no explicit `branch.<b>.{remote,merge}` is configured *and* a
@@ -1209,6 +1226,45 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     // sees the old contents or the fully-updated file, never a torn one.
     write_atomic_user_config(&path, out.as_bytes())?;
     Ok(())
+}
+
+/// Remove a single user-scoped key from `$XDG_CONFIG_HOME/mkit/config`,
+/// mirroring [`write_user_kv`]'s read-modify-write-atomically shape but
+/// dropping the matching line instead of replacing it. Returns `true`
+/// iff a matching line was found and removed (a no-op unset — the key
+/// was already absent — returns `false` rather than erroring, so
+/// `mkit config --unset` on an already-unset key is idempotent).
+pub fn remove_user_kv(key: &str) -> Result<bool, ConfigError> {
+    let key = normalize_config_key(key);
+    let key = key.as_str();
+    let path = user_config_path();
+    let existing = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(ConfigError::Io(e)),
+    };
+    let mut out = String::new();
+    let mut removed = false;
+    for raw_line in existing.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if let Some((k, _)) = line.split_once('=')
+            && normalize_config_key(k.trim()) == key
+        {
+            removed = true;
+            continue;
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if removed {
+        write_atomic_user_config(&path, out.as_bytes())?;
+    }
+    Ok(removed)
 }
 
 /// Atomically write `bytes` to `path`: write into a sibling temp file,

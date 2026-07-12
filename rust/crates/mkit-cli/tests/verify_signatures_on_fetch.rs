@@ -98,7 +98,7 @@ fn pull_rejects_a_tampered_commit_signature_and_leaves_bob_untouched() {
     // would appear to a fetcher who never pushed them at all.
     push_all(alice.path(), tx.as_ref()).expect("push (no verification on push side)");
 
-    let err = pull_all(bob.path(), tx.as_ref(), "default").expect_err(
+    let err = pull_all(bob.path(), tx.as_ref(), "default", None).expect_err(
         "pull must reject a commit whose signature does not verify, by default (issue #692)",
     );
     match &err {
@@ -172,7 +172,7 @@ fn pull_all_accepts_a_validly_signed_history() {
 
     // Signature verification is ON by default (`pull_all`) and a validly
     // signed history still fast-forwards cleanly.
-    pull_all(bob.path(), tx.as_ref(), "default").expect("pull of a validly signed history");
+    pull_all(bob.path(), tx.as_ref(), "default", None).expect("pull of a validly signed history");
 
     let alice_layout = RepoLayout::single(alice.path());
     let bob_layout = RepoLayout::single(bob.path());
@@ -205,7 +205,7 @@ fn require_signed_false_bypasses_the_check() {
     // The explicit opt-out (mirrors `--no-verify-signatures` /
     // `pull.require_signed = false`) accepts the same tampered history
     // `pull_all` (verification on) rejects above.
-    pull_all_with(bob.path(), tx.as_ref(), "default", false)
+    pull_all_with(bob.path(), tx.as_ref(), "default", None, false)
         .expect("require_signed=false must bypass the signature check");
     let bob_layout = RepoLayout::single(bob.path());
     assert_eq!(refs::read_ref(&bob_layout, "main").unwrap(), Some(tampered));

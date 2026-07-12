@@ -27,6 +27,23 @@ struct ConfigOpts {
     /// Output format for the show forms.
     #[arg(long, value_enum, default_value = "default")]
     format: ConfigFormat,
+    /// Remove `<KEY>` instead of showing or setting it. Deletes from
+    /// whichever scope a `set` of that key would use — the repo layer
+    /// for a repo-safe key, the user-scoped layer for a
+    /// `REPO_FORBIDDEN_KEYS` key — unless overridden by `--local` /
+    /// `--global`. Takes no positional arguments.
+    #[arg(long, value_name = "KEY")]
+    unset: Option<String>,
+    /// Force the repo-scoped layer (`<repo>/.mkit/config`) for `--unset`
+    /// or a `<key> <value>` set. Refused for a `REPO_FORBIDDEN_KEYS` key
+    /// — those must never be storable in a clone-traveling repo config.
+    #[arg(long, conflicts_with = "global")]
+    local: bool,
+    /// Force the user-scoped layer (`$XDG_CONFIG_HOME/mkit/config`) for
+    /// `--unset` or a `<key> <value>` set, even for a key that would
+    /// otherwise be repo-safe.
+    #[arg(long, conflicts_with = "local")]
+    global: bool,
     /// Optional `<key>` to show, or `<key> <value>` pair to set.
     args: Vec<String>,
 }
@@ -54,6 +71,13 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
     let json = matches!(opts.format, ConfigFormat::Json);
+
+    if let Some(raw_key) = opts.unset.as_deref() {
+        if !opts.args.is_empty() {
+            return super::usage_error("mkit config --unset takes no positional arguments");
+        }
+        return run_unset(&layout, &layered, raw_key, opts.local, opts.global);
+    }
 
     match opts.args.len() {
         0 => return show_all(&layered.merged, json),
@@ -99,7 +123,21 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
-    if REPO_FORBIDDEN_KEYS.contains(&key) {
+    let forbidden = REPO_FORBIDDEN_KEYS.contains(&key);
+    if opts.local && forbidden {
+        return emit_err(
+            &format!(
+                "config key `{key}` cannot be stored in the repo (--local); it is user-scoped only"
+            ),
+            exit::CONFIG_ERROR,
+        );
+    }
+    // `--global` forces the user-scoped layer even for an otherwise
+    // repo-safe key; a bare `forbidden` key always goes there regardless
+    // of flags (that's the whole point of `REPO_FORBIDDEN_KEYS`); `--local`
+    // is only meaningful (and already validated above) for repo-safe keys,
+    // where it's a no-op since that's the default.
+    if forbidden || opts.global {
         return write_user_scoped(key, &normalized_value);
     }
     // Apply to the repo layer only and persist that — never the merged
@@ -112,6 +150,102 @@ pub fn run(args: &[String]) -> u8 {
     match config::write(&layout, &repo_cfg) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write config: {e}"), exit::CANTCREAT),
+    }
+}
+
+/// `mkit config --unset <key>` — delete `<key>` from the scope a `set`
+/// of it would use (or the scope forced by `--local`/`--global`).
+/// Idempotent: unsetting an already-absent key is a silent success,
+/// like `rm -f`, not an error — only an unknown key name is rejected.
+fn run_unset(
+    layout: &mkit_core::layout::RepoLayout,
+    layered: &config::LayeredConfig,
+    raw_key: &str,
+    local: bool,
+    global: bool,
+) -> u8 {
+    let key_normalized = config::normalize_config_key(raw_key);
+    let key = key_normalized.as_str();
+    if lookup(&Config::default(), key).is_none() {
+        return emit_err(&format!("unknown config key: {key}"), exit::CONFIG_ERROR);
+    }
+    let forbidden = REPO_FORBIDDEN_KEYS.contains(&key);
+    if local && forbidden {
+        return emit_err(
+            &format!(
+                "config key `{key}` cannot be unset from the repo (--local); it is user-scoped only"
+            ),
+            exit::CONFIG_ERROR,
+        );
+    }
+    if forbidden || global {
+        return match config::remove_user_kv(key) {
+            Ok(removed) => {
+                if removed {
+                    let mut stderr = std::io::stderr().lock();
+                    let _ = writeln!(
+                        stderr,
+                        "removed `{key}` from user-scoped config at {}",
+                        config::user_config_path().display()
+                    );
+                }
+                exit::OK
+            }
+            Err(e) => emit_err(
+                &format!(
+                    "remove user config at {}: {e}",
+                    config::user_config_path().display()
+                ),
+                exit::CANTCREAT,
+            ),
+        };
+    }
+    let mut repo_cfg = layered.repo.clone();
+    match unset_repo_key(&mut repo_cfg, key) {
+        Ok(_removed) => {}
+        Err(code) => return code,
+    }
+    match config::write(layout, &repo_cfg) {
+        Ok(()) => exit::OK,
+        Err(e) => emit_err(&format!("write config: {e}"), exit::CANTCREAT),
+    }
+}
+
+/// Clear a repo-safe key from the in-memory `Config`, mirroring
+/// [`apply`]'s key match but removing instead of setting. Only
+/// repo-safe keys are reachable here — [`run_unset`] routes
+/// `REPO_FORBIDDEN_KEYS` keys to the user-scoped removal path before
+/// this is called. Returns whether the key had a value to remove
+/// (informational only — [`run_unset`] treats both outcomes as
+/// success).
+fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
+    fn take_nonempty(field: &mut String) -> bool {
+        if field.is_empty() {
+            false
+        } else {
+            field.clear();
+            true
+        }
+    }
+    match key {
+        "user.name" => Ok(take_nonempty(&mut cfg.user_name)),
+        "user.email" => Ok(take_nonempty(&mut cfg.user_email)),
+        "default_branch" => Ok(take_nonempty(&mut cfg.default_branch)),
+        "durability.objects" => Ok(take_nonempty(&mut cfg.durability_objects)),
+        "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
+        "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
+        "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
+        k if config::is_core_section(k) => match config::core_allowed_suffix(k) {
+            Some(suffix) => Ok(cfg.core.remove(&suffix).is_some()),
+            None => Err(emit_err(
+                &format!("unknown config key: {key}"),
+                exit::CONFIG_ERROR,
+            )),
+        },
+        _ => Err(emit_err(
+            &format!("unknown config key: {key}"),
+            exit::CONFIG_ERROR,
+        )),
     }
 }
 
