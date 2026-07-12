@@ -29,6 +29,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
+      # Enforces the REMINDER above: the TODO(YYYY-MM-DD) deadline is parsed
+      # straight out of rust/deny.toml (single source of truth) so this step
+      # can't drift out of sync with the ignore it's gating. Mirrored as a
+      # pre-step in cloudbuild/security.yaml for the per-PR/per-push gate.
+      - name: Check RUSTSEC-2023-0071 ignore has not expired
+        run: |
+          set -euo pipefail
+          deadline=$(grep -oP 'TODO\(\K\d{4}-\d{2}-\d{2}(?=\))' rust/deny.toml | head -n1)
+          if [ -z "$deadline" ]; then
+            echo "::error::Could not find a TODO(YYYY-MM-DD) deadline in rust/deny.toml for RUSTSEC-2023-0071" >&2
+            exit 1
+          fi
+          today=$(date -u +%Y-%m-%d)
+          if [[ "$today" > "$deadline" || "$today" == "$deadline" ]]; then
+            echo "::error::RUSTSEC-2023-0071 ignore in rust/deny.toml expired on $deadline (today: $today). Re-justify or drop the ignore (see rust/deny.toml and rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs)." >&2
+            exit 1
+          fi
+          echo "RUSTSEC-2023-0071 ignore still valid until $deadline (today: $today)."
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
