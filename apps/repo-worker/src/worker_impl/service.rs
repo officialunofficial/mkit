@@ -19,7 +19,9 @@ use worker::{Env, Method, Request as WorkerRequest, RequestInit};
 
 use super::auth::{AuthorPubkey, IdempotencyKey};
 use crate::hashing::object_id_matches;
-use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
+use crate::refs::{
+    is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
+};
 use crate::proto::mkit::repo::v1::{
     ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
     ListCommitsRequest,
@@ -322,6 +324,9 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         }
         if new_id.len() != 32 {
             return Err(ce_invalid("new_id must be 32 bytes"));
+        }
+        if !is_valid_expected_id_len(&expected_id) {
+            return Err(ce_invalid("expected_id must be 32 bytes"));
         }
 
         // The verified writer pubkey stashed by the auth interceptor.
