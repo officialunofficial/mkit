@@ -316,8 +316,16 @@ eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
   target or a DO/SQLite harness.
 - `src/worker_impl.rs` + `src/worker_impl/{auth,refstore,service}.rs` —
   wasm32-only worker glue (the macros emit `#[wasm_bindgen]`).
-- `proto/` — the canonical `repo.proto`. `build.rs` runs `connectrpc-build` over
-  it into `$OUT_DIR`, included via `connectrpc::include_generated!()`.
+- `proto/` — the canonical `repo.proto`, plus `buf.gen.yaml` (the reference
+  TypeScript codegen recipe external `RepoService` clients run via `buf
+  generate` against the `buf.build/officialunofficial/mkit-repo` BSR module,
+  issue #719 — distinct from `../buf.gen.yaml`, which drives apps/web's own
+  internal vendored-codegen regen). `repo.proto`'s buf module (`name:`,
+  lint/breaking config) lives in the repo-root `buf.yaml` workspace, not a
+  `buf.yaml` here. `build.rs` runs `connectrpc-build` over `repo.proto` into
+  `$OUT_DIR` for this crate's own Rust server, included via
+  `connectrpc::include_generated!()` — a separate path from the
+  BSR-published recipe above.
 
 ## Deploy (go live)
 

@@ -18,7 +18,7 @@ Contents:
 
 ## What gets published
 
-A single `vX.Y.Z` tag drives three decoupled channels:
+A single `vX.Y.Z` tag drives four decoupled channels:
 
 - **Binaries + npm wasm** via
   [`.github/workflows/release.yml`](../.github/workflows/release.yml).
@@ -28,6 +28,12 @@ A single `vX.Y.Z` tag drives three decoupled channels:
   [`.github/workflows/mcp-release.yml`](../.github/workflows/mcp-release.yml),
   which indexes the tagged tree for the mkit docs MCP server so the served
   corpus always matches the published crates.
+- **BSR proto modules** (`buf.build/officialunofficial/mkit-rpc` and
+  `buf.build/officialunofficial/mkit-repo`) via the `buf-push` job in
+  [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml),
+  so third-party signer integrators and `RepoService` clients can `buf
+  generate` typed bindings from a pinned tag without vendoring this repo.
+  Dormant until [`BUF_TOKEN`](#buf_token) is provisioned.
 
 All are gated on the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
@@ -645,6 +651,7 @@ less reliable than the macOS case until that's verified.
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new + publish-update) | `crates-publish.yml` |
 | `MKIT_NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
 | `CODECOV_TOKEN` | Codecov upload auth — **vestigial**: no GitHub workflow reads it. Coverage runs on Cloud Build (`cloudbuild/coverage.yaml`); the live token is the GCP Secret Manager copy | — (see [`CODECOV_TOKEN`](#codecov_token)) |
+| `BUF_TOKEN` | Buf Schema Registry API token (write access) — pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
 cosign keyless and npm provenance both run on the GitHub OIDC token; no extra
 secrets are needed for those.
@@ -652,6 +659,7 @@ secrets are needed for those.
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `MKIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
+| `BUF_PUBLISH_ENABLED` | Set to `true` to arm the `buf-push` job (job-level `if:` cannot read `secrets`, so this variable — not `BUF_TOKEN`'s presence — is the gate) | `crates-publish.yml`'s `buf-push` job |
 
 ## One-time setup
 
@@ -719,6 +727,43 @@ workflow under the package's Publishing access settings, drop the
 `NODE_AUTH_TOKEN` env on the publish step, delete the secret, and cut a patch
 release to validate. Defer until after at least one successful token-based
 release.
+
+### `BUF_TOKEN`
+
+`buf.build/officialunofficial/mkit-rpc` (common.proto/signer.proto/ssh.proto/
+verify.proto, from the `rust/crates/mkit-rpc/proto` module) and
+`buf.build/officialunofficial/mkit-repo` (repo.proto, from the
+`apps/repo-worker/proto` module) are the two named modules in the repo-root
+`buf.yaml` v2 workspace that the `buf-push` job in `crates-publish.yml`
+publishes on every tagged release (issue #719). Both are pushed **private** —
+`signer.proto` is the security-critical external-signer wire contract
+([SPEC-EXTERNAL-SIGNER.md](specs/SPEC-EXTERNAL-SIGNER.md)) and `repo.proto` is
+this repo's internal `RepoService` contract; flip a module to public only as a
+deliberate decision, not a default.
+
+1. Sign in (or create an account) at <https://buf.build/> under the
+   `officialunofficial` organization. **The BSR org name is assumed to match
+   the GitHub org (`officialunofficial`) — confirm this before the first push,
+   or update the `name:` field on the `rust/crates/mkit-rpc/proto` and
+   `apps/repo-worker/proto` modules in the repo-root `buf.yaml` (and the `buf
+   generate`/`buf push` references in this doc and the `buf-push` job) to the
+   actual BSR org if it differs.**
+2. Generate a BSR API token (`buf.build` → Settings → API Tokens) scoped to
+   that organization, with write access.
+3. Add it as an **org-level** (or repo) secret named `BUF_TOKEN`, and set the
+   `BUF_PUBLISH_ENABLED` repo/org **variable** to `true`. Until the variable is
+   `true`, `buf-push` is a clean skip (`if: vars.BUF_PUBLISH_ENABLED ==
+   'true'`) — same dormant-until-provisioned pattern as `RELEASE_PLZ_ENABLED`.
+   Two knobs, not one, because a job-level `if:` cannot read the `secrets`
+   context to gate on `BUF_TOKEN`'s presence directly.
+4. First push auto-creates both BSR repositories (`--create
+   --create-visibility private`); no manual "create the module" step needed.
+5. Verify: after a release tag, `buf generate
+   buf.build/officialunofficial/mkit-repo:vX.Y.Z --template
+   apps/repo-worker/proto/buf.gen.yaml` (with `buf registry login` first, since
+   the module is private) should produce TypeScript bindings without this repo
+   checked out — this is exactly what the `buf-push` job's own smoke-test step
+   does on every tagged release.
 
 ### Package name decision
 

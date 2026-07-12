@@ -38,3 +38,11 @@ apps/*/.vocs/
 
 # Reference-signers workspace build output (separate workspace, #225)
 contrib/signers/target/
+
+# Scratch output of `buf generate` run locally against a proto/buf.gen.yaml
+# template (issue #719). Vendored/committed generated code (e.g.
+# rust/crates/mkit-rpc/generated/, apps/repo-worker/generated/,
+# apps/web/vendor/mkit-repo-proto/generated/, and
+# contrib/signers/mkit-sign-se/Sources/mkit-sign-se/Generated/) is refreshed
+# by the scripts/regen-*.sh scripts instead, not left here.
+**/proto/gen/
