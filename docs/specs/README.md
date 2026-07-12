@@ -29,3 +29,4 @@ front matter.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) — seven-verb transport wire protocol (file, SSH, HTTP, S3, memory).
 - [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) — draft `mkit.transport.v1` Connect service, the canonical remote protocol superseding SPEC-TRANSPORT §5.
 - [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) — self-contained encrypted-stream transport (`mkit+enc://`).
+- [SPEC-WORKTREE](SPEC-WORKTREE.md) &mdash; linked working trees: common-dir/per-tree state split, discovery, and cross-worktree locking.
