@@ -15,12 +15,18 @@ use std::path::PathBuf;
 
 fn main() {
     let proto_dir = PathBuf::from("proto");
+    // Shared ref types (mkit.common.v1.RefExpectation / RefEntry), one repo
+    // root up from rust/crates/mkit-rpc — see mkit/common/v1/refs.proto's
+    // header comment. Also used by apps/repo-worker's repo.proto.
+    let common_dir = PathBuf::from("../../../proto");
+    let common_refs_proto = common_dir.join("mkit/common/v1/refs.proto");
 
     let files = [
         proto_dir.join("mkit/rpc/v1/common.proto"),
         proto_dir.join("mkit/rpc/v1/signer/signer.proto"),
         proto_dir.join("mkit/rpc/v1/ssh/ssh.proto"),
         proto_dir.join("mkit/rpc/v1/verify/verify.proto"),
+        common_refs_proto.clone(),
     ];
 
     // Re-run when a .proto, the vendored output, or the mode changes.
@@ -42,7 +48,7 @@ fn main() {
     if std::env::var_os("MKIT_RPC_CODEGEN").is_some() {
         buffa_build::Config::new()
             .files(&files)
-            .includes(&[&proto_dir])
+            .includes(&[&proto_dir, &common_dir])
             .include_file("_includes.rs")
             // Emits `arbitrary::Arbitrary` derives gated behind the
             // crate's opt-in `arbitrary` feature — used by the fuzz

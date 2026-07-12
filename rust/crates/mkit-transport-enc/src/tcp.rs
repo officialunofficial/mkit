@@ -949,10 +949,9 @@ mod tests {
         use commonware_codec::Encode as _;
         use commonware_cryptography::Signer as _;
         use mkit_core::protocol::Transport as _;
+        use mkit_rpc::mkit::common::v1::RefEntry;
         use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-        use mkit_rpc::mkit::rpc::v1::ssh::{
-            HelloResponse, ListRefsResponse, SshFrame, list_refs_response, ssh_frame,
-        };
+        use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, ListRefsResponse, SshFrame, ssh_frame};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::mpsc;
         use std::thread;
@@ -1012,7 +1011,7 @@ mod tests {
 
                     let resp = ListRefsResponse {
                         refs: vec![
-                            list_refs_response::RefEntry::default()
+                            RefEntry::default()
                                 .with_name("refs/heads/main")
                                 .with_object_id(vec![0x11u8; 32]),
                         ],

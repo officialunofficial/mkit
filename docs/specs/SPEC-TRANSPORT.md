@@ -211,7 +211,10 @@ before any header is emitted.
 CAS intent is carried entirely by the `RefExpectation` enum in
 `UpdateRef.expectation`. `expected_id` carries the digest only when
 `expectation = REF_EXPECTATION_MATCH`; it is ignored for `ANY` /
-`MISSING`.
+`MISSING`. `RefExpectation` is defined once, in
+[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto),
+and imported by `ssh.proto` — it is the same enum (same wire numbers)
+the `mkit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 
 | `RefWriteCondition` | `expectation`             | `expected_id`       | Semantics |
 |---|---|---|---|

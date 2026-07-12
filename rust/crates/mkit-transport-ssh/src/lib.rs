@@ -1061,9 +1061,8 @@ mod tests {
     // SshTransport against it. For now, basic smoke tests of the
     // helper functions live here.
     use super::*;
-    use mkit_rpc::mkit::rpc::v1::ssh::{
-        DownloadPackHeader, RefExpectation, list_refs_response::RefEntry,
-    };
+    use mkit_rpc::mkit::common::v1::{RefEntry, RefExpectation};
+    use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
     use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
 
     /// A CAS mismatch — `InvalidRequest` with the current id in

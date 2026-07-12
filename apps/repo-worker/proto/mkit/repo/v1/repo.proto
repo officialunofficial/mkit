@@ -17,10 +17,10 @@
 //   - edition 2023.
 //   - All object/ref ids are raw `bytes` = 32-byte BLAKE3 digests (never hex
 //     on the wire).
-//   - The CAS enum is `RefExpectation` with the SAME wire numbers as ssh.proto
-//     (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0 is a protocol error).
-//   - `RefEntry { string name; bytes object_id; }` matches
-//     ListRefsResponse.RefEntry in ssh.proto.
+//   - `RefExpectation` (the CAS enum) and `RefEntry` are shared with
+//     ssh.proto via mkit/common/v1/refs.proto — one proto definition, no
+//     hand-synced copies. See that file's header comment for the
+//     versioning/compat contract.
 //
 // AUTH (transport-level, not in this proto): every unary/stream call carries
 // the signed-write envelope as request metadata (headers) — `X-Public-Key`,
@@ -34,30 +34,7 @@ edition = "2023";
 
 package mkit.repo.v1;
 
-// ----------------------------------------------------------------------------
-// CAS semantics for UpdateRef. Wire numbers are load-bearing and match
-// mkit.rpc.v1.ssh.RefExpectation — do NOT renumber; new variants append.
-
-enum RefExpectation {
-  // Protocol error if sent (the proto default). Servers MUST reject.
-  REF_EXPECTATION_UNSPECIFIED = 0;
-
-  // "Clobber" / last-writer-wins. `expected_id` MUST be empty.
-  REF_EXPECTATION_ANY = 1;
-
-  // "Create only". The ref MUST NOT already exist. `expected_id` MUST be
-  // empty. (ANY overwrites an existing ref; MISSING conflicts on it.)
-  REF_EXPECTATION_MISSING = 2;
-
-  // Compare-and-swap. `expected_id` MUST be the 32-byte current value.
-  REF_EXPECTATION_MATCH = 3;
-}
-
-// A single ref and the object it points at. Matches ssh.proto RefEntry.
-message RefEntry {
-  string name = 1;        // e.g. "refs/heads/main" (mkit ref-name grammar)
-  bytes object_id = 2;    // raw 32-byte BLAKE3 digest
-}
+import "mkit/common/v1/refs.proto";
 
 // ----------------------------------------------------------------------------
 // RepoService — the full anonymous-push + multiplayer surface.
@@ -188,7 +165,7 @@ message UpdateRefRequest {
   string room = 1;
   string name = 2;
   bytes new_id = 3;             // 32-byte target value
-  RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
+  mkit.common.v1.RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
   bytes expected_id = 5;        // 32 bytes for MATCH; MUST be empty for ANY/MISSING
 }
 
@@ -204,7 +181,7 @@ message ListRefsRequest {
 }
 
 message ListRefsResponse {
-  repeated RefEntry refs = 1;
+  repeated mkit.common.v1.RefEntry refs = 1;
 }
 
 // ----------------------------------------------------------------------------

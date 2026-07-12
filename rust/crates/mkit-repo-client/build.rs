@@ -39,9 +39,29 @@ fn main() {
         let proto = canonical_root.join("mkit/repo/v1/repo.proto");
         println!("cargo:rerun-if-changed={}", proto.display());
 
+        // Shared ref types (mkit.common.v1.RefExpectation / RefEntry) live at
+        // the repo root, alongside the canonical repo.proto's own module tree
+        // — see mkit/common/v1/refs.proto's header comment.
+        let common_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../proto")
+            .canonicalize()
+            .expect("common proto root not found: expected proto/ at the repo root");
+        let common_refs_proto = common_root.join("mkit/common/v1/refs.proto");
+        println!("cargo:rerun-if-changed={}", common_refs_proto.display());
+
         connectrpc_build::Config::new()
-            .files(&[proto.to_str().expect("proto path is valid UTF-8")])
-            .includes(&[canonical_root.to_str().expect("proto root is valid UTF-8")])
+            .files(&[
+                proto.to_str().expect("proto path is valid UTF-8"),
+                common_refs_proto
+                    .to_str()
+                    .expect("common refs proto path is valid UTF-8"),
+            ])
+            .includes(&[
+                canonical_root.to_str().expect("proto root is valid UTF-8"),
+                common_root
+                    .to_str()
+                    .expect("common proto root is valid UTF-8"),
+            ])
             .include_file("_connectrpc.rs")
             .compile()
             .expect("connectrpc-build codegen failed for canonical repo.proto");
