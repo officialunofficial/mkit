@@ -270,6 +270,35 @@ integration would also let the public `connect_tcp` signature take a
 keystore-backed key type instead of a raw one. The allowlist is a flat
 `--enc-authorized-peers` file, not a keystore partition.
 
+### 6.3 Retry / reconnect
+
+`EncTransport` is connection-oriented (a single long-lived encrypted
+session), so it follows the same reconnect-before-retry pattern as
+`SshTransport` (SPEC-TRANSPORT §4.5) rather than the request-per-attempt
+shape HTTP/S3 use. Orphan rules prevent mapping
+`commonware_stream::encrypted::Error` variants individually, so
+`stream_err` collapses every cipher-layer I/O failure — a send, a
+receive, a decrypt — to `TransportError::ConnectionFailed`; any such
+failure can leave the session's per-record nonce counters desynced
+between client and peer, so resuming on the same session is never safe
+once a failure is observed.
+
+Every verb is driven through [`mkit_core::protocol::retrying`]. A
+`ConnectionFailed` marks the session `dead`; the next attempt calls
+`ensure_connected`, which redials through the transport's `ReconnectFn`
+(when one is wired — `tcp::connect_tcp` wires a real redial closure
+that reruns the full dial + `commonware_stream::encrypted::dial`
+handshake) and redoes the application `Hello`/`HelloResponse` exchange
+before the verb is re-issued against the fresh session. A transport
+built directly from an already-established session with no redial
+capability (e.g. the in-process test harness) has no `ReconnectFn`
+wired, so a dead session surfaces `ConnectionFailed` immediately
+instead of retrying — matching pre-retry behavior for those callers.
+As with SSH, `upload_pack` is safe to resend in full on the fresh
+session; `update_ref` is not idempotent across retries per
+SPEC-TRANSPORT §7, so a retried CAS write still requires the caller's
+`read_ref` disambiguation on `RefConflict`.
+
 ---
 
 ## 7. Versioning
@@ -297,6 +326,7 @@ record layer needs a hard break that the application-level
 | The listener is fail-closed: an unlisted peer gets nothing | binding requires `--enc-authorized-peers` (or the loud `--unsafe-allow-any-enc-peer` escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |
 | Verb semantics never diverge from the SSH transport | same `SshFrame` message set; semantics byte-for-byte per SPEC-TRANSPORT §4 (§3) |
 | Application plaintext never appears on the wire | pinned by the byte-sniffing round-trip tests (§5) |
+| A `ConnectionFailed` never resumes writes/reads on the same (possibly desynced) session | every verb driven through `retrying`; a dead session is redialed and re-`Hello`'d before the next attempt, never reused (§6.3) |
 
 Explicitly **not** guaranteed, inherited from the stream layer:
 anonymity (peer identities exchanged in cleartext) and length padding

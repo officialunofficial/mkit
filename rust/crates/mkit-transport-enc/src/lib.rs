@@ -90,7 +90,8 @@ pub use tcp::{
 /// crate's transitive surface area centred on `mkit-transport-enc`.
 pub use commonware_stream::encrypted::{Receiver as EncReceiver, Sender as EncSender};
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use buffa::Message;
@@ -99,7 +100,9 @@ use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Config as EncConfig, Receiver, Sender};
 
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
+use mkit_core::protocol::{
+    BackoffIterator, PackKey, Transport, TransportError, TransportResult,
+};
 // Aliased: `mkit_rpc::mkit::rpc::v1::ssh::PackChunk` (the wire protobuf
 // message) is imported unaliased below for the existing frame-building
 // code; `CorePackChunk` is the transport-agnostic streaming type the
@@ -119,6 +122,16 @@ use mkit_rpc::{
 };
 
 use mkit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
+
+/// Redial hook: dials a fresh, transport-level [`EncSession`] (no
+/// application `Hello` yet — [`EncTransport`] performs that uniformly
+/// after any dial, initial or reconnect). `None` when the transport was
+/// built from an already-established session with no way to redial
+/// (e.g. the in-process test harness, or a caller that owns the
+/// dial lifecycle itself) — in that case a broken connection surfaces
+/// `ConnectionFailed` immediately rather than retrying against a dead
+/// session. `tcp::connect_tcp` wires a real redial closure.
+pub type ReconnectFn<I, O> = Arc<dyn Fn() -> Result<EncSession<I, O>, EncInitError> + Send + Sync>;
 
 /// Client identification string sent in the `Hello` frame. Inherits
 /// the workspace version so a release bump propagates automatically.
@@ -231,6 +244,23 @@ pub use mkit_core::protocol::async_shim::Executor;
 /// underlying ChaCha20-Poly1305 cipher state advances per-message in
 /// both directions; pipelining across concurrent callers is therefore
 /// **not** supported (same posture as `mkit-transport-ssh`).
+///
+/// ## Retry / reconnect (SPEC-TRANSPORT §7)
+///
+/// Every verb is driven through [`mkit_core::protocol::retrying`]. The
+/// cipher layer collapses every I/O-level failure to
+/// `TransportError::ConnectionFailed` (via the crate-private
+/// `stream_err`), and any such failure can leave the stream
+/// mid-message — the local and peer nonce counters may already
+/// disagree, so **resuming on the same session is never safe**. A
+/// `ConnectionFailed` therefore marks the session dead; before the
+/// next retry attempt, the crate-private `ensure_connected` redials via
+/// the transport's [`ReconnectFn`] (if one was wired — see
+/// [`tcp::connect_tcp`]) and redoes the application `Hello` before the
+/// verb is re-issued from scratch. Transports built directly from an
+/// already-established session (no redial capability) surface
+/// `ConnectionFailed` immediately once dead, matching pre-retry
+/// behavior.
 pub struct EncTransport<I: Stream, O: Sink, E: Executor> {
     session: Mutex<EncSession<I, O>>,
     executor: E,
@@ -241,6 +271,16 @@ pub struct EncTransport<I: Stream, O: Sink, E: Executor> {
     host: String,
     /// Remote port. Same diagnostic-only caveat as `host`.
     port: u16,
+    /// Retry-delay ladder factory. Production uses the spec ladder;
+    /// tests inject a shorter ladder.
+    backoff: fn() -> BackoffIterator,
+    /// Sleep hook between retry attempts.
+    sleep: fn(Duration),
+    /// Set once a verb observes `ConnectionFailed` on this session.
+    /// Cleared by a successful reconnect.
+    dead: AtomicBool,
+    /// Redial hook — see [`ReconnectFn`]. `None` disables reconnect.
+    reconnect: Option<ReconnectFn<I, O>>,
 }
 
 impl<I: Stream, O: Sink, E: Executor> std::fmt::Debug for EncTransport<I, O, E> {
@@ -248,12 +288,18 @@ impl<I: Stream, O: Sink, E: Executor> std::fmt::Debug for EncTransport<I, O, E> 
         f.debug_struct("EncTransport")
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("dead", &self.dead.load(Ordering::Relaxed))
+            .field("reconnect", &self.reconnect.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
-    /// Wrap an already-established [`EncSession`] in an [`EncTransport`].
+    /// Wrap an already-established [`EncSession`] in an [`EncTransport`]
+    /// with no reconnect capability — a `ConnectionFailed` will not be
+    /// retried past the first attempt. Use
+    /// [`Self::from_session_with_reconnect`] when a redial hook is
+    /// available.
     ///
     /// The application-level [`Hello`] handshake is performed eagerly
     /// here, so a successful return guarantees the first verb call
@@ -261,68 +307,198 @@ impl<I: Stream, O: Sink, E: Executor> EncTransport<I, O, E> {
     ///
     /// Tests use this constructor after driving the commonware-stream
     /// handshake manually; production TCP callers use `tcp::connect_tcp`,
-    /// which folds dial + handshake + Hello and then calls this.
+    /// which folds dial + handshake + Hello and wires a real reconnect
+    /// hook via [`Self::from_session_with_reconnect`].
     pub fn from_session(
         session: EncSession<I, O>,
         executor: E,
         host: impl Into<String>,
         port: u16,
     ) -> Result<Self, EncInitError> {
+        Self::new(
+            session,
+            executor,
+            host,
+            port,
+            BackoffIterator::new,
+            sleep_impl,
+            None,
+        )
+    }
+
+    /// Like [`Self::from_session`] but wires a [`ReconnectFn`] so a
+    /// `ConnectionFailed` on this session is retried against a freshly
+    /// redialed one instead of failing on the first attempt.
+    pub fn from_session_with_reconnect(
+        session: EncSession<I, O>,
+        executor: E,
+        host: impl Into<String>,
+        port: u16,
+        reconnect: ReconnectFn<I, O>,
+    ) -> Result<Self, EncInitError> {
+        Self::new(
+            session,
+            executor,
+            host,
+            port,
+            BackoffIterator::new,
+            sleep_impl,
+            Some(reconnect),
+        )
+    }
+
+    /// Test-only constructor with explicit retry hooks (short/no-op
+    /// ladder) and an optional reconnect closure.
+    #[doc(hidden)]
+    pub fn from_session_for_test(
+        session: EncSession<I, O>,
+        executor: E,
+        host: impl Into<String>,
+        port: u16,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+        reconnect: Option<ReconnectFn<I, O>>,
+    ) -> Result<Self, EncInitError> {
+        Self::new(session, executor, host, port, backoff, sleep, reconnect)
+    }
+
+    fn new(
+        session: EncSession<I, O>,
+        executor: E,
+        host: impl Into<String>,
+        port: u16,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+        reconnect: Option<ReconnectFn<I, O>>,
+    ) -> Result<Self, EncInitError> {
         let mut me = Self {
             session: Mutex::new(session),
             executor,
             host: host.into(),
             port,
+            backoff,
+            sleep,
+            dead: AtomicBool::new(false),
+            reconnect,
         };
         me.app_hello()?;
         Ok(me)
     }
 
     fn app_hello(&mut self) -> Result<(), EncInitError> {
-        let hello = SshFrame {
-            body: Some(ssh_frame::Body::Hello(Box::new(
-                Hello::default()
-                    .with_proto(ProtocolVersion::ProtocolVersion1)
-                    .with_client_id(CLIENT_ID),
-            ))),
-            ..Default::default()
-        };
         // A poisoned session mutex means a prior holder panicked. As a library
         // we surface that as an error rather than panicking the host process.
         let session = self
             .session
             .get_mut()
             .map_err(|_| EncInitError::AppHelloFailed("session mutex poisoned".into()))?;
-        let executor = &self.executor;
-        executor.block_on(async {
-            send_frame_init(&mut session.sender, &hello)
-                .await
-                .map_err(|e| EncInitError::AppHelloFailed(format!("send hello: {e}")))?;
-            let resp = recv_frame_init(&mut session.receiver)
-                .await
-                .map_err(|e| EncInitError::AppHelloFailed(format!("read hello reply: {e}")))?;
-            match resp.body {
-                Some(ssh_frame::Body::HelloResponse(h)) => {
-                    let proto = h.proto.unwrap_or_default();
-                    if proto != ProtocolVersion::ProtocolVersion1 {
-                        return Err(EncInitError::AppHelloFailed(format!(
-                            "server proto_version {} != expected 1",
-                            proto.to_i32()
-                        )));
-                    }
-                    Ok(())
-                }
-                Some(ssh_frame::Body::Error(e)) => Err(EncInitError::AppHelloFailed(format!(
-                    "server error: {}",
-                    e.message.unwrap_or_default()
-                ))),
-                other => Err(EncInitError::AppHelloFailed(format!(
-                    "unexpected hello reply: {}",
-                    body_name(&other)
-                ))),
-            }
-        })
+        perform_app_hello(session, &self.executor)
     }
+
+    /// Ensure the session is live, redialing via [`Self::reconnect`] and
+    /// redoing the application `Hello` if a prior attempt marked it
+    /// `dead`. No-op (and always `Ok`) when the session is already
+    /// live. Returns `ConnectionFailed` if the session is dead and
+    /// either no reconnect hook is wired, the redial fails, or the
+    /// post-redial `Hello` fails.
+    fn ensure_connected(&self) -> TransportResult<()> {
+        if !self.dead.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(reconnect) = &self.reconnect else {
+            return Err(TransportError::ConnectionFailed);
+        };
+        let mut fresh = reconnect().map_err(|_| TransportError::ConnectionFailed)?;
+        perform_app_hello(&mut fresh, &self.executor)
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        *guard = fresh;
+        drop(guard);
+        self.dead.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder,
+    /// reconnecting first if a previous attempt left the session dead.
+    /// A `ConnectionFailed` from `attempt` marks the session dead for
+    /// the next iteration — see the type-level docs for why resuming on
+    /// the same session is unsafe.
+    fn with_retry<T>(
+        &self,
+        mut attempt: impl FnMut(&mut EncSession<I, O>) -> TransportResult<T>,
+    ) -> TransportResult<T> {
+        mkit_core::protocol::retrying(
+            || {
+                self.ensure_connected()?;
+                let mut session = self
+                    .session
+                    .lock()
+                    .map_err(|_| TransportError::ConnectionFailed)?;
+                let result = attempt(&mut session);
+                drop(session);
+                if matches!(result, Err(TransportError::ConnectionFailed)) {
+                    self.dead.store(true, Ordering::Release);
+                }
+                result
+            },
+            self.backoff,
+            self.sleep,
+        )
+    }
+}
+
+/// Perform the application-level `Hello` / `HelloResponse` exchange on
+/// a freshly-dialed session. Shared by the initial constructor and the
+/// reconnect path in [`EncTransport::ensure_connected`] so the two
+/// cannot drift.
+fn perform_app_hello<I: Stream, O: Sink, E: Executor>(
+    session: &mut EncSession<I, O>,
+    executor: &E,
+) -> Result<(), EncInitError> {
+    let hello = SshFrame {
+        body: Some(ssh_frame::Body::Hello(Box::new(
+            Hello::default()
+                .with_proto(ProtocolVersion::ProtocolVersion1)
+                .with_client_id(CLIENT_ID),
+        ))),
+        ..Default::default()
+    };
+    executor.block_on(async {
+        send_frame_init(&mut session.sender, &hello)
+            .await
+            .map_err(|e| EncInitError::AppHelloFailed(format!("send hello: {e}")))?;
+        let resp = recv_frame_init(&mut session.receiver)
+            .await
+            .map_err(|e| EncInitError::AppHelloFailed(format!("read hello reply: {e}")))?;
+        match resp.body {
+            Some(ssh_frame::Body::HelloResponse(h)) => {
+                let proto = h.proto.unwrap_or_default();
+                if proto != ProtocolVersion::ProtocolVersion1 {
+                    return Err(EncInitError::AppHelloFailed(format!(
+                        "server proto_version {} != expected 1",
+                        proto.to_i32()
+                    )));
+                }
+                Ok(())
+            }
+            Some(ssh_frame::Body::Error(e)) => Err(EncInitError::AppHelloFailed(format!(
+                "server error: {}",
+                e.message.unwrap_or_default()
+            ))),
+            other => Err(EncInitError::AppHelloFailed(format!(
+                "unexpected hello reply: {}",
+                body_name(&other)
+            ))),
+        }
+    })
+}
+
+/// Default sleep hook for production retry ladders.
+fn sleep_impl(delay: Duration) {
+    std::thread::sleep(delay);
 }
 
 /// Default [`EncConfig`] suitable for mkit's encrypted transport.
@@ -394,119 +570,115 @@ pub fn default_handshake_config_with_bounds(
 
 impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-
-        // Header frame.
-        let header = SshFrame {
-            body: Some(ssh_frame::Body::UploadPack(Box::new(
-                UploadPack::default()
-                    .with_pack_id(key.as_bytes().to_vec())
-                    .with_total_bytes(bytes.len() as u64),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &header))?;
-
-        // Body chunks. `CHUNK_DATA_MAX` lives in `mkit_rpc` so the
-        // ssh and enc transports cannot drift on the bound, keeping the
-        // inner SshFrame under `MAX_FRAME_BYTES` after protobuf overhead.
-        let mut offset = 0u64;
-        let total = bytes.len();
-        let mut iter_pos = 0usize;
-        while iter_pos < total {
-            let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
-            let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(
-                    PackChunk::default()
+        self.with_retry(|session| {
+            // Header frame.
+            let header = SshFrame {
+                body: Some(ssh_frame::Body::UploadPack(Box::new(
+                    UploadPack::default()
                         .with_pack_id(key.as_bytes().to_vec())
-                        .with_offset(offset)
-                        .with_data(bytes[iter_pos..end].to_vec())
-                        .with_last(end == total),
+                        .with_total_bytes(bytes.len() as u64),
                 ))),
                 ..Default::default()
             };
             self.executor
-                .block_on(send_frame(&mut session.sender, &chunk))?;
-            offset += (end - iter_pos) as u64;
-            iter_pos = end;
-        }
-        if total == 0 {
-            let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(
-                    PackChunk::default()
-                        .with_pack_id(key.as_bytes().to_vec())
-                        .with_offset(0)
-                        .with_data(Vec::new())
-                        .with_last(true),
-                ))),
-                ..Default::default()
-            };
-            self.executor
-                .block_on(send_frame(&mut session.sender, &chunk))?;
-        }
+                .block_on(send_frame(&mut session.sender, &header))?;
 
-        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        match resp.body {
-            Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
-            other => Err(unexpected_frame("enc", "UploadPackResponse", other)),
-        }
+            // Body chunks. `CHUNK_DATA_MAX` lives in `mkit_rpc` so the
+            // ssh and enc transports cannot drift on the bound, keeping the
+            // inner SshFrame under `MAX_FRAME_BYTES` after protobuf overhead.
+            let mut offset = 0u64;
+            let total = bytes.len();
+            let mut iter_pos = 0usize;
+            while iter_pos < total {
+                let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
+                let chunk = SshFrame {
+                    body: Some(ssh_frame::Body::PackChunk(Box::new(
+                        PackChunk::default()
+                            .with_pack_id(key.as_bytes().to_vec())
+                            .with_offset(offset)
+                            .with_data(bytes[iter_pos..end].to_vec())
+                            .with_last(end == total),
+                    ))),
+                    ..Default::default()
+                };
+                self.executor
+                    .block_on(send_frame(&mut session.sender, &chunk))?;
+                offset += (end - iter_pos) as u64;
+                iter_pos = end;
+            }
+            if total == 0 {
+                let chunk = SshFrame {
+                    body: Some(ssh_frame::Body::PackChunk(Box::new(
+                        PackChunk::default()
+                            .with_pack_id(key.as_bytes().to_vec())
+                            .with_offset(0)
+                            .with_data(Vec::new())
+                            .with_last(true),
+                    ))),
+                    ..Default::default()
+                };
+                self.executor
+                    .block_on(send_frame(&mut session.sender, &chunk))?;
+            }
+
+            let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            match resp.body {
+                Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+                other => Err(unexpected_frame("enc", "UploadPackResponse", other)),
+            }
+        })
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
+        self.with_retry(|session| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::DownloadPack(Box::new(
+                    DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &req))?;
 
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::DownloadPack(Box::new(
-                DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &req))?;
-
-        let header = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        let total = match header.body {
-            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
-            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "enc")),
-            other => return Err(unexpected_frame("enc", "DownloadPackHeader", other)),
-        };
-
-        if total > PACK_BODY_LIMIT {
-            return Err(TransportError::RemoteError(
-                "server-advertised pack size exceeds client cap".into(),
-            ));
-        }
-
-        let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
-        let mut out = Vec::with_capacity(initial);
-        loop {
-            let chunk_frame = self.executor.block_on(recv_frame(&mut session.receiver))?;
-            match chunk_frame.body {
-                Some(ssh_frame::Body::PackChunk(c)) => {
-                    let data = c.data.unwrap_or_default();
-                    if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
-                        return Err(TransportError::RemoteError(
-                            "server-streamed pack body exceeds client cap".into(),
-                        ));
-                    }
-                    out.extend_from_slice(&data);
-                    if c.last.unwrap_or(false) {
-                        break;
-                    }
-                }
+            let header = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            let total = match header.body {
+                Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
                 Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "enc")),
-                other => return Err(unexpected_frame("enc", "PackChunk", other)),
+                other => return Err(unexpected_frame("enc", "DownloadPackHeader", other)),
+            };
+
+            if total > PACK_BODY_LIMIT {
+                return Err(TransportError::RemoteError(
+                    "server-advertised pack size exceeds client cap".into(),
+                ));
             }
-        }
-        Ok(out)
+
+            let initial = core::cmp::min(total as usize, PACK_BODY_LIMIT_USIZE);
+            let mut out = Vec::with_capacity(initial);
+            loop {
+                let chunk_frame = self.executor.block_on(recv_frame(&mut session.receiver))?;
+                match chunk_frame.body {
+                    Some(ssh_frame::Body::PackChunk(c)) => {
+                        let data = c.data.unwrap_or_default();
+                        if out.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
+                            return Err(TransportError::RemoteError(
+                                "server-streamed pack body exceeds client cap".into(),
+                            ));
+                        }
+                        out.extend_from_slice(&data);
+                        if c.last.unwrap_or(false) {
+                            break;
+                        }
+                    }
+                    Some(ssh_frame::Body::Error(e)) => {
+                        return Err(rpc_error_to_transport(*e, "enc"));
+                    }
+                    other => return Err(unexpected_frame("enc", "PackChunk", other)),
+                }
+            }
+            Ok(out)
+        })
     }
 
     fn upload_pack_streaming(
@@ -610,24 +782,22 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::PackExists(Box::new(
-                PackExists::default().with_pack_id(key.as_bytes().to_vec()),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &req))?;
-        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        match resp.body {
-            Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
-            other => Err(unexpected_frame("enc", "PackExistsResponse", other)),
-        }
+        self.with_retry(|session| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::PackExists(Box::new(
+                    PackExists::default().with_pack_id(key.as_bytes().to_vec()),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &req))?;
+            let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            match resp.body {
+                Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+                other => Err(unexpected_frame("enc", "PackExistsResponse", other)),
+            }
+        })
     }
 
     fn update_ref(
@@ -643,35 +813,32 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
             return Err(TransportError::InvalidRef("ref name too long".into()));
         }
 
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
+        self.with_retry(|session| {
+            let (expected_id, expectation) = cond_to_wire(condition);
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::UpdateRef(Box::new(
+                    UpdateRef::default()
+                        .with_name(name)
+                        .with_expected_id(expected_id)
+                        .with_new_id(hash.to_vec())
+                        .with_expectation(expectation),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &req))?;
 
-        let (expected_id, expectation) = cond_to_wire(condition);
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::UpdateRef(Box::new(
-                UpdateRef::default()
-                    .with_name(name)
-                    .with_expected_id(expected_id)
-                    .with_new_id(hash.to_vec())
-                    .with_expectation(expectation),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &req))?;
-
-        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        match resp.body {
-            Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
-            // Same details-based CAS classification as the SSH client
-            // (SPEC-TRANSPORT §4.2.1): `InvalidRequest` is only a
-            // `RefConflict` when the write carried a precondition AND
-            // the server surfaced the current id in `details`.
-            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "enc")),
-            other => Err(unexpected_frame("enc", "UpdateRefResponse", other)),
-        }
+            let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            match resp.body {
+                Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
+                // Same details-based CAS classification as the SSH client
+                // (SPEC-TRANSPORT §4.2.1): `InvalidRequest` is only a
+                // `RefConflict` when the write carried a precondition AND
+                // the server surfaced the current id in `details`.
+                Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "enc")),
+                other => Err(unexpected_frame("enc", "UpdateRefResponse", other)),
+            }
+        })
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -681,35 +848,33 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         if name.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref name too long".into()));
         }
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::ReadRef(Box::new(
-                ReadRef::default().with_name(name),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &req))?;
-        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        match resp.body {
-            Some(ssh_frame::Body::ReadRefResponse(r)) => {
-                let oid = r.object_id.unwrap_or_default();
-                if oid.is_empty() {
-                    Ok(None)
-                } else if oid.len() == 32 {
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&oid);
-                    Ok(Some(h))
-                } else {
-                    Err(TransportError::InvalidResponse)
+        self.with_retry(|session| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::ReadRef(Box::new(
+                    ReadRef::default().with_name(name),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &req))?;
+            let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            match resp.body {
+                Some(ssh_frame::Body::ReadRefResponse(r)) => {
+                    let oid = r.object_id.unwrap_or_default();
+                    if oid.is_empty() {
+                        Ok(None)
+                    } else if oid.len() == 32 {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(&oid);
+                        Ok(Some(h))
+                    } else {
+                        Err(TransportError::InvalidResponse)
+                    }
                 }
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+                other => Err(unexpected_frame("enc", "ReadRefResponse", other)),
             }
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
-            other => Err(unexpected_frame("enc", "ReadRefResponse", other)),
-        }
+        })
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
@@ -719,28 +884,26 @@ impl<I: Stream, O: Sink, E: Executor> Transport for EncTransport<I, O, E> {
         if prefix.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref prefix too long".into()));
         }
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::ListRefs(Box::new(
-                ListRefs::default().with_prefix(prefix),
-            ))),
-            ..Default::default()
-        };
-        self.executor
-            .block_on(send_frame(&mut session.sender, &req))?;
-        let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
-        match resp.body {
-            Some(ssh_frame::Body::ListRefsResponse(r)) => r
-                .refs
-                .into_iter()
-                .map(ref_entry_to_ref)
-                .collect::<TransportResult<Vec<_>>>(),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
-            other => Err(unexpected_frame("enc", "ListRefsResponse", other)),
-        }
+        self.with_retry(|session| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::ListRefs(Box::new(
+                    ListRefs::default().with_prefix(prefix),
+                ))),
+                ..Default::default()
+            };
+            self.executor
+                .block_on(send_frame(&mut session.sender, &req))?;
+            let resp = self.executor.block_on(recv_frame(&mut session.receiver))?;
+            match resp.body {
+                Some(ssh_frame::Body::ListRefsResponse(r)) => r
+                    .refs
+                    .into_iter()
+                    .map(ref_entry_to_ref)
+                    .collect::<TransportResult<Vec<_>>>(),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "enc")),
+                other => Err(unexpected_frame("enc", "ListRefsResponse", other)),
+            }
+        })
     }
 }
 
@@ -827,7 +990,10 @@ impl<I: Stream, O: Sink, E: Executor> Iterator for EncDownloadPackChunks<'_, I, 
 /// Errors from the cipher layer collapse to
 /// [`TransportError::ConnectionFailed`]; preserving the detailed
 /// reason would require an orphan-rules workaround and isn't worth it
-/// — callers retry on `ConnectionFailed` regardless.
+/// — [`EncTransport`]'s crate-private retry driver marks the session
+/// dead and retries against a freshly reconnected one (see the
+/// type-level docs on [`EncTransport`]) rather than resuming on this
+/// one.
 pub async fn send_frame<O: Sink>(sender: &mut Sender<O>, msg: &SshFrame) -> TransportResult<()> {
     let body = msg.encode_to_vec();
     sender.send(body).await.map_err(stream_err)
@@ -902,9 +1068,13 @@ async fn recv_frame_init<I: Stream>(
 ///
 /// Orphan rules prevent `impl From<encrypted::Error> for TransportError`
 /// here (neither type is local), so each verb threads `.map_err(stream_err)`
-/// on its `send_frame` / `recv_frame` calls. Callers retry on
-/// `ConnectionFailed` regardless of the cipher's reason — preserving the
-/// detailed reason is not worth the orphan-rules workaround.
+/// on its `send_frame` / `recv_frame` calls. A `ConnectionFailed` from
+/// this collapse always means the cipher stream may be mid-message
+/// desynced — [`EncTransport`]'s crate-private retry driver treats it
+/// as fatal to the current session and reconnects (when a redial hook
+/// is wired) rather than resuming; preserving the detailed cipher-error
+/// reason is not
+/// worth the orphan-rules workaround.
 fn stream_err(_: commonware_stream::encrypted::Error) -> TransportError {
     TransportError::ConnectionFailed
 }
