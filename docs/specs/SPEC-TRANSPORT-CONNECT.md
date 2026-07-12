@@ -49,10 +49,16 @@ against this proto over R2 + a Durable Object; `DownloadPack`
 (server-streaming) conforms to the wire shape but whole-pack-buffers
 rather than incrementally streaming — see its README "Known
 limitations" — so §6.3's owned-mpsc-channel bridge and its unresolved
-end-to-end delivery risk remain unverified by that implementation. No
-test yet drives `mkit-transport-connect`'s client against a real
-`apps/vcs-worker` deployment (or a `wrangler dev` instance of it) — the
-cross-target integration §7.1 calls for is still open. `apps/repo-worker`
+end-to-end delivery risk remain unverified by that implementation. Every
+RPC has been manually verified against a real local `wrangler dev`
+instance (real R2/DO emulation, real Ed25519-signed envelopes) — see
+`apps/vcs-worker/README.md` "Known limitations" for the trial writeup —
+but no AUTOMATED test drives `mkit-transport-connect`'s client against
+`apps/vcs-worker`, and that client cannot yet authenticate a write
+against it at all: `ConnectTransport` only speaks the bearer-token scheme
+(SPEC-TRANSPORT §5.2), while this server's only write-auth is the Ed25519
+envelope §7.1 describes. The cross-target integration §7.1 calls for
+remains open on both the testing and the auth-interop axis. `apps/repo-worker`
 remains the closest OTHER existing analog (a Connect service on
 Cloudflare Workers) but implements the unrelated `mkit.repo.v1.RepoService`
 anonymous-demo contract, not this one; this document borrows its proven

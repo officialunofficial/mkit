@@ -96,16 +96,58 @@ same-author, never authority.
   additionally need `Response::from_stream` (or equivalent) in that bridge,
   which this reference server does not implement — see
   SPEC-TRANSPORT-CONNECT §6.3.
-- **No end-to-end integration test yet.** This crate ships unit tests for
-  its pure logic (envelope verification, ref-CAS decisions, pack-digest
-  matching — `cargo test --lib`, host target) but no test drives the real
-  generated Worker service against `wrangler dev` or a `workers-rs` local
-  test harness the way mkit#699's "Testing Decisions" describes. `mkit
-  push`/`fetch`/`clone` over `mkit+https://` still exercise
-  `mkit-transport-http`'s fake-server fixture
-  (`rust/crates/mkit-cli/tests/remote_dispatch_http.rs`), not this Worker —
-  wiring a real CLI-side Connect client is mkit#701's scope, and the e2e
-  harness depends on it.
+- **End-to-end RPC surface — manually VERIFIED (2026-07-12) against local
+  `wrangler dev`.** Every RPC was driven against a real local `wrangler dev`
+  instance (wrangler 4.110.0, `worker` 0.8.5, `connectrpc` 0.8.1) with real
+  R2 + Durable Object emulation, using hand-crafted Connect requests
+  (unary JSON for `ListRefs`/`ReadRef`/`PackExists`/`UpdateRef`/
+  `AdvanceRefs`, enveloped `application/connect+json` framing for the
+  streaming `UploadPack`/`DownloadPack`) signed with a real Ed25519 key
+  through the exact canonical-string construction `envelope.rs` implements:
+  `ListRefs` and `ReadRef` against an empty store; `UpdateRef` (ANY) then
+  `ReadRef` confirming the write landed; `UploadPack` then `PackExists` then
+  `DownloadPack` confirming the exact uploaded bytes round-tripped back
+  (header `totalBytes` + one `chunk` matching the source data byte-for-byte);
+  `AdvanceRefs` (ANY/ANY) committing both refs atomically, confirmed via
+  `ReadRef` on each; and a CAS conflict (`UpdateRef` with `MISSING` against
+  an already-existing ref) correctly returning Connect `failed_precondition`.
+  This is real coverage of the wasm-specific glue no host-side `cargo test`
+  can reach (the `SendFuture` shim, `Env::bucket`/`Env::durable_object`,
+  the internal DO JSON wire protocol, the `AuthInterceptor` wiring) — see
+  `apps/repo-worker/README.md`'s "WatchRefs / streaming" section for why
+  this project verifies wasm-only Worker glue manually against `wrangler
+  dev` rather than trying to automate it in CI. **What was NOT verified:**
+  a real deployed Cloudflare Worker (this pass had no deploy authorization,
+  same caveat as repo-worker's own WatchRefs verification), and the
+  incremental-streaming `DownloadPack` bridge SPEC-TRANSPORT-CONNECT §6.3
+  flags as unresolved (this server deliberately doesn't attempt it — see
+  above).
+- **`mkit-transport-connect` (mkit#701, merged after this branch was
+  originally opened) cannot yet authenticate a write against this server.**
+  `ConnectTransport` — the real client `mkit-cli`'s `remote_dispatch`
+  constructs for `mkit+https://` — only supports `mkit-transport-http`'s
+  bearer-token scheme (`MKIT_API_TOKEN` → `Authorization: Bearer`,
+  SPEC-TRANSPORT §5.2). It has no support for this server's Ed25519
+  signed-envelope headers (`X-Public-Key`/`X-Signature`/`X-Digest`/
+  `X-Created-At`/`Idempotency-Key`), which is the ONLY write-auth this
+  server implements (see "Auth" above) — issue #699's Implementation Notes
+  prescribed reusing `repo-worker`'s envelope scheme verbatim, and that
+  predates #701's client landing with only bearer-token support. Reads
+  (`ListRefs`/`ReadRef`/`PackExists`/`DownloadPack`) are open and DO work
+  with the real client today (verified above via hand-crafted requests
+  exercising the identical wire dialect `ConnectTransport` speaks); `mkit
+  push` — which needs `UpdateRef`/`AdvanceRefs`/`UploadPack` — cannot
+  authenticate against this deployment until one side gains the other's
+  scheme (or both move to a shared interceptor, mkit#703). This is a
+  genuine, currently-open gap, not a resolved one — tracked as a fast-follow
+  from this pass, not fixed here (extending `ConnectTransport`'s auth is
+  arguably #701's/#703's scope, not #699's; extending this server to ALSO
+  accept a bearer token was considered but is a real auth-surface change
+  better done deliberately than folded into a rebase pass).
+- No automated `cargo test` drives this end-to-end scenario (the manual
+  verification above is not wired into CI) — this crate's automated tests
+  remain the host-only unit tests for pure logic (envelope verification,
+  ref-CAS decisions, pack-digest matching — `cargo test --lib`).
 
 ## Endpoints
 
