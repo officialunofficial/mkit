@@ -11,14 +11,21 @@
 
 use worker::*;
 
+mod audit;
 mod envelope;
 mod names;
 
+use audit::{audit_for, WriteAudit};
 use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
 use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
 
 /// KV namespace binding (declared in wrangler.jsonc).
 const KV_BINDING: &str = "NAMES";
+
+/// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
+/// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
+/// `WRITE_EVENTS` binding name so the two datasets share vocabulary.
+const WRITE_EVENTS_BINDING: &str = "WRITE_EVENTS";
 
 /// Envelope `procedure` field for a name write — the web client signs the same
 /// constant, so changing it here is a breaking protocol change.
@@ -125,6 +132,48 @@ async fn read_capped_body(req: &mut Request) -> Result<std::result::Result<Vec<u
     Ok(Ok(body))
 }
 
+/// Push one audit record to the `WRITE_EVENTS` Analytics Engine dataset. A
+/// missing binding (e.g. local `wrangler dev` without it configured) or a
+/// failed write is logged and swallowed — telemetry must never fail the
+/// request it's describing.
+fn log_write(env: &Env, audit: &WriteAudit) {
+    let dataset = match env.analytics_engine(WRITE_EVENTS_BINDING) {
+        Ok(d) => d,
+        Err(e) => {
+            console_error!("{WRITE_EVENTS_BINDING} analytics engine binding unavailable: {e}");
+            return;
+        }
+    };
+    // `indexes` takes exactly one value (Analytics Engine drops multi-index
+    // points) — "accepted"/"rejected" — so the two outcomes are cheaply
+    // filterable in a query without parsing blobs.
+    let point = match audit {
+        WriteAudit::Accepted {
+            procedure,
+            signer_pubkey,
+            bytes,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["accepted"])
+            .add_blob(procedure.as_str())
+            .add_blob(signer_pubkey.as_str())
+            .add_double(*bytes as f64)
+            .build(),
+        WriteAudit::Rejected {
+            procedure,
+            reason,
+            status,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["rejected"])
+            .add_blob(procedure.as_str())
+            .add_blob(reason.as_str())
+            .add_double(f64::from(*status))
+            .build(),
+    };
+    if let Err(e) = dataset.write_data_point(&point) {
+        console_error!("analytics engine write_data_point failed: {e}");
+    }
+}
+
 fn read_envelope_headers(req: &Request) -> EnvelopeHeaders {
     let h = req.headers();
     EnvelopeHeaders {
@@ -162,7 +211,17 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
     let actual_digest = blake3_hex(&body);
     let now = Date::now().as_millis() as i64;
 
-    let signer = match verify_envelope(SET_NAME_PROCEDURE, &actual_digest, now, &headers) {
+    // Log the accepted/rejected outcome BEFORE branching on it, so a
+    // rejected write (bad signature, stale timestamp, …) is observable too —
+    // see #695. `audit_for` is pure and unit-tested in `audit.rs`; only the
+    // Analytics Engine write below is untested worker glue.
+    let verify_result = verify_envelope(SET_NAME_PROCEDURE, &actual_digest, now, &headers);
+    log_write(
+        env,
+        &audit_for(SET_NAME_PROCEDURE, body.len() as u64, &verify_result),
+    );
+
+    let signer = match verify_result {
         VerifyEnvelope::Ok { public_key } => public_key.to_ascii_lowercase(),
         VerifyEnvelope::Err { status, error } => return Response::error(error, status),
     };

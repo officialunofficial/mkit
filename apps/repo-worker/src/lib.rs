@@ -16,6 +16,7 @@
 // run under `cargo test` on the host. The `sign` dev binary depends only on
 // these (+ the generated proto), so the host build never compiles the
 // wasm-only worker glue below.
+pub mod audit;
 pub mod chat;
 pub mod envelope;
 pub mod hashing;

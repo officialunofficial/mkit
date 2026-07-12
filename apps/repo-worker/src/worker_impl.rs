@@ -162,8 +162,9 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Build the service fresh per request — `Env` is Send and cheap to clone;
     // the service holds no cross-request state. The interceptor needs its own
     // `Env` clone too: it addresses the room's RefStore DO directly for the
-    // write-quota check, ahead of (and independent of) the handler's own DO
-    // calls.
+    // write-quota check (ahead of, and independent of, the handler's own DO
+    // calls), and separately reaches the `WRITE_EVENTS` Analytics Engine
+    // binding for accepted/rejected-write telemetry (see worker_impl/auth.rs).
     let router: Router = Arc::new(RepoServer::new(env.clone())).register(Router::new());
     // Default compression policy (gzip large responses). The wasm client now
     // re-asserts `content-encoding` from the gzip magic and decompresses, so the

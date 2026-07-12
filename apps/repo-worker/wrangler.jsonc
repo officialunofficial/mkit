@@ -19,6 +19,15 @@
   // Structured logs/metrics for the deployed Worker.
   "observability": { "enabled": true },
 
+  // Accepted/rejected-write telemetry: `AuthInterceptor` (worker_impl/auth.rs)
+  // writes one data point per write-path request (PutObject/UpdateRef/
+  // PostMessage/React) — {room, procedure, author_pubkey, bytes} on accept,
+  // {procedure, reason, status} on reject — so per-room write volume and
+  // auth-failure/probing rate are queryable instead of invisible. See #695.
+  "analytics_engine_datasets": [
+    { "binding": "WRITE_EVENTS", "dataset": "mkit_repo_write_events" }
+  ],
+
   // Smart Placement: run the Worker close to its back-end (the RefStore DO + R2),
   // not just at the edge nearest the client — so the many worker→DO and worker→R2
   // round-trips per request don't each pay the full client-to-DO distance.
@@ -74,7 +83,17 @@
 
       // Same RefStore class, but bound to the staging Worker script
       // (`mkit-repo-worker-staging`), so it gets its own DO storage.
-      "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] }
+      "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+
+      // Dedicated staging dataset — `analytics_engine_datasets` is also a
+      // non-inheritable key (see link above), so without this the staging
+      // deployment's AuthInterceptor would silently drop write telemetry
+      // instead of mirroring it. Analytics Engine datasets need no explicit
+      // pre-creation (unlike R2/KV): the first write_data_point call creates
+      // them.
+      "analytics_engine_datasets": [
+        { "binding": "WRITE_EVENTS", "dataset": "mkit_repo_write_events_staging" }
+      ]
     }
   }
 }
