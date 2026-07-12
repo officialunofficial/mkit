@@ -12,7 +12,16 @@
 //!                    SignResponse{ signature, public_key, key_id }
 //!                      OR
 //!                    Error{ code, message }
+//!                      OR (zero or more times, mid-sign)
+//!                    PinPrompt{ reason, retries_remaining, wants_pin }
+//! parent → child:    PinResponse{ pin }     (sourced from a
+//!                                            `PinProvider`, never argv)
 //! ```
+//!
+//! The child's stdin is kept open for the whole conversation (not
+//! closed right after the initial write) specifically so a `PinPrompt`
+//! mid-sign can be answered on the same pipe; it is closed only once a
+//! terminal `SignResponse`/`Error` has been read.
 //!
 //! `keyid` is only known after the first sign call; `keyid()` before
 //! that returns `Error::KeyIdNotKnownUntilFirstSign`.
@@ -30,19 +39,29 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mkit_rpc::mkit::rpc::v1::signer::{
-    Hello, SignRequest, SignResponse, SignerFrame, signer_frame,
+    Hello, PinPrompt, PinResponse, SignRequest, SignResponse, SignerFrame, signer_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, KeyForm, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
 
 use crate::Error;
 use crate::algorithm::Algorithm;
+use crate::pin_provider::{PinPromptInfo, PinProvider, TtyPinProvider};
 use crate::signer::Signer;
 #[cfg(feature = "algo-p256")]
 use crate::webauthn::WebAuthnPolicy;
 
 /// Cap for child-stderr drain. 1 MiB is generous; stderr is advisory.
 const MAX_STDERR_DRAIN: usize = 1024 * 1024;
+
+/// Cap on `PinPrompt` round trips within a single sign conversation.
+/// SPEC-EXTERNAL-SIGNER §4 allows a signer to re-prompt (e.g. a wrong
+/// PIN with retries remaining), but an unbounded loop would let a
+/// malicious or buggy signer spin the host indefinitely inside the
+/// same wall-clock deadline. Chosen generously above any real
+/// CTAP/TPM/PKCS#11 retry counter (typically well under 8 attempts
+/// before a hardware lockout).
+const MAX_PIN_PROMPTS: u32 = 8;
 
 /// Default wall-clock budget for the entire signer conversation
 /// (spawn → request-write → response-read → stderr-drain → child-exit).
@@ -72,6 +91,11 @@ pub struct ExternalSigner {
     /// assertion. Defaults to [`WebAuthnPolicy::permissive`].
     #[cfg(feature = "algo-p256")]
     webauthn_policy: WebAuthnPolicy,
+    /// Sources a PIN when the signer emits a `PinPrompt` mid-sign.
+    /// Defaults to [`TtyPinProvider`] (interactive terminal prompt;
+    /// never argv or an environment variable — SPEC-EXTERNAL-SIGNER
+    /// §2, THREAT-MODEL §3.2).
+    pin_provider: Box<dyn PinProvider>,
 }
 
 impl ExternalSigner {
@@ -113,6 +137,7 @@ impl ExternalSigner {
             timeout: DEFAULT_EXTERNAL_SIGNER_TIMEOUT,
             #[cfg(feature = "algo-p256")]
             webauthn_policy: WebAuthnPolicy::permissive(),
+            pin_provider: Box::new(TtyPinProvider),
         })
     }
 
@@ -148,6 +173,17 @@ impl ExternalSigner {
     #[must_use]
     pub fn with_webauthn_policy(mut self, policy: WebAuthnPolicy) -> Self {
         self.webauthn_policy = policy;
+        self
+    }
+
+    /// Override the [`PinProvider`] used to answer a signer's
+    /// `PinPrompt` mid-sign. Defaults to [`TtyPinProvider`]. Callers
+    /// embedding `ExternalSigner` in a non-interactive context (a
+    /// daemon, a test) MUST supply their own rather than relying on
+    /// the interactive default.
+    #[must_use]
+    pub fn with_pin_provider(mut self, provider: impl PinProvider + 'static) -> Self {
+        self.pin_provider = Box::new(provider);
         self
     }
 }
@@ -245,11 +281,11 @@ impl ExternalSigner {
             return Err(conv.fail(Error::ExternalSignerSpawn("stdin not piped".into())));
         };
         let write_rx = spawn_request_writer(stdin, hello, sign_req);
-        match recv_until_deadline(&write_rx, deadline) {
-            Ok(Ok(())) => {}
+        let mut stdin = match recv_until_deadline(&write_rx, deadline) {
+            Ok(Ok(stdin)) => stdin,
             Ok(Err(e)) => return Err(conv.fail(e)),
             Err(()) => return Err(conv.fail(Error::ExternalSignerTimeout("request-write"))),
-        }
+        };
 
         // --- Read the response (bounded) --------------------------
         let Some(stdout) = conv.child.stdout.take() else {
@@ -275,13 +311,22 @@ impl ExternalSigner {
             return Err(conv.fail(e));
         }
 
-        let resp = match recv_frame_until_deadline(&stdout_rx, deadline) {
-            Ok(frame) => frame,
-            Err(FrameTimeout::Timeout) => {
-                return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
-            }
-            Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
-        };
+        // --- Read until a terminal frame, answering PinPrompt -----
+        //
+        // SPEC-EXTERNAL-SIGNER §4: the signer MAY interleave zero or
+        // more PinPrompt frames before its terminal SignResponse /
+        // Error. `read_until_terminal_frame` answers each on the spot
+        // via `self.pin_provider` and a PinResponse written back on
+        // `stdin` (kept open for exactly this reason — see
+        // `spawn_request_writer`).
+        let resp = self.read_until_terminal_frame(&stdout_rx, &mut stdin, deadline, &mut conv)?;
+        // The terminal frame is in hand; no more requests are coming
+        // on this connection. Close stdin now so a signer that loops
+        // on stdin (SPEC-EXTERNAL-SIGNER §8) sees EOF and can exit —
+        // this must happen AFTER the PinPrompt loop above, which needs
+        // stdin to stay open for PinResponse writes.
+        drop(stdin);
+
         let (signature, key_id) = match self.extract_signature_with_policy(resp, pae) {
             Ok(v) => v,
             Err(e) => return Err(conv.fail(e)),
@@ -340,6 +385,51 @@ impl ExternalSigner {
         #[cfg(not(feature = "algo-p256"))]
         {
             extract_signature(frame, self.algorithm, pae)
+        }
+    }
+
+    /// Read frames off `stdout_rx` until a terminal `SignResponse`/
+    /// `Error`, answering any `PinPrompt` along the way via
+    /// `self.pin_provider` and writing the `PinResponse` back on
+    /// `stdin`. The round-trip count is capped at [`MAX_PIN_PROMPTS`]
+    /// so a malicious or buggy signer can't spin the host forever
+    /// inside one wall-clock deadline. Any failure tears the
+    /// conversation down via `conv.fail` before returning, matching
+    /// every other error path in [`Self::run_conversation`].
+    fn read_until_terminal_frame(
+        &self,
+        stdout_rx: &mpsc::Receiver<Result<SignerFrame, FrameError>>,
+        stdin: &mut std::process::ChildStdin,
+        deadline: Instant,
+        conv: &mut Conversation,
+    ) -> Result<SignerFrame, Error> {
+        let mut pin_prompts_seen: u32 = 0;
+        loop {
+            let frame = match recv_frame_until_deadline(stdout_rx, deadline) {
+                Ok(frame) => frame,
+                Err(FrameTimeout::Timeout) => {
+                    return Err(conv.fail(Error::ExternalSignerTimeout("response-read")));
+                }
+                Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
+            };
+            let Some(signer_frame::Body::PinPrompt(ref prompt)) = frame.body else {
+                return Ok(frame);
+            };
+            pin_prompts_seen += 1;
+            if pin_prompts_seen > MAX_PIN_PROMPTS {
+                return Err(conv.fail(Error::ExternalSignerBadResponse(format!(
+                    "signer sent more than {MAX_PIN_PROMPTS} PinPrompt frames in one conversation"
+                ))));
+            }
+            let pin = match self.pin_provider.provide_pin(&pin_prompt_info(prompt)) {
+                Ok(pin) => pin,
+                Err(e) => return Err(conv.fail(e)),
+            };
+            if let Err(e) = write_frame(stdin, &pin_response_frame(pin)) {
+                return Err(conv.fail(Error::ExternalSignerSpawn(format!(
+                    "write pin response: {e}"
+                ))));
+            }
         }
     }
 }
@@ -444,24 +534,29 @@ fn spawn_stderr_drainer<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandl
 }
 
 /// Spawn a thread that writes the Hello + `SignRequest` frames to the
-/// child's stdin, then closes stdin (drops the handle) so the child sees
-/// EOF. Reports the result over a channel.
+/// child's stdin. On success, hands `stdin` back over the channel
+/// instead of closing it: the caller keeps it open for the rest of the
+/// conversation so a mid-sign `PinPrompt` can be answered with a
+/// `PinResponse` on the same pipe, and closes it only once a terminal
+/// `SignResponse`/`Error` has been read (signalling "no more requests"
+/// per SPEC-EXTERNAL-SIGNER §8's "loop until EOF" contract). On
+/// failure `stdin` is simply dropped when this closure returns,
+/// closing the pipe — harmless because the caller kills the child on
+/// any write error anyway.
 fn spawn_request_writer(
     mut stdin: std::process::ChildStdin,
     hello: SignerFrame,
     sign_req: SignerFrame,
-) -> mpsc::Receiver<Result<(), Error>> {
-    let (tx, rx) = mpsc::sync_channel::<Result<(), Error>>(1);
+) -> mpsc::Receiver<Result<std::process::ChildStdin, Error>> {
+    let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let result = (|| {
             write_frame(&mut stdin, &hello)
                 .map_err(|e| Error::ExternalSignerSpawn(format!("write hello: {e}")))?;
             write_frame(&mut stdin, &sign_req)
                 .map_err(|e| Error::ExternalSignerSpawn(format!("write sign request: {e}")))?;
-            Ok(())
+            Ok(stdin)
         })();
-        // Drop stdin so the child sees EOF before we report completion.
-        drop(stdin);
         let _ = tx.send(result);
     });
     rx
@@ -1009,6 +1104,36 @@ fn require_hello_response(frame: &SignerFrame) -> Result<(), Error> {
     }
 }
 
+/// Decode a wire `PinPrompt` into the protocol-agnostic
+/// [`PinPromptInfo`] a [`PinProvider`] consumes.
+///
+/// `wants_pin` defaults to `true` when the signer leaves it unset: a
+/// signer that omits the field is more likely asking for a PIN than a
+/// touch (touch-only signers own their own gesture prompt and don't
+/// gate on a wire round trip to display it), and prompting when a
+/// touch was actually wanted is harmless — the human enters nothing
+/// useful and the signer ignores `PinResponse.pin` — whereas silently
+/// sending an empty PIN when one really was needed just fails the
+/// sign with a confusing hardware error.
+fn pin_prompt_info(p: &PinPrompt) -> PinPromptInfo {
+    PinPromptInfo {
+        reason: p.reason.clone().unwrap_or_default(),
+        retries_remaining: p.retries_remaining.unwrap_or(0),
+        wants_pin: p.wants_pin.unwrap_or(true),
+    }
+}
+
+/// Build the `PinResponse` frame sent back on `stdin` in answer to a
+/// `PinPrompt`.
+fn pin_response_frame(pin: String) -> SignerFrame {
+    SignerFrame {
+        body: Some(signer_frame::Body::PinResponse(Box::new(
+            PinResponse::default().with_pin(pin),
+        ))),
+        ..Default::default()
+    }
+}
+
 fn frame_name(b: &Option<signer_frame::Body>) -> &'static str {
     use signer_frame::Body;
     match b {
@@ -1041,6 +1166,62 @@ mod tests {
     #[test]
     fn new_accepts_absolute_path() {
         ExternalSigner::new("/usr/bin/foo").expect("absolute path accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_pin_provider_overrides_default() {
+        #[derive(Debug)]
+        struct Canned;
+        impl PinProvider for Canned {
+            fn provide_pin(&self, _prompt: &PinPromptInfo) -> Result<String, Error> {
+                Ok("000000".into())
+            }
+        }
+        let signer = ExternalSigner::new("/usr/bin/foo")
+            .unwrap()
+            .with_pin_provider(Canned);
+        assert_eq!(
+            signer
+                .pin_provider
+                .provide_pin(&PinPromptInfo::default())
+                .unwrap(),
+            "000000"
+        );
+    }
+
+    #[test]
+    fn pin_prompt_info_carries_reason_and_retries() {
+        let prompt = PinPrompt::default()
+            .with_reason("authenticator locked")
+            .with_retries_remaining(2)
+            .with_wants_pin(true);
+        let info = pin_prompt_info(&prompt);
+        assert_eq!(info.reason, "authenticator locked");
+        assert_eq!(info.retries_remaining, 2);
+        assert!(info.wants_pin);
+    }
+
+    #[test]
+    fn pin_prompt_info_defaults_wants_pin_true_when_unset() {
+        // A signer that omits `wants_pin` is more likely asking for a
+        // PIN than a touch — see `pin_prompt_info`'s doc comment.
+        let prompt = PinPrompt::default();
+        let info = pin_prompt_info(&prompt);
+        assert!(info.wants_pin);
+        assert_eq!(info.retries_remaining, 0);
+        assert_eq!(info.reason, "");
+    }
+
+    #[test]
+    fn pin_response_frame_round_trips_the_pin() {
+        let frame = pin_response_frame("445566".to_owned());
+        match frame.body {
+            Some(signer_frame::Body::PinResponse(pr)) => {
+                assert_eq!(pr.pin.as_deref(), Some("445566"));
+            }
+            other => panic!("expected PinResponse, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1348,6 +1529,53 @@ mod tests {
             (dir, path)
         }
 
+        /// Exact byte length of the Hello + `SignRequest` frames
+        /// `ExternalSigner::sign` writes for `(Algorithm::Ed25519, PAE)`.
+        ///
+        /// The host now keeps the child's stdin open for the whole
+        /// conversation (so a mid-sign `PinPrompt` can be answered on
+        /// it — see `spawn_request_writer`), so a script fixture can no
+        /// longer drain the initial request with `cat >/dev/null`: that
+        /// blocks on EOF, which never comes until *after* the host has
+        /// read a terminal frame — a fixture that blocks on EOF before
+        /// writing anything would deadlock. Fixtures instead read
+        /// exactly this many bytes via `dd bs=1 count=N`.
+        fn initial_request_len() -> usize {
+            let hello = SignerFrame {
+                body: Some(signer_frame::Body::Hello(Box::new(
+                    Hello::default()
+                        .with_protocol(ProtocolVersion::ProtocolVersion1)
+                        .with_caller_id(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION")))
+                        .with_want_capabilities(false),
+                ))),
+                ..Default::default()
+            };
+            let sign_req = SignerFrame {
+                body: Some(signer_frame::Body::SignRequest(Box::new(
+                    SignRequest::default()
+                        .with_algorithm(RpcAlgorithm::Ed25519)
+                        .with_key_form(KeyForm::RawBytes)
+                        .with_key_ref(Vec::new())
+                        .with_payload(PAE.to_vec())
+                        .with_context(Vec::new()),
+                ))),
+                ..Default::default()
+            };
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &hello).unwrap();
+            write_frame(&mut buf, &sign_req).unwrap();
+            buf.len()
+        }
+
+        /// Shell snippet that drains exactly the initial Hello +
+        /// `SignRequest` request off stdin without relying on EOF.
+        fn drain_initial_request() -> String {
+            format!(
+                "dd bs=1 count={} 2>/dev/null >/dev/null\n",
+                initial_request_len()
+            )
+        }
+
         /// Serialize a valid Ed25519 `SignResponse` (Hello + `SignResponse`)
         /// to a length-prefixed frame byte stream, base64-free, written
         /// to a file the child can `cat`.
@@ -1391,7 +1619,8 @@ mod tests {
         fn hang_before_stdout_times_out_and_reaps_child() {
             // Child reads stdin then sleeps forever without writing
             // stdout — the classic "hung on a touch that never comes".
-            let (_dir, path) = write_script("#!/bin/sh\ncat >/dev/null\nsleep 600\n");
+            let script = format!("#!/bin/sh\n{}sleep 600\n", drain_initial_request());
+            let (_dir, path) = write_script(&script);
             let mut signer = ExternalSigner::new(&path)
                 .unwrap()
                 .with_timeout(Duration::from_millis(300));
@@ -1419,11 +1648,13 @@ mod tests {
             // emitting any stdout, then hangs. Without the concurrent
             // stderr drain this would deadlock; with it, we still hit the
             // response-read timeout cleanly (bounded, no hang).
-            let (_dir, path) = write_script(
-                "#!/bin/sh\ncat >/dev/null\n\
+            let script = format!(
+                "#!/bin/sh\n{}\
                  yes deadlock-flood-line | head -c 2000000 1>&2\n\
                  sleep 600\n",
+                drain_initial_request(),
             );
+            let (_dir, path) = write_script(&script);
             let mut signer = ExternalSigner::new(&path)
                 .unwrap()
                 .with_timeout(Duration::from_millis(500));
@@ -1453,7 +1684,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let resp = valid_response_frames_file(dir.path());
             let script = format!(
-                "#!/bin/sh\ncat >/dev/null\ncat '{}'\nsleep 600\n",
+                "#!/bin/sh\n{}cat '{}'\nsleep 600\n",
+                drain_initial_request(),
                 resp.display()
             );
             let bin = dir.path().join("signer.sh");
@@ -1490,7 +1722,11 @@ mod tests {
             // bounded path doesn't break the happy case.
             let dir = tempfile::tempdir().unwrap();
             let resp = valid_response_frames_file(dir.path());
-            let script = format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", resp.display());
+            let script = format!(
+                "#!/bin/sh\n{}cat '{}'\n",
+                drain_initial_request(),
+                resp.display()
+            );
             let bin = dir.path().join("signer.sh");
             std::fs::write(&bin, script).unwrap();
             let mut perms = std::fs::metadata(&bin).unwrap().permissions();
@@ -1541,7 +1777,11 @@ mod tests {
             let resp = dir.path().join("response.bin");
             std::fs::write(&resp, &bytes).unwrap();
 
-            let script = format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", resp.display());
+            let script = format!(
+                "#!/bin/sh\n{}cat '{}'\n",
+                drain_initial_request(),
+                resp.display()
+            );
             let bin = dir.path().join("signer.sh");
             std::fs::write(&bin, script).unwrap();
             let mut perms = std::fs::metadata(&bin).unwrap().permissions();
@@ -1559,6 +1799,131 @@ mod tests {
                 "expected ExternalSignerBadResponse, got {err:?}"
             );
             assert!(err.to_string().contains("HelloResponse"));
+        }
+
+        #[test]
+        fn pin_prompt_round_trip_completes_sign() {
+            // SPEC-EXTERNAL-SIGNER §4: the signer MAY interleave a
+            // PinPrompt before its terminal response. The child here
+            // drains the initial request, emits HelloResponse +
+            // PinPrompt, drains the exact-length PinResponse the host
+            // sends back, then emits a valid SignResponse — proving the
+            // host (a) doesn't fall into `extract_signature`'s `other`
+            // arm on a PinPrompt, (b) invokes the configured
+            // `PinProvider`, (c) writes a well-formed `PinResponse` on
+            // the still-open stdin without deadlocking, and (d)
+            // completes signing.
+            #[derive(Debug, Clone)]
+            struct FakePinProvider {
+                seen: std::rc::Rc<std::cell::RefCell<Vec<PinPromptInfo>>>,
+                pin: String,
+            }
+            impl PinProvider for FakePinProvider {
+                fn provide_pin(&self, prompt: &PinPromptInfo) -> Result<String, Error> {
+                    self.seen.borrow_mut().push(prompt.clone());
+                    Ok(self.pin.clone())
+                }
+            }
+
+            const TEST_PIN: &str = "445566";
+
+            let dir = tempfile::tempdir().unwrap();
+
+            let hello_and_prompt = {
+                let hello_resp = SignerFrame {
+                    body: Some(signer_frame::Body::HelloResponse(Box::<
+                        mkit_rpc::mkit::rpc::v1::signer::HelloResponse,
+                    >::default(
+                    ))),
+                    ..Default::default()
+                };
+                let prompt = SignerFrame {
+                    body: Some(signer_frame::Body::PinPrompt(Box::new(
+                        PinPrompt::default()
+                            .with_reason("authenticator locked")
+                            .with_retries_remaining(3)
+                            .with_wants_pin(true),
+                    ))),
+                    ..Default::default()
+                };
+                let mut buf = Vec::new();
+                write_frame(&mut buf, &hello_resp).unwrap();
+                write_frame(&mut buf, &prompt).unwrap();
+                let path = dir.path().join("hello_and_prompt.bin");
+                std::fs::write(&path, &buf).unwrap();
+                path
+            };
+
+            // The exact wire length of the `PinResponse` the host will
+            // send back once `FakePinProvider` supplies `TEST_PIN` — so
+            // the fixture can drain it precisely instead of racing EOF.
+            let pin_response_len = {
+                let frame = pin_response_frame(TEST_PIN.to_owned());
+                let mut buf = Vec::new();
+                write_frame(&mut buf, &frame).unwrap();
+                buf.len()
+            };
+
+            // Just the `SignResponse` — the `HelloResponse` already went
+            // out in `hello_and_prompt` above, so reusing
+            // `valid_response_frames_file` here would send a second one
+            // and desync the host's terminal-frame read.
+            let sign_response = {
+                use ed25519_dalek::{Signer as _, SigningKey};
+                let sk = SigningKey::from_bytes(&[0x42; 32]);
+                let pk = sk.verifying_key().to_bytes().to_vec();
+                let sig = sk.sign(PAE).to_bytes().to_vec();
+                let sign_resp = SignerFrame {
+                    body: Some(signer_frame::Body::SignResponse(Box::new(
+                        SignResponse::default()
+                            .with_signature(sig)
+                            .with_public_key(pk)
+                            .with_algorithm(RpcAlgorithm::Ed25519)
+                            .with_key_id("opaque:test".to_owned()),
+                    ))),
+                    ..Default::default()
+                };
+                let mut buf = Vec::new();
+                write_frame(&mut buf, &sign_resp).unwrap();
+                let path = dir.path().join("sign_response.bin");
+                std::fs::write(&path, &buf).unwrap();
+                path
+            };
+
+            let script = format!(
+                "#!/bin/sh\n{}cat '{}'\ndd bs=1 count={} 2>/dev/null >/dev/null\ncat '{}'\n",
+                drain_initial_request(),
+                hello_and_prompt.display(),
+                pin_response_len,
+                sign_response.display(),
+            );
+            let bin = dir.path().join("signer.sh");
+            std::fs::write(&bin, script).unwrap();
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+
+            let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let provider = FakePinProvider {
+                seen: std::rc::Rc::clone(&seen),
+                pin: TEST_PIN.to_owned(),
+            };
+
+            let mut signer = ExternalSigner::new(&bin)
+                .unwrap()
+                .with_timeout(Duration::from_secs(30))
+                .with_pin_provider(provider);
+            let sig = signer
+                .sign(PAE)
+                .expect("PinPrompt round trip must complete signing");
+            assert_eq!(sig.len(), 64, "Ed25519 signature is 64 bytes");
+            assert_eq!(signer.keyid().unwrap(), "opaque:test");
+
+            let seen = seen.borrow();
+            assert_eq!(seen.len(), 1, "PinProvider must be invoked exactly once");
+            assert_eq!(seen[0].reason, "authenticator locked");
+            assert_eq!(seen[0].retries_remaining, 3);
+            assert!(seen[0].wants_pin);
         }
     }
 }

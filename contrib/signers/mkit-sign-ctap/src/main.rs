@@ -33,6 +33,15 @@
 //!   request via `SignRequest.key_ref`.
 //! * `list-credentials` — dumps the local metadata store.
 //!
+//! `--pin` on argv is **deprecated**: it is readable by any other
+//! local user via `ps` / `/proc/<pid>/cmdline`. Omit it — when the
+//! authenticator needs a PIN, the signer requests it in-band over the
+//! `PinPrompt`/`PinResponse` round trip (SPEC-EXTERNAL-SIGNER §4)
+//! instead, which `mkit-attest`'s `ExternalSigner` answers via an
+//! interactive TTY prompt by default. Passing `--pin` still works
+//! during the migration window but emits a deprecation warning on
+//! stderr.
+//!
 //! See `docs/specs/SPEC-EXTERNAL-SIGNER.md` for the wire protocol and
 //! `contrib/signers/README.md` for how mkit wires this binary in.
 
@@ -118,6 +127,9 @@ fn parse_enroll(it: impl Iterator<Item = String>) -> Result<EnrollArgs, SignerEr
 
 fn run_enroll(it: impl Iterator<Item = String>) -> Result<(), SignerError> {
     let a = parse_enroll(it)?;
+    if a.pin.is_some() {
+        warn_pin_argv_deprecated();
+    }
     let rp_id = a.rp_id.as_deref().unwrap_or("mkit.local");
     let user_name = a.user_name.as_deref().unwrap_or("mkit-user");
 
@@ -192,6 +204,9 @@ fn parse_sign(it: impl Iterator<Item = String>) -> Result<SignArgs, SignerError>
 
 fn run_sign(it: impl Iterator<Item = String>) -> Result<(), SignerError> {
     let a = parse_sign(it)?;
+    if a.pin.is_some() {
+        warn_pin_argv_deprecated();
+    }
     let defaults = SignDefaults {
         credential_id_b64url: a.credential_id_b64url,
         rp_id: a.rp_id,
@@ -220,6 +235,26 @@ fn run_list() -> Result<(), SignerError> {
 
 // -- Misc --------------------------------------------------------------
 
+/// `--pin` on argv is readable by any other local user on the host via
+/// `ps` / `/proc/<pid>/cmdline` — the same exposure class
+/// `docs/THREAT-MODEL.md` §3.2 defends key-file confidentiality
+/// against. It is kept for backward compatibility during the
+/// migration window (it still works — see `SignDefaults::pin`), but
+/// callers should omit it and let `mkit-sign-ctap` source the PIN
+/// in-band instead: when the authenticator reports it needs one, the
+/// signer emits a `PinPrompt` frame and blocks for the host's
+/// `PinResponse` (`mkit-attest`'s `ExternalSigner` answers this with
+/// its configured `PinProvider`, which defaults to an interactive TTY
+/// prompt — never argv). See `docs/specs/SPEC-EXTERNAL-SIGNER.md` §4.
+fn warn_pin_argv_deprecated() {
+    eprintln!(
+        "mkit-sign-ctap: warning: --pin on argv is deprecated and will be removed; \
+         it is readable by other local users via `ps` / `/proc/<pid>/cmdline`. \
+         Omit --pin and mkit-sign-ctap will request it in-band via the \
+         PinPrompt/PinResponse round trip instead (see docs/specs/SPEC-EXTERNAL-SIGNER.md §4)."
+    );
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -242,6 +277,10 @@ The `sign` subcommand enters the mkit-rpc signer protocol loop on
 stdin/stdout (length-prefixed buffa SignerFrames). `--credential-id`
 is a default; the caller MAY override per request via
 SignRequest.key_ref.
+
+--pin on argv is DEPRECATED (readable by other local users via ps /
+/proc/<pid>/cmdline). Omit it: the signer requests a PIN in-band via
+a PinPrompt/PinResponse round trip when the authenticator needs one.
 
 Setup-phase errors (no device, bad args, store IO failure) exit
 non-zero with a stderr message. Per-request errors are returned as

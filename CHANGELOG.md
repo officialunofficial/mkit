@@ -432,6 +432,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit_rpc::map_update_ref_error`), so genuine invalid requests no
   longer misclassify as conflicts
   ([#551](https://github.com/officialunofficial/mkit/issues/551)).
+- **External-signer `PinPrompt`/`PinResponse` round trip is now
+  implemented; `mkit-sign-ctap --pin` on argv is deprecated.**
+  SPEC-EXTERNAL-SIGNER §4 specifies an in-band PIN round trip so a
+  hardware signer can request a PIN mid-sign without it ever touching
+  argv, but `ExternalSigner` only wrote `Hello`/`SignRequest` and
+  rejected any `PinPrompt` frame with `ExternalSignerBadResponse` —
+  the only way to supply a PIN was the reference CTAP signer's plain
+  `--pin` flag, readable by any other local user via `ps` /
+  `/proc/<pid>/cmdline` (the same exposure class `docs/THREAT-MODEL.md`
+  §3.2 defends key-file confidentiality against). `ExternalSigner` now
+  keeps the child's stdin open for the whole sign conversation and
+  answers a `PinPrompt` via a new `PinProvider` trait (default
+  `TtyPinProvider`: an interactive terminal prompt, best-effort
+  no-echo via `stty` on Unix — never argv or an environment variable),
+  bounded to 8 round trips per conversation. `mkit-sign-ctap` now
+  requests a PIN in-band when the authenticator needs one and prints a
+  deprecation warning to stderr when `--pin` is passed
+  ([#694](https://github.com/officialunofficial/mkit/issues/694)).
 
 ### Internal
 

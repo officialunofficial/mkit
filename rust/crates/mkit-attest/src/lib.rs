@@ -20,6 +20,9 @@
 //!   `attestation_id`.
 //! * [`signer`] — common Signer trait.
 //! * [`signer_repo_key`] — Ed25519 over the repo key (default).
+//! * [`pin_provider`] — [`PinProvider`] trait sourcing a PIN for the
+//!   external signer's `PinPrompt`/`PinResponse` round trip; default
+//!   [`TtyPinProvider`] prompts interactively, never argv/env.
 //! * [`signer_external`] — length-prefixed buffa `SignerFrame`
 //!   protocol over stdin/stdout to a caller-supplied subprocess
 //!   (see `rust/crates/mkit-rpc/proto/signer.proto`).
@@ -42,6 +45,7 @@
 pub mod algorithm;
 pub mod envelope;
 pub mod jcs;
+pub mod pin_provider;
 pub mod signer;
 #[cfg(feature = "bls-threshold")]
 pub mod signer_bls_threshold;
@@ -64,6 +68,7 @@ pub mod webauthn;
 
 pub use algorithm::Algorithm;
 pub use envelope::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, attestation_id, pae_of};
+pub use pin_provider::{PinPromptInfo, PinProvider, TtyPinProvider};
 pub use signer::Signer;
 #[cfg(feature = "bls-threshold")]
 pub use signer_bls_threshold::{

@@ -315,6 +315,19 @@ reconstructs the signed input. A CTAP signer that has a credential ID but
 no local public-key metadata MUST return an error rather than an empty
 `public_key`.
 
+`--pin` on argv is **deprecated**. It is readable by any other local
+user on the host via `ps` / `/proc/<pid>/cmdline` — the same exposure
+class `docs/THREAT-MODEL.md` §3.2 defends key-file confidentiality
+against — so it MUST NOT be relied on. Omit it: when the authenticator
+reports it needs a PIN, the reference signer requests one in-band over
+the `PinPrompt`/`PinResponse` round trip (§4) instead. On the host
+side, `mkit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
+configured `PinProvider`, which defaults to an interactive terminal
+prompt and never sources a PIN from argv or an environment variable.
+`--pin` still works during the migration window (mkit-sign-ctap prints
+a deprecation warning to stderr when it is passed) but will be removed
+in a future release.
+
 For compatibility with mkit's current external-signer host path, the
 reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
 empty and the credential handle is supplied by argv `--credential-id`.
