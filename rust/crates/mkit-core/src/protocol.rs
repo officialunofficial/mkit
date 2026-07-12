@@ -284,8 +284,9 @@ impl Iterator for BackoffIterator {
 /// One bounded-size segment of a streamed pack transfer.
 ///
 /// Mirrors the wire-level `PackChunk` shape shared by the SSH and enc
-/// transports (`offset`, `data`, `last` — see `mkit-rpc/proto/ssh.proto`)
-/// and the `mkit.transport.v1` Connect proto being designed for the HTTP
+/// transports (`offset`, `data`, `last` — see
+/// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`) and the `mkit.transport.v1`
+/// Connect proto being designed for the HTTP
 /// reference worker, without this crate depending on any
 /// protobuf-generated type: `mkit-core` is the dependency root that
 /// `mkit-rpc` builds on, not the reverse (see this module's header

@@ -141,6 +141,36 @@ Run `cargo --workspace` commands from `rust/` for the core crates:
 `(cd rust && cargo nextest run --workspace)`. The signers are built
 and tested separately from `contrib/signers/`.
 
+### Protobuf schemas (buf)
+
+The repo-root [`buf.yaml`](buf.yaml) is a [Buf](https://buf.build) v2
+workspace covering every `.proto` tree in the repo:
+
+```
+buf.yaml (repo root)
+├── rust/crates/mkit-rpc/proto        → mkit.rpc.v1 (+ .signer, .ssh, .verify)  [wire-frozen, SPEC-RPC]
+├── apps/repo-worker/proto            → mkit.repo.v1
+└── proto                             → mkit.transport.v1  [SPEC-TRANSPORT-CONNECT]
+```
+
+Directory layout matches package name (`mkit/rpc/v1/common.proto` for
+package `mkit.rpc.v1`, `mkit/rpc/v1/signer/signer.proto` for package
+`mkit.rpc.v1.signer`, etc.) so `buf lint`'s `PACKAGE_DIRECTORY_MATCH`
+rule holds with no directory exception. Run from the repo root:
+
+```sh
+buf lint                                          # schema style/consistency
+buf breaking --against '.git#branch=main'         # wire-compat vs. main
+```
+
+`mkit-rpc`'s protos are wire-frozen (v1 SPEC-RPC promise) — `buf
+breaking`'s `FILE` category is the mechanical enforcement of that
+promise; a genuine break means a new `signer2.proto` /`ssh2.proto`
+sibling, not an edit in place. Generated Rust is vendored, not built
+fresh from `.proto` — see `rust/crates/mkit-rpc/README.md` and
+`scripts/regen-rpc-proto.sh` / `scripts/regen-repo-proto.sh` after
+schema edits.
+
 ## Continuous integration
 
 Workflows live in `.github/workflows/`. Display names are prefixed by purpose so
@@ -153,7 +183,7 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 | `CI: Coverage` | every PR; push `main`¹ | `cargo-llvm-cov` → Codecov |
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
 | `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `apps/web/**` / `apps/mcp/**` change; each has an always-run gate job so a required check is always present |
-| `CI: Buf` | every PR; push `main` | `buf lint` + `buf breaking` (via `bufbuild/buf-action`) against `apps/repo-worker/proto` and `rust/crates/mkit-rpc/proto`. Unconditional — no path filter, no skip gate — so it can never read "skipped" as green. |
+| `CI: Buf` | every PR; push `main` | `buf lint` + `buf breaking` (via `bufbuild/buf-action`) against the repo-root `buf.yaml` workspace (all three proto modules). Unconditional — no path filter, no skip gate — so it can never read "skipped" as green. |
 | `Security: Rust` | PR, weekly, dispatch | `cargo audit` + `cargo deny` |
 | `Nightly: Fuzz` | scheduled, dispatch | fuzz harnesses |
 | `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |

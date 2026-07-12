@@ -2,7 +2,7 @@
 //
 // The wire is length-prefixed protobuf 3 / edition 2023 `SignerFrame`
 // messages over stdin/stdout, as defined in
-// `rust/crates/mkit-rpc/proto/signer.proto` and documented in
+// `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto` and documented in
 // `docs/specs/SPEC-EXTERNAL-SIGNER.md`. Each frame is:
 //
 //     [u32 LE length][N bytes protobuf-encoded SignerFrame]

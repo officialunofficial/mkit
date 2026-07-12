@@ -45,7 +45,7 @@ edition = "2023";
 
 package mkit.rpc.v1.signer;
 
-import "common.proto";
+import "mkit/rpc/v1/common.proto";
 
 // ----------------------------------------------------------------------------
 // SignerFrame — the union of every message on the wire. Receivers

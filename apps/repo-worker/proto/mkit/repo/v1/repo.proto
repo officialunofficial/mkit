@@ -13,7 +13,7 @@
 //   - Refs are the only mutable state, advanced via compare-and-swap.
 //   - WatchRefs streams live ref advances for the multiplayer UI.
 //
-// Conventions mirror mkit-rpc/proto/ssh.proto + common.proto:
+// Conventions mirror mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto + common.proto:
 //   - edition 2023.
 //   - All object/ref ids are raw `bytes` = 32-byte BLAKE3 digests (never hex
 //     on the wire).

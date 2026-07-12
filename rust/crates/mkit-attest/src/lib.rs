@@ -25,7 +25,7 @@
 //!   [`TtyPinProvider`] prompts interactively, never argv/env.
 //! * [`signer_external`] — length-prefixed buffa `SignerFrame`
 //!   protocol over stdin/stdout to a caller-supplied subprocess
-//!   (see `rust/crates/mkit-rpc/proto/signer.proto`).
+//!   (see `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`).
 //! * [`signer_sigstore`] — scaffold; returns `SigstoreNotImplemented`.
 //! * [`store`] — content-addressed `.mkit/attestations/<commit>/<id>.dsse`
 //!   on-disk layout with atomic writes.

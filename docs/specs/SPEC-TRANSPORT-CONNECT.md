@@ -39,19 +39,17 @@ The proto lives at
 ## 1. Buf module and package layout
 
 ```
-buf.yaml (repo root, v2, single module today)
+buf.yaml (repo root, v2, three-module workspace)
+├── rust/crates/mkit-rpc/proto         → mkit.rpc.v1 (+ .signer, .ssh, .verify)
+├── apps/repo-worker/proto             → mkit.repo.v1
 └── proto/mkit/transport/v1/transport.proto   → mkit.transport.v1
 ```
 
-This is deliberately the same "standalone single-module `buf.yaml`"
-shape `apps/repo-worker/buf.yaml` used before the repo had any other
-proto module registered with `buf`. A separate change (tracked as
-mkit#677, "buf workspace + proto path restructure") folds this
-module into a repo-root **three-module** `buf.yaml` workspace
-alongside `rust/crates/mkit-rpc/proto` (`mkit.rpc.v1`) and
-`apps/repo-worker/proto` (`mkit.repo.v1`); until that lands, `buf
-lint` / `buf breaking` on this module are invoked from the repo root
-using the `buf.yaml` this document ships.
+This module shares the repo-root `buf.yaml` workspace (mkit#677, "buf
+workspace + proto path restructure") alongside `rust/crates/mkit-rpc/proto`
+(`mkit.rpc.v1`) and `apps/repo-worker/proto` (`mkit.repo.v1`). `buf
+lint` / `buf breaking` run from the repo root against the whole
+workspace — see `CONTRIBUTING.md`'s "Protobuf schemas (buf)" section.
 
 `buf breaking` is configured with `breaking.use: [FILE]` from this
 module's first commit onward, so every subsequent change to
@@ -60,13 +58,13 @@ there is no grace period after this document merges.
 
 A follow-up (tracked as mkit#679) extracts `RefExpectation` and
 `RefEntry` into a shared `mkit/common/v1/refs.proto` imported by
-`mkit.rpc.v1.ssh`, `mkit.repo.v1`, and this package, once the buf
-workspace exists to make a cross-module import resolvable. Until
-then, `mkit.transport.v1.RefExpectation` and `RefEntry` are
-byte-for-byte duplicates of the `mkit.rpc.v1.ssh` originals — the
-same "duplicate now, wire numbers pinned, extract later" pattern
-`mkit.repo.v1.RefExpectation` already uses (see the comment at
-`apps/repo-worker/proto/mkit/repo/v1/repo.proto:38-40`).
+`mkit.rpc.v1.ssh`, `mkit.repo.v1`, and this package — the buf
+workspace (§1) now makes that cross-module import resolvable. Until
+that extraction lands, `mkit.transport.v1.RefExpectation` and
+`RefEntry` are byte-for-byte duplicates of the `mkit.rpc.v1.ssh`
+originals — the same "duplicate now, wire numbers pinned, extract
+later" pattern `mkit.repo.v1.RefExpectation` already uses (see the
+comment at `apps/repo-worker/proto/mkit/repo/v1/repo.proto:38-40`).
 
 ---
 
@@ -235,7 +233,7 @@ is not.
 `UploadPack` (client-streaming) and `DownloadPack` (server-streaming)
 carry [`PackChunk`](../../proto/mkit/transport/v1/transport.proto),
 which duplicates
-[`mkit.rpc.v1.ssh.PackChunk`](../../rust/crates/mkit-rpc/proto/ssh.proto)'s
+[`mkit.rpc.v1.ssh.PackChunk`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto)'s
 field layout exactly (`pack_id`, `offset`, `data`, `last` — same
 numbers, same types). This is a deliberate wire-identical duplication,
 not a new chunking format: the bytes a client streams over Connect are

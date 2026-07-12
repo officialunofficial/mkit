@@ -1,6 +1,6 @@
 //! External signer — subprocess-based [`Signer`] impl driven over
 //! the mkit-rpc signer protocol (length-prefixed buffa frames on
-//! stdin/stdout). See `rust/crates/mkit-rpc/proto/signer.proto` and
+//! stdin/stdout). See `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto` and
 //! `docs/specs/SPEC-EXTERNAL-SIGNER.md`.
 //!
 //! Conversation per sign call:

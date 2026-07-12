@@ -19,7 +19,7 @@
 //             expected_id?)
 //
 // CAS lives INSIDE the message via `RefExpectation` (ANY | MISSING | MATCH),
-// mirroring mkit-rpc/proto/ssh.proto — NOT in transport headers.
+// mirroring mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto — NOT in transport headers.
 
 export * from './repo/envelope'
 export * from './repo/backend'
