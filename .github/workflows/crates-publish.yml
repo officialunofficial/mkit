@@ -133,6 +133,7 @@ jobs:
             -p mkit-transport-s3 \
             -p mkit-transport-enc \
             -p mkit-transport-ssh \
+            -p mkit-transport-connect \
             -p mkit-git-bridge
 
       # Publishes every member without `publish = false` in dependency order,
