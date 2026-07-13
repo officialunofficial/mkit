@@ -43,6 +43,11 @@ buffa = "0.8.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# CORS/body-cap/fetch-adapter glue shared with apps/vcs-worker (mkit#797) —
+# a standalone sibling crate, not a rust/ workspace member (same pattern as
+# the mkit-core/mkit-attest path deps below).
+mkit-worker-common = { path = "../mkit-worker-common" }
+
 # mkit crates by path (BLAKE3 hashing + native Ed25519 strict verify).
 # Both are wasm-clean in their default builds (no tokio / no commonware
 # heavy features). mkit-wasm depends on these same paths and ships to

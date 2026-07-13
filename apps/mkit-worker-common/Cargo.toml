@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Shared CF Worker request/response glue for apps/repo-worker and
+# apps/vcs-worker (mkit#797): CORS preflight handling, the Content-Length
+# body-size cap, and the `worker::Request` <-> `http::Request` fetch-adapter
+# skeleton (including the SendFuture-wrapped tower::Service dispatch). Not
+# the auth/quota business logic — see src/lib.rs for what stays out and why.
+#
+# Standalone Cargo package, like apps/repo-worker/apps/vcs-worker/
+# apps/keys-worker: not a member of rust/'s workspace (rust/Cargo.toml's
+# `members` list is untouched by this crate). The explicit empty
+# `[workspace]` below mirrors apps/keys-worker's convention, making the
+# standalone-ness self-documenting rather than implicit.
+[package]
+name = "mkit-worker-common"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+# workers-rs Request/Response/Headers/Method types the fetch-adapter glue
+# converts to/from. Same feature set as apps/repo-worker/apps/vcs-worker so
+# the type each crate imports is identical.
+worker = { version = "0.8", features = ["http"] }
+
+# http / body plumbing for the worker::Request <-> http::Request adapter —
+# versions matched to what apps/repo-worker and apps/vcs-worker already pin
+# so the pair (and this crate) never drift apart.
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+
+# `respond_streamed`'s `Stream::map` over `into_data_stream()` (the WatchRefs
+# server-streaming response bridge apps/repo-worker uses).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# `dispatch_oneshot`'s unit test drives a fake `tower::Service` through
+# `#[tokio::test]` — host-only, mirrors the identical dev-dependency
+# rationale in apps/repo-worker/apps/vcs-worker's Cargo.toml (the crate
+# itself never depends on tokio; its wasm32 runtime is
+# wasm_bindgen_futures).
+tokio = { version = "1", features = ["macros", "rt"] }

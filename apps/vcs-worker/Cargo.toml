@@ -28,6 +28,10 @@ buffa = "0.8.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# CORS/body-cap/fetch-adapter glue shared with apps/repo-worker (mkit#797) —
+# a standalone sibling crate, not a rust/ workspace member.
+mkit-worker-common = { path = "../mkit-worker-common" }
+
 # BLAKE3 hashing (pack digest verification) via the canonical mkit-core hash,
 # native Ed25519 strict verify for the write envelope.
 mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
