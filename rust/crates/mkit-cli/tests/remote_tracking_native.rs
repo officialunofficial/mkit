@@ -319,6 +319,234 @@ fn remote_rename_multi_to_multi_segment_moves_refs_and_bridge_state() {
 }
 
 #[test]
+fn rename_into_own_subtree_moves_state() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "a");
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    let out = r.ok(&["remote", "rename", "a", "a/sub"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "rename into own subtree must not degrade: {stderr}"
+    );
+
+    assert!(
+        refs::read_remote_ref(&layout, "a/sub", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs into the subtree destination"
+    );
+
+    let moved_marker = layout.git_state_dir().join("a/sub/marker.txt");
+    assert!(
+        moved_marker.exists(),
+        "bridge state must move into the subtree destination"
+    );
+    assert_eq!(std::fs::read(&moved_marker).unwrap(), b"bridge state\n");
+
+    // The `a` level now contains only `sub/` — no stray files directly
+    // under the old locations.
+    let refs_a_entries: Vec<_> = std::fs::read_dir(layout.remotes_dir().join("a"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(refs_a_entries, vec![std::ffi::OsString::from("sub")]);
+    let state_a_entries: Vec<_> = std::fs::read_dir(layout.git_state_dir().join("a"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(state_a_entries, vec![std::ffi::OsString::from("sub")]);
+}
+
+#[test]
+fn rename_out_of_own_subtree_moves_state() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a/sub", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "a/sub");
+
+    r.ok(&["remote", "add", "a/sub", "mkit+file:///tmp/nowhere"]);
+    let out = r.ok(&["remote", "rename", "a/sub", "a"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "rename out of own subtree must not degrade: {stderr}"
+    );
+
+    assert!(
+        refs::read_remote_ref(&layout, "a", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs to the flat destination"
+    );
+    // No remnant of the old nesting under either state root.
+    assert!(!layout.remotes_dir().join("a/sub").exists());
+    assert!(!layout.git_state_dir().join("a/sub").exists());
+
+    let moved_marker = layout.git_state_dir().join("a/marker.txt");
+    assert!(moved_marker.exists(), "bridge state must move to 'a'");
+    assert_eq!(std::fs::read(&moved_marker).unwrap(), b"bridge state\n");
+}
+
+#[test]
+fn rename_out_of_deep_nesting_prunes_parents() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "x/y/z", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "x/y/z");
+
+    r.ok(&["remote", "add", "x/y/z", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "rename", "x/y/z", "flat"]);
+
+    assert!(
+        refs::read_remote_ref(&layout, "flat", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move tracking refs to the flat destination"
+    );
+    // The whole emptied `x/y/z` chain must be pruned, including the
+    // top-level `x` directory.
+    assert!(!layout.remotes_dir().join("x").exists());
+    assert!(!layout.git_state_dir().join("x").exists());
+
+    let moved_marker = layout.git_state_dir().join("flat/marker.txt");
+    assert!(moved_marker.exists(), "bridge state must move to 'flat'");
+}
+
+#[test]
+fn failed_rename_restores_source_state() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "orig", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "orig");
+    r.ok(&["remote", "add", "orig", "mkit+file:///tmp/nowhere"]);
+
+    // A non-empty orphaned state dir at the destination, with no config
+    // entry — exactly what `remote remove` leaves behind for bridge
+    // state (see `warn_orphaned_bridge_state`). Its non-emptiness makes
+    // the final rename into it fail (ENOTEMPTY-ish).
+    let taken_state = layout.git_state_dir().join("taken");
+    std::fs::create_dir_all(&taken_state).unwrap();
+    std::fs::write(taken_state.join("occupied.txt"), b"pre-existing\n").unwrap();
+
+    let out = r.ok(&["remote", "rename", "orig", "taken"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not move git-bridge state"),
+        "expected a warning for the failed bridge-state move: {stderr}"
+    );
+
+    // Restore contract: orig's bridge state is back/intact at its
+    // original location, not stranded in a temp dir.
+    let restored_marker = layout.git_state_dir().join("orig/marker.txt");
+    assert!(
+        restored_marker.exists(),
+        "bridge state must be restored to 'orig' after a failed move"
+    );
+    assert_eq!(std::fs::read(&restored_marker).unwrap(), b"bridge state\n");
+    // The pre-existing occupant at the destination is untouched.
+    assert!(taken_state.join("occupied.txt").exists());
+    // No `.rename.tmp.*` temp dir left under the state root.
+    let stray_temp = std::fs::read_dir(layout.git_state_dir())
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(".rename.tmp."));
+    assert!(!stray_temp, "no temp dir should remain after a failed move");
+}
+
+/// Plants a `.rename.tmp.<pid>.0`-shaped orphan directly under
+/// `refs/remotes/` — exactly the crash debris `rename_state_dir` can
+/// leave behind between its two renames — and confirms both native ref
+/// listing enumerators treat it as inert: `show-ref` and `for-each-ref`
+/// never surface a phantom `refs/remotes/.rename.tmp.../...` ref or
+/// remote. The companion bridge-side assertion (zero-arg bridge-state
+/// resolution via `state_names`/`resolve_state` ignoring the same
+/// shape planted under `.mkit/git/`) lives in
+/// `git_tools::tests::state_names_and_resolve_state_skip_dot_leading_orphans`
+/// (feature `git-bridge`), since those functions only exist under that
+/// feature. This is the test the PR #659 review's finding 1 called out
+/// as missing: before the dot-leading-segment rejection in
+/// `validate_ref_name`, this orphan was a fully populated, listable ref
+/// namespace, not the harmless empty-directory debris the old docs
+/// claimed.
+#[test]
+fn orphaned_rename_temp_dir_is_inert_in_listings() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    plant_tracking_ref(&r, "orig", "main");
+
+    // Crash debris under `refs/remotes/`: a dot-leading dir with a real
+    // ref file inside, just like a crash between `rename_state_dir`'s
+    // two renames would leave.
+    let ref_orphan = layout.remotes_dir().join(".rename.tmp.99999.0");
+    std::fs::create_dir_all(&ref_orphan).unwrap();
+    std::fs::write(ref_orphan.join("main"), b"not a real ref, never read\n").unwrap();
+
+    let out = r.ok(&["show-ref"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/remotes/orig/main"),
+        "show-ref must still list the legitimate tracking ref: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".rename.tmp"),
+        "show-ref must not surface the dot-leading orphan as a ref or remote: {stdout}"
+    );
+
+    let out = r.ok(&["for-each-ref"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("refs/remotes/orig/main"),
+        "for-each-ref must still list the legitimate tracking ref: {stdout}"
+    );
+    assert!(
+        !stdout.contains(".rename.tmp"),
+        "for-each-ref must not surface the dot-leading orphan: {stdout}"
+    );
+}
+
+#[test]
+fn prefix_nested_remotes_coexist() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+
+    let out = r.ok(&["remote"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('a'), "listing: {stdout}");
+    assert!(stdout.contains("a/b"), "listing: {stdout}");
+
+    r.ok(&["remote", "remove", "a"]);
+
+    let out = r.ok(&["remote"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("a/b"),
+        "a/b must survive removal of unrelated remote 'a': {stdout}"
+    );
+    let out = r.ok(&["remote", "get-url", "a/b"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "mkit+file:///tmp/nowhere-b",
+        "a/b's config entry must remain intact"
+    );
+}
+
+#[test]
 fn named_remote_fetch_and_pull_use_their_namespace() {
     // Origin repo with one commit, exposed over mkit+file://.
     let origin = Repo::new();

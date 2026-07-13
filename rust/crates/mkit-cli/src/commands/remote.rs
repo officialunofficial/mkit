@@ -339,28 +339,90 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 
 /// Move the per-remote state directory for `old` to `new` under `root`,
 /// tolerating multi-segment remote names (which map to nested
-/// subdirectories) on both sides: the destination's parent is created
-/// first since `fs::rename` won't do it, and once the move succeeds any
-/// now-empty parent directories left behind under the source are pruned
-/// so a rename away from a multi-segment name doesn't strand empty
-/// directories. Both sides are derived from `root` here so the prune
-/// can never walk outside it. A missing source directory is a no-op
-/// (nothing to move). Both extra steps are best-effort — parent
-/// creation failures fall through to `rename` (which then fails and the
-/// caller's warning fires, possibly leaving the just-created empty
-/// destination parents behind — an accepted wart on this warn-only
-/// path), and prune failures are silent since they're just tidiness,
-/// not correctness.
+/// subdirectories) on both sides, *including* the case where one name is
+/// a path-prefix of the other (`a` <-> `a/b`). A direct `fs::rename(src,
+/// dst)` breaks for that case in both directions: renaming `a` to `a/b`
+/// asks the OS to move a directory into its own subtree (EINVAL), and
+/// renaming `a/b` to `a` lands on the non-empty old ancestor (ENOTEMPTY).
+/// git's per-ref transactions don't have this problem, so this was a
+/// real parity gap, not an exotic input.
+///
+/// The fix is a two-step move through a dot-named temp directory
+/// directly under `root`: rename `src` to the temp sibling (always legal
+/// — never a move into one's own subtree), prune any now-empty parents
+/// left behind under `src`, create the destination's parents (`fs::rename`
+/// won't), then rename the temp directory into place. This is one
+/// uniform path with no prefix-nesting case analysis.
+///
+/// A missing source directory is a no-op (nothing to move). If the final
+/// rename fails (e.g. an orphaned state directory already occupies the
+/// destination), the state is restored to `src` on a best-effort basis
+/// before the error is returned, so a failed move is a clean no-op
+/// rather than stranding state in the temp directory — the caller's
+/// existing warning then fires as before. Parent creation/pruning are
+/// both best-effort: creation failures fall through to the following
+/// `rename`, which then fails and is handled by the same restore path;
+/// prune failures are silent since they're tidiness, not correctness.
+/// If the restore rename *also* fails, the returned error is annotated
+/// with the temp path so the caller's warning says where the state
+/// actually ended up, rather than only describing the final-rename
+/// failure that triggered the restore.
+///
+/// Crash safety: a crash between the two renames leaves a
+/// `.rename.tmp.<pid>.<seq>` directory orphaned directly under `root`
+/// (the same temp-name convention as `atomic::write_atomic`). Unlike the
+/// pre-existing empty-dir warts on this warn-only path, this one is
+/// fully populated — but a dot-leading path component is invalid per
+/// `validate_ref_name` (`refs::validate_ref_name`, SPEC-REFS §3), so
+/// every listing enumerator (`show-ref`, `for-each-ref`,
+/// `list_remote_names`) and the git-bridge `state_names` scan treat it
+/// as inert rather than a phantom remote or ref namespace. The temp
+/// name can't collide with any live remote's state directory either,
+/// since remote names are validated dot-free (`validate_remote_name`).
+/// What nesting-boundary cleanup this does NOT attempt (a sibling `a/b`
+/// dragged along by a rename of `a`, or deleted by a `remove` of `a`) is
+/// tracked in #660.
 fn rename_state_dir(root: &Path, old: &str, new: &str) -> std::io::Result<()> {
     let (src, dst) = (root.join(old), root.join(new));
     if !src.is_dir() {
         return Ok(());
     }
+    // `.{name}.tmp.{pid}.{seq}` mirrors `atomic::write_atomic`'s temp-file
+    // convention (`atomic.rs:44-46`) so crash debris is grep-able by one
+    // pattern across the codebase. The "name" component is the fixed
+    // literal `rename` rather than `old`/`new`: those may be multi-segment
+    // remote names (`team/upstream`), and embedding a `/` into a single
+    // path component here would make `root.join(...)` build a *nested*
+    // path instead of a flat sibling, defeating the one-temp-dir-directly-
+    // under-`root` invariant this whole function relies on. `seq` is
+    // fixed at `0` rather than reusing `atomic`'s process-wide counter:
+    // that counter is private to `mkit-core` (`atomic` is `pub(crate)`,
+    // `TEMP_SEQ` is a private static) and unreachable from this crate,
+    // and this function creates and consumes exactly one temp dir per
+    // call before returning, so a fixed suffix cannot collide with
+    // another temp dir from the same call.
+    let tmp = root.join(format!(".rename.tmp.{}.0", std::process::id()));
+    std::fs::rename(&src, &tmp)?;
+    prune_empty_parents(&src, root);
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::rename(&src, &dst)?;
-    prune_empty_parents(&src, root);
+    if let Err(e) = std::fs::rename(&tmp, &dst) {
+        if let Some(parent) = src.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::rename(&tmp, &src).is_err() {
+            // The restore itself failed too: state is now parked at
+            // `tmp`, not `src`. Say so — the final-rename error alone
+            // doesn't tell the caller (and its warning) where the state
+            // actually went.
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("{e}; state parked at {}", tmp.display()),
+            ));
+        }
+        return Err(e);
+    }
     Ok(())
 }
 

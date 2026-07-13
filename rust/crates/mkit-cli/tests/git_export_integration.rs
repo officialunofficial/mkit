@@ -219,19 +219,21 @@ fn git_illegal_ref_is_skipped_with_warning_rest_exported() {
         return;
     }
     let r = fixture();
-    // Leading-dot branch: mkit-legal (SPEC-REFS §3), git-illegal (§12.1).
-    r.ok(&["branch", ".hidden"]);
+    // Trailing-dot branch: mkit-legal (SPEC-REFS §3 only bans the exact
+    // `.`/`..` segments and dot-leading segments, not a trailing dot),
+    // git-illegal (§12.1, `refname::check_git_legal`).
+    r.ok(&["branch", "trailing."]);
     let mroot = mirror_root();
     let mirror = mroot.path().join("mirror-d");
     let out = r.ok(&["git", "export", mirror.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("skipping refs/heads/.hidden"),
+        stderr.contains("skipping refs/heads/trailing."),
         "expected a skip warning, got:\n{stderr}"
     );
     let names = mirror_refs(&mirror);
     assert!(names.iter().any(|l| l.starts_with("refs/heads/main ")));
-    assert!(!names.iter().any(|l| l.contains(".hidden")));
+    assert!(!names.iter().any(|l| l.contains("trailing.")));
 }
 
 #[test]
@@ -240,14 +242,14 @@ fn all_skipped_export_fails() {
         return;
     }
     let r = fixture();
-    r.ok(&["branch", ".hidden"]);
+    r.ok(&["branch", "trailing."]);
     let mroot = mirror_root();
     let mirror = mroot.path().join("mirror-e");
     let out = r.run(&[
         "git",
         "export",
         "--ref",
-        "refs/heads/.hidden",
+        "refs/heads/trailing.",
         mirror.to_str().unwrap(),
     ]);
     assert!(

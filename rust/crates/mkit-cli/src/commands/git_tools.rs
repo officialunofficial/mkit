@@ -76,6 +76,13 @@ fn state_names(layout: &RepoLayout) -> Vec<String> {
         for e in rd.flatten() {
             if e.path().is_dir()
                 && let Some(name) = e.file_name().to_str()
+                // Dot-leading entries are never valid bridge-state names
+                // (mirrors `validate_ref_name`'s dot-leading-component
+                // rejection): skips crash debris from a `remote rename`
+                // move parked at a `.rename.tmp.<pid>.<seq>` temp dir
+                // directly under this root, so it never fools zero-arg
+                // state resolution into reporting "multiple bridge states".
+                && !name.starts_with('.')
             {
                 names.push(name.to_owned());
             }
@@ -923,5 +930,44 @@ mod tests {
     fn slugs() {
         assert_eq!(slug("Add foo, bar & baz!"), "Add-foo-bar-baz");
         assert_eq!(slug("???"), "patch");
+    }
+
+    /// PR #659 review, finding 1's missing test: a `.rename.tmp.<pid>.0`
+    /// orphan under `.mkit/git/` — the crash debris `remote.rs`'s
+    /// `rename_state_dir` can leave behind between its two renames —
+    /// must not count as a second bridge state. Before the
+    /// dot-leading-segment rejection in `validate_ref_name`, `state_names`
+    /// had no filtering of its own and would have listed the orphan
+    /// alongside the legitimate state, turning zero-arg resolution
+    /// ("exactly one state dir") into a spurious "multiple bridge
+    /// states" error. The companion assertion for `refs/remotes/` (the
+    /// other state root) lives in
+    /// `remote_tracking_native::orphaned_rename_temp_dir_is_inert_in_listings`,
+    /// which exercises `show-ref`/`for-each-ref` directly since those
+    /// don't require the `git-bridge` feature this module is gated on.
+    #[test]
+    fn state_names_and_resolve_state_skip_dot_leading_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let state_dir = layout.git_state_dir();
+        std::fs::create_dir_all(state_dir.join("orig")).unwrap();
+        std::fs::write(state_dir.join("orig").join("marker.txt"), b"real state\n").unwrap();
+        // Crash debris: dot-leading, fully populated, directly under
+        // the same root as the legitimate state dir.
+        let orphan = state_dir.join(".rename.tmp.99999.0");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("marker.txt"), b"orphaned bridge state\n").unwrap();
+
+        assert_eq!(
+            state_names(&layout),
+            vec!["orig".to_string()],
+            "state_names must skip the dot-leading orphan"
+        );
+        let (name, path) = resolve_state(&layout, None).expect(
+            "zero-arg resolution must pick the lone legitimate state \
+             instead of erroring 'multiple bridge states' over the orphan",
+        );
+        assert_eq!(name, "orig");
+        assert_eq!(path, state_dir.join("orig"));
     }
 }
