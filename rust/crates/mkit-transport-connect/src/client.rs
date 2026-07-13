@@ -57,7 +57,7 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// [`mkit_core::protocol::retrying`] / [`BackoffIterator`] ladder — the same
 /// driver `mkit-transport-http`/`-ssh`/`-enc` use (mkit#703) — so a
 /// transient `ConnectionFailed` or 5xx/429-equivalent (`unavailable` /
-/// `resource_exhausted`, see [`crate::error::map_connect_error`]) is
+/// `resource_exhausted`, see `crate::error::map_connect_error`) is
 /// retried up to [`mkit_core::protocol::BACKOFF_MAX_ATTEMPTS`] times before
 /// surfacing to the caller, instead of failing on the first attempt. Each
 /// retry re-invokes the whole async call from scratch (a fresh request, and
