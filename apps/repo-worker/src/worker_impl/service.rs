@@ -744,6 +744,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     text: Some(m.text),
                     created_at: Some(m.created_at),
                     seq: Some(m.seq),
+                    created_at_unix_ms: Some(m.created_at),
                     ..Default::default()
                 })
                 .collect();

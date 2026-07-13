@@ -27,8 +27,9 @@ export type RefEntry = { name: string; objectIdHex: string }
 export type RefUpdate = { name: string; objectIdHex: string; authorPubkeyHex: string }
 
 /**
- * One stored chat message — mirrors the proto `ChatMessage`. `createdAt` is server epoch-ms; `seq` is the monotonic
- * per-room order used to merge chat against commits in the lobby feed.
+ * One stored chat message — mirrors the proto `ChatMessage`. `createdAt` is server epoch-ms, sourced from the wire's
+ * unambiguous `createdAtUnixMs` field (falling back to the deprecated `createdAt` field for an old cached worker build
+ * — see mkit#795); `seq` is the monotonic per-room order used to merge chat against commits in the lobby feed.
  */
 export type ChatMessageEntry = {
   messageIdHex: string
@@ -103,7 +104,11 @@ export function aggregateReactions(entries: ReactionEntry[], myPubkeyHex?: strin
  * Live-stream handlers for a room: ref advances, chat messages, and reaction toggles. All ride the ONE `/watch/<room>`
  * socket so the lobby stays live.
  */
-/** One online participant — an Ed25519 key present in the room right now. */
+/**
+ * One online participant — an Ed25519 key present in the room right now. `since` is epoch-ms, sourced from the wire's
+ * unambiguous `sinceUnixMs` field (falling back to the deprecated `since` field for an old cached worker build — see
+ * mkit#795).
+ */
 export type PresenceMember = { pubkeyHex: string; since: number }
 /** Live room presence: distinct online keys + the count of identity-less viewers. */
 export type PresenceState = { members: PresenceMember[]; viewers: number }
@@ -165,7 +170,10 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
     const members: PresenceMember[] = raw
       .map((m) => {
         const o = (m ?? {}) as Record<string, unknown>
-        return { pubkeyHex: protoBytesToHex(o.authorPubkey), since: Number(o.since ?? 0) }
+        // `sinceUnixMs` is the unambiguous field (mkit#795); `since` is the
+        // deprecated same-unit sibling, kept as a fallback only for a stale
+        // cached worker build that predates the new field.
+        return { pubkeyHex: protoBytesToHex(o.authorPubkey), since: Number(o.sinceUnixMs ?? o.since ?? 0) }
       })
       .filter((m) => m.pubkeyHex)
     return { kind: 'presence', presence: { members, viewers: Number(p.viewers ?? 0) } }
@@ -197,7 +205,10 @@ export function parseActivityFrame(data: unknown): ActivityFrame | null {
         messageIdHex,
         authorPubkeyHex: protoBytesToHex(c.authorPubkey),
         text: (c.text ?? '') as string,
-        createdAt: Number(c.createdAt ?? 0),
+        // `createdAtUnixMs` is the unambiguous field (mkit#795); `createdAt`
+        // is the deprecated same-unit sibling, kept as a fallback only for a
+        // stale cached worker build that predates the new field.
+        createdAt: Number(c.createdAtUnixMs ?? c.createdAt ?? 0),
         seq: Number(c.seq ?? 0),
       },
     }

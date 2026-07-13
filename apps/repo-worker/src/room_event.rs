@@ -46,7 +46,10 @@ pub fn commit_event(
     }
 }
 
-/// Build the `chat` variant of `RoomEvent`.
+/// Build the `chat` variant of `RoomEvent`. `created_at` is epoch-ms; populates
+/// both the deprecated `created_at` field and its unambiguous
+/// `created_at_unix_ms` sibling (mkit#795) so old and new clients alike
+/// decode the right value during the migration.
 #[must_use]
 pub fn chat_event(
     message_id_hex: &str,
@@ -62,6 +65,7 @@ pub fn chat_event(
             text: Some(text),
             created_at: Some(created_at),
             seq: Some(seq),
+            created_at_unix_ms: Some(created_at),
             ..Default::default()
         }))),
         ..Default::default()
@@ -93,7 +97,10 @@ pub fn reaction_event(
 
 /// Build the `presence` variant of `RoomEvent`. `members` is `(pubkey_hex,
 /// since_epoch_ms)`; a member whose pubkey fails to decode is dropped from
-/// the roster rather than failing the whole presence broadcast.
+/// the roster rather than failing the whole presence broadcast. Populates
+/// both the deprecated `since` field and its unambiguous `since_unix_ms`
+/// sibling (mkit#795) so old and new clients alike decode the right value
+/// during the migration.
 #[must_use]
 pub fn presence_event(members: Vec<(String, i64)>, viewers: u32) -> RoomEvent {
     RoomEvent {
@@ -104,6 +111,7 @@ pub fn presence_event(members: Vec<(String, i64)>, viewers: u32) -> RoomEvent {
                     Some(PresenceMember {
                         author_pubkey: Some(hex::decode(&pubkey_hex).ok()?),
                         since: Some(since),
+                        since_unix_ms: Some(since),
                         ..Default::default()
                     })
                 })
@@ -190,6 +198,7 @@ mod tests {
         assert_eq!(chat.author_pubkey, Some(hex::decode(&author).unwrap()));
         assert_eq!(chat.text.as_deref(), Some("hi room"));
         assert_eq!(chat.created_at, Some(1_700_000_000_000));
+        assert_eq!(chat.created_at_unix_ms, Some(1_700_000_000_000));
         assert_eq!(chat.seq, Some(7));
     }
 
@@ -225,6 +234,7 @@ mod tests {
             Some(hex::decode(&a).unwrap())
         );
         assert_eq!(presence.members[0].since, Some(100));
+        assert_eq!(presence.members[0].since_unix_ms, Some(100));
         assert_eq!(
             presence.members[1].author_pubkey,
             Some(hex::decode(&b).unwrap())
