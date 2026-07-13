@@ -546,6 +546,193 @@ fn prefix_nested_remotes_coexist() {
     );
 }
 
+/// #660: `remote remove a` must not delete the tracking refs of a
+/// configured sibling `a/b` nested under it — the directory-keyed
+/// layout means `a/b`'s refs live under `refs/remotes/a/b/`, inside
+/// `a`'s own directory prefix, but they belong to a different remote.
+/// This is git parity: `git remote remove a` preserves `refs/remotes/a/b/*`
+/// too.
+#[test]
+fn remove_prefix_remote_preserves_nested_sibling() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    refs::write_remote_ref(&layout, "a/b", "main", &tip).unwrap();
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+
+    let out = r.ok(&["remote", "remove", "a"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("warning"),
+        "the sibling-aware selective removal must not degrade: {stderr}"
+    );
+
+    assert!(
+        refs::read_remote_ref(&layout, "a", "main")
+            .unwrap()
+            .is_none(),
+        "a's own tracking ref must be gone"
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "a/b", "main")
+            .unwrap()
+            .is_some(),
+        "a/b's tracking ref must survive removal of 'a'"
+    );
+
+    let out = r.ok(&["remote"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.lines().any(|l| l == "a/b"),
+        "a/b must still be listed: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l == "a"),
+        "'a' itself must be gone: {stdout}"
+    );
+}
+
+/// #660: `remote rename a x` must not drag a configured sibling `a/b`'s
+/// refs or bridge state along to `x/b` — `a/b`'s state must stay
+/// exactly where it is, and its config entry (still `a/b` -> its own
+/// URL) is untouched throughout. This is stricter than git (git 2.50.1
+/// has the same drag bug on rename), justified because the
+/// directory-keyed layout needs it to make nested remote names safe.
+#[test]
+fn rename_prefix_remote_preserves_nested_sibling() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    refs::write_remote_ref(&layout, "a/b", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "a");
+    plant_bridge_state(&layout, "a/b");
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b", "mkit+file:///tmp/nowhere-b"]);
+
+    let out = r.ok(&["remote", "rename", "a", "x"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "sibling-aware rename must not degrade: {stderr}"
+    );
+
+    // `x`'s own refs moved into place; `a`'s own refs are gone.
+    assert!(
+        refs::read_remote_ref(&layout, "x", "main")
+            .unwrap()
+            .is_some(),
+        "rename must move x's own tracking refs"
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "a", "main")
+            .unwrap()
+            .is_none()
+    );
+
+    // `a/b`'s refs are untouched, STILL resolving at the old prefix.
+    assert!(
+        refs::read_remote_ref(&layout, "a/b", "main")
+            .unwrap()
+            .is_some(),
+        "a/b's tracking ref must remain at a/b, not move with the rename of 'a'"
+    );
+
+    // Bridge state: x's marker moved; a/b's marker untouched in place.
+    let x_marker = layout.git_state_dir().join("x/marker.txt");
+    assert!(x_marker.exists(), "x's bridge state must move");
+    assert_eq!(std::fs::read(&x_marker).unwrap(), b"bridge state\n");
+    let ab_marker = layout.git_state_dir().join("a/b/marker.txt");
+    assert!(
+        ab_marker.exists(),
+        "a/b's bridge state must remain at .mkit/git/a/b/, untouched"
+    );
+    assert_eq!(std::fs::read(&ab_marker).unwrap(), b"bridge state\n");
+
+    // a/b's config entry is unaffected by the rename of 'a'.
+    let out = r.ok(&["remote", "get-url", "a/b"]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "mkit+file:///tmp/nowhere-b",
+        "a/b's config entry must remain intact"
+    );
+}
+
+/// #660: exercises the ancestor-recursion arm of `walk_unprotected` —
+/// the sibling nests two levels down (`a/b/c`), so the walker must
+/// recurse through the intermediate `b` directory rather than treating
+/// it as removable whole.
+#[test]
+fn deeply_nested_sibling_survives() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
+
+    r.ok(&["remote", "remove", "a"]);
+
+    assert!(
+        refs::read_remote_ref(&layout, "a", "main")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        refs::read_remote_ref(&layout, "a/b/c", "main")
+            .unwrap()
+            .is_some(),
+        "deeply nested sibling a/b/c must survive removal of 'a'"
+    );
+}
+
+/// #660 regression guard: with no configured sibling nested under the
+/// target, both the selective-removal and selective-move helpers are
+/// never invoked (`nested_sibling_names` returns empty) — the
+/// pre-existing whole-directory fast paths (`remove_dir_all`,
+/// `rename_state_dir`) still run unchanged and still fully clean up.
+#[test]
+fn no_sibling_fast_path_unchanged() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "team/upstream", "main", &tip).unwrap();
+    plant_bridge_state(&layout, "team/upstream");
+    r.ok(&["remote", "add", "team/upstream", "mkit+file:///tmp/nowhere"]);
+
+    r.ok(&["remote", "remove", "team/upstream"]);
+
+    assert!(
+        refs::read_remote_ref(&layout, "team/upstream", "main")
+            .unwrap()
+            .is_none(),
+        "tracking refs must be fully removed with no sibling present"
+    );
+    assert!(
+        !layout.remotes_dir().join("team/upstream").exists(),
+        "no leftover tracking-ref directory for the removed remote"
+    );
+    // `remote remove` deliberately leaves bridge state in place
+    // (`warn_orphaned_bridge_state`) regardless of siblings — unaffected
+    // by #660.
+    assert!(
+        layout
+            .git_state_dir()
+            .join("team/upstream/marker.txt")
+            .exists()
+    );
+}
+
 #[test]
 fn named_remote_fetch_and_pull_use_their_namespace() {
     // Origin repo with one commit, exposed over mkit+file://.
