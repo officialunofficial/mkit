@@ -101,7 +101,36 @@ jobs:
 
             echo "::group::buf breaking $dir (against origin/main)"
             if git cat-file -e "origin/main:$dir/buf.yaml" 2>/dev/null; then
-              if ! buf breaking "$dir" --against ".git#branch=origin/main,subdir=$dir"; then
+              # When $buf_yaml itself changed since origin/main, pin the
+              # HISTORICAL side to the CURRENT buf.yaml (--against-config)
+              # instead of letting buf resolve origin/main's own
+              # (differently-configured) buf.yaml. Without this, a v2
+              # workspace module transitioning from unnamed to named (e.g.
+              # issue #719's `name:` additions) makes buf's workspace-level
+              # module-identity matching misalign between the two sides —
+              # verified to spuriously report every file in the renamed
+              # module (and, via matching drift, files in OTHER modules in
+              # the same workspace) as "deleted", with no actual breaking
+              # change present. Confirmed against buf 1.66.0 and 1.71.0;
+              # --against-config resolves it and still correctly catches
+              # real breaking changes (spot-checked by temporarily deleting
+              # an enum value and re-running).
+              #
+              # Only pass it when the config actually changed: unlike a
+              # true buf.yaml workspace (module `path:` == the dir buf.yaml
+              # lives in, e.g. rust/crates/mkit-rpc/proto nested under the
+              # repo-root buf.yaml), a standalone single-module buf.yaml
+              # like rust/crates/mkit-trust-rpc/buf.yaml has `path: proto`
+              # relative to ITS OWN location — passing --against-config
+              # there when nothing changed flips buf's input-resolution
+              # mode and errors ("did not contain modules found in
+              # workspace"), so this is opt-in per dir, not blanket.
+              against_config_args=()
+              if ! git diff --quiet origin/main -- "$buf_yaml" 2>/dev/null; then
+                against_config_args=(--against-config "$buf_yaml")
+                echo "$buf_yaml changed since origin/main — pinning historical config to current $buf_yaml"
+              fi
+              if ! buf breaking "$dir" --against ".git#branch=origin/main,subdir=$dir" "${against_config_args[@]+"${against_config_args[@]}"}"; then
                 status=1
               fi
             else

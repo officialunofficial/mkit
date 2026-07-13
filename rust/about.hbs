@@ -1,0 +1,32 @@
+THIRD-PARTY-NOTICES
+====================
+
+mkit is dual-licensed under MIT OR Apache-2.0 (see LICENSE-MIT and
+LICENSE-APACHE at the repository root). This file is a consolidated,
+machine-generated listing of every third-party Rust dependency compiled
+into mkit release binaries, grouped by license, along with the full text
+of each license. It is generated at release time by `cargo about generate`
+from `rust/about.toml` and `rust/about.hbs` — see rust/about.toml for the
+accepted-license policy and docs/RELEASE.md for how it is produced.
+
+Do not hand-edit this file; it is overwritten on every release build.
+
+Overview
+--------
+{{#each overview}}
+  - {{{name}}} ({{count}} package(s))
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+================================================================================
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

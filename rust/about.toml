@@ -1,0 +1,35 @@
+# cargo-about license-attribution policy for the mkit Rust workspace.
+#
+# `accepted` mirrors rust/deny.toml's [licenses] allow list — the two files
+# are the same policy expressed to two different tools (cargo-deny gates
+# CI on every dependency change; cargo-about renders the accepted set into
+# THIRD-PARTY-NOTICES for release). Keep them in lockstep: if you add a
+# license here, add it there too, and vice versa.
+#
+# `cargo about generate` fails the job outright on any dependency whose
+# license isn't in this list — that failure is a real release blocker, not
+# something to silence with a blanket `ignore`.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    # libfuzzer-sys ships its LLVM-derived C shim under NCSA. Feature-gated
+    # (--features libfuzzer), not part of the default build, but present in
+    # the resolved dependency graph — see rust/deny.toml for the same note.
+    "NCSA",
+    # option-ext (transitive via ctap-hid-fido2 -> dirs-sys). File-level
+    # copyleft; combining with differently-licensed code is allowed.
+    "MPL-2.0",
+    # webpki-roots / rustls cert bundles.
+    "CDLA-Permissive-2.0",
+]
+
+workarounds = []

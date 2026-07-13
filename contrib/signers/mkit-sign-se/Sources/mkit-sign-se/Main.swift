@@ -394,6 +394,7 @@ private func rpcAlgorithmName(_ a: RpcAlgorithm) -> String {
     case .secp256K1: return "ALGORITHM_SECP256K1"
     case .p256: return "ALGORITHM_P256"
     case .ed25519Webauthn: return "ALGORITHM_ED25519_WEBAUTHN"
+    case .bls12381Threshold: return "ALGORITHM_BLS12381_THRESHOLD"
     case .UNRECOGNIZED(let n): return "ALGORITHM_UNKNOWN(\(n))"
     }
 }

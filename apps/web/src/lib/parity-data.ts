@@ -101,8 +101,8 @@ export const categories: ParityCategory[] = [
     items: [
       {
         cmd: 'log',
-        status: 'parity',
-        note: 'Ranges, -n, --oneline, --format=json, --author/--grep (substring), --since/--until, --no-merges, --first-parent. --graph is accepted as a no-op.',
+        status: 'divergent',
+        note: 'Ranges, -n, --oneline, --format=json, --author/--grep (substring), --since/--until, --no-merges, --first-parent. --graph is accepted as a no-op. -p, --stat, --decorate, and --all are not yet implemented.',
       },
       {
         cmd: 'show',

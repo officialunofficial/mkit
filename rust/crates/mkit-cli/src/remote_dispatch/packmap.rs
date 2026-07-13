@@ -743,6 +743,13 @@ fn unpack_downloaded_packs(
             return Err(DispatchError::Interrupted);
         }
         let report = PackReader::read(&pack, store)?;
+        // Honest progress (#711): real objects just landed in the local
+        // store, counted straight from the pack's own `UnpackReport` —
+        // never an estimate. See `crate::progress`.
+        let unpacked = (report.raw_count + report.delta_count) as usize;
+        if unpacked > 0 {
+            crate::progress::report(crate::progress::Event::ObjectsUnpacked(unpacked));
+        }
         stored.extend(report.stored);
         applied.insert(&key);
     }

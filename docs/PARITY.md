@@ -155,11 +155,17 @@ people and agents who learned git's surface aren't surprised:
   diffstat; `fetch`: `From <url>` + per-ref summary (silent on no-op);
   `clone`: `Cloning into '<dir>'...`. `fetch --all` / `pull --all` repeat the
   same per-remote summary once per configured remote rather than inventing a
-  combined format. The git object-count / delta-compression
-  **progress lines** (`Enumerating/Counting/Compressing/Writing objects`,
-  `Total N (delta D)`) are a deliberate **follow-up** — mkit's transport is
-  one-object-per-pack and computes no deltas, so those numbers would be
-  fabricated.
+  combined format. `clone`/`push`/`pull`/`fetch` also stream a live,
+  **honest** transfer-progress line on stderr while the network transfer
+  runs (`Writing objects: N objects, B bytes` / `Unpacking objects: N
+  objects`, #711) — real counts derived from objects actually staged into
+  the outgoing pack / unpacked from a downloaded one, shown only when
+  stderr is a tty (`--quiet`/`-q` or `MKIT_PROGRESS=never` suppress it;
+  `MKIT_PROGRESS=always` forces it). mkit deliberately does **not**
+  fabricate git's object-count / delta-compression progress lines
+  (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) — mkit's
+  transport is one-object-per-pack and computes no cross-branch delta
+  graph, so those specific numbers would be invented.
 - **Local mutation** — `commit`/`cherry-pick`/`revert`: `[<branch> <hash>]
   <subject>` + diffstat + `create/delete mode`; `merge`: `Merge made by the
   'ort' strategy.` / `CONFLICT (content): …` + `Automatic merge failed; …`;

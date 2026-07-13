@@ -60,7 +60,24 @@ mkit-keystore = { version = "0.4", path = "../mkit-keystore" }
 # `[dev-dependencies]`. It is intentionally NOT a normal dependency so it
 # does not ship in `cargo install mkit-cli`.
 mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
+# `mkit-transport-http`'s bespoke JSON dialect is retired as the ACTIVE
+# `mkit+https://`/`mkit+http://` implementation (see `mkit-transport-connect`
+# below) as of mkit#701 (SPEC-TRANSPORT-CONNECT verb parity). The dependency
+# stays: its `sparse-checkout`/`pack-shards` cargo features are not yet
+# covered by `mkit.transport.v1` (SPEC-TRANSPORT-CONNECT §8), and
+# `config.rs` still reads its `TOKEN_ENV` constant (identical value to
+# `mkit-transport-connect::TOKEN_ENV`, so callers of either transport read
+# the same `MKIT_API_TOKEN` env var).
 mkit-transport-http = { version = "0.4", path = "../mkit-transport-http" }
+# `mkit-transport-connect` provides BOTH the native ConnectRPC client —
+# the active implementation behind `mkit+https://` / loopback
+# `mkit+http://` dispatch (mkit#701) — and the axum-hosted
+# mkit.transport.v1 Connect server `mkit serve --http` uses (issue #700).
+# Required unconditionally (client dispatch, not feature-gated); its own
+# `server`/`axum` Connect features are also unconditional (see
+# `rust/crates/mkit-transport-connect/README.md`), so no `http-transport`
+# feature gate is needed on this dependency itself.
+mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
 mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
@@ -73,12 +90,12 @@ mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional
 # server (issue #700, SPEC-TRANSPORT-CONNECT). Off by default so the
 # baseline `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
 # `enc-transport`. Turn on via `--features http-transport`.
-mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect", optional = true }
 # ConnectRPC + axum are pulled in directly (not just transitively through
-# mkit-transport-connect) so `commands/serve/http.rs` can build the
-# bearer-auth `Interceptor` and drive `axum::serve` itself. Feature set
-# mirrors `mkit-transport-connect`'s own (server + axum), version-pinned
-# to the same "0.8" the rest of the workspace's connectrpc consumers use.
+# mkit-transport-connect, which already unconditionally depends on both)
+# so `commands/serve/http.rs` can build the bearer-auth `Interceptor` and
+# drive `axum::serve` itself. Feature set mirrors `mkit-transport-connect`'s
+# own server-side (server + axum), version-pinned to the same "0.8" the
+# rest of the workspace's connectrpc consumers use.
 connectrpc = { version = "0.8", default-features = false, features = [
     "server",
     "axum",
@@ -198,6 +215,16 @@ insta = { version = "1", features = ["filters"] }
 # mkit-core's dev-dep. Bounded by default (32 cases); the nightly job
 # raises PROPTEST_CASES under the `state-machine` nextest profile.
 proptest = "1"
+# tests/remote_dispatch_connect.rs (mkit#701): drives push_all/pull_all
+# against a REAL in-process mkit.transport.v1.TransportService server
+# (connectrpc's hyper server, memory-backed) rather than a mockito stub —
+# the regression gate proving `mkit+http://` round-trips through the
+# generated Connect codebase end-to-end. `server` is additive on top of
+# `mkit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
+# unions dependency features across dependency kinds).
+connectrpc = { version = "0.8", default-features = false, features = ["server", "gzip", "zstd", "streaming", "json"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
+futures = "0.3"
 
 [features]
 default = []
@@ -213,11 +240,15 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
 # Enables `mkit serve --http <addr>` (issue #700): hosts
 # `mkit.transport.v1.TransportService` over axum, backed by `FileTransport`.
-# Pulls in `mkit-transport-connect`, `connectrpc`'s server+axum features,
-# `axum`, and a multi-thread `tokio` runtime. Off by default so the baseline
-# `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
-# `enc-transport`. See SPEC-TRANSPORT-CONNECT.md.
-http-transport = ["dep:mkit-transport-connect", "dep:connectrpc", "dep:axum", "dep:tokio", "dep:subtle", "dep:http"]
+# `mkit-transport-connect` itself is an unconditional dependency (it also
+# backs `mkit+https://` client dispatch, mkit#701) but its OWN server-side
+# axum/hyper-server bits are behind ITS `server` cargo feature (off by
+# default there too), so this feature both flips that on and pulls in the
+# CLI's own directly-used `connectrpc`'s server+axum features, `axum`, and
+# a multi-thread `tokio` runtime for `commands/serve/http.rs`. Off by
+# default so the baseline `mkit-cli` build doesn't pay axum/hyper's compile
+# cost, mirroring `enc-transport`. See SPEC-TRANSPORT-CONNECT.md.
+http-transport = ["mkit-transport-connect/server", "dep:connectrpc", "dep:axum", "dep:tokio", "dep:subtle", "dep:http"]
 # The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's

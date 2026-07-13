@@ -45,6 +45,9 @@ struct PullOpts {
     /// `--all`, one JSON object is printed per remote pulled.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
+    /// Suppress transfer progress output on stderr (#711).
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[must_use]
@@ -83,7 +86,7 @@ pub fn run(args: &[String]) -> u8 {
         // worst exit code observed is returned at the end.
         let mut worst = exit::OK;
         for name in names {
-            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed, json);
+            let code = pull_one(&cwd, &layout, &cfg, &name, require_signed, json, opts.quiet);
             if code != exit::OK {
                 worst = code;
             }
@@ -97,6 +100,7 @@ pub fn run(args: &[String]) -> u8 {
         opts.remote.as_deref().unwrap_or(""),
         require_signed,
         json,
+        opts.quiet,
     )
 }
 
@@ -111,6 +115,7 @@ fn pull_one(
     remote: &str,
     require_signed: bool,
     json: bool,
+    quiet: bool,
 ) -> u8 {
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err_json(
@@ -134,15 +139,26 @@ fn pull_one(
     let old_tip = branch
         .as_deref()
         .and_then(|b| mkit_core::refs::read_ref(layout, b).ok().flatten());
-    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg) {
+    match remote_dispatch::open_trusted(endpoint, resolved.repo_chosen, cfg, layout) {
         Ok(tx) => {
-            match remote_dispatch::pull_all_with(
-                cwd,
-                tx.as_ref(),
-                &resolved.name,
-                None,
-                require_signed,
-            ) {
+            let pull_outcome = {
+                // Scoped tightly so the progress guard's final line
+                // lands before the `Updating <a>..<b>` / diffstat
+                // summary printed below, not after it.
+                let _progress = crate::progress::start(
+                    "Unpacking objects",
+                    None,
+                    crate::progress::should_report(quiet),
+                );
+                remote_dispatch::pull_all_with(
+                    cwd,
+                    tx.as_ref(),
+                    &resolved.name,
+                    None,
+                    require_signed,
+                )
+            };
+            match pull_outcome {
                 Ok(_) => {
                     let new_tip = branch
                         .as_deref()

@@ -158,6 +158,7 @@ ConnectRPC unary, `POST /mkit.repo.v1.RepoService/<Method>`:
 | `UpdateRef` | write | CAS (`ANY`/`MISSING`/`MATCH`) inside the DO's serial execution → `{committed, conflict, current_id}`. |
 | `ListRefs`  | read  | DO list under an optional prefix → `{refs}`. |
 | `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket, streaming a `RoomEvent` (commit/chat/reaction/presence) per broadcast — see below. |
+| `PurgeRoom` | admin | Deletes the room's R2 objects + chat bodies and its DO-resident refs/messages/reactions/commit-index rows. Irreversible. See "Retention & backup/restore" below. |
 
 ### WatchRefs / streaming (issue #705, building on the #697 spike)
 
@@ -262,6 +263,113 @@ decodes the unified `RoomEvent` schema instead of the old ad hoc
 `WatchFrame`/`PresenceJson` JSON dialects. The unary path is fully functional
 independent of either streaming path.
 
+## Retention & backup/restore
+
+Every mkit object `PutObject` stores is content-addressed and **permanent** —
+no RPC ever deletes one implicitly, and the DO's SQLite prunes are bounded
+serving caches, not deletion of the underlying data (chat/reaction rows are
+capped by `MESSAGES_RETAINED`/`REACTIONS_RETAINED`, but the objects
+themselves live in R2 forever; see `refstore.rs`). Combined with open,
+anonymous `PutObject`, storage for an abandoned or abusive room only grows.
+Two independent mechanisms bound that:
+
+### 1. `PurgeRoom` — operator-triggered, immediate
+
+`PurgeRoom({ room })` deletes, in this order:
+
+1. Every R2 object under `{room}/objects/` and `{room}/messages/` (paginated
+   `list` + batched `delete_multiple`, 1000 keys/call).
+2. Every row the room's RefStore DO owns: `refs`, `messages` (+ `idem_keys`),
+   `reactions` (+ `react_idem`/`react_rate`), and the denormalized `commits`
+   index.
+
+It is **irreversible** — there is no soft-delete, undo, or grace period — and
+**admin-gated**: the request MUST carry a bearer `X-Admin-Token` header equal
+to the Worker's `ADMIN_TOKEN` secret, checked in constant time
+(`worker_impl/auth.rs`). Provision the secret once per environment:
+
+```sh
+# Generate and store a random token (never commit it). Re-running `secret put`
+# rotates it — no code change needed on either side.
+openssl rand -hex 32 | wrangler secret put ADMIN_TOKEN
+```
+
+An unset `ADMIN_TOKEN` fails **every** `PurgeRoom` call closed
+(`unauthenticated`), never open — there is no "demo mode" fallback for this
+RPC, unlike the open-write envelope above.
+
+Example call (see [`src/bin/sign.rs`](src/bin/sign.rs) for the write-envelope
+signer used by the other RPCs — `PurgeRoom` needs no signature, only the
+admin header):
+
+```sh
+curl -s -X POST https://api.mkit.sh/mkit.repo.v1.RepoService/PurgeRoom \
+  -H 'Content-Type: application/json' \
+  -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -d '{"room":"some-abandoned-room"}'
+```
+
+### 2. R2 lifecycle rule — automatic, age-based backstop
+
+`PurgeRoom` is opt-in and per-room; an operator has to know a room exists and
+choose to purge it. As a backstop independent of that RPC, configure an R2
+[object lifecycle rule] on the `mkit-repo-objects` bucket that expires
+objects a fixed age after upload, so a room nobody ever purges doesn't
+accumulate cost forever:
+
+```sh
+# Verify flags with `wrangler r2 bucket lifecycle add --help` first — the CLI
+# surface has changed across wrangler versions and this was not exercised
+# against a live account in this change. 180 days is a starting point, not a
+# validated production value; tune it against actual demo-room lifetimes.
+wrangler r2 bucket lifecycle add mkit-repo-objects \
+  --id expire-180d --prefix "" --expire-days 180
+```
+
+This was **not** added as a Terraform resource alongside the WAF rules in
+`infra/cloudflare/`. That module authenticates with a **zone**-scoped token
+(`Zone WAF Write`) against `mkit.sh`'s zone, and manages resources
+(`cloudflare_ruleset`) that already exist there; R2 buckets are
+**account**-scoped and, per this crate's own README, already provisioned
+out-of-band via `wrangler r2 bucket create` — Terraform doesn't manage the
+bucket itself today. Bolting an account-scoped, unverified-schema resource
+onto a zone-scoped module (with no CLOUDFLARE_ACCOUNT_ID token available to
+validate a `terraform plan` from this change) seemed like a worse default
+than documenting the equivalent `wrangler` command next to the tool that
+already owns the bucket's lifecycle. Revisit if/when `infra/cloudflare/`
+grows account-scoped state.
+
+[object lifecycle rule]: https://developers.cloudflare.com/r2/buckets/object-lifecycles/
+
+### Backup / restore
+
+**Assumption stated explicitly (no prior art in this repo for either half):**
+
+- **R2 objects.** There is no bulk export/import RPC. For ad hoc backup of a
+  single room, script the existing read RPCs (`ListRefs` + `ListCommits` +
+  `GetObject` per hash, `ListMessages`, `ListReactions`) — everything needed
+  to reconstruct a room already round-trips over the public read surface, no
+  new machinery required. For whole-bucket backup, R2 exposes an
+  [S3-compatible API]; use `rclone` or the AWS CLI against it
+  (`rclone sync r2:mkit-repo-objects ./backup/`). Restore is the same in
+  reverse (`rclone sync ./backup/ r2:mkit-repo-objects`) — object keys are
+  content-addressed, so a restore can never corrupt an object, only
+  reintroduce one a client will re-verify by hash on read.
+- **DO SQLite state (refs/messages/reactions/commit-index).** workers-rs
+  0.8's `SqlStorage` exposes no bulk export API, and this repo has no
+  DO-snapshotting tooling. The primary safety net is Cloudflare's own
+  [Point-in-Time Recovery] for SQLite-backed Durable Objects (automatic,
+  ~30-day retention, dashboard-driven restore-to-bookmark) — this requires NO
+  code or process in this repo, but IS an assumption about a platform
+  feature this change does not verify end-to-end. A room's *refs* can also be
+  reconstructed from R2 alone (walk `ListCommits`/`GetObject` and replay
+  `UpdateRef`), which is a slower but code-free fallback if PITR is
+  unavailable; chat/reaction history has no such fallback (it isn't derivable
+  from the object graph) and is not durably backed up beyond PITR.
+
+[S3-compatible API]: https://developers.cloudflare.com/r2/api/s3/
+[Point-in-Time Recovery]: https://developers.cloudflare.com/durable-objects/reference/data-location/
+
 ## RefStore Durable Object
 
 One instance per `room` (`env.durable_object("REFSTORE").id_from_name(room)`).
@@ -316,8 +424,16 @@ eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
   target or a DO/SQLite harness.
 - `src/worker_impl.rs` + `src/worker_impl/{auth,refstore,service}.rs` —
   wasm32-only worker glue (the macros emit `#[wasm_bindgen]`).
-- `proto/` — the canonical `repo.proto`. `build.rs` runs `connectrpc-build` over
-  it into `$OUT_DIR`, included via `connectrpc::include_generated!()`.
+- `proto/` — the canonical `repo.proto`, plus `buf.gen.yaml` (the reference
+  TypeScript codegen recipe external `RepoService` clients run via `buf
+  generate` against the `buf.build/officialunofficial/mkit-repo` BSR module,
+  issue #719 — distinct from `../buf.gen.yaml`, which drives apps/web's own
+  internal vendored-codegen regen). `repo.proto`'s buf module (`name:`,
+  lint/breaking config) lives in the repo-root `buf.yaml` workspace, not a
+  `buf.yaml` here. `build.rs` runs `connectrpc-build` over `repo.proto` into
+  `$OUT_DIR` for this crate's own Rust server, included via
+  `connectrpc::include_generated!()` — a separate path from the
+  BSR-published recipe above.
 
 ## Deploy (go live)
 

@@ -959,8 +959,8 @@ Remote / sync:
   the flat default remote). `mkit remote set-url <name> <url>` — change an
   existing remote's URL (validated like `remote add`).
 - `mkit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
-  [--no-verify-signatures] <url> [<dir>]` — clone a repository into
-  `<dir>` (defaults to the final URL path segment). `--sparse
+  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]` — clone a repository
+  into `<dir>` (defaults to the final URL path segment). `--sparse
   <pattern>...` persists the patterns and materialises only the
   matching files via the verifiable sparse-checkout pipeline (requires
   a build with `--features sparse-checkout`). Note this is an
@@ -981,8 +981,9 @@ Remote / sync:
     (mirrors `mkit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `mkit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]`
-  — download from remote without merging. Fetched branch tips are stored
+- `mkit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]
+  [-q|--quiet]` — download from remote without merging. Fetched branch tips
+  are stored
   under `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>`
   for the flat default remote) and do not move local branches. `--all`
   fetches every configured remote (the flat default plus every named
@@ -994,8 +995,8 @@ Remote / sync:
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
   "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
   success, or `{"ok":false,"error":"..."}` on failure.
-- `mkit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]`
-  — fetch, then fast-forward the current branch from
+- `mkit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
+  [-q|--quiet]` — fetch, then fast-forward the current branch from
   `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
   explicit merge/rebase flows after resolving the divergence. Fresh repos
   with no local branch tip initialize the current branch/worktree from
@@ -1021,7 +1022,8 @@ Remote / sync:
   set from a cloned repo's own `.mkit/config` (see THREAT-MODEL.md §4).
   `--all` applies the same verification (and the same opt-out) to every
   remote it iterates.
-- `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run] [--format=json]`
+- `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
+  [--format=json] [-q|--quiet]`
   — push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
@@ -1043,6 +1045,17 @@ Remote / sync:
   "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
+- **Transfer progress (#711).** `clone`/`push`/`pull`/`fetch` stream a
+  live, honest progress line on stderr while the network transfer runs —
+  `Writing objects: N objects, B bytes` while building/uploading the
+  outgoing pack, `Unpacking objects: N objects` while applying a
+  downloaded one. The counts are real (objects actually staged/unpacked,
+  bytes actually handed to the transport); mkit never fabricates git's
+  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines
+  — mkit's transport is one-object-per-pack and computes no cross-branch
+  delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
+  forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
+  tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve <path>` — internal SSH transport server. Speaks the
   mkit-rpc SSH framing on stdin/stdout by default.
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
@@ -1386,11 +1399,14 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   40-hex SHA-1 — the inherent hash-length divergence. Output otherwise
   matches git's shape (e.g. `To <url>` + `<old>..<new>  main -> main`,
   `[main <hash>] <subject>` + diffstat, `Fast-forward`).
-- **The git object-count / delta-compression progress lines**
-  (`Enumerating/Counting/Compressing/Writing objects`,
-  `Total N (delta D)`) are **not** emitted: mkit's transport is
-  one-object-per-pack and computes no deltas, so those numbers would be
-  fabricated. A tracked follow-up may add an honest object count.
+- **git's object-count / delta-compression progress lines**
+  (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) are
+  **not** emitted: mkit's transport is one-object-per-pack and computes
+  no cross-branch delta graph, so those specific numbers would be
+  fabricated. `clone`/`push`/`pull`/`fetch` do stream an honest
+  `Writing objects: N objects, B bytes` / `Unpacking objects: N objects`
+  progress line (#711) — real counts only; see "Transfer progress"
+  above.
 - **`mkit remote`** lists remote **names only** (git-shaped); use
   `mkit remote -v` for `<name>\t<url> (fetch)`/`(push)`.
 - **`mkit log --graph` is a no-op (v1 non-goal).** The flag is accepted
@@ -1476,6 +1492,7 @@ which routes them to the user scope automatically.
 | `remote_endpoint` | URL / path | empty | Set via `mkit remote add` |
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
+| `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
@@ -1534,12 +1551,24 @@ Accepted schemes:
 | Scheme | Form | Use |
 |--------|------|-----|
 | `mkit+file` | `mkit+file:///abs/path` | local filesystem mirror |
-| `mkit+https` | `mkit+https://host[:port]/path` | HTTP gateway (e.g. VCS Worker) |
+| `mkit+https` | `mkit+https://host[:port][/path]` | ConnectRPC gateway (e.g. VCS Worker) |
 | `mkit+s3` | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 
-See `docs/specs/SPEC-TRANSPORT.md` for the wire protocol.
+`mkit+https` (and loopback-only `mkit+http`) speaks
+`mkit.transport.v1.TransportService` over ConnectRPC — see
+`docs/specs/SPEC-TRANSPORT-CONNECT.md`. Any `/path` on the URL is
+accepted (for shape-consistency with the other schemes) but currently
+has no wire effect: every RPC resolves to the fixed
+`/mkit.transport.v1.TransportService/<Method>` path regardless.
+Write RPCs against a deployment that requires the Ed25519 write envelope
+(e.g. `apps/vcs-worker`, the reference server) need
+`mkit config transport_auth envelope` — see the config table above and
+SPEC-TRANSPORT-CONNECT §7.3.
+
+See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
+protocols.
 
 ## Version output contract
 

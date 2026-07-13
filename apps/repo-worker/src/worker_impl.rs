@@ -39,9 +39,11 @@ pub use refstore::RefStore;
 /// this is refused with `invalid_argument`.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
-/// Headers we expose for cross-origin browser clients.
+/// Headers we expose for cross-origin browser clients. `x-admin-token` is
+/// listed for completeness (an operator console could call PurgeRoom
+/// cross-origin) even though the shipped web demo never sends it.
 const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created-at, \
-     idempotency-key, content-type, connect-protocol-version";
+     idempotency-key, x-admin-token, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
 /// Append the permissive `Access-Control-Allow-Origin: *` header to a response.
@@ -159,6 +161,13 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         }
     }
 
+    // Read the admin secret BEFORE `env` moves into `RepoServer::new` below.
+    // `env.secret()` is `Err` when the binding doesn't exist (never
+    // configured, or a local `wrangler dev` run with no `.dev.vars` entry) —
+    // that maps to `None`, which the interceptor treats as "fail every
+    // PurgeRoom call closed", not "allow any token".
+    let admin_token = env.secret("ADMIN_TOKEN").ok().map(|s| s.to_string());
+
     // Build the service fresh per request — `Env` is Send and cheap to clone;
     // the service holds no cross-request state. The interceptor needs its own
     // `Env` clone too: it addresses the room's RefStore DO directly for the
@@ -170,7 +179,8 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // re-asserts `content-encoding` from the gzip magic and decompresses, so the
     // earlier "browser strips the header → client decodes raw gzip" bug is fixed
     // at the source (see mkit-repo-client transport `is_gzip`).
-    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor::new(env));
+    let svc =
+        ConnectRpcService::new(router).with_interceptor(AuthInterceptor::new(env, admin_token));
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
     // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`

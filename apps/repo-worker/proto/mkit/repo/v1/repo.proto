@@ -29,6 +29,14 @@
 // is open-write/demo-mode: any valid Ed25519 key may write any ref. Carrying
 // auth in metadata (rather than proto fields) keeps the message shapes clean
 // and lets the same envelope guard every procedure uniformly.
+//
+// ADMIN AUTH (also transport-level, separate mechanism from the write
+// envelope above): PurgeRoom requires a bearer `X-Admin-Token` header equal
+// to the server's `ADMIN_TOKEN` secret (see apps/repo-worker/README.md
+// "Retention & backup/restore"). This is a plain shared-secret check — NOT
+// an Ed25519 envelope — because a purge is an operator action with no
+// room-participant author to attribute. An unset `ADMIN_TOKEN` fails
+// PurgeRoom closed (`unauthenticated`) for every caller, never open.
 
 edition = "2023";
 
@@ -96,6 +104,20 @@ service RepoService {
   // the previous object). The client decodes the bytes with its existing
   // decoder, so the server needs no field-by-field parity. Unauthenticated read.
   rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+
+  // Permanently delete a room's R2 objects (both the `objects/` and
+  // `messages/` key prefixes) and its Durable-Object-resident mutable state
+  // (refs, chat rows, reactions, and the denormalized commit index) — the
+  // ONLY way to reclaim storage the anonymous-multiplayer write path
+  // otherwise retains forever (immutable objects are never deleted by any
+  // other RPC). Admin-gated (see the ADMIN AUTH note above): the request
+  // MUST carry a valid `X-Admin-Token` header, or the server rejects with
+  // `unauthenticated` before this handler runs. There is no signed-write
+  // envelope requirement (a purge is an operator action, not a
+  // room-participant write) and no undo — the purge is immediate and
+  // irreversible. See the README "Retention & backup/restore" runbook
+  // before invoking against a production room.
+  rpc PurgeRoom(PurgeRoomRequest) returns (PurgeRoomResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -301,4 +323,22 @@ message Reaction {
 
 message ListReactionsResponse {
   repeated Reaction reactions = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Room retention / deletion — admin-only (see the ADMIN AUTH note + PurgeRoom
+// above). One request purges everything content-addressed or mutable under a
+// single room.
+
+message PurgeRoomRequest {
+  string room = 1;
+}
+
+message PurgeRoomResponse {
+  bool purged = 1;                    // true unless the room already had nothing to purge
+  uint32 objects_deleted = 2;         // R2 objects removed under {room}/objects/
+  uint32 message_bodies_deleted = 3;  // R2 chat bodies removed under {room}/messages/
+  uint32 refs_deleted = 4;            // DO `refs` rows removed
+  uint32 messages_deleted = 5;        // DO `messages` rows removed
+  uint32 reactions_deleted = 6;       // DO `reactions` rows removed
 }

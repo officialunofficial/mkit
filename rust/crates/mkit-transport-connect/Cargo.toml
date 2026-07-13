@@ -1,6 +1,25 @@
+# mkit-transport-connect — both halves of `mkit.transport.v1.TransportService`
+# (SPEC-TRANSPORT-CONNECT), the implementation behind the `mkit+https://`
+# remote scheme:
+#   - a native (non-wasm) ConnectRPC CLIENT implementing `Transport` itself,
+#     used by `mkit-cli`'s `remote_dispatch` for `mkit+https://` / loopback
+#     `mkit+http://` — mandatory, always compiled.
+#   - an axum-hosted ConnectRPC SERVER generic over any
+#     `mkit_core::protocol::Transport` backend (`mkit serve --http`) — behind
+#     this crate's own `server` cargo feature, mirroring `mkit-cli`'s
+#     `http-transport` feature (which enables it) so a client-only consumer
+#     (the common case) doesn't pay axum/hyper-server's compile cost.
+#
+# Mirrors `mkit-repo-client`'s "zero-duplication" codegen approach (compiled
+# directly from the canonical `proto/mkit/transport/v1/transport.proto` via a
+# workspace-relative `build.rs` path — never a hand-copied proto), but on the
+# client side targets native (Tokio, `connectrpc`'s hyper-rustls client
+# transport) instead of wasm (Fetch API). Drops the wasm-only deps
+# (`wasm-bindgen`, `web-sys`, `send_wrapper`) `mkit-repo-client` needs and
+# enables `connectrpc`'s native/TLS client features instead.
 [package]
 name = "mkit-transport-connect"
-description = "mkit.transport.v1 Connect service: an axum-hosted TransportService server generic over any mkit_core::protocol::Transport backend (SPEC-TRANSPORT-CONNECT)"
+description = "mkit.transport.v1 Connect service: native ConnectRPC client for mkit+https://, plus an optional axum-hosted TransportService server (SPEC-TRANSPORT-CONNECT)"
 keywords = ["mkit", "vcs", "transport", "connectrpc", "axum"]
 categories = ["network-programming", "web-programming::http-server"]
 readme = "README.md"
@@ -24,35 +43,70 @@ all = { level = "warn", priority = -1 }
 # accepts them.
 mkit-core = { version = "0.4", path = "../mkit-core" }
 
-# ConnectRPC server, hosted over axum (this crate's whole point — see
-# SPEC-TRANSPORT-CONNECT §7.2). `server` pulls hyper/hyper-util server
-# bits; `axum` gives Router::into_axum_router()/into_axum_service() so
-# `mkit serve --http` can hand the result straight to `axum::serve`.
-# `json` keeps the buffa-generated message types' serde derives (matches
-# every other connectrpc consumer in this workspace). `zstd` is dropped
-# (native binary, not wasm — but this server has no need for response
-# compression beyond gzip today; add it if a future issue asks for it).
+# ConnectRPC native client: hyper/hyper-util transport + rustls TLS. This is
+# the crate's mandatory baseline; `server`/`axum` are added by the `server`
+# feature below (see `[features]`).
+# `streaming` is tokio-based async-compression for `UploadPack`/
+# `DownloadPack`'s client-streaming/server-streaming RPCs (fine natively,
+# unlike on wasm — re-enabled explicitly since `default-features = false`
+# drops it). `json` keeps the buffa-generated message types' serde derives
+# (matches every other connectrpc consumer in this workspace).
 connectrpc = { version = "0.8", default-features = false, features = [
-    "server",
-    "axum",
+    "client",
+    "client-tls",
+    "streaming",
     "gzip",
+    "zstd",
     "json",
 ] }
 buffa = "0.8.1"
 buffa-types = "0.8"
 
-axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
-tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "macros"] }
+# Only pulled in by the `server` feature — see `[features]`.
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
+
+# Async runtime driving the ConnectRPC client (and, under `server`, the axum
+# server too). The `Transport` trait (mkit_core::protocol::Transport) is
+# synchronous; `mkit_core::protocol::async_shim::Executor` bridges the
+# client side, mirroring mkit-transport-enc's `tcp::TokioExecutor`.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "sync",
+    "macros",
+    "time",
+] }
 
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1.6"
 futures = "0.3"
+url = "2"
 thiserror = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
+# — same crate/version mkit-core, mkit-cli, and mkit-keystore already pull in
+# for their own random-value needs (key generation, ephemeral enc-transport
+# keys).
+getrandom = "0.4"
+
+# Pure-Rust TLS root store for `HttpClient::with_tls` (Mozilla root program
+# via the `webpki-roots` crate) — no OS trust-store dependency.
+webpki-roots = "1"
+
+# Explicit dependency (beyond connectrpc's own re-export of `rustls`) so
+# this crate can deterministically install a `ring`-backed default
+# `CryptoProvider` regardless of what crypto backend(s) a consuming
+# workspace's OTHER dependencies pull in for the same `rustls` version
+# (`aws-lc-rs`, `ring`, or both) — see `client::ensure_crypto_provider`.
+# `ring` needs no `cmake` (unlike `aws-lc-rs`), matching this crate's
+# minimal-system-dependency posture.
+rustls = { version = "0.23", features = ["ring"] }
 
 [build-dependencies]
 connectrpc-build = "0.8"
@@ -60,17 +114,47 @@ connectrpc-build = "0.8"
 [dev-dependencies]
 tempfile = "3"
 mkit-transport-file = { path = "../mkit-transport-file" }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
-# Native (non-wasm) ConnectRPC client, used ONLY by this crate's own
-# integration test to drive a real end-to-end round trip against the
-# axum server (SPEC-TRANSPORT-CONNECT-issue-700's testing decision). The
-# polished, public native CLI client crate is mkit#701's scope — this is
-# a minimal test-only client, not that crate.
+mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+# Test-only: `envelope::tests::parity` independently re-verifies the write
+# envelope headers `EnvelopeTransport` produces against a from-scratch
+# reimplementation of `apps/vcs-worker`'s server-side `verify_envelope` /
+# `verify_stream_envelope`, so a canonical-string or header regression is
+# caught here rather than only by a live `wrangler dev` run.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+hex = "0.4"
+# `tests/roundtrip.rs` builds its own in-process `TransportService` server
+# directly against `connectrpc::server`/`Router` (the client-side regression
+# gate — SPEC-TRANSPORT-CONNECT's testing decision) independent of this
+# crate's own `server` feature, so `server` is listed unconditionally here.
 connectrpc = { version = "0.8", default-features = false, features = [
     "client",
+    "client-tls",
+    "server",
     "gzip",
+    "zstd",
+    "streaming",
     "json",
 ] }
+
+[features]
+default = []
+# `mkit serve --http`'s axum-hosted `mkit.transport.v1.TransportService`
+# server (issue #700, SPEC-TRANSPORT-CONNECT §7.2), generic over any
+# `mkit_core::protocol::Transport` backend. Off by default so a consumer
+# that only needs the `mkit+https://` client (the mandatory baseline,
+# e.g. `mkit-cli`'s unconditional `remote_dispatch` dependency) doesn't pay
+# axum/hyper-server's compile cost. Turn on directly, or transitively via
+# `mkit-cli`'s `http-transport` feature.
+server = ["dep:axum", "connectrpc/server", "connectrpc/axum"]
+
+# `tests/e2e.rs` drives a real `mkit_transport_connect::serve` (this crate's
+# OWN server API, not just connectrpc's), so it needs the `server` feature
+# to compile at all — `cargo test -p mkit-transport-connect` without it
+# still runs `tests/roundtrip.rs` (the client-side regression gate). With
+# `--features server` (or `--all-features`) both run.
+[[test]]
+name = "e2e"
+required-features = ["server"]
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.

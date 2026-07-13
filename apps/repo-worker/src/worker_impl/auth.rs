@@ -41,6 +41,16 @@
 // gate then throttles it — quota rejections stay out of
 // `WriteAudit::Rejected`, which is reserved for envelope-verification
 // failures (see `crate::audit::WriteAudit` doc).
+//
+// PurgeRoom uses a SEPARATE, simpler gate: a bearer `X-Admin-Token` header
+// checked against the `ADMIN_TOKEN` Worker secret (constant-time compare).
+// It deliberately does NOT reuse the write envelope — a purge is an operator
+// action with no room-participant author to attribute, and requiring an
+// Ed25519 keypair for an ops-only endpoint would add ceremony with no
+// corresponding benefit. An unset `ADMIN_TOKEN` fails every PurgeRoom call
+// closed (never open). PurgeRoom is not write-quota-checked or write-audited
+// — it isn't a room-participant write, so neither the budget nor the
+// accepted/rejected write-telemetry model applies to it.
 
 use connectrpc::interceptor::{UnaryRequest, UnaryResponse};
 use connectrpc::payload::Payload;
@@ -52,7 +62,7 @@ use worker::send::SendFuture;
 
 use crate::audit::{WriteAudit, audit_for};
 use crate::envelope::{EnvelopeHeaders, VerifyEnvelope, verify_envelope};
-use crate::hashing::blake3_hex;
+use crate::hashing::{blake3_hex, constant_time_eq};
 use crate::proto::mkit::repo::v1::{
     PostMessageRequest, PutObjectRequest, ReactRequest, UpdateRefRequest,
 };
@@ -83,12 +93,18 @@ pub struct IdempotencyKey(pub String);
 /// Procedures that mutate state and therefore require a write envelope.
 /// PostMessage is a signed write too — the verified pubkey IS the chat
 /// author (same open-write/demo model as UpdateRef). ListMessages, like the
-/// other reads, is open.
+/// other reads, is open. PurgeRoom is NOT here — it uses the separate admin
+/// gate (`requires_admin_auth`), not the write envelope.
 fn requires_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/PutObject")
         || procedure.ends_with("/UpdateRef")
         || procedure.ends_with("/PostMessage")
         || procedure.ends_with("/React")
+}
+
+/// Procedures gated by the admin bearer token instead of the write envelope.
+fn requires_admin_auth(procedure: &str) -> bool {
+    procedure.ends_with("/PurgeRoom")
 }
 
 /// Normalize an incoming hex header: strip an optional `0x`, lowercase.
@@ -107,11 +123,16 @@ pub struct AuthInterceptor {
     /// accepted/rejected-write telemetry. Cheap to clone (see `worker::Env`'s
     /// doc note on `worker_impl.rs`).
     env: Env,
+    /// The server's configured `ADMIN_TOKEN` secret, read once per request in
+    /// `worker_impl.rs::serve_connect`. `None` when the secret is unset —
+    /// every `PurgeRoom` call then fails closed with `unauthenticated`,
+    /// regardless of what the caller sends.
+    admin_token: Option<String>,
 }
 
 impl AuthInterceptor {
-    pub fn new(env: Env) -> Self {
-        Self { env }
+    pub fn new(env: Env, admin_token: Option<String>) -> Self {
+        Self { env, admin_token }
     }
 
     /// Check-and-consume `author`'s write budget for `room` against the
@@ -140,7 +161,10 @@ impl AuthInterceptor {
                 &env,
                 &room,
                 "/quota",
-                &QuotaCheckReq { author: author.clone(), bytes: incoming_bytes },
+                &QuotaCheckReq {
+                    author: author.clone(),
+                    bytes: incoming_bytes,
+                },
             )
             .await
             {
@@ -154,7 +178,8 @@ impl AuthInterceptor {
                 None
             } else {
                 Some(ConnectError::resource_exhausted(
-                    resp.reason.unwrap_or_else(|| "write quota exceeded".to_string()),
+                    resp.reason
+                        .unwrap_or_else(|| "write quota exceeded".to_string()),
                 ))
             }
         })
@@ -208,6 +233,28 @@ impl Interceptor for AuthInterceptor {
         // The fully-qualified procedure, e.g. "/mkit.repo.v1.RepoService/UpdateRef".
         let procedure = req.ctx.path().unwrap_or_default().to_owned();
 
+        if requires_admin_auth(&procedure) {
+            let header = req
+                .ctx
+                .header("x-admin-token")
+                .and_then(|v| v.to_str().ok());
+            let authorized = match (self.admin_token.as_deref(), header) {
+                (Some(expected), Some(actual)) if !expected.is_empty() => {
+                    constant_time_eq(expected.as_bytes(), actual.as_bytes())
+                }
+                // Either the server has no ADMIN_TOKEN configured, or the
+                // caller sent no header — both fail closed, never open.
+                _ => false,
+            };
+            return if authorized {
+                next.run(req).await
+            } else {
+                Err(ConnectError::unauthenticated(
+                    "missing or invalid X-Admin-Token",
+                ))
+            };
+        }
+
         if !requires_write_auth(&procedure) {
             return next.run(req).await; // reads are open
         }
@@ -260,8 +307,9 @@ impl Interceptor for AuthInterceptor {
                 if let Some((room, incoming_bytes)) =
                     parse_write_target(&procedure, req.payload.bytes())
                     && is_valid_room(&room)
-                    && let Some(err) =
-                        self.enforce_write_quota(&room, &public_key, incoming_bytes).await
+                    && let Some(err) = self
+                        .enforce_write_quota(&room, &public_key, incoming_bytes)
+                        .await
                 {
                     return Err(err);
                 }

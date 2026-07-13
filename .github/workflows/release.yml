@@ -439,10 +439,61 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  third-party-notices:
+    name: Generate THIRD-PARTY-NOTICES
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, build]
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          COMMIT="${{ needs.validate-release-tag.outputs.commit }}"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ steps.meta.outputs.commit }}
+          fetch-depth: 0
+
+      # cargo-about has no cargo-nextest-style default binary — the crates.io
+      # crate gates its CLI behind the `cli` feature (see rust/about.toml's
+      # header comment). taiki-e/install-action fetches a prebuilt binary the
+      # same way the cargo-nextest/cargo-semver-checks installs above do, so
+      # this job never compiles cargo-about from source.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3  # v2
+        with:
+          tool: cargo-about@0.9.1
+
+      # Scoped to the whole `rust` workspace's resolved dependency graph
+      # (--all-features, so no optional/feature-gated dependency's license is
+      # silently dropped from attribution just because this release's default
+      # build didn't enable it) — matches the SBOM job's whole-workspace scope
+      # above. rust/about.toml carries the accepted-license policy in lockstep
+      # with rust/deny.toml's [licenses] allow list; cargo-about fails this
+      # step outright on any dependency whose license isn't in that list, and
+      # that failure is a real release blocker (see rust/about.toml).
+      - name: Generate THIRD-PARTY-NOTICES
+        working-directory: rust
+        run: |
+          cargo about generate --all-features about.hbs -o THIRD-PARTY-NOTICES
+
+      - name: Upload THIRD-PARTY-NOTICES artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: third-party-notices
+          path: rust/THIRD-PARTY-NOTICES
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [validate-release-tag, build, sbom]
+    needs: [validate-release-tag, build, sbom, third-party-notices]
     permissions:
       contents: write       # create the GitHub Release + upload assets
       id-token: write       # cosign keyless OIDC + SLSA provenance OIDC
@@ -588,8 +639,8 @@ jobs:
         shell: bash
         working-directory: dist
         run: |
-          sha256sum *.tar.gz *.zip *.release.dsse *.provenance.jsonl sbom.cdx.json > SHA256SUMS || \
-            shasum -a 256 *.tar.gz *.zip *.release.dsse *.provenance.jsonl sbom.cdx.json > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.release.dsse *.provenance.jsonl sbom.cdx.json THIRD-PARTY-NOTICES > SHA256SUMS || \
+            shasum -a 256 *.tar.gz *.zip *.release.dsse *.provenance.jsonl sbom.cdx.json THIRD-PARTY-NOTICES > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -632,6 +683,7 @@ jobs:
             dist/*.release.dsse
             dist/*.provenance.jsonl
             dist/sbom.cdx.json
+            dist/THIRD-PARTY-NOTICES
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.crt

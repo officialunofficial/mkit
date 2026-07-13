@@ -40,8 +40,19 @@
   "routes": [{ "pattern": "api.mkit.sh", "custom_domain": true }],
 
   // R2 object store for immutable, content-addressed mkit objects.
-  // Key layout: {room}/objects/{hex(object_id)}.
+  // Key layout: {room}/objects/{hex(object_id)}, {room}/messages/{hex(id)}.
+  //
+  // Objects are never deleted implicitly — only the admin-gated PurgeRoom RPC
+  // (per-room, on demand) and an out-of-band R2 lifecycle rule (bucket-wide,
+  // age-based backstop; NOT configurable from this file — see README
+  // "Retention & backup/restore") ever remove one.
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-repo-objects" }],
+
+  // ADMIN_TOKEN (a Worker *secret*, set via `wrangler secret put ADMIN_TOKEN`
+  // — deliberately NOT declared here; secrets never belong in wrangler.jsonc)
+  // gates the PurgeRoom RPC. See README "Retention & backup/restore" for
+  // provisioning + the constant-time comparison in worker_impl/auth.rs. An
+  // unset secret fails every PurgeRoom call closed, never open.
 
   // The RefStore Durable Object — one instance per room — owns all mutable refs
   // (serial CAS) and the WatchRefs WebSocket fan-out.
