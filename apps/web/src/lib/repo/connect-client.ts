@@ -66,7 +66,13 @@ export async function listMessages(client: RepoConnectClient, room: string, limi
     messageIdHex: hex(m.messageId),
     authorPubkeyHex: hex(m.authorPubkey),
     text: m.text,
-    createdAt: Number(m.createdAt),
+    // `createdAtUnixMs` is the unambiguous field (mkit#795); `createdAt` is
+    // the deprecated same-unit sibling, kept as a fallback only for a stale
+    // cached worker build that predates the new field. `||`, not `??`: a
+    // proto3 scalar absent on the wire decodes as 0n (not null/undefined),
+    // so an old build's response has `createdAtUnixMs` at its zero default,
+    // not unset — only `||` treats that as "fall back to createdAt".
+    createdAt: Number(m.createdAtUnixMs || m.createdAt),
     seq: Number(m.seq),
   }))
 }

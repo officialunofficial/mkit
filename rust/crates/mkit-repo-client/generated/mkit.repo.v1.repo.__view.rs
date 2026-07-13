@@ -5442,6 +5442,8 @@ pub struct PresenceMemberView<'a> {
     pub author_pubkey: ::core::option::Option<&'a [u8]>,
     /// Field 2: `since`
     pub since: ::core::option::Option<i64>,
+    /// Field 3: `since_unix_ms`
+    pub since_unix_ms: ::core::option::Option<i64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for PresenceMemberView<'a> {
@@ -5485,6 +5487,13 @@ impl<'a> ::buffa::MessageView<'a> for PresenceMemberView<'a> {
                 )?;
                 view.since = Some(::buffa::types::decode_int64(&mut cur)?);
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.since_unix_ms = Some(::buffa::types::decode_int64(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -5509,6 +5518,7 @@ impl<'a> ::buffa::MessageView<'a> for PresenceMemberView<'a> {
         ::core::result::Result::Ok(super::super::PresenceMember {
             author_pubkey: self.author_pubkey.map(|b| (b).to_vec()),
             since: self.since,
+            since_unix_ms: self.since_unix_ms,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -5524,6 +5534,9 @@ impl<'a> ::buffa::ViewEncode<'a> for PresenceMemberView<'a> {
             size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
         }
         if let Some(v) = self.since {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.since_unix_ms {
             size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
@@ -5542,6 +5555,9 @@ impl<'a> ::buffa::ViewEncode<'a> for PresenceMemberView<'a> {
         }
         if let Some(v) = self.since {
             ::buffa::types::put_int64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.since_unix_ms {
+            ::buffa::types::put_int64_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -5573,6 +5589,13 @@ impl<'__a> ::serde::Serialize for PresenceMemberView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.since {
             __map.serialize_entry("since", &::buffa::json_helpers::ProtoJson(&__v))?;
+        }
+        if let ::core::option::Option::Some(__v) = self.since_unix_ms {
+            __map
+                .serialize_entry(
+                    "sinceUnixMs",
+                    &::buffa::json_helpers::ProtoJson(&__v),
+                )?;
         }
         __map.end()
     }
@@ -5674,6 +5697,11 @@ impl PresenceMemberOwnedView {
     #[must_use]
     pub fn since(&self) -> ::core::option::Option<i64> {
         self.0.reborrow().since
+    }
+    /// Field 3: `since_unix_ms`
+    #[must_use]
+    pub fn since_unix_ms(&self) -> ::core::option::Option<i64> {
+        self.0.reborrow().since_unix_ms
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<PresenceMemberView<'static>>>
@@ -6564,6 +6592,8 @@ pub struct ChatMessageView<'a> {
     pub created_at: ::core::option::Option<i64>,
     /// Field 5: `seq`
     pub seq: ::core::option::Option<u64>,
+    /// Field 6: `created_at_unix_ms`
+    pub created_at_unix_ms: ::core::option::Option<i64>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ChatMessageView<'a> {
@@ -6628,6 +6658,13 @@ impl<'a> ::buffa::MessageView<'a> for ChatMessageView<'a> {
                 )?;
                 view.seq = Some(::buffa::types::decode_uint64(&mut cur)?);
             }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.created_at_unix_ms = Some(::buffa::types::decode_int64(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -6655,6 +6692,7 @@ impl<'a> ::buffa::MessageView<'a> for ChatMessageView<'a> {
             text: self.text.map(|s| s.to_string()),
             created_at: self.created_at,
             seq: self.seq,
+            created_at_unix_ms: self.created_at_unix_ms,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -6681,6 +6719,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ChatMessageView<'a> {
         if let Some(v) = self.seq {
             size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
         }
+        if let Some(v) = self.created_at_unix_ms {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -6706,6 +6747,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ChatMessageView<'a> {
         }
         if let Some(v) = self.seq {
             ::buffa::types::put_uint64_field(5u32, v, buf);
+        }
+        if let Some(v) = self.created_at_unix_ms {
+            ::buffa::types::put_int64_field(6u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -6746,6 +6790,13 @@ impl<'__a> ::serde::Serialize for ChatMessageView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.seq {
             __map.serialize_entry("seq", &::buffa::json_helpers::ProtoJson(&__v))?;
+        }
+        if let ::core::option::Option::Some(__v) = self.created_at_unix_ms {
+            __map
+                .serialize_entry(
+                    "createdAtUnixMs",
+                    &::buffa::json_helpers::ProtoJson(&__v),
+                )?;
         }
         __map.end()
     }
@@ -6860,6 +6911,11 @@ impl ChatMessageOwnedView {
     #[must_use]
     pub fn seq(&self) -> ::core::option::Option<u64> {
         self.0.reborrow().seq
+    }
+    /// Field 6: `created_at_unix_ms`
+    #[must_use]
+    pub fn created_at_unix_ms(&self) -> ::core::option::Option<i64> {
+        self.0.reborrow().created_at_unix_ms
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<ChatMessageView<'static>>>

@@ -3721,6 +3721,14 @@ pub struct PresenceMember {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub since: ::core::option::Option<i64>,
+    /// Field 3: `since_unix_ms`
+    #[serde(
+        rename = "sinceUnixMs",
+        alias = "since_unix_ms",
+        with = "::buffa::json_helpers::opt_int64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub since_unix_ms: ::core::option::Option<i64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -3730,6 +3738,7 @@ impl ::core::fmt::Debug for PresenceMember {
         f.debug_struct("PresenceMember")
             .field("author_pubkey", &self.author_pubkey)
             .field("since", &self.since)
+            .field("since_unix_ms", &self.since_unix_ms)
             .finish()
     }
 }
@@ -3758,6 +3767,13 @@ impl PresenceMember {
         self.since = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::since_unix_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_since_unix_ms(mut self, value: i64) -> Self {
+        self.since_unix_ms = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(PresenceMember);
 impl ::buffa::MessageName for PresenceMember {
@@ -3783,6 +3799,9 @@ impl ::buffa::Message for PresenceMember {
         if let Some(v) = self.since {
             size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
         }
+        if let Some(v) = self.since_unix_ms {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -3798,6 +3817,9 @@ impl ::buffa::Message for PresenceMember {
         }
         if let Some(v) = self.since {
             ::buffa::types::put_int64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.since_unix_ms {
+            ::buffa::types::put_int64_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3831,6 +3853,15 @@ impl ::buffa::Message for PresenceMember {
                     ::buffa::types::decode_int64(buf)?,
                 );
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.since_unix_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_int64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3841,6 +3872,7 @@ impl ::buffa::Message for PresenceMember {
     fn clear(&mut self) {
         self.author_pubkey = ::core::option::Option::None;
         self.since = ::core::option::Option::None;
+        self.since_unix_ms = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -4444,6 +4476,14 @@ pub struct ChatMessage {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub seq: ::core::option::Option<u64>,
+    /// Field 6: `created_at_unix_ms`
+    #[serde(
+        rename = "createdAtUnixMs",
+        alias = "created_at_unix_ms",
+        with = "::buffa::json_helpers::opt_int64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub created_at_unix_ms: ::core::option::Option<i64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -4456,6 +4496,7 @@ impl ::core::fmt::Debug for ChatMessage {
             .field("text", &self.text)
             .field("created_at", &self.created_at)
             .field("seq", &self.seq)
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
             .finish()
     }
 }
@@ -4511,6 +4552,13 @@ impl ChatMessage {
         self.seq = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::created_at_unix_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_created_at_unix_ms(mut self, value: i64) -> Self {
+        self.created_at_unix_ms = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(ChatMessage);
 impl ::buffa::MessageName for ChatMessage {
@@ -4545,6 +4593,9 @@ impl ::buffa::Message for ChatMessage {
         if let Some(v) = self.seq {
             size += 1u32 + ::buffa::types::uint64_encoded_len(v) as u32;
         }
+        if let Some(v) = self.created_at_unix_ms {
+            size += 1u32 + ::buffa::types::int64_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -4569,6 +4620,9 @@ impl ::buffa::Message for ChatMessage {
         }
         if let Some(v) = self.seq {
             ::buffa::types::put_uint64_field(5u32, v, buf);
+        }
+        if let Some(v) = self.created_at_unix_ms {
+            ::buffa::types::put_int64_field(6u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -4631,6 +4685,15 @@ impl ::buffa::Message for ChatMessage {
                     ::buffa::types::decode_uint64(buf)?,
                 );
             }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.created_at_unix_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_int64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -4644,6 +4707,7 @@ impl ::buffa::Message for ChatMessage {
         self.text = ::core::option::Option::None;
         self.created_at = ::core::option::Option::None;
         self.seq = ::core::option::Option::None;
+        self.created_at_unix_ms = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

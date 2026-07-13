@@ -37,6 +37,28 @@
 // an Ed25519 envelope — because a purge is an operator action with no
 // room-participant author to attribute. An unset `ADMIN_TOKEN` fails
 // PurgeRoom closed (`unauthenticated`) for every caller, never open.
+//
+// TIMESTAMP CONVENTION (mkit#795): every bare `int64` timestamp field in
+// this file names its own unit — `_unix` for epoch-SECONDS, `_unix_ms` for
+// epoch-MILLISECONDS — because a plain `int64` gives a client no way to
+// tell the two apart otherwise. `CommitEntry.created_at_unix` was always
+// correct; `ChatMessage.created_at` and `PresenceMember.since` predate the
+// convention and are actually epoch-ms despite looking unit-less. Both are
+// now `[deprecated = true]` in favor of a same-named sibling field with the
+// `_unix_ms` suffix (`created_at_unix_ms` / `since_unix_ms`), added rather
+// than renamed in place: this module is checked by `buf breaking` with
+// `breaking.use: [FILE]` (root buf.yaml), and a bare rename changes both
+// the field's name AND its `json_name` — breaking Connect's JSON codec for
+// any existing client, confirmed locally via `buf breaking . --against
+// '.git#branch=main'` before this fix landed. A deprecated field is kept
+// (not deleted) and the server keeps populating it, so old clients still
+// decode correctly during the transition; new clients should read the
+// `_unix_ms` field. Migrating instead to `google.protobuf.Timestamp`
+// throughout would be a real wire-breaking change and would need a sibling
+// `repo2.proto` per this proto tree's breaking-change convention (see
+// ssh.proto/signer.proto's "sibling `ssh2.proto`/`signer2.proto`" header
+// notes and common.proto's "bump to common2.proto") — out of scope here,
+// since the ambiguity is fully fixed by the additive rename above.
 
 edition = "2023";
 
@@ -160,7 +182,7 @@ message CommitEntry {
   string parent = 2;          // 64-hex first parent; empty if root
   string author_pubkey = 3;   // 64-hex signer
   string message = 4;
-  int64 created_at_unix = 5;  // unix seconds (client renders ISO)
+  int64 created_at_unix = 5;  // unix seconds (client renders ISO); the naming model for this file's timestamp convention (mkit#795)
   string kind = 6;            // "commit" | "remix"
   string sources_json = 7;    // [[upstreamHex, commitHex], …]; "[]" for a commit
 }
@@ -255,7 +277,8 @@ message PresenceEvent {
 
 message PresenceMember {
   bytes author_pubkey = 1;      // 32-byte Ed25519 pubkey
-  int64 since = 2;              // epoch-ms the (earliest) connection joined
+  int64 since = 2 [deprecated = true];  // epoch-ms; ambiguous name — use since_unix_ms (mkit#795)
+  int64 since_unix_ms = 3;      // epoch-ms the (earliest) connection joined
 }
 
 // ----------------------------------------------------------------------------
@@ -282,14 +305,15 @@ message ListMessagesRequest {
 }
 
 // One stored chat message. `message_id` is the content address (BLAKE3 of the
-// canonical bytes); `created_at` is server epoch-ms; `seq` is the monotonic
-// per-room order used to merge against commits in the feed.
+// canonical bytes); `created_at_unix_ms` is server epoch-ms; `seq` is the
+// monotonic per-room order used to merge against commits in the feed.
 message ChatMessage {
   bytes message_id = 1;
   bytes author_pubkey = 2;     // 32-byte Ed25519 pubkey of the signer
   string text = 3;
-  int64 created_at = 4;        // server-stamped epoch milliseconds
+  int64 created_at = 4 [deprecated = true];  // epoch-ms; ambiguous name — use created_at_unix_ms (mkit#795)
   uint64 seq = 5;              // monotonic per-room sequence
+  int64 created_at_unix_ms = 6;  // server-stamped epoch milliseconds
 }
 
 message ListMessagesResponse {
