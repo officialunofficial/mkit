@@ -465,7 +465,7 @@ jobs:
       # same way the cargo-nextest/cargo-semver-checks installs above do, so
       # this job never compiles cargo-about from source.
       - name: Install cargo-about
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3  # v2
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
         with:
           tool: cargo-about@0.9.1
 
@@ -662,7 +662,7 @@ jobs:
             SHA256SUMS
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: mkit ${{ steps.meta.outputs.version }}
@@ -906,7 +906,7 @@ jobs:
           ls -la "${STAGE}.tar.gz" "${STAGE}.tar.gz.sha256"
 
       - name: Attach WASM bundle to GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           files: |
