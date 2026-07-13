@@ -211,6 +211,63 @@ jobs:
       - name: buf lint (workspace)
         run: buf lint .
 
+      # buf breaking, one last time, immediately before the actual BSR
+      # publish — against the BSR's OWN currently-published state, not
+      # origin/main (issue #791). proto.yml's PR-time gate and Cloud
+      # Build's codegen-freshness check are both origin/main-relative, so
+      # they only protect a commit that reached main through the normal
+      # required-checks path. This repo has demonstrated admin-override
+      # merges that bypass required checks (PRs #668, #669/#670); an
+      # override that broke a wire-frozen field, followed by a tag, would
+      # otherwise reach buf.build/officialunofficial/mkit-rpc or
+      # -mkit-repo with zero independent verification at push time. This
+      # step closes that gap regardless of how the tagged commit landed on
+      # main.
+      #
+      # `--against buf.build/<owner>/<module>` (no `:ref`) compares against
+      # the module's latest commit on its default BSR branch — the same
+      # semantics as `--against-registry`, but named explicitly so each
+      # step is self-documenting about which module it's checking.
+      #
+      # A module with no prior BSR commit (this job's first-ever run,
+      # before `--create` below has pushed anything) can't have a breaking
+      # change against a state that doesn't exist yet; buf reports that as
+      # "resource ... was not found" rather than a breaking-change
+      # violation, so that specific message is treated as a pass-through
+      # rather than a failure. Any other failure (a real breaking change,
+      # or an actual auth/network problem) fails the job.
+      - name: buf breaking (BSR) — mkit-rpc
+        run: |
+          set -euo pipefail
+          if output="$(buf breaking rust/crates/mkit-rpc/proto \
+              --against buf.build/officialunofficial/mkit-rpc 2>&1)"; then
+            echo "$output"
+          else
+            echo "$output"
+            if grep -q 'was not found' <<<"$output"; then
+              echo "buf.build/officialunofficial/mkit-rpc has no prior published state — first push, skipping breaking check"
+            else
+              echo "::error::buf breaking found an incompatible change vs. the published buf.build/officialunofficial/mkit-rpc module — refusing to publish"
+              exit 1
+            fi
+          fi
+
+      - name: buf breaking (BSR) — mkit-repo
+        run: |
+          set -euo pipefail
+          if output="$(buf breaking apps/repo-worker/proto \
+              --against buf.build/officialunofficial/mkit-repo 2>&1)"; then
+            echo "$output"
+          else
+            echo "$output"
+            if grep -q 'was not found' <<<"$output"; then
+              echo "buf.build/officialunofficial/mkit-repo has no prior published state — first push, skipping breaking check"
+            else
+              echo "::error::buf breaking found an incompatible change vs. the published buf.build/officialunofficial/mkit-repo module — refusing to publish"
+              exit 1
+            fi
+          fi
+
       # `--exclude-unnamed` pushes only the modules that carry a `name:` in
       # the workspace buf.yaml (mkit-rpc, mkit-repo) and skips the unnamed
       # `proto` module (mkit.common.v1/mkit.transport.v1) instead of
