@@ -114,6 +114,9 @@ jobs:
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
         with:
           github_token: ${{ github.token }}
+          # Match proto.yml's BUF_VERSION rather than buf-setup-action's
+          # stale default (1.50.0) -- see web.yml's identical pin for why.
+          version: '1.66.0'
 
       - name: buf lint (apps/repo-worker/proto)
         working-directory: apps/repo-worker
