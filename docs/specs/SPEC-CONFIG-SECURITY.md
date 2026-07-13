@@ -79,6 +79,7 @@ forward-compat slot.
 | `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `mkit push` to MITM.                                                                                                              |
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
+| `transport_auth`                     | SAFE       | Write-auth MODE selector for `mkit+https://`/`mkit+http://` (`""`/`bearer` vs `envelope`, `mkit-transport-connect::ConnectTransport`). Same shape as `remote_type`: it picks which wire-auth mechanism applies, not WHICH key or backend signs — that remains `signer`/`signing_key`/`key.*`, all UNSAFE and unchanged. Flipping it to `envelope` makes `mkit push` sign each write RPC's canonical string (procedure + body digest + timestamp + idempotency key) with the user's existing commit-signing Ed25519 key, but that key ALREADY signs the pushed commit/remix/tag objects themselves for any remote (gated only by `remote_endpoint`'s credential trust, §2's `remote_endpoint` row) — Ed25519 is EUF-CMA secure against chosen-message signing requests, so a repo-chosen endpoint attacker-influencing a signed *request digest* does not expand what a repo-chosen endpoint already gets by attacker-influencing signed *commit content* through the same key. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponises a user-scoped binary / keystore against attacker-chosen content.                                          |
 | `attest.external_signer_path`        | **UNSAFE** | Arbitrary executable path → RCE under the user's UID.                                                                                                                              |
@@ -112,6 +113,14 @@ forward-compat slot.
   regardless of which ref is nominated as default. A hostile clone
   pointing `default_branch = main` at attacker-controlled commits
   does not bypass signature verification.
+- **`transport_auth`**: same borderline shape as `remote_type` — it is a
+  wire-auth MODE selector, not a key/backend selector (those stay
+  UNSAFE). If a future auth mode's canonical string were ever extended
+  to cover repo-controlled data with materially MORE signing power than
+  a commit signature already grants under the same key (e.g. something
+  that could be replayed to authorize an unrelated action, unlike the
+  scoped, freshness-windowed, procedure-and-digest-bound write envelope),
+  this key MUST be reclassified UNSAFE.
 
 ---
 
@@ -150,6 +159,7 @@ durability.objects
 remote_endpoint
 remote_bucket
 remote_type
+transport_auth
 remote.<name>.url / remote.<name>.type   (per named remote)
 branch.<name>.remote / branch.<name>.merge   (per-branch upstream tracking)
 core.<key>                               (allow-listed git-compat keys)

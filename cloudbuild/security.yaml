@@ -26,6 +26,22 @@ steps:
       - -c
       - |
         set -euo pipefail
+        # RUSTSEC-2023-0071 ignore expiry gate — mirrors the check in
+        # .github/workflows/rust-security.yml. The TODO(YYYY-MM-DD) deadline
+        # is parsed straight out of rust/deny.toml (single source of truth)
+        # so this can't drift out of sync with the ignore it's gating.
+        deadline=$(grep -oP 'TODO\(\K\d{4}-\d{2}-\d{2}(?=\))' rust/deny.toml | head -n1)
+        if [ -z "$deadline" ]; then
+          echo "ERROR: could not find a TODO(YYYY-MM-DD) deadline in rust/deny.toml for RUSTSEC-2023-0071" >&2
+          exit 1
+        fi
+        today=$(date -u +%Y-%m-%d)
+        if [[ "$today" > "$deadline" || "$today" == "$deadline" ]]; then
+          echo "ERROR: RUSTSEC-2023-0071 ignore in rust/deny.toml expired on $deadline (today: $today). Re-justify or drop the ignore (see rust/deny.toml and rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs)." >&2
+          exit 1
+        fi
+        echo "RUSTSEC-2023-0071 ignore still valid until $deadline (today: $today)."
+
         # A shell function (lowercase name, no `$`) keeps the long ignore list
         # in one place WITHOUT a `$$VAR` reference — Cloud Build would otherwise
         # consume a bare `$$AUDIT` as a substitution before bash ever sees it.

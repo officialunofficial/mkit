@@ -19,10 +19,19 @@ pub mod __buffa {
         #[allow(unused_imports)]
         use super::*;
         include!("mkit.repo.v1.repo.__view.rs");
+        pub mod oneof {
+            #[allow(unused_imports)]
+            use super::*;
+            include!("mkit.repo.v1.repo.__view_oneof.rs");
+        }
+    }
+    pub mod oneof {
+        #[allow(unused_imports)]
+        use super::*;
+        include!("mkit.repo.v1.repo.__oneof.rs");
     }
     /// Register this package's `Any` type entries and extension entries.
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
-        reg.register_json_any(super::__REF_ENTRY_JSON_ANY);
         reg.register_json_any(super::__PUT_OBJECT_REQUEST_JSON_ANY);
         reg.register_json_any(super::__PUT_OBJECT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__GET_OBJECT_REQUEST_JSON_ANY);
@@ -38,6 +47,10 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__WATCH_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__REF_EVENT_JSON_ANY);
+        reg.register_json_any(super::__ROOM_EVENT_JSON_ANY);
+        reg.register_json_any(super::__REACTION_EVENT_JSON_ANY);
+        reg.register_json_any(super::__PRESENCE_EVENT_JSON_ANY);
+        reg.register_json_any(super::__PRESENCE_MEMBER_JSON_ANY);
         reg.register_json_any(super::__POST_MESSAGE_REQUEST_JSON_ANY);
         reg.register_json_any(super::__POST_MESSAGE_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__LIST_MESSAGES_REQUEST_JSON_ANY);
@@ -48,12 +61,10 @@ pub mod __buffa {
         reg.register_json_any(super::__LIST_REACTIONS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__REACTION_JSON_ANY);
         reg.register_json_any(super::__LIST_REACTIONS_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__PURGE_ROOM_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__PURGE_ROOM_RESPONSE_JSON_ANY);
     }
 }
-#[doc(inline)]
-pub use self::__buffa::view::RefEntryView;
-#[doc(inline)]
-pub use self::__buffa::view::RefEntryOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PutObjectRequestView;
 #[doc(inline)]
@@ -115,6 +126,22 @@ pub use self::__buffa::view::RefEventView;
 #[doc(inline)]
 pub use self::__buffa::view::RefEventOwnedView;
 #[doc(inline)]
+pub use self::__buffa::view::RoomEventView;
+#[doc(inline)]
+pub use self::__buffa::view::RoomEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionEventView;
+#[doc(inline)]
+pub use self::__buffa::view::ReactionEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceEventView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceEventOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceMemberView;
+#[doc(inline)]
+pub use self::__buffa::view::PresenceMemberOwnedView;
+#[doc(inline)]
 pub use self::__buffa::view::PostMessageRequestView;
 #[doc(inline)]
 pub use self::__buffa::view::PostMessageRequestOwnedView;
@@ -154,6 +181,14 @@ pub use self::__buffa::view::ReactionOwnedView;
 pub use self::__buffa::view::ListReactionsResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::ListReactionsResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::PurgeRoomResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.repo.v1.repo.__connect.rs");

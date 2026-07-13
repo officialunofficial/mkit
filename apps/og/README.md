@@ -18,16 +18,23 @@ https://og.mkit.sh/?title=hash&description=Every%20object%20named%20by%20its%20B
 | `title`       | `mkit`                                                   |
 | `description` | `A content-addressed version control toolkit written in Rust.` |
 
-Responses are `image/png` with a one-year immutable cache header.
+`title` is capped at 120 characters (`src/title.ts`) — longer input is
+truncated rather than rejected, since a whole-file whole-title render is the
+same cost either way for this unauthenticated, public endpoint.
+
+Responses are `image/png` with a one-year immutable cache header: the card is
+a pure function of `title`, so the same query always renders the same image.
 
 ## Develop
 
 ```sh
 cd apps/og
 npm install
-npm run dev        # wrangler dev — open http://localhost:8787/
-npm run typecheck  # wrangler types && tsc --noEmit
-npm run deploy     # wrangler deploy (provisions og.mkit.sh on first run)
+npm run dev            # wrangler dev — open http://localhost:8787/
+npm run typecheck      # wrangler types && tsc --noEmit
+npm run test           # vitest run
+npm run test:coverage  # vitest run --coverage (CI-enforced thresholds)
+npm run deploy         # wrangler deploy (provisions og.mkit.sh on first run)
 ```
 
 The brand mark is generated deterministically (`src/grid.ts`, seeded `"mkit"`),

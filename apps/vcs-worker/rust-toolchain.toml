@@ -1,0 +1,10 @@
+# Pin the toolchain for the Cloudflare Workers Build image (this standalone
+# worker isn't a member of the rust/ workspace, so it wouldn't otherwise
+# inherit rust/rust-toolchain.toml). 1.95.0 matches the workspace MSRV and is
+# new enough for the vendored connectrpc codegen's precise-capturing
+# `use<Self>` (Rust 1.82+). Declaring the target here means rustup
+# auto-installs it before the build. Mirrors apps/repo-worker.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]

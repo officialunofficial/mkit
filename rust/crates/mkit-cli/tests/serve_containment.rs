@@ -18,7 +18,7 @@ fn mkit_bin() -> &'static str {
 
 /// A valid Hello frame the server expects before entering the loop.
 /// Encoded as a length-prefixed buffa `SshFrame` per
-/// `mkit-rpc/proto/ssh.proto`.
+/// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`.
 fn encode_hello_frame() -> Vec<u8> {
     use buffa::Message;
     use mkit_rpc::mkit::rpc::v1::ProtocolVersion;

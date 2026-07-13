@@ -195,7 +195,14 @@ fn show_commit_like(
     // on every changed blob (#625).
     let display = DisplaySource::new(store);
     for e in &result.entries {
-        super::diff::emit_entry_patch(out, &display, e).map_err(|e| (e, exit::GENERAL_ERROR))?;
+        super::diff::emit_entry_patch(
+            out,
+            &display,
+            e,
+            mkit_core::ops::DEFAULT_CONTEXT_LINES,
+            mkit_core::ops::WhitespaceMode::Exact,
+        )
+        .map_err(|e| (e, exit::GENERAL_ERROR))?;
     }
     Ok(())
 }

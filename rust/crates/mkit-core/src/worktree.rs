@@ -1996,17 +1996,15 @@ mod tests {
 
         let staged_hash = store_file_object(&store, b"cached content").unwrap();
         let meta = meta_of(&f);
-        let idx = crate::index::Index {
-            entries: vec![crate::index::IndexEntry {
-                path: "locked.txt".into(),
-                status: crate::index::EntryStatus::Blob,
-                object_hash: staged_hash,
-                mtime_ns: mtime_nanos(&meta),
-                size: meta.len(),
-                ino: 0,
-                ctime_ns: 0,
-            }],
-        };
+        let idx = crate::index::Index::from_entries(vec![crate::index::IndexEntry {
+            path: "locked.txt".into(),
+            status: crate::index::EntryStatus::Blob,
+            object_hash: staged_hash,
+            mtime_ns: mtime_nanos(&meta),
+            size: meta.len(),
+            ino: 0,
+            ctime_ns: 0,
+        }]);
 
         // Make any read attempt error out.
         fs::set_permissions(&f, fs::Permissions::from_mode(0o000)).unwrap();
@@ -2107,28 +2105,26 @@ mod tests {
 
         let clean_hash = store_file_object(&store, b"clean bytes").unwrap();
         let stale_hash = crate::hash::hash(b"old content");
-        let idx = crate::index::Index {
-            entries: vec![
-                crate::index::IndexEntry {
-                    path: "clean.txt".into(),
-                    status: crate::index::EntryStatus::Blob,
-                    object_hash: clean_hash,
-                    mtime_ns: 0, // racy-smudged: forces a re-hash
-                    size: 0,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-                crate::index::IndexEntry {
-                    path: "dirty.txt".into(),
-                    status: crate::index::EntryStatus::Blob,
-                    object_hash: stale_hash,
-                    mtime_ns: 0,
-                    size: 0,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-            ],
-        };
+        let idx = crate::index::Index::from_entries(vec![
+            crate::index::IndexEntry {
+                path: "clean.txt".into(),
+                status: crate::index::EntryStatus::Blob,
+                object_hash: clean_hash,
+                mtime_ns: 0, // racy-smudged: forces a re-hash
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            },
+            crate::index::IndexEntry {
+                path: "dirty.txt".into(),
+                status: crate::index::EntryStatus::Blob,
+                object_hash: stale_hash,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            },
+        ]);
         let mut obs = Vec::new();
         build_tree_filtered_observed(&store, work.path(), Some(&idx), &mut obs).unwrap();
 
@@ -2151,18 +2147,16 @@ mod tests {
         fs::write(&f, b"new content").unwrap();
         let stale_hash = crate::hash::hash(b"not the real object");
         let meta = meta_of(&f);
-        let idx = crate::index::Index {
-            entries: vec![crate::index::IndexEntry {
-                path: "changed.txt".into(),
-                status: crate::index::EntryStatus::Blob,
-                object_hash: stale_hash,
-                // size deliberately wrong → mismatch → re-hash.
-                mtime_ns: mtime_nanos(&meta),
-                size: meta.len() + 1,
-                ino: 0,
-                ctime_ns: 0,
-            }],
-        };
+        let idx = crate::index::Index::from_entries(vec![crate::index::IndexEntry {
+            path: "changed.txt".into(),
+            status: crate::index::EntryStatus::Blob,
+            object_hash: stale_hash,
+            // size deliberately wrong → mismatch → re-hash.
+            mtime_ns: mtime_nanos(&meta),
+            size: meta.len() + 1,
+            ino: 0,
+            ctime_ns: 0,
+        }]);
         let tree_h = build_tree_filtered(&store, work.path(), Some(&idx)).unwrap();
         let Object::Tree(t) = store.read_object(&tree_h).unwrap() else {
             panic!("expected tree");

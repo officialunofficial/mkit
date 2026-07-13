@@ -27,6 +27,7 @@ pub mod config;
 pub mod editor;
 pub mod exit;
 pub mod format;
+pub mod progress;
 pub mod remote_dispatch;
 pub mod signal;
 #[cfg(feature = "sparse-checkout")]
@@ -116,6 +117,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "verify" => commands::verify::run(&rest),
         "attest" => commands::attest::run(&rest),
         "verify-attest" => commands::verify_attest::run(&rest),
+        "trust" => commands::trust::run(&rest),
         "config" => commands::config_cmd::run(&rest),
         "remote" => commands::remote::run(&rest),
         "push" => commands::push::run(&rest),

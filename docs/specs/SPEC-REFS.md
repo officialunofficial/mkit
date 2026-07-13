@@ -1,13 +1,26 @@
 ---
 spec: SPEC-REFS
 version: 1
-status: draft
+status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
 
 # SPEC-REFS — mkit v1 ref wire format and semantics
 
-Status: **Normative** for mkit v1.
+Status: **Normative** and **Stable** for mkit v1 — the wire format,
+namespace layout, and CAS semantics below are settled and backed by
+shipped, tested transports (memory, file, s3, http, ssh). One
+deliberately-scoped limitation is called out inline rather than left
+implicit: the in-process memory transport's `.match` CAS is a
+read-then-write race by design (§5.1, §8) — it is single-fibre by
+construction and never shared across processes, so this is a
+documented, permanent property of that one code path, not an open
+question about the format itself, and it does not block this
+document's stability. (The local `mkit-core` `refs::cas_write` helper
+used by commands that write refs directly is, as of #637, serialized
+under a per-ref lock and is *not* part of this exception — see
+§5.1.) See SPEC-CONVENTIONS §2 for what draft/stable and
+normative/advisory mean.
 Scope: ref names, ref wire bytes, ref storage layout, and the exact
 semantics of `listRefs(prefix)` and `updateRef(condition)` across
 transports.
@@ -380,9 +393,10 @@ base/ours/theirs material lives only in this sidecar.
 5. **`.match` on file transport, exactly-one-winner**: two concurrent
    `.match` writers to the same ref — exactly one succeeds, the other
    returns `RefConflict` and the ref is left at the winner's value.
-   Enforced by the OS exclusive lock (§5.1); a corresponding negative
-   test still documents the read-then-write race in the local
-   `mkit-core` `refs::cas_write` helper (not the file transport).
+   Enforced by the OS exclusive lock (§5.1); the local `mkit-core`
+   `refs::cas_write` helper (not the file transport) has the same
+   exactly-one-winner property since #637, proven by
+   `cas_match_race_never_loses_an_update_across_uncoordinated_callers`.
 6. **Ref name grammar**: valid — `main`, `feat/v1.0-beta`,
    `release/2024_09`. Invalid — `feat/..`, `/main`, `main@v1`,
    `feat\branch`, `` (empty).
@@ -412,9 +426,13 @@ base/ours/theirs material lives only in this sidecar.
 | At most one of merge / cherry-pick / rebase is in progress | starting a second operation while state files exist is refused (§6.1) |
 
 One property is deliberately **not** guaranteed in v1: `.match` on the
-in-process memory transport, and on the local `mkit-core` `refs::cas_write`
-helper used by commands that write refs directly rather than through the
-file transport, is a read-then-write race (§5.1, test vector 5). The file
-transport's own `.match` is race-free (OS exclusive lock). Callers needing
-CAS under concurrency through a code path other than the file transport
-MUST use s3/http/ssh.
+in-process memory transport is a read-then-write race (§5.1, test
+vector 5) — it is single-fibre by construction and never shared across
+processes, so this is scoped to that one in-memory code path. The file
+transport's own `.match` is race-free (OS exclusive lock), and the
+local `mkit-core` `refs::cas_write` helper used by commands that write
+refs directly rather than through the file transport is, as of #637,
+likewise serialized under a per-ref lock (§5.1) and is *not* part of
+this exception. Callers needing CAS under concurrency through the
+in-process memory transport MUST use a different transport (file/s3/
+http/ssh) or the local `refs::cas_write` path.

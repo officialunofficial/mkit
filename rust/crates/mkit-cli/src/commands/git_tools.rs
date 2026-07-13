@@ -761,7 +761,14 @@ fn render_patch(
         // commits elsewhere, not a render a human just glances at.
         // Corruption here must surface as a loud `HashMismatch`, not
         // propagate into someone's history — keep this read verified.
-        super::diff::emit_entry_patch(&mut one, store, e).map_err(|m| (m, exit::GENERAL_ERROR))?;
+        super::diff::emit_entry_patch(
+            &mut one,
+            store,
+            e,
+            mkit_core::ops::DEFAULT_CONTEXT_LINES,
+            mkit_core::ops::WhitespaceMode::Exact,
+        )
+        .map_err(|m| (m, exit::GENERAL_ERROR))?;
         // `git am` cannot apply the textual "Binary files differ"
         // notice (and we don't emit git's base85 binary literals), so
         // a series touching binary content would fail at the

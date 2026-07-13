@@ -1,5 +1,6 @@
 import { QueryClient, QueryObserver, MutationObserver, keepPreviousData } from '@tanstack/react-query'
 import { describe, expect, it, vi } from 'vitest'
+import { bytesToHex } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
 import {
@@ -10,6 +11,7 @@ import {
   MockRepoBackend,
   type FeedItem,
   type ReactionEntry,
+  type RepoConnectClient,
   aggregateReactions,
   mergeFeed,
   parseActivityFrame,
@@ -32,6 +34,9 @@ import {
 } from './repo-api'
 
 const SEED = '0101010101010101010101010101010101010101010101010101010101010101'
+
+/** No writes exercised — every WasmRepoBackend fixture below only drives reads through {@link fakeClient}. */
+const NO_WRITES = {} as unknown as RepoWasmClient
 
 /**
  * A fully-stubbed `RepoBackend` with inert no-op defaults; pass `overrides` to make just the method(s) under test do
@@ -60,6 +65,55 @@ function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2)
   for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
   return out
+}
+
+/**
+ * A `RepoConnectClient` stand-in exposing only the six unauthenticated reads `WasmRepoBackend` drives through it
+ * (GetRef, GetObject, ListRefs, ListMessages, ListReactions, ListCommits — see `connect-client.ts`); the write RPCs
+ * stay on the wasm client (`NO_WRITES` above), so the fake never needs them. Each stub receives the SAME
+ * `bytes`/`bigint`-shaped request `connect-client.ts`'s wrapper functions build and returns a generated-message- shaped
+ * response (minus the `$typeName` brand, irrelevant to the wrapper's field reads) — so these tests exercise the real
+ * hex<->bytes / bigint<->number conversion, not a re-declared parallel shape. Missing methods default to an
+ * empty/absent response. Cast at the call site like every other fake in this file (`as unknown as RepoWasmClient`).
+ */
+type GetRefReq = { room: string; name: string }
+type GetObjectReq = { room: string; objectId: Uint8Array }
+type ListRefsReq = { room: string; prefix: string }
+type ListMessagesReq = { room: string; limit: number }
+type ListReactionsReq = { room: string }
+type ListCommitsReq = { room: string; ref: string; startId: Uint8Array; pageSize: number }
+
+function fakeClient(methods: {
+  getRef?: (req: GetRefReq) => { exists: boolean; objectId: Uint8Array }
+  getObject?: (req: GetObjectReq) => { found: boolean; bytes: Uint8Array }
+  listRefs?: (req: ListRefsReq) => { refs: Array<{ name: string; objectId: Uint8Array }> }
+  listMessages?: (req: ListMessagesReq) => {
+    messages: Array<{ messageId: Uint8Array; authorPubkey: Uint8Array; text: string; createdAt: bigint; seq: bigint }>
+  }
+  listReactions?: (req: ListReactionsReq) => {
+    reactions: Array<{ targetId: string; emoji: string; authorPubkey: Uint8Array }>
+  }
+  listCommits?: (req: ListCommitsReq) => {
+    commits: Array<{
+      hash: string
+      parent: string
+      authorPubkey: string
+      message: string
+      createdAtUnix: bigint
+      kind: string
+      sourcesJson: string
+    }>
+    nextCursor: string
+  }
+}): RepoConnectClient {
+  return {
+    getRef: async (req: GetRefReq) => methods.getRef?.(req) ?? { exists: false, objectId: new Uint8Array(0) },
+    getObject: async (req: GetObjectReq) => methods.getObject?.(req) ?? { found: false, bytes: new Uint8Array(0) },
+    listRefs: async (req: ListRefsReq) => methods.listRefs?.(req) ?? { refs: [] },
+    listMessages: async (req: ListMessagesReq) => methods.listMessages?.(req) ?? { messages: [] },
+    listReactions: async (req: ListReactionsReq) => methods.listReactions?.(req) ?? { reactions: [] },
+    listCommits: async (req: ListCommitsReq) => methods.listCommits?.(req) ?? { commits: [], nextCursor: '' },
+  } as unknown as RepoConnectClient
 }
 
 describe('Connect-flavored envelope construction', () => {
@@ -227,7 +281,7 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
   // follows firstParent from the room's `main` head, decoding each node.
   type Node = { message: string; signer: string; parent?: string }
 
-  /** Build a fake wasm client + api over a static commit graph. */
+  /** Build a fake Connect client + api over a static commit graph. */
   function harness(opts: {
     head: string | undefined
     graph: Record<string, Node>
@@ -240,26 +294,30 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     let head = opts.head
     const refs = opts.refs ?? {}
     // The worker now owns the commit-log walk (ListCommits), so the client just
-    // calls `list_commits` and renders the denormalized metadata. The harness
+    // calls `listCommits` and renders the denormalized metadata. The harness
     // serves that walk straight from `graph`; `listCommitsCalls` lets the
     // head-keyed cache tests assert round-trips the way they used to with decode.
     const listCommitsCalls: string[] = []
 
-    const wasm = {
-      get_ref: async (_base: string, _room: string, name: string) => {
+    const client = fakeClient({
+      getRef: ({ name }) => {
         counters.getRef++
-        if (name === 'main') return head
-        return refs[name]
+        const v = name === 'main' ? head : refs[name]
+        return v ? { exists: true, objectId: hexToBytes(v) } : { exists: false, objectId: new Uint8Array(0) }
       },
-      get_object: async (_base: string, _room: string, hash: string) => {
-        counters.getObject++
-        // Encode the hash itself as the "bytes" so commit_decode can map back.
-        return graph[hash] ? new TextEncoder().encode(hash) : undefined
-      },
-      list_commits: async (_base: string, _room: string, ref: string, startIdHex: string, pageSize: number) => {
+      listCommits: ({ ref, startId, pageSize }) => {
         listCommitsCalls.push(ref)
+        const startIdHex = bytesToHex(startId)
         let cur: string | undefined = startIdHex || (ref === 'main' ? head : refs[ref])
-        const commits: Array<Record<string, unknown>> = []
+        const commits: Array<{
+          hash: string
+          parent: string
+          authorPubkey: string
+          message: string
+          createdAtUnix: bigint
+          kind: string
+          sourcesJson: string
+        }> = []
         const seen = new Set<string>()
         while (cur && commits.length < pageSize && !seen.has(cur)) {
           seen.add(cur)
@@ -268,24 +326,24 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
           commits.push({
             hash: cur,
             parent: node.parent ?? '',
-            authorPubkeyHex: node.signer,
+            authorPubkey: node.signer,
             message: node.message,
-            createdAtUnix: 1,
+            createdAtUnix: 1n,
             kind: 'commit',
             sourcesJson: '[]',
           })
           cur = node.parent
         }
-        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
+        return { commits, nextCursor: cur && commits.length >= pageSize ? cur : '' }
       },
-      list_refs: async (_base: string, _room: string, prefix: string) => {
+      listRefs: ({ prefix }) => {
         const all = [
-          ...(head ? [{ name: 'main', objectIdHex: head }] : []),
-          ...Object.entries(refs).map(([name, objectIdHex]) => ({ name, objectIdHex })),
+          ...(head ? [{ name: 'main', objectId: hexToBytes(head) }] : []),
+          ...Object.entries(refs).map(([name, h]) => ({ name, objectId: hexToBytes(h) })),
         ]
-        return all.filter((r) => r.name.startsWith(prefix))
+        return { refs: all.filter((r) => r.name.startsWith(prefix)) }
       },
-    } as unknown as RepoWasmClient
+    })
 
     const api = {
       // The walk now routes by object_kind first; every node in these
@@ -312,7 +370,7 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
       },
     } as unknown as MkitApi
 
-    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    const backend = new WasmRepoBackend(NO_WRITES, api, () => null, 'http://x', client)
     return { backend, listCommitsCalls, setHead: (h: string | undefined) => (head = h) }
   }
 
@@ -369,15 +427,18 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
 
   it('walks a non-`main` ref independently, tagging entries with that ref', async () => {
     const counters = { decode: 0, getObject: 0, getRef: 0 }
+    // Ref target hashes must be valid hex (they round-trip through real bytes on the wire, unlike the plain-string
+    // CommitEntry.hash/message/signer fields) — 'a1'/'a2' stand in for what were 'm1'/'m2' before this backend moved
+    // GetRef/ListRefs onto the generated Connect client.
     const graph = {
-      m2: { message: 'main 2', signer: 's', parent: 'm1' },
-      m1: { message: 'main 1', signer: 's' },
+      a2: { message: 'main 2', signer: 's', parent: 'a1' },
+      a1: { message: 'main 1', signer: 's' },
       f1: { message: 'feature spike', signer: 's' },
     }
-    const { backend } = harness({ head: 'm2', graph, counters, refs: { feature: 'f1' } })
+    const { backend } = harness({ head: 'a2', graph, counters, refs: { feature: 'f1' } })
 
     const main = await backend.commitLog('room', 'main')
-    expect(main.map((e) => e.hash)).toEqual(['m2', 'm1'])
+    expect(main.map((e) => e.hash)).toEqual(['a2', 'a1'])
     expect(main.every((e) => e.ref === 'main')).toBe(true)
 
     const feature = await backend.commitLog('room', 'feature')
@@ -388,10 +449,10 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
   it('caches per `room::ref`: switching branches does not invalidate the other', async () => {
     const counters = { decode: 0, getObject: 0, getRef: 0 }
     const graph = {
-      m1: { message: 'main', signer: 's' },
+      a1: { message: 'main', signer: 's' },
       f1: { message: 'feature', signer: 's' },
     }
-    const { backend, listCommitsCalls } = harness({ head: 'm1', graph, counters, refs: { feature: 'f1' } })
+    const { backend, listCommitsCalls } = harness({ head: 'a1', graph, counters, refs: { feature: 'f1' } })
 
     await backend.commitLog('room', 'main')
     await backend.commitLog('room', 'feature')
@@ -416,11 +477,13 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     const TREE = '33'.repeat(32)
     const commit = api.commit_encode_and_sign(TREE, '', 'detail me', 1n, SEED)
 
-    const wasm = {
-      get_object: async (_base: string, _room: string, hash: string) =>
-        hash === commit.hash_hex ? commit.bytes : undefined,
-    } as unknown as RepoWasmClient
-    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    const client = fakeClient({
+      getObject: ({ objectId }) =>
+        bytesToHex(objectId) === commit.hash_hex
+          ? { found: true, bytes: commit.bytes }
+          : { found: false, bytes: new Uint8Array(0) },
+    })
+    const backend = new WasmRepoBackend(NO_WRITES, api, () => null, 'http://x', client)
 
     // The detail view fetches the object then decodes it client-side.
     const bytes = await backend.getObject('room', commit.hash_hex)
@@ -437,24 +500,15 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
 
 describe('listRefs exposes all branches in the room', () => {
   it('WasmRepoBackend.listRefs returns main + branches', async () => {
-    const graph = { m1: { message: 'main', signer: 's' }, f1: { message: 'feat', signer: 's' } }
-    // Reuse the wasm harness above via a fresh instance.
-    const backend = new WasmRepoBackend(
-      {
-        get_ref: async (_b: string, _r: string, n: string) =>
-          n === 'main' ? 'm1' : n === 'feature' ? 'f1' : undefined,
-        get_object: async (_b: string, _r: string, h: string) =>
-          graph[h as keyof typeof graph] ? new TextEncoder().encode(h) : undefined,
-        list_refs: async (_b: string, _r: string, prefix: string) =>
-          [
-            { name: 'main', objectIdHex: 'm1' },
-            { name: 'feature', objectIdHex: 'f1' },
-          ].filter((r) => r.name.startsWith(prefix)),
-      } as unknown as RepoWasmClient,
-      {} as unknown as MkitApi,
-      () => null,
-      'http://x',
-    )
+    const client = fakeClient({
+      listRefs: ({ prefix }) => ({
+        refs: [
+          { name: 'main', objectId: hexToBytes('a1') },
+          { name: 'feature', objectId: hexToBytes('f1') },
+        ].filter((r) => r.name.startsWith(prefix)),
+      }),
+    })
+    const backend = new WasmRepoBackend(NO_WRITES, {} as unknown as MkitApi, () => null, 'http://x', client)
     const refs = await backend.listRefs('room')
     expect(refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
     const filtered = await backend.listRefs('room', 'feat')
@@ -663,36 +717,33 @@ describe('WasmRepoBackend.commitLog walks a fork ref of remixes', () => {
     const remix = api.remix_encode_and_sign(TREE, '', sourcesJson, 'a fork', 2n, SEED2)
     const forkRef = forkRefName(upstream.hash_hex)
 
-    // Real object bytes keyed by hash; get_object returns them verbatim so the
-    // walk decodes the genuine remix object (not a fake).
-    const store: Record<string, Uint8Array> = {
-      [remix.hash_hex]: remix.bytes,
-      [upstream.hash_hex]: upstream.bytes,
-    }
-    const wasm = {
-      get_ref: async (_b: string, _r: string, name: string) => (name === forkRef ? remix.hash_hex : undefined),
-      get_object: async (_b: string, _r: string, hash: string) => store[hash],
-      // The worker's ListCommits index serves the remix's denormalized metadata
-      // (kind + sources), so the client renders it with no client-side decode.
-      list_commits: async () => ({
+    // The worker's ListCommits index serves the remix's denormalized metadata (kind + sources), so the client
+    // renders it with no client-side decode / no GetObject round-trip.
+    const client = fakeClient({
+      getRef: ({ name }) =>
+        name === forkRef
+          ? { exists: true, objectId: hexToBytes(remix.hash_hex) }
+          : { exists: false, objectId: new Uint8Array(0) },
+      listCommits: () => ({
         commits: [
           {
             hash: remix.hash_hex,
             parent: '',
-            authorPubkeyHex: 'sig',
+            authorPubkey: 'sig',
             message: 'a fork',
-            createdAtUnix: 2,
+            createdAtUnix: 2n,
             kind: 'remix',
             sourcesJson: JSON.stringify([[UPSTREAM_ID, upstream.hash_hex]]),
           },
         ],
-        nextCursorHex: '',
+        nextCursor: '',
       }),
-      list_refs: async (_b: string, _r: string, prefix: string) =>
-        [{ name: forkRef, objectIdHex: remix.hash_hex }].filter((r) => r.name.startsWith(prefix)),
-    } as unknown as RepoWasmClient
+      listRefs: ({ prefix }) => ({
+        refs: [{ name: forkRef, objectId: hexToBytes(remix.hash_hex) }].filter((r) => r.name.startsWith(prefix)),
+      }),
+    })
 
-    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    const backend = new WasmRepoBackend(NO_WRITES, api, () => null, 'http://x', client)
     const log = await backend.commitLog('room', forkRef)
     // Root remix → the walk yields just the remix (its parents are empty).
     expect(log.map((e) => e.hash)).toEqual([remix.hash_hex])
@@ -807,36 +858,36 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
 describe('WasmRepoBackend object cache (content-addressed → cache forever)', () => {
   function spyClient(store: Record<string, Uint8Array>) {
     const calls: string[] = []
-    const wasm = {
-      get_ref: async () => undefined,
-      get_object: async (_b: string, _r: string, hash: string) => {
-        calls.push(hash)
-        return store[hash]
+    const client = fakeClient({
+      getObject: ({ objectId }) => {
+        const hex = bytesToHex(objectId)
+        calls.push(hex)
+        const bytes = store[hex]
+        return bytes ? { found: true, bytes } : { found: false, bytes: new Uint8Array(0) }
       },
-      list_refs: async () => [],
-    } as unknown as RepoWasmClient
-    return { wasm, calls }
+    })
+    return { client, calls }
   }
 
   it('getObject for the same hash issues exactly ONE underlying client call', async () => {
     const bytes = new Uint8Array([1, 2, 3])
-    const { wasm, calls } = spyClient({ h1: bytes })
-    const backend = new WasmRepoBackend(wasm, {} as unknown as MkitApi, () => null, 'http://x')
+    const { client, calls } = spyClient({ a1: bytes })
+    const backend = new WasmRepoBackend(NO_WRITES, {} as unknown as MkitApi, () => null, 'http://x', client)
 
-    const a = await backend.getObject('room', 'h1')
-    const b = await backend.getObject('room', 'h1')
+    const a = await backend.getObject('room', 'a1')
+    const b = await backend.getObject('room', 'a1')
     expect(a).toEqual(bytes)
     expect(b).toEqual(bytes)
-    expect(calls).toEqual(['h1']) // second read served from cache
+    expect(calls).toEqual(['a1']) // second read served from cache
   })
 
   it('getObject for a DIFFERENT hash still fetches', async () => {
-    const { wasm, calls } = spyClient({ h1: new Uint8Array([1]), h2: new Uint8Array([2]) })
-    const backend = new WasmRepoBackend(wasm, {} as unknown as MkitApi, () => null, 'http://x')
-    await backend.getObject('room', 'h1')
-    await backend.getObject('room', 'h2')
-    await backend.getObject('room', 'h1') // cached
-    expect(calls).toEqual(['h1', 'h2'])
+    const { client, calls } = spyClient({ a1: new Uint8Array([1]), a2: new Uint8Array([2]) })
+    const backend = new WasmRepoBackend(NO_WRITES, {} as unknown as MkitApi, () => null, 'http://x', client)
+    await backend.getObject('room', 'a1')
+    await backend.getObject('room', 'a2')
+    await backend.getObject('room', 'a1') // cached
+    expect(calls).toEqual(['a1', 'a2'])
   })
 })
 
@@ -847,16 +898,28 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
     let head = initialHead
     const getObjectCalls: string[] = []
     const listCommitsCalls: string[] = []
-    const wasm = {
-      get_ref: async () => head,
-      get_object: async (_b: string, _r: string, hash: string) => {
+    const client = fakeClient({
+      getRef: () => ({ exists: true, objectId: hexToBytes(head) }),
+      getObject: ({ objectId }) => {
+        const hash = bytesToHex(objectId)
         getObjectCalls.push(hash)
-        return graph[hash] ? new TextEncoder().encode(hash) : undefined
+        return graph[hash]
+          ? { found: true, bytes: new TextEncoder().encode(hash) }
+          : { found: false, bytes: new Uint8Array(0) }
       },
-      list_commits: async (_b: string, _r: string, _ref: string, startIdHex: string, pageSize: number) => {
+      listCommits: ({ startId, pageSize }) => {
+        const startIdHex = bytesToHex(startId)
         listCommitsCalls.push(startIdHex || head)
         let cur: string | undefined = startIdHex || head
-        const commits: Array<Record<string, unknown>> = []
+        const commits: Array<{
+          hash: string
+          parent: string
+          authorPubkey: string
+          message: string
+          createdAtUnix: bigint
+          kind: string
+          sourcesJson: string
+        }> = []
         const seen = new Set<string>()
         while (cur && commits.length < pageSize && !seen.has(cur)) {
           seen.add(cur)
@@ -865,18 +928,17 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
           commits.push({
             hash: cur,
             parent: row.parent ?? '',
-            authorPubkeyHex: row.signer,
+            authorPubkey: row.signer,
             message: row.message,
-            createdAtUnix: 1,
+            createdAtUnix: 1n,
             kind: 'commit',
             sourcesJson: '[]',
           })
           cur = row.parent
         }
-        return { commits, nextCursorHex: cur && commits.length >= pageSize ? cur : '' }
+        return { commits, nextCursor: cur && commits.length >= pageSize ? cur : '' }
       },
-      list_refs: async () => [],
-    } as unknown as RepoWasmClient
+    })
     const api = {
       object_kind: (bytes: Uint8Array) => {
         const hash = new TextDecoder().decode(bytes)
@@ -897,7 +959,7 @@ describe('WasmRepoBackend incremental commit-log walk', () => {
         }
       },
     } as unknown as MkitApi
-    const backend = new WasmRepoBackend(wasm, api, () => null, 'http://x')
+    const backend = new WasmRepoBackend(NO_WRITES, api, () => null, 'http://x', client)
     return { backend, getObjectCalls, listCommitsCalls, setHead: (h: string) => (head = h) }
   }
 
@@ -1010,32 +1072,64 @@ describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () =
   })
 })
 
-describe('parseActivityFrame dispatches commit vs chat frames', () => {
-  it('parses a server commit frame (kind=commit, snake_case)', () => {
+/** Hex -> standard base64, matching the proto3-JSON `bytes` field encoding `parseActivityFrame` now expects. */
+function hexToB64(hex: string): string {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin)
+}
+
+describe('parseActivityFrame decodes the RoomEvent proto3-JSON oneof (mkit#705)', () => {
+  it('parses a commit frame ({"commit": {...}})', () => {
     const f = parseActivityFrame(
-      JSON.stringify({ kind: 'commit', name: 'main', object_id: 'abc', author_pubkey: 'pk' }),
+      JSON.stringify({ commit: { name: 'main', objectId: hexToB64('ab'), authorPubkey: hexToB64('cd') } }),
     )
-    expect(f).toEqual({ kind: 'commit', ref: { name: 'main', objectIdHex: 'abc', authorPubkeyHex: 'pk' } })
+    expect(f).toEqual({ kind: 'commit', ref: { name: 'main', objectIdHex: 'ab', authorPubkeyHex: 'cd' } })
   })
 
-  it('parses a legacy commit frame with no kind (back-compat with deployed clients)', () => {
-    const f = parseActivityFrame(JSON.stringify({ name: 'main', object_id: 'abc' }))
-    expect(f?.kind).toBe('commit')
-  })
-
-  it('parses a chat frame (kind=chat, snake_case)', () => {
+  it('parses a chat frame ({"chat": {...}})', () => {
     const f = parseActivityFrame(
-      JSON.stringify({ kind: 'chat', message_id: 'mid', author_pubkey: 'pk', text: 'gm', created_at: 123, seq: 7 }),
+      JSON.stringify({
+        chat: {
+          messageId: hexToB64('ab'),
+          authorPubkey: hexToB64('cd'),
+          text: 'gm',
+          createdAt: 123,
+          seq: 7,
+        },
+      }),
     )
     expect(f).toEqual({
       kind: 'chat',
-      message: { messageIdHex: 'mid', authorPubkeyHex: 'pk', text: 'gm', createdAt: 123, seq: 7 },
+      message: { messageIdHex: 'ab', authorPubkeyHex: 'cd', text: 'gm', createdAt: 123, seq: 7 },
     })
+  })
+
+  it('parses a reaction frame ({"reaction": {...}})', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({
+        reaction: { targetId: 'targethex', emoji: '👍', authorPubkey: hexToB64('cd'), active: true, count: 3 },
+      }),
+    )
+    expect(f).toEqual({
+      kind: 'reaction',
+      reaction: { targetIdHex: 'targethex', emoji: '👍', authorPubkeyHex: 'cd', active: true, count: 3 },
+    })
+  })
+
+  it('parses a presence frame ({"presence": {...}})', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({ presence: { members: [{ authorPubkey: hexToB64('ab'), since: 100 }], viewers: 2 } }),
+    )
+    expect(f).toEqual({ kind: 'presence', presence: { members: [{ pubkeyHex: 'ab', since: 100 }], viewers: 2 } })
   })
 
   it('returns null for malformed or incomplete frames', () => {
     expect(parseActivityFrame('not json')).toBeNull()
-    expect(parseActivityFrame(JSON.stringify({ name: 'main' }))).toBeNull() // commit missing object id
+    expect(parseActivityFrame(JSON.stringify({ commit: { name: 'main' } }))).toBeNull() // commit missing object id
+    expect(parseActivityFrame(JSON.stringify({}))).toBeNull() // no recognized oneof key
     expect(parseActivityFrame(42 as unknown)).toBeNull()
   })
 })

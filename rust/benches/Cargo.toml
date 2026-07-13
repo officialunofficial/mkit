@@ -38,6 +38,15 @@ harness = false
 name = "pack_create"
 harness = false
 
+# Issue #646 — SPEC-PACKFILE v2 zstd compression: pack-byte comparison
+# ({v1 uncompressed, v2 compressed}) for a small multi-commit text-file
+# corpus. Not gated on any feature — `pack-zstd` is a default feature
+# of `mkit-core`, so a plain `cargo bench -p mkit-benches --bench
+# pack_compression` exercises the real compressed path.
+[[bench]]
+name = "pack_compression"
+harness = false
+
 [[bench]]
 name = "store_write"
 harness = false
@@ -53,6 +62,14 @@ harness = false
 # fix. No feature gate: repo_lock is always compiled.
 [[bench]]
 name = "lock_contention"
+harness = false
+
+# Issue #708 — `mkit add -A` staging cost (10k/100k synthetic files),
+# guarding against the `Index::find_entry`/`remove_file_directory_conflicts`
+# O(n)-scan-per-file regression that made bulk staging O(N^2). No feature
+# gate: `add` is always compiled.
+[[bench]]
+name = "add_staging"
 harness = false
 
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
@@ -103,6 +120,11 @@ serde_json = "1"
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
 mkit-core = { path = "../crates/mkit-core" }
+# add_staging.rs drives the real `mkit add -A` CLI path in-process (issue
+# #708) — mkit-cli's library surface is unstable/internal-only (see its
+# Cargo.toml header), which is fine for a dev-dependency exercising it as
+# a black box, same as the CLI's own integration tests do.
+mkit-cli = { path = "../crates/mkit-cli" }
 blake3 = "1"
 sha1 = "0.11"
 sha2 = "0.10"

@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::{ConnectRpcService, Router};
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use tower::ServiceExt;
 use worker::send::SendFuture;
-use worker::{event, Context, Env, Method, Request, Response, Result};
+use worker::{Context, Env, Method, Request, Response, Result, event};
 
 pub mod auth;
 pub mod commit_index;
@@ -38,9 +39,11 @@ pub use refstore::RefStore;
 /// this is refused with `invalid_argument`.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 
-/// Headers we expose for cross-origin browser clients.
+/// Headers we expose for cross-origin browser clients. `x-admin-token` is
+/// listed for completeness (an operator console could call PurgeRoom
+/// cross-origin) even though the shipped web demo never sends it.
 const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created-at, \
-     idempotency-key, content-type, connect-protocol-version";
+     idempotency-key, x-admin-token, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
 /// Append the permissive `Access-Control-Allow-Origin: *` header to a response.
@@ -58,7 +61,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // any routing, so browsers can complete the preflight for the signed-write
     // headers (X-Public-Key, …) regardless of the eventual route.
     if req.method() == Method::Options {
-        let mut headers = worker::Headers::new();
+        let headers = worker::Headers::new();
         let _ = headers.set("Access-Control-Allow-Origin", "*");
         let _ = headers.set("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
         let _ = headers.set("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
@@ -70,28 +73,28 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // straight to the room's RefStore DO (see README "WatchRefs"). Everything
     // else is a ConnectRPC call routed through the Router.
     let path = req.path();
-    if let Some(room) = path.strip_prefix("/watch/") {
-        if !room.is_empty() {
-            // Validate the room with the SAME allow-list the unary path enforces
-            // (see `service::check_room` → `is_valid_room`) BEFORE addressing a
-            // DO via `id_from_name`: the room is used as the DO instance name, so
-            // an unvalidated value must not reach `watch_fallback`.
-            if !is_valid_room(room) {
-                return Ok(with_cors(Response::error("invalid room", 400)?));
-            }
-            // Forward the optional `?pubkey=<hex>` so the DO can attribute live
-            // presence to a key (absent → a signed-out viewer).
-            let pubkey = req.url().ok().and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "pubkey")
-                    .map(|(_, v)| v.into_owned())
-            });
-            // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
-            // NOT run `with_cors` on it: CORS headers are meaningless on a 101
-            // handshake, and mutating the upgrade response can drop the
-            // `webSocket` it carries. CORS stays on the unary/JSON path only.
-            return watch_fallback(env, room, pubkey).await;
+    if let Some(room) = path.strip_prefix("/watch/")
+        && !room.is_empty()
+    {
+        // Validate the room with the SAME allow-list the unary path enforces
+        // (see `service::check_room` → `is_valid_room`) BEFORE addressing a
+        // DO via `id_from_name`: the room is used as the DO instance name, so
+        // an unvalidated value must not reach `watch_fallback`.
+        if !is_valid_room(room) {
+            return Ok(with_cors(Response::error("invalid room", 400)?));
         }
+        // Forward the optional `?pubkey=<hex>` so the DO can attribute live
+        // presence to a key (absent → a signed-out viewer).
+        let pubkey = req.url().ok().and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "pubkey")
+                .map(|(_, v)| v.into_owned())
+        });
+        // Return the WebSocket upgrade Response (status 101) DIRECTLY — do
+        // NOT run `with_cors` on it: CORS headers are meaningless on a 101
+        // handshake, and mutating the upgrade response can drop the
+        // `webSocket` it carries. CORS stays on the unary/JSON path only.
+        return watch_fallback(env, room, pubkey).await;
     }
 
     serve_connect(req, env).await
@@ -99,8 +102,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
 /// The Connect `invalid_argument` 400 returned when a request body exceeds the cap.
 fn body_too_large() -> Result<Response> {
-    let payload =
-        format!("{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}");
+    let payload = format!(
+        "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
+    );
     let mut resp = Response::error(payload, 400)?;
     let _ = resp.headers_mut().set("Content-Type", "application/json");
     Ok(resp)
@@ -117,10 +121,10 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // whole payload in the isolate first (the only large input is PutObject
     // `bytes`). The post-buffer check below is the backstop for chunked/
     // unknown-length requests where Content-Length is absent.
-    if let Ok(Some(len)) = req.headers().get("content-length") {
-        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
-            return Ok(with_cors(body_too_large()?));
-        }
+    if let Ok(Some(len)) = req.headers().get("content-length")
+        && len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES)
+    {
+        return Ok(with_cors(body_too_large()?));
     }
     let body = req.bytes().await.unwrap_or_default();
     if body.len() > MAX_BODY_BYTES {
@@ -157,14 +161,26 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         }
     }
 
+    // Read the admin secret BEFORE `env` moves into `RepoServer::new` below.
+    // `env.secret()` is `Err` when the binding doesn't exist (never
+    // configured, or a local `wrangler dev` run with no `.dev.vars` entry) —
+    // that maps to `None`, which the interceptor treats as "fail every
+    // PurgeRoom call closed", not "allow any token".
+    let admin_token = env.secret("ADMIN_TOKEN").ok().map(|s| s.to_string());
+
     // Build the service fresh per request — `Env` is Send and cheap to clone;
-    // the service holds no cross-request state.
-    let router: Router = Arc::new(RepoServer::new(env)).register(Router::new());
+    // the service holds no cross-request state. The interceptor needs its own
+    // `Env` clone too: it addresses the room's RefStore DO directly for the
+    // write-quota check (ahead of, and independent of, the handler's own DO
+    // calls), and separately reaches the `WRITE_EVENTS` Analytics Engine
+    // binding for accepted/rejected-write telemetry (see worker_impl/auth.rs).
+    let router: Router = Arc::new(RepoServer::new(env.clone())).register(Router::new());
     // Default compression policy (gzip large responses). The wasm client now
     // re-asserts `content-encoding` from the gzip magic and decompresses, so the
     // earlier "browser strips the header → client decodes raw gzip" bug is fixed
     // at the source (see mkit-repo-client transport `is_gzip`).
-    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
+    let svc =
+        ConnectRpcService::new(router).with_interceptor(AuthInterceptor::new(env, admin_token));
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
     // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`
@@ -178,12 +194,38 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
 
     let status = http_resp.status().as_u16();
     let resp_headers = http_resp.headers().clone();
-    let collected = SendFuture::new(async move { http_resp.into_body().collect().await })
-        .await
-        .map(|c| c.to_bytes())
-        .unwrap_or_default();
 
-    let mut out = Response::from_bytes(collected.to_vec())?.with_status(status);
+    // Stream the response body chunk-by-chunk rather than buffering it whole.
+    // A unary response is a single chunk either way, but a server-streaming
+    // RPC (`WatchRefs`) produces an OPEN-ENDED body — it only reaches EOF
+    // when the client disconnects — so the previous `.collect()`-then-
+    // `from_bytes` would block forever waiting for a terminal chunk that
+    // never comes, and the client would never see a single byte. Bridging a
+    // borrowed `WebSocket::events()` into a `'static + Send` `ServiceStream`
+    // (see `worker_impl/service.rs::watch_refs`) is necessary but not
+    // SUFFICIENT for Connect server-streaming on Workers — this half, the
+    // generic HTTP adapter's response side, is the other half: it has to
+    // forward each Connect envelope frame to the client as `svc.oneshot`
+    // produces it, not wait for the stream to end.
+    //
+    // KNOWN GAP (2026-07-11): switching to `from_stream` here made the
+    // bridge itself provably work under `wrangler dev` (see the `watch_refs`
+    // doc comment) but did NOT get a byte of the response back to a test
+    // client — `curl -N`/`fetch()` against `WatchRefs` still see zero bytes,
+    // even after the bridge logged real `RefEvent`s flowing through it. Not
+    // yet root-caused: could be a `wrangler dev`/miniflare-local limitation
+    // for wasm-worker `ReadableStream` responses, or a remaining issue in
+    // this adapter — unverified against a real deployed Worker (no deploy
+    // credentials in this environment). See README "WatchRefs / streaming".
+    let body_stream = http_resp.into_body().into_data_stream().map(
+        |item: std::result::Result<Bytes, std::convert::Infallible>| {
+            // `ConnectRpcBody`'s `Error` is `Infallible`, so `item` is always
+            // `Ok`; `unwrap_or_default()` just avoids matching a variant that
+            // can't exist while giving the closure a concrete `Result` type.
+            Ok::<Vec<u8>, worker::Error>(item.unwrap_or_default().to_vec())
+        },
+    );
+    let mut out = Response::from_stream(body_stream)?.with_status(status);
     let out_headers = out.headers_mut();
     for (k, v) in resp_headers.iter() {
         if let Ok(val) = v.to_str() {

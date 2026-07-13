@@ -11,14 +11,21 @@
 
 use worker::*;
 
+mod audit;
 mod envelope;
 mod names;
 
+use audit::{audit_for, WriteAudit};
 use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
 use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
 
 /// KV namespace binding (declared in wrangler.jsonc).
 const KV_BINDING: &str = "NAMES";
+
+/// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
+/// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
+/// `WRITE_EVENTS` binding name so the two datasets share vocabulary.
+const WRITE_EVENTS_BINDING: &str = "WRITE_EVENTS";
 
 /// Envelope `procedure` field for a name write — the web client signs the same
 /// constant, so changing it here is a breaking protocol change.
@@ -31,6 +38,13 @@ const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
 /// Cap on `/resolve` batch size (KV has no multi-get; we loop sequentially).
 const MAX_RESOLVE: usize = 256;
 
+/// Reject any request body larger than this. Both write bodies (`set_name`'s
+/// JSON name payload, `resolve`'s pubkey list) are tiny; buffering more than
+/// this is refused with `invalid_argument` before `req.bytes()` materializes
+/// the whole payload in the isolate. Mirrors apps/repo-worker's
+/// `worker_impl::MAX_BODY_BYTES` pattern.
+const MAX_BODY_BYTES: usize = 64 * 1024; // 64 KiB
+
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Answer the CORS preflight before routing so the browser can send the
@@ -41,6 +55,16 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let method = req.method();
     let path = req.path();
+
+    // Body cap, checked once in the shared entry point so both write routes
+    // (`set_name`, `resolve`) get the pre-buffer rejection for free. Reject by
+    // Content-Length BEFORE buffering (O(1)); the post-buffer check inside
+    // `read_capped_body` is the backstop for chunked/unknown-length requests.
+    if let Ok(Some(len)) = req.headers().get("content-length") {
+        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
+            return Ok(with_cors(body_too_large()?));
+        }
+    }
 
     let out = if method == Method::Get && (path == "/" || path == "/health") {
         Response::ok("mkit-keys-worker ok")
@@ -84,6 +108,72 @@ fn json_response(body: String) -> Result<Response> {
     Ok(resp)
 }
 
+/// The `invalid_argument` 400 returned when a request body exceeds the cap.
+/// Matches apps/repo-worker's `worker_impl::body_too_large` JSON shape so both
+/// workers' HTTP surfaces are consistent.
+fn body_too_large() -> Result<Response> {
+    let payload = format!(
+        "{{\"code\":\"invalid_argument\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
+    );
+    let mut resp = Response::error(payload, 400)?;
+    let _ = resp.headers_mut().set("Content-Type", "application/json");
+    Ok(resp)
+}
+
+/// Read the request body, enforcing `MAX_BODY_BYTES` as a backstop for
+/// chunked/unknown-length requests where Content-Length was absent (the
+/// `fetch` entry point already rejected any declared Content-Length over the
+/// cap before this runs).
+async fn read_capped_body(req: &mut Request) -> Result<std::result::Result<Vec<u8>, Response>> {
+    let body = req.bytes().await?;
+    if body.len() > MAX_BODY_BYTES {
+        return Ok(Err(body_too_large()?));
+    }
+    Ok(Ok(body))
+}
+
+/// Push one audit record to the `WRITE_EVENTS` Analytics Engine dataset. A
+/// missing binding (e.g. local `wrangler dev` without it configured) or a
+/// failed write is logged and swallowed — telemetry must never fail the
+/// request it's describing.
+fn log_write(env: &Env, audit: &WriteAudit) {
+    let dataset = match env.analytics_engine(WRITE_EVENTS_BINDING) {
+        Ok(d) => d,
+        Err(e) => {
+            console_error!("{WRITE_EVENTS_BINDING} analytics engine binding unavailable: {e}");
+            return;
+        }
+    };
+    // `indexes` takes exactly one value (Analytics Engine drops multi-index
+    // points) — "accepted"/"rejected" — so the two outcomes are cheaply
+    // filterable in a query without parsing blobs.
+    let point = match audit {
+        WriteAudit::Accepted {
+            procedure,
+            signer_pubkey,
+            bytes,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["accepted"])
+            .add_blob(procedure.as_str())
+            .add_blob(signer_pubkey.as_str())
+            .add_double(*bytes as f64)
+            .build(),
+        WriteAudit::Rejected {
+            procedure,
+            reason,
+            status,
+        } => AnalyticsEngineDataPointBuilder::new()
+            .indexes(["rejected"])
+            .add_blob(procedure.as_str())
+            .add_blob(reason.as_str())
+            .add_double(f64::from(*status))
+            .build(),
+    };
+    if let Err(e) = dataset.write_data_point(&point) {
+        console_error!("analytics engine write_data_point failed: {e}");
+    }
+}
+
 fn read_envelope_headers(req: &Request) -> EnvelopeHeaders {
     let h = req.headers();
     EnvelopeHeaders {
@@ -114,11 +204,24 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
     }
 
     let headers = read_envelope_headers(req);
-    let body = req.bytes().await?;
+    let body = match read_capped_body(req).await? {
+        Ok(body) => body,
+        Err(resp) => return Ok(resp),
+    };
     let actual_digest = blake3_hex(&body);
     let now = Date::now().as_millis() as i64;
 
-    let signer = match verify_envelope(SET_NAME_PROCEDURE, &actual_digest, now, &headers) {
+    // Log the accepted/rejected outcome BEFORE branching on it, so a
+    // rejected write (bad signature, stale timestamp, …) is observable too —
+    // see #695. `audit_for` is pure and unit-tested in `audit.rs`; only the
+    // Analytics Engine write below is untested worker glue.
+    let verify_result = verify_envelope(SET_NAME_PROCEDURE, &actual_digest, now, &headers);
+    log_write(
+        env,
+        &audit_for(SET_NAME_PROCEDURE, body.len() as u64, &verify_result),
+    );
+
+    let signer = match verify_result {
         VerifyEnvelope::Ok { public_key } => public_key.to_ascii_lowercase(),
         VerifyEnvelope::Err { status, error } => return Response::error(error, status),
     };
@@ -147,7 +250,10 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
 
 /// POST /resolve — batch-read names for a list of pubkeys (for the commit log).
 async fn resolve(req: &mut Request, env: &Env) -> Result<Response> {
-    let body = req.bytes().await?;
+    let body = match read_capped_body(req).await? {
+        Ok(body) => body,
+        Err(resp) => return Ok(resp),
+    };
     let Ok(parsed) = serde_json::from_slice::<ResolveBody>(&body) else {
         return Response::error("invalid body", 400);
     };

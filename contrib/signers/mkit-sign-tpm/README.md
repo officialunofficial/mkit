@@ -132,7 +132,7 @@ little-endian length prefix, `MAX_FRAME_BYTES = 1 MiB`) on stdin and
 stdout — NOT a JSON line protocol. See
 [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md)
 and [`docs/specs/SPEC-RPC.md`](../../../docs/specs/SPEC-RPC.md); the schema is
-[`rust/crates/mkit-rpc/proto/signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto).
+[`rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto).
 
 The conversation:
 

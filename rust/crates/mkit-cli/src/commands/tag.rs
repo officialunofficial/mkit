@@ -16,7 +16,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Object, ObjectType, Tag};
 use mkit_core::refs;
@@ -26,10 +26,16 @@ use mkit_core::store::ObjectStore;
 use crate::clap_shim;
 use crate::editor::spawn_editor;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
 
 const TAG_EDITMSG_TEMPLATE: &str =
     "\n# Write a message for tag.\n# Lines starting with '#' are ignored.\n";
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TagFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit tag", about = "List, create, or delete tags.")]
@@ -54,10 +60,26 @@ struct TagOpts {
     /// Override the tagger Identity for this tag.
     #[arg(long = "author", value_name = "SPEC")]
     author_spec: Option<String>,
+    /// Output format. On the list form, JSONL with keys `name`, `hash`,
+    /// `annotated`, `signed`; on create/delete, one outcome object.
+    #[arg(long, value_enum, default_value = "default")]
+    format: TagFormat,
     /// Tag name. Omit to list all tags.
     name: Option<String>,
     /// Commit-ish to tag. Defaults to HEAD.
     target: Option<String>,
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 #[must_use]
@@ -66,6 +88,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(opts.format, TagFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -85,7 +108,7 @@ pub fn run(args: &[String]) -> u8 {
         if opts.delete {
             return super::usage_error("mkit tag: -l and -d are mutually exclusive");
         }
-        return list(&layout, opts.name.as_deref());
+        return list(&layout, opts.name.as_deref(), json);
     }
 
     match (opts.delete, opts.name.as_deref()) {
@@ -106,9 +129,23 @@ pub fn run(args: &[String]) -> u8 {
                             let _ = writeln!(stderr, "Deleted tag '{name}'");
                         }
                     }
+                    drop(stderr);
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_bool("ok", true)
+                            .field_str("kind", "deleted")
+                            .field_str("name", name)
+                            .field_opt_hash("hash", was.as_ref());
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    }
                     exit::OK
                 }
-                Err(e) => emit_err(&format!("delete tag {name}: {e}"), exit::GENERAL_ERROR),
+                Err(e) => emit_err_json(
+                    &format!("delete tag {name}: {e}"),
+                    exit::GENERAL_ERROR,
+                    json,
+                ),
             }
         }
         (true, None) => super::usage_error("usage: mkit tag -d <name>"),
@@ -116,27 +153,27 @@ pub fn run(args: &[String]) -> u8 {
             if annotated || opts.message.is_some() {
                 return super::usage_error("usage: mkit tag -a|-s <name> [-m <msg>] [<commit>]");
             }
-            list(&layout, None)
+            list(&layout, None, json)
         }
         (false, Some(name)) => {
             if annotated {
-                create_annotated(&layout, &opts, name)
+                create_annotated(&layout, &opts, name, json)
             } else {
                 if opts.message.is_some() {
                     return super::usage_error(
                         "the -m flag requires -a or -s (annotated/signed tag)",
                     );
                 }
-                create_lightweight(&layout, name, opts.target.as_deref())
+                create_lightweight(&layout, name, opts.target.as_deref(), json)
             }
         }
     }
 }
 
-fn list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
+fn list(layout: &RepoLayout, pattern: Option<&str>, json: bool) -> u8 {
     let mut tags = match refs::list_tags(layout) {
         Ok(t) => t,
-        Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
+        Err(e) => return emit_err_json(&format!("list tags: {e}"), exit::GENERAL_ERROR, json),
     };
     if let Some(pat) = pattern {
         tags.retain(|t| super::branch::glob_match(pat, &t.name));
@@ -146,29 +183,32 @@ fn list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
     let store = ObjectStore::open(layout).ok();
     let mut stdout = std::io::stdout().lock();
     for t in tags {
+        let annotation = t.hash.and_then(|h| {
+            let store = store.as_ref()?;
+            match store.read_object(&h) {
+                Ok(Object::Tag(tag)) => Some(tag.signature != [0u8; 64]),
+                _ => None,
+            }
+        });
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_str("name", &t.name)
+                .field_opt_hash("hash", t.hash.as_ref())
+                .field_bool("annotated", annotation.is_some())
+                .field_bool("signed", annotation.unwrap_or(false));
+            let _ = writeln!(stdout, "{}", obj.finish());
+            continue;
+        }
         let short = t
             .hash
             .map(|h| format::short_hash(&h, 8))
             .unwrap_or_default();
-        // Surface annotated-tag metadata: if the ref points at a Tag
-        // object, mark it and show whether it carries a signature.
-        let annotation = t.hash.and_then(|h| {
-            let store = store.as_ref()?;
-            match store.read_object(&h) {
-                Ok(Object::Tag(tag)) => Some(if tag.signature == [0u8; 64] {
-                    "\tannotated".to_string()
-                } else {
-                    "\tsigned".to_string()
-                }),
-                _ => None,
-            }
-        });
-        let _ = writeln!(
-            stdout,
-            "{} {short}{}",
-            t.name,
-            annotation.unwrap_or_default()
-        );
+        let suffix = match annotation {
+            Some(true) => "\tsigned",
+            Some(false) => "\tannotated",
+            None => "",
+        };
+        let _ = writeln!(stdout, "{} {short}{suffix}", t.name);
     }
     exit::OK
 }
@@ -189,7 +229,13 @@ fn resolve_target(
     }
 }
 
-fn create_lightweight(layout: &RepoLayout, name: &str, target_spec: Option<&str>) -> u8 {
+fn create_lightweight(
+    layout: &RepoLayout,
+    name: &str,
+    target_spec: Option<&str>,
+    json: bool,
+) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     let store = match ObjectStore::open(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
@@ -219,7 +265,18 @@ fn create_lightweight(layout: &RepoLayout, name: &str, target_spec: Option<&str>
     // `Missing` (issue #206) refuses to silently overwrite an existing
     // tag of the same name.
     match refs::update_tag(layout, name, refs::RefWriteCondition::Missing, &h) {
-        Ok(()) => exit::OK,
+        Ok(()) => {
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", true)
+                    .field_str("kind", "lightweight")
+                    .field_str("name", name)
+                    .field_hash("target", &h);
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{}", obj.finish());
+            }
+            exit::OK
+        }
         Err(refs::RefError::Conflict(_)) => {
             emit_err(&format!("tag '{name}' already exists"), exit::CANTCREAT)
         }
@@ -227,7 +284,9 @@ fn create_lightweight(layout: &RepoLayout, name: &str, target_spec: Option<&str>
     }
 }
 
-fn create_annotated(layout: &RepoLayout, opts: &TagOpts, name: &str) -> u8 {
+#[allow(clippy::too_many_lines)] // linear flow: resolve + sign + write + report
+fn create_annotated(layout: &RepoLayout, opts: &TagOpts, name: &str, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     let store = match ObjectStore::open(layout) {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a mkit repo: {e}"), exit::GENERAL_ERROR),
@@ -343,6 +402,18 @@ fn create_annotated(layout: &RepoLayout, opts: &TagOpts, name: &str) -> u8 {
         format::short_hash(&target, 8),
         ObjectType::name(target_type),
     );
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", kind)
+            .field_str("name", name)
+            .field_hash("hash", &tag_hash)
+            .field_hash("target", &target)
+            .field_str("target_type", ObjectType::name(target_type));
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
     exit::OK
 }
 

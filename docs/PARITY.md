@@ -79,6 +79,9 @@ rendered on the web **[`/parity`](../apps/web/src/pages/parity.tsx)** page from
 [`apps/web/src/lib/parity-data.ts`](../apps/web/src/lib/parity-data.ts). That
 page is the single source of truth for *which commands and flags* behave like
 git today; keep it current when a command's behavior changes.
+[`apps/web/src/lib/parity-sync.test.ts`](../apps/web/src/lib/parity-sync.test.ts)
+parses the "Deferred flags" list below and fails CI if a command listed there
+is rendered with an unqualified `'parity'` status on the web page.
 
 This document keeps the surrounding **contract** that the web page distills out
 (it carries user-facing notes only): the scope gate above, and the
@@ -150,11 +153,19 @@ people and agents who learned git's surface aren't surprised:
   (`* [new branch]`, `<old>..<new>`, `+ …(forced update)`, `! [rejected] …`);
   `pull`: `Already up to date.` / `Updating <a>..<b>` + `Fast-forward` +
   diffstat; `fetch`: `From <url>` + per-ref summary (silent on no-op);
-  `clone`: `Cloning into '<dir>'...`. The git object-count / delta-compression
-  **progress lines** (`Enumerating/Counting/Compressing/Writing objects`,
-  `Total N (delta D)`) are a deliberate **follow-up** — mkit's transport is
-  one-object-per-pack and computes no deltas, so those numbers would be
-  fabricated.
+  `clone`: `Cloning into '<dir>'...`. `fetch --all` / `pull --all` repeat the
+  same per-remote summary once per configured remote rather than inventing a
+  combined format. `clone`/`push`/`pull`/`fetch` also stream a live,
+  **honest** transfer-progress line on stderr while the network transfer
+  runs (`Writing objects: N objects, B bytes` / `Unpacking objects: N
+  objects`, #711) — real counts derived from objects actually staged into
+  the outgoing pack / unpacked from a downloaded one, shown only when
+  stderr is a tty (`--quiet`/`-q` or `MKIT_PROGRESS=never` suppress it;
+  `MKIT_PROGRESS=always` forces it). mkit deliberately does **not**
+  fabricate git's object-count / delta-compression progress lines
+  (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) — mkit's
+  transport is one-object-per-pack and computes no cross-branch delta
+  graph, so those specific numbers would be invented.
 - **Local mutation** — `commit`/`cherry-pick`/`revert`: `[<branch> <hash>]
   <subject>` + diffstat + `create/delete mode`; `merge`: `Merge made by the
   'ort' strategy.` / `CONFLICT (content): …` + `Automatic merge failed; …`;
@@ -183,10 +194,12 @@ These commonly-typed flags are recognized as in-scope for full parity but are
 **not yet implemented**; they are larger feature additions best done as their
 own change, and are listed here so the gap is explicit:
 
-- `log -p` / `--stat` / `--decorate` / `--author` / `--grep` / `--since` /
-  `--until` / `--no-merges` / `--first-parent` / `--all` — needs the log
-  renderer + walk extensions.
-- `diff -w` / `-b` / `-U<n>` — whitespace and context-line control.
+- `log -p` / `--stat` / `--decorate` / `--all` — needs the log renderer
+  + walk extensions. (`--author` / `--grep` / `--since` / `--until` /
+  `--no-merges` / `--first-parent` shipped: #712 — `--author`/`--grep`
+  are substring matches rather than regexes, and `--since`/`--until`
+  use a small explicit date grammar rather than git's `approxidate`;
+  both are documented divergences, not gaps.)
 - `branch -r` / `-a` / `-u` / `--unset-upstream` — remote-tracking listing and
   upstream config.
 - `add -n` / `--dry-run` — needs the path-selection pass without the index

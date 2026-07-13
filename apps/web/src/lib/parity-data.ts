@@ -3,6 +3,10 @@
  * User-facing notes only; the surrounding scope gate, machine-output contract, and internal phase/issue tracking live
  * in `docs/PARITY.md`. The framing that matters: mkit targets CLI/UX parity, not on-disk or wire interop with real
  * `.git` repositories. A BLAKE3 object store cannot share bytes with git's SHA-1 store.
+ *
+ * `parity-sync.test.ts` parses `docs/PARITY.md`'s "Deferred flags" list and fails CI if a command listed there is
+ * rendered with an unqualified `'parity'` status below — keep a command's status/note here honest with that list when
+ * either file changes.
  */
 
 export type ParityStatus = 'parity' | 'divergent' | 'non-goal'
@@ -39,7 +43,11 @@ export const categories: ParityCategory[] = [
     blurb: 'Stage, commit, and undo your everyday changes.',
     items: [
       { cmd: 'init', status: 'parity', note: 'Create a repo. The marker is .mkit/, not .git/.' },
-      { cmd: 'add', status: 'parity', note: 'Pathspecs, -A, -u, and -p interactive hunk staging.' },
+      {
+        cmd: 'add',
+        status: 'divergent',
+        note: "Pathspecs, -A, -u, and -p interactive hunk staging. -n/--dry-run isn't implemented yet — a no-op flag would incorrectly stage, so it's deferred rather than faked.",
+      },
       {
         cmd: 'status',
         status: 'parity',
@@ -48,7 +56,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'diff',
         status: 'parity',
-        note: 'Worktree, --staged, ranges, --stat, --name-status, and byte-exact Myers hunks.',
+        note: 'Worktree, --staged, ranges, --stat, --name-status, -w/-b whitespace modes, -U<n> context, and byte-exact Myers hunks.',
       },
       { cmd: 'commit', status: 'parity', note: '-m, -a, --amend, --author. Every commit is signed.' },
       { cmd: 'rm', status: 'parity', note: '--cached, -r, -f. Refuses to destroy modified content without -f.' },
@@ -69,7 +77,11 @@ export const categories: ParityCategory[] = [
     name: 'Branches, tags, and merging',
     blurb: 'Create branches and tags, then merge history back together.',
     items: [
-      { cmd: 'branch', status: 'parity', note: 'Create, list, -v, -d/-D, -m.' },
+      {
+        cmd: 'branch',
+        status: 'divergent',
+        note: "Create, list, -v, -d/-D, -m. Remote-tracking listing and upstream flags (-r, -a, -u, --unset-upstream) aren't implemented yet.",
+      },
       { cmd: 'tag', status: 'parity', note: 'Lightweight, -a, -s, -m, -d.' },
       {
         cmd: 'merge / cherry-pick / rebase',
@@ -87,7 +99,11 @@ export const categories: ParityCategory[] = [
     name: 'History and inspection',
     blurb: 'Read what happened, and find when it changed.',
     items: [
-      { cmd: 'log', status: 'parity', note: 'Ranges, -n, --oneline, --format=json. --graph is accepted as a no-op.' },
+      {
+        cmd: 'log',
+        status: 'divergent',
+        note: 'Ranges, -n, --oneline, --format=json, --author/--grep (substring), --since/--until, --no-merges, --first-parent. --graph is accepted as a no-op. -p, --stat, --decorate, and --all are not yet implemented.',
+      },
       {
         cmd: 'show',
         status: 'parity',
@@ -184,7 +200,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'push / pull / fetch / clone',
         status: 'parity',
-        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. They speak mkit's protocol, not git's wire protocol.",
+        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>. They speak mkit's protocol, not git's wire protocol.",
       },
       {
         cmd: 'git import',
@@ -211,6 +227,11 @@ export const categories: ParityCategory[] = [
         cmd: 'config user.name / user.email',
         status: 'parity',
         note: 'Accepted and round-tripped, but non-authoritative: they never feed the signed identity.',
+      },
+      {
+        cmd: 'config --unset / --local / --global',
+        status: 'parity',
+        note: 'Removes a key from whichever scope a set of it would use (repo vs. user-scoped), or the scope forced by --local/--global. Idempotent on an already-unset key.',
       },
       {
         cmd: 'config core.*',

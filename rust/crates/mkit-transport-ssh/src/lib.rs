@@ -6,7 +6,7 @@
 //! Implements [`mkit_core::protocol::Transport`] over a long-lived
 //! system `ssh(1)` child process, exchanging the seven mkit verbs as
 //! length-prefixed protobuf [`SshFrame`] messages defined in
-//! `mkit-rpc/proto/ssh.proto` (buffa is the Rust runtime mkit uses;
+//! `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto` (buffa is the Rust runtime mkit uses;
 //! the wire is plain protobuf 3 / edition 2023).
 //!
 //! # Design choice: `std::process::Command`, NOT `russh`
@@ -50,7 +50,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{PackKey, Transport, TransportError, TransportResult};
+use mkit_core::protocol::{BackoffIterator, PackKey, Transport, TransportError, TransportResult};
+// Aliased: `mkit_rpc::mkit::rpc::v1::ssh::PackChunk` (the wire protobuf
+// message) is imported unaliased below for the existing frame-building
+// code; `CorePackChunk` is the transport-agnostic streaming type the
+// `Transport::upload_pack_streaming`/`download_pack_streaming` trait
+// methods speak.
+use mkit_core::protocol::PackChunk as CorePackChunk;
 use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
 use mkit_rpc::mkit::rpc::v1::ssh::{
@@ -112,6 +118,23 @@ pub enum SshInitError {
 /// child is torn down before the constructor returns, so a successful
 /// [`SshTransport::connect`] ALWAYS yields a handle whose first verb
 /// call lands on a v1 mkit server.
+///
+/// ## Retry / reconnect (SPEC-TRANSPORT §7)
+///
+/// Every verb is driven through [`mkit_core::protocol::retrying`]. A
+/// `ConnectionFailed` on the child pipe (broken stdin/stdout, a
+/// desynced frame stream, a stalled handshake) marks the connection
+/// `closed`; before each retry attempt the transport transparently
+/// spawns a *new* `ssh` child from the same `target`/`options` and
+/// redoes the `Hello` handshake, then re-issues the verb from scratch
+/// against the fresh connection. This is required for correctness, not
+/// just resilience — resuming a partially-written frame sequence on a
+/// pipe that already desynced would corrupt every subsequent frame, so
+/// the only safe retry is a full reconnect. `upload_pack` is
+/// content-addressed and safe to resend in full on the new connection
+/// (SPEC-TRANSPORT §7); a retried `update_ref` CAS write is not
+/// idempotent and callers MUST disambiguate a `RefConflict` with
+/// `read_ref` as usual.
 #[derive(Debug)]
 pub struct SshTransport {
     /// The child's stdio handles sit behind a `Mutex` so `&self`
@@ -119,6 +142,17 @@ pub struct SshTransport {
     /// pipelined stream — concurrent verbs on one [`SshTransport`]
     /// serialise through this mutex.
     io: Mutex<ChildIo>,
+    /// Remote target, retained so a dropped connection can be
+    /// transparently re-dialed on retry.
+    target: SshTarget,
+    /// `.mkit/config` SSH options, retained for the same reason.
+    options: SshOptions,
+    /// Retry-delay ladder factory. Production uses the spec ladder;
+    /// tests inject a shorter ladder so retry assertions stay fast.
+    backoff: fn() -> BackoffIterator,
+    /// Sleep hook between retry attempts. Production sleeps for the
+    /// full delay; tests inject a no-op.
+    sleep: fn(Duration),
 }
 
 #[derive(Debug)]
@@ -152,36 +186,34 @@ impl SshTransport {
         target: &SshTarget,
         options: &SshOptions,
     ) -> Result<Self, SshInitError> {
-        validate_ssh_path(&target.path)?;
-        let mut cmd = build_ssh_command(target, options);
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| SshInitError::HandshakeFailed("no child stdin".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| SshInitError::HandshakeFailed("no child stdout".into()))?;
-        let stdin_tx = spawn_stdin_writer(stdin);
-        let stdout_rx = spawn_stdout_reader(stdout);
-        let mut io = ChildIo {
-            child,
-            stdin_tx: Some(stdin_tx),
-            stdout_rx,
-            closed: false,
-        };
-        if let Err(e) = perform_client_handshake(&mut io) {
-            // Tear down before returning so the caller never sees a
-            // half-initialised transport.
-            let _ = shut_child(&mut io);
-            return Err(e);
-        }
-        Ok(Self { io: Mutex::new(io) })
+        let io = spawn_and_handshake(target, options)?;
+        Ok(Self {
+            io: Mutex::new(io),
+            target: target.clone(),
+            options: options.clone(),
+            backoff: BackoffIterator::new,
+            sleep: thread::sleep,
+        })
+    }
+
+    /// Test-only constructor with explicit retry hooks — lets unit/e2e
+    /// tests use a short deterministic backoff ladder and a no-op sleep
+    /// instead of the multi-second production ladder.
+    #[doc(hidden)]
+    pub fn connect_with_options_and_retry(
+        target: &SshTarget,
+        options: &SshOptions,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+    ) -> Result<Self, SshInitError> {
+        let io = spawn_and_handshake(target, options)?;
+        Ok(Self {
+            io: Mutex::new(io),
+            target: target.clone(),
+            options: options.clone(),
+            backoff,
+            sleep,
+        })
     }
 
     /// Explicit shutdown — closes stdin and waits for the child.
@@ -193,6 +225,93 @@ impl SshTransport {
             Err(_) => Err(io::Error::other("ssh transport mutex poisoned")),
         }
     }
+
+    /// Ensure the child connection is live, respawning it from
+    /// `self.target` / `self.options` if a prior failure marked it
+    /// `closed`. Called at the top of every retry attempt so a
+    /// `ConnectionFailed` from the previous attempt heals before the
+    /// verb is re-issued.
+    fn ensure_connected(&self) -> TransportResult<()> {
+        let needs_reconnect = {
+            let io = self
+                .io
+                .lock()
+                .map_err(|_| TransportError::ConnectionFailed)?;
+            io.closed
+        };
+        if !needs_reconnect {
+            return Ok(());
+        }
+        let fresh = spawn_and_handshake(&self.target, &self.options)
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        // Defensive: tear down whatever's left of the old child (already
+        // marked closed, but a fresh `shut_child` call is a no-op if so).
+        let _ = shut_child(&mut io);
+        *io = fresh;
+        Ok(())
+    }
+
+    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder,
+    /// reconnecting before every attempt after the first if the prior
+    /// one left the connection `closed`.
+    fn with_retry<T>(
+        &self,
+        mut attempt: impl FnMut(&mut ChildIo) -> TransportResult<T>,
+    ) -> TransportResult<T> {
+        mkit_core::protocol::retrying(
+            || {
+                self.ensure_connected()?;
+                let mut io = self
+                    .io
+                    .lock()
+                    .map_err(|_| TransportError::ConnectionFailed)?;
+                attempt(&mut io)
+            },
+            self.backoff,
+            self.sleep,
+        )
+    }
+}
+
+/// Spawn the `ssh` child, wire up its stdio pumps, and drive the
+/// mandatory `Hello` handshake. Shared by [`SshTransport::connect_with_options`]
+/// and [`SshTransport::ensure_connected`]'s reconnect path so the two
+/// never drift.
+fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<ChildIo, SshInitError> {
+    validate_ssh_path(&target.path)?;
+    let mut cmd = build_ssh_command(target, options);
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| SshInitError::HandshakeFailed("no child stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SshInitError::HandshakeFailed("no child stdout".into()))?;
+    let stdin_tx = spawn_stdin_writer(stdin);
+    let stdout_rx = spawn_stdout_reader(stdout);
+    let mut io = ChildIo {
+        child,
+        stdin_tx: Some(stdin_tx),
+        stdout_rx,
+        closed: false,
+    };
+    if let Err(e) = perform_client_handshake(&mut io) {
+        // Tear down before returning so the caller never sees a
+        // half-initialised connection.
+        let _ = shut_child(&mut io);
+        return Err(e);
+    }
+    Ok(io)
 }
 
 impl Drop for SshTransport {
@@ -211,6 +330,84 @@ impl Drop for SshTransport {
 
 impl Transport for SshTransport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.with_retry(|io| {
+            // Header frame announces the pack id + advertised total length.
+            let header = SshFrame {
+                body: Some(ssh_frame::Body::UploadPack(Box::new(
+                    UploadPack::default()
+                        .with_pack_id(key.as_bytes().to_vec())
+                        .with_total_bytes(bytes.len() as u64),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, header)?;
+
+            // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
+            // so transport-ssh and transport-enc cannot drift on the bound.
+            let mut offset = 0u64;
+            let total = bytes.len();
+            let mut iter_pos = 0usize;
+            while iter_pos < total {
+                let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
+                let chunk = SshFrame {
+                    body: Some(ssh_frame::Body::PackChunk(Box::new(
+                        PackChunk::default()
+                            .with_pack_id(key.as_bytes().to_vec())
+                            .with_offset(offset)
+                            .with_data(bytes[iter_pos..end].to_vec())
+                            .with_last(end == total),
+                    ))),
+                    ..Default::default()
+                };
+                write_child_frame_or_err(io, chunk)?;
+                offset += (end - iter_pos) as u64;
+                iter_pos = end;
+            }
+            if total == 0 {
+                // Empty packs still need a final last=true chunk so the
+                // server knows the upload is complete.
+                let chunk = SshFrame {
+                    body: Some(ssh_frame::Body::PackChunk(Box::new(
+                        PackChunk::default()
+                            .with_pack_id(key.as_bytes().to_vec())
+                            .with_offset(0)
+                            .with_data(Vec::new())
+                            .with_last(true),
+                    ))),
+                    ..Default::default()
+                };
+                write_child_frame_or_err(io, chunk)?;
+            }
+
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                other => Err(unexpected_frame("ssh", "UploadPackResponse", other)),
+            }
+        })
+    }
+
+    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+        self.with_retry(|io| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::DownloadPack(Box::new(
+                    DownloadPack::default().with_pack_id(key.as_bytes().to_vec()),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+
+            read_download_pack_body_from_child(io)
+        })
+    }
+
+    fn upload_pack_streaming(
+        &self,
+        key: &PackKey,
+        total_bytes: u64,
+        chunks: &mut dyn Iterator<Item = TransportResult<CorePackChunk>>,
+    ) -> TransportResult<()> {
         let mut io = self
             .io
             .lock()
@@ -219,52 +416,54 @@ impl Transport for SshTransport {
             return Err(TransportError::ConnectionFailed);
         }
 
-        // Header frame announces the pack id + advertised total length.
+        // Header frame — identical shape to the whole-buffer path.
         let header = SshFrame {
             body: Some(ssh_frame::Body::UploadPack(Box::new(
                 UploadPack::default()
                     .with_pack_id(key.as_bytes().to_vec())
-                    .with_total_bytes(bytes.len() as u64),
+                    .with_total_bytes(total_bytes),
             ))),
             ..Default::default()
         };
         write_child_frame_or_err(&mut io, header)?;
 
-        // Body chunks. The per-frame data cap lives in `mkit_rpc::CHUNK_DATA_MAX`
-        // so transport-ssh and transport-enc cannot drift on the bound.
-        let mut offset = 0u64;
-        let total = bytes.len();
-        let mut iter_pos = 0usize;
-        while iter_pos < total {
-            let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
-            let chunk = SshFrame {
+        // Forward each caller-supplied chunk straight to a wire frame —
+        // unlike `upload_pack`, we never hold more than one chunk (plus
+        // whatever the caller's own iterator buffers) in memory at a
+        // time, so a multi-GB pack streamed from disk stays in bounded
+        // memory here.
+        let mut sent_last = false;
+        for chunk in chunks {
+            let c = chunk?;
+            let last = c.last;
+            let frame = SshFrame {
                 body: Some(ssh_frame::Body::PackChunk(Box::new(
                     PackChunk::default()
                         .with_pack_id(key.as_bytes().to_vec())
-                        .with_offset(offset)
-                        .with_data(bytes[iter_pos..end].to_vec())
-                        .with_last(end == total),
+                        .with_offset(c.offset)
+                        .with_data(c.data)
+                        .with_last(last),
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(&mut io, chunk)?;
-            offset += (end - iter_pos) as u64;
-            iter_pos = end;
+            write_child_frame_or_err(&mut io, frame)?;
+            if last {
+                sent_last = true;
+                break;
+            }
         }
-        if total == 0 {
-            // Empty packs still need a final last=true chunk so the
-            // server knows the upload is complete.
-            let chunk = SshFrame {
-                body: Some(ssh_frame::Body::PackChunk(Box::new(
-                    PackChunk::default()
-                        .with_pack_id(key.as_bytes().to_vec())
-                        .with_offset(0)
-                        .with_data(Vec::new())
-                        .with_last(true),
-                ))),
-                ..Default::default()
-            };
-            write_child_frame_or_err(&mut io, chunk)?;
+        if !sent_last {
+            // The caller's iterator ended (or was empty) without ever
+            // yielding a `last = true` chunk — per the trait contract
+            // this is a protocol-level caller bug, not a transport
+            // failure. The server is left waiting for a final chunk it
+            // will never receive; the connection is unusable for
+            // further verbs, so close it rather than hand back a
+            // half-open child.
+            io.closed = true;
+            let _ = io.stdin_tx.take();
+            terminate_child_now(&mut io.child);
+            return Err(TransportError::ProtocolError);
         }
 
         let resp = read_child_frame_or_err(&mut io)?;
@@ -275,7 +474,10 @@ impl Transport for SshTransport {
         }
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    fn download_pack_streaming(
+        &self,
+        key: &PackKey,
+    ) -> TransportResult<Box<dyn Iterator<Item = TransportResult<CorePackChunk>> + '_>> {
         let mut io = self
             .io
             .lock()
@@ -292,30 +494,34 @@ impl Transport for SshTransport {
         };
         write_child_frame_or_err(&mut io, req)?;
 
-        read_download_pack_body_from_child(&mut io)
+        let header = read_child_frame_or_err(&mut io)?;
+        let total = match header.body {
+            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+            other => return Err(unexpected_frame("ssh", "DownloadPackHeader", other)),
+        };
+
+        let stream =
+            assemble_download_pack_stream(total, move || read_child_frame_or_err(&mut io))?;
+        Ok(Box::new(stream))
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        if io.closed {
-            return Err(TransportError::ConnectionFailed);
-        }
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::PackExists(Box::new(
-                PackExists::default().with_pack_id(key.as_bytes().to_vec()),
-            ))),
-            ..Default::default()
-        };
-        write_child_frame_or_err(&mut io, req)?;
-        let resp = read_child_frame_or_err(&mut io)?;
-        match resp.body {
-            Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
-            other => Err(unexpected_frame("ssh", "PackExistsResponse", other)),
-        }
+        self.with_retry(|io| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::PackExists(Box::new(
+                    PackExists::default().with_pack_id(key.as_bytes().to_vec()),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                other => Err(unexpected_frame("ssh", "PackExistsResponse", other)),
+            }
+        })
     }
 
     fn update_ref(
@@ -331,36 +537,30 @@ impl Transport for SshTransport {
             return Err(TransportError::InvalidRef("ref name too long".into()));
         }
 
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        if io.closed {
-            return Err(TransportError::ConnectionFailed);
-        }
+        self.with_retry(|io| {
+            // CAS intent = `expectation`. `expected_id` is meaningful only
+            // for MATCH. See SPEC-TRANSPORT §4.2.1.
+            let (expected_id, expectation) = cond_to_wire(condition);
 
-        // CAS intent = `expectation`. `expected_id` is meaningful only
-        // for MATCH. See SPEC-TRANSPORT §4.2.1.
-        let (expected_id, expectation) = cond_to_wire(condition);
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::UpdateRef(Box::new(
+                    UpdateRef::default()
+                        .with_name(name)
+                        .with_expected_id(expected_id)
+                        .with_new_id(hash.to_vec())
+                        .with_expectation(expectation),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
 
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::UpdateRef(Box::new(
-                UpdateRef::default()
-                    .with_name(name)
-                    .with_expected_id(expected_id)
-                    .with_new_id(hash.to_vec())
-                    .with_expectation(expectation),
-            ))),
-            ..Default::default()
-        };
-        write_child_frame_or_err(&mut io, req)?;
-
-        let resp = read_child_frame_or_err(&mut io)?;
-        match resp.body {
-            Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
-            Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "ssh")),
-            other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
-        }
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(()),
+                Some(ssh_frame::Body::Error(e)) => Err(map_update_ref_error(*e, condition, "ssh")),
+                other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
+            }
+        })
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -370,37 +570,32 @@ impl Transport for SshTransport {
         if name.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref name too long".into()));
         }
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        if io.closed {
-            return Err(TransportError::ConnectionFailed);
-        }
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::ReadRef(Box::new(
-                ReadRef::default().with_name(name),
-            ))),
-            ..Default::default()
-        };
-        write_child_frame_or_err(&mut io, req)?;
-        let resp = read_child_frame_or_err(&mut io)?;
-        match resp.body {
-            Some(ssh_frame::Body::ReadRefResponse(r)) => {
-                let oid = r.object_id.unwrap_or_default();
-                if oid.is_empty() {
-                    Ok(None)
-                } else if oid.len() == 32 {
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&oid);
-                    Ok(Some(h))
-                } else {
-                    Err(TransportError::InvalidResponse)
+        self.with_retry(|io| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::ReadRef(Box::new(
+                    ReadRef::default().with_name(name),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::ReadRefResponse(r)) => {
+                    let oid = r.object_id.unwrap_or_default();
+                    if oid.is_empty() {
+                        Ok(None)
+                    } else if oid.len() == 32 {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(&oid);
+                        Ok(Some(h))
+                    } else {
+                        Err(TransportError::InvalidResponse)
+                    }
                 }
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                other => Err(unexpected_frame("ssh", "ReadRefResponse", other)),
             }
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
-            other => Err(unexpected_frame("ssh", "ReadRefResponse", other)),
-        }
+        })
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
@@ -410,30 +605,25 @@ impl Transport for SshTransport {
         if prefix.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref prefix too long".into()));
         }
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        if io.closed {
-            return Err(TransportError::ConnectionFailed);
-        }
-        let req = SshFrame {
-            body: Some(ssh_frame::Body::ListRefs(Box::new(
-                ListRefs::default().with_prefix(prefix),
-            ))),
-            ..Default::default()
-        };
-        write_child_frame_or_err(&mut io, req)?;
-        let resp = read_child_frame_or_err(&mut io)?;
-        match resp.body {
-            Some(ssh_frame::Body::ListRefsResponse(r)) => r
-                .refs
-                .into_iter()
-                .map(ref_entry_to_ref)
-                .collect::<TransportResult<Vec<_>>>(),
-            Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
-            other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
-        }
+        self.with_retry(|io| {
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::ListRefs(Box::new(
+                    ListRefs::default().with_prefix(prefix),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::ListRefsResponse(r)) => r
+                    .refs
+                    .into_iter()
+                    .map(ref_entry_to_ref)
+                    .collect::<TransportResult<Vec<_>>>(),
+                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
+            }
+        })
     }
 }
 
@@ -507,6 +697,103 @@ where
 #[cfg(test)]
 fn read_download_pack_body<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
     assemble_download_pack_body(|| read_frame_or_err(r))
+}
+
+/// Lazy [`Iterator`] over the response side of `download_pack_streaming`,
+/// driven by a caller-supplied `next_frame` closure — the streaming
+/// counterpart to [`assemble_download_pack_body`]. Reads exactly one
+/// `PackChunk` frame per [`Iterator::next`] call, so memory stays
+/// bounded to roughly one chunk regardless of total pack size.
+///
+/// Generic over `F` (rather than boxing `next_frame` internally) so both
+/// the child-process path (`download_pack_streaming`, closing over a
+/// held `MutexGuard<ChildIo>`) and unit tests (closing over an
+/// `io::Read` cursor) monomorphize to a concrete, zero-overhead type;
+/// the *caller* erases it to `Box<dyn Iterator<..> + '_>` at the trait
+/// boundary.
+struct DownloadPackChunks<F> {
+    next_frame: F,
+    /// Bytes still allowed before the running total would exceed
+    /// [`PACK_BODY_LIMIT_USIZE`] — decremented per chunk, never
+    /// re-derived from `total_bytes` alone, so a malicious server that
+    /// streams past its own advertised header is still cut off (mirrors
+    /// [`assemble_download_pack_body`]'s running-total check).
+    remaining_budget: usize,
+    done: bool,
+    errored: bool,
+}
+
+impl<F> Iterator for DownloadPackChunks<F>
+where
+    F: FnMut() -> TransportResult<SshFrame>,
+{
+    type Item = TransportResult<CorePackChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.errored {
+            return None;
+        }
+        match (self.next_frame)() {
+            Ok(frame) => match frame.body {
+                Some(ssh_frame::Body::PackChunk(c)) => {
+                    let data = c.data.unwrap_or_default();
+                    if data.len() > self.remaining_budget {
+                        self.errored = true;
+                        return Some(Err(TransportError::RemoteError(
+                            "server-streamed pack body exceeds client cap".into(),
+                        )));
+                    }
+                    self.remaining_budget -= data.len();
+                    let last = c.last.unwrap_or(false);
+                    if last {
+                        self.done = true;
+                    }
+                    Some(Ok(CorePackChunk {
+                        offset: c.offset.unwrap_or(0),
+                        data,
+                        last,
+                    }))
+                }
+                Some(ssh_frame::Body::Error(e)) => {
+                    self.errored = true;
+                    Some(Err(rpc_error_to_transport(*e, "ssh")))
+                }
+                other => {
+                    self.errored = true;
+                    Some(Err(unexpected_frame("ssh", "PackChunk", other)))
+                }
+            },
+            Err(e) => {
+                self.errored = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+/// Build a [`DownloadPackChunks`] iterator over `next_frame`, having
+/// already read the `DownloadPackHeader` (`total` is its `total_bytes`).
+/// Rejects an oversize header up front, before any chunk is pulled —
+/// same defence as [`assemble_download_pack_body`]'s allocation guard,
+/// just against a running budget instead of a `Vec::with_capacity`.
+fn assemble_download_pack_stream<F>(
+    total: u64,
+    next_frame: F,
+) -> TransportResult<DownloadPackChunks<F>>
+where
+    F: FnMut() -> TransportResult<SshFrame>,
+{
+    if total > PACK_BODY_LIMIT {
+        return Err(TransportError::RemoteError(
+            "server-advertised pack size exceeds client cap".into(),
+        ));
+    }
+    Ok(DownloadPackChunks {
+        next_frame,
+        remaining_budget: core::cmp::min(total, PACK_BODY_LIMIT) as usize,
+        done: false,
+        errored: false,
+    })
 }
 
 fn read_download_pack_body_from_child(io: &mut ChildIo) -> TransportResult<Vec<u8>> {
@@ -772,9 +1059,8 @@ mod tests {
     // SshTransport against it. For now, basic smoke tests of the
     // helper functions live here.
     use super::*;
-    use mkit_rpc::mkit::rpc::v1::ssh::{
-        DownloadPackHeader, RefExpectation, list_refs_response::RefEntry,
-    };
+    use mkit_rpc::mkit::common::v1::{RefEntry, RefExpectation};
+    use mkit_rpc::mkit::rpc::v1::ssh::DownloadPackHeader;
     use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
 
     /// A CAS mismatch — `InvalidRequest` with the current id in
@@ -909,6 +1195,206 @@ mod tests {
         let mut cursor = std::io::Cursor::new(buf);
         let out = read_download_pack_body(&mut cursor).expect("honest small pack should succeed");
         assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    // --- upload_pack_streaming / download_pack_streaming (issue #702) ---
+
+    /// Test-only adapter mirroring [`read_download_pack_body`]: drives
+    /// [`assemble_download_pack_stream`] from a generic in-memory reader
+    /// (a header frame followed by N chunk frames) and collects it back
+    /// into one `Vec<u8>`, so the streaming assembly logic gets the same
+    /// coverage as the whole-buffer path without spawning a child
+    /// process.
+    fn collect_download_pack_stream<R: io::Read>(r: &mut R) -> TransportResult<Vec<u8>> {
+        let header = read_frame_or_err(r)?;
+        let total = match header.body {
+            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+            Some(ssh_frame::Body::Error(e)) => return Err(rpc_error_to_transport(*e, "ssh")),
+            other => return Err(unexpected_frame("ssh", "DownloadPackHeader", other)),
+        };
+        let stream = assemble_download_pack_stream(total, || read_frame_or_err(r))?;
+        let mut out = Vec::new();
+        for chunk in stream {
+            let c = chunk?;
+            out.extend_from_slice(&c.data);
+        }
+        Ok(out)
+    }
+
+    /// A pack spanning several `CHUNK_DATA_MAX`-sized frames streams
+    /// through `assemble_download_pack_stream` byte-for-byte identical
+    /// to the whole-buffer `assemble_download_pack_body` path, with
+    /// ascending contiguous offsets and exactly one `last = true` chunk.
+    /// This is the Testing Decisions regression case: a pack "larger
+    /// than a small fixed chunk-size-multiple" pushed through the
+    /// streaming path.
+    #[test]
+    fn download_pack_streaming_matches_whole_buffer_path_across_many_chunks() {
+        // Real CHUNK_DATA_MAX is 800 KiB; use a small local chunk size so
+        // the test stays fast while still exercising several chunks.
+        const TEST_CHUNK: usize = 37;
+        let payload: Vec<u8> = (0..(TEST_CHUNK * 5 + 11) as u32)
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let mut buf = Vec::new();
+        write_frame(
+            &mut buf,
+            &SshFrame {
+                body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
+                    DownloadPackHeader::default().with_total_bytes(payload.len() as u64),
+                ))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut offset = 0usize;
+        let mut chunk_count = 0usize;
+        let mut offsets = Vec::new();
+        while offset < payload.len() {
+            let end = core::cmp::min(offset + TEST_CHUNK, payload.len());
+            let last = end == payload.len();
+            offsets.push(offset as u64);
+            write_frame(
+                &mut buf,
+                &SshFrame {
+                    body: Some(ssh_frame::Body::PackChunk(Box::new(
+                        PackChunk::default()
+                            .with_pack_id(vec![0u8; 32])
+                            .with_offset(offset as u64)
+                            .with_data(payload[offset..end].to_vec())
+                            .with_last(last),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            chunk_count += 1;
+            offset = end;
+        }
+        assert!(chunk_count >= 5, "test should exercise several chunks");
+
+        // Whole-buffer path.
+        let mut cursor = std::io::Cursor::new(buf.clone());
+        let whole = read_download_pack_body(&mut cursor).expect("whole-buffer path");
+        assert_eq!(whole, payload);
+
+        // Streaming path — collect chunk-by-chunk and independently
+        // check offsets are ascending/contiguous and only the final
+        // chunk is marked `last`.
+        let mut cursor2 = std::io::Cursor::new(buf);
+        let header2 = read_frame_or_err(&mut cursor2).unwrap();
+        let total = match header2.body {
+            Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+            _ => panic!("expected header"),
+        };
+        let stream =
+            assemble_download_pack_stream(total, || read_frame_or_err(&mut cursor2)).unwrap();
+        let mut collected = Vec::new();
+        let mut seen_offsets = Vec::new();
+        let mut last_flags = Vec::new();
+        for chunk in stream {
+            let c = chunk.expect("no stream error");
+            seen_offsets.push(c.offset);
+            last_flags.push(c.last);
+            collected.extend_from_slice(&c.data);
+        }
+        assert_eq!(
+            collected, payload,
+            "streamed bytes must match whole-buffer path"
+        );
+        assert_eq!(
+            seen_offsets, offsets,
+            "chunk offsets must be ascending/contiguous"
+        );
+        assert_eq!(
+            last_flags.iter().filter(|l| **l).count(),
+            1,
+            "exactly one chunk must be marked last"
+        );
+        assert_eq!(
+            last_flags.last(),
+            Some(&true),
+            "the final chunk must be last"
+        );
+    }
+
+    /// A `DownloadPackHeader` with `total_bytes = u64::MAX` must be
+    /// rejected by the streaming path before any chunk is pulled — the
+    /// streaming counterpart to
+    /// `download_pack_rejects_oversize_header_without_allocating`.
+    #[test]
+    fn download_pack_streaming_rejects_oversize_header() {
+        let mut buf = Vec::new();
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
+                DownloadPackHeader::default().with_total_bytes(u64::MAX),
+            ))),
+            ..Default::default()
+        };
+        write_frame(&mut buf, &header).expect("write header frame");
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let err =
+            collect_download_pack_stream(&mut cursor).expect_err("must reject oversize header");
+        match err {
+            TransportError::RemoteError(msg) => {
+                assert!(
+                    msg.contains("exceeds client cap"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    /// A server that streams more bytes than its own advertised header
+    /// promised is cut off mid-stream (as an `Err` item, not a panic or
+    /// unbounded accumulation) — the streaming counterpart to
+    /// `download_pack_rejects_overflowing_chunk_stream`.
+    #[test]
+    fn download_pack_streaming_rejects_chunk_exceeding_budget() {
+        let mut buf = Vec::new();
+        write_frame(
+            &mut buf,
+            &SshFrame {
+                body: Some(ssh_frame::Body::DownloadPackHeader(Box::new(
+                    DownloadPackHeader::default().with_total_bytes(2),
+                ))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Advertises 2 bytes but sends 4 — the streaming iterator must
+        // surface an error on that chunk rather than silently accepting
+        // it.
+        write_frame(
+            &mut buf,
+            &SshFrame {
+                body: Some(ssh_frame::Body::PackChunk(Box::new(
+                    PackChunk::default()
+                        .with_pack_id(vec![0u8; 32])
+                        .with_offset(0)
+                        .with_data(vec![1, 2, 3, 4])
+                        .with_last(true),
+                ))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let err = collect_download_pack_stream(&mut cursor)
+            .expect_err("must reject a chunk exceeding the advertised budget");
+        match err {
+            TransportError::RemoteError(msg) => {
+                assert!(
+                    msg.contains("exceeds client cap"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
     }
 
     #[test]

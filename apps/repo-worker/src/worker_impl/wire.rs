@@ -39,8 +39,8 @@ pub struct GetResp {
 /// (see `commit_log::extract_commit_meta`) and passes the fields here.
 #[derive(Serialize, Deserialize, Default)]
 pub struct CommitMetaWire {
-    pub parent: String,  // 64-hex first parent, empty if root
-    pub signer: String,  // 64-hex author pubkey
+    pub parent: String, // 64-hex first parent, empty if root
+    pub signer: String, // 64-hex author pubkey
     pub message: String,
     pub timestamp: i64,  // unix seconds
     pub kind: String,    // "commit" | "remix"
@@ -58,6 +58,11 @@ pub struct UpdateReq {
     /// non-commit/remix target, or from an older worker — `default` = None).
     #[serde(default)]
     pub commit: Option<CommitMetaWire>,
+    /// Request Idempotency-Key — replay dedupe, keyed together with `author`
+    /// and `name` (empty if none). Closes the `REF_EXPECTATION_ANY` replay
+    /// hole: a replayed signed UpdateRef returns its original
+    /// (committed, conflict, current) result instead of re-running the CAS.
+    pub idem: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,7 +103,7 @@ pub struct PostReq {
     pub id: String,     // 64-hex BLAKE3 message id (content address)
     pub author: String, // 64-hex Ed25519 pubkey of the verified signer
     pub text: String,
-    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
+    pub idem: String, // request Idempotency-Key — replay dedupe (empty if none)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -203,4 +208,46 @@ pub struct RecordCommitsReq {
 #[derive(Serialize, Deserialize)]
 pub struct RecordCommitsResp {
     pub recorded: u32,
+}
+
+// --- Write quota (auth interceptor -> DO) -----------------------------------
+//
+//   POST /quota  QuotaCheckReq -> QuotaCheckResp
+//
+// Called by `AuthInterceptor` (auth.rs) for PutObject/UpdateRef, BEFORE the
+// handler runs, so the per-author write budget
+// (`crate::write_quota::evaluate_quota`) is checked-and-consumed serially
+// inside the room's DO (`refstore::handle_quota_check`) rather than raced
+// from the stateless Worker. `author` is the envelope-verified 64-hex Ed25519
+// pubkey; `bytes` is the incoming payload size counted against the budget
+// (the `PutObject` `bytes` field length, or 0 for `UpdateRef`).
+
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckReq {
+    pub author: String,
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckResp {
+    pub allowed: bool,
+    /// Set (and safe to surface to the client) when `allowed` is false.
+    pub reason: Option<String>,
+}
+
+// --- Room purge (worker -> DO) ----------------------------------------------
+//
+//   POST /purge (no body) -> PurgeResp
+//
+// Wipes every table row scoped to this DO instance (one instance per room):
+// refs, messages (+ idem_keys), reactions (+ react_idem/react_rate), and the
+// commits index. The worker purges the room's R2 prefixes (objects/,
+// messages/) separately — the DO owns none of R2. See service.rs
+// `purge_room` and refstore.rs `handle_purge`.
+
+#[derive(Serialize, Deserialize)]
+pub struct PurgeResp {
+    pub refs_deleted: u32,
+    pub messages_deleted: u32,
+    pub reactions_deleted: u32,
 }

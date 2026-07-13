@@ -71,6 +71,13 @@ installs `mkit` into `~/.local/bin`. Equivalent explicit form:
 `curl -sSfL https://mkit.sh/install.sh | sh`; append
 `-s -- --version v0.3.0` to pin an exact release.
 
+On native Windows (PowerShell, no WSL/Git-Bash), use the PowerShell
+installer instead:
+
+```powershell
+irm https://mkit.sh/install.ps1 | iex
+```
+
 ### From source
 
 ```sh
@@ -88,8 +95,8 @@ on first build). Drops `mkit` into `~/.cargo/bin/`.
 
 ### From GitHub Releases
 
-Cosign-signed archives for macOS (arm64 + x86_64) and Linux (x86_64 +
-arm64) on every `v*.*.*` tag:
+Cosign-signed archives for macOS (arm64 + x86_64), Linux (x86_64 +
+arm64), and Windows (x86_64) on every `v*.*.*` tag:
 
 ```sh
 VERSION=0.3.0
@@ -244,14 +251,21 @@ one:
                        │   (in-toto v1 + DSSE)        │
                        └──────────┬───────────────────┘
                                   │
-        ┌─────────────────────────┼─────────────────────────────┐
-        ▼                         ▼                             ▼
-┌─────────────────┐    ┌──────────────────────┐    ┌────────────────────┐
-│ repo-key signer │    │ external signer      │    │ keyless / sigstore │
-│  (Ed25519 from  │    │ (subprocess, stdio   │    │ (planned, OIDC →   │
-│   .mkit/keys)   │    │   protocol; TPM,     │    │   short-lived cert)│
-│                 │    │   FIDO2/CTAP, SE,…)  │    │                    │
-└─────────────────┘    └──────────────────────┘    └────────────────────┘
+                 ┌────────────────┴────────────────┐
+                 ▼                                  ▼
+       ┌─────────────────┐              ┌──────────────────────┐
+       │ repo-key signer │              │ external signer      │
+       │  (Ed25519 from  │              │ (subprocess, stdio   │
+       │   .mkit/keys)   │              │   protocol; TPM,     │
+       │                 │              │   FIDO2/CTAP, SE,…)  │
+       └─────────────────┘              └──────────────────────┘
+                    implemented today, at parity
+
+       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+       ┆ keyless / sigstore  — roadmap, not implemented       ┆
+       ┆ (OIDC → short-lived cert; `SigstoreSigner` returns   ┆
+       ┆  `Error::SigstoreNotImplemented` unconditionally)    ┆
+       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 ```
 
 Attestations carry the commit hash as the in-toto `subject`, so they
@@ -361,6 +375,7 @@ series.
 | [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commits |
 | [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
 | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
+| [`apps/repo-worker/README.md#run-your-own-instance-self-hosting`](apps/repo-worker/README.md#run-your-own-instance-self-hosting) | Operators — self-hosting the anonymous-multiplayer repo server: Cloudflare plan/cost requirements, R2 bucket + route overrides |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 
 ## Build

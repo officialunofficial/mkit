@@ -363,8 +363,8 @@ headings, callouts, and changelog entries.
 
 When referencing how to install or run a Rust binary, use Cargo as
 the canonical entry point. For mkit specifically, prefer the
-documented install channels (`cargo install`, Homebrew, the
-`install.sh` script, or a release binary) and link to
+documented install channels (`cargo install`, Homebrew, Scoop, the
+`install.sh`/`install.ps1` scripts, or a release binary) and link to
 [`docs/INSTALL.md`](INSTALL.md) for the full set.
 
 - Correct: `cargo install --git https://github.com/officialunofficial/mkit mkit-cli`

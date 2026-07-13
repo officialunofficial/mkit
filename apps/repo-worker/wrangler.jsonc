@@ -19,6 +19,15 @@
   // Structured logs/metrics for the deployed Worker.
   "observability": { "enabled": true },
 
+  // Accepted/rejected-write telemetry: `AuthInterceptor` (worker_impl/auth.rs)
+  // writes one data point per write-path request (PutObject/UpdateRef/
+  // PostMessage/React) — {room, procedure, author_pubkey, bytes} on accept,
+  // {procedure, reason, status} on reject — so per-room write volume and
+  // auth-failure/probing rate are queryable instead of invisible. See #695.
+  "analytics_engine_datasets": [
+    { "binding": "WRITE_EVENTS", "dataset": "mkit_repo_write_events" }
+  ],
+
   // Smart Placement: run the Worker close to its back-end (the RefStore DO + R2),
   // not just at the edge nearest the client — so the many worker→DO and worker→R2
   // round-trips per request don't each pay the full client-to-DO distance.
@@ -31,14 +40,71 @@
   "routes": [{ "pattern": "api.mkit.sh", "custom_domain": true }],
 
   // R2 object store for immutable, content-addressed mkit objects.
-  // Key layout: {room}/objects/{hex(object_id)}.
+  // Key layout: {room}/objects/{hex(object_id)}, {room}/messages/{hex(id)}.
+  //
+  // Objects are never deleted implicitly — only the admin-gated PurgeRoom RPC
+  // (per-room, on demand) and an out-of-band R2 lifecycle rule (bucket-wide,
+  // age-based backstop; NOT configurable from this file — see README
+  // "Retention & backup/restore") ever remove one.
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-repo-objects" }],
+
+  // ADMIN_TOKEN (a Worker *secret*, set via `wrangler secret put ADMIN_TOKEN`
+  // — deliberately NOT declared here; secrets never belong in wrangler.jsonc)
+  // gates the PurgeRoom RPC. See README "Retention & backup/restore" for
+  // provisioning + the constant-time comparison in worker_impl/auth.rs. An
+  // unset secret fails every PurgeRoom call closed, never open.
 
   // The RefStore Durable Object — one instance per room — owns all mutable refs
   // (serial CAS) and the WatchRefs WebSocket fan-out.
   "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
 
   // SQLite-backed DO classes are declared in a `new_sqlite_classes` migration
-  // (the DO uses `state.storage().sql()`).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  // (the DO uses `state.storage().sql()`). Top-level `migrations` is a
+  // top-level-only key: it is inherited by every named environment below
+  // (including `staging`), so it is not repeated there.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }],
+
+  // Named environments. `wrangler deploy --env staging` deploys an isolated
+  // Worker (`mkit-repo-worker-staging`) with its own route, R2 bucket, and
+  // RefStore DO namespace (Durable Object bindings are never inherited across
+  // environments — Wrangler auto-suffixes the DO's owning script name with
+  // `-staging`, so storage is isolated even though the class name is
+  // unchanged). Staging writes can never land in the production
+  // `mkit-repo-objects` bucket because `r2_buckets` is also non-inheritable
+  // and is fully re-specified here. If you add more top-level bindings later,
+  // remember non-inheritable keys (vars, durable_objects, kv_namespaces,
+  // r2_buckets, routes) must be duplicated into every `env.*` block that
+  // needs them — see
+  // https://developers.cloudflare.com/workers/wrangler/configuration/#non-inheritable-keys.
+  "env": {
+    "staging": {
+      "name": "mkit-repo-worker-staging",
+
+      // Non-production route so schema/auth/rate-limit changes can be
+      // validated against a real Cloudflare deployment before promotion to
+      // api.mkit.sh. Update apps/web/src/security-policy.js CSP `connect-src`
+      // (and the web build's `VITE_REPO_BACKEND_URL`) if the web app needs to
+      // target this host for end-to-end checks.
+      "routes": [{ "pattern": "staging-api.mkit.sh", "custom_domain": true }],
+
+      // Dedicated staging bucket (created via `wrangler r2 bucket create
+      // mkit-repo-objects-staging`) — never the production
+      // `mkit-repo-objects` bucket.
+      "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-repo-objects-staging" }],
+
+      // Same RefStore class, but bound to the staging Worker script
+      // (`mkit-repo-worker-staging`), so it gets its own DO storage.
+      "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+
+      // Dedicated staging dataset — `analytics_engine_datasets` is also a
+      // non-inheritable key (see link above), so without this the staging
+      // deployment's AuthInterceptor would silently drop write telemetry
+      // instead of mirroring it. Analytics Engine datasets need no explicit
+      // pre-creation (unlike R2/KV): the first write_data_point call creates
+      // them.
+      "analytics_engine_datasets": [
+        { "binding": "WRITE_EVENTS", "dataset": "mkit_repo_write_events_staging" }
+      ]
+    }
+  }
 }

@@ -18,6 +18,7 @@ Most are off by default to keep the baseline build lean:
 | Feature | Adds |
 |---|---|
 | `enc-transport` | `mkit+enc://` dispatch and `mkit serve --listen-enc` (SPEC-TRANSPORT-ENC §6). |
+| `http-transport` | `mkit serve --http` — self-hosted `mkit.transport.v1.TransportService` Connect remote over axum (SPEC-TRANSPORT-CONNECT, issue #700). |
 | `git-bridge` (alias `git-export`) | `mkit git …` (SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout (issue #158). |
 | `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads (issue #159). |

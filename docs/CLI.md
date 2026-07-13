@@ -126,7 +126,7 @@ Working-tree commands:
   porcelain) NUL-terminates records and emits **raw, unquoted** paths —
   the round-trip-safe form for paths containing newlines or other special
   bytes. Empty stdout means clean.
-- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
+- `mkit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   — show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree — the change `mkit commit`
@@ -169,6 +169,15 @@ Working-tree commands:
   green additions, red deletions); the default `auto` colorizes only on a
   tty (honoring `NO_COLOR`/`CLICOLOR_FORCE`), and `--no-color` forces it
   off. (Color for `status`/`log`/`branch` is a tracked follow-up.)
+  `-w`/`--ignore-all-space` ignores whitespace when comparing lines (a
+  line that differs from its counterpart only in whitespace shows as
+  unchanged context — like git); `-b`/`--ignore-space-change` is the
+  weaker form, where differing *amounts* of whitespace compare equal but a
+  line with whitespace where the other side has none still differs. `-w`
+  wins if both are given. Either way the printed hunk lines show their own
+  real (unmodified) bytes — only line *comparison* changes. `-U<n>` /
+  `--unified=<n>` sets the number of unchanged context lines around each
+  hunk (default 3, matching git's `-U3`).
 - `mkit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
   `remove [--force] <path>` / `prune [--dry-run]` — manage linked working
   trees (git-worktree parity, #493). Linked trees share the one object
@@ -191,7 +200,8 @@ Working-tree commands:
   `.mkit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
   follow-up phase of #493) — remove or prune them first.
-- `mkit stash [save|list|pop|apply|drop|clear|show]` — save/restore WIP
+- `mkit stash [save|list|pop|apply|drop|clear|show] [--format=json]` —
+  save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
@@ -206,11 +216,17 @@ Working-tree commands:
   **including staged deletions** (`mkit rm`-staged) — which a tree could not
   encode. Stashes created before this feature carry no index snapshot, so
   `--index` is a no-op for them (with a note).
+  `--format=json` (a global flag, valid after any subcommand) emits a
+  machine-readable result to stdout: on `list`, JSONL with keys `index`,
+  `hash`, `message` (mirroring `branch --format=json`); on
+  `save`/`pop`/`apply`/`drop`/`clear`, a single `{"ok":true,"kind":"…",
+  ...}` object; on failure, `{"ok":false,"error":"…"}`.
 - `mkit sparse-checkout` — manage sparse checkout patterns.
 
 History / commits:
 
-- `mkit commit [-a|--all] [--amend] [--author <spec>] [-m <msg> | -F <file>]`
+- `mkit commit [-a|--all] [--amend] [--author <spec>] [-m <msg> | -F <file>]
+  [--format=json]`
   — create
   a signed commit from the staging index. The index is built by `mkit
   add` / `mkit rm`; `commit` with an empty index is an error. Use `mkit
@@ -247,7 +263,11 @@ History / commits:
   `-q`/`--quiet` suppresses it. `-S`/`--gpg-sign[=<keyid>]` and
   `--no-verify` are accepted **no-ops** (mkit always signs and has no
   hooks); `--no-edit` matches mkit's default amend behavior.
-- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
+  `--format=json` additionally emits one JSON object to stdout on success:
+  `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
+  "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
+  "is_merge":<bool>,"is_root":<bool>}`.
+- `mkit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]` — show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -271,6 +291,23 @@ History / commits:
   Unix-seconds integer for machine consumption. **`--graph` is accepted
   for compatibility but is currently a no-op** (no ASCII graph is drawn);
   see "Divergences from Git" below.
+  `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
+  **substring** match — `--author` against both the short display form
+  (the `Author:` line) and the full `kind:hex`/`mid:N` form
+  (`--format=json`'s `author` field); `--grep` against the full commit
+  message (title + body). This is intentionally not a regex: unlike git,
+  mkit identities are opaque (Ed25519 keys, `mid:N` numbers, DID keys),
+  not free-text `Name <email>`. `--since <date>`/`--until <date>` bound
+  the commit timestamp; accepted forms are `@<unix-seconds>`,
+  `now`/`today`/`yesterday`, `<N> <unit> ago`
+  (second/minute/hour/day/week/month/year), `YYYY-MM-DD` (midnight UTC),
+  and `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` — a small, explicit
+  grammar, not git's full natural-language `approxidate`. `--no-merges`
+  hides merge commits (more than one parent) from the output without
+  changing the walk; `--first-parent` is stronger — it follows only each
+  commit's first parent, so a merged side branch never enters the walk at
+  all. All of these filters apply **before** `-n <limit>`, so `-n` caps
+  the filtered result, matching git.
 - `mkit reflog [<ref>] [--format=json] [-n N]` — **read-only** view of a
   branch's recorded movement history. Defaults to the branch `HEAD`
   points at (a detached `HEAD` needs an explicit `<ref>`, since the
@@ -398,9 +435,20 @@ History / commits:
   `-L` compose with `--reverse`. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
-- `mkit verify <rev>` — verify the signature on a commit, remix, or
-  signed tag. `<rev>` is an object hash, a branch/tag name, or `HEAD`; a
-  tag name resolves to its annotated-tag object when one exists.
+- `mkit verify <rev> [--trusted] [--trust-roots <path>]` — verify the
+  signature on a commit, remix, or signed tag. `<rev>` is an object
+  hash, a branch/tag name, or `HEAD`; a tag name resolves to its
+  annotated-tag object when one exists. By itself this only proves the
+  object's own embedded `signer` produced the signature — it does NOT
+  check `signer` against any allow-list, so a signature from an
+  unrecognized key verifies identically to one from a key you actually
+  trust. Pass `--trusted` (or `--trust-roots <path>`) to additionally
+  cross-check `signer` against the trust-roots registry `mkit trust`
+  manages, failing closed (nonzero exit, distinct from a bad-signature
+  failure) on an unlisted signer. `--trust-roots` defaults to
+  `$XDG_CONFIG_HOME/mkit/trust-roots.toml`; an in-repo path is refused
+  unless passed explicitly (see `mkit trust` below and
+  `docs/THREAT-MODEL.md` §5).
 - `mkit cat <hash>` — display an object by its hash.
 - `mkit hash <file>` — hash a file and store it as a blob.
 - `mkit tree` — snapshot the working directory as a tree object.
@@ -564,11 +612,16 @@ Attestations:
   ```
 
 - `mkit verify-attest [--commit <hash>] [--trust-roots <path>]
-  [--algorithm <alg>]` — verify every attestation attached to a
+  [--algorithm <alg>] [--format=json]` — verify every attestation attached to a
   commit. For each envelope, looks each signature's `keyid` up in the
   trust-roots registry and verifies the DSSE PAE. Reports per-
-  signature verdicts to stderr; stdout is reserved for a future
-  `--format=json` mode. Exits `0` iff every listed attestation has
+  signature verdicts to stderr; with `--format=json`, also emits one JSON
+  object to stdout: `{"ok":<bool>,"commit":"<64-hex>","error":"<string>|null",
+  "attestations":[{"id":"<64-hex>|null","error":"<string>|null",
+  "signatures":[{"keyid":"...","algorithm":"<string>|null","verified":<bool>,
+  "reason":"<string>|null"}]}]}` — the JSON `signatures` list is unfiltered
+  (it always carries every signature, independent of `--algorithm`, which
+  only filters the stderr report). Exits `0` iff every listed attestation has
   at least one verified signature, `65` (`dataerr`) if any failed,
   `1` (`general_error`) if the commit has no attestations.
 
@@ -590,6 +643,30 @@ Attestations:
 
   ```sh
   mkit verify-attest --trust-roots ~/.config/mkit/trust-roots.toml
+  ```
+
+- `mkit trust add <keyid> <pubkey-hex> [--kind <kind>] [--trust-roots <path>] [--force]` /
+  `mkit trust list [--trust-roots <path>] [--json]` /
+  `mkit trust remove <keyid> [--trust-roots <path>] --yes` — manage the
+  trust-roots registry `mkit verify --trusted` and `mkit verify-attest`
+  read (same `[[trust_root]]` TOML file, same default path). `add`
+  validates `pubkey-hex` decodes and, if `keyid` embeds a hex/digest
+  body (the `<algorithm>:<hex>` or `blake3:<hex>` shapes), that it
+  matches the given pubkey — a mismatch is rejected, not silently
+  dropped. `--kind` defaults to `ed25519` (commit/remix/tag signing is
+  Ed25519-only today); `p256-sec1`, `secp256k1`, and `bls12381-thr`
+  (with the `bls-threshold` feature) only matter to `verify-attest`.
+  `add` refuses to overwrite an existing keyid without `--force`;
+  `remove` requires `--yes` and fails if the keyid isn't registered.
+  `list --json` emits a JSON array of `{keyid, kind, pubkey_hex}`.
+
+  Example:
+
+  ```sh
+  mkit keygen --print-pubkey                     # ed25519:<hex>
+  mkit trust add ed25519:<hex> <hex>              # trust your own key
+  mkit trust list
+  mkit verify --trusted HEAD
   ```
 
 Branches / refs:
@@ -660,7 +737,7 @@ Branches / refs:
   fully-removable untracked directory is a known limitation — name the
   directory or use `.`. Ignore matching uses the shared path-aware ignore
   matcher (see "Ignore files" below).
-- `mkit tag` — list, create, or delete tags.
+- `mkit tag [--format=json]` — list, create, or delete tags.
   - `mkit tag` (no args) — list tags; annotated/signed tags are marked.
   - `mkit tag -l [<pattern>]` — list tags, optionally filtered by a shell
     glob (e.g. `mkit tag -l 'v*'`), reusing `branch`'s `wildmatch` engine.
@@ -676,7 +753,10 @@ Branches / refs:
   - `mkit tag -d <name>` — delete a tag.
   - `--author <spec>` overrides the tagger identity (same grammar as
     `commit --author`).
-- `mkit merge [--no-commit] [-m <msg>] <branch> | --continue | --abort` —
+  - `--format=json` — on the list form, JSONL with keys `name`, `hash`,
+    `annotated`, `signed` (mirroring `branch --format=json`); on
+    create/delete, one `{"ok":true,"kind":"…",...}` outcome object.
+- `mkit merge [--no-commit] [-m <msg>] [--format=json] <branch> | --continue | --abort` —
   three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On
@@ -688,7 +768,12 @@ Branches / refs:
   leaves you to finish with `mkit commit` (which records a two-parent
   merge commit) or `mkit merge --continue`. A fast-forward creates no
   commit, so `--no-commit` does not affect it.
-- `mkit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] <hash> | --continue | --abort`
+  `--format=json` emits one JSON object to stdout for every outcome:
+  `{"ok":true,"kind":"up-to-date"|"fast-forward"|"no-commit"|"merge-commit"|"aborted",...}`
+  on success, or `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
+  "error":"..."}` on a conflict pause (and `{"ok":false,"error":"..."}` for
+  any other error).
+- `mkit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] [--format=json] <hash> | --continue | --abort`
   — apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
@@ -704,7 +789,10 @@ Branches / refs:
   against) and rejected for a non-merge commit. Note this differs from
   `git commit -m` — git's `cherry-pick -m` is mainline selection, not a
   message override.
-- `mkit revert <commit> | --continue | --abort` `[-n|--no-commit]` —
+  `--format=json` emits one JSON object to stdout, same shape as `merge`
+  (`"kind":"commit"|"no-commit"|"aborted"` on success, `"kind":"conflict"`
+  with a `conflicts` array on a pause).
+- `mkit revert <commit> | --continue | --abort` `[-n|--no-commit] [--format=json]` —
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
   `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
@@ -715,8 +803,9 @@ Branches / refs:
   committing, so you can revert several commits and commit once.
   **Reverting a merge commit is refused** — the inverse depends on which
   parent is the mainline, and `-m`/mainline selection is not yet
-  supported.
-- `mkit rebase [-i|--interactive] <revspec> | --continue | --abort | --skip`
+  supported. `--format=json` emits the same outcome-object shape as
+  `merge`/`cherry-pick`.
+- `mkit rebase [-i|--interactive] [--format=json] <revspec> | --continue | --abort | --skip`
   — replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   Restore steps refuse to overwrite staged changes, dirty tracked files,
@@ -734,6 +823,12 @@ Branches / refs:
   mutation. Removing every line resets the branch to the base. A
   `reword`/`squash` whose replay hits a conflict still reopens the editor
   on `--continue`. `edit` (stop-to-amend) is not yet supported.
+  `--format=json` emits one JSON object to stdout on the top-level
+  outcomes: `{"ok":true,"kind":"up-to-date"|"rebased"|"aborted",...}` on
+  success, `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
+  "error":"..."}` on a conflict pause. Best-effort on the interactive
+  (`-i`) editing path and a handful of deep internal errors (e.g. signer
+  setup), which stay stderr-only.
 - `mkit bisect start | good | bad | skip | reset | run <cmd> [args…]` —
   binary search for a bug. `run` drives the loop automatically: it checks
   out each candidate, runs `<cmd>`, and classifies from the exit status
@@ -863,26 +958,72 @@ Remote / sync:
 - `mkit remote get-url <name>` — print a remote's URL (use `default` for
   the flat default remote). `mkit remote set-url <name> <url>` — change an
   existing remote's URL (validated like `remote add`).
-- `mkit clone [--depth N] [--sparse ...] <url> [<dir>]` — clone a
-  repository into `<dir>` (defaults to the final URL path segment).
-  `--sparse <pattern>...` persists the patterns and materialises only the
-  matching files via the verifiable sparse-checkout pipeline (requires a
-  build with `--features sparse-checkout`). Note this is an
+- `mkit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
+  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]` — clone a repository
+  into `<dir>` (defaults to the final URL path segment). `--sparse
+  <pattern>...` persists the patterns and materialises only the
+  matching files via the verifiable sparse-checkout pipeline (requires
+  a build with `--features sparse-checkout`). Note this is an
   **enhancement over git**: mkit's `--sparse` takes one or more PATTERN
   arguments, whereas git's `clone --sparse` is a boolean flag (it cones
   to the top-level files and you add patterns afterward). **`--depth N` is parsed but
   not yet wired**: passing it fails with a clear `--depth is not yet
   wired` usage error rather than silently producing a full clone; see
   "Divergences from Git".
-- `mkit fetch` — download from remote without merging. Fetched branch
-  tips are stored under `refs/remotes/default/<branch>` and do not move
-  local branches.
-- `mkit pull` — fetch, then fast-forward the current branch from
-  `refs/remotes/default/<branch>`. Divergent histories are refused; use
+  - `-b`/`--branch <name>` — check out `<name>` instead of the remote's
+    default branch. The branch MUST exist among the remote's advertised
+    refs; unlike the default heuristic (current default branch, falling
+    back to whatever the remote advertises first) an explicit `-b` never
+    silently substitutes another branch — a missing branch fails the
+    clone with a "remote branch not found" error.
+  - `-o`/`--origin <name>` — name the cloned remote `<name>` in the new
+    repo's `.mkit/config` instead of the implicit flat `default` remote
+    (mirrors `mkit remote add <name> <url>` at clone time). The name
+    must be dot-free and ref-safe, like a named `remote add`. Tracking
+    refs land under `refs/remotes/<name>/*` to match.
+- `mkit fetch [<remote>] [--all] [--no-verify-signatures] [--format=json]
+  [-q|--quiet]` — download from remote without merging. Fetched branch tips
+  are stored
+  under `refs/remotes/<remote>/<branch>` (`refs/remotes/default/<branch>`
+  for the flat default remote) and do not move local branches. `--all`
+  fetches every configured remote (the flat default plus every named
+  `remote.<name>.url`) in one invocation, printing each remote's usual
+  `From <url>` + per-ref summary in turn; mutually exclusive with an
+  explicit `<remote>` argument. A per-remote failure does not stop the
+  others — `fetch --all` continues through the full list and exits
+  non-zero if any remote failed. `--format=json` emits one JSON object
+  per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
+  "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
+  success, or `{"ok":false,"error":"..."}` on failure.
+- `mkit pull [<remote>] [--all] [--no-verify-signatures] [--format=json]
+  [-q|--quiet]` — fetch, then fast-forward the current branch from
+  `refs/remotes/<remote>/<branch>`. Divergent histories are refused; use
   explicit merge/rebase flows after resolving the divergence. Fresh repos
   with no local branch tip initialize the current branch/worktree from
-  the remote default branch.
-- `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]`
+  the remote default branch. `--all` pulls from every configured remote
+  in turn (same enumeration and failure-tolerance as `fetch --all`),
+  fast-forwarding the current branch from each; mutually exclusive with
+  an explicit `<remote>` argument. `--format=json` emits one JSON object
+  per remote pulled: `{"ok":true,"remote":"...","endpoint":"...",
+  "branch":"...","old":"<hex>|null","new":"<hex>|null",
+  "up_to_date":<bool>}` on success, or `{"ok":false,"error":"..."}` on
+  failure.
+- **Post-fetch signature verification (issue #692, default ON).**
+  `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
+  introduces — the same check `mkit verify <rev>` runs manually
+  (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`) — before
+  publishing the remote-tracking ref. A structurally invalid or missing
+  signature aborts with exit 65 (`DATAERR`) and leaves local branch/
+  remote-tracking refs and the working tree untouched. Only the objects
+  a given fetch actually introduces are checked, not the whole history
+  (bounded cost per fetch). Opt out per invocation with
+  `--no-verify-signatures`, or persistently for scripted/CI use via the
+  **user-scoped** `pull.require_signed = false` config key — it cannot be
+  set from a cloned repo's own `.mkit/config` (see THREAT-MODEL.md §4).
+  `--all` applies the same verification (and the same opt-out) to every
+  remote it iterates.
+- `mkit push [<remote>] [--all] [--force|--force-with-lease] [--dry-run]
+  [--format=json] [-q|--quiet]`
   — push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
@@ -898,7 +1039,23 @@ Remote / sync:
   flows through the per-endpoint credential-trust gate, which is keyed on
   the resolved endpoint URL, never the remote name. On success `push`
   prints git's `To <url>` + ref-update summary (or `Everything
-  up-to-date`).
+  up-to-date`). `--format=json` emits one JSON object to stdout:
+  `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
+  "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
+  "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
+  "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
+  (`{"ok":false,"error":"..."}` for any other failure).
+- **Transfer progress (#711).** `clone`/`push`/`pull`/`fetch` stream a
+  live, honest progress line on stderr while the network transfer runs —
+  `Writing objects: N objects, B bytes` while building/uploading the
+  outgoing pack, `Unpacking objects: N objects` while applying a
+  downloaded one. The counts are real (objects actually staged/unpacked,
+  bytes actually handed to the transport); mkit never fabricates git's
+  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines
+  — mkit's transport is one-object-per-pack and computes no cross-branch
+  delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
+  forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
+  tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve <path>` — internal SSH transport server. Speaks the
   mkit-rpc SSH framing on stdin/stdout by default.
 - `mkit serve <path> --listen-enc <addr>` — bind a TCP socket on
@@ -943,6 +1100,26 @@ Remote / sync:
   default port advertised by `mkit+enc://` URLs when none is supplied
   is **9418**. Full keystore integration is deferred (see
   SPEC-TRANSPORT-ENC §6.2).
+- `mkit serve <path> --http <addr>` — self-hosted Connect remote: bind
+  `<addr>` (e.g. `0.0.0.0:8443`) and host `mkit.transport.v1.TransportService`
+  (SPEC-TRANSPORT-CONNECT) over axum/HTTP, instead of the SSH-frame
+  protocol. Requires building with `--features http-transport`. This is
+  a plaintext HTTP listener — put a TLS-terminating reverse proxy in
+  front for production use (or bind to loopback and tunnel).
+  **Fail-closed**, mirroring `--listen-enc`: refuses to bind unless one
+  of the following is supplied:
+  - `--http-token <TOKEN>` (or the `MKIT_API_TOKEN` environment variable
+    — the same variable `mkit+https://` clients already send as
+    `Authorization: Bearer <token>`, SPEC-TRANSPORT §5.2) — every RPC
+    (unary and streaming, including `UploadPack`/`DownloadPack`) is
+    rejected with `unauthenticated` unless it carries a matching bearer
+    token, checked in constant time.
+  - `--unsafe-allow-any-http-peer` — a development escape that accepts
+    ANY caller with no authentication at all. Prints a loud warning;
+    never use in production.
+  These two are mutually exclusive, and mutually exclusive with
+  `--listen-enc`. `Ctrl-C`/`SIGTERM` drain in-flight requests before
+  exiting (the same cooperative shutdown flag the rest of the CLI uses).
 - `mkit pack-shard <hash> [--out <dir>] [--force]` — encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS
@@ -1093,6 +1270,26 @@ Config / keys / version:
 - `mkit config [--format=json]` — show all configuration values.
   `--format=json` emits a flat JSON object with every known key.
 - `mkit config <key> [--format=json]` — show one value.
+- `mkit config --unset <key>` — remove a configuration value. Deletes
+  from whichever scope a `set` of that key would use — the repo layer
+  (`<repo>/.mkit/config`) for a repo-safe key, or the user-scoped layer
+  (`$XDG_CONFIG_HOME/mkit/config`) for a `REPO_FORBIDDEN_KEYS` key —
+  unless overridden by `--local`/`--global`. Idempotent: unsetting an
+  already-absent key is a silent success (like `rm -f`), not an error;
+  only an unknown key name is rejected. Takes no positional arguments.
+- `mkit config [--local|--global] <key> <value>` — set a configuration
+  value, or `--unset <key>` to remove one. `--local` forces the
+  repo-scoped layer (refused for a `REPO_FORBIDDEN_KEYS` key, which can
+  never live in a clone-traveling repo config); `--global` forces the
+  user-scoped layer even for an otherwise repo-safe key. **Put
+  `--local`/`--global` before `--unset`** (`mkit config --global --unset
+  <key>`, not `--unset --global <key>`) — like any clap value-taking
+  option, `--unset` consumes the very next token as `<KEY>`, so a flag
+  placed between `--unset` and the key is swallowed as (invalid) key
+  text rather than parsed separately. The two flags
+  are mutually exclusive; neither is needed for the common case, where
+  scope is chosen automatically by whether the key is in
+  `REPO_FORBIDDEN_KEYS`.
 - `mkit config <key> <value>` — set a configuration value. Config
   **section** and **variable** names are matched **case-insensitively**
   (canonicalized to lowercase), like git — so `user.Name`, `USER.EMAIL`,
@@ -1202,11 +1399,14 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   40-hex SHA-1 — the inherent hash-length divergence. Output otherwise
   matches git's shape (e.g. `To <url>` + `<old>..<new>  main -> main`,
   `[main <hash>] <subject>` + diffstat, `Fast-forward`).
-- **The git object-count / delta-compression progress lines**
-  (`Enumerating/Counting/Compressing/Writing objects`,
-  `Total N (delta D)`) are **not** emitted: mkit's transport is
-  one-object-per-pack and computes no deltas, so those numbers would be
-  fabricated. A tracked follow-up may add an honest object count.
+- **git's object-count / delta-compression progress lines**
+  (`Enumerating/Counting/Compressing objects`, `Total N (delta D)`) are
+  **not** emitted: mkit's transport is one-object-per-pack and computes
+  no cross-branch delta graph, so those specific numbers would be
+  fabricated. `clone`/`push`/`pull`/`fetch` do stream an honest
+  `Writing objects: N objects, B bytes` / `Unpacking objects: N objects`
+  progress line (#711) — real counts only; see "Transfer progress"
+  above.
 - **`mkit remote`** lists remote **names only** (git-shaped); use
   `mkit remote -v` for `<name>\t<url> (fetch)`/`(push)`.
 - **`mkit log --graph` is a no-op (v1 non-goal).** The flag is accepted
@@ -1215,6 +1415,17 @@ These are documented behaviours, not bugs, with tracked follow-ups:
   `log` body already diverges from git's `commit/Author/Date` (mkit
   `Identity` + 64-hex ids); an `--oneline --graph` renderer for the
   linear/DAG case is a tracked post-v1 follow-up, not a v1 blocker.
+- **`mkit log --author`/`--grep` are plain substring matches, not
+  regexes.** git's `--author`/`--grep` default to POSIX extended-regex
+  matching against a free-text `Name <email>` header; mkit identities are
+  opaque (Ed25519 keys, `mid:N` numbers, DID keys), so a regex engine
+  would buy little for the common case. A literal substring (the typical
+  `--author=me` / `--grep=fix:` usage) behaves the same either way.
+- **`mkit log --since`/`--until` use a small, explicit date grammar, not
+  git's `approxidate`.** Accepted forms: `@<unix-seconds>`,
+  `now`/`today`/`yesterday`, `<N> <unit> ago`, `YYYY-MM-DD`, and
+  `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` (UTC). git's fuzzier
+  natural-language forms (`last Tuesday`, `3am`, `noon`) are not accepted.
 - **`mkit status --porcelain=v2`** matches git's format except that object
   ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
   `2` record (`R100`); `--branch` header lines are not emitted.
@@ -1281,6 +1492,7 @@ which routes them to the user scope automatically.
 | `remote_endpoint` | URL / path | empty | Set via `mkit remote add` |
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
+| `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
@@ -1339,12 +1551,24 @@ Accepted schemes:
 | Scheme | Form | Use |
 |--------|------|-----|
 | `mkit+file` | `mkit+file:///abs/path` | local filesystem mirror |
-| `mkit+https` | `mkit+https://host[:port]/path` | HTTP gateway (e.g. VCS Worker) |
+| `mkit+https` | `mkit+https://host[:port][/path]` | ConnectRPC gateway (e.g. VCS Worker) |
 | `mkit+s3` | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `mkit+ssh` | `mkit+ssh://user@host[:port]:path` | SSH with the mkit shell |
 | `mkit+memory` | `mkit+memory://` | in-memory (testing only) |
 
-See `docs/specs/SPEC-TRANSPORT.md` for the wire protocol.
+`mkit+https` (and loopback-only `mkit+http`) speaks
+`mkit.transport.v1.TransportService` over ConnectRPC — see
+`docs/specs/SPEC-TRANSPORT-CONNECT.md`. Any `/path` on the URL is
+accepted (for shape-consistency with the other schemes) but currently
+has no wire effect: every RPC resolves to the fixed
+`/mkit.transport.v1.TransportService/<Method>` path regardless.
+Write RPCs against a deployment that requires the Ed25519 write envelope
+(e.g. `apps/vcs-worker`, the reference server) need
+`mkit config transport_auth envelope` — see the config table above and
+SPEC-TRANSPORT-CONNECT §7.3.
+
+See `docs/specs/SPEC-TRANSPORT.md` for the other transports' wire
+protocols.
 
 ## Version output contract
 

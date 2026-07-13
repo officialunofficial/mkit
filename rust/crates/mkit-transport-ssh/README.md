@@ -6,7 +6,7 @@ SSH transport for mkit using a forced-command server pattern over a system
 Implements the `Transport` trait (`docs/specs/SPEC-TRANSPORT.md`) over a long-lived
 system `ssh(1)` child process, exchanging the seven mkit verbs as
 length-prefixed protobuf `SshFrame` messages defined in
-`mkit-rpc/proto/ssh.proto`.
+`mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`.
 
 ## Design choice: `std::process::Command`, not `russh`
 

@@ -102,6 +102,9 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
+
       - name: Install web dependencies
         working-directory: apps/web
         run: bun install --frozen-lockfile
@@ -110,13 +113,21 @@ jobs:
         working-directory: apps/web
         run: bun run wasm:build
 
+      # Fails if apps/web/vendor/mkit-repo-proto/generated/ drifted from what
+      # repo.proto + protoc-gen-es currently produce — the TS sibling of the
+      # Rust codegen-freshness check on Cloud Build (see
+      # scripts/check-generated-fresh-ts.sh for why this runs HERE and not
+      # there: that job's image has no Node/buf).
+      - name: Check generated TS client freshness
+        run: ./scripts/check-generated-fresh-ts.sh
+
       - name: Typecheck
         working-directory: apps/web
         run: bun run typecheck
 
-      - name: Test
+      - name: Test (coverage-enforced)
         working-directory: apps/web
-        run: bun run test
+        run: bun run test --coverage
 
       - name: Lint
         working-directory: apps/web

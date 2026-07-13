@@ -16,16 +16,24 @@
 // run under `cargo test` on the host. The `sign` dev binary depends only on
 // these (+ the generated proto), so the host build never compiles the
 // wasm-only worker glue below.
+pub mod audit;
 pub mod chat;
 pub mod envelope;
 pub mod hashing;
 pub mod refs;
+pub mod write_quota;
 
 /// Generated buffa messages + ConnectRPC RepoService server stubs.
 pub mod commit_log;
 pub mod proto {
     connectrpc::include_generated!();
 }
+
+/// The `/watch` wire encoding — a `RoomEvent` proto-JSON payload — shared by
+/// the RefStore DO (producer) and the WatchRefs Connect-streaming bridge
+/// (consumer). See the module doc for why this lives outside `worker_impl`
+/// (host-testable, no wasm32 target required).
+pub mod room_event;
 
 // Worker glue (R2 / Durable Object / fetch event) is wasm32-only: the
 // `#[durable_object]` and `#[event(fetch)]` macros emit `#[wasm_bindgen]`

@@ -1,5 +1,6 @@
 ---
 source: crates/mkit-cli/tests/help_snapshot.rs
+assertion_line: 199
 expression: stdout
 ---
 usage: mkit <command> [args]
@@ -69,22 +70,30 @@ commands:
   ref cat <name>    Print the resolved hash for one ref (HEAD,
                     refs/heads/<b>, refs/tags/<t>, or refs/remotes/<r>/<b>),
                     following HEAD's symbolic indirection
-  commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>]
+  commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>] [--format=json]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
                     -F reads the message from <file> (`-` = stdin); --author
                     overrides the commit author. After `merge --no-commit`
                     (or a resolved merge) this records a two-parent merge commit.
                     -q suppresses the summary; -S/--gpg-sign, --no-verify,
-                    --no-edit are accepted no-ops (mkit always signs, no hooks)
+                    --no-edit are accepted no-ops (mkit always signs, no hooks);
+                    --format=json emits a JSON result object on success
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable until `gc` ships.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--graph] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp;
-                    --graph is accepted but currently a no-op). Optional
+                    --graph is accepted but currently a no-op). --author/
+                    --grep filter by substring match on the author identity
+                    / commit message; --since/--until bound the commit
+                    timestamp (@<unix>, now/today/yesterday, N-unit-ago,
+                    or YYYY-MM-DD[ HH:MM:SS]); --no-merges hides
+                    merge commits from the output; --first-parent walks
+                    only first parents, never entering a merged side
+                    branch. Filters apply before -n's limit. Optional
                     <rev> starts the walk there; <A>..<B> shows commits in B
                     not in A; <A>...<B> the symmetric difference (empty
                     side = HEAD)
@@ -102,7 +111,7 @@ commands:
                     --porcelain=v2 emits git's richer per-path format with
                     modes + object ids; special-byte paths are C-style
                     quoted; -z NUL-terminates records with raw paths)
-  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
+  diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [--exit-code|--quiet] [--color[=WHEN]|--no-color] [-w|-b] [-U N] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]
                     Show changes as a unified patch (HEAD vs workdir,
                     --staged for HEAD vs index, a single revision vs the
                     worktree, two revisions, an A..B range, or an A...B
@@ -114,7 +123,10 @@ commands:
                     A/D/M (T = mode change) letter; --stat shows per-file
                     change counts + a +/- graph and a summary line; -z
                     NUL-terminates name-only/-status records with raw paths
-                    (else special-byte paths are C-style quoted)
+                    (else special-byte paths are C-style quoted); -w/
+                    --ignore-all-space and -b/--ignore-space-change control
+                    whitespace sensitivity (-w wins if both given); -U<n>/
+                    --unified=<n> sets the context-line count (default 3)
   branch [-v|--verbose] [--format=json]
                     List branches (* marks current; no commit id by
                     default, like git; -v adds the abbreviated id +
@@ -140,14 +152,17 @@ commands:
                     Remove untracked files (refuses without -f; -n
                     previews). -d also removes untracked dirs; -x includes
                     ignored files, -X removes only ignored
-  tag [<name>] [<commit>]  List tags, or create a lightweight tag
+  tag [<name>] [<commit>] [--format=json]  List tags, or create a lightweight tag
   tag -l [<pattern>]  List tags, optionally filtered by a shell glob
+                    (JSONL with --format=json)
   tag -a <name> [-m <msg>] [--author <spec>] [<commit>]  Create an annotated tag
   tag -s <name> [-m <msg>] [--author <spec>] [<commit>]  Create a signed tag
   tag -d <name>     Delete a tag
   config [--format=json]  Show all configuration values (JSON with --format=json)
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
+  config --unset <key>  Remove a configuration value (idempotent; unknown key errors)
+  config [--local|--global] <key> <value>|--unset <key>  Force repo/user scope
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
   config user.name|user.email <value>  Git-compatibility aliases; stored and
@@ -157,25 +172,32 @@ commands:
   config ssh.strict_host_key_checking <yes|no|accept-new>  Override SSH host policy
   config ssh.user_known_hosts_file <path>  Custom SSH known_hosts file
   config ssh.identity_file <path>  SSH private key file
-  merge [--no-commit] [-m <msg>] <branch> | --continue | --abort
+  merge [--no-commit] [-m <msg>] [--format=json] <branch> | --continue | --abort
                     Merge a branch into HEAD (--no-commit stages the merge and
                     stops before committing; finish with `mkit commit` or
-                    `mkit merge --continue`; -m overrides the merge message)
-  push [<remote>] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run]
+                    `mkit merge --continue`; -m overrides the merge message;
+                    --format=json emits a JSON outcome object)
+  push [<remote>] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run] [--format=json]
                     Push current branch to its upstream (--all mirrors every
                     branch; -u records the upstream; prints git's `To <url>` +
-                    ref-update summary, or `Everything up-to-date`)
-  pull              Pull changes from remote (fast-forward; prints `Updating
-                    <a>..<b>`/`Fast-forward`/diffstat, or `Already up to date.`)
-  fetch             Download from remote without merging (prints `From <url>`
-                    + per-ref summary; silent when nothing changed)
+                    ref-update summary, or `Everything up-to-date`;
+                    --format=json emits a JSON outcome object)
+  pull [<remote>] [--all] [--format=json]  Pull changes from remote (fast-forward;
+                    prints `Updating <a>..<b>`/`Fast-forward`/diffstat, or
+                    `Already up to date.`); --all pulls every configured remote;
+                    --format=json emits a JSON outcome object
+  fetch [<remote>] [--all] [--format=json]  Download from remote without merging
+                    (prints `From <url>` + per-ref summary; silent when nothing
+                    changed); --all fetches every configured remote;
+                    --format=json emits a JSON outcome object
   worktree add <path> [<commit-ish>]  Create a linked working tree (shares the
                     object store and refs; own HEAD/index/stash). With no
                     commit-ish, creates a branch named after the path
   worktree list [--porcelain]  List the main and every linked working tree
   worktree remove [--force] <path>     Remove a linked working tree
   worktree prune [--dry-run]   Delete registry entries whose tree is gone
-  stash             Stash working dir changes (save WIP; -m for a message)
+  stash [--format=json]  Stash working dir changes (save WIP; -m for a message;
+                    --format=json emits a JSON outcome, or JSONL on `list`)
   stash save -m <msg>  Stash with a message
   stash list        List stash entries (printed as stash@{N})
   stash pop [--index] [<n>|stash@{n}]    Apply and remove a stash entry (default
@@ -185,7 +207,9 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
-  clone [--sparse ...] <url>  Clone a repository
+  clone [--sparse ...] [-b <branch>] [-o <name>] <url>  Clone a repository
+                    (-b checks out <branch> instead of the remote default;
+                    -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
                     `<name>	<url> (fetch)`/`(push)`; JSON with --format=json)
   remote add [<name>] <url>  Add a remote (mkit+file://, mkit+https://, mkit+s3://, mkit+ssh://)
@@ -197,17 +221,20 @@ commands:
   key generate|list|import|export|delete  Manage user-scoped keystore keys
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
-  cherry-pick [-n] [-m <parent-number>] <hash> | --continue | --abort
+  cherry-pick [-n] [-m <parent-number>] [--format=json] <hash> | --continue | --abort
                     Apply a commit to the current branch (-n stages the change
                     without committing; -m/--mainline selects the mainline
-                    parent when replaying a merge commit, like git)
-  revert [-n] [--no-edit] <commit> | --continue | --abort
+                    parent when replaying a merge commit, like git;
+                    --format=json emits a JSON outcome object)
+  revert [-n] [--no-edit] [--format=json] <commit> | --continue | --abort
                     Create a new commit undoing <commit> (forward commit;
-                    conflict-aware; -n stages the revert without committing)
+                    conflict-aware; -n stages the revert without committing;
+                    --format=json emits a JSON outcome object)
   rebase <branch>    Replay commits onto a different base
   rebase -i <branch> Interactive: reorder/drop/reword/squash/fixup the todo
   rebase --continue  Continue rebase after conflict resolution
   rebase --abort     Abort rebase and restore original state
+                    (--format=json on any form emits a JSON outcome object)
   bisect start       Begin binary search for a bug
   bisect good [hash] Mark a commit as good
   bisect bad [hash]  Mark a commit as bad
@@ -249,14 +276,24 @@ commands:
                     forward, <rev> blames as of a revision (default HEAD; JSONL
                     with --format=json, or git-shaped
                     --porcelain/--line-porcelain)
-  verify <rev>      Verify the signature on a commit, remix, or signed tag
+  verify <rev> [--trusted] [--trust-roots <path>]
+                    Verify the signature on a commit, remix, or signed tag;
+                    --trusted (or --trust-roots) also cross-checks the
+                    signer against the trust-roots registry, failing
+                    closed on an unlisted signer
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer "algorithm=<alg>,signer=<kind>[,path=<p>]"]... [--external-signer-arg <V>]...
                     Produce a signed DSSE attestation for a commit
                     (--external-signer-arg is repeatable; the supplied list
                     replaces attest.external_signer_args from config)
-  verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>]
-                    Verify every attestation attached to a commit
+  verify-attest [--commit <hash>] [--trust-roots <path>] [--algorithm <filter>] [--format=json]
+                    Verify every attestation attached to a commit (per-signature
+                    verdicts to stderr; --format=json also emits a JSON result)
+  trust add <keyid> <pubkey-hex> [--kind <kind>] [--trust-roots <path>] [--force]
+  trust list [--trust-roots <path>] [--json]
+  trust remove <keyid> [--trust-roots <path>] --yes
+                    Manage the trust-roots registry `verify --trusted` and
+                    `verify-attest` read from
   self update [--version <tag>] [--check] [--allow-downgrade] [--format human|json]
                     Update this binary in place from a signed GitHub
                     Release, verifying the mkit-native release

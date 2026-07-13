@@ -4,6 +4,15 @@
 pub mod mkit {
     use super::*;
     #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
+    pub mod common {
+        use super::*;
+        #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
+        pub mod v1 {
+            use super::*;
+            include!(concat!(env!("OUT_DIR"), "/mkit.common.v1.mod.rs"));
+        }
+    }
+    #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
     pub mod repo {
         use super::*;
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]

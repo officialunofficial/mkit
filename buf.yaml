@@ -1,0 +1,62 @@
+version: v2
+# Root buf v2 workspace: three modules covering all of mkit's proto
+# trees — rust/crates/mkit-rpc/proto (mkit.rpc.v1[.signer/.ssh/.verify]),
+# apps/repo-worker/proto (mkit.repo.v1), and proto (mkit.common.v1,
+# mkit.transport.v1). The mkit-rpc flat-to-`mkit/rpc/v1/`-path
+# restructuring and this workspace's general FILE-level lint/breaking
+# CI gate landed via #677/#678; #679 (mkit/common/v1/refs.proto
+# extraction) adds no new module — mkit.common.v1 lives inside the
+# existing `proto` module alongside mkit.transport.v1.
+#
+# Two of the three modules also carry a `name:` (issue #719): that's what
+# lets `buf push --exclude-unnamed` (the `buf-push` job in
+# .github/workflows/crates-publish.yml, tag-gated) publish them to the
+# Buf Schema Registry so third-party signer integrators and RepoService
+# clients can `buf generate` typed bindings from a pinned release tag
+# instead of vendoring this repo. The `proto` module (mkit.common.v1 /
+# mkit.transport.v1) is deliberately left unnamed — #719 scopes BSR
+# publishing to exactly the mkit-rpc and mkit-repo surfaces;
+# `--exclude-unnamed` skips it rather than erroring the push.
+modules:
+  # mkit.rpc.v1 (+ .signer, .ssh, .verify) — external-signer, SSH-transport,
+  # and object-signature-verification wire protocols. v1 is wire-frozen
+  # (SPEC-RPC promise); breaking.use: FILE below enforces that
+  # mechanically. Published to the BSR as buf.build/officialunofficial/mkit-rpc.
+  - path: rust/crates/mkit-rpc/proto
+    name: buf.build/officialunofficial/mkit-rpc
+    lint:
+      # mkit.rpc.v1.signer, mkit.rpc.v1.ssh, and mkit.rpc.v1.verify all
+      # end their package in a sub-protocol name (signer/ssh/verify), not
+      # a version — none of them predate or postdate
+      # PACKAGE_VERSION_SUFFIX so much as deliberately nest under the
+      # shared mkit.rpc.v1 vocabulary instead of versioning
+      # independently. Renaming any of them would rename buffa's
+      # generated Rust modules and is out of scope for a
+      # directory-layout-only move; scope the exception to just these
+      # three files rather than the whole workspace.
+      ignore_only:
+        PACKAGE_VERSION_SUFFIX:
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh
+          - rust/crates/mkit-rpc/proto/mkit/rpc/v1/verify
+  # mkit.repo.v1 — the repo-worker's multiplayer coordinator contract.
+  # Published to the BSR as buf.build/officialunofficial/mkit-repo.
+  - path: apps/repo-worker/proto
+    name: buf.build/officialunofficial/mkit-repo
+    lint:
+      except:
+        # mkit-rpc's common.proto (imported transitively via ssh-frame
+        # concepts mirrored here) uses `bytes` for 32-byte BLAKE3 ids and
+        # a field literally named `bytes`; allow it here too.
+        - FIELD_LOWER_SNAKE_CASE
+        # The coordinator's contract names the WatchRefs stream element
+        # `RefEvent` (a broadcast event, reused conceptually across the
+        # stream), not `WatchRefsResponse`. Keep the spec'd name.
+        - RPC_RESPONSE_STANDARD_NAME
+  # mkit.common.v1 (shared RefExpectation/RefEntry, #679) and
+  # mkit.transport.v1 (the canonical Connect remote protocol, #698 /
+  # SPEC-TRANSPORT-CONNECT) — the repo-root shared proto tree.
+  - path: proto
+breaking:
+  use:
+    - FILE

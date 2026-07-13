@@ -18,6 +18,15 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`, issue #692). **Not** a framed protocol under §1/§4 below — it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
+
+`ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
+type (`RefEntry`) from
+[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto) at
+the repo root — a vocabulary shared with `mkit.repo.v1` (the
+`apps/repo-worker` multiplayer demo protocol), so the two wire
+protocols cannot desync on CAS semantics. See that file's header
+comment for its own versioning contract.
 
 Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) — the only
 value mkit currently speaks. Wire-breaking changes (renumbering or
@@ -25,6 +34,17 @@ removing a field) are made by introducing a sibling `signer2.proto` /
 `ssh2.proto` package and bumping to a new `ProtocolVersion` value,
 never by silently reinterpreting `PROTOCOL_VERSION_1`'s existing wire
 shape (see §2).
+
+**Distribution.** These schemas are published as the
+`buf.build/officialunofficial/mkit-rpc` module on the Buf Schema
+Registry on every tagged release (the named module at
+`rust/crates/mkit-rpc/proto` in the repo-root `buf.yaml` workspace,
+pushed by the `buf-push` job in `.github/workflows/crates-publish.yml`;
+see [docs/RELEASE.md](../RELEASE.md#buf_token)). Integrators generate
+typed bindings in their own language with `buf generate` against a
+pinned module ref instead of vendoring this repo — the checked-in
+`rust/crates/mkit-rpc/proto/buf.gen.yaml` is the reference codegen
+recipe (Swift today; add other languages the same way).
 
 ---
 

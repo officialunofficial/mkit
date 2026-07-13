@@ -24,6 +24,7 @@ cd "$(dirname "$0")/.."
 
 bash scripts/regen-rpc-proto.sh
 bash scripts/regen-repo-proto.sh
+bash scripts/regen-transport-proto.sh
 
 # Detect drift in ANY committed codegen tree: every vendored generated dir is
 # named `generated/`, so match on that rather than a hardcoded list that has to
@@ -34,7 +35,7 @@ bash scripts/regen-repo-proto.sh
 # Scoping to `/generated/` keeps cargo build's Cargo.lock / target churn out.
 drift="$(git status --porcelain | grep -E '/generated/' || true)"
 if [ -n "${drift}" ]; then
-    echo "::error::Vendored generated code is STALE. Run scripts/regen-rpc-proto.sh and scripts/regen-repo-proto.sh, then commit the result." >&2
+    echo "::error::Vendored generated code is STALE. Run scripts/regen-rpc-proto.sh, scripts/regen-repo-proto.sh, and scripts/regen-transport-proto.sh, then commit the result." >&2
     echo >&2
     echo "Drift detected in vendored codegen:" >&2
     echo "${drift}" >&2

@@ -1,6 +1,10 @@
 //! Cross-transport types: error taxonomy, the [`Transport`] trait, the
 //! [`PackKey`] digest wrapper, and the retry/backoff helpers used by
-//! every transport implementation (memory, file, HTTP, S3, SSH).
+//! every transport implementation (memory, file, HTTP, S3, SSH, enc).
+//! [`retrying`] is the single shared driver of the SPEC-TRANSPORT §7
+//! ladder — every transport's `retrying`/`with_retry` method is a thin
+//! wrapper around it, so the backoff/classification policy lives in
+//! exactly one place instead of being reimplemented per crate.
 //!
 //! The SSH wire format is defined in `mkit-rpc`'s `ssh.proto` and
 //! lives in `mkit_rpc::mkit::rpc::v1::ssh`; transport-ssh consumes
@@ -277,6 +281,86 @@ impl Iterator for BackoffIterator {
     }
 }
 
+/// Transport-agnostic retry driver shared by every [`Transport`]
+/// implementation, so the SPEC-TRANSPORT §7 ladder lives in exactly one
+/// place instead of being reimplemented per crate. Extracted from what
+/// was `HttpTransport::retrying` in `mkit-transport-http`.
+///
+/// `op` is re-invoked from scratch on every attempt — it MUST perform a
+/// fresh, self-contained unit of work each call (a new HTTP request on
+/// the existing connection pool, a freshly-reconnected SSH child, a
+/// redialed encrypted session, …) rather than assuming any state left
+/// over from a failed prior attempt is still valid. This matters most
+/// for connection-oriented transports: a frame-level failure can leave
+/// a stream mid-message-desynced, so `op` reconnecting before retrying
+/// (rather than resuming on the same broken handle) is what makes the
+/// retry safe, not just present.
+///
+/// `backoff` is a ladder *factory* (not a live iterator) so a fresh
+/// ladder starts on every call to `retrying` — production uses
+/// [`BackoffIterator::new`], tests inject a short/deterministic ladder.
+/// `sleep` is the delay hook between attempts; production sleeps for
+/// the full duration, tests typically inject a no-op or recorder.
+///
+/// Retries only the classes [`is_retryable`] accepts
+/// (`ConnectionFailed`, `ServerError{5xx}`, `ServerError{429}`); every
+/// other error returns immediately on the first attempt.
+pub fn retrying<T>(
+    mut op: impl FnMut() -> TransportResult<T>,
+    backoff: fn() -> BackoffIterator,
+    sleep: fn(Duration),
+) -> TransportResult<T> {
+    let mut ladder = backoff();
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                if is_retryable(&err)
+                    && let Some(delay) = ladder.next()
+                {
+                    sleep(delay);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PackChunk — transport-agnostic streaming segment
+// ---------------------------------------------------------------------------
+
+/// One bounded-size segment of a streamed pack transfer.
+///
+/// Mirrors the wire-level `PackChunk` shape shared by the SSH and enc
+/// transports (`offset`, `data`, `last` — see
+/// `mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto`) and the `mkit.transport.v1`
+/// Connect proto being designed for the HTTP
+/// reference worker, without this crate depending on any
+/// protobuf-generated type: `mkit-core` is the dependency root that
+/// `mkit-rpc` builds on, not the reverse (see this module's header
+/// comment), so the canonical protobuf `PackChunk` cannot be named here.
+/// Transports convert 1:1 between this type and their own wire
+/// representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackChunk {
+    /// Byte offset of `data` within the pack. Consecutive chunks in one
+    /// transfer MUST have ascending, contiguous offsets starting at 0 —
+    /// i.e. chunk *n*'s `offset` equals the sum of every prior chunk's
+    /// `data.len()`.
+    pub offset: u64,
+    /// Chunk payload. Transports typically bound this to a fixed
+    /// per-frame maximum (e.g. `mkit_rpc::CHUNK_DATA_MAX`, 800 KiB for
+    /// SSH/enc) so no single chunk forces a large allocation.
+    pub data: Vec<u8>,
+    /// `true` on the final chunk of the stream. An empty pack is still
+    /// represented as exactly one chunk with `last = true` and empty
+    /// `data` — a stream MUST NOT end silently without a `last = true`
+    /// chunk.
+    pub last: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Transport trait
 // ---------------------------------------------------------------------------
@@ -304,6 +388,108 @@ pub trait Transport: Send + Sync {
     /// Returns [`TransportError::PackNotFound`] if the remote does not
     /// hold this digest.
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>>;
+
+    /// Upload a pack by streaming bounded-size [`PackChunk`]s instead of
+    /// requiring the whole pack materialized as one `&[u8]` up front.
+    ///
+    /// `total_bytes` is the caller-declared pack length — the wire
+    /// header most streaming transports send before the first chunk.
+    /// `chunks` MUST yield its segments in ascending contiguous `offset`
+    /// order and end with exactly one item whose `last` field is `true`
+    /// (an empty pack still yields one `last = true` chunk with empty
+    /// `data`); the accumulated `data` length across every yielded chunk
+    /// MUST equal `total_bytes`. The digest (`key`) is still computed by
+    /// the caller up front, exactly as for [`Self::upload_pack`] — this
+    /// method does not hash the stream itself.
+    ///
+    /// This is an additive, opt-in entry point: no existing transport is
+    /// forced to implement real streaming. The default impl buffers
+    /// `chunks` into one `Vec` (bounded by [`PACK_BODY_LIMIT_USIZE`]) and
+    /// delegates to [`Self::upload_pack`], so every transport gets a
+    /// working implementation with zero code — callers may always use
+    /// this entry point, even against a transport that has not opted
+    /// into streaming. Transports that can forward chunks directly to
+    /// their own wire (SSH, enc — see `mkit-transport-ssh`'s existing
+    /// `PackChunk` frame loop) SHOULD override this to avoid the buffer
+    /// and stay in bounded memory regardless of pack size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::ProtocolError`] if `chunks` never
+    /// yields a `last = true` item, or if the accumulated byte count
+    /// does not equal `total_bytes`. Returns
+    /// [`TransportError::PayloadTooLarge`] if `total_bytes` (or the
+    /// accumulated count) would exceed [`PACK_BODY_LIMIT`]. Propagates
+    /// any error yielded by `chunks` itself (e.g. the caller's own I/O
+    /// error while reading a pack off disk).
+    fn upload_pack_streaming(
+        &self,
+        key: &PackKey,
+        total_bytes: u64,
+        chunks: &mut dyn Iterator<Item = TransportResult<PackChunk>>,
+    ) -> TransportResult<()> {
+        if total_bytes > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
+        }
+        // `total_bytes <= PACK_BODY_LIMIT` was just checked, and
+        // `PACK_BODY_LIMIT_USIZE as u64 == PACK_BODY_LIMIT` is asserted
+        // at the constant's definition, so this conversion never
+        // truncates — `try_from` (rather than `as`) makes that provable
+        // to clippy instead of asserted in a comment.
+        let initial = usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE);
+        let mut buf = Vec::with_capacity(initial);
+        let mut saw_last = false;
+        for chunk in chunks {
+            let c = chunk?;
+            if buf.len().saturating_add(c.data.len()) > PACK_BODY_LIMIT_USIZE {
+                return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
+            }
+            buf.extend_from_slice(&c.data);
+            if c.last {
+                saw_last = true;
+                break;
+            }
+        }
+        if !saw_last || buf.len() as u64 != total_bytes {
+            return Err(TransportError::ProtocolError);
+        }
+        self.upload_pack(&buf, key)
+    }
+
+    /// Download a pack as a lazy stream of bounded-size [`PackChunk`]s
+    /// instead of one big `Vec<u8>`.
+    ///
+    /// This is an additive, opt-in entry point mirroring
+    /// [`Self::upload_pack_streaming`]. The default impl calls
+    /// [`Self::download_pack`] eagerly (so it does not save memory by
+    /// itself) and wraps the whole result as a single `last = true`
+    /// chunk — every transport gets a working implementation with zero
+    /// code. Transports that can read their own wire incrementally (SSH,
+    /// enc) SHOULD override this to yield each wire chunk as it arrives,
+    /// keeping memory bounded to roughly one chunk at a time regardless
+    /// of total pack size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::PackNotFound`] immediately if the
+    /// remote does not hold `key` — a conforming implementation never
+    /// returns a stream that then fails its first item with
+    /// `PackNotFound`. Errors surfacing mid-stream (a malformed frame, a
+    /// connection drop) are yielded as `Err` items from the returned
+    /// iterator rather than failing this call itself, since an
+    /// overridden implementation may not know the transfer will fail
+    /// until partway through.
+    fn download_pack_streaming(
+        &self,
+        key: &PackKey,
+    ) -> TransportResult<Box<dyn Iterator<Item = TransportResult<PackChunk>> + '_>> {
+        let bytes = self.download_pack(key)?;
+        Ok(Box::new(core::iter::once(Ok(PackChunk {
+            offset: 0,
+            data: bytes,
+            last: true,
+        }))))
+    }
 
     /// HEAD-check a pack. Cheaper than [`Self::download_pack`] on
     /// network transports.
@@ -538,5 +724,281 @@ mod tests {
         for d in &delays[1..] {
             assert!(*d <= cap);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // upload_pack_streaming / download_pack_streaming default impls
+    // -----------------------------------------------------------------
+
+    /// Minimal in-memory [`Transport`] that only implements the
+    /// required whole-buffer methods, so its `*_streaming` behavior is
+    /// entirely the trait's default impl under test.
+    #[derive(Default)]
+    struct RecordingTransport {
+        uploaded: std::sync::Mutex<Option<(Vec<u8>, PackKey)>>,
+        stored: std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>,
+    }
+
+    impl Transport for RecordingTransport {
+        fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+            *self.uploaded.lock().unwrap() = Some((bytes.to_vec(), *key));
+            self.stored
+                .lock()
+                .unwrap()
+                .insert(*key.as_bytes(), bytes.to_vec());
+            Ok(())
+        }
+
+        fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+            self.stored
+                .lock()
+                .unwrap()
+                .get(key.as_bytes())
+                .cloned()
+                .ok_or(TransportError::PackNotFound)
+        }
+
+        fn pack_exists(&self, _key: &PackKey) -> TransportResult<bool> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn update_ref(
+            &self,
+            _name: &str,
+            _condition: RefWriteCondition,
+            _hash: &Hash,
+        ) -> TransportResult<()> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn read_ref(&self, _name: &str) -> TransportResult<Option<Hash>> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn list_refs(&self, _prefix: &str) -> TransportResult<Vec<Ref>> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
+    fn chunks_of(data: &[u8], chunk_len: usize) -> Vec<PackChunk> {
+        if data.is_empty() {
+            return vec![PackChunk {
+                offset: 0,
+                data: Vec::new(),
+                last: true,
+            }];
+        }
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let end = core::cmp::min(offset + chunk_len, data.len());
+            out.push(PackChunk {
+                offset: offset as u64,
+                data: data[offset..end].to_vec(),
+                last: end == data.len(),
+            });
+            offset = end;
+        }
+        out
+    }
+
+    #[test]
+    fn upload_pack_streaming_default_delegates_to_upload_pack() {
+        let t = RecordingTransport::default();
+        let payload = b"hello mkit pack bytes".repeat(100);
+        let key = PackKey::new([0x11; 32]);
+        let mut it = chunks_of(&payload, 7).into_iter().map(Ok);
+
+        t.upload_pack_streaming(&key, payload.len() as u64, &mut it)
+            .expect("streaming upload via default impl");
+
+        let (got_bytes, got_key) = t.uploaded.lock().unwrap().clone().expect("upload recorded");
+        assert_eq!(got_bytes, payload);
+        assert_eq!(got_key, key);
+    }
+
+    #[test]
+    fn upload_pack_streaming_default_rejects_missing_last_chunk() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x22; 32]);
+        // No chunk at all — total_bytes = 0 still requires one `last =
+        // true` chunk per the trait contract.
+        let mut it = core::iter::empty();
+
+        let err = t
+            .upload_pack_streaming(&key, 0, &mut it)
+            .expect_err("must reject a stream with no last=true chunk");
+        assert!(matches!(err, TransportError::ProtocolError));
+    }
+
+    #[test]
+    fn upload_pack_streaming_default_rejects_total_bytes_mismatch() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x33; 32]);
+        let mut it = core::iter::once(Ok(PackChunk {
+            offset: 0,
+            data: vec![1, 2, 3],
+            last: true,
+        }));
+
+        // Declared total (10) does not match the 3 bytes actually
+        // streamed.
+        let err = t
+            .upload_pack_streaming(&key, 10, &mut it)
+            .expect_err("must reject a total_bytes/accumulated-length mismatch");
+        assert!(matches!(err, TransportError::ProtocolError));
+    }
+
+    #[test]
+    fn upload_pack_streaming_default_propagates_chunk_error() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x44; 32]);
+        let mut it = core::iter::once(Err(TransportError::ConnectionFailed));
+
+        let err = t
+            .upload_pack_streaming(&key, 0, &mut it)
+            .expect_err("must propagate an error yielded mid-stream");
+        assert!(matches!(err, TransportError::ConnectionFailed));
+    }
+
+    #[test]
+    fn upload_pack_streaming_default_rejects_oversize_total() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x55; 32]);
+        let mut it = core::iter::empty();
+
+        let err = t
+            .upload_pack_streaming(&key, PACK_BODY_LIMIT + 1, &mut it)
+            .expect_err("must reject total_bytes above PACK_BODY_LIMIT");
+        assert!(matches!(err, TransportError::PayloadTooLarge(_)));
+    }
+
+    #[test]
+    fn download_pack_streaming_default_wraps_whole_pack() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x66; 32]);
+        let payload = vec![9u8; 4096];
+        t.upload_pack(&payload, &key).unwrap();
+
+        let mut stream = t.download_pack_streaming(&key).expect("stream opens");
+        let first = stream.next().expect("one chunk").expect("no error");
+        assert_eq!(first.data, payload);
+        assert!(first.last);
+        assert!(
+            stream.next().is_none(),
+            "default impl yields exactly one chunk"
+        );
+    }
+
+    #[test]
+    fn download_pack_streaming_default_propagates_not_found() {
+        let t = RecordingTransport::default();
+        let key = PackKey::new([0x77; 32]);
+        // `Box<dyn Iterator<..>>`'s `Ok` type isn't `Debug`, so match
+        // instead of `expect_err`.
+        match t.download_pack_streaming(&key) {
+            Err(TransportError::PackNotFound) => {}
+            Err(other) => panic!("expected PackNotFound, got {other:?}"),
+            Ok(_) => panic!("missing pack must fail before any chunk is produced"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // retrying() driver
+    // -----------------------------------------------------------------
+
+    fn test_backoff() -> BackoffIterator {
+        BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
+    }
+
+    fn no_sleep(_delay: Duration) {}
+
+    #[test]
+    fn retrying_succeeds_on_first_try_without_sleeping() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        fn record_sleep(_delay: Duration) {
+            SLEEPS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static SLEEPS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+        SLEEPS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            },
+            test_backoff,
+            record_sleep,
+        );
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SLEEPS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn retrying_recovers_after_transient_connection_failures() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                let n = CALLS.fetch_add(1, Ordering::SeqCst);
+                if n < 3 {
+                    Err(TransportError::ConnectionFailed)
+                } else {
+                    Ok(42)
+                }
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn retrying_gives_up_after_ladder_exhausts() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Err(TransportError::ConnectionFailed)
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert!(matches!(result, Err(TransportError::ConnectionFailed)));
+        // 5-attempt ladder => 1 initial + 5 retries = 6 total calls.
+        assert_eq!(CALLS.load(Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn retrying_does_not_retry_non_retryable_errors() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        CALLS.store(0, Ordering::SeqCst);
+
+        let result = retrying::<u32>(
+            || {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                Err(TransportError::PackNotFound)
+            },
+            test_backoff,
+            no_sleep,
+        );
+
+        assert!(matches!(result, Err(TransportError::PackNotFound)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
 }

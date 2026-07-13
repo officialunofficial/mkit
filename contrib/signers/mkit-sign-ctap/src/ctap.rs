@@ -17,7 +17,7 @@ use crate::SignerError;
 /// is the 65-byte `0x04 || x || y` form CTAP returns; if the
 /// authenticator does not emit a parsable pubkey (older devices) the
 /// field is empty.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnrolledCredential {
     pub credential_id: Vec<u8>,
     pub public_key_sec1_uncompressed: Vec<u8>,
@@ -27,7 +27,7 @@ pub struct EnrolledCredential {
 /// What [`CtapDevice::get_assertion`] returns. `auth_data` and the
 /// signed `client_data_json` together form the WebAuthn assertion the
 /// verifier reconstructs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SignedAssertion {
     pub auth_data: Vec<u8>,
     /// DER-encoded ECDSA. Convert with `proto::der_to_compact_p256`
@@ -275,10 +275,14 @@ impl CtapDevice for RealCtapDevice {
 /// it, so we suppress the dead-code lint here rather than gating the
 /// type on `cfg(test)` — that would prevent re-use.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MockCtapDevice {
     pub canned_credential: EnrolledCredential,
     pub canned_assertion: SignedAssertion,
+    /// If true, `get_assertion` fails with a CTAP error until called
+    /// with a non-empty PIN — exercises the in-band `PinPrompt`/
+    /// `PinResponse` round trip (issue #694) without hardware.
+    pub requires_pin: bool,
 }
 
 impl CtapDevice for MockCtapDevice {
@@ -296,8 +300,11 @@ impl CtapDevice for MockCtapDevice {
         _rp_id: &str,
         _credential_id: &[u8],
         _client_data_json: &[u8],
-        _pin: Option<&str>,
+        pin: Option<&str>,
     ) -> Result<SignedAssertion, SignerError> {
+        if self.requires_pin && pin.is_none_or(str::is_empty) {
+            return Err(SignerError::Ctap("CTAP2_ERR_PIN_REQUIRED".into()));
+        }
         Ok(self.canned_assertion.clone())
     }
 }

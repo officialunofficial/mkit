@@ -2,8 +2,8 @@
 //
 // Worker-specific ref helpers: the `room` allow-list plus thin wrappers over
 // the canonical SPEC-REFS §3 validators in `mkit_core::refs`, and the CAS state
-// machine for UpdateRef. The CAS unit tests below replay the TS conformance
-// vectors verbatim.
+// machine for UpdateRef. The CAS unit tests below are the conformance suite
+// for this state machine.
 
 /// Validate a ref name against the mkit SPEC-REFS §3 grammar. Delegates to the
 /// canonical [`mkit_core::refs::validate_ref_name`] so the worker and the core
@@ -30,6 +30,19 @@ pub fn is_valid_room(room: &str) -> bool {
 #[must_use]
 pub fn is_valid_ref_prefix(prefix: &str) -> bool {
     mkit_core::refs::validate_ref_prefix(prefix)
+}
+
+/// Validate the length of an `UpdateRef` CAS `expected_id`. Empty is valid —
+/// ANY/MISSING expectations carry no `expected_id` (see [`evaluate_cas`]
+/// below) — but a non-empty value must be exactly 32 bytes (a BLAKE3 object
+/// id). Enforced at the RPC boundary in `worker_impl::service::update_ref`,
+/// mirroring [`is_valid_room`] / [`is_valid_ref_name`] above, so a malformed
+/// length is rejected with `invalid_argument` before it ever reaches
+/// [`evaluate_cas`], where comparing mismatched-length byte slices can never
+/// be equal and would otherwise silently resolve to `Conflict(Mismatch)`.
+#[must_use]
+pub fn is_valid_expected_id_len(expected_id: &[u8]) -> bool {
+    expected_id.is_empty() || expected_id.len() == 32
 }
 
 /// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
@@ -79,8 +92,7 @@ pub enum CasDecision {
 
 /// Pure CAS decision. `current` is the ref's present value (None = absent);
 /// `expected` is the MATCH target (must be None for ANY/MISSING). Ids are
-/// compared as opaque byte slices. Mirrors `evaluateCas` in
-/// reference-ts/lib/refs.ts.
+/// compared as opaque byte slices.
 ///
 ///   ANY      -> always commit (clobber); expected MUST be empty.
 ///   MISSING  -> commit iff current is None (else conflict Exists); expected MUST be empty.
@@ -130,11 +142,17 @@ mod tests {
     const ID_A: &[u8] = &[0xaa; 32];
     const ID_B: &[u8] = &[0xbb; 32];
 
-    // --- evaluate_cas, replaying reference-ts/test/refs.test.ts -------------
+    // --- evaluate_cas conformance vectors ------------------------------------
     #[test]
     fn any_clobbers() {
-        assert_eq!(evaluate_cas(Some(ID_A), RefExpectation::Any, None), CasDecision::Committed);
-        assert_eq!(evaluate_cas(None, RefExpectation::Any, None), CasDecision::Committed);
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Any, None),
+            CasDecision::Committed
+        );
+        assert_eq!(
+            evaluate_cas(None, RefExpectation::Any, None),
+            CasDecision::Committed
+        );
         assert!(matches!(
             evaluate_cas(Some(ID_A), RefExpectation::Any, Some(ID_A)),
             CasDecision::Invalid(_)
@@ -143,7 +161,10 @@ mod tests {
 
     #[test]
     fn missing_create_only() {
-        assert_eq!(evaluate_cas(None, RefExpectation::Missing, None), CasDecision::Committed);
+        assert_eq!(
+            evaluate_cas(None, RefExpectation::Missing, None),
+            CasDecision::Committed
+        );
         assert_eq!(
             evaluate_cas(Some(ID_A), RefExpectation::Missing, None),
             CasDecision::Conflict(ConflictReason::Exists)
@@ -190,7 +211,15 @@ mod tests {
         for r in ["demo", "room-1", "a.b_c", "A1", &"x".repeat(64)] {
             assert!(is_valid_room(r), "should accept {r:?}");
         }
-        for r in ["", "a/b", "a b", "a\\b", "a@b", &"x".repeat(65), "refs/heads"] {
+        for r in [
+            "",
+            "a/b",
+            "a b",
+            "a\\b",
+            "a@b",
+            &"x".repeat(65),
+            "refs/heads",
+        ] {
             assert!(!is_valid_room(r), "should reject {r:?}");
         }
     }
@@ -202,5 +231,47 @@ mod tests {
         assert_eq!(RefExpectation::from_wire(3), RefExpectation::Match);
         assert_eq!(RefExpectation::from_wire(0), RefExpectation::Unspecified);
         assert_eq!(RefExpectation::from_wire(99), RefExpectation::Unspecified);
+    }
+
+    // --- is_valid_expected_id_len (issue #682) -------------------------
+    //
+    // Regression for the `update_ref` RPC-boundary guard: a MATCH request
+    // with a non-empty, wrong-length `expected_id` must be caught here
+    // (service.rs returns `invalid_argument`) instead of falling through to
+    // `evaluate_cas`, where comparing mismatched-length byte slices can
+    // never be equal and would deterministically — but misleadingly —
+    // resolve to `Conflict(Mismatch)`.
+    #[test]
+    fn expected_id_len_rejects_non_empty_wrong_lengths() {
+        for len in [1, 16, 31, 33, 64] {
+            assert!(
+                !is_valid_expected_id_len(&vec![0xaa; len]),
+                "length {len} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_id_len_accepts_empty_for_any_missing() {
+        assert!(is_valid_expected_id_len(&[]));
+    }
+
+    #[test]
+    fn expected_id_len_accepts_32_bytes_for_match() {
+        assert!(is_valid_expected_id_len(ID_A));
+    }
+
+    // Confirms the exact failure mode this guard prevents: without the
+    // length check, a malformed `expected_id` reaches `evaluate_cas` and
+    // resolves to a misleading `Conflict(Mismatch)` rather than a protocol
+    // error, because mismatched-length slices are never `==`.
+    #[test]
+    fn without_the_guard_evaluate_cas_would_mask_the_malformed_request() {
+        let malformed_expected: &[u8] = &[0xaa; 16]; // not 32 bytes
+        assert!(!is_valid_expected_id_len(malformed_expected));
+        assert_eq!(
+            evaluate_cas(Some(ID_A), RefExpectation::Match, Some(malformed_expected)),
+            CasDecision::Conflict(ConflictReason::Mismatch)
+        );
     }
 }

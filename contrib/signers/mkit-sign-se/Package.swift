@@ -5,7 +5,7 @@
 // Speaks the v1 external-signer protocol defined in
 // `docs/specs/SPEC-EXTERNAL-SIGNER.md`: length-prefixed protobuf `SignerFrame`
 // messages on stdin/stdout. The schema is shared with the Rust
-// reference signers (`rust/crates/mkit-rpc/proto/signer.proto`); the
+// reference signers (`rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`); the
 // Swift package consumes pre-generated `.pb.swift` sources from
 // `Sources/mkit-sign-se/Generated/` (regenerate with the `protoc`
 // command documented in README.md).

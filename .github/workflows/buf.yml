@@ -1,0 +1,66 @@
+name: "CI: Buf"
+
+# Schema gate for mkit's repo-root buf v2 workspace (buf.yaml), which
+# covers all three proto trees — rust/crates/mkit-rpc/proto
+# (mkit.rpc.v1[.signer/.ssh/.verify]), apps/repo-worker/proto
+# (mkit.repo.v1), and proto (mkit.transport.v1) — as workspace modules.
+# This is the ONLY place buf lint / buf breaking run —
+# cloudbuild/codegen.yaml (Cloud Build) covers vendored-codegen
+# freshness via scripts/check-generated-fresh.sh, which is a separate,
+# additive concern (and not a required status for external fork PRs the
+# way this native GitHub Actions check is).
+#
+# Deliberately unconditional: no `paths:` filter on the trigger and no
+# SHOULD_RUN/workflow_dispatch skip gate (contrast rust.yml's
+# build-and-test / keystore-backends, or web.yml/mcp.yml's paths-filter
+# + always-on-gate dance). A wire-breaking or lint-violating proto
+# change must fail this check on every PR, full stop — "skipped" must
+# never read as green here.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per PR; newer pushes cancel superseded runs. Pushes to main are
+# never cancelled (key the guard off the event name, not github.ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  buf:
+    name: buf lint + buf breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      # Single invocation over the repo-root buf.yaml workspace: lint +
+      # breaking coverage per the workspace's STANDARD lint policy (with
+      # each module's documented exceptions) and `breaking: use: [FILE]`
+      # policy, applied uniformly across all three modules — including
+      # rust/crates/mkit-rpc/proto, which is wire-frozen per SPEC-RPC and
+      # gets the same FILE-level breaking enforcement as the others.
+      #
+      # input is left unset (defaults to ".", the workspace root) and
+      # breaking_against is deliberately left unset: buf-action's own
+      # default ("base branch of the pull request, or the commit before
+      # the push") is exactly what we want for both trigger types and
+      # avoids hardcoding a ref that would resolve to a same-commit
+      # (no-op) comparison on `push` events. See buf-action's MIGRATION.md
+      # ("We recommend not setting this parameter and instead relying on
+      # the default behavior.").
+      - name: buf (workspace)
+        uses: bufbuild/buf-action@fd21066df7214747548607aaa45548ba2b9bc1ff  # v1.4.0
+        with:
+          version: "1.66.0"
+          lint: true
+          format: false
+          breaking: true
+          push: false
+          archive: false
+          pr_comment: false

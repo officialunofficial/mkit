@@ -80,7 +80,7 @@ commonware-utils = "=2026.5.0"
 # pattern to verify its matching semantics (same regex engine family
 # keyring-core's store search uses).
 [target.'cfg(windows)'.dev-dependencies]
-regex = "=1.12.4"
+regex = "=1.13.0"
 
 [package.metadata.docs.rs]
 # NOT `all-features`: `backend-yubikey` pulls `card-backend-pcsc` → `pcsc-sys`,

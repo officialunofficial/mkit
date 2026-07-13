@@ -20,12 +20,11 @@
 //!   advisory string baked into a `RemoteError`, which is parameterised
 //!   via a `&str` label (e.g. `"ssh"` / `"enc"`).
 
+use crate::mkit::common::v1::{RefEntry, RefExpectation};
 use crate::mkit::rpc::v1::Error as RpcError;
 use crate::mkit::rpc::v1::ErrorCode;
 use crate::mkit::rpc::v1::signer::{SignerFrame, signer_frame};
-use crate::mkit::rpc::v1::ssh::{
-    RefExpectation, SshFrame, list_refs_response::RefEntry, ssh_frame,
-};
+use crate::mkit::rpc::v1::ssh::{SshFrame, ssh_frame};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{TransportError, TransportResult};

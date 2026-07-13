@@ -125,20 +125,38 @@ mod tests {
         // prefix, room, author, NONCE, text — nonce before text so newline-bearing
         // text stays last.
         let bytes = canonical_message("lobby", AUTHOR, "gm", "n1");
-        assert_eq!(String::from_utf8(bytes).unwrap(), "mkit-chat:v1\nlobby\n11\nn1\ngm");
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "mkit-chat:v1\nlobby\n11\nn1\ngm"
+        );
     }
 
     #[test]
     fn id_is_unique_per_nonce_and_content_addressed() {
         // Same (room, author, text, nonce) → same id (a replay recomputes it).
-        assert_eq!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gm", "n1"));
+        assert_eq!(
+            message_id("lobby", AUTHOR, "gm", "n1"),
+            message_id("lobby", AUTHOR, "gm", "n1")
+        );
         // SAME text, DIFFERENT nonce → DIFFERENT id: the exact fix — two distinct
         // posts of identical text no longer collide (so reactions can't leak across them).
-        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gm", "n2"));
+        assert_ne!(
+            message_id("lobby", AUTHOR, "gm", "n1"),
+            message_id("lobby", AUTHOR, "gm", "n2")
+        );
         // distinct text, author, or room each change the id too
-        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", AUTHOR, "gn", "n1"));
-        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("lobby", OTHER, "gm", "n1"));
-        assert_ne!(message_id("lobby", AUTHOR, "gm", "n1"), message_id("other", AUTHOR, "gm", "n1"));
+        assert_ne!(
+            message_id("lobby", AUTHOR, "gm", "n1"),
+            message_id("lobby", AUTHOR, "gn", "n1")
+        );
+        assert_ne!(
+            message_id("lobby", AUTHOR, "gm", "n1"),
+            message_id("lobby", OTHER, "gm", "n1")
+        );
+        assert_ne!(
+            message_id("lobby", AUTHOR, "gm", "n1"),
+            message_id("other", AUTHOR, "gm", "n1")
+        );
     }
 
     #[test]
@@ -169,9 +187,15 @@ mod tests {
         // posted just now -> refused
         assert!(is_rate_limited(Some(10_000), 10_000));
         // within the window -> refused
-        assert!(is_rate_limited(Some(10_000), 10_000 + MIN_POST_INTERVAL_MS - 1));
+        assert!(is_rate_limited(
+            Some(10_000),
+            10_000 + MIN_POST_INTERVAL_MS - 1
+        ));
         // exactly at the window edge -> allowed
-        assert!(!is_rate_limited(Some(10_000), 10_000 + MIN_POST_INTERVAL_MS));
+        assert!(!is_rate_limited(
+            Some(10_000),
+            10_000 + MIN_POST_INTERVAL_MS
+        ));
         // well after -> allowed
         assert!(!is_rate_limited(Some(10_000), 60_000));
     }

@@ -10,6 +10,7 @@
 //! Also contains `status_diff` — the working-tree vs HEAD diff that
 //! powers `mkit status`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use crate::hash::Hash;
@@ -404,6 +405,80 @@ fn join_path(prefix: &str, name: &[u8]) -> String {
 /// Number of unchanged context lines emitted on each side of a hunk.
 const PATCH_CONTEXT: usize = 3;
 
+/// Default number of unchanged context lines around each hunk — git's own
+/// `-U3` default. Exposed so a caller threading an explicit `-U<n>` (e.g.
+/// the CLI's `diff -U<n>`) can fall back to the same default mkit already
+/// uses when the flag is omitted.
+pub const DEFAULT_CONTEXT_LINES: usize = PATCH_CONTEXT;
+
+/// Whitespace-comparison mode for hunk generation — the primitive behind
+/// git's `diff -w`/`--ignore-all-space` and `-b`/`--ignore-space-change`.
+/// Only line **comparison** for the edit script changes; a rendered hunk
+/// always shows each line's real, unmodified bytes. Mirrors
+/// `ops::blame`'s `-w` (ignore-all-space) semantics — see that module's
+/// `strip_ws` — plus the `-b` (ignore-space-change) mode blame does not
+/// need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WhitespaceMode {
+    /// Exact byte comparison (the default).
+    #[default]
+    Exact,
+    /// `-b`/`--ignore-space-change`: runs of whitespace compare equal
+    /// regardless of length, and trailing whitespace is ignored, but a
+    /// line with whitespace where the other side has none still differs.
+    IgnoreSpaceChange,
+    /// `-w`/`--ignore-all-space`: every whitespace byte is ignored, so
+    /// `foo(a, b)` and `foo(a,b)` compare equal.
+    IgnoreAllSpace,
+}
+
+/// Whitespace-normalized comparison key for a line under `mode`. `Exact`
+/// borrows the line unchanged (no allocation).
+fn ws_key(text: &[u8], mode: WhitespaceMode) -> Cow<'_, [u8]> {
+    match mode {
+        WhitespaceMode::Exact => Cow::Borrowed(text),
+        WhitespaceMode::IgnoreAllSpace => Cow::Owned(strip_all_ws(text)),
+        WhitespaceMode::IgnoreSpaceChange => Cow::Owned(collapse_ws(text)),
+    }
+}
+
+/// git's `isspace()` byte class: ASCII whitespace plus vertical tab
+/// (`\x0B`), which Rust's `is_ascii_whitespace` does not include.
+fn is_ws_byte(b: u8) -> bool {
+    b.is_ascii_whitespace() || b == 0x0B
+}
+
+/// `-w`/`--ignore-all-space`: drop every whitespace byte.
+fn strip_all_ws(line: &[u8]) -> Vec<u8> {
+    line.iter().copied().filter(|&b| !is_ws_byte(b)).collect()
+}
+
+/// `-b`/`--ignore-space-change`: collapse each run of whitespace to a
+/// single space and drop trailing whitespace, so differing *amounts* of
+/// whitespace compare equal but a line with whitespace where the other
+/// has none still differs (unlike `-w`).
+fn collapse_ws(line: &[u8]) -> Vec<u8> {
+    let mut end = line.len();
+    while end > 0 && is_ws_byte(line[end - 1]) {
+        end -= 1;
+    }
+    let line = &line[..end];
+    let mut out = Vec::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        if is_ws_byte(line[i]) {
+            out.push(b' ');
+            while i < line.len() && is_ws_byte(line[i]) {
+                i += 1;
+            }
+        } else {
+            out.push(line[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Render a unified-diff patch between two byte blobs.
 ///
 /// `old_path` / `new_path` are the `a/…` and `b/…` labels for the
@@ -456,13 +531,30 @@ pub fn text_patch(old_bytes: &[u8], new_bytes: &[u8], old_path: &str, new_path: 
 /// algorithm — Myers diff with git-style hunk compaction — in one place.
 #[must_use]
 pub fn unified_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<u8>> {
+    unified_hunks_opts(old_bytes, new_bytes, PATCH_CONTEXT, WhitespaceMode::Exact)
+}
+
+/// Like [`unified_hunks`] but with an explicit context-line count and
+/// whitespace-comparison mode — the primitives behind git's `diff -U<n>`
+/// and `-w`/`-b`. `context` controls how many unchanged lines surround
+/// each hunk ([`DEFAULT_CONTEXT_LINES`] is git's own default of 3); `mode`
+/// controls which lines the edit script treats as equal (a rendered hunk
+/// always shows each line's real, unmodified bytes — only comparison
+/// changes).
+#[must_use]
+pub fn unified_hunks_opts(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    context: usize,
+    mode: WhitespaceMode,
+) -> Option<Vec<u8>> {
     if is_binary(old_bytes) || is_binary(new_bytes) {
         return None;
     }
     let old_lines = split_lines(old_bytes);
     let new_lines = split_lines(new_bytes);
-    let ops = edit_script(&old_lines, &new_lines);
-    let hunks = group_hunks(&ops, PATCH_CONTEXT);
+    let ops = edit_script(&old_lines, &new_lines, mode);
+    let hunks = group_hunks(&ops, context);
     let mut out = Vec::new();
     for hunk in &hunks {
         render_hunk(&mut out, hunk, &old_lines, &new_lines);
@@ -525,7 +617,7 @@ pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHu
     }
     let old_lines = split_lines(old_bytes);
     let new_lines = split_lines(new_bytes);
-    let ops = edit_script(&old_lines, &new_lines);
+    let ops = edit_script(&old_lines, &new_lines, WhitespaceMode::Exact);
     let hunks = group_hunks(&ops, PATCH_CONTEXT);
     Some(
         hunks
@@ -665,7 +757,7 @@ fn changed_regions(base: &[DiffLine<'_>], side: &[DiffLine<'_>]) -> Vec<MergeReg
     let mut regions: Vec<MergeRegion> = Vec::new();
     let mut cur: Option<MergeRegion> = None;
     let mut base_idx = 0usize; // next unconsumed base line
-    for op in edit_script(base, side) {
+    for op in edit_script(base, side, WhitespaceMode::Exact) {
         match op {
             DiffOp::Equal(bi, _) => {
                 if let Some(r) = cur.take() {
@@ -766,7 +858,7 @@ pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, us
     let new_lines = split_lines(new_bytes);
     let mut added = 0;
     let mut deleted = 0;
-    for op in edit_script(&old_lines, &new_lines) {
+    for op in edit_script(&old_lines, &new_lines, WhitespaceMode::Exact) {
         match op {
             DiffOp::Insert(_) => added += 1,
             DiffOp::Delete(_) => deleted += 1,
@@ -840,10 +932,10 @@ enum DiffOp {
 /// changed lines as far down as identical neighbours allow). The result
 /// matches `git diff`'s hunks for the common cases — same algorithm, same
 /// boundary convention — modulo git's optional indent heuristic.
-fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> Vec<DiffOp> {
-    let (mut old_changed, mut new_changed) = myers_changed(old, new);
-    compact_changes(old, &mut old_changed);
-    compact_changes(new, &mut new_changed);
+fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode) -> Vec<DiffOp> {
+    let (mut old_changed, mut new_changed) = myers_changed(old, new, mode);
+    compact_changes(old, &mut old_changed, mode);
+    compact_changes(new, &mut new_changed, mode);
     script_from_flags(old, new, &old_changed, &new_changed)
 }
 
@@ -861,7 +953,11 @@ fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> Vec<DiffOp> {
     clippy::cast_possible_wrap,
     clippy::many_single_char_names
 )]
-fn myers_changed(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> (Vec<bool>, Vec<bool>) {
+fn myers_changed(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    mode: WhitespaceMode,
+) -> (Vec<bool>, Vec<bool>) {
     let n = old.len();
     let m = new.len();
     let mut old_changed = vec![false; n];
@@ -895,7 +991,7 @@ fn myers_changed(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> (Vec<bool>, Vec<
             let mut y = x - k;
             while (x as usize) < n
                 && (y as usize) < m
-                && lines_equal(&old[x as usize], &new[y as usize])
+                && lines_equal(&old[x as usize], &new[y as usize], mode)
             {
                 x += 1;
                 y += 1;
@@ -941,7 +1037,7 @@ fn myers_changed(old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> (Vec<bool>, Vec<
 /// top of the run equals the line entering at the bottom — git's
 /// `xdl_change_compact` canonical placement, so a change among identical
 /// neighbours lands where git puts it.
-fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool]) {
+fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool], mode: WhitespaceMode) {
     let n = lines.len();
     let mut i = 0;
     while i < n {
@@ -958,7 +1054,7 @@ fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool]) {
         // Slide down: the line at `start` leaves the run and the line at
         // `end` joins it, valid only when they are identical.
         let (mut s, mut e) = (start, end);
-        while e < n && lines_equal(&lines[s], &lines[e]) {
+        while e < n && lines_equal(&lines[s], &lines[e], mode) {
             changed[s] = false;
             changed[e] = true;
             s += 1;
@@ -999,8 +1095,12 @@ fn script_from_flags(
     ops
 }
 
-fn lines_equal(a: &DiffLine<'_>, b: &DiffLine<'_>) -> bool {
-    a.text == b.text && a.has_newline == b.has_newline
+/// Line equality under `mode`: trailing-newline presence always matters
+/// (whitespace-insensitivity is about line *content*, not the `\ No
+/// newline at end of file` marker); the text comparison itself is
+/// normalized per [`ws_key`].
+fn lines_equal(a: &DiffLine<'_>, b: &DiffLine<'_>, mode: WhitespaceMode) -> bool {
+    a.has_newline == b.has_newline && ws_key(a.text, mode) == ws_key(b.text, mode)
 }
 
 /// A contiguous group of edits plus surrounding context, with the
@@ -2170,5 +2270,134 @@ mod tests {
     #[test]
     fn merge3_binary_side_conflicts() {
         assert_eq!(merge_blob_3way(b"a\nb\n", b"a\0\nb\n", b"a\nb\nc\n"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // unified_hunks_opts — WhitespaceMode (#712)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ignore_all_space_treats_whitespace_only_change_as_unchanged() {
+        let old = b"head\nfoo(a, b)\ntail\n";
+        let new = b"head\nfoo(a,b)\ntail\n";
+        let exact = unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::Exact).unwrap();
+        assert!(!exact.is_empty(), "exact mode should see the change");
+        let ws =
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::IgnoreAllSpace).unwrap();
+        assert!(
+            ws.is_empty(),
+            "-w should ignore a line that only gained/lost whitespace: {ws:?}"
+        );
+    }
+
+    #[test]
+    fn ignore_space_change_does_not_ignore_whitespace_appearing_from_nothing() {
+        // One side has a space the other side lacks entirely — `-b` must
+        // still see this as a change (unlike `-w`).
+        let old = b"foo(a, b)\n";
+        let new = b"foo(a,b)\n";
+        let hunks =
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::IgnoreSpaceChange).unwrap();
+        assert!(
+            !hunks.is_empty(),
+            "-b should still flag whitespace appearing where there was none"
+        );
+    }
+
+    #[test]
+    fn ignore_space_change_ignores_differing_amounts() {
+        // Both sides have whitespace at the same spot, just a different
+        // amount — `-b` ignores this.
+        let old = b"foo(a,   b)\n";
+        let new = b"foo(a, b)\n";
+        let hunks =
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::IgnoreSpaceChange).unwrap();
+        assert!(
+            hunks.is_empty(),
+            "-b should ignore a pure whitespace-amount change: {hunks:?}"
+        );
+        // `-w` ignores it too (it ignores whitespace unconditionally).
+        let ws_hunks =
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::IgnoreAllSpace).unwrap();
+        assert!(ws_hunks.is_empty());
+    }
+
+    #[test]
+    fn whitespace_mode_never_changes_the_rendered_line_bytes() {
+        // Even when `-w`/`-b` change *which* lines are considered part of a
+        // hunk, any line that DOES render keeps its own real bytes. The
+        // whitespace-only line sits far (beyond the context window) from
+        // the real change, so under `-b` it is equal-and-uninvolved,
+        // appearing in NEITHER hunk at all — not even as context.
+        let old = b"foo(x,  y)\npad1\npad2\npad3\npad4\npad5\nCHANGED-OLD\npad6\n";
+        let new = b"foo(x, y)\npad1\npad2\npad3\npad4\npad5\nCHANGED-NEW\npad6\n";
+        let hunks =
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::IgnoreSpaceChange).unwrap();
+        let text = String::from_utf8(hunks).unwrap();
+        assert!(text.contains("-CHANGED-OLD\n"), "{text}");
+        assert!(text.contains("+CHANGED-NEW\n"), "{text}");
+        // The whitespace-only line is outside the context window of the
+        // real change and compares equal under `-b`, so it never renders.
+        assert!(!text.contains("foo(x"), "{text}");
+    }
+
+    #[test]
+    fn unified_hunks_opts_default_matches_unified_hunks() {
+        let old = b"a\nb\nc\n";
+        let new = b"a\nB\nc\n";
+        assert_eq!(
+            unified_hunks(old, new),
+            unified_hunks_opts(old, new, PATCH_CONTEXT, WhitespaceMode::Exact)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // unified_hunks_opts — context-line count (#712)
+    // -----------------------------------------------------------------
+
+    fn ten_lines_changing_the_fifth() -> (Vec<u8>, Vec<u8>) {
+        let lines: Vec<String> = (1..=10).map(|n| format!("l{n}")).collect();
+        let mut old = lines.join("\n");
+        old.push('\n');
+        let mut changed = lines;
+        changed[4] = "l5-changed".to_string();
+        let mut new = changed.join("\n");
+        new.push('\n');
+        (old.into_bytes(), new.into_bytes())
+    }
+
+    fn context_line_count(hunks: &[u8]) -> usize {
+        String::from_utf8_lossy(hunks)
+            .lines()
+            .skip_while(|l| !l.starts_with("@@"))
+            .skip(1)
+            .filter(|l| l.starts_with(' '))
+            .count()
+    }
+
+    #[test]
+    fn context_zero_shows_no_surrounding_lines() {
+        let (old, new) = ten_lines_changing_the_fifth();
+        let hunks = unified_hunks_opts(&old, &new, 0, WhitespaceMode::Exact).unwrap();
+        assert_eq!(context_line_count(&hunks), 0);
+        let text = String::from_utf8(hunks).unwrap();
+        assert!(text.contains("-l5\n"), "{text}");
+        assert!(text.contains("+l5-changed\n"), "{text}");
+    }
+
+    #[test]
+    fn context_one_shows_one_line_each_side() {
+        let (old, new) = ten_lines_changing_the_fifth();
+        let hunks = unified_hunks_opts(&old, &new, 1, WhitespaceMode::Exact).unwrap();
+        assert_eq!(context_line_count(&hunks), 2);
+    }
+
+    #[test]
+    fn context_default_matches_three() {
+        let (old, new) = ten_lines_changing_the_fifth();
+        let hunks =
+            unified_hunks_opts(&old, &new, DEFAULT_CONTEXT_LINES, WhitespaceMode::Exact).unwrap();
+        assert_eq!(DEFAULT_CONTEXT_LINES, 3);
+        assert_eq!(context_line_count(&hunks), 6);
     }
 }

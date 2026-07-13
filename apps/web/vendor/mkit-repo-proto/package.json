@@ -1,0 +1,18 @@
+{
+  "name": "mkit-repo-proto",
+  "version": "0.0.0-local",
+  "private": true,
+  "type": "module",
+  "module": "./generated/mkit/repo/v1/repo_pb.ts",
+  "types": "./generated/mkit/repo/v1/repo_pb.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": "./generated/mkit/repo/v1/repo_pb.ts"
+  },
+  "files": [
+    "generated"
+  ],
+  "peerDependencies": {
+    "@bufbuild/protobuf": "^2"
+  }
+}

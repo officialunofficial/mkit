@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use base64::Engine as _;
 use mkit_attest::build_client_data_json;
 use mkit_rpc::mkit::rpc::v1::signer::{
-    Capabilities, HelloResponse, SignResponse, SignerFrame, WebAuthnData, signer_frame,
+    Capabilities, HelloResponse, PinPrompt, SignResponse, SignerFrame, WebAuthnData, signer_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{Algorithm as RpcAlgorithm, ErrorCode, KeyForm, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, signer_error_frame, write_frame};
@@ -103,17 +103,19 @@ where
             }
 
             Some(signer_frame::Body::SignRequest(req_box)) => {
-                let resp = handle_sign(&req_box, device, defaults);
+                let resp = handle_sign(r, w, &req_box, device, defaults)?;
                 write_frame(w, &resp).map_err(|e| SignerError::Io(format!("write sign: {e}")))?;
             }
 
-            // CTAP signer doesn't request PINs in-band right now; argv
-            // `--pin` covers it. A stray PinResponse is a protocol bug.
+            // `handle_sign` above solicits any PinResponse it needs
+            // itself, via a direct read on `r` mid-request (see
+            // `request_pin_in_band`) — so a PinResponse reaching this
+            // top-level dispatch is always out of turn.
             Some(signer_frame::Body::PinResponse(_)) => {
                 write_error(
                     w,
                     ErrorCode::InvalidRequest,
-                    "mkit-sign-ctap does not solicit PINs in-band; pass --pin instead".to_owned(),
+                    "unexpected PinResponse outside an active PIN round trip".to_owned(),
                 )?;
             }
 
@@ -131,19 +133,21 @@ where
     }
 }
 
-fn handle_sign<D: CtapDevice>(
+fn handle_sign<R: Read, W: Write, D: CtapDevice>(
+    r: &mut R,
+    w: &mut W,
     req: &mkit_rpc::mkit::rpc::v1::signer::SignRequest,
     device: &D,
     defaults: &SignDefaults,
-) -> SignerFrame {
+) -> Result<SignerFrame, SignerError> {
     // The reference CTAP signer only supports P-256 credentials. Reject
     // other WebAuthn algorithms until their public-key/signature formats
     // are implemented end-to-end.
     if !req.algorithm.is_some_and(|a| a == RpcAlgorithm::P256) {
-        return signer_error_frame(
+        return Ok(signer_error_frame(
             ErrorCode::UnsupportedAlgorithm,
             "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
-        );
+        ));
     }
 
     // CTAP signers require an opaque credential_id handle. Current mkit
@@ -160,10 +164,10 @@ fn handle_sign<D: CtapDevice>(
         .as_deref()
         .is_some_and(|credential_id| !credential_id.is_empty());
     if !ctap_key_form_allowed(key_form, has_key_ref, has_default_credential) {
-        return signer_error_frame(
+        return Ok(signer_error_frame(
             ErrorCode::UnsupportedKeyForm,
             "mkit-sign-ctap only supports KEY_FORM_OPAQUE_HANDLE (the credential_id)".to_owned(),
-        );
+        ));
     }
 
     // Resolve credential_id from key_ref (preferred) or argv default.
@@ -177,11 +181,11 @@ fn handle_sign<D: CtapDevice>(
     let credential_id = match credential_id {
         Some(c) => c,
         None => {
-            return signer_error_frame(
+            return Ok(signer_error_frame(
                 ErrorCode::InvalidRequest,
                 "no credential — pass --credential-id on argv or set SignRequest.key_ref"
                     .to_owned(),
-            );
+            ));
         }
     };
 
@@ -190,10 +194,12 @@ fn handle_sign<D: CtapDevice>(
     let credential_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_id);
     let store_path = match cred_store::default_path() {
         Ok(p) => p,
-        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
+        Err(e) => return Ok(signer_error_frame(ErrorCode::Internal, e.to_string())),
     };
     let store = cred_store::Store::load(&store_path).unwrap_or_default();
     handle_sign_with_store(
+        r,
+        w,
         req,
         device,
         defaults,
@@ -213,36 +219,38 @@ fn ctap_key_form_allowed(
         || (key_form == KeyForm::RawBytes && !has_key_ref && has_default_credential)
 }
 
-fn handle_sign_with_store<D: CtapDevice>(
+fn handle_sign_with_store<R: Read, W: Write, D: CtapDevice>(
+    r: &mut R,
+    w: &mut W,
     req: &mkit_rpc::mkit::rpc::v1::signer::SignRequest,
     device: &D,
     defaults: &SignDefaults,
     store: &cred_store::Store,
     credential_id: &[u8],
     credential_id_b64: &str,
-) -> SignerFrame {
+) -> Result<SignerFrame, SignerError> {
     if !req.algorithm.is_some_and(|a| a == RpcAlgorithm::P256) {
-        return signer_error_frame(
+        return Ok(signer_error_frame(
             ErrorCode::UnsupportedAlgorithm,
             "mkit-sign-ctap only signs ALGORITHM_P256".to_owned(),
-        );
+        ));
     }
 
     let Some(record) = store.find_by_credential_id(credential_id_b64) else {
-        return signer_error_frame(
+        return Ok(signer_error_frame(
             ErrorCode::InvalidRequest,
             format!(
                 "credential metadata for {credential_id_b64} is missing; run `mkit-sign-ctap enroll` so the signer can return a public_key"
             ),
-        );
+        ));
     };
     let public_key = match hex_decode(&record.public_key_sec1_uncompressed_hex) {
         Ok(key) if key.len() == 65 => key,
         _ => {
-            return signer_error_frame(
+            return Ok(signer_error_frame(
                 ErrorCode::Internal,
                 format!("stored public key for credential {credential_id_b64} is invalid"),
-            );
+            ));
         }
     };
 
@@ -258,22 +266,53 @@ fn handle_sign_with_store<D: CtapDevice>(
     let pae = req.payload.clone().unwrap_or_default();
     let client_data_json = build_client_data_json(&pae, &origin, false);
 
-    let assertion = match device.get_assertion(
+    // First attempt: the (deprecated) argv `--pin` default, if the
+    // caller passed one, else no PIN at all. Real authenticators with
+    // no PIN configured succeed here.
+    let mut assertion = device.get_assertion(
         &rp_id,
         credential_id,
         &client_data_json,
         defaults.pin.as_deref(),
-    ) {
+    );
+
+    // SPEC-EXTERNAL-SIGNER §4: source the PIN in-band rather than
+    // requiring `--pin` on argv. Only attempted when the caller didn't
+    // already supply one (argv still wins during the deprecation
+    // window — see `warn_pin_argv_deprecated` in main.rs) and only
+    // once: a wrong PIN decrements the authenticator's own retry
+    // counter, so blind looping against it would burn attempts.
+    //
+    // The mock/no-`ctap-hw` device surfaces every failure as an opaque
+    // `SignerError::Ctap(String)` — there is no PIN-specific error
+    // variant to key off yet (`ctap-hid-fido2`'s CTAP2 status codes
+    // aren't threaded through `CtapDevice` today), so any first-attempt
+    // failure with no PIN supplied is treated as "might need a PIN"
+    // and retried once with one. A future revision that plumbs real
+    // CTAP2 status codes through `CtapDevice::get_assertion` can narrow
+    // this to just `CTAP2_ERR_PIN_REQUIRED`.
+    if assertion.is_err() && defaults.pin.is_none() {
+        match request_pin_in_band(r, w, "authenticator PIN required", 0, true) {
+            Ok(pin) if !pin.is_empty() => {
+                assertion =
+                    device.get_assertion(&rp_id, credential_id, &client_data_json, Some(&pin));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    let assertion = match assertion {
         Ok(a) => a,
         Err(SignerError::Ctap(msg)) => {
-            return signer_error_frame(ErrorCode::HardwareError, msg);
+            return Ok(signer_error_frame(ErrorCode::HardwareError, msg));
         }
-        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
+        Err(e) => return Ok(signer_error_frame(ErrorCode::Internal, e.to_string())),
     };
 
     let sig_compact = match proto::der_to_compact_p256(&assertion.signature) {
         Ok(c) => c.to_vec(),
-        Err(e) => return signer_error_frame(ErrorCode::Internal, e.to_string()),
+        Err(e) => return Ok(signer_error_frame(ErrorCode::Internal, e.to_string())),
     };
 
     let key_id = if record.keyid.is_empty() {
@@ -282,7 +321,7 @@ fn handle_sign_with_store<D: CtapDevice>(
         record.keyid.clone()
     };
 
-    SignerFrame {
+    Ok(SignerFrame {
         body: Some(signer_frame::Body::SignResponse(Box::new(SignResponse {
             signature: Some(sig_compact),
             public_key: Some(public_key),
@@ -299,6 +338,57 @@ fn handle_sign_with_store<D: CtapDevice>(
             ..Default::default()
         }))),
         ..Default::default()
+    })
+}
+
+/// Emit a `PinPrompt` frame and block for the caller's `PinResponse`,
+/// returning the PIN it carried (possibly empty, for a touch-only
+/// prompt — see `PinPrompt.wants_pin`). Any other frame — including an
+/// out-of-turn `SignRequest` — is a protocol violation: this signer
+/// doesn't pipeline while a PIN round trip is outstanding.
+fn request_pin_in_band<R: Read, W: Write>(
+    r: &mut R,
+    w: &mut W,
+    reason: &str,
+    retries_remaining: u32,
+    wants_pin: bool,
+) -> Result<String, SignerError> {
+    let prompt = SignerFrame {
+        body: Some(signer_frame::Body::PinPrompt(Box::new(
+            PinPrompt::default()
+                .with_reason(reason.to_owned())
+                .with_retries_remaining(retries_remaining)
+                .with_wants_pin(wants_pin),
+        ))),
+        ..Default::default()
+    };
+    write_frame(w, &prompt).map_err(|e| SignerError::Io(format!("write pin prompt: {e}")))?;
+
+    let resp: SignerFrame =
+        read_frame(r).map_err(|e| SignerError::Io(format!("read pin response: {e}")))?;
+    match resp.body {
+        Some(signer_frame::Body::PinResponse(pr)) => Ok(pr.pin.unwrap_or_default()),
+        other => Err(SignerError::Io(format!(
+            "expected PinResponse, got {}",
+            signer_frame_body_name(&other)
+        ))),
+    }
+}
+
+/// Stringify a `SignerFrame` body variant for diagnostics. Small local
+/// mirror of `mkit-attest`'s private `frame_name` — not worth sharing
+/// across crates for six match arms.
+fn signer_frame_body_name(b: &Option<signer_frame::Body>) -> &'static str {
+    use signer_frame::Body;
+    match b {
+        Some(Body::Hello(_)) => "hello",
+        Some(Body::HelloResponse(_)) => "hello_response",
+        Some(Body::SignRequest(_)) => "sign_request",
+        Some(Body::SignResponse(_)) => "sign_response",
+        Some(Body::PinPrompt(_)) => "pin_prompt",
+        Some(Body::PinResponse(_)) => "pin_response",
+        Some(Body::Error(_)) => "error",
+        None => "(empty body)",
     }
 }
 
@@ -406,6 +496,7 @@ mod tests {
                 b"DSSEv1 28 application/vnd.in-toto+json 2 {}",
                 "https://mkit.local",
             ),
+            requires_pin: false,
         }
     }
 
@@ -468,14 +559,19 @@ mod tests {
             .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec());
+        let mut r = Cursor::new(Vec::new());
+        let mut w = Vec::new();
         let resp = handle_sign_with_store(
+            &mut r,
+            &mut w,
             &req,
             &device,
             &SignDefaults::default(),
             &store,
             b"mock-cred",
             &credential_id_b64url,
-        );
+        )
+        .unwrap();
         let sign_resp = match resp.body.clone() {
             Some(signer_frame::Body::SignResponse(s)) => *s,
             Some(signer_frame::Body::Error(e)) => panic!("server returned Error: {e:?}"),
@@ -501,14 +597,19 @@ mod tests {
             .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"x".to_vec());
+        let mut r = Cursor::new(Vec::new());
+        let mut w = Vec::new();
         let resp = handle_sign_with_store(
+            &mut r,
+            &mut w,
             &req,
             &device,
             &SignDefaults::default(),
             &Store::default(),
             b"mock-cred",
             "bW9jay1jcmVk",
-        );
+        )
+        .unwrap();
 
         let err = match resp.body.clone() {
             Some(signer_frame::Body::Error(e)) => e,
@@ -531,14 +632,19 @@ mod tests {
             .with_key_form(KeyForm::OpaqueHandle)
             .with_key_ref(b"mock-cred".to_vec())
             .with_payload(b"x".to_vec());
+        let mut r = Cursor::new(Vec::new());
+        let mut w = Vec::new();
         let resp = handle_sign_with_store(
+            &mut r,
+            &mut w,
             &req,
             &device,
             &SignDefaults::default(),
             &store,
             b"mock-cred",
             "bW9jay1jcmVk",
-        );
+        )
+        .unwrap();
 
         let err = match resp.body.clone() {
             Some(signer_frame::Body::Error(e)) => e,
@@ -615,5 +721,65 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         };
         assert_eq!(err.code, Some(ErrorCode::InvalidRequest.into()));
+    }
+
+    #[test]
+    fn pin_required_device_completes_via_in_band_round_trip() {
+        // Issue #694 / SPEC-EXTERNAL-SIGNER §4: a device that rejects
+        // the pin-less first attempt must be answered with a
+        // PinPrompt, and a well-formed PinResponse on the wire must
+        // let the sign complete — without `--pin` ever touching argv.
+        let mut device = mock_device();
+        device.requires_pin = true;
+        let store = store_with_mock_credential();
+
+        let req = SignRequest::default()
+            .with_algorithm(RpcAlgorithm::P256)
+            .with_key_form(KeyForm::OpaqueHandle)
+            .with_key_ref(b"mock-cred".to_vec())
+            .with_payload(b"DSSEv1 28 application/vnd.in-toto+json 2 {}".to_vec());
+
+        // `handle_sign_with_store` reads any in-band PinResponse
+        // directly off `r` mid-request (see `request_pin_in_band`) —
+        // feed it just that one trailing frame.
+        let pin_response = SignerFrame {
+            body: Some(signer_frame::Body::PinResponse(Box::new(
+                mkit_rpc::mkit::rpc::v1::signer::PinResponse::default().with_pin("1234"),
+            ))),
+            ..Default::default()
+        };
+        let mut r = Cursor::new(encode(&[pin_response]));
+        let mut w = Vec::new();
+
+        let resp = handle_sign_with_store(
+            &mut r,
+            &mut w,
+            &req,
+            &device,
+            &SignDefaults::default(),
+            &store,
+            b"mock-cred",
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"mock-cred"),
+        )
+        .expect("PinPrompt round trip must not error");
+
+        // The signer must have written exactly one PinPrompt to `w`
+        // before returning the terminal SignResponse.
+        let emitted = decode(&w);
+        assert_eq!(
+            emitted.len(),
+            1,
+            "expected exactly one emitted frame (PinPrompt)"
+        );
+        let prompt = match emitted[0].body.clone() {
+            Some(signer_frame::Body::PinPrompt(p)) => *p,
+            other => panic!("expected PinPrompt, got {other:?}"),
+        };
+        assert!(prompt.wants_pin.unwrap_or(false));
+
+        match resp.body {
+            Some(signer_frame::Body::SignResponse(_)) => {}
+            other => panic!("expected SignResponse after the PIN round trip, got {other:?}"),
+        }
     }
 }

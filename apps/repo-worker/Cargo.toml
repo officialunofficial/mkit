@@ -47,7 +47,11 @@ serde_json = "1"
 # Both are wasm-clean in their default builds (no tokio / no commonware
 # heavy features). mkit-wasm depends on these same paths and ships to
 # wasm32, which is our parity proof that they compile to the target.
-mkit-core = { path = "../../rust/crates/mkit-core" }
+# `default-features = false` on mkit-core drops `pack-zstd` (on by
+# default for native consumers): zstd-sys can't target
+# wasm32-unknown-unknown, and this worker compiles to that target via
+# worker-build same as mkit-wasm — mirror its opt-out here too.
+mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
 mkit-attest = { path = "../../rust/crates/mkit-attest" }
 
 # Ed25519 strict verify for the write-envelope. The envelope is a PLAIN
@@ -67,6 +71,16 @@ bytes = "1"
 tower = { version = "0.5", features = ["util"] }
 hex = "0.4"
 
+# The WatchRefs Connect-streaming bridge (worker_impl/service.rs): an owned
+# mpsc channel is the `Send + 'static` boundary the bridge crosses, and
+# `spawn_local` (not a `Send`-bounded spawn) is what lets the task on the
+# other end own the borrowed `WebSocket::events()` stream without that
+# borrow ever needing to escape. Already in the dep graph transitively via
+# `worker`; declared directly because this crate's own code names them.
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+wasm-bindgen-futures = "0.4"
+
 # Activate browser randomness backends for getrandom in the dep graph on
 # wasm32 (mirrors mkit-wasm's posture — dalek/mkit-core pull getrandom 0.4,
 # the k256/p256 stack in mkit-attest pulls 0.2; each needs its own feature).
@@ -80,6 +94,11 @@ connectrpc-build = "0.8"
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
 rand_core = "0.6"
+# Host-side WatchRefs Connect-streaming integration test
+# (tests/watch_refs_stream.rs) needs an executor for `#[tokio::test]`; the
+# worker itself never depends on tokio (its runtime is wasm_bindgen_futures on
+# wasm32), so this is a test-only, host-only addition.
+tokio = { version = "1", features = ["macros", "rt"] }
 
 [profile.release]
 opt-level = "s"

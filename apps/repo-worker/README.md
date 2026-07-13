@@ -111,23 +111,40 @@ This is a DEMO server; the envelope proves request integrity + same-author,
 not authority. Be aware of:
 
 - **Replay within the freshness window.** A captured signed write is replayable
-  for as long as it stays fresh (the **±5 min** `X-Created-At` window). The
-  `Idempotency-Key` is *signed* but **not deduplicated** server-side, so a
-  replay is accepted again. For content-addressed `PutObject` a replay is inert
-  (same `object_id` → `duplicate=true`). The materially affected case is
-  `UpdateRef` with `REF_EXPECTATION_ANY` (the ANY-clobber): a replayed
-  ANY-update can re-clobber a ref to a stale value inside the window.
-  `MISSING`/`MATCH` updates are self-limiting (the precondition fails on
-  replay). Mitigation for the demo is the short window; a production deployment
-  would persist `(public_key, idempotency_key)` in the DO with a TTL and reject
-  duplicates (cheap to add, deferred here — documenting is sufficient for the
-  demo).
+  for as long as it stays fresh (the **±5 min** `X-Created-At` window), but the
+  `Idempotency-Key` IS deduplicated server-side for the writes where a replay
+  would otherwise be observable: `PostMessage` and `React` dedupe on
+  `(author, idem)`, and `UpdateRef` dedupes on `(author, name, idem)` — a
+  replayed request returns the ORIGINAL result instead of re-applying (see
+  `idem_keys` / `react_idem` / `update_idem` in `refstore.rs`). This closes the
+  `REF_EXPECTATION_ANY` ANY-clobber: a replayed ANY-update, resubmitted inside
+  the freshness window, returns its first result rather than re-running the CAS
+  against whatever the ref holds now. `MISSING`/`MATCH` updates were already
+  self-limiting (the precondition fails on replay) and remain so. For
+  content-addressed `PutObject` a replay is inert regardless (same `object_id`
+  → `duplicate=true`), so it has no dedupe table. Each ledger is pruned on the
+  same freshness-window schedule so it can't grow unbounded.
 - **Open write.** Any valid Ed25519 key may write any ref in any room; there is
   no allow-list. The signature is integrity + attribution, never authorization.
 - **Input bounds.** `room` is validated `^[A-Za-z0-9._-]{1,64}$`; ref `name`/
   `prefix` follow SPEC-REFS §3; request bodies (and the PutObject `bytes`
   payload) are capped at 8 MiB. Invalid inputs are rejected with Connect
   `invalid_argument` before any storage I/O.
+- **Per-key write quota.** A valid Ed25519 signature proves a *distinct* key,
+  not a *throttled* one, and a fresh key is free to mint — so `PutObject`/
+  `UpdateRef` are additionally metered per `(author, room)`: at most
+  `WRITE_QUOTA_MAX_OPS` writes and `WRITE_QUOTA_MAX_BYTES` of `PutObject`
+  bytes per author per room in a rolling `WRITE_QUOTA_WINDOW_MS` window (see
+  [`src/write_quota.rs`](src/write_quota.rs)). `AuthInterceptor`
+  (`src/worker_impl/auth.rs`) checks-and-consumes the budget against the
+  room's RefStore DO (`POST /quota`, `src/worker_impl/refstore.rs`) BEFORE
+  the handler runs, so the counter lives in the DO's serial per-room state
+  rather than a Worker-global that would race across isolates. Over-quota
+  writes are rejected with Connect `resource_exhausted`. A DO-unreachable
+  quota check fails OPEN (logged, write proceeds) rather than turning a
+  transient infra hiccup into an outage for every writer. This is
+  application-layer defense; pair with a Cloudflare Rate Limiting rule keyed
+  on `X-Public-Key` at the edge for defense in depth (not configured here).
 
 ## Endpoints
 
@@ -140,31 +157,230 @@ ConnectRPC unary, `POST /mkit.repo.v1.RepoService/<Method>`:
 | `GetRef`    | read  | DO read → `{exists, object_id}`. |
 | `UpdateRef` | write | CAS (`ANY`/`MISSING`/`MATCH`) inside the DO's serial execution → `{committed, conflict, current_id}`. |
 | `ListRefs`  | read  | DO list under an optional prefix → `{refs}`. |
-| `WatchRefs` | read  | See below. |
+| `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket, streaming a `RoomEvent` (commit/chat/reaction/presence) per broadcast — see below. |
+| `PurgeRoom` | admin | Deletes the room's R2 objects + chat bodies and its DO-resident refs/messages/reactions/commit-index rows. Irreversible. See "Retention & backup/restore" below. |
 
-### WatchRefs / streaming (fallback)
+### WatchRefs / streaming (issue #705, building on the #697 spike)
 
-Live ref streaming is served over a **raw WebSocket** at the worker route
-`GET /watch/<room>`, **not** over Connect server-streaming.
+`WatchRefs` is real Connect server-streaming, not a stub: the worker opens
+its own WebSocket to the room's RefStore DO `/watch` endpoint (the same
+endpoint the raw-WebSocket fallback below proxies to a browser), consumes it,
+and re-emits every broadcast — a ref advance, a chat post, a reaction toggle,
+or a presence roster change — as a `RoomEvent` on the
+`ServiceStream<RoomEvent>` the generated trait requires. `RoomEvent` is a
+`oneof` over `RefEvent`/`ChatMessage`/`ReactionEvent`/`PresenceEvent` (see
+`proto/mkit/repo/v1/repo.proto`), so a Connect client sees one schema-
+validated feed for the whole room, not just ref advances.
 
-Why the fallback: the worker `WebSocket::events()` stream is borrowed
-(`EventStream<'ws>`), so it cannot be boxed into the `'static + Send`
-`ServiceStream<RefEvent>` the generated trait requires. Rather than block the
-unary path, `WatchRefs` over Connect is unimplemented; clients use the
-WebSocket route. The RefStore DO accepts each `/watch` subscriber as a
-hibernatable WebSocket and broadcasts a JSON frame
-(`{ "name", "object_id", "author_pubkey" }`, all hex) to every subscriber on
-each successful `UpdateRef`. The unary path is fully functional independent of
-this.
+**The lifetime wall, and the bridge past it.** `WebSocket::events()` returns
+`EventStream<'ws>`, which *borrows* the socket — a struct holding both a
+`WebSocket` and its own `EventStream<'_>` is self-referential and can't be
+built in safe Rust, so naively trying to return that borrowed stream as the
+`'static + Send` `ServiceStream<RoomEvent>` doesn't compile. The fix: never
+let the borrow escape a function. `service.rs::bridge_watch_socket` owns the
+`WebSocket`, calls `.events()` on it locally, and fully drains that borrowed
+stream inside its own async body — which runs under
+`wasm_bindgen_futures::spawn_local` rather than a `Send`-bounded spawn, so it
+never needs to be `Send` either. Each event it decodes is translated into a
+fully-owned `RoomEvent` (or `ConnectError`) and pushed onto a
+`futures_channel::mpsc::unbounded` sender; the **receiver** end — the "owned
+channel" — is what actually satisfies `ServiceStream<RoomEvent>`: it holds no
+borrow into the WebSocket or the spawned task, so it is `Send` (its item type
+is plain owned data) and `'static` (no lifetime parameters at all), with no
+`unsafe impl Send` required anywhere in the bridge. See the doc comment on
+`RepoServer::watch_refs` in
+[`src/worker_impl/service.rs`](src/worker_impl/service.rs) for the full
+walkthrough, and [`src/room_event.rs`](src/room_event.rs) (host-testable,
+covered by `cargo test --lib`) for the `RoomEvent` build/encode/decode
+functions shared by the DO broadcast path and this bridge.
+
+**End-to-end delivery — VERIFIED (2026-07-11, issue #705).** The #697 spike
+that introduced this bridge reported a gap: a hand-rolled Connect-streaming
+test client against `WatchRefs` under local `wrangler dev` received *zero
+bytes, not even headers*, seconds after the bridge had already logged
+processing an event — and left it unresolved, guessing either a
+`wrangler dev`/miniflare buffering artifact or a bug in the generic HTTP
+response adapter (`worker_impl.rs::serve_connect`). Re-running that exact
+scenario against the SAME bridge code in this pass, with careful attention to
+test-harness artifacts (a naive `curl -N ... & sleep; kill` pattern can lose
+buffered-but-unflushed bytes on `SIGTERM` before they hit disk, which is what
+produced the "zero bytes" symptom on a subsequent repro attempt in this same
+session — polling for actual byte growth before tearing down the client fixed
+it):
+
+- **20+ manual trials** against a fresh local `wrangler dev` instance
+  (wrangler 4.110.0, `worker` 0.8.5, `connectrpc` 0.8.0) delivered every
+  triggered event, every time — single-event, back-to-back multi-trial, and
+  incremental multi-event-over-one-connection runs (two `UpdateRef`s on the
+  same open `WatchRefs` stream, each arriving within tens of milliseconds of
+  the triggering RPC, not buffered until the stream closes).
+- Repeated with `Accept-Encoding: gzip` set (matching what a real browser/
+  `fetch()` client negotiates) — no change; delivery is not gzip-buffered.
+- Repeated after modeling the full `RoomEvent` oneof (this issue's scope): all
+  four kinds — commit, chat, reaction, presence — arrive correctly as the new
+  proto union, not the old flat/ad hoc shape.
+- **`apps/repo-worker/tests/watch_refs_stream.rs`** is a host-side (no
+  wasm32 target, no DO, no Worker runtime) `cargo test` that drives
+  `WatchRefs` through the REAL `connectrpc::Router`/`ConnectRpcService`
+  dispatch used in production and asserts all four `RoomEvent` kinds decode
+  correctly off the wire — this is the automated regression test PR #738's
+  spike didn't have.
+
+**What was NOT verified: a real deployed Cloudflare Worker.** This session
+had real `wrangler` credentials for the org's Cloudflare account, but no
+authorization to run an actual `wrangler deploy` to production infrastructure
+(the harness's own safety guardrail blocked it — deploying to a live account,
+even under a disposable script name, is a production-modifying action outside
+this pass's scope). `wrangler dev --remote` — the documented fallback for
+edge-realistic testing without a full deploy — turned out to be a dead end
+independent of that: this wrangler version (4.110.0) has fully removed
+Durable Object support from `--remote` mode (`wrangler dev --remote is no
+longer supported for Durable Objects`), which is unusable for this Worker
+(every RPC except the unary `PutObject`/`GetObject` R2 path touches the
+RefStore DO). So the verification above is against local `wrangler dev`
+only — the same environment PR #738's spike used, just with the actual
+delivery gap it reported not reproducing. A maintainer with deploy
+authorization re-running the same manual trials against a real
+`wrangler deploy` (or the `mkit-repo-worker` Workers Builds deployment) would
+close out the last mile of confidence this pass couldn't reach.
+
+**Scope.** The bridge is single-subscriber-per-request, not bidi: each
+`WatchRefs` call opens its own worker→DO WebSocket, which is fine for a
+demo's fan-out but is a DO connection per Connect subscriber, not shared.
+
+**Raw-WebSocket fallback (still wired, still the production path).** Live
+room activity is *also* still reachable over a raw WebSocket at the worker
+route `GET /watch/<room>` — the RefStore DO accepts each subscriber as a
+hibernatable WebSocket and broadcasts the SAME `RoomEvent` proto3-JSON
+payload (see `src/room_event.rs`) to every subscriber on each successful
+`UpdateRef`/`PostMessage`/`React`/presence change, so the raw socket and the
+Connect stream share one wire schema (see mkit#705's Implementation Notes).
+`apps/web`'s `subscribeRoom` still uses this raw-WebSocket route directly
+(not the generated Connect client — that broader TS client rollout across
+`apps/web` is tracked separately, out of scope for this issue) but its frame
+parser (`parseActivityFrame` in `apps/web/src/lib/repo/backend.ts`) now
+decodes the unified `RoomEvent` schema instead of the old ad hoc
+`WatchFrame`/`PresenceJson` JSON dialects. The unary path is fully functional
+independent of either streaming path.
+
+## Retention & backup/restore
+
+Every mkit object `PutObject` stores is content-addressed and **permanent** —
+no RPC ever deletes one implicitly, and the DO's SQLite prunes are bounded
+serving caches, not deletion of the underlying data (chat/reaction rows are
+capped by `MESSAGES_RETAINED`/`REACTIONS_RETAINED`, but the objects
+themselves live in R2 forever; see `refstore.rs`). Combined with open,
+anonymous `PutObject`, storage for an abandoned or abusive room only grows.
+Two independent mechanisms bound that:
+
+### 1. `PurgeRoom` — operator-triggered, immediate
+
+`PurgeRoom({ room })` deletes, in this order:
+
+1. Every R2 object under `{room}/objects/` and `{room}/messages/` (paginated
+   `list` + batched `delete_multiple`, 1000 keys/call).
+2. Every row the room's RefStore DO owns: `refs`, `messages` (+ `idem_keys`),
+   `reactions` (+ `react_idem`/`react_rate`), and the denormalized `commits`
+   index.
+
+It is **irreversible** — there is no soft-delete, undo, or grace period — and
+**admin-gated**: the request MUST carry a bearer `X-Admin-Token` header equal
+to the Worker's `ADMIN_TOKEN` secret, checked in constant time
+(`worker_impl/auth.rs`). Provision the secret once per environment:
+
+```sh
+# Generate and store a random token (never commit it). Re-running `secret put`
+# rotates it — no code change needed on either side.
+openssl rand -hex 32 | wrangler secret put ADMIN_TOKEN
+```
+
+An unset `ADMIN_TOKEN` fails **every** `PurgeRoom` call closed
+(`unauthenticated`), never open — there is no "demo mode" fallback for this
+RPC, unlike the open-write envelope above.
+
+Example call (see [`src/bin/sign.rs`](src/bin/sign.rs) for the write-envelope
+signer used by the other RPCs — `PurgeRoom` needs no signature, only the
+admin header):
+
+```sh
+curl -s -X POST https://api.mkit.sh/mkit.repo.v1.RepoService/PurgeRoom \
+  -H 'Content-Type: application/json' \
+  -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -d '{"room":"some-abandoned-room"}'
+```
+
+### 2. R2 lifecycle rule — automatic, age-based backstop
+
+`PurgeRoom` is opt-in and per-room; an operator has to know a room exists and
+choose to purge it. As a backstop independent of that RPC, configure an R2
+[object lifecycle rule] on the `mkit-repo-objects` bucket that expires
+objects a fixed age after upload, so a room nobody ever purges doesn't
+accumulate cost forever:
+
+```sh
+# Verify flags with `wrangler r2 bucket lifecycle add --help` first — the CLI
+# surface has changed across wrangler versions and this was not exercised
+# against a live account in this change. 180 days is a starting point, not a
+# validated production value; tune it against actual demo-room lifetimes.
+wrangler r2 bucket lifecycle add mkit-repo-objects \
+  --id expire-180d --prefix "" --expire-days 180
+```
+
+This was **not** added as a Terraform resource alongside the WAF rules in
+`infra/cloudflare/`. That module authenticates with a **zone**-scoped token
+(`Zone WAF Write`) against `mkit.sh`'s zone, and manages resources
+(`cloudflare_ruleset`) that already exist there; R2 buckets are
+**account**-scoped and, per this crate's own README, already provisioned
+out-of-band via `wrangler r2 bucket create` — Terraform doesn't manage the
+bucket itself today. Bolting an account-scoped, unverified-schema resource
+onto a zone-scoped module (with no CLOUDFLARE_ACCOUNT_ID token available to
+validate a `terraform plan` from this change) seemed like a worse default
+than documenting the equivalent `wrangler` command next to the tool that
+already owns the bucket's lifecycle. Revisit if/when `infra/cloudflare/`
+grows account-scoped state.
+
+[object lifecycle rule]: https://developers.cloudflare.com/r2/buckets/object-lifecycles/
+
+### Backup / restore
+
+**Assumption stated explicitly (no prior art in this repo for either half):**
+
+- **R2 objects.** There is no bulk export/import RPC. For ad hoc backup of a
+  single room, script the existing read RPCs (`ListRefs` + `ListCommits` +
+  `GetObject` per hash, `ListMessages`, `ListReactions`) — everything needed
+  to reconstruct a room already round-trips over the public read surface, no
+  new machinery required. For whole-bucket backup, R2 exposes an
+  [S3-compatible API]; use `rclone` or the AWS CLI against it
+  (`rclone sync r2:mkit-repo-objects ./backup/`). Restore is the same in
+  reverse (`rclone sync ./backup/ r2:mkit-repo-objects`) — object keys are
+  content-addressed, so a restore can never corrupt an object, only
+  reintroduce one a client will re-verify by hash on read.
+- **DO SQLite state (refs/messages/reactions/commit-index).** workers-rs
+  0.8's `SqlStorage` exposes no bulk export API, and this repo has no
+  DO-snapshotting tooling. The primary safety net is Cloudflare's own
+  [Point-in-Time Recovery] for SQLite-backed Durable Objects (automatic,
+  ~30-day retention, dashboard-driven restore-to-bookmark) — this requires NO
+  code or process in this repo, but IS an assumption about a platform
+  feature this change does not verify end-to-end. A room's *refs* can also be
+  reconstructed from R2 alone (walk `ListCommits`/`GetObject` and replay
+  `UpdateRef`), which is a slower but code-free fallback if PITR is
+  unavailable; chat/reaction history has no such fallback (it isn't derivable
+  from the object graph) and is not durably backed up beyond PITR.
+
+[S3-compatible API]: https://developers.cloudflare.com/r2/api/s3/
+[Point-in-Time Recovery]: https://developers.cloudflare.com/durable-objects/reference/data-location/
 
 ## RefStore Durable Object
 
 One instance per `room` (`env.durable_object("REFSTORE").id_from_name(room)`).
 Stores refs in SQLite — `refs(path TEXT PRIMARY KEY, value TEXT)`, `value` =
 64-hex of the 32-byte object id. The worker reaches it over an internal JSON
-HTTP protocol (`POST /get | /update | /list`, `GET /watch`). The CAS decision
-is the pure `refs::evaluate_cas` shared with the unit tests, evaluated inside
-the DO's single-threaded `fetch`, so concurrent `UpdateRef`s can't race.
+HTTP protocol (`POST /get | /update | /list | /quota`, `GET /watch`). The CAS
+decision is the pure `refs::evaluate_cas` shared with the unit tests,
+evaluated inside the DO's single-threaded `fetch`, so concurrent `UpdateRef`s
+can't race. The same single-threaded serialization is why the per-author
+write-quota ledger (`write_quota` table, `POST /quota`) lives here too — see
+"Per-key write quota" above.
 
 ## Build & run
 
@@ -200,15 +416,24 @@ eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
 
 ## Layout
 
-- `src/envelope.rs`, `src/refs.rs`, `src/hashing.rs` — pure, target-independent
-  logic carrying the conformance contract (the `#[cfg(test)]` modules replay the
-  TS vectors). Compiled on host *and* wasm.
+- `src/envelope.rs`, `src/refs.rs`, `src/hashing.rs`, `src/chat.rs`,
+  `src/write_quota.rs` — pure, target-independent logic carrying the
+  conformance contract (the `#[cfg(test)]` modules replay the TS vectors, or
+  for `write_quota` exercise the fixed-window budget decision directly).
+  Compiled on host *and* wasm; `cargo test --lib` runs them without a wasm32
+  target or a DO/SQLite harness.
 - `src/worker_impl.rs` + `src/worker_impl/{auth,refstore,service}.rs` —
   wasm32-only worker glue (the macros emit `#[wasm_bindgen]`).
-- `proto/` — the canonical `repo.proto`. `build.rs` runs `connectrpc-build` over
-  it into `$OUT_DIR`, included via `connectrpc::include_generated!()`.
-- `reference-ts/` — the original TypeScript pure-logic + tests, kept as the
-  conformance reference the Rust ports mirror.
+- `proto/` — the canonical `repo.proto`, plus `buf.gen.yaml` (the reference
+  TypeScript codegen recipe external `RepoService` clients run via `buf
+  generate` against the `buf.build/officialunofficial/mkit-repo` BSR module,
+  issue #719 — distinct from `../buf.gen.yaml`, which drives apps/web's own
+  internal vendored-codegen regen). `repo.proto`'s buf module (`name:`,
+  lint/breaking config) lives in the repo-root `buf.yaml` workspace, not a
+  `buf.yaml` here. `build.rs` runs `connectrpc-build` over `repo.proto` into
+  `$OUT_DIR` for this crate's own Rust server, included via
+  `connectrpc::include_generated!()` — a separate path from the
+  BSR-published recipe above.
 
 ## Deploy (go live)
 
@@ -235,6 +460,90 @@ live for everyone:
 
 Open write is intentional (anonymous demo); see the security note above for the
 replay-window / rate-limit caveats before exposing it publicly.
+
+### Run your own instance (self-hosting)
+
+The steps above assume the maintainers' own Cloudflare account, the
+`mkit-repo-objects` R2 bucket, and the `api.mkit.sh` route
+(`wrangler.jsonc:31`/`:35`). To run a private instance on your own account
+instead:
+
+1. **Provision your own bucket.** Edit `r2_buckets[0].bucket_name` in
+   `wrangler.jsonc` (currently `mkit-repo-objects`) to a globally-unique name
+   of your own, then create it: `wrangler r2 bucket create <your-bucket-name>`.
+   Reusing the literal `mkit-repo-objects` name will collide with the
+   maintainers' bucket if you ever deploy to the same account.
+2. **Point the route at your own domain, or drop it.** Edit
+   `routes[0].pattern` in `wrangler.jsonc` (currently `api.mkit.sh`) to a
+   hostname on a Cloudflare zone you control, or delete the `routes` array
+   entirely to deploy to the default `<name>.<subdomain>.workers.dev` origin
+   instead — no custom domain required.
+3. **Deploy:** `wrangler deploy` (needs an authenticated wrangler /
+   `CLOUDFLARE_API_TOKEN`). The `RefStore` Durable Object and its `v1` SQLite
+   migration (`wrangler.jsonc:40-43`) are created automatically on first
+   deploy, same as the maintainers' instance.
+4. **Re-point the web app's CSP and backend URL, if you're also self-hosting
+   `apps/web`** (or writing your own client): add your Worker's origin, in
+   both `https://` and `wss://` forms, to the `connect-src` directive in
+   `apps/web/src/security-policy.js` (the `wss://` form covers the
+   `/watch/<room>` WebSocket — see "WatchRefs / streaming" above), and set the
+   web build's `VITE_REPO_BACKEND_URL` to your Worker's `https://` origin
+   (unset, the web app falls back to an in-memory mock backend).
+
+#### Cloudflare plan and cost notes
+
+- **Durable Objects with the SQLite storage backend** — what `RefStore` uses
+  (`wrangler.jsonc:40-43`, `new_sqlite_classes: ["RefStore"]`) — run on
+  **both** the Workers Free and Workers Paid plans; Cloudflare lifted the
+  earlier Paid-only restriction for the SQLite storage class. Re-verify
+  against Cloudflare's [Durable Objects
+  pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
+  page before budgeting — pricing and plan gating change over time, and a
+  stale number here would be worse than none.
+- **Free plan caps** worth knowing before a real (non-toy) deployment: 100,000
+  Durable Object requests/day, 100,000 SQLite row writes/day, 5 GB total
+  SQLite storage, and 13,000 GB-s of compute duration/day, all per account.
+  Every `UpdateRef` costs one DO request plus at least one row write, so a
+  busy shared room can exhaust the daily write cap.
+- **R2** (the `STORAGE` binding, holding every `PutObject`'s bytes) requires a
+  payment method on file to activate at all, even if usage stays inside its
+  free tier (10 GB storage, 1M Class A ops/month, 10M Class B ops/month, no
+  egress charge — see [R2
+  pricing](https://developers.cloudflare.com/r2/pricing/)). R2 is billed
+  independently of the Workers plan tier.
+- **If you outgrow the Free plan**, Workers Paid is a **$5/month minimum**
+  (metered beyond the included allotments — see [Workers
+  pricing](https://developers.cloudflare.com/workers/platform/pricing/)),
+  which also raises the Durable Object allotments to 1M requests + 400,000
+  GB-s duration + 25B row reads + 50M row writes included per month.
+- **Custom domains** (`routes[0].custom_domain: true`) need the domain's zone
+  active on your Cloudflare account (nameservers pointed at Cloudflare) but
+  are themselves available on the Free plan — you do not need Paid just to
+  attach a custom domain. Dropping the `routes` block and using the default
+  `workers.dev` subdomain (step 2 above) avoids the zone requirement
+  altogether.
+
+## Staging
+
+`wrangler.jsonc` also declares an `env.staging` block: a fully isolated
+deployment (`mkit-repo-worker-staging`, its own `mkit-repo-objects-staging` R2
+bucket, its own RefStore DO storage) fronted by `staging-api.mkit.sh`. It
+never shares state with production.
+
+```sh
+# validate the config without deploying (no resources touched)
+wrangler deploy --env staging --dry-run
+
+# deploy for real (needs an authenticated wrangler / CLOUDFLARE_API_TOKEN)
+wrangler deploy --env staging
+```
+
+Use it to validate schema, auth-interceptor, or rate-limit changes against a
+real Cloudflare account before promoting them to `api.mkit.sh`. To exercise it
+end to end, point a generated Connect client (or `src/bin/sign.rs` +
+`curl`) at `https://staging-api.mkit.sh` and run a `PutObject`/`GetObject`
+round trip — the same generated client used against production works
+unmodified, just retargeted.
 
 [workers-rs]: https://github.com/cloudflare/workers-rs
 [ConnectRPC]: https://connectrpc.com/

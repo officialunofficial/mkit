@@ -1,0 +1,61 @@
+# mkit reference `mkit.transport.v1` server — a Rust Cloudflare Worker
+# (workers-rs) speaking ConnectRPC over the `mkit.transport.v1.TransportService`
+# contract in proto/mkit/transport/v1/transport.proto (repo root).
+#
+# Built with `worker-build` (see wrangler.jsonc `[build] command`), which
+# compiles this cdylib to `wasm32-unknown-unknown` and emits the ES-module
+# shim + bindings glue. Dependency set mirrors apps/repo-worker byte-for-byte
+# (see its Cargo.toml for the rationale on each choice); only the package name
+# and the mkit-attest dep (unused here — no attestation surface) differ.
+[package]
+name = "mkit-vcs-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95.0"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = { version = "0.8", features = ["http"] }
+
+# See apps/repo-worker/Cargo.toml for the full rationale (pinned to the same
+# connectrpc/buffa versions so the pair never drifts).
+connectrpc = { version = "0.8", default-features = false, features = ["gzip", "json"] }
+buffa = "0.8.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# BLAKE3 hashing (pack digest verification) via the canonical mkit-core hash,
+# native Ed25519 strict verify for the write envelope.
+mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
+
+# Ed25519 strict verify for the write envelope — see apps/repo-worker's
+# rationale; identical envelope shape, so identical verify line.
+ed25519-dalek = { version = "2", default-features = false }
+
+# http / body plumbing for the worker::Request <-> connectrpc adapter.
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+hex = "0.4"
+futures = "0.3"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[build-dependencies]
+connectrpc-build = "0.8"
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
+rand_core = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Shared ref types used across mkit's wire protocols. Used by
+// mkit.rpc.v1.ssh (rust/crates/mkit-rpc/proto/ssh.proto) and
+// mkit.repo.v1 (apps/repo-worker/proto/mkit/repo/v1/repo.proto), and
+// intended for the forthcoming mkit.transport.v1 canonical remote
+// protocol.
+//
+// Both `ssh.proto` and `repo.proto` previously carried verbatim,
+// hand-synced copies of these two types with a comment warning not to
+// renumber them independently. This file is now the single source of
+// truth; the wire numbers below are exactly the numbers both copies
+// already agreed on; extracting them here changed no serialized byte
+// (verified by a WIRE-level `buf breaking` check — see
+// scripts/check-refs-wire-breaking.sh).
+//
+// Versioning: this file is v1 of the shared ref vocabulary.
+// Wire-compatible additions (new enum values, new fields with default
+// values) ship as patches. Breaking changes (renumbered fields,
+// removed values) bump the file to refs2.proto and consumers opt in
+// explicitly.
+
+edition = "2023";
+
+package mkit.common.v1;
+
+// ----------------------------------------------------------------------------
+// CAS semantics for ref-update RPCs across every mkit wire protocol.
+// Wire numbers are load-bearing. Do NOT renumber; new variants append.
+
+enum RefExpectation {
+  // Protocol error if sent (the proto default). Servers MUST reject.
+  REF_EXPECTATION_UNSPECIFIED = 0;
+
+  // "Clobber" / last-writer-wins. `expected_id` MUST be empty.
+  REF_EXPECTATION_ANY = 1;
+
+  // "Create only". The ref MUST NOT already exist. `expected_id` MUST
+  // be empty. (ANY overwrites an existing ref; MISSING conflicts on
+  // it.)
+  REF_EXPECTATION_MISSING = 2;
+
+  // Compare-and-swap. `expected_id` MUST be the 32-byte current value.
+  REF_EXPECTATION_MATCH = 3;
+}
+
+// A single ref and the object it points at.
+message RefEntry {
+  string name = 1;        // e.g. "refs/heads/main" (mkit ref-name grammar)
+  bytes object_id = 2;    // raw 32-byte BLAKE3 digest
+}

@@ -528,6 +528,98 @@ fn verify_attest_rejects_in_repo_trust_roots() {
 }
 
 #[test]
+fn verify_trusted_succeeds_with_external_trust_roots() {
+    // `mkit_verify`'s `trusted`/`trust_roots` args (issue #693), end-to-end
+    // through JSON-RPC: commit, then cross-check the commit's signer
+    // against a trust-roots file OUTSIDE the repo.
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().to_str().unwrap().to_string();
+    let mut client = McpClient::spawn(Some(root.path()));
+
+    ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
+    let keygen = ok(
+        &mut client,
+        "mkit_keygen",
+        &json!({ "repo_path": repo, "print_pubkey": true }),
+    );
+    let pubkey_hex = pubkey_hex_from(&keygen);
+
+    std::fs::write(root.path().join("a.txt"), "a\n").unwrap();
+    ok(
+        &mut client,
+        "mkit_add",
+        &json!({ "repo_path": repo, "files": ["a.txt"] }),
+    );
+    ok(
+        &mut client,
+        "mkit_commit",
+        &json!({ "repo_path": repo, "message": "c" }),
+    );
+
+    let roots_dir = tempfile::tempdir().unwrap();
+    let roots = roots_dir.path().join("trust-roots.toml");
+    std::fs::write(
+        &roots,
+        format!(
+            "[[trust_root]]\nkeyid = \"ed25519:{pubkey_hex}\"\nkind = \"ed25519\"\npubkey_hex = \"{pubkey_hex}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let out = ok(
+        &mut client,
+        "mkit_verify",
+        &json!({ "repo_path": repo, "revision": "HEAD", "trust_roots": roots.to_str().unwrap() }),
+    );
+    assert!(out.contains("trusted"), "verify: {out}");
+}
+
+#[test]
+fn verify_trusted_fails_closed_for_unregistered_signer_via_mcp() {
+    let (_root, mut client, repo) = init_keygen_committed();
+
+    let roots_dir = tempfile::tempdir().unwrap();
+    let roots = roots_dir.path().join("trust-roots.toml");
+    let other_hex = "77".repeat(32);
+    std::fs::write(
+        &roots,
+        format!(
+            "[[trust_root]]\nkeyid = \"ed25519:{other_hex}\"\nkind = \"ed25519\"\npubkey_hex = \"{other_hex}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let text = err(
+        &mut client,
+        "mkit_verify",
+        &json!({ "repo_path": repo, "revision": "HEAD", "trust_roots": roots.to_str().unwrap() }),
+    );
+    assert!(
+        text.contains("not in the trust-roots registry") || text.to_lowercase().contains("untrust"),
+        "{text}"
+    );
+}
+
+#[test]
+fn verify_rejects_in_repo_trust_roots() {
+    // Same hostile-clone defense as verify-attest: a repo-local
+    // trust-roots path can never be selected through the MCP for
+    // `mkit_verify` either.
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().to_str().unwrap().to_string();
+    let mut client = McpClient::spawn(Some(root.path()));
+    ok(&mut client, "mkit_init", &json!({ "repo_path": repo }));
+    std::fs::write(root.path().join(".mkit/trust-roots.toml"), "x").unwrap();
+
+    let text = err(
+        &mut client,
+        "mkit_verify",
+        &json!({ "repo_path": repo, "revision": "HEAD", "trust_roots": ".mkit/trust-roots.toml" }),
+    );
+    assert!(text.contains("inside the repository"), "{text}");
+}
+
+#[test]
 fn attest_rejects_predicate_file_outside_repo() {
     // Scope escape: a scoped MCP must not read an outside file into a
     // signed attestation, even though --repository only confines repo_path.

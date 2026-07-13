@@ -10,7 +10,7 @@
 // The `sign` subcommand is what mkit drives as an external signer; it
 // speaks the v1 wire protocol — length-prefixed protobuf `SignerFrame`
 // messages on stdin/stdout. See `docs/specs/SPEC-EXTERNAL-SIGNER.md` and
-// `rust/crates/mkit-rpc/proto/signer.proto`.
+// `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`.
 //
 // The tag identifying the Secure Enclave key can be supplied two ways:
 //
@@ -394,6 +394,7 @@ private func rpcAlgorithmName(_ a: RpcAlgorithm) -> String {
     case .secp256K1: return "ALGORITHM_SECP256K1"
     case .p256: return "ALGORITHM_P256"
     case .ed25519Webauthn: return "ALGORITHM_ED25519_WEBAUTHN"
+    case .bls12381Threshold: return "ALGORITHM_BLS12381_THRESHOLD"
     case .UNRECOGNIZED(let n): return "ALGORITHM_UNKNOWN(\(n))"
     }
 }

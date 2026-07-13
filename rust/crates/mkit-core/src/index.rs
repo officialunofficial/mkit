@@ -23,6 +23,7 @@
 //! Path rules (SPEC-INDEX §2): non-empty, no leading `/`, no `.`/`..`
 //! segments, no NULs/backslashes, and never under `.mkit/` or `.git/`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -103,11 +104,45 @@ pub struct IndexEntry {
 }
 
 /// In-memory staging index.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+///
+/// `entries` stays `pub` for the many read-only call sites across the CLI
+/// (`.iter()`, indexing, `.len()`) that predate the path index below and
+/// have no reason to route through a method. Any code that *mutates*
+/// `entries` — inserting, removing, or reordering — MUST go through
+/// [`Index::upsert_entry`], [`Index::remove_entry_at`],
+/// [`Index::remove_path`], or [`Index::retain_entries`] instead of touching
+/// the `Vec` directly, or `by_path` silently goes stale (see those methods'
+/// docs). In-place field mutation of an entry already at a known position
+/// (status/hash/stat-cache updates that leave `path` unchanged) is fine
+/// either way, since it never moves or renames anything `by_path` tracks.
+#[derive(Debug, Default, Clone)]
 pub struct Index {
     /// Entries in insertion order.
     pub entries: Vec<IndexEntry>,
+    /// `path -> position in entries`, maintained by every mutation that
+    /// goes through this type's own methods (issue #708). Lets
+    /// `find_entry`/`tracks_path_or_descendant`/`has_tracked_file_at` —
+    /// each called up to three times per staged file by `mkit add -A` —
+    /// answer in `O(log n)` instead of the `O(n)` linear scan that made
+    /// staging N files cost `O(N^2)` overall. A `BTreeMap` (not a
+    /// `HashMap`) so it can *also* answer `tracks_path_or_descendant`'s
+    /// ancestor/descendant prefix query via a sorted range scan, without a
+    /// second structure to keep in sync.
+    by_path: BTreeMap<String, usize>,
 }
+
+/// Value equality compares staged content only — `by_path` is a derived
+/// lookup cache, not user-visible state, and two indexes with identical
+/// entries are equal regardless of whether their caches happen to be
+/// populated (e.g. one built via [`deserialize`], the other via
+/// `entries.push` in a test fixture that never queries it).
+impl PartialEq for Index {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for Index {}
 
 impl Index {
     /// Construct an empty index.
@@ -115,28 +150,56 @@ impl Index {
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
+            by_path: BTreeMap::new(),
         }
     }
 
-    /// Find an entry by path. `O(n)`.
+    /// Build an index from an already path-unique entry vec (e.g. freshly
+    /// parsed by [`deserialize`]), populating `by_path` in one `O(n log n)`
+    /// pass. `pub(crate)` so other `mkit-core` modules that assemble an
+    /// `Index` directly from a `Vec<IndexEntry>` (test fixtures in
+    /// `worktree`, `ops::stash`, `ops::gc`) don't need to duplicate this,
+    /// now that `by_path` makes the old `Index { entries }` struct-literal
+    /// construction unavailable outside this module.
+    ///
+    /// # Panics
+    /// Panics (via the debug-only consistency check) if `entries` contains
+    /// duplicate paths — callers must pre-validate uniqueness, same
+    /// contract as `deserialize`'s `seen_paths` check.
+    pub(crate) fn from_entries(entries: Vec<IndexEntry>) -> Self {
+        let mut idx = Self {
+            entries,
+            by_path: BTreeMap::new(),
+        };
+        idx.rebuild_path_index();
+        idx
+    }
+
+    /// Find an entry by path. `O(log n)`.
     #[must_use]
     pub fn find_entry(&self, path: &str) -> Option<usize> {
-        self.entries.iter().position(|e| e.path == path)
+        self.by_path.get(path).copied()
     }
 
     /// `true` if `path` is itself tracked (a non-removed entry) or is an
     /// ancestor directory of a tracked path. Used to decide whether an
     /// ignored worktree path must still be visited because it (or its
-    /// subtree) holds tracked content. `O(n)`.
+    /// subtree) holds tracked content. `O(log n + k)`, `k` = number of
+    /// tracked entries directly under `path`.
     #[must_use]
     pub fn tracks_path_or_descendant(&self, path: &str) -> bool {
-        self.entries.iter().any(|e| {
-            e.status != EntryStatus::Removed
-                && (e.path == path
-                    || (e.path.len() > path.len()
-                        && e.path.starts_with(path)
-                        && e.path.as_bytes().get(path.len()) == Some(&b'/')))
-        })
+        if let Some(&pos) = self.by_path.get(path)
+            && self.entries[pos].status != EntryStatus::Removed
+        {
+            return true;
+        }
+        let mut prefix = String::with_capacity(path.len() + 1);
+        prefix.push_str(path);
+        prefix.push('/');
+        self.by_path
+            .range(prefix.clone()..)
+            .take_while(|(p, _)| p.starts_with(prefix.as_str()))
+            .any(|(_, &pos)| self.entries[pos].status != EntryStatus::Removed)
     }
 
     /// `true` if a tracked (non-removed) entry exists at *exactly* `path`.
@@ -148,7 +211,7 @@ impl Index {
     /// directory's contents as untracked in that case (#288), reporting only
     /// the tracked-side deletion. A `Removed` tombstone does **not** count —
     /// the path is no longer tracked, so its replacement is genuinely
-    /// untracked. `O(n)`.
+    /// untracked. `O(log n)`.
     #[must_use]
     pub fn has_tracked_file_at(&self, path: &str) -> bool {
         self.find_entry(path)
@@ -163,6 +226,116 @@ impl Index {
             .filter(|e| e.status != EntryStatus::Removed)
             .count()
     }
+
+    /// Insert `entry`, replacing any existing entry at the same path.
+    /// `O(log n)`. The sanctioned way to add or wholesale-replace an
+    /// entry — unlike a direct `entries.push`/`entries[i] = entry`, this
+    /// keeps `by_path` in lockstep.
+    pub fn upsert_entry(&mut self, entry: IndexEntry) {
+        if let Some(&pos) = self.by_path.get(entry.path.as_str()) {
+            self.entries[pos] = entry;
+        } else {
+            let pos = self.entries.len();
+            self.by_path.insert(entry.path.clone(), pos);
+            self.entries.push(entry);
+        }
+        self.debug_assert_consistent();
+    }
+
+    /// Remove and return the entry at `pos`. `O(n)` — same asymptotic cost
+    /// as the underlying `Vec::remove` shift (every later entry's position
+    /// changes), so `by_path` is fully rebuilt. Intended for single-path
+    /// removals (`rm`/`restore`/conflict abort), not a per-file staging
+    /// loop.
+    ///
+    /// # Panics
+    /// Panics if `pos >= self.entries.len()` (same as `Vec::remove`).
+    pub fn remove_entry_at(&mut self, pos: usize) -> IndexEntry {
+        let removed = self.entries.remove(pos);
+        self.rebuild_path_index();
+        removed
+    }
+
+    /// Remove the entry at `path`, if any tracked or tombstoned entry
+    /// exists there. `O(log n)` to find it, `O(n)` to remove (see
+    /// [`Index::remove_entry_at`]).
+    pub fn remove_path(&mut self, path: &str) -> Option<IndexEntry> {
+        self.find_entry(path).map(|pos| self.remove_entry_at(pos))
+    }
+
+    /// Retain only entries matching `keep`, rebuilding `by_path` in one
+    /// pass afterward. `O(n)` — the same cost `Vec::retain` already pays.
+    pub fn retain_entries(&mut self, keep: impl FnMut(&IndexEntry) -> bool) {
+        self.entries.retain(keep);
+        self.rebuild_path_index();
+    }
+
+    /// Remove any entry that conflicts with staging `path` as a file leaf:
+    /// a tracked ancestor directory-as-file (blocks descending into it), or
+    /// a tracked descendant nested under `path` treated as a directory (the
+    /// reverse conflict). An entry at exactly `path` is left untouched —
+    /// callers replace/insert it separately via [`Index::upsert_entry`].
+    ///
+    /// `O(depth)` in the common case where staging `path` has no conflict
+    /// (checked via `by_path` rather than a full scan of the index); falls
+    /// back to an `O(n)` retain + rebuild only when a conflict is actually
+    /// found, which is rare relative to the number of files staged.
+    pub fn remove_directory_conflicts(&mut self, path: &str) {
+        let has_ancestor_conflict =
+            ancestor_prefixes(path).any(|anc| self.by_path.contains_key(anc));
+        let descendant_prefix = format!("{path}/");
+        let has_descendant_conflict = self
+            .by_path
+            .range(descendant_prefix.clone()..)
+            .next()
+            .is_some_and(|(p, _)| p.starts_with(descendant_prefix.as_str()));
+        if !has_ancestor_conflict && !has_descendant_conflict {
+            return;
+        }
+        self.entries.retain(|entry| {
+            entry.path == path
+                || !(path_descends_from(&entry.path, path) || path_descends_from(path, &entry.path))
+        });
+        self.rebuild_path_index();
+    }
+
+    /// Rebuild `by_path` from `entries` in one `O(n log n)` pass. Called by
+    /// every mutation method that can move/remove entries at more than one
+    /// position at once.
+    fn rebuild_path_index(&mut self) {
+        self.by_path.clear();
+        for (i, e) in self.entries.iter().enumerate() {
+            self.by_path.insert(e.path.clone(), i);
+        }
+        self.debug_assert_consistent();
+    }
+
+    /// Debug-only consistency check for `by_path`: same length as
+    /// `entries`, and every entry's path maps back to its own position. A
+    /// mismatch means some code mutated `entries` directly instead of going
+    /// through `upsert_entry`/`remove_entry_at`/`remove_path`/
+    /// `retain_entries`/`remove_directory_conflicts`. Exercised by the
+    /// `by_path_*` tests below and by every other index test indirectly
+    /// (each mutation call re-checks itself).
+    #[cfg(debug_assertions)]
+    fn debug_assert_consistent(&self) {
+        debug_assert_eq!(
+            self.by_path.len(),
+            self.entries.len(),
+            "Index path map desynced from entries (missed upsert/remove/retain?)"
+        );
+        for (i, e) in self.entries.iter().enumerate() {
+            debug_assert_eq!(
+                self.by_path.get(e.path.as_str()),
+                Some(&i),
+                "Index path map has a stale/dangling position for '{}'",
+                e.path
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn debug_assert_consistent(&self) {}
 
     /// Serialise to the on-disk byte form per SPEC-INDEX §2.
     ///
@@ -197,6 +370,25 @@ impl Index {
         }
         out
     }
+}
+
+/// Yield every strict ancestor directory prefix of `path`, shallowest
+/// first — e.g. `"a/b/c.txt"` yields `"a"`, then `"a/b"` (never `path`
+/// itself). Used by [`Index::remove_directory_conflicts`] to check for a
+/// tracked ancestor-as-file in `O(depth)` instead of scanning the index.
+fn ancestor_prefixes(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(move |(i, _)| &path[..i])
+}
+
+/// `true` if `path` is a strict descendant of `base` (`base` followed by a
+/// `/` and at least one more byte). Mirrors
+/// `mkit_cli::commands::index_path_descends_from` — duplicated here rather
+/// than shared across the crate boundary, since `mkit-core` cannot depend
+/// on `mkit-cli`.
+fn path_descends_from(path: &str, base: &str) -> bool {
+    path.len() > base.len()
+        && path.starts_with(base)
+        && path.as_bytes().get(base.len()) == Some(&b'/')
 }
 
 /// Errors returned by the index subsystem.
@@ -338,7 +530,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     if offset != data.len() {
         return Err(IndexError::Corrupt);
     }
-    Ok(Index { entries })
+    Ok(Index::from_entries(entries))
 }
 
 /// Read this worktree's staging index. Returns an empty index if the
@@ -430,16 +622,16 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
 /// Propagates object-store errors and returns [`IndexError::NotTree`]
 /// if `tree_hash` does not point at a tree object.
 pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
-    let mut idx = Index::new();
-    push_tree_entries(store, tree_hash, "", &mut idx, 0)?;
-    Ok(idx)
+    let mut entries = Vec::new();
+    push_tree_entries(store, tree_hash, "", &mut entries, 0)?;
+    Ok(Index::from_entries(entries))
 }
 
 fn push_tree_entries(
     store: &ObjectStore,
     tree_hash: Hash,
     prefix: &str,
-    idx: &mut Index,
+    entries: &mut Vec<IndexEntry>,
     depth: usize,
 ) -> IndexResult<()> {
     if depth > MAX_TREE_DEPTH {
@@ -457,7 +649,7 @@ fn push_tree_entries(
         };
         match entry.mode {
             EntryMode::Tree => {
-                push_tree_entries(store, entry.object_hash, &path, idx, depth + 1)?;
+                push_tree_entries(store, entry.object_hash, &path, entries, depth + 1)?;
             }
             EntryMode::Blob | EntryMode::Executable | EntryMode::Symlink => {
                 if !validate_index_path(&path) {
@@ -469,7 +661,7 @@ fn push_tree_entries(
                     EntryMode::Symlink => EntryStatus::Symlink,
                     EntryMode::Tree => unreachable!("handled above"),
                 };
-                idx.entries.push(IndexEntry {
+                entries.push(IndexEntry {
                     path,
                     status,
                     object_hash: entry.object_hash,
@@ -558,17 +750,15 @@ mod tests {
     #[test]
     fn single_entry_pinned_bytes() {
         let h = seed_hash("hello");
-        let idx = Index {
-            entries: vec![IndexEntry {
-                path: "hello.txt".to_string(),
-                status: EntryStatus::Blob,
-                object_hash: h,
-                mtime_ns: 0x0102_0304_0506_0708,
-                size: 11,
-                ino: 0x0A0B_0C0D_0E0F_1011,
-                ctime_ns: 0x1112_1314_1516_1718,
-            }],
-        };
+        let idx = Index::from_entries(vec![IndexEntry {
+            path: "hello.txt".to_string(),
+            status: EntryStatus::Blob,
+            object_hash: h,
+            mtime_ns: 0x0102_0304_0506_0708,
+            size: 11,
+            ino: 0x0A0B_0C0D_0E0F_1011,
+            ctime_ns: 0x1112_1314_1516_1718,
+        }]);
         let bytes = idx.serialize();
         assert_eq!(bytes.len(), 85);
         let mut expected = Vec::new();
@@ -648,28 +838,26 @@ mod tests {
                 .as_nanos(),
         )
         .unwrap();
-        let idx = Index {
-            entries: vec![
-                IndexEntry {
-                    path: "racy.txt".to_string(),
-                    status: EntryStatus::Blob,
-                    object_hash: seed_hash("racy"),
-                    mtime_ns: now_ns,
-                    size: 4,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-                IndexEntry {
-                    path: "settled.txt".to_string(),
-                    status: EntryStatus::Blob,
-                    object_hash: seed_hash("settled"),
-                    mtime_ns: now_ns - 10_000_000_000, // 10s ago
-                    size: 7,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-            ],
-        };
+        let idx = Index::from_entries(vec![
+            IndexEntry {
+                path: "racy.txt".to_string(),
+                status: EntryStatus::Blob,
+                object_hash: seed_hash("racy"),
+                mtime_ns: now_ns,
+                size: 4,
+                ino: 0,
+                ctime_ns: 0,
+            },
+            IndexEntry {
+                path: "settled.txt".to_string(),
+                status: EntryStatus::Blob,
+                object_hash: seed_hash("settled"),
+                mtime_ns: now_ns - 10_000_000_000, // 10s ago
+                size: 7,
+                ino: 0,
+                ctime_ns: 0,
+            },
+        ]);
         write_index(&layout, &idx).unwrap();
         // Pin the index FILE's mtime to exactly the racy entry's time so
         // the test is deterministic regardless of scheduling delays and
@@ -706,32 +894,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let layout = RepoLayout::single(dir.path());
         let base_ns: u64 = 1_700_000_000_000_000_000; // whole-second tick
-        let idx = Index {
-            entries: vec![
-                IndexEntry {
-                    path: "coarse.txt".to_string(),
-                    status: EntryStatus::Blob,
-                    object_hash: seed_hash("coarse"),
-                    // 500ms before the index mtime, WHOLE-second value:
-                    // inside the 1s window, outside the 10ms one.
-                    mtime_ns: base_ns - 1_000_000_000,
-                    size: 4,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-                IndexEntry {
-                    path: "precise.txt".to_string(),
-                    status: EntryStatus::Blob,
-                    object_hash: seed_hash("precise"),
-                    // Same age but ns-precise: the 10ms window applies
-                    // and it is safely older than the floor.
-                    mtime_ns: base_ns - 1_000_000_000 + 123,
-                    size: 7,
-                    ino: 0,
-                    ctime_ns: 0,
-                },
-            ],
-        };
+        let idx = Index::from_entries(vec![
+            IndexEntry {
+                path: "coarse.txt".to_string(),
+                status: EntryStatus::Blob,
+                object_hash: seed_hash("coarse"),
+                // 500ms before the index mtime, WHOLE-second value:
+                // inside the 1s window, outside the 10ms one.
+                mtime_ns: base_ns - 1_000_000_000,
+                size: 4,
+                ino: 0,
+                ctime_ns: 0,
+            },
+            IndexEntry {
+                path: "precise.txt".to_string(),
+                status: EntryStatus::Blob,
+                object_hash: seed_hash("precise"),
+                // Same age but ns-precise: the 10ms window applies
+                // and it is safely older than the floor.
+                mtime_ns: base_ns - 1_000_000_000 + 123,
+                size: 7,
+                ino: 0,
+                ctime_ns: 0,
+            },
+        ]);
         write_index(&layout, &idx).unwrap();
         // Index file mtime: ns-precise, 500ms after the coarse entry.
         let f = fs::File::options()
@@ -760,7 +946,7 @@ mod tests {
     #[test]
     fn tracks_path_or_descendant_matches_self_and_ancestors() {
         let mut idx = Index::new();
-        idx.entries.push(IndexEntry {
+        idx.upsert_entry(IndexEntry {
             path: "src/lib.rs".to_string(),
             status: EntryStatus::Blob,
             object_hash: seed_hash("lib"),
@@ -769,7 +955,7 @@ mod tests {
             ino: 0,
             ctime_ns: 0,
         });
-        idx.entries.push(IndexEntry {
+        idx.upsert_entry(IndexEntry {
             path: "removed.txt".to_string(),
             status: EntryStatus::Removed,
             object_hash: hash::ZERO,
@@ -791,7 +977,7 @@ mod tests {
     #[test]
     fn has_tracked_file_at_exact_only_and_not_removed() {
         let mut idx = Index::new();
-        idx.entries.push(IndexEntry {
+        idx.upsert_entry(IndexEntry {
             path: "f".to_string(),
             status: EntryStatus::Blob,
             object_hash: seed_hash("f"),
@@ -800,7 +986,7 @@ mod tests {
             ino: 0,
             ctime_ns: 0,
         });
-        idx.entries.push(IndexEntry {
+        idx.upsert_entry(IndexEntry {
             path: "gone".to_string(),
             status: EntryStatus::Removed,
             object_hash: hash::ZERO,
@@ -813,7 +999,7 @@ mod tests {
         assert!(idx.has_tracked_file_at("f"));
         // Unlike `tracks_path_or_descendant`, an ancestor directory does NOT
         // match — only an exact tracked leaf does (the collision predicate).
-        idx.entries.push(IndexEntry {
+        idx.upsert_entry(IndexEntry {
             path: "dir/inner.txt".to_string(),
             status: EntryStatus::Blob,
             object_hash: seed_hash("inner"),
@@ -1294,5 +1480,158 @@ mod tests {
         let idx = from_tree(&store, tree).unwrap();
         let rebuilt = crate::worktree::build_tree_from_index(&store, &idx).unwrap();
         assert_eq!(rebuilt, tree);
+    }
+
+    // ---- by_path (issue #708) --------------------------------------------
+
+    fn blob_entry(path: &str) -> IndexEntry {
+        IndexEntry {
+            path: path.to_string(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash(path),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        }
+    }
+
+    /// `upsert_entry` on a fresh path appends and registers it; `find_entry`
+    /// then answers via the map, not a scan. Each call self-checks
+    /// consistency in debug builds (see `debug_assert_consistent`), so this
+    /// test alone exercises the map on every one of its mutations.
+    #[test]
+    fn upsert_entry_inserts_new_path() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a.txt"));
+        idx.upsert_entry(blob_entry("b.txt"));
+        assert_eq!(idx.entries.len(), 2);
+        assert_eq!(idx.find_entry("a.txt"), Some(0));
+        assert_eq!(idx.find_entry("b.txt"), Some(1));
+        assert_eq!(idx.find_entry("missing"), None);
+    }
+
+    /// `upsert_entry` on an already-tracked path replaces in place — same
+    /// position, no growth, and the map still resolves it.
+    #[test]
+    fn upsert_entry_replaces_existing_path() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a.txt"));
+        idx.upsert_entry(blob_entry("b.txt"));
+        let mut replacement = blob_entry("a.txt");
+        replacement.status = EntryStatus::Executable;
+        idx.upsert_entry(replacement);
+        assert_eq!(idx.entries.len(), 2, "replace must not grow the index");
+        let pos = idx.find_entry("a.txt").unwrap();
+        assert_eq!(idx.entries[pos].status, EntryStatus::Executable);
+        // The unrelated entry's position is untouched.
+        assert_eq!(idx.find_entry("b.txt"), Some(1));
+    }
+
+    /// `remove_path` drops the entry and shifts later positions in the map
+    /// to match the `Vec::remove` shift.
+    #[test]
+    fn remove_path_updates_positions_of_later_entries() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a.txt"));
+        idx.upsert_entry(blob_entry("b.txt"));
+        idx.upsert_entry(blob_entry("c.txt"));
+        let removed = idx.remove_path("a.txt").expect("a.txt was tracked");
+        assert_eq!(removed.path, "a.txt");
+        assert_eq!(idx.entries.len(), 2);
+        assert_eq!(idx.find_entry("a.txt"), None);
+        assert_eq!(idx.entries[idx.find_entry("b.txt").unwrap()].path, "b.txt");
+        assert_eq!(idx.entries[idx.find_entry("c.txt").unwrap()].path, "c.txt");
+        // Removing an absent path is a documented no-op.
+        assert!(idx.remove_path("a.txt").is_none());
+    }
+
+    /// `retain_entries` rebuilds the map so positions stay correct for
+    /// every survivor, regardless of how many entries were dropped.
+    #[test]
+    fn retain_entries_rebuilds_positions() {
+        let mut idx = Index::new();
+        for p in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            idx.upsert_entry(blob_entry(p));
+        }
+        idx.retain_entries(|e| e.path != "b.txt" && e.path != "c.txt");
+        assert_eq!(idx.entries.len(), 2);
+        assert_eq!(idx.entries[idx.find_entry("a.txt").unwrap()].path, "a.txt");
+        assert_eq!(idx.entries[idx.find_entry("d.txt").unwrap()].path, "d.txt");
+        assert_eq!(idx.find_entry("b.txt"), None);
+        assert_eq!(idx.find_entry("c.txt"), None);
+    }
+
+    /// The common `add -A` case: staging an unrelated file has no ancestor
+    /// or descendant conflict, so nothing is removed.
+    #[test]
+    fn remove_directory_conflicts_is_noop_without_conflict() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("src/lib.rs"));
+        idx.remove_directory_conflicts("src/main.rs");
+        assert_eq!(idx.entries.len(), 1);
+        assert!(idx.find_entry("src/lib.rs").is_some());
+    }
+
+    /// Staging `a/b` when `a` is already tracked as a file evicts the
+    /// ancestor entry.
+    #[test]
+    fn remove_directory_conflicts_evicts_tracked_ancestor() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a"));
+        idx.remove_directory_conflicts("a/b");
+        assert_eq!(idx.find_entry("a"), None);
+        assert_eq!(idx.entries.len(), 0);
+    }
+
+    /// Staging `a` when `a/b` is already tracked as a file evicts the
+    /// descendant entry, leaving unrelated entries alone.
+    #[test]
+    fn remove_directory_conflicts_evicts_tracked_descendant() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a/b"));
+        idx.upsert_entry(blob_entry("a/c"));
+        idx.upsert_entry(blob_entry("unrelated.txt"));
+        idx.remove_directory_conflicts("a");
+        assert_eq!(idx.find_entry("a/b"), None);
+        assert_eq!(idx.find_entry("a/c"), None);
+        assert!(idx.find_entry("unrelated.txt").is_some());
+        assert_eq!(idx.entries.len(), 1);
+    }
+
+    /// An entry at exactly the staged path is left alone — the caller
+    /// upserts it separately.
+    #[test]
+    fn remove_directory_conflicts_keeps_exact_match() {
+        let mut idx = Index::new();
+        idx.upsert_entry(blob_entry("a.txt"));
+        idx.remove_directory_conflicts("a.txt");
+        assert!(idx.find_entry("a.txt").is_some());
+    }
+
+    /// `deserialize` (and therefore `read_index`) populates `by_path`
+    /// without any caller having to call `upsert_entry` — `find_entry` on
+    /// the result is immediately map-backed.
+    #[test]
+    fn deserialize_populates_path_index() {
+        let mut built = Index::new();
+        built.upsert_entry(blob_entry("a.txt"));
+        built.upsert_entry(blob_entry("dir/b.txt"));
+        let round_tripped = deserialize(&built.serialize()).unwrap();
+        assert_eq!(round_tripped.find_entry("a.txt"), Some(0));
+        assert_eq!(round_tripped.find_entry("dir/b.txt"), Some(1));
+        assert!(round_tripped.tracks_path_or_descendant("dir"));
+    }
+
+    /// Two indexes with identical entries compare equal regardless of
+    /// whether their `by_path` cache happens to be populated — equality is
+    /// about staged content, not internal cache state.
+    #[test]
+    fn equality_ignores_path_index_population() {
+        let mut via_field_push = Index::new();
+        via_field_push.entries.push(blob_entry("a.txt"));
+        let mut via_upsert = Index::new();
+        via_upsert.upsert_entry(blob_entry("a.txt"));
+        assert_eq!(via_field_push, via_upsert);
     }
 }

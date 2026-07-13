@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { Box, HStack, Img, svgToDataUri, Text, VStack } from "@officialunofficial/og";
 import { loadGoogleFonts, renderOgImage } from "@officialunofficial/og/render";
 import { MKIT_SEED, mulberry32, renderGridSvg } from "./grid";
+import { sanitizeTitle } from "./title";
 
 const app = new Hono();
 
@@ -17,8 +18,14 @@ const LOGO_SVG = svgToDataUri(renderGridSvg(mulberry32(MKIT_SEED), 8, 12));
 // Render at 2x for Retina-quality output.
 const SCALE = 2;
 
+// The card is a pure function of `title` (same title in -> same PNG out), so it's
+// safe to cache aggressively at the edge — a year, immutable. Set explicitly
+// rather than relying on `renderOgImage`'s default, so this endpoint's caching
+// contract stays intentional even if that default ever changes upstream.
+const CACHE_CONTROL = "public, max-age=31536000, immutable";
+
 app.get("/", async (c) => {
-  const title = c.req.query("title") || DEFAULT_TITLE;
+  const title = sanitizeTitle(c.req.query("title"), DEFAULT_TITLE);
 
   const s = SCALE;
   // Flat-black, minimal layout (modal.com/docs social image): grid mark + "mkit"
@@ -66,7 +73,7 @@ app.get("/", async (c) => {
     { family: "Geist", weight: 700 },
   ]);
 
-  return renderOgImage(html, { fonts, width: 1200, height: 630, scale: s });
+  return renderOgImage(html, { fonts, width: 1200, height: 630, scale: s, cacheControl: CACHE_CONTROL });
 });
 
 export default app;

@@ -9,6 +9,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **BSR-published proto modules for external integrators.** The `mkit-rpc`
+  schemas (`common.proto`/`signer.proto`/`ssh.proto`/`verify.proto`) and
+  `apps/repo-worker`'s `repo.proto` (`RepoService`) are now named modules in
+  the repo-root `buf.yaml` v2 workspace, pushed to the Buf Schema Registry as
+  `buf.build/officialunofficial/mkit-rpc` and
+  `buf.build/officialunofficial/mkit-repo` on every tagged release (new
+  `buf-push` job in `crates-publish.yml`, dormant until `BUF_TOKEN` /
+  `BUF_PUBLISH_ENABLED` are provisioned — see `docs/RELEASE.md`). Third-party
+  signer integrators (HSM/TPM vendors, custodial signing services) and
+  `RepoService` clients can now `buf generate` typed bindings from a pinned
+  tag instead of vendoring this repo — see the checked-in `buf.gen.yaml`
+  reference recipes in each module's proto directory.
+  `contrib/signers/mkit-sign-se`'s checked-in Swift bindings are now
+  regenerated via `scripts/regen-mkit-sign-se-swift.sh` (`buf generate`, not
+  raw `protoc`) and refreshed to include the previously-missing
+  `ALGORITHM_BLS12381_THRESHOLD` case.
+- **`mkit serve --http <addr>`: self-hosted Connect remote (SPEC-TRANSPORT-CONNECT).**
+  `mkit serve` can now host `mkit.transport.v1.TransportService` over
+  axum/HTTP instead of the SSH-frame protocol, behind the new
+  `http-transport` cargo feature — an operator without SSH access or a
+  cloud object store can run a real, testable `mkit+https://` remote
+  against a local repository (server-side half of the `mkit-transport-connect`
+  crate, behind that crate's own `server` cargo feature; generic over any
+  `mkit_core::protocol::Transport` backend; instantiated today over
+  `FileTransport`). All seven wire RPCs
+  (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/
+  `UploadPack`/`DownloadPack`) run the underlying `Transport` call on a
+  blocking task so a synchronous CAS ref write never stalls the async
+  executor. `UploadPack`/`DownloadPack` validate the full header-then-chunks
+  stream (offset contiguity, declared-vs-received length, BLAKE3) before
+  ever touching storage, so a rejected upload never creates or overwrites
+  the destination pack, and a download either completes or fails before
+  any message is sent — never a partial stream. **Fail-closed**, mirroring
+  `--listen-enc`: refuses to bind unless `--http-token`/`MKIT_API_TOKEN`
+  (checked in constant time on every unary and streaming RPC) or the
+  explicit `--unsafe-allow-any-http-peer` development escape is supplied;
+  `Ctrl-C`/`SIGTERM` drain in-flight requests before exiting. The
+  `mkit.transport.v1` proto (`proto/mkit/transport/v1/transport.proto`) is
+  generated via `buffa`/`connectrpc-build`, vendored under `generated/`
+  the same way `mkit-repo-client`/`apps/repo-worker` already do — see
+  `docs/specs/SPEC-TRANSPORT-CONNECT.md`. A hosted reference-Worker
+  deployment is a separate, later change
+  ([#699](https://github.com/officialunofficial/mkit/issues/699)).
+- **Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
+  ([#711](https://github.com/officialunofficial/mkit/issues/711)).**
+  These commands now stream a live progress line on stderr while the
+  network transfer runs — `Writing objects: N objects, B bytes` while
+  building/uploading the outgoing pack, `Unpacking objects: N objects`
+  while applying a downloaded one — using only real counts (objects
+  actually staged/unpacked, bytes actually handed to the transport).
+  mkit still never fabricates git's `Enumerating/Counting/Compressing
+  objects` or `Total N (delta D)` lines, per `docs/PARITY.md`: mkit's
+  transport is one-object-per-pack and computes no cross-branch delta
+  graph. Progress shows only when stderr is a tty; the new `-q`/
+  `--quiet` flag on all four commands forces it off, and
+  `MKIT_PROGRESS=always`/`never` overrides the tty auto-detection
+  explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
+- **Native ConnectRPC client for `mkit+https://` (SPEC-TRANSPORT-CONNECT,
+  [#701](https://github.com/officialunofficial/mkit/issues/701)).**
+  The `mkit-transport-connect` crate's mandatory baseline (always compiled,
+  independent of its `server` feature above) is now a non-wasm ConnectRPC
+  client for `mkit.transport.v1.TransportService`, generated from
+  `proto/mkit/transport/v1/transport.proto` via the same vendored-codegen
+  pattern `mkit-repo-client`/`apps/repo-worker` use (no `protoc` needed on
+  the default build path; `MKIT_REPO_CODEGEN=1` +
+  `scripts/regen-transport-proto.sh` to regenerate). `mkit-cli`'s
+  `remote_dispatch` now constructs this transport for `mkit+https://` /
+  loopback `mkit+http://`, replacing `mkit-transport-http`'s bespoke JSON
+  dialect there. TLS trust is pure-Rust (`webpki-roots`, no OS trust
+  store); the synchronous `Transport` trait is bridged to the async
+  generated client via a dedicated per-instance tokio runtime, mirroring
+  `mkit-transport-enc`'s `TokioExecutor`. `ConnectTransport::
+  supports_atomic_advance()` defaults to `false` (opt in via
+  `with_atomic_advance(true)`) until a confirmed-transactional reference
+  deployment exists. `mkit-transport-http` is NOT removed: its
+  `sparse-checkout`/`pack-shards` extensions have no `mkit.transport.v1`
+  equivalent yet.
+- **`Transport`: additive streaming pack transfer (`upload_pack_streaming`
+  / `download_pack_streaming`).** Two new opt-in trait methods move a
+  pack as a sequence of bounded-size `PackChunk { offset, data, last }`
+  segments instead of one `Vec<u8>`, reusing the same chunk shape
+  `mkit-rpc`'s `ssh.proto` already defines. Both have default
+  implementations expressed in terms of the existing whole-buffer
+  `upload_pack`/`download_pack` (buffer-then-delegate for upload,
+  delegate-then-wrap-as-one-chunk for download), so every transport
+  gets a working implementation with zero code and none is forced to
+  change. `mkit-transport-ssh` and `mkit-transport-enc` override both
+  to forward chunks straight to the `PackChunk` frame loop they already
+  ran internally, so a multi-GB pack streamed from disk over SSH/enc
+  now stays in bounded memory (roughly one chunk at a time) regardless
+  of total pack size, instead of requiring the whole pack materialized
+  up front. `mkit-transport-http` keeps the default buffer-then-delegate
+  behavior for now — real HTTP pack streaming arrives via the
+  `mkit.transport.v1` Connect service's client-/server-streaming
+  `UploadPack`/`DownloadPack` RPCs (SPEC-TRANSPORT-CONNECT §6, pending
+  #698/#701) — but its per-retry full-body clone in `upload_pack` is
+  fixed separately: the request body is now `Bytes` (refcounted) instead
+  of `Vec<u8>`, so a retried upload shares the same buffer across every
+  attempt instead of copying it again per retry
+  ([#702](https://github.com/officialunofficial/mkit/issues/702)).
+- **`log --author`/`--grep`/`--since`/`--until`/`--no-merges`/`--first-parent`
+  and `diff -w`/`-b`/`-U<n>` (#712).** `mkit log` filters commits by a
+  substring match on the author identity (`--author`) or commit message
+  (`--grep`), by a `--since`/`--until` timestamp bound (accepting
+  `@<unix-seconds>`, `now`/`today`/`yesterday`, `<N> <unit> ago`, or
+  `YYYY-MM-DD[ HH:MM:SS]`), hides merge commits from the output
+  (`--no-merges`), or walks only first parents so a merged side branch
+  never enters the walk at all (`--first-parent`, stronger than
+  `--no-merges`). All filters apply before `-n`'s limit. `mkit diff`
+  gains `-w`/`--ignore-all-space` and `-b`/`--ignore-space-change`
+  (whitespace-insensitive line comparison; `-w` wins if both are given)
+  and `-U<n>`/`--unified=<n>` (context-line count, default 3). Both
+  `--author`/`--grep` are plain substring matches rather than regexes
+  (mkit identities are opaque, not free-text names) and `--since`/
+  `--until` use a small explicit date grammar rather than git's
+  `approxidate` — documented divergences, not gaps.
+- **Windows release target (`x86_64-pc-windows-msvc`) and PowerShell
+  installer.** `release.yml`'s build matrix now ships a fifth leg —
+  `windows-latest`, `.zip` archive instead of `.tar.gz`, `mkit.exe` — built
+  with the `backend-windows-credential` keystore feature (already the
+  default on Windows via `mkit-cli`'s `[target.'cfg(windows)'.dependencies]`
+  stanza), matching parity with the already-tested `windows-credential` leg
+  of `rust.yml`'s manual-only `keystore-backends` matrix. The Windows
+  archive goes through the same cosign keyless signing and mkit-native DSSE
+  release attestation as every other target. New `install.ps1` at the repo
+  root is the native-Windows counterpart to `install.sh` (same trust model:
+  cosign-required by default, downgrade guard, atomic install) — served at
+  `https://mkit.sh/install.ps1` alongside the existing `install.sh`. New
+  `contrib/scoop/mkit.json` manifest template (mirrors
+  `contrib/homebrew/mkit.rb`) un-defers the Scoop-manifest checklist item in
+  `docs/RELEASE.md`. `install.sh` itself still targets Darwin/Linux only —
+  it now points MINGW/MSYS/Cygwin users at `install.ps1` instead of failing
+  with an unsupported-OS error. Known gap: `mkit self update` does not yet
+  support the Windows install (it hardcodes `.tar.gz`/tar+gzip extraction
+  and resolves its state dir via `$HOME`, which is commonly unset on native
+  Windows) — Windows users should reinstall via `install.ps1` or a future
+  Scoop bucket instead of `mkit self update` for now
+  ([#714](https://github.com/officialunofficial/mkit/issues/714), part of
+  [#676](https://github.com/officialunofficial/mkit/issues/676)).
+- **SLSA build provenance for release archives.** The `release` job in
+  `.github/workflows/release.yml` now generates a standard SLSA build
+  provenance attestation (`actions/attest-build-provenance`, GitHub/
+  Sigstore-native) over every `dist/*.tar.gz` and `dist/*.zip` archive
+  (including the Windows leg), staged alongside the existing cosign
+  signatures and the mkit-native DSSE attestation as
+  `mkit-X.Y.Z.provenance.jsonl`. This is additive — it does not replace
+  cosign or the mkit-native attestation — but gives downstream tooling
+  (`gh attestation verify`, `slsa-verifier`) a recognized, off-the-shelf
+  provenance format to check against instead of parsing mkit's bespoke DSSE
+  predicate. See `docs/RELEASE.md` ("Verify the SLSA build provenance
+  attestation").
+- **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
+  `PackWriter`/`PackReader` transparently compress/decompress pack
+  entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
+  each carrying its own independent zstd frame (no shared dictionary,
+  no whole-pack stream, so existing framing/caps/trailer semantics are
+  unchanged and decompression memory is bounded to one entry at a
+  time). No call-site changes needed: `push_raw`/`push_delta` compress
+  a candidate payload when it is at least 64 bytes and compresses
+  strictly smaller on the wire (mirroring the existing delta-preference
+  gate's posture), using zstd level 3 (library default). The writer
+  emits `version = 1` when a pack has no compressed entries and
+  `version = 2` the moment it has at least one; `0x03`/`0x04` are
+  illegal inside a `version = 1` pack and rejected as `InvalidEntryType`
+  if seen there. Old (pre-v2) readers hitting a v2 pack fail closed
+  with `UnsupportedVersion` — the intended behavior, not a bug. Decode
+  is bomb-guarded: the claimed decompressed length is checked against
+  the 1 GiB object cap *before* any decompression allocation,
+  decompression is capacity-bounded to that claim, and the actual
+  decompressed length is re-checked against the claim afterward (new
+  `PackError::DecompressedSizeOverCap` / `DecompressedSizeMismatch` /
+  `ZstdEntryTruncated` / `ZstdDecompress` variants). On a synthetic
+  6-commit / 4-file-per-commit text corpus (files 8–48 KiB, <100 KB
+  cap), pack bytes went from 655,764 (v1 uncompressed) to 184,881 (v2
+  compressed) — a 3.55x reduction (71.8% saved); see
+  `rust/benches/benches/pack_compression.rs`. New direct `zstd`
+  dependency on `mkit-core` (behind a `pack-zstd` feature, on by
+  default) — already present transitively via the `commonware-storage`
+  dependency stack at the same resolved version (0.13.3), so this adds
+  no new supply-chain root. `mkit-wasm` and `apps/repo-worker` (both
+  compile to wasm32-unknown-unknown) opt out (`default-features =
+  false`) since `zstd-sys` cannot target that platform.
+- **`mkit-core`: CAS-guarded ref delete.** New public `refs` primitives
+  `delete_ref_if_matches` and (on `--features history-mmr`)
+  `delete_ref_with_history_if_matches` — a `delete_ref`/
+  `delete_ref_with_history` that only removes the ref (and, on
+  history-mmr builds, its journal) when its current on-disk value is
+  exactly the caller-supplied `expected` hash, using the same per-ref
+  `cas_lock_name` lock `update_ref`'s `Match` arm already takes.
+  `mkit branch -m` now routes its source-branch drop (and, on a lost
+  race, its destination rollback) through these instead of an
+  unconditional delete — see the Fixed entry below
+  ([#658](https://github.com/officialunofficial/mkit/issues/658)).
 - **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
   machine-readable blame: a per-line header (`<id> <orig> <final>
   [<group-len>]`) plus a metadata block (author/committer, `author-time`/
@@ -351,6 +544,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`branch -m` racing `commit` on the same branch could silently lose
+  the commit.** #637 serialized `Match`-conditioned ref writes under a
+  shared per-ref lock, but `commit`'s ref advance still used
+  `RefWriteCondition::Any` (an unconditional clobber) and `branch -m`'s
+  delete of the renamed-away source ref was unconditional too — neither
+  side went through `Match`, so the shared lock never engaged between
+  them. A rename could read a branch's tip, let a concurrent `commit`
+  land on top of it via its own CAS, and then delete the ref anyway,
+  destroying the just-landed commit with both commands reporting
+  success. `commit`'s `advance_head` now writes `Match(expected_tip)` /
+  `Missing` instead of `Any` (aborting with a clear, GC-recoverable
+  `TEMPFAIL` if the branch moved underneath it since composing the
+  message), and `branch -m` now deletes the source ref via the new
+  CAS-guarded `delete_ref_if_matches`, rolling back the just-created
+  destination and erroring instead of destroying a concurrent commit
+  ([#658](https://github.com/officialunofficial/mkit/issues/658)).
 - **`listRefs(prefix)` no longer matches across a ref-name component
   boundary in `mkit-transport-memory` and `mkit-transport-s3`.** A
   request for prefix `refs/heads/feat` incorrectly matched
@@ -374,6 +583,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit_rpc::map_update_ref_error`), so genuine invalid requests no
   longer misclassify as conflicts
   ([#551](https://github.com/officialunofficial/mkit/issues/551)).
+- **External-signer `PinPrompt`/`PinResponse` round trip is now
+  implemented; `mkit-sign-ctap --pin` on argv is deprecated.**
+  SPEC-EXTERNAL-SIGNER §4 specifies an in-band PIN round trip so a
+  hardware signer can request a PIN mid-sign without it ever touching
+  argv, but `ExternalSigner` only wrote `Hello`/`SignRequest` and
+  rejected any `PinPrompt` frame with `ExternalSignerBadResponse` —
+  the only way to supply a PIN was the reference CTAP signer's plain
+  `--pin` flag, readable by any other local user via `ps` /
+  `/proc/<pid>/cmdline` (the same exposure class `docs/THREAT-MODEL.md`
+  §3.2 defends key-file confidentiality against). `ExternalSigner` now
+  keeps the child's stdin open for the whole sign conversation and
+  answers a `PinPrompt` via a new `PinProvider` trait (default
+  `TtyPinProvider`: an interactive terminal prompt, best-effort
+  no-echo via `stty` on Unix — never argv or an environment variable),
+  bounded to 8 round trips per conversation. `mkit-sign-ctap` now
+  requests a PIN in-band when the authenticator needs one and prints a
+  deprecation warning to stderr when `--pin` is passed
+  ([#694](https://github.com/officialunofficial/mkit/issues/694)).
 
 ### Internal
 
@@ -385,6 +612,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write, BLS external-signer fail-closed) with regression tests.
 
 ### Security
+
+- **`clone`/`pull`/`fetch` now verify commit/remix/tag signatures and
+  fail closed by default.** Previously the only signature check was the
+  manual, single-revision `mkit verify <rev>` — a hostile remote
+  (THREAT-MODEL §3.1) could push an entirely unsigned or forged history
+  and every `clone`/`pull`/`fetch` would accept it with zero indication
+  anything was wrong. Every commit/remix/tag a fetch newly introduces is
+  now run through `mkit_core::sign::{verify_commit,verify_remix,verify_tag}`
+  — the exact check `mkit verify` runs manually — before the
+  remote-tracking ref is published; a structurally invalid or missing
+  signature aborts with exit 65 and leaves local refs/working tree
+  untouched. Only the newly-fetched delta is checked (bounded per-fetch
+  cost), and the new `DispatchError::UnsignedOrInvalidObject` is
+  deliberately excluded from the applied-pack self-heal retry. Opt out
+  per invocation with `--no-verify-signatures`, or persistently via the
+  **user-scoped** `pull.require_signed = false` config key (added to
+  `REPO_FORBIDDEN_KEYS` — a cloned repo's own config cannot disable the
+  check that protects the clone against exactly that repo). A new
+  message-only `mkit.rpc.v1.verify` proto (`verify.proto`, co-located
+  with `signer.proto`) documents the verification contract so a future
+  ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical
+  check instead of reimplementing it
+  ([#692](https://github.com/officialunofficial/mkit/issues/692)).
 
 - **SSH trust-pinning is now actually enforced.** The per-repo
   `ssh.strict_host_key_checking`, `ssh.user_known_hosts_file`, and

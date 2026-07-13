@@ -34,10 +34,9 @@ use commonware_codec::Encode as _;
 use commonware_cryptography::Signer;
 use commonware_cryptography::ed25519::PrivateKey;
 use mkit_core::protocol::Transport;
+use mkit_rpc::mkit::common::v1::RefEntry;
 use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
-use mkit_rpc::mkit::rpc::v1::ssh::{
-    HelloResponse, ListRefsResponse, SshFrame, list_refs_response::RefEntry, ssh_frame,
-};
+use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, ListRefsResponse, SshFrame, ssh_frame};
 use mkit_transport_enc::tcp::{TokioExecutor, connect_tcp_with_executor};
 use mkit_transport_enc::tokio_io::{TokioSink, TokioStream};
 use mkit_transport_enc::{EncSession, HANDSHAKE_NAMESPACE, recv_frame, send_frame};

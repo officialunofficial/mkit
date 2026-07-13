@@ -1,0 +1,200 @@
+name: "CI: Workers"
+
+# apps/repo-worker, apps/keys-worker, and apps/vcs-worker are standalone
+# Cargo packages (each with its own [package]/[workspace]) — none is a
+# member of rust/Cargo.toml, so cargo fmt/clippy/nextest in
+# cloudbuild/ci.yaml never touches them. This workflow is their dedicated
+# gate: fmt, clippy, `cargo test --lib` for all three crates, a
+# wasm32-unknown-unknown build for keys-worker (repo-worker and vcs-worker
+# already get an incidental wasm build via the codegen-freshness check in
+# cloudbuild/codegen.yaml — not duplicated here), and `buf lint` against
+# apps/repo-worker/proto (apps/repo-worker/buf.yaml is otherwise dormant; no
+# CI surface runs it today). vcs-worker has no app-local buf.yaml — it
+# compiles against the repo-root `proto/` module, already covered by
+# buf.yml/proto.yml — so there is no per-app buf lint step for it here.
+#
+# Deploys live elsewhere (Cloudflare Workers Builds on merge to main, same
+# model as apps/web) — this workflow is validation only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/workers.yml'
+      - 'apps/repo-worker/**'
+      - 'apps/keys-worker/**'
+      - 'apps/vcs-worker/**'
+      - 'proto/mkit/transport/v1/**'
+  # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
+  # its required check (workers-gate) is never absent. The `ci` job is gated
+  # on the in-workflow paths-filter below instead — this avoids the
+  # "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch worker paths.
+  # Mirrors the same pattern already used by web.yml/mcp.yml.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per PR; newer pushes cancel superseded runs. Pushes to main are
+# never cancelled (key the guard off the event name, not github.ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Detect whether this PR touches either worker crate. The `ci` job runs
+  # only when it does; the `workers-gate` job below always runs and is the
+  # stable required-check name.
+  changes:
+    name: Detect worker-relevant changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # paths-filter reads the PR's changed-file list from the API.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      workers: ${{ steps.filter.outputs.workers }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+        id: filter
+        with:
+          filters: |
+            workers:
+              - '.github/workflows/workers.yml'
+              - 'apps/repo-worker/**'
+              - 'apps/keys-worker/**'
+              - 'apps/vcs-worker/**'
+              - 'proto/mkit/transport/v1/**'
+
+  ci:
+    name: fmt, clippy, test, wasm build, buf lint
+    # Run on main pushes (push is path-filtered at the trigger), and on PRs
+    # only when worker-relevant paths changed.
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.workers == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      # Neither worker is a rust/ workspace member, so the shared
+      # .github/actions/setup-rust composite (hardcoded to `rust ->
+      # rust/target`) doesn't fit — install the toolchain and cache directly,
+      # scoped to both standalone crates. Both pin rust-version = "1.95.0" in
+      # their own rust-toolchain.toml; match that here rather than picking a
+      # different toolchain for CI (per the issue's MSRV-consistency note).
+      - name: Install Rust 1.95.0 + wasm32 target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          workspaces: |
+            apps/repo-worker -> apps/repo-worker/target
+            apps/keys-worker -> apps/keys-worker/target
+            apps/vcs-worker -> apps/vcs-worker/target
+          prefix-key: "rust-ci-workers"
+          cache-on-failure: false
+          cache-bin: false
+
+      # apps/repo-worker/buf.yaml defines STANDARD lint + FILE breaking rules
+      # but no CI image installs buf (cloudbuild/Dockerfile.ci installs protoc
+      # only) — this is the first CI surface to exercise it. `buf breaking` is
+      # deliberately out of scope here (companion buf-lint/breaking issue).
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
+        with:
+          github_token: ${{ github.token }}
+
+      - name: buf lint (apps/repo-worker/proto)
+        working-directory: apps/repo-worker
+        run: buf lint
+
+      - name: repo-worker - Check formatting
+        working-directory: apps/repo-worker
+        run: cargo fmt --check
+
+      - name: repo-worker - Clippy
+        working-directory: apps/repo-worker
+        run: cargo clippy --all-targets -- -D warnings
+
+      # repo-worker's wasm32 build is already exercised (incidentally) by the
+      # codegen-freshness check on Cloud Build (cloudbuild/codegen.yaml ->
+      # scripts/regen-repo-proto.sh) — not duplicated here.
+      - name: repo-worker - Test (lib)
+        working-directory: apps/repo-worker
+        run: cargo test --lib
+
+      - name: keys-worker - Check formatting
+        working-directory: apps/keys-worker
+        run: cargo fmt --check
+
+      - name: keys-worker - Clippy
+        working-directory: apps/keys-worker
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: keys-worker - Test (lib)
+        working-directory: apps/keys-worker
+        run: cargo test --lib
+
+      # keys-worker has no other CI footprint anywhere today (zero references
+      # in .github/workflows/ or cloudbuild/*.yaml) and no incidental wasm
+      # build like repo-worker's codegen check — build it explicitly.
+      - name: keys-worker - wasm32 build
+        working-directory: apps/keys-worker
+        run: cargo build --target wasm32-unknown-unknown
+
+      - name: vcs-worker - Check formatting
+        working-directory: apps/vcs-worker
+        run: cargo fmt --check
+
+      - name: vcs-worker - Clippy
+        working-directory: apps/vcs-worker
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: vcs-worker - Clippy (wasm32)
+        working-directory: apps/vcs-worker
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # vcs-worker's wasm32 build is already exercised (incidentally) by the
+      # codegen-freshness check on Cloud Build (cloudbuild/codegen.yaml ->
+      # scripts/regen-transport-proto.sh) — not duplicated here.
+      - name: vcs-worker - Test (lib)
+        working-directory: apps/vcs-worker
+        run: cargo test --lib
+
+  # Stable required-check name for branch protection. Always runs on PRs
+  # (if: always()) so the status is never absent — closing the
+  # "required-but-skipped" trap. Passes when the `ci` job succeeded OR was
+  # legitimately skipped because the PR touched no worker-relevant paths;
+  # fails if `ci` actually failed or was cancelled.
+  workers-gate:
+    name: Workers CI gate
+    if: always() && github.event_name == 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check ci job result
+        shell: bash
+        env:
+          CI: ${{ needs.ci.result }}
+        run: |
+          echo "ci: ${CI}"
+          case "${CI}" in
+            success|skipped)
+              echo "Workers CI gate satisfied."
+              ;;
+            *)
+              echo "::error::ci job did not succeed (result=${CI})"
+              exit 1
+              ;;
+          esac

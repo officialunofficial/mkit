@@ -67,6 +67,8 @@ pub mod switch;
 pub mod symbolic_ref;
 pub mod tag;
 pub mod tree;
+pub mod trust;
+pub mod trust_roots;
 pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
@@ -757,6 +759,39 @@ pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<
     }
 }
 
+/// CAS-guarded sibling of [`delete_ref_dropping_history`] (issue #658):
+/// only deletes `branch` (and, on `--features history-mmr` builds,
+/// destroys its journal) if its current value is exactly `expected`.
+///
+/// `mkit branch -m` uses this — not the unconditional version — for
+/// BOTH the source-branch drop and, on a lost race, the rollback delete
+/// of the just-created destination: an unconditional delete here can't
+/// tell "the branch tip I read is still current" from "a concurrent
+/// `commit` just advanced it out from under me", so it would silently
+/// destroy the concurrently-landed commit's only ref. See
+/// [`mkit_core::refs::delete_ref_if_matches`] for the full race
+/// analysis.
+///
+/// - **Default build (no `history-mmr`)** — exactly
+///   `refs::delete_ref_if_matches(layout, branch, expected)`.
+/// - **`--features history-mmr`** — routes through
+///   [`mkit_core::refs::delete_ref_with_history_if_matches`], sharing
+///   the same process-global executor as [`write_ref_recording_history`].
+pub fn delete_ref_dropping_history_if_matches(
+    layout: &RepoLayout,
+    branch: &str,
+    expected: Hash,
+) -> Result<(), RefError> {
+    #[cfg(feature = "history-mmr")]
+    {
+        refs::delete_ref_with_history_if_matches(layout, branch, expected, history_executor())
+    }
+    #[cfg(not(feature = "history-mmr"))]
+    {
+        refs::delete_ref_if_matches(layout, branch, expected)
+    }
+}
+
 /// Current branch name for recovery logging — empty for a detached HEAD
 /// or an unreadable/symbolic-only HEAD.
 #[must_use]
@@ -860,12 +895,12 @@ pub fn stage_removed_tombstones(
     }
     let mut idx = mkit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
     for path in removed {
-        match idx.entries.iter().position(|x| x.path == path) {
+        match idx.find_entry(&path) {
             Some(j) => {
                 idx.entries[j].status = EntryStatus::Removed;
                 idx.entries[j].object_hash = mkit_core::hash::ZERO;
             }
-            None => idx.entries.push(mkit_core::index::IndexEntry {
+            None => idx.upsert_entry(mkit_core::index::IndexEntry {
                 path,
                 status: EntryStatus::Removed,
                 object_hash: mkit_core::hash::ZERO,
@@ -1135,10 +1170,11 @@ pub(crate) fn collect_worktree_paths(
 }
 
 pub(crate) fn index_tracks_path_or_descendant(index: &Index, path: &str) -> bool {
-    index.entries.iter().any(|entry| {
-        entry.status != EntryStatus::Removed
-            && (entry.path == path || index_path_descends_from(&entry.path, path))
-    })
+    // Delegates to `Index::tracks_path_or_descendant`, which answers via
+    // the maintained `path -> position` map in `O(log n + k)` instead of
+    // this function's old `O(n)` full scan (issue #708) — `add_tree` calls
+    // this once per directory/file it walks.
+    index.tracks_path_or_descendant(path)
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {

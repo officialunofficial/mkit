@@ -21,6 +21,7 @@
 // `pub(crate)` so the `remote remove`/`rename` command handlers can drive
 // the record's lifecycle ops (#545); everything else stays module-private.
 pub(crate) mod applied_packs;
+mod envelope_signer;
 mod packmap;
 
 use mkit_core::layout::RepoLayout;
@@ -38,8 +39,8 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
+use mkit_transport_connect::ConnectTransport;
 use mkit_transport_file::FileTransport;
-use mkit_transport_http::HttpTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
 
@@ -153,6 +154,21 @@ pub enum DispatchError {
         "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
     )]
     ClosureTooLarge(usize),
+    /// A commit/remix/tag newly introduced by this fetch failed Ed25519
+    /// signature verification via [`mkit_core::sign::verify_commit`] /
+    /// `verify_remix` / `verify_tag` — the exact check `mkit verify <rev>`
+    /// runs manually (issue #692). A hostile remote (THREAT-MODEL §3.1) can
+    /// otherwise push an unsigned or forged history that `clone`/`pull`/
+    /// `fetch` would silently materialise. Deliberately distinct from
+    /// [`RemoteMissingObject`](Self::RemoteMissingObject) so it does NOT
+    /// feed the applied-pack self-heal retry (#409): an invalid signature
+    /// is not evidence of local staleness, and clearing the applied-packs
+    /// record would not make a hostile remote's history valid. Fails
+    /// closed by default; opt out with `--no-verify-signatures` or the
+    /// user-scoped `pull.require_signed = false` config (never settable
+    /// from repo-scoped config — see [`crate::config::REPO_FORBIDDEN_KEYS`]).
+    #[error("object {hash} failed signature verification: {reason}")]
+    UnsignedOrInvalidObject { hash: String, reason: String },
     /// A remote name passed to the applied-packs record (#409) is not a legal
     /// ref name (per [`mkit_core::refs::validate_ref_name`]). A remote name
     /// *is* a ref name, so this should never occur for a config-registered
@@ -176,28 +192,101 @@ pub enum DispatchError {
 /// config (the flat `remote_endpoint` or a `remote.<name>.url`),
 /// `false` when it came from the user / an explicit CLI argument. Trust
 /// is per ENDPOINT, never per remote name.
+///
+/// `layout` is needed only to resolve a repo-key-file envelope signer
+/// when `cfg.merged.transport_auth == "envelope"` (see
+/// `envelope_signer_from_config`) — every caller already has it at
+/// hand (it discovered the repo before building `cfg`).
 pub fn open_trusted(
     endpoint: &str,
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
+    layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    open_with_config(endpoint, &cfg.merged)
+    open_with_config(endpoint, &cfg.merged, layout)
 }
 
-/// The single chokepoint that resolves SSH trust-pinning from config and
-/// opens a transport. Every config-bearing caller — [`open_trusted`]
-/// (push / fetch / pull) and `clone` — routes through here, so the
-/// `ssh.*` keys (issue #389) are resolved and threaded in exactly ONE
-/// place. A new remote command physically cannot forget them as long as
-/// it opens through config; the only un-pinned path is the config-less
-/// [`open`], which production never uses for `ssh`.
+/// The single chokepoint that resolves SSH trust-pinning (issue #389) and
+/// `mkit+https://` envelope-signing config from `cfg` and opens a
+/// transport. Every config-bearing caller — [`open_trusted`] (push /
+/// fetch / pull) and `clone` — routes through here, so both are resolved
+/// and threaded in exactly ONE place. A new remote command physically
+/// cannot forget them as long as it opens through config; the only
+/// un-pinned path is the config-less [`open`], which production never
+/// uses for `ssh` or envelope auth.
 pub(crate) fn open_with_config(
     url: &str,
     cfg: &crate::config::Config,
+    layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
-    open_with_ssh_options(url, &ssh_options_from_config(cfg))
+    let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        envelope_signer_from_config(cfg, layout)?
+    } else {
+        None
+    };
+    open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
+}
+
+/// Resolve an [`mkit_transport_connect::EnvelopeSigner`] from `cfg`, when
+/// `cfg.transport_auth_envelope()` is set — `Ok(None)` otherwise (the
+/// default: bearer-token-only, unchanged from #700/#701).
+///
+/// Reuses EXACTLY the same signer resolution as `mkit commit`'s
+/// [`crate::commands::commit::load_commit_signer`] (`cfg.signer` ==
+/// `""`/`"legacy"` -> the repo key file at `cfg.signing_key`; `"keystore"`
+/// -> `cfg.key.ed25519_ref_or_fallback()` via `mkit-keystore`) rather than
+/// inventing a parallel key path — the write envelope authenticates with
+/// the SAME Ed25519 identity that already signs the user's commits.
+///
+/// Both signer kinds sign the raw envelope digest directly (no
+/// SPEC-SIGNING commit/remix/tag domain prefix): the legacy path delegates
+/// to the EXISTING `mkit_attest::RepoKeySigner` (its `sign` already signs
+/// the given bytes directly — "the PAE's own `\"DSSEv1 \"` prefix is the
+/// domain separator" per its own doc comment — so no new raw-Ed25519 call
+/// site is needed here), the keystore path via `KeySigner::sign`, whose
+/// own contract already documents "Ed25519 signers return the 64-byte
+/// RFC 8032 signature over `msg`" — i.e. no domain digest applied, exactly
+/// what the envelope needs. See `envelope_signer.rs` for both adapters.
+pub(crate) fn envelope_signer_from_config(
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+) -> Result<Option<Arc<dyn mkit_transport_connect::EnvelopeSigner>>, DispatchError> {
+    if !cfg.transport_auth_envelope() {
+        return Ok(None);
+    }
+    let remote_error = |msg: String| DispatchError::Transport(TransportError::RemoteError(msg));
+    match cfg.signer.as_str() {
+        "" | "legacy" => {
+            let key_path =
+                crate::config::resolve_key_path(layout, &cfg.signing_key).map_err(|e| {
+                    remote_error(format!("transport_auth = envelope: signing_key: {e}"))
+                })?;
+            if !key_path.exists() {
+                return Err(remote_error(format!(
+                    "transport_auth = envelope requires a signing key at {} — run `mkit keygen` first",
+                    key_path.display()
+                )));
+            }
+            let kp = mkit_core::sign::load_key(&key_path)
+                .map_err(|e| remote_error(format!("transport_auth = envelope: load key: {e}")))?;
+            Ok(Some(
+                Arc::new(envelope_signer::RepoKeyEnvelopeSigner::new(kp))
+                    as Arc<dyn mkit_transport_connect::EnvelopeSigner>,
+            ))
+        }
+        "keystore" => {
+            let signer = envelope_signer::KeystoreEnvelopeSigner::open(cfg)
+                .map_err(|e| remote_error(format!("transport_auth = envelope: {e}")))?;
+            Ok(Some(
+                Arc::new(signer) as Arc<dyn mkit_transport_connect::EnvelopeSigner>
+            ))
+        }
+        other => Err(remote_error(format!(
+            "transport_auth = envelope: unknown signer `{other}` — expected `legacy` or `keystore`"
+        ))),
+    }
 }
 
 /// Map the three `ssh.*` trust-pinning keys from a merged [`Config`] into
@@ -227,17 +316,22 @@ fn ssh_options_from_config(cfg: &crate::config::Config) -> SshOptions {
 ///
 /// [`Config`]: crate::config::Config
 pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
-    open_with_ssh_options(url, &SshOptions::default())
+    open_with_ssh_options(url, &SshOptions::default(), None)
 }
 
-/// Scheme dispatch with explicit SSH options. Identical to [`open`] for
-/// every non-SSH scheme; the `mkit+ssh://` branch threads `ssh_options`
-/// (issue #389) into the spawned `ssh(1)` child via
-/// [`SshTransport::connect_with_options`]. Reached only via [`open`]
-/// (default options) and [`open_with_config`] (config-derived options).
+/// Scheme dispatch with explicit SSH options and an optional `mkit+https://`
+/// / `mkit+http://` envelope signer. Identical to [`open`] for every
+/// non-SSH, non-Connect scheme; the `mkit+ssh://` branch threads
+/// `ssh_options` (issue #389) into the spawned `ssh(1)` child via
+/// [`SshTransport::connect_with_options`], and the `mkit+https://`/
+/// `mkit+http://` branch threads `envelope_signer` (issue #699 follow-up)
+/// into [`ConnectTransport::connect_with_signer`]. Reached only via
+/// [`open`] (no config — both `None`/default) and [`open_with_config`]
+/// (config-derived).
 fn open_with_ssh_options(
     url: &str,
     ssh_options: &SshOptions,
+    envelope_signer: Option<Arc<dyn mkit_transport_connect::EnvelopeSigner>>,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     if url.starts_with("git+") {
         return Err(DispatchError::UnsupportedScheme(format!(
@@ -260,9 +354,15 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
-        // HttpTransport::connect strips the `mkit+` prefix itself and
-        // reads MKIT_API_TOKEN from the environment.
-        let tx = HttpTransport::connect(url)?;
+        // ConnectTransport::connect_with_signer strips the `mkit+` prefix
+        // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
+        // the native mkit.transport.v1 ConnectRPC client, replacing the
+        // retired mkit-transport-http JSON dialect as of
+        // SPEC-TRANSPORT-CONNECT verb parity). `envelope_signer` is `None`
+        // unless the caller resolved one via `open_with_config` (mkit#699
+        // follow-up: `transport_auth = envelope`) — bearer token and
+        // envelope signing are independent, additive auth modes.
+        let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
         return Ok(Arc::new(tx));
     }
     if url.starts_with("mkit+s3://") {
@@ -670,13 +770,21 @@ pub fn push_branch_with_depth(
     for h in &plan.raw {
         let bytes = store.read(h)?;
         w.push_raw(*h, &bytes)?;
+        // Honest progress (#711): one real object just got staged into
+        // the outgoing pack. Never git's fabricated
+        // Enumerating/Counting/Compressing lines — see `crate::progress`.
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
     for d in &plan.deltas {
         w.push_delta(&d.base, &d.stream)?;
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
     let pack = w.finish()?;
     let pack_key = pack::pack_key(&pack);
     tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+    // Upload is complete — report the real byte count handed to the
+    // transport, not an estimate.
+    crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
 
     // Chain the pack onto the packmap AND move the head together (#408): a
     // transactional transport applies both atomically, the default does
@@ -697,18 +805,48 @@ pub fn push_branch_with_depth(
     advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip)
 }
 
+/// [`pull_all_with`] with signature verification on — the CLI's default
+/// (issue #692). Existing in-process callers (the integration-test suite)
+/// that construct only validly-signed histories are unaffected.
+pub fn pull_all(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    target_branch: Option<&str>,
+) -> Result<usize, DispatchError> {
+    pull_all_with(cwd, tx, remote, target_branch, true)
+}
+
 /// Fetch remote refs, then fast-forward the current local branch from
 /// `refs/remotes/default/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
-pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+///
+/// `target_branch`, when `Some`, overrides which remote branch to land
+/// on (used by `mkit clone -b <branch>`): the branch MUST exist among
+/// the remote's advertised refs or the call fails with
+/// [`DispatchError::RemoteBranchMissing`] rather than silently falling
+/// back to another branch. `None` preserves the historical HEAD-driven
+/// selection used by plain `pull`.
+///
+/// `require_signed` gates the post-fetch commit/remix/tag signature check
+/// (issue #692) — `true` (the CLI's default, see [`pull_all`]) verifies
+/// every newly-fetched object and fails closed; `false` is the explicit
+/// `--no-verify-signatures` / `pull.require_signed = false` opt-out.
+pub fn pull_all_with(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    target_branch: Option<&str>,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
     // Fetch phase: `fetch_objects` takes the repo lock itself, narrowly and
     // per branch, around only the local unpack + remote-ref-publish window
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
-    let n = fetch_objects(&store, &layout, tx, remote)?;
+    let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
     let remote_refs = refs::list_remote_refs(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
@@ -731,17 +869,21 @@ pub fn pull_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, D
     )?;
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
-        Some(Head::Branch(branch)) => {
-            let local_tip = refs::read_ref(&layout, branch)?;
-            let selected = if local_tip.is_some() {
+        Some(Head::Branch(head_branch)) => {
+            let want_branch = target_branch.unwrap_or(head_branch.as_str());
+            let local_tip = refs::read_ref(&layout, want_branch)?;
+            let selected = if local_tip.is_some() || target_branch.is_some() {
+                // An explicit `-b <branch>` (or an already-committed local
+                // branch of that name) must match exactly — no silent
+                // fallback to a different branch.
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == branch)
-                    .ok_or_else(|| DispatchError::RemoteBranchMissing(branch.clone()))?
+                    .find(|(name, _)| name == want_branch)
+                    .ok_or_else(|| DispatchError::RemoteBranchMissing(want_branch.to_owned()))?
             } else {
                 remote_refs
                     .iter()
-                    .find(|(name, _)| name == branch)
+                    .find(|(name, _)| name == want_branch)
                     .unwrap_or(&remote_refs[0])
             };
             (selected.0.clone(), local_tip, selected.1)
@@ -819,11 +961,25 @@ fn rollback_pull_ref(
     }
 }
 
+/// [`fetch_all_with`] with signature verification on — the CLI's default
+/// (issue #692). Existing in-process callers (the integration-test suite)
+/// that construct only validly-signed histories are unaffected.
+pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+    fetch_all_with(cwd, tx, remote, true)
+}
+
 /// `fetch` — `pull_all` without the HEAD update. Downloads every object
 /// reachable from each remote ref (via [`Transport::download_pack`] on
 /// the object's own digest) and writes the ref into
 /// `refs/remotes/default/<branch>`.
-pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, DispatchError> {
+///
+/// See [`pull_all_with`] for the `require_signed` contract (issue #692).
+pub fn fetch_all_with(
+    cwd: &Path,
+    tx: &dyn Transport,
+    remote: &str,
+    require_signed: bool,
+) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     // No outer lock here (#642): `fetch_objects` takes the repo lock
     // itself, narrowly and per branch, around only the local unpack +
@@ -831,7 +987,7 @@ pub fn fetch_all(cwd: &Path, tx: &dyn Transport, remote: &str) -> Result<usize, 
     // network transfer. See `packmap::resolve_and_download_chain` /
     // `apply_fetched_chain` and `fetch_objects_inner` below.
     let store = crate::commands::open_store_configured(&layout)?;
-    fetch_objects(&store, &layout, tx, remote)
+    fetch_objects(&store, &layout, tx, remote, require_signed)
 }
 
 /// Reconstruct every remote `refs/heads/*` from its packmap chain and
@@ -912,9 +1068,10 @@ fn fetch_objects(
     layout: &RepoLayout,
     tx: &dyn Transport,
     remote: &str,
+    require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let mut applied = AppliedPacks::load_or_empty(layout, remote);
-    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied);
+    let result = fetch_objects_inner(store, layout, tx, remote, &mut applied, require_signed);
     persist_record(&mut applied, remote);
     result
 }
@@ -927,6 +1084,7 @@ fn fetch_objects_inner(
     tx: &dyn Transport,
     remote: &str,
     applied: &mut AppliedPacks,
+    require_signed: bool,
 ) -> Result<usize, DispatchError> {
     let remote_refs = tx.list_refs("refs/heads/")?;
     let mut n = 0;
@@ -976,49 +1134,58 @@ fn fetch_objects_inner(
             // correct (possibly re-acquired) guard is what's held at
             // `tracking.write` below — see the retry branch's comment for why
             // there are two guards, not one held across the whole match.
-            let (published_tip, _lock) =
-                match apply_fetched_chain(store, tx, remote, &r.name, fetched, h, applied) {
-                    Ok(()) => (h, lock),
-                    Err(e @ DispatchError::RemoteMissingObject(_)) => {
-                        // Re-read the branch's CURRENT tip + packmap. If either
-                        // is gone (branch deleted mid-fetch) the original error
-                        // stands. Otherwise retry the chain ONCE with the fresh
-                        // pair; a second failure propagates via `?`.
-                        let (Some(fresh_h), Some(fresh_head)) = (
-                            tx.read_ref(&format!("refs/heads/{}", r.name))?,
-                            tx.read_ref(&packmap_ref(&r.name))?,
-                        ) else {
-                            return Err(e);
-                        };
-                        // Release the lock for the retry's network
-                        // re-download too — mirrors phase 1's unlocked
-                        // download exactly, rather than the previously
-                        // "accepted trade" of holding the lock across a
-                        // second network round-trip on this rare
-                        // race-recovery path. Re-acquire before the
-                        // retry's local unpack + publish, which still
-                        // needs the same #267 protection phase 2 always
-                        // has.
-                        drop(lock);
-                        let fresh_fetched =
-                            resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
-                        let lock = mkit_core::repo_lock::acquire_default(
-                            layout.worktree_state_dir(),
-                            crate::commands::WORKTREE_LOCK,
-                        )?;
-                        apply_fetched_chain(
-                            store,
-                            tx,
-                            remote,
-                            &r.name,
-                            fresh_fetched,
-                            fresh_h,
-                            applied,
-                        )?;
-                        (fresh_h, lock)
-                    }
-                    Err(e) => return Err(e),
-                };
+            let (published_tip, _lock) = match apply_fetched_chain(
+                store,
+                tx,
+                remote,
+                &r.name,
+                fetched,
+                h,
+                applied,
+                require_signed,
+            ) {
+                Ok(()) => (h, lock),
+                Err(e @ DispatchError::RemoteMissingObject(_)) => {
+                    // Re-read the branch's CURRENT tip + packmap. If either
+                    // is gone (branch deleted mid-fetch) the original error
+                    // stands. Otherwise retry the chain ONCE with the fresh
+                    // pair; a second failure propagates via `?`.
+                    let (Some(fresh_h), Some(fresh_head)) = (
+                        tx.read_ref(&format!("refs/heads/{}", r.name))?,
+                        tx.read_ref(&packmap_ref(&r.name))?,
+                    ) else {
+                        return Err(e);
+                    };
+                    // Release the lock for the retry's network
+                    // re-download too — mirrors phase 1's unlocked
+                    // download exactly, rather than the previously
+                    // "accepted trade" of holding the lock across a
+                    // second network round-trip on this rare
+                    // race-recovery path. Re-acquire before the
+                    // retry's local unpack + publish, which still
+                    // needs the same #267 protection phase 2 always
+                    // has.
+                    drop(lock);
+                    let fresh_fetched =
+                        resolve_and_download_chain(tx, &r.name, fresh_head, applied)?;
+                    let lock = mkit_core::repo_lock::acquire_default(
+                        layout.worktree_state_dir(),
+                        crate::commands::WORKTREE_LOCK,
+                    )?;
+                    apply_fetched_chain(
+                        store,
+                        tx,
+                        remote,
+                        &r.name,
+                        fresh_fetched,
+                        fresh_h,
+                        applied,
+                        require_signed,
+                    )?;
+                    (fresh_h, lock)
+                }
+                Err(e) => return Err(e),
+            };
             // Still inside `_lock`'s scope (the original guard, or the
             // retry's re-acquired one — see above).
             tracking.write(&r.name, &published_tip)?;

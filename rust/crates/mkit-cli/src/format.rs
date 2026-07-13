@@ -209,6 +209,123 @@ pub fn ref_rejected_line(src: &str, dst: &str) -> String {
     format!(" ! [rejected]        {src} -> {dst} (non-fast-forward)")
 }
 
+/// A minimal single-object JSON builder for `--format=json` on the
+/// mutating commands (`commit`, `push`, `pull`, `fetch`, `merge`,
+/// `cherry-pick`, `revert`, `rebase`, `stash`, `tag`, `verify-attest`):
+/// each invocation emits exactly one JSON object to stdout describing
+/// the outcome, unlike `log`/`branch`'s per-record JSONL streaming.
+///
+/// Keeps the same hand-rolled-escaping approach as the rest of this
+/// module (`json_escape`) rather than pulling `serde_json` into the
+/// CLI's presentation layer — see `branch.rs`/`log.rs` for the
+/// precedent this mirrors. Fields are written in insertion order, so
+/// callers should add them in a fixed, documented order to keep output
+/// deterministic and snapshot-friendly.
+#[derive(Debug, Default)]
+pub struct JsonObject {
+    buf: String,
+    first: bool,
+}
+
+impl JsonObject {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buf: String::from("{"),
+            first: true,
+        }
+    }
+
+    fn comma(&mut self) {
+        if !self.first {
+            self.buf.push(',');
+        }
+        self.first = false;
+    }
+
+    /// Append `"<key>":"<escaped value>"`.
+    pub fn field_str(&mut self, key: &str, value: &str) -> &mut Self {
+        self.comma();
+        self.buf.push('"');
+        self.buf.push_str(key);
+        self.buf.push_str("\":\"");
+        self.buf.push_str(&json_escape(value));
+        self.buf.push('"');
+        self
+    }
+
+    /// Append `"<key>":<hash-as-64-hex-string>"`.
+    pub fn field_hash(&mut self, key: &str, h: &Hash) -> &mut Self {
+        self.field_str(key, &hex_hash(h))
+    }
+
+    /// Append `"<key>":null` when `h` is `None`, else the hex hash.
+    pub fn field_opt_hash(&mut self, key: &str, h: Option<&Hash>) -> &mut Self {
+        match h {
+            Some(h) => self.field_hash(key, h),
+            None => self.field_raw(key, "null"),
+        }
+    }
+
+    /// Append `"<key>":null` when `s` is `None`, else the escaped string.
+    pub fn field_opt_str(&mut self, key: &str, s: Option<&str>) -> &mut Self {
+        match s {
+            Some(s) => self.field_str(key, s),
+            None => self.field_raw(key, "null"),
+        }
+    }
+
+    /// Append `"<key>":true`/`"<key>":false`.
+    pub fn field_bool(&mut self, key: &str, v: bool) -> &mut Self {
+        self.field_raw(key, if v { "true" } else { "false" })
+    }
+
+    /// Append `"<key>":<integer>`.
+    pub fn field_u64(&mut self, key: &str, v: u64) -> &mut Self {
+        use std::fmt::Write as _;
+        self.comma();
+        let _ = write!(self.buf, "\"{key}\":{v}");
+        self
+    }
+
+    /// Append `"<key>":<raw>` verbatim — `raw` must already be valid
+    /// JSON (a literal, number, array, or nested object built via a
+    /// nested `JsonObject`/`json_string_array`).
+    pub fn field_raw(&mut self, key: &str, raw: &str) -> &mut Self {
+        self.comma();
+        self.buf.push('"');
+        self.buf.push_str(key);
+        self.buf.push_str("\":");
+        self.buf.push_str(raw);
+        self
+    }
+
+    /// Consume the builder and return the closed `{...}` JSON text (no
+    /// trailing newline — callers `writeln!` it).
+    #[must_use]
+    pub fn finish(mut self) -> String {
+        self.buf.push('}');
+        self.buf
+    }
+}
+
+/// Render a slice of strings as a JSON array of escaped string
+/// literals, e.g. for a `field_raw` value: `["a","b"]`.
+#[must_use]
+pub fn json_string_array<S: AsRef<str>>(items: &[S]) -> String {
+    let mut out = String::from("[");
+    for (i, s) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(s.as_ref()));
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +426,51 @@ mod tests {
         let s = full_identity(&id);
         assert!(s.starts_with("ed25519:"));
         assert_eq!(s.len(), "ed25519:".len() + 64);
+    }
+
+    #[test]
+    fn json_object_empty() {
+        assert_eq!(JsonObject::new().finish(), "{}");
+    }
+
+    #[test]
+    fn json_object_fields_in_insertion_order() {
+        let h = hash::hash(b"x");
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("branch", "main")
+            .field_hash("hash", &h)
+            .field_opt_hash("parent", None)
+            .field_opt_str("note", None)
+            .field_u64("count", 3)
+            .field_raw("items", &json_string_array(&["a", "b"]));
+        let out = obj.finish();
+        assert_eq!(
+            out,
+            format!(
+                "{{\"ok\":true,\"branch\":\"main\",\"hash\":\"{}\",\"parent\":null,\"note\":null,\"count\":3,\"items\":[\"a\",\"b\"]}}",
+                hex_hash(&h)
+            )
+        );
+    }
+
+    #[test]
+    fn json_object_escapes_string_fields() {
+        let mut obj = JsonObject::new();
+        obj.field_str("message", "line one\nline \"two\"");
+        assert_eq!(
+            obj.finish(),
+            "{\"message\":\"line one\\nline \\\"two\\\"\"}"
+        );
+    }
+
+    #[test]
+    fn json_string_array_empty_and_populated() {
+        let empty: &[&str] = &[];
+        assert_eq!(json_string_array(empty), "[]");
+        assert_eq!(
+            json_string_array(&["a.txt", "b.txt"]),
+            "[\"a.txt\",\"b.txt\"]"
+        );
     }
 }

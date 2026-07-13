@@ -752,9 +752,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.12.0"
+version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 dependencies = [
  "serde",
 ]
@@ -1265,6 +1265,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -1290,6 +1292,7 @@ checksum = "e269f3f40beac0c161e048847c0106f81eed9afb70ce35911f8ef9287cc209a1"
 dependencies = [
  "async-compression",
  "async-trait",
+ "axum",
  "base64",
  "buffa",
  "bytes",
@@ -1298,16 +1301,25 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "libc",
  "percent-encoding",
  "pin-project",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tower",
+ "tower-http",
  "tracing",
  "wasm-bindgen-futures",
+ "zstd",
 ]
 
 [[package]]
@@ -1687,9 +1699,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+checksum = "a69dedd701da44b0536442edf09c81a64b0ab97a7a4a5e3d1971f00027cbc63d"
 dependencies = [
  "const-oid 0.10.2",
  "der_derive",
@@ -1796,7 +1808,7 @@ version = "0.17.0-rc.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c72d1455753a703ad4b90ed2a759f2bc4562024a303176439cf6e593b5ade4"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.1",
  "digest 0.11.3",
  "elliptic-curve 0.14.1",
  "rfc6979 0.6.0-pre.0",
@@ -1833,6 +1845,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek 4.1.3",
  "ed25519 2.2.3",
+ "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",
@@ -3015,6 +3028,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "git2",
  "k256",
+ "mkit-cli",
  "mkit-core",
  "p256 0.13.2",
  "serde",
@@ -3028,13 +3042,17 @@ dependencies = [
 name = "mkit-cli"
 version = "0.3.0"
 dependencies = [
+ "axum",
  "buffa",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
+ "connectrpc",
  "ed25519-dalek 2.2.0",
  "flate2",
+ "futures",
  "getrandom 0.4.2",
+ "http",
  "insta",
  "k256",
  "libc",
@@ -3044,6 +3062,7 @@ dependencies = [
  "mkit-keystore",
  "mkit-rpc",
  "mkit-test-util",
+ "mkit-transport-connect",
  "mkit-transport-enc",
  "mkit-transport-file",
  "mkit-transport-http",
@@ -3058,9 +3077,11 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "signal-hook",
+ "subtle",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "zeroize",
 ]
 
@@ -3088,6 +3109,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]
@@ -3125,7 +3147,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-utils",
- "der 0.8.0",
+ "der 0.8.1",
  "ed25519-dalek 2.2.0",
  "getrandom 0.4.2",
  "k256",
@@ -3197,6 +3219,36 @@ name = "mkit-test-util"
 version = "0.3.0"
 
 [[package]]
+name = "mkit-transport-connect"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "buffa",
+ "buffa-types",
+ "bytes",
+ "connectrpc",
+ "connectrpc-build",
+ "ed25519-dalek 2.2.0",
+ "futures",
+ "getrandom 0.4.2",
+ "hex",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mkit-core",
+ "mkit-transport-file",
+ "mkit-transport-memory",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
 name = "mkit-transport-enc"
 version = "0.3.0"
 dependencies = [
@@ -3228,6 +3280,7 @@ dependencies = [
 name = "mkit-transport-http"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "mkit-core",
  "mockito",
  "reqwest",
@@ -3747,7 +3800,7 @@ version = "0.8.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.1",
  "spki 0.8.0",
 ]
 
@@ -3767,7 +3820,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
- "der 0.8.0",
+ "der 0.8.1",
  "spki 0.8.0",
 ]
 
@@ -4232,9 +4285,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "2a0e75113e14dc5acb068cd0786884f214f1312650a3d36d269f5c4f3cdee8a2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -4386,6 +4439,8 @@ version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4410,6 +4465,7 @@ version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted 0.9.0",
@@ -4476,7 +4532,7 @@ checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct 1.0.0",
  "ctutils 0.4.2",
- "der 0.8.0",
+ "der 0.8.1",
  "hybrid-array",
  "subtle",
  "zeroize",
@@ -4813,7 +4869,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
- "der 0.8.0",
+ "der 0.8.1",
 ]
 
 [[package]]
@@ -5202,10 +5258,12 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
@@ -6122,7 +6180,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e21aad3a769f25f3d2d0cbf30ea8b50a1d602354bd6ab687fad112821608ba6"
 dependencies = [
  "const-oid 0.10.2",
- "der 0.8.0",
+ "der 0.8.1",
  "sha1",
  "signature 3.0.0",
  "spki 0.8.0",
@@ -6173,7 +6231,7 @@ dependencies = [
  "bitflags",
  "cipher 0.5.2",
  "curve25519-dalek 5.0.0-pre.6",
- "der 0.8.0",
+ "der 0.8.1",
  "des",
  "ecdsa 0.17.0-rc.22",
  "ed25519-dalek 3.0.0-pre.7",

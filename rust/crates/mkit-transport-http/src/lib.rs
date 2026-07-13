@@ -24,10 +24,10 @@
 //!
 //! Auth: optional `MKIT_API_TOKEN` env var → `Authorization: Bearer <t>`.
 //!
-//! Retry policy: every request is driven by [`BackoffIterator`] from
-//! `mkit_core::protocol` — up to 5 attempts, classified by
-//! [`is_retryable`]. CAS writes (412/409) never retry because the gate
-//! in `is_retryable` rejects 4xx.
+//! Retry policy: every request is driven by [`BackoffIterator`] and
+//! [`mkit_core::protocol::retrying`] — up to 5 attempts, classified by
+//! [`mkit_core::protocol::is_retryable`]. CAS writes (412/409) never
+//! retry because that gate rejects 4xx.
 //!
 //! Blocking by design: the [`Transport`] trait is synchronous, so this
 //! crate uses `reqwest::blocking`. Callers in an async context MUST
@@ -44,10 +44,11 @@ use std::io::Read;
 use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use mkit_core::hash::{Hash, from_hex};
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
-    TransportResult, is_retryable,
+    TransportResult,
 };
 use mkit_core::refs::Ref;
 use reqwest::StatusCode;
@@ -426,36 +427,35 @@ impl HttpTransport {
     /// Production sleeps for the full spec delay. Tests use
     /// [`HttpTransport::new_for_test`] or `new_for_test_with_retry` to
     /// inject short/no-op sleeps without changing shipped behavior.
+    ///
+    /// Thin wrapper over the transport-agnostic
+    /// [`mkit_core::protocol::retrying`] — this closure just classifies
+    /// a reqwest `Result<Response, Error>` into the shared
+    /// `TransportResult<Response>` shape the ladder understands.
     fn retrying<F>(&self, mut build_req: F) -> TransportResult<Response>
     where
         F: FnMut() -> RequestBuilder,
     {
-        let mut backoff = (self.backoff)();
-        loop {
-            let err = match build_req().send() {
+        mkit_core::protocol::retrying(
+            || match build_req().send() {
                 Ok(r) => {
                     let status = r.status();
                     if status.is_server_error() || status.as_u16() == 429 {
-                        TransportError::ServerError {
+                        Err(TransportError::ServerError {
                             status: status.as_u16(),
-                        }
+                        })
                     } else {
-                        return Ok(r);
+                        Ok(r)
                     }
                 }
                 // Connect, timeout, request-build, TLS, DNS — every
                 // reqwest `Error` at the outer layer is a pre-response
                 // failure, so map uniformly to ConnectionFailed.
-                Err(_) => TransportError::ConnectionFailed,
-            };
-            if is_retryable(&err)
-                && let Some(delay) = backoff.next()
-            {
-                (self.sleep)(delay);
-                continue;
-            }
-            return Err(err);
-        }
+                Err(_) => Err(TransportError::ConnectionFailed),
+            },
+            self.backoff,
+            self.sleep,
+        )
     }
 }
 
@@ -500,7 +500,15 @@ fn map_status(status: StatusCode, on_not_found: TransportError) -> TransportErro
 impl Transport for HttpTransport {
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
         let url = self.packs_collection_url()?;
-        let body = bytes.to_vec();
+        // `Bytes` (Arc-backed, refcounted) rather than `Vec<u8>`: the
+        // retry closure below runs once per attempt (up to
+        // `BACKOFF_MAX_ATTEMPTS`), and `reqwest::blocking::Body::from`
+        // has no `TryClone` for a `Vec<u8>`-backed body, so the old code
+        // called `body.clone()` — a full N-byte copy — on every retry,
+        // multiplying peak memory on a large pack. `Bytes::clone()` is a
+        // refcount bump; the underlying buffer is shared across every
+        // attempt (mkit#702).
+        let body = Bytes::copy_from_slice(bytes);
         let resp = self.retrying(|| {
             let mut r = self
                 .client
@@ -942,33 +950,30 @@ fn fetch_shard_with_retry(
     backoff: fn() -> BackoffIterator,
     sleep: fn(Duration),
 ) -> TransportResult<Vec<u8>> {
-    let mut ladder = backoff();
-    loop {
-        let mut req = client.get(url.clone()).timeout(SHARD_REQUEST_TIMEOUT);
-        if let Some(t) = token
-            && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
-        {
-            req = req.header(AUTHORIZATION, v);
-        }
-        let err = match req.send() {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    // Body-decode / size-cap failures are terminal — never retried.
-                    return HttpTransport::read_body_capped(resp);
-                }
-                map_status(status, TransportError::PackNotFound)
+    mkit_core::protocol::retrying(
+        || {
+            let mut req = client.get(url.clone()).timeout(SHARD_REQUEST_TIMEOUT);
+            if let Some(t) = token
+                && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
+            {
+                req = req.header(AUTHORIZATION, v);
             }
-            Err(_) => TransportError::ConnectionFailed,
-        };
-        if is_retryable(&err)
-            && let Some(delay) = ladder.next()
-        {
-            sleep(delay);
-            continue;
-        }
-        return Err(err);
-    }
+            match req.send() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        // Body-decode / size-cap failures are terminal — never retried.
+                        HttpTransport::read_body_capped(resp)
+                    } else {
+                        Err(map_status(status, TransportError::PackNotFound))
+                    }
+                }
+                Err(_) => Err(TransportError::ConnectionFailed),
+            }
+        },
+        backoff,
+        sleep,
+    )
 }
 
 // ---------------------------------------------------------------------------

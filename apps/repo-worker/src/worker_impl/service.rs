@@ -13,28 +13,32 @@
 // lives in the service struct.
 
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
+use futures_util::StreamExt;
 use serde::Serialize;
 use worker::send::SendFuture;
-use worker::{Env, Method, Request as WorkerRequest, RequestInit};
+use worker::{Env, Method, Request as WorkerRequest, RequestInit, WebSocket, WebsocketEvent};
 
 use super::auth::{AuthorPubkey, IdempotencyKey};
-use crate::hashing::object_id_matches;
-use crate::refs::{is_valid_ref_name, is_valid_ref_prefix, is_valid_room};
-use crate::proto::mkit::repo::v1::{
-    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
-    ListCommitsRequest,
-    ListCommitsResponse, ListMessagesRequest, ListMessagesResponse, ListReactionsRequest,
-    ListReactionsResponse, ListRefsRequest, ListRefsResponse, PostMessageRequest,
-    PostMessageResponse, PutObjectRequest, PutObjectResponse, ReactRequest, ReactResponse, Reaction,
-    RefEntry, RefEvent, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
-};
-use std::collections::HashSet;
-use super::refstore::WatchFrame;
 use super::wire::{
     CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
-    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, ReactReq, ReactResp, ReactionsResp,
-    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
+    ListResp, MessagesReq, MessagesResp, PostReq, PostResp, PurgeResp, ReactReq, ReactResp,
+    ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
+use crate::hashing::object_id_matches;
+use crate::proto::mkit::common::v1::RefEntry;
+use crate::proto::mkit::repo::v1::{
+    ChatMessage, CommitEntry, GetObjectRequest, GetObjectResponse, GetRefRequest, GetRefResponse,
+    ListCommitsRequest, ListCommitsResponse, ListMessagesRequest, ListMessagesResponse,
+    ListReactionsRequest, ListReactionsResponse, ListRefsRequest, ListRefsResponse,
+    PostMessageRequest, PostMessageResponse, PurgeRoomRequest, PurgeRoomResponse, PutObjectRequest,
+    PutObjectResponse, ReactRequest, ReactResponse, Reaction, RoomEvent, UpdateRefRequest,
+    UpdateRefResponse, WatchRefsRequest,
+};
+use crate::refs::{
+    is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
+};
+use crate::room_event;
+use std::collections::HashSet;
 
 const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
@@ -68,7 +72,9 @@ fn check_room(room: &str) -> Result<(), connectrpc::ConnectError> {
     if is_valid_room(room) {
         Ok(())
     } else {
-        Err(ce_invalid("room is empty or invalid (^[A-Za-z0-9._-]{1,64}$)"))
+        Err(ce_invalid(
+            "room is empty or invalid (^[A-Za-z0-9._-]{1,64}$)",
+        ))
     }
 }
 
@@ -91,7 +97,11 @@ fn message_key(room: &str, id: &[u8]) -> String {
 /// true when this call wrote (key was absent), false when it already existed.
 /// Shared by PutObject and PostMessage so the idempotent-store contract lives in
 /// ONE place.
-async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, connectrpc::ConnectError> {
+async fn put_addressed(
+    env: &Env,
+    key: &str,
+    bytes: Vec<u8>,
+) -> Result<bool, connectrpc::ConnectError> {
     let bucket = env
         .bucket(STORAGE_BUCKET)
         .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
@@ -114,7 +124,11 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<bool, con
 /// indexes nothing (the index is backfillable), never failing the update.
 async fn read_commit_meta_wire(env: &Env, room: &str, new_id: &[u8]) -> Option<CommitMetaWire> {
     let bucket = env.bucket(STORAGE_BUCKET).ok()?;
-    let obj = bucket.get(&object_key(room, new_id)).execute().await.ok()??;
+    let obj = bucket
+        .get(object_key(room, new_id))
+        .execute()
+        .await
+        .ok()??;
     let bytes = obj.body()?.bytes().await.ok()?;
     let m = crate::commit_log::extract_commit_meta(&bytes)?;
     // Compute the borrowing fields before moving the owned `String`s out of `m`.
@@ -147,7 +161,9 @@ fn row_to_entry(row: CommitRowWire) -> CommitEntry {
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
-async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+/// `pub(crate)` so `auth.rs`'s write-quota check reuses the SAME DO-call
+/// plumbing (retry-free, one round trip) rather than a second copy.
+pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,
     room: &str,
     op: &str,
@@ -163,7 +179,8 @@ async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
 
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_body(Some(payload.into()));
+    init.with_method(Method::Post)
+        .with_body(Some(payload.into()));
     let req = WorkerRequest::new_with_init(&format!("https://refstore{op}"), &init)
         .map_err(|e| ce_internal(e.to_string()))?;
 
@@ -179,6 +196,131 @@ async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     resp.json::<Resp>()
         .await
         .map_err(|e| ce_internal(format!("refstore decode: {e}")))
+}
+
+/// Open + accept a WebSocket to the room DO's `/watch` endpoint — the same
+/// upgrade `worker_impl.rs::watch_fallback` proxies straight through to a
+/// browser client, but here the WORKER itself is the WebSocket client: the
+/// returned, owned `WebSocket` is what `bridge_watch_socket` below pumps into
+/// the Connect stream. `stub.fetch_with_request` on an `Upgrade: websocket`
+/// request resolves once the DO has accepted the pair (see
+/// `refstore::RefStore::fetch`'s `/watch` branch), carrying the client
+/// half of the pair on the response (`resp.websocket()`).
+async fn open_watch_socket(env: Env, room: String) -> Result<WebSocket, connectrpc::ConnectError> {
+    let ns = env
+        .durable_object(REFSTORE_BINDING)
+        .map_err(|e| ce_internal(format!("REFSTORE binding: {e}")))?;
+    let stub = ns
+        .id_from_name(&room)
+        .and_then(|id| id.get_stub())
+        .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
+
+    let mut req = WorkerRequest::new("https://refstore/watch", Method::Get)
+        .map_err(|e| ce_internal(e.to_string()))?;
+    req.headers_mut()
+        .map_err(|e| ce_internal(e.to_string()))?
+        .set("upgrade", "websocket")
+        .map_err(|e| ce_internal(e.to_string()))?;
+
+    let resp = stub
+        .fetch_with_request(req)
+        .await
+        .map_err(|e| ce_internal(format!("REFSTORE watch fetch: {e}")))?;
+
+    let ws = resp
+        .websocket()
+        .ok_or_else(|| ce_internal("REFSTORE /watch did not upgrade to a websocket"))?;
+    ws.accept()
+        .map_err(|e| ce_internal(format!("REFSTORE watch accept: {e}")))?;
+    Ok(ws)
+}
+
+/// Own `ws` end-to-end and drain its (borrowed-from-`ws`, never escaping this
+/// function) `EventStream` onto `tx`, forwarding EVERY `RoomEvent` kind the DO
+/// broadcasts (commit/chat/reaction/presence — see `crate::room_event`) onto
+/// the Connect stream. Runs inside `wasm_bindgen_futures::spawn_local` — see
+/// the `watch_refs` doc comment for why that, and not a `Send`-bounded spawn,
+/// is what makes this sound. A malformed/unparseable frame is silently
+/// skipped (`room_event::decode`'s contract) rather than failing the stream;
+/// only a genuine socket error or close ends it.
+async fn bridge_watch_socket(
+    ws: WebSocket,
+    tx: futures_channel::mpsc::UnboundedSender<Result<RoomEvent, connectrpc::ConnectError>>,
+) {
+    let mut events = match ws.events() {
+        Ok(events) => events,
+        Err(e) => {
+            let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket events: {e}"))));
+            return;
+        }
+    };
+    while let Some(item) = events.next().await {
+        match item {
+            Ok(WebsocketEvent::Message(msg)) => {
+                let Some(text) = msg.text() else { continue };
+                if let Some(event) = room_event::decode(&text) {
+                    // The receiver end (`rx`, the ServiceStream) is dropped
+                    // when the Connect client disconnects and the dispatcher
+                    // stops polling the stream; a failed send means exactly
+                    // that, so stop pumping rather than looping forever.
+                    if tx.unbounded_send(Ok(event)).is_err() {
+                        break;
+                    }
+                }
+            }
+            Ok(WebsocketEvent::Close(_)) => break,
+            Err(e) => {
+                let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket error: {e}"))));
+                break;
+            }
+        }
+    }
+    // Best-effort: the socket may already be closed (that's often why the
+    // loop above exited), so a failure here is not itself an error.
+    let _ = ws.close(None, None::<&str>);
+}
+
+/// Delete every R2 object under `prefix`, paging through R2's list cursor and
+/// batch-deleting each page with `delete_multiple` (capped at 1000 keys per
+/// call, which R2 also happens to cap `list()` at by default — one
+/// list-then-delete round-trip per page). Returns the total number of
+/// objects removed. Used by `PurgeRoom` for both the `{room}/objects/` and
+/// `{room}/messages/` prefixes.
+async fn purge_prefix(env: &Env, prefix: &str) -> Result<u32, connectrpc::ConnectError> {
+    let bucket = env
+        .bucket(STORAGE_BUCKET)
+        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+    let mut deleted = 0u32;
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut list = bucket.list().prefix(prefix).limit(1000);
+        if let Some(c) = cursor.take() {
+            list = list.cursor(c);
+        }
+        let page = list
+            .execute()
+            .await
+            .map_err(|e| ce_internal(format!("R2 list: {e}")))?;
+        let keys: Vec<String> = page.objects().into_iter().map(|o| o.key()).collect();
+        if !keys.is_empty() {
+            bucket
+                .delete_multiple(keys.clone())
+                .await
+                .map_err(|e| ce_internal(format!("R2 delete_multiple: {e}")))?;
+            deleted = deleted.saturating_add(keys.len() as u32);
+        }
+        if !page.truncated() {
+            break;
+        }
+        // Defensive: `truncated=true` with no cursor should not happen per the
+        // R2 contract, but looping forever on a malformed page is worse than
+        // stopping one page early.
+        match page.cursor() {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    Ok(deleted)
 }
 
 // DO wire types are declared once in `super::wire` and shared with refstore.rs.
@@ -323,12 +465,21 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         if new_id.len() != 32 {
             return Err(ce_invalid("new_id must be 32 bytes"));
         }
+        if !is_valid_expected_id_len(&expected_id) {
+            return Err(ce_invalid("expected_id must be 32 bytes"));
+        }
 
         // The verified writer pubkey stashed by the auth interceptor.
-        let author = ctx
+        let author = ctx.extensions().get::<AuthorPubkey>().map(|a| a.0.clone());
+        // The request's Idempotency-Key (verified in the envelope) — the DO
+        // uses it, together with `author` and `name`, to dedupe a replayed
+        // signed UpdateRef into its original result instead of re-running the
+        // CAS (closes the REF_EXPECTATION_ANY replay-clobber hole).
+        let idem = ctx
             .extensions()
-            .get::<AuthorPubkey>()
-            .map(|a| a.0.clone());
+            .get::<IdempotencyKey>()
+            .map(|k| k.0.clone())
+            .unwrap_or_default();
 
         let env = self.env.clone();
         SendFuture::new(async move {
@@ -345,6 +496,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 },
                 author,
                 commit,
+                idem,
             };
             let resp: UpdateResp = do_call(&env, &room, "/update", &body).await?;
             let current = hex_to_bytes_opt(&resp.current).unwrap_or_default();
@@ -374,8 +526,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: ListResp =
-                do_call(&env, &room, "/list", &ListReq { prefix }).await?;
+            let resp: ListResp = do_call(&env, &room, "/list", &ListReq { prefix }).await?;
             let refs = resp
                 .refs
                 .into_iter()
@@ -393,29 +544,76 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         .await
     }
 
+    // WatchRefs — Connect server-streaming over an owned-channel DO bridge.
+    //
+    // The lifetime wall this used to hit: `WebSocket::events()` returns
+    // `EventStream<'ws>`, which BORROWS the socket, so a struct holding both
+    // the `WebSocket` and its own `EventStream<'_>` is self-referential and
+    // can't be built in safe Rust — which blocked returning it as the
+    // `'static + Send` `ServiceStream<RoomEvent>` the generated trait requires
+    // (see git history / apps/repo-worker/README.md before this change for
+    // the previous `unimplemented` stub and its full rationale).
+    //
+    // The bridge: never let the borrow escape a function at all.
+    // `bridge_watch_socket` below OWNS the `WebSocket` and calls `.events()`
+    // on it locally — the resulting `EventStream<'_>` borrows a value that
+    // lives exactly as long as that async fn's stack frame, and is fully
+    // drained (`while let Some(item) = events.next().await`) before the
+    // function returns. It never needs to be `Send` either, because it runs
+    // inside `wasm_bindgen_futures::spawn_local` — the one Cloudflare-Workers
+    // task primitive that does NOT require its future to be `Send` (matching
+    // the Router's own internal spawn per the module doc in worker_impl.rs).
+    // Each event is translated into a fully-owned `RoomEvent` (or dropped, or
+    // turned into an owned `ConnectError`) and pushed onto a
+    // `futures_channel::mpsc::unbounded` sender. The receiver end — the
+    // "owned channel" — holds no borrow into the spawned task or the
+    // WebSocket: it is `Send` because `Result<RoomEvent, ConnectError>` is
+    // `Send` (plain owned data, no JsValue), and `'static` because it has no
+    // lifetime parameters at all. That receiver, not the WebSocket or its
+    // event stream, is what crosses the `ServiceStream<RoomEvent>` boundary.
+    //
+    // VERIFIED end-to-end (2026-07-11, issue #705): the bridge AND response
+    // delivery both work. PR #738 (the #697 spike) proved the bridge itself
+    // but reported delivery to a Connect client as an unverified/failing gap
+    // ("zero bytes, not even headers") under local `wrangler dev`. Re-running
+    // that exact scenario in this pass — repeated trials against a fresh
+    // local `wrangler dev` instance (wrangler 4.110.0 / worker-rs 0.8.5 /
+    // connectrpc 0.8.0), including incremental multi-event delivery and
+    // `Accept-Encoding: gzip` negotiation like a real browser client — did
+    // NOT reproduce that gap: headers and body both arrive, and each
+    // broadcast event is pushed to the client within tens of milliseconds of
+    // the triggering RPC, not buffered until stream end. See the README
+    // "WatchRefs / streaming" section for the full writeup, repro script, and
+    // the one verification this pass could NOT complete (a real `wrangler
+    // deploy`/custom-domain edge deployment — blocked by this session's
+    // production-deploy guardrail, not by anything in the code).
     async fn watch_refs(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, WatchRefsRequest>,
-    ) -> ServiceResult<ServiceStream<RefEvent>> {
-        // FALLBACK (documented): live ref streaming is served over a raw
-        // WebSocket at the worker route `GET /watch/<room>`, NOT over Connect
-        // server-streaming.
-        //
-        // Why: the worker `WebSocket::events()` stream is `EventStream<'ws>` —
-        // it borrows the WebSocket — so it cannot be boxed into the `'static +
-        // Send` `ServiceStream<RefEvent>` the generated trait requires without
-        // a self-referential owner. Rather than let this block the unary path
-        // (PutObject/GetObject/GetRef/UpdateRef/ListRefs all work), WatchRefs
-        // over Connect returns `unimplemented` and points clients at the
-        // WebSocket route, which is fully wired: the RefStore DO broadcasts a
-        // JSON RefEvent frame to every `/watch` subscriber on each successful
-        // UpdateRef. See README "WatchRefs / streaming".
-        let _ = (REFSTORE_BINDING, std::marker::PhantomData::<WatchFrame>);
-        Err(connectrpc::ConnectError::unimplemented(
-            "WatchRefs is served over the WebSocket route GET /watch/<room>, \
-             not Connect server-streaming (see README)",
-        ))
+        request: ServiceRequest<'_, WatchRefsRequest>,
+    ) -> ServiceResult<ServiceStream<RoomEvent>> {
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        let room_for_open = room.clone();
+        // Opening + accepting the WebSocket touches `!Send` JS handles
+        // (Stub, Request, Response), so — like every other DO call in this
+        // file — it's wrapped in `SendFuture` (sound under single-threaded
+        // wasm; see the module doc at the top of this file).
+        let ws = SendFuture::new(open_watch_socket(env, room_for_open)).await?;
+
+        let (tx, rx) =
+            futures_channel::mpsc::unbounded::<Result<RoomEvent, connectrpc::ConnectError>>();
+        // `spawn_local`, not `SendFuture` + an ordinary `.await`: this task
+        // must keep running to feed `rx` for the lifetime of the stream,
+        // independent of `watch_refs` having already returned. It has no
+        // `Send` bound, which is exactly what lets it own the
+        // borrow-of-itself `EventStream` described above.
+        wasm_bindgen_futures::spawn_local(bridge_watch_socket(ws, tx));
+
+        Response::stream_ok(rx)
     }
 
     async fn post_message(
@@ -470,7 +668,12 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 &env,
                 &room,
                 "/post",
-                &PostReq { id: hex::encode(id), author, text, idem },
+                &PostReq {
+                    id: hex::encode(id),
+                    author,
+                    text,
+                    idem,
+                },
             )
             .await?;
 
@@ -484,7 +687,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 // Only surface a content address for a message that was actually
                 // stored; a rejected post returns an empty id so a client keying
                 // off message_id can't mistake a refusal for a stored message.
-                message_id: Some(if resp.accepted { id.to_vec() } else { Vec::new() }),
+                message_id: Some(if resp.accepted {
+                    id.to_vec()
+                } else {
+                    Vec::new()
+                }),
                 accepted: Some(resp.accepted),
                 rate_limited: Some(resp.rate_limited),
                 ..Default::default()
@@ -506,7 +713,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: MessagesResp = do_call(&env, &room, "/messages", &MessagesReq { limit }).await?;
+            let resp: MessagesResp =
+                do_call(&env, &room, "/messages", &MessagesReq { limit }).await?;
             let messages = resp
                 .messages
                 .into_iter()
@@ -543,7 +751,9 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         // reactions table's cardinality and stop arbitrary content being
         // persisted + broadcast to every viewer.
         if !crate::chat::is_valid_target_id(&target) {
-            return Err(ce_invalid("target_id must be a 64-char lowercase-hex feed-item id"));
+            return Err(ce_invalid(
+                "target_id must be a 64-char lowercase-hex feed-item id",
+            ));
         }
         if !crate::chat::is_allowed_emoji(&emoji) {
             return Err(ce_invalid("emoji is not in the allowed reaction set"));
@@ -553,7 +763,9 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .extensions()
             .get::<AuthorPubkey>()
             .map(|a| a.0.clone())
-            .ok_or_else(|| connectrpc::ConnectError::unauthenticated("missing verified author pubkey"))?;
+            .ok_or_else(|| {
+                connectrpc::ConnectError::unauthenticated("missing verified author pubkey")
+            })?;
         // The request's Idempotency-Key — the DO dedupes a replayed signed React
         // (a toggle) into its original result rather than flipping state again.
         let idem = ctx
@@ -564,8 +776,18 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: ReactResp =
-                do_call(&env, &room, "/react", &ReactReq { target, emoji, author, idem }).await?;
+            let resp: ReactResp = do_call(
+                &env,
+                &room,
+                "/react",
+                &ReactReq {
+                    target,
+                    emoji,
+                    author,
+                    idem,
+                },
+            )
+            .await?;
             Ok(Response::new(ReactResponse {
                 active: Some(resp.active),
                 count: Some(resp.count),
@@ -641,7 +863,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 "/list-commits",
                 &ListCommitsReq {
                     r#ref: ref_name.clone(),
-                    start_id: if start_id.is_empty() { String::new() } else { hex::encode(&start_id) },
+                    start_id: if start_id.is_empty() {
+                        String::new()
+                    } else {
+                        hex::encode(&start_id)
+                    },
                     page_size: cap as u32,
                 },
             )
@@ -665,8 +891,15 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             let head: Vec<u8> = if !start_id.is_empty() {
                 start_id
             } else {
-                let resp: GetResp =
-                    do_call(&env, &room, "/get", &GetReq { name: ref_name.clone() }).await?;
+                let resp: GetResp = do_call(
+                    &env,
+                    &room,
+                    "/get",
+                    &GetReq {
+                        name: ref_name.clone(),
+                    },
+                )
+                .await?;
                 if !resp.exists {
                     return Ok(Response::new(ListCommitsResponse::default()));
                 }
@@ -688,7 +921,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 if !seen.insert(current.clone()) {
                     break;
                 }
-                let bytes = match bucket.get(&object_key(&room, &current)).execute().await {
+                let bytes = match bucket.get(object_key(&room, &current)).execute().await {
                     Ok(Some(obj)) => obj
                         .body()
                         .ok_or_else(|| ce_internal("R2 object had no body"))?
@@ -730,7 +963,10 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     &env,
                     &room,
                     "/record-commits",
-                    &RecordCommitsReq { r#ref: ref_name, commits: rows.clone() },
+                    &RecordCommitsReq {
+                        r#ref: ref_name,
+                        commits: rows.clone(),
+                    },
                 )
                 .await;
             }
@@ -739,6 +975,55 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             Ok(Response::new(ListCommitsResponse {
                 commits,
                 next_cursor: Some(next_cursor),
+                ..Default::default()
+            }))
+        })
+        .await
+    }
+
+    async fn purge_room(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, PurgeRoomRequest>,
+    ) -> ServiceResult<PurgeRoomResponse> {
+        // `_ctx` is unused: the `AuthInterceptor` already rejected this call
+        // before it reached the handler unless `X-Admin-Token` matched the
+        // server's `ADMIN_TOKEN` secret (see worker_impl/auth.rs). There is
+        // no per-caller identity to extract here, unlike UpdateRef/PostMessage/
+        // React's `AuthorPubkey` — a purge has no room-participant author.
+        let msg = request.to_owned_message();
+        let room = msg.room.unwrap_or_default();
+        check_room(&room)?;
+
+        let env = self.env.clone();
+        SendFuture::new(async move {
+            // R2 first, DO second: if the worker dies between the two, the
+            // room is left with objects gone but refs/messages still present
+            // rather than the reverse — a re-run of PurgeRoom is idempotent
+            // either way (an empty prefix / already-empty tables just yield
+            // zero counts on the retried half).
+            let objects_deleted = purge_prefix(&env, &format!("{room}/objects/")).await?;
+            let message_bodies_deleted = purge_prefix(&env, &format!("{room}/messages/")).await?;
+            let resp: PurgeResp = do_call(&env, &room, "/purge", &()).await?;
+
+            // `purged` reflects the proto contract ("true unless the room
+            // already had nothing to purge") rather than always `true` — a
+            // PurgeRoom against an already-empty/nonexistent room is a
+            // harmless no-op, and the response should say so instead of
+            // falsely claiming something was removed.
+            let purged = objects_deleted > 0
+                || message_bodies_deleted > 0
+                || resp.refs_deleted > 0
+                || resp.messages_deleted > 0
+                || resp.reactions_deleted > 0;
+
+            Ok(Response::new(PurgeRoomResponse {
+                purged: Some(purged),
+                objects_deleted: Some(objects_deleted),
+                message_bodies_deleted: Some(message_bodies_deleted),
+                refs_deleted: Some(resp.refs_deleted),
+                messages_deleted: Some(resp.messages_deleted),
+                reactions_deleted: Some(resp.reactions_deleted),
                 ..Default::default()
             }))
         })

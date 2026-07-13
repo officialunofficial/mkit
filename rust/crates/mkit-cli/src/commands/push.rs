@@ -12,13 +12,20 @@
 
 use std::io::Write;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::layout::RepoLayout;
 
 use crate::clap_shim;
 use crate::config;
 use crate::exit;
+use crate::format::JsonObject;
 use crate::remote_dispatch::{self, PushLease};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PushFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,6 +53,17 @@ struct PushOpts {
     /// Print what would be pushed without contacting the remote.
     #[arg(long)]
     dry_run: bool,
+    /// Emit a machine-readable JSON result object to stdout:
+    /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
+    /// "remote_branch":"...","old":"<hex>|null","new":"<hex>",
+    /// "forced":<bool>,"up_to_date":<bool>}` on success, or
+    /// `{"ok":false,"error":"...","rejected":<bool>,...}` on a
+    /// non-fast-forward (CAS) rejection.
+    #[arg(long, value_enum, default_value = "default")]
+    format: PushFormat,
+    /// Suppress transfer progress output on stderr (#711).
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[must_use]
@@ -83,15 +101,17 @@ pub fn run(args: &[String]) -> u8 {
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
 fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+    let json = matches!(opts.format, PushFormat::Json);
     let branch = match mkit_core::refs::read_head(layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => b,
         Ok(mkit_core::refs::Head::Detached(_)) => {
-            return emit_err(
+            return emit_err_json(
                 "cannot push a detached HEAD; check out a branch first",
                 exit::CONFIG_ERROR,
+                json,
             );
         }
-        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::CONFIG_ERROR),
+        Err(e) => return emit_err_json(&format!("read HEAD: {e}"), exit::CONFIG_ERROR, json),
     };
 
     // Resolve the (remote, remote-branch) to push to. An explicit
@@ -102,23 +122,25 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
         None => match config::resolve_upstream(cfg, &branch) {
             Some(up) => (up.remote, up.branch),
             None => {
-                return emit_err(
+                return emit_err_json(
                     &format!(
                         "no upstream configured for branch '{branch}' and no default remote; \
                          run `mkit push <remote>` to push it (the upstream will be remembered)"
                     ),
                     exit::CONFIG_ERROR,
+                    json,
                 );
             }
         },
     };
 
     let Some(resolved) = config::resolve_remote(cfg, &remote_name) else {
-        return emit_err(
+        return emit_err_json(
             &format!(
                 "unknown remote '{remote_name}' — add it with `mkit remote add {remote_name} <url>`"
             ),
             exit::CONFIG_ERROR,
+            json,
         );
     };
 
@@ -133,6 +155,19 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
     if !opts.force && local_tip.is_some() && local_tip == old_tracked {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Everything up-to-date");
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_str("remote", &resolved.name)
+                .field_str("endpoint", &resolved.endpoint)
+                .field_str("branch", &branch)
+                .field_str("remote_branch", &remote_branch)
+                .field_opt_hash("old", old_tracked.as_ref())
+                .field_opt_hash("new", old_tracked.as_ref())
+                .field_bool("forced", false)
+                .field_bool("up_to_date", true);
+            emit_json_stdout(obj);
+        }
         return exit::OK;
     }
 
@@ -144,25 +179,51 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             "(dry-run) would push {branch} -> {}:{remote_branch} ({})",
             resolved.name, resolved.endpoint
         );
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_bool("dry_run", true)
+                .field_str("remote", &resolved.name)
+                .field_str("endpoint", &resolved.endpoint)
+                .field_str("branch", &branch)
+                .field_str("remote_branch", &remote_branch);
+            emit_json_stdout(obj);
+        }
         return exit::OK;
     }
 
-    let tx = match remote_dispatch::open_trusted(&resolved.endpoint, resolved.repo_chosen, cfg) {
+    let tx = match remote_dispatch::open_trusted(
+        &resolved.endpoint,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+    ) {
         Ok(tx) => tx,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
-            return emit_err(&msg, exit::CONFIG_ERROR);
+            return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
-        Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+        Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
 
-    match remote_dispatch::push_branch_tracked(
-        layout.worktree_root(),
-        tx.as_ref(),
-        &resolved.name,
-        &branch,
-        &remote_branch,
-        lease,
-    ) {
+    let push_outcome = {
+        // Scoped tightly around the transfer call so the progress
+        // guard's final `, done.` line lands before the git-shaped
+        // `To <url>` / ref-update summary printed below, not after it.
+        let _progress = crate::progress::start(
+            "Writing objects",
+            None,
+            crate::progress::should_report(opts.quiet),
+        );
+        remote_dispatch::push_branch_tracked(
+            layout.worktree_root(),
+            tx.as_ref(),
+            &resolved.name,
+            &branch,
+            &remote_branch,
+            lease,
+        )
+    };
+    match push_outcome {
         Ok(new_tip) => {
             // Remember the upstream so a bare `mkit push` works next
             // time (Git-like first-push convenience). Only persisted
@@ -196,41 +257,66 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
                     forced,
                 )
             );
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", true)
+                    .field_str("remote", &resolved.name)
+                    .field_str("endpoint", &resolved.endpoint)
+                    .field_str("branch", &branch)
+                    .field_str("remote_branch", &remote_branch)
+                    .field_opt_hash("old", old_tracked.as_ref())
+                    .field_hash("new", &new_tip)
+                    .field_bool("forced", forced)
+                    .field_bool("up_to_date", false);
+                emit_json_stdout(obj);
+            }
             exit::OK
         }
-        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => {
+        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch: rejected }) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
                 stderr,
                 "{}",
-                crate::format::ref_rejected_line(&branch, &branch)
+                crate::format::ref_rejected_line(&rejected, &rejected)
             );
-            emit_err(
-                &format!(
-                    "updates were rejected for '{branch}' (non-fast-forward); \
-                     `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
-                ),
-                exit::GENERAL_ERROR,
-            )
+            drop(stderr);
+            let msg = format!(
+                "updates were rejected for '{rejected}' (non-fast-forward); \
+                 `mkit fetch` and merge/rebase first, or re-run with --force-with-lease / --force"
+            );
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", false)
+                    .field_bool("rejected", true)
+                    .field_str("remote", &resolved.name)
+                    .field_str("endpoint", &resolved.endpoint)
+                    .field_str("branch", &rejected)
+                    .field_str("remote_branch", &remote_branch)
+                    .field_str("error", &msg);
+                emit_json_stdout(obj);
+            }
+            emit_err(&msg, exit::GENERAL_ERROR)
         }
         Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err("push: interrupted", exit::TEMPFAIL)
+            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
         }
-        Err(e) => emit_err(&format!("push: {e}"), exit::GENERAL_ERROR),
+        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
     }
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+    let json = matches!(opts.format, PushFormat::Json);
     let remote_name = opts
         .remote
         .clone()
         .unwrap_or_else(|| config::DEFAULT_REMOTE_NAME.to_owned());
     let Some(resolved) = config::resolve_remote(cfg, &remote_name) else {
-        return emit_err(
+        return emit_err_json(
             "no remote configured — use `mkit remote add <url>`",
             exit::CONFIG_ERROR,
+            json,
         );
     };
     if opts.dry_run {
@@ -240,21 +326,42 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             "(dry-run) would mirror all branches to {} ({})",
             resolved.name, resolved.endpoint
         );
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_bool("dry_run", true)
+                .field_str("remote", &resolved.name)
+                .field_str("endpoint", &resolved.endpoint);
+            emit_json_stdout(obj);
+        }
         return exit::OK;
     }
-    let tx = match remote_dispatch::open_trusted(&resolved.endpoint, resolved.repo_chosen, cfg) {
+    let tx = match remote_dispatch::open_trusted(
+        &resolved.endpoint,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+    ) {
         Ok(tx) => tx,
         Err(remote_dispatch::DispatchError::UntrustedRemote(msg)) => {
-            return emit_err(&msg, exit::CONFIG_ERROR);
+            return emit_err_json(&msg, exit::CONFIG_ERROR, json);
         }
-        Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
+        Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
-    match remote_dispatch::push_all_with(
-        layout.worktree_root(),
-        tx.as_ref(),
-        Some(&resolved.name),
-        opts.force,
-    ) {
+    let push_outcome = {
+        let _progress = crate::progress::start(
+            "Writing objects",
+            None,
+            crate::progress::should_report(opts.quiet),
+        );
+        remote_dispatch::push_all_with(
+            layout.worktree_root(),
+            tx.as_ref(),
+            Some(&resolved.name),
+            opts.force,
+        )
+    };
+    match push_outcome {
         Ok(n) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
@@ -262,20 +369,57 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                 "pushed {n} ref(s) to {} ({})",
                 resolved.name, resolved.endpoint
             );
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", true)
+                    .field_str("remote", &resolved.name)
+                    .field_str("endpoint", &resolved.endpoint)
+                    .field_u64("ref_count", n as u64);
+                emit_json_stdout(obj);
+            }
             exit::OK
         }
-        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => emit_err(
-            &format!(
+        Err(remote_dispatch::DispatchError::NonFastForwardPush { branch }) => {
+            let msg = format!(
                 "updates were rejected for '{branch}' (non-fast-forward); \
                  `mkit fetch` first, or re-run with --force"
-            ),
-            exit::GENERAL_ERROR,
-        ),
-        Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err("push: interrupted", exit::TEMPFAIL)
+            );
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", false)
+                    .field_bool("rejected", true)
+                    .field_str("remote", &resolved.name)
+                    .field_str("endpoint", &resolved.endpoint)
+                    .field_str("branch", &branch)
+                    .field_str("error", &msg);
+                emit_json_stdout(obj);
+            }
+            emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err(e) => emit_err(&format!("push: {e}"), exit::GENERAL_ERROR),
+        Err(remote_dispatch::DispatchError::Interrupted) => {
+            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
+        }
+        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
     }
+}
+
+/// Consume a [`JsonObject`] and print it as one line to stdout.
+fn emit_json_stdout(obj: JsonObject) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", obj.finish());
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout — so every exit path (not just the documented
+/// CAS-rejection shape) leaves `--format=json` callers with a
+/// self-contained stdout payload.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        emit_json_stdout(obj);
+    }
+    emit_err(msg, code)
 }
 
 fn lease_for(opts: &PushOpts) -> PushLease {

@@ -11,7 +11,7 @@
 //!   key the commit signer uses.
 //! * [`crate::signer_external::ExternalSigner`] — length-prefixed buffa
 //!   `SignerFrame` protocol over stdin/stdout to a caller-supplied
-//!   subprocess (see `rust/crates/mkit-rpc/proto/signer.proto`).
+//!   subprocess (see `rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`).
 //! * [`crate::signer_sigstore::SigstoreSigner`] — scaffold; returns
 //!   `Error::SigstoreNotImplemented`.
 //!

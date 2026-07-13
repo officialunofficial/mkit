@@ -18,7 +18,7 @@ Contents:
 
 ## What gets published
 
-A single `vX.Y.Z` tag drives three decoupled channels:
+A single `vX.Y.Z` tag drives four decoupled channels:
 
 - **Binaries + npm wasm** via
   [`.github/workflows/release.yml`](../.github/workflows/release.yml).
@@ -28,24 +28,36 @@ A single `vX.Y.Z` tag drives three decoupled channels:
   [`.github/workflows/mcp-release.yml`](../.github/workflows/mcp-release.yml),
   which indexes the tagged tree for the mkit docs MCP server so the served
   corpus always matches the published crates.
+- **BSR proto modules** (`buf.build/officialunofficial/mkit-rpc` and
+  `buf.build/officialunofficial/mkit-repo`) via the `buf-push` job in
+  [`.github/workflows/crates-publish.yml`](../.github/workflows/crates-publish.yml),
+  so third-party signer integrators and `RepoService` clients can `buf
+  generate` typed bindings from a pinned tag without vendoring this repo.
+  Dormant until [`BUF_TOKEN`](#buf_token) is provisioned.
 
 All are gated on the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
 
-1. **GitHub Release** with native binaries for four targets:
+1. **GitHub Release** with native binaries for five targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu`
    - `x86_64-unknown-linux-gnu`
+   - `x86_64-pc-windows-msvc` (`.zip`, `mkit.exe`, `backend-windows-credential`
+     keystore feature enabled — see [Artifacts attached to every
+     release](#artifacts-attached-to-every-release))
 
-   Each archive contains the `mkit` binary, licenses, README, optional
-   changelog, `share/man/man1/mkit.1`, and shell completions under
+   Each archive contains the `mkit`/`mkit.exe` binary, licenses, README,
+   optional changelog, `share/man/man1/mkit.1`, and shell completions under
    `share/completions/`. Each archive is cosign-signed (keyless OIDC, Rekor
    logged) and ships alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an
    aggregate `SHA256SUMS` (also cosign-signed), a CycloneDX `sbom.cdx.json`,
-   and a `THIRD-PARTY-NOTICES` file.
+   a `THIRD-PARTY-NOTICES` file, and a standards-based SLSA build provenance
+   attestation (`actions/attest-build-provenance`), verifiable with `gh
+   attestation verify` or `slsa-verifier` in addition to cosign and the
+   mkit-native DSSE attestation below.
 
 2. **npm package** `@makechain/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
@@ -64,6 +76,12 @@ allowlisted release fingerprint, and points at a commit reachable from
 > only LICENSE + README — there is no `Formula/` directory, so `brew install`
 > fails until a formula is pushed. The Distribution step that targets the tap
 > is live and expected to be performed at the next release.
+>
+> **Scoop bucket status: not yet provisioned.** Unlike the Homebrew tap,
+> `officialunofficial/scoop-bucket` does not exist yet — creating it (empty
+> bucket repo, then `bucket/mkit.json` from `contrib/scoop/mkit.json`) is
+> part of the Distribution step below, same pattern as the Homebrew tap's
+> initial setup.
 
 Run top to bottom. Do not skip steps.
 
@@ -76,6 +94,10 @@ Run top to bottom. Do not skip steps.
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
   - [ ] `--target=aarch64-unknown-linux-gnu`
+  - [ ] `--target=x86_64-pc-windows-msvc` (requires a Windows host or the
+        `windows-latest` CI runner — cross-compiling this target isn't
+        possible here, same reasoning as the `keystore-backends` matrix in
+        `rust.yml`: `windows-native-keyring-store` is `cfg(windows)`-gated)
 - [ ] `[workspace.package].version` in `rust/Cargo.toml` is bumped to a version
       **not already published** (crates.io versions are immutable — a re-publish
       of an existing version fails the whole `cargo publish` run).
@@ -93,10 +115,16 @@ Run top to bottom. Do not skip steps.
       `keyserver.ubuntu.com` so the workflow can import it before
       `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
+- [ ] Manually dispatch `rust.yml`'s `keystore-backends` job
+      (`gh workflow run rust.yml --ref main`) and confirm all three legs
+      (macOS Keychain+YubiKey, Windows Credential Manager, Linux Secret
+      Service+systemd-creds+YubiKey) succeed. It stays `workflow_dispatch`-only
+      (3-OS matrix cost) and is not exercised by any automatic trigger, so this
+      is the only per-release check that native keystore backends still work.
 
 ### Wait for the release workflows
 
-- [ ] `release.yml` succeeded through `validate-release-tag` and all four
+- [ ] `release.yml` succeeded through `validate-release-tag` and all five
       platform builds.
 - [ ] `crates-publish.yml` succeeded (every publishable crate indexed).
 - [ ] `mcp-release.yml` succeeded (docs MCP corpus indexed for the tag).
@@ -104,27 +132,36 @@ Run top to bottom. Do not skip steps.
 - [ ] Archives present:
       `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
-      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
-      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
+      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`,
+      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, and
+      `mkit-X.Y.Z-x86_64-pc-windows-msvc.zip`.
 - [ ] `sbom.cdx.json` present.
 - [ ] `THIRD-PARTY-NOTICES` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
       `SHA256SUMS.cosign.bundle` present.
-- [ ] Per-archive `.cosign.bundle` present for every archive.
+- [ ] Per-archive `.cosign.bundle` present for every archive (including the
+      `.zip`).
+- [ ] `mkit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
+      `gh attestation verify <archive> --repo officialunofficial/mkit`
+      succeeds for at least one archive (including the `.zip`).
 
 ### Smoke test
 
-On at least one macOS and one Linux box:
+On at least one macOS box, one Linux box, and one Windows box (or
+`windows-latest` via `gh workflow run`):
 
 - [ ] Download the archive for your platform.
 - [ ] Verify the cosign signature (see [below](#verify-a-downloaded-archive)).
 - [ ] Verify `SHA256SUMS` matches the archive.
-- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` — version string
-      matches the tag.
+- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` (macOS/Linux) or
+      `.\mkit-X.Y.Z-x86_64-pc-windows-msvc\mkit.exe version` (Windows) —
+      version string matches the tag.
 - [ ] Extracted archive contains `share/man/man1/mkit.1`,
       `share/completions/mkit.bash`, `share/completions/_mkit`, and
       `share/completions/mkit.fish`.
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
+- [ ] Windows only: `irm https://mkit.sh/install.ps1 | iex` installs
+      `mkit.exe` and `mkit version` runs from a fresh PowerShell session.
 - [ ] `npm view @makechain/mkit-wasm@X.Y.Z` and `npm audit signatures`.
 
 ### Distribution and announce
@@ -133,8 +170,11 @@ On at least one macOS and one Linux box:
       into `Formula/mkit.rb`, update the version, and replace every
       `PLACEHOLDER_SHA_*` with the matching archive hash from release
       `SHA256SUMS`.
-- [ ] (If applicable) update Scoop manifest — deferred until Windows builds
-      land.
+- [ ] In `officialunofficial/scoop-bucket` (create the bucket repo if it
+      doesn't exist yet — same pattern as `homebrew-tap`), copy
+      `contrib/scoop/mkit.json` into `bucket/mkit.json`, update `version`
+      and `url`, and replace `PLACEHOLDER_SHA_X86_64_PC_WINDOWS_MSVC` with
+      the `x86_64-pc-windows-msvc.zip` hash from release `SHA256SUMS`.
 - [ ] Release notes reviewed (auto-generated by `softprops/action-gh-release`
       plus the signing snippet).
 - [ ] Pin the release in the repo sidebar; post in relevant channels.
@@ -261,19 +301,26 @@ field needs neither `cosign` nor GitHub's attestation API to verify a release.
 
 ### Artifacts attached to every release
 
-For each of the four target archives, release archives build the production
+For each of the five target archives, release archives build the production
 `mkit-cli` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
 targets without changing the lean default feature set of the `mkit-keystore`
-library crate.
+library crate. On Windows the CLI additionally enables the native
+`backend-windows-credential` keystore backend unconditionally (via
+`mkit-cli`'s `[target.'cfg(windows)'.dependencies]`), matching the
+`windows-credential` leg of `rust.yml`'s `keystore-backends` matrix.
 
 | File | Purpose |
 | --- | --- |
-| `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
-| `...tar.gz.sha256` | SHA256 of the archive (convenience). |
-| `...tar.gz.sig` | Raw cosign signature (base64). |
-| `...tar.gz.crt` | Fulcio-issued code-signing certificate. |
-| `...tar.gz.cosign.bundle` | Bundle: sig + cert + Rekor entry. |
+| `mkit-X.Y.Z-<triple>.tar.gz` (macOS/Linux) or `.zip` (Windows) | Binary, licenses, README, manpage, completions. |
+| `...sha256` | SHA256 of the archive (convenience). |
+| `...sig` | Raw cosign signature (base64). |
+| `...crt` | Fulcio-issued code-signing certificate. |
+| `...cosign.bundle` | Bundle: sig + cert + Rekor entry. |
+
+The Windows archive is not Authenticode-signed (no code-signing
+certificate); trust is the cosign signature above, same as every other
+target.
 
 Plus one top-level set for the aggregate:
 
@@ -284,6 +331,7 @@ Plus one top-level set for the aggregate:
 | `sbom.cdx.json` | CycloneDX SBOM of the release. |
 | `THIRD-PARTY-NOTICES` | Consolidated third-party license attribution for the Rust dependency graph, generated by `cargo about generate` (see [`NOTICE`](../NOTICE)). |
 | `mkit-X.Y.Z.release.dsse` | mkit-native DSSE/in-toto attestation over the BLAKE3 digests of every archive. Verified by `mkit self update`. |
+| `mkit-X.Y.Z.provenance.jsonl` | GitHub-native SLSA build provenance attestation (`actions/attest-build-provenance`) over the archives. Verified with `gh attestation verify` or `slsa-verifier`. |
 
 ### Verify a downloaded archive
 
@@ -373,13 +421,43 @@ cargo run -p mkit-release-attest -- verify \
   --pubkeys docs/keys/release-attest.pub \
   --dsse "mkit-${VERSION}.release.dsse" \
   --tag "v${VERSION}" \
-  mkit-${VERSION}-*.tar.gz
+  mkit-${VERSION}-*.tar.gz mkit-${VERSION}-*.zip
 ```
 
 The check requires: a signature by one of the listed keys, the expected
 predicate tag, and the subject set to exactly equal the given archives
-(basename + BLAKE3). The envelope itself is also listed in the cosign-signed
-`SHA256SUMS`, chaining it into the Sigstore trust path as well.
+(basename + BLAKE3) — **all five** archives (four `.tar.gz` plus the
+Windows `.zip`) must be passed together, or verification fails on a
+subject-set mismatch. The envelope itself is also listed in the
+cosign-signed `SHA256SUMS`, chaining it into the Sigstore trust path as
+well.
+
+### Verify the SLSA build provenance attestation
+
+Every archive also carries a standard
+[SLSA build provenance](https://slsa.dev/spec/v1.0/provenance) attestation,
+generated by [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
+and recorded in the Sigstore public-good transparency log. Unlike the cosign
+signature and the mkit-native DSSE attestation above (both mkit-specific
+verification paths), this attestation is checkable with off-the-shelf,
+standards-aware tooling and requires no mkit-specific parsing:
+
+```sh
+gh attestation verify mkit-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
+```
+
+or with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
+
+```sh
+slsa-verifier verify-artifact mkit-X.Y.Z-<target>.tar.gz \
+  --provenance-path mkit-X.Y.Z.provenance.jsonl \
+  --source-uri github.com/officialunofficial/mkit \
+  --source-tag vX.Y.Z
+```
+
+This is additive: it does not replace the cosign signature or the
+mkit-native DSSE attestation, both of which remain in place and are
+independently verified above.
 
 ### Release attestation key
 
@@ -543,7 +621,7 @@ byte-identical binary to the one published on GitHub Releases.
 
 1. **Rust toolchain version** — pinned in `rust-toolchain.toml`; the workflow
    installs it verbatim.
-2. **Target triple** — one of the four release triples, passed as
+2. **Target triple** — one of the five release triples, passed as
    `--target=<triple>`.
 3. **Build profile** — `release`.
 4. **Source tree hash** — the Git commit the tag points at; every source file is
@@ -582,6 +660,10 @@ before the next tag.
 Binaries built on your local macOS are not expected to match GitHub's `macos-14`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux
 x86_64 build is the most reliable reproducibility target for third parties.
+Windows (`x86_64-pc-windows-msvc`) additionally embeds a PDB path and MSVC
+linker/toolset version into the binary, so byte-identical reproduction there
+also requires matching Visual Studio Build Tools versions — treat it as even
+less reliable than the macOS case until that's verified.
 
 ## Required GitHub Actions secrets and variables
 
@@ -590,6 +672,7 @@ x86_64 build is the most reliable reproducibility target for third parties.
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new + publish-update) | `crates-publish.yml` |
 | `MKIT_NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
 | `CODECOV_TOKEN` | Codecov upload auth — **vestigial**: no GitHub workflow reads it. Coverage runs on Cloud Build (`cloudbuild/coverage.yaml`); the live token is the GCP Secret Manager copy | — (see [`CODECOV_TOKEN`](#codecov_token)) |
+| `BUF_TOKEN` | Buf Schema Registry API token (write access) — pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
 cosign keyless and npm provenance both run on the GitHub OIDC token; no extra
 secrets are needed for those.
@@ -597,6 +680,7 @@ secrets are needed for those.
 | Variable | Purpose | Required for |
 | --- | --- | --- |
 | `MKIT_RELEASE_GPG_FINGERPRINTS` | Space-separated trusted 40-hex GPG fingerprints allowed to sign release tags (public keys must be on `keys.openpgp.org` or `keyserver.ubuntu.com`) | `release.yml` preflight |
+| `BUF_PUBLISH_ENABLED` | Set to `true` to arm the `buf-push` job (job-level `if:` cannot read `secrets`, so this variable — not `BUF_TOKEN`'s presence — is the gate) | `crates-publish.yml`'s `buf-push` job |
 
 ## One-time setup
 
@@ -664,6 +748,43 @@ workflow under the package's Publishing access settings, drop the
 `NODE_AUTH_TOKEN` env on the publish step, delete the secret, and cut a patch
 release to validate. Defer until after at least one successful token-based
 release.
+
+### `BUF_TOKEN`
+
+`buf.build/officialunofficial/mkit-rpc` (common.proto/signer.proto/ssh.proto/
+verify.proto, from the `rust/crates/mkit-rpc/proto` module) and
+`buf.build/officialunofficial/mkit-repo` (repo.proto, from the
+`apps/repo-worker/proto` module) are the two named modules in the repo-root
+`buf.yaml` v2 workspace that the `buf-push` job in `crates-publish.yml`
+publishes on every tagged release (issue #719). Both are pushed **private** —
+`signer.proto` is the security-critical external-signer wire contract
+([SPEC-EXTERNAL-SIGNER.md](specs/SPEC-EXTERNAL-SIGNER.md)) and `repo.proto` is
+this repo's internal `RepoService` contract; flip a module to public only as a
+deliberate decision, not a default.
+
+1. Sign in (or create an account) at <https://buf.build/> under the
+   `officialunofficial` organization. **The BSR org name is assumed to match
+   the GitHub org (`officialunofficial`) — confirm this before the first push,
+   or update the `name:` field on the `rust/crates/mkit-rpc/proto` and
+   `apps/repo-worker/proto` modules in the repo-root `buf.yaml` (and the `buf
+   generate`/`buf push` references in this doc and the `buf-push` job) to the
+   actual BSR org if it differs.**
+2. Generate a BSR API token (`buf.build` → Settings → API Tokens) scoped to
+   that organization, with write access.
+3. Add it as an **org-level** (or repo) secret named `BUF_TOKEN`, and set the
+   `BUF_PUBLISH_ENABLED` repo/org **variable** to `true`. Until the variable is
+   `true`, `buf-push` is a clean skip (`if: vars.BUF_PUBLISH_ENABLED ==
+   'true'`) — same dormant-until-provisioned pattern as `RELEASE_PLZ_ENABLED`.
+   Two knobs, not one, because a job-level `if:` cannot read the `secrets`
+   context to gate on `BUF_TOKEN`'s presence directly.
+4. First push auto-creates both BSR repositories (`--create
+   --create-visibility private`); no manual "create the module" step needed.
+5. Verify: after a release tag, `buf generate
+   buf.build/officialunofficial/mkit-repo:vX.Y.Z --template
+   apps/repo-worker/proto/buf.gen.yaml` (with `buf registry login` first, since
+   the module is private) should produce TypeScript bindings without this repo
+   checked out — this is exactly what the `buf-push` job's own smoke-test step
+   does on every tagged release.
 
 ### Package name decision
 

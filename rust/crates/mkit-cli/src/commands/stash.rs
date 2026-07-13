@@ -3,20 +3,31 @@
 
 use std::io::Write;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mkit_core::layout::RepoLayout;
 use mkit_core::ops::stash;
 use mkit_core::store::ObjectStore;
 
 use crate::clap_shim;
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum StashFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit stash", about = "Stash working-directory changes.")]
 struct StashOpts {
     #[command(subcommand)]
     sub: StashCmd,
+    /// Emit a machine-readable JSON result object to stdout. On `list`
+    /// this is JSONL (one `{"index":N,"hash":"<hex>","message":"..."}`
+    /// per entry); every other subcommand emits one outcome object.
+    #[arg(long, value_enum, default_value = "default", global = true)]
+    format: StashFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -130,17 +141,32 @@ pub fn run(args: &[String]) -> u8 {
         StashCmd::List | StashCmd::Show { .. } => None,
     };
 
+    let json = matches!(opts.format, StashFormat::Json);
     // `lock` is held until this binding drops at the end of `run`, so the
     // worktree stays serialised across the whole `dispatch` call.
-    let code = dispatch(opts.sub, &store, &layout);
+    let code = dispatch(opts.sub, &store, &layout, json);
     drop(lock);
     code
+}
+
+/// `error(msg, code)` plus, when `json` is set, a `{"ok":false,...}`
+/// line on stdout.
+fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", false).field_str("error", msg);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
+    }
+    emit_err(msg, code)
 }
 
 /// Run a parsed stash subcommand. Split out of [`run`] so the worktree
 /// lock acquisition / mode dispatch stays small enough for clippy's
 /// `too_many_lines`.
-fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
+#[allow(clippy::too_many_lines)] // linear per-subcommand dispatch, plus --format=json branches
+fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     match sub {
         StashCmd::Save(save) => {
             // git stores the descriptor in the stash message itself, so a
@@ -163,6 +189,15 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
                         stderr,
                         "Saved working directory and index state {effective}"
                     );
+                    drop(stderr);
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_bool("ok", true)
+                            .field_str("kind", "save")
+                            .field_str("message", &effective);
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    }
                     exit::OK
                 }
                 Err(e) => emit_err(&format!("stash save: {e}"), exit::GENERAL_ERROR),
@@ -172,10 +207,19 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
             Ok(list) => {
                 // git prints nothing for an empty stash; one
                 // `stash@{N}: <message>` line per entry otherwise (no hash
-                // column, matching git).
+                // column, matching git). `--format=json` emits the same
+                // set as JSONL, mirroring `branch --format=json`.
                 let mut stdout = std::io::stdout().lock();
                 for (i, e) in list.entries.iter().enumerate() {
-                    let _ = writeln!(stdout, "stash@{{{i}}}: {}", e.message);
+                    if json {
+                        let mut obj = JsonObject::new();
+                        obj.field_u64("index", i as u64)
+                            .field_hash("hash", &e.commit_hash)
+                            .field_str("message", &e.message);
+                        let _ = writeln!(stdout, "{}", obj.finish());
+                    } else {
+                        let _ = writeln!(stdout, "stash@{{{i}}}: {}", e.message);
+                    }
                 }
                 exit::OK
             }
@@ -189,20 +233,27 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
             index,
             restore_index,
         } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, layout, i, true, restore_index),
+            Ok(i) => restore_entry(store, layout, i, true, restore_index, json),
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Apply {
             index,
             restore_index,
         } => match parse_stash_index(&index) {
-            Ok(i) => restore_entry(store, layout, i, false, restore_index),
+            Ok(i) => restore_entry(store, layout, i, false, restore_index, json),
             Err(e) => emit_err(&e, exit::USAGE),
         },
         StashCmd::Clear => match stash::clear(layout) {
             Ok(()) => {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "cleared all stash entries");
+                drop(stderr);
+                if json {
+                    let mut obj = JsonObject::new();
+                    obj.field_bool("ok", true).field_str("kind", "clear");
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = writeln!(stdout, "{}", obj.finish());
+                }
                 exit::OK
             }
             Err(e) => emit_err(&format!("stash clear: {e}"), exit::GENERAL_ERROR),
@@ -228,6 +279,16 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout) -> u8 {
                             None => {
                                 let _ = writeln!(stderr, "Dropped refs/stash@{{{i}}}");
                             }
+                        }
+                        drop(stderr);
+                        if json {
+                            let mut obj = JsonObject::new();
+                            obj.field_bool("ok", true)
+                                .field_str("kind", "drop")
+                                .field_u64("index", i as u64)
+                                .field_opt_hash("hash", was.as_ref());
+                            let mut stdout = std::io::stdout().lock();
+                            let _ = writeln!(stdout, "{}", obj.finish());
                         }
                         exit::OK
                     }
@@ -260,18 +321,16 @@ fn restore_entry(
     index: usize,
     drop_entry: bool,
     restore_index: bool,
+    json: bool,
 ) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
     let verb = if drop_entry { "pop" } else { "apply" };
     // Empty stash → git's `No stash entries found.` (exit 1).
     let entries = stash::list(layout).map(|l| l.entries).unwrap_or_default();
     if entries.is_empty() {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "No stash entries found.");
-        return exit::GENERAL_ERROR;
+        return emit_err("No stash entries found.", exit::GENERAL_ERROR);
     }
-    let entry_short = entries
-        .get(index)
-        .map(|e| format::short_hash(&e.commit_hash, format::SUMMARY_ABBREV));
+    let entry_hash = entries.get(index).map(|e| e.commit_hash);
     let tree_hash = match stash::entry_tree_hash(store, layout, index) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
@@ -291,7 +350,7 @@ fn restore_entry(
         };
         return match result {
             Ok(()) => {
-                report_restore(drop_entry, index, entry_short.as_deref());
+                report_restore(drop_entry, index, entry_hash, json);
                 exit::OK
             }
             Err(e) => emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
@@ -329,16 +388,23 @@ fn restore_entry(
     if drop_entry && let Err(e) = stash::pop_finalize(layout, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
-    report_restore(drop_entry, index, entry_short.as_deref());
+    report_restore(drop_entry, index, entry_hash, json);
     exit::OK
 }
 
 /// git-shaped post-restore line: `pop` reports `Dropped refs/stash@{N}
 /// (<id>)` (the entry was removed); `apply` reports it stays on the stack.
-fn report_restore(drop_entry: bool, index: usize, entry_short: Option<&str>) {
+/// When `json` is set, also emits the `--format=json` outcome object.
+fn report_restore(
+    drop_entry: bool,
+    index: usize,
+    entry_hash: Option<mkit_core::hash::Hash>,
+    json: bool,
+) {
+    let entry_short = entry_hash.map(|h| format::short_hash(&h, format::SUMMARY_ABBREV));
     let mut stderr = std::io::stderr().lock();
     if drop_entry {
-        match entry_short {
+        match entry_short.as_deref() {
             Some(id) => {
                 let _ = writeln!(stderr, "Dropped refs/stash@{{{index}}} ({id})");
             }
@@ -348,6 +414,16 @@ fn report_restore(drop_entry: bool, index: usize, entry_short: Option<&str>) {
         }
     } else {
         let _ = writeln!(stderr, "Applied stash@{{{index}}} (kept on the stack)");
+    }
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("kind", if drop_entry { "pop" } else { "apply" })
+            .field_u64("index", index as u64)
+            .field_opt_hash("hash", entry_hash.as_ref());
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
     }
 }
 

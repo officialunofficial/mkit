@@ -29,6 +29,12 @@
 //! C-style quoted (git `core.quotePath`); `-z` instead NUL-terminates
 //! records and emits raw paths (and, for `--name-status`, NUL-terminates
 //! the status letter and path as separate fields).
+//!
+//! `-w`/`--ignore-all-space` and `-b`/`--ignore-space-change` change
+//! which lines the hunk generator treats as equal (`-w` wins if both are
+//! given); `-U<n>`/`--unified=<n>` sets the number of unchanged context
+//! lines around each hunk (default 3). Neither affects the bytes of a
+//! line that does render — only which lines end up part of a hunk.
 
 use std::io::Write;
 
@@ -37,7 +43,10 @@ use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
-use mkit_core::ops::{DiffEntry, DiffKind, detect_exact_renames, diff_trees, unified_hunks};
+use mkit_core::ops::{
+    DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode, detect_exact_renames, diff_trees,
+    unified_hunks_opts,
+};
 use mkit_core::refs;
 use mkit_core::store::{DisplaySource, EphemeralSink, ObjectSource, ObjectStore};
 use mkit_core::worktree;
@@ -123,12 +132,47 @@ struct DiffOpts {
     #[arg(long = "no-color")]
     no_color: bool,
 
+    /// Ignore whitespace when comparing lines — like git's `-w` /
+    /// `--ignore-all-space`. A line that differs from its counterpart only
+    /// in whitespace is treated as unchanged context; the printed line
+    /// still shows its own real (unmodified) bytes. Takes precedence over
+    /// `-b` when both are given.
+    #[arg(short = 'w', long = "ignore-all-space")]
+    ignore_all_space: bool,
+
+    /// Ignore changes in the *amount* of whitespace — like git's `-b` /
+    /// `--ignore-space-change`. Runs of whitespace compare equal
+    /// regardless of length, but a line with whitespace where the other
+    /// side has none still differs (unlike `-w`).
+    #[arg(short = 'b', long = "ignore-space-change")]
+    ignore_space_change: bool,
+
+    /// Number of unchanged context lines shown around each hunk (default
+    /// 3) — like git's `-U<n>` / `--unified=<n>`.
+    #[arg(short = 'U', long = "unified", value_name = "N")]
+    unified: Option<usize>,
+
     /// Optional revisions (refs, full/short hashes, `HEAD~n`, or an
     /// `A..B` range) followed by optional pathspecs to limit the
     /// output. With no revisions, diffs HEAD vs worktree (or HEAD vs
     /// index with --staged). A leading argument that is not a resolvable
     /// revision starts the pathspec list.
     args: Vec<String>,
+}
+
+impl DiffOpts {
+    /// Resolve `-w`/`-b` into the single [`WhitespaceMode`] the hunk
+    /// renderer consumes. `-w` wins when both are given, matching git
+    /// (the more aggressive mode takes precedence rather than erroring).
+    fn whitespace_mode(&self) -> WhitespaceMode {
+        if self.ignore_all_space {
+            WhitespaceMode::IgnoreAllSpace
+        } else if self.ignore_space_change {
+            WhitespaceMode::IgnoreSpaceChange
+        } else {
+            WhitespaceMode::Exact
+        }
+    }
 }
 
 #[must_use]
@@ -151,6 +195,8 @@ pub fn run(args: &[String]) -> u8 {
     };
     let use_color = !opts.no_color
         && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let ws_mode = opts.whitespace_mode();
+    let context = opts.unified.unwrap_or(DEFAULT_CONTEXT_LINES);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -239,7 +285,7 @@ pub fn run(args: &[String]) -> u8 {
             // Render the entry to a buffer, then colorize line-by-line so
             // the byte-exact patch machinery stays color-agnostic.
             let mut buf: Vec<u8> = Vec::new();
-            match emit_entry_patch(&mut buf, &display, e) {
+            match emit_entry_patch(&mut buf, &display, e, context, ws_mode) {
                 // Colorize on RAW BYTES (not via from_utf8_lossy) so a
                 // non-UTF-8 patch body round-trips byte-for-byte, matching
                 // the uncolored path.
@@ -249,7 +295,7 @@ pub fn run(args: &[String]) -> u8 {
                 Err(msg) => Err(msg),
             }
         } else {
-            emit_entry_patch(&mut stdout, &display, e)
+            emit_entry_patch(&mut stdout, &display, e, context, ws_mode)
         };
         if let Err(msg) = res {
             return emit_err(&msg, exit::GENERAL_ERROR);
@@ -799,11 +845,19 @@ fn abbrev(h: Option<Hash>) -> String {
 /// the one inherent divergence; everything else matches `git diff`.
 ///
 /// Shared with `mkit show`, so a commit's diff body is byte-identical to
-/// `mkit diff <parent> <commit>`.
+/// `mkit diff <parent> <commit>` when both use the default `context`/`ws`
+/// (git's `-U3`, exact comparison).
+///
+/// `context` is the `-U<n>` unchanged-context-line count and `ws` is the
+/// `-w`/`-b` whitespace-comparison mode; pass
+/// [`mkit_core::ops::DEFAULT_CONTEXT_LINES`] / [`WhitespaceMode::Exact`]
+/// for git's defaults.
 pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
     out: &mut impl Write,
     store: &S,
     e: &DiffEntry,
+    context: usize,
+    ws: WhitespaceMode,
 ) -> Result<(), String> {
     // git C-style quotes special-byte paths in the header (core.quotePath),
     // quoting the whole `a/<path>` / `b/<path>` token as a unit. For a
@@ -872,7 +926,7 @@ pub(super) fn emit_entry_patch<S: ObjectSource + ?Sized>(
         DiffKind::Removed => (a_path.clone(), "/dev/null".to_string()),
         _ => (a_path.clone(), b_path.clone()),
     };
-    match unified_hunks(&old_bytes, &new_bytes) {
+    match unified_hunks_opts(&old_bytes, &new_bytes, context, ws) {
         None => {
             let _ = writeln!(out, "Binary files {minus} and {plus} differ");
         }

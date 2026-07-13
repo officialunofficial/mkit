@@ -317,8 +317,42 @@ fn rename(layout: &RepoLayout, names: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("write {new}: {e}"), exit::CANTCREAT),
     }
 
-    if let Err(e) = super::delete_ref_dropping_history(layout, &old) {
-        return emit_err(&format!("delete {old}: {e}"), exit::GENERAL_ERROR);
+    // CAS-guarded, not unconditional (#658): `hash` is the tip we read
+    // above, before the destination was even created. If a concurrent
+    // `commit` advanced `old` in the meantime (via its own
+    // Match-conditioned advance — see `commit.rs`'s `advance_head`),
+    // this delete now sees a different current value and refuses rather
+    // than silently deleting the ref out from under the just-landed
+    // commit, which would make it permanently unreferenced with no
+    // error to either caller.
+    match super::delete_ref_dropping_history_if_matches(layout, &old, hash) {
+        Ok(()) => {}
+        Err(refs::RefError::Conflict(_)) => {
+            // Roll back the destination we just created. It was seeded
+            // with `Missing`, so we know its exact current value is
+            // `hash` (nothing else should be racing to write a
+            // brand-new branch name) — use the same CAS-guarded delete
+            // so an unexpected concurrent write to `new` is reported
+            // rather than silently clobbered here too.
+            if let Err(e) = super::delete_ref_dropping_history_if_matches(layout, &new, hash) {
+                return emit_err(
+                    &format!(
+                        "branch '{old}' moved while renaming (a concurrent commit?) — rename \
+                         aborted, but rolling back the partially-created '{new}' also failed: \
+                         {e}; run `mkit branch -d {new}` manually, then re-run the rename"
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            return emit_err(
+                &format!(
+                    "branch '{old}' moved while renaming (a concurrent commit?) — rename \
+                     aborted, re-run"
+                ),
+                exit::GENERAL_ERROR,
+            );
+        }
+        Err(e) => return emit_err(&format!("delete {old}: {e}"), exit::GENERAL_ERROR),
     }
 
     // Move HEAD if we renamed the checked-out branch.

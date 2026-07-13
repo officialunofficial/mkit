@@ -13,14 +13,14 @@
 //   - Refs are the only mutable state, advanced via compare-and-swap.
 //   - WatchRefs streams live ref advances for the multiplayer UI.
 //
-// Conventions mirror mkit-rpc/proto/ssh.proto + common.proto:
+// Conventions mirror mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto + common.proto:
 //   - edition 2023.
 //   - All object/ref ids are raw `bytes` = 32-byte BLAKE3 digests (never hex
 //     on the wire).
-//   - The CAS enum is `RefExpectation` with the SAME wire numbers as ssh.proto
-//     (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0 is a protocol error).
-//   - `RefEntry { string name; bytes object_id; }` matches
-//     ListRefsResponse.RefEntry in ssh.proto.
+//   - `RefExpectation` (the CAS enum) and `RefEntry` are shared with
+//     ssh.proto via mkit/common/v1/refs.proto — one proto definition, no
+//     hand-synced copies. See that file's header comment for the
+//     versioning/compat contract.
 //
 // AUTH (transport-level, not in this proto): every unary/stream call carries
 // the signed-write envelope as request metadata (headers) — `X-Public-Key`,
@@ -29,35 +29,20 @@
 // is open-write/demo-mode: any valid Ed25519 key may write any ref. Carrying
 // auth in metadata (rather than proto fields) keeps the message shapes clean
 // and lets the same envelope guard every procedure uniformly.
+//
+// ADMIN AUTH (also transport-level, separate mechanism from the write
+// envelope above): PurgeRoom requires a bearer `X-Admin-Token` header equal
+// to the server's `ADMIN_TOKEN` secret (see apps/repo-worker/README.md
+// "Retention & backup/restore"). This is a plain shared-secret check — NOT
+// an Ed25519 envelope — because a purge is an operator action with no
+// room-participant author to attribute. An unset `ADMIN_TOKEN` fails
+// PurgeRoom closed (`unauthenticated`) for every caller, never open.
 
 edition = "2023";
 
 package mkit.repo.v1;
 
-// ----------------------------------------------------------------------------
-// CAS semantics for UpdateRef. Wire numbers are load-bearing and match
-// mkit.rpc.v1.ssh.RefExpectation — do NOT renumber; new variants append.
-
-enum RefExpectation {
-  // Protocol error if sent (the proto default). Servers MUST reject.
-  REF_EXPECTATION_UNSPECIFIED = 0;
-
-  // "Clobber" / last-writer-wins. `expected_id` MUST be empty.
-  REF_EXPECTATION_ANY = 1;
-
-  // "Create only". The ref MUST NOT already exist. `expected_id` MUST be
-  // empty. (ANY overwrites an existing ref; MISSING conflicts on it.)
-  REF_EXPECTATION_MISSING = 2;
-
-  // Compare-and-swap. `expected_id` MUST be the 32-byte current value.
-  REF_EXPECTATION_MATCH = 3;
-}
-
-// A single ref and the object it points at. Matches ssh.proto RefEntry.
-message RefEntry {
-  string name = 1;        // e.g. "refs/heads/main" (mkit ref-name grammar)
-  bytes object_id = 2;    // raw 32-byte BLAKE3 digest
-}
+import "mkit/common/v1/refs.proto";
 
 // ----------------------------------------------------------------------------
 // RepoService — the full anonymous-push + multiplayer surface.
@@ -81,9 +66,12 @@ service RepoService {
   // List refs under an optional prefix.
   rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
 
-  // Server-streaming live ref advances for the room — one RefEvent per
-  // successful UpdateRef, to every subscriber.
-  rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);
+  // Server-streaming live room activity — one RoomEvent per successful
+  // UpdateRef/PostMessage/React, plus presence roster changes, to every
+  // subscriber. RoomEvent is a oneof of the four kinds (commit/chat/
+  // reaction/presence) so the stream is one schema-validated feed instead of
+  // requiring a second, hand-parsed channel for chat/reactions/presence.
+  rpc WatchRefs(WatchRefsRequest) returns (stream RoomEvent);
 
   // Post a signed chat message to the room. The write envelope (request
   // metadata) authenticates the author exactly like UpdateRef — the verified
@@ -116,6 +104,20 @@ service RepoService {
   // the previous object). The client decodes the bytes with its existing
   // decoder, so the server needs no field-by-field parity. Unauthenticated read.
   rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+
+  // Permanently delete a room's R2 objects (both the `objects/` and
+  // `messages/` key prefixes) and its Durable-Object-resident mutable state
+  // (refs, chat rows, reactions, and the denormalized commit index) — the
+  // ONLY way to reclaim storage the anonymous-multiplayer write path
+  // otherwise retains forever (immutable objects are never deleted by any
+  // other RPC). Admin-gated (see the ADMIN AUTH note above): the request
+  // MUST carry a valid `X-Admin-Token` header, or the server rejects with
+  // `unauthenticated` before this handler runs. There is no signed-write
+  // envelope requirement (a purge is an operator action, not a
+  // room-participant write) and no undo — the purge is immediate and
+  // irreversible. See the README "Retention & backup/restore" runbook
+  // before invoking against a production room.
+  rpc PurgeRoom(PurgeRoomRequest) returns (PurgeRoomResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -185,7 +187,7 @@ message UpdateRefRequest {
   string room = 1;
   string name = 2;
   bytes new_id = 3;             // 32-byte target value
-  RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
+  mkit.common.v1.RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
   bytes expected_id = 5;        // 32 bytes for MATCH; MUST be empty for ANY/MISSING
 }
 
@@ -201,7 +203,7 @@ message ListRefsRequest {
 }
 
 message ListRefsResponse {
-  repeated RefEntry refs = 1;
+  repeated mkit.common.v1.RefEntry refs = 1;
 }
 
 // ----------------------------------------------------------------------------
@@ -215,6 +217,45 @@ message RefEvent {
   string name = 1;
   bytes object_id = 2;
   bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the writer
+}
+
+// A discriminated union of everything the room's live subscribers can
+// receive over WatchRefs (and, during migration, the raw `/watch/<room>`
+// WebSocket fallback described in repo-worker's README — both carry the SAME
+// RoomEvent proto3-JSON encoding so there is one source of truth for the
+// wire shape): a ref advance, a chat post, a reaction toggle, or a presence
+// roster update. Replaces the old ad hoc, hand-parsed `WatchFrame` JSON enum
+// + separate untyped `PresenceJson` shape — see mkit#705.
+message RoomEvent {
+  oneof event {
+    RefEvent commit = 1;
+    ChatMessage chat = 2;
+    ReactionEvent reaction = 3;
+    PresenceEvent presence = 4;
+  }
+}
+
+// A live reaction TOGGLE — the new on/off state for one (target, emoji,
+// author) tuple after a React call, broadcast to every room subscriber.
+// Distinct from `Reaction` (the stored row shape ListReactionsResponse
+// returns, which carries no `active`/`count`).
+message ReactionEvent {
+  string target_id = 1;         // hex id of the feed item (message_id or commit hash)
+  string emoji = 2;
+  bytes author_pubkey = 3;      // 32-byte Ed25519 pubkey of the reactor
+  bool active = 4;              // true if the reaction is now ON for this author
+  uint32 count = 5;             // total reactors for (target, emoji) after the toggle
+}
+
+// Live room presence, broadcast to every subscriber on join/leave.
+message PresenceEvent {
+  repeated PresenceMember members = 1;  // distinct online keys, deduped by pubkey across tabs
+  uint32 viewers = 2;                   // connections with no identity yet ("N viewers")
+}
+
+message PresenceMember {
+  bytes author_pubkey = 1;      // 32-byte Ed25519 pubkey
+  int64 since = 2;              // epoch-ms the (earliest) connection joined
 }
 
 // ----------------------------------------------------------------------------
@@ -282,4 +323,22 @@ message Reaction {
 
 message ListReactionsResponse {
   repeated Reaction reactions = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Room retention / deletion — admin-only (see the ADMIN AUTH note + PurgeRoom
+// above). One request purges everything content-addressed or mutable under a
+// single room.
+
+message PurgeRoomRequest {
+  string room = 1;
+}
+
+message PurgeRoomResponse {
+  bool purged = 1;                    // true unless the room already had nothing to purge
+  uint32 objects_deleted = 2;         // R2 objects removed under {room}/objects/
+  uint32 message_bodies_deleted = 3;  // R2 chat bodies removed under {room}/messages/
+  uint32 refs_deleted = 4;            // DO `refs` rows removed
+  uint32 messages_deleted = 5;        // DO `messages` rows removed
+  uint32 reactions_deleted = 6;       // DO `reactions` rows removed
 }

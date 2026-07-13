@@ -42,9 +42,9 @@ pub type OwnedListRefsResponseView = ::buffa::view::OwnedView<
 pub type OwnedWatchRefsRequestView = ::buffa::view::OwnedView<
     __buffa::view::WatchRefsRequestView<'static>,
 >;
-///Shorthand for `OwnedView<RefEventView<'static>>`.
-pub type OwnedRefEventView = ::buffa::view::OwnedView<
-    __buffa::view::RefEventView<'static>,
+///Shorthand for `OwnedView<RoomEventView<'static>>`.
+pub type OwnedRoomEventView = ::buffa::view::OwnedView<
+    __buffa::view::RoomEventView<'static>,
 >;
 ///Shorthand for `OwnedView<PostMessageRequestView<'static>>`.
 pub type OwnedPostMessageRequestView = ::buffa::view::OwnedView<
@@ -85,6 +85,14 @@ pub type OwnedListCommitsRequestView = ::buffa::view::OwnedView<
 ///Shorthand for `OwnedView<ListCommitsResponseView<'static>>`.
 pub type OwnedListCommitsResponseView = ::buffa::view::OwnedView<
     __buffa::view::ListCommitsResponseView<'static>,
+>;
+///Shorthand for `OwnedView<PurgeRoomRequestView<'static>>`.
+pub type OwnedPurgeRoomRequestView = ::buffa::view::OwnedView<
+    __buffa::view::PurgeRoomRequestView<'static>,
+>;
+///Shorthand for `OwnedView<PurgeRoomResponseView<'static>>`.
+pub type OwnedPurgeRoomResponseView = ::buffa::view::OwnedView<
+    __buffa::view::PurgeRoomResponseView<'static>,
 >;
 impl ::connectrpc::Encodable<PutObjectResponse>
 for __buffa::view::PutObjectResponseView<'_> {
@@ -175,7 +183,7 @@ for ::buffa::view::OwnedView<__buffa::view::ListRefsResponseView<'static>> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
 }
-impl ::connectrpc::Encodable<RefEvent> for __buffa::view::RefEventView<'_> {
+impl ::connectrpc::Encodable<RoomEvent> for __buffa::view::RoomEventView<'_> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -183,8 +191,8 @@ impl ::connectrpc::Encodable<RefEvent> for __buffa::view::RefEventView<'_> {
         ::connectrpc::__codegen::encode_view_body(self, codec)
     }
 }
-impl ::connectrpc::Encodable<RefEvent>
-for ::buffa::view::OwnedView<__buffa::view::RefEventView<'static>> {
+impl ::connectrpc::Encodable<RoomEvent>
+for ::buffa::view::OwnedView<__buffa::view::RoomEventView<'static>> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -274,6 +282,24 @@ for __buffa::view::ListCommitsResponseView<'_> {
 }
 impl ::connectrpc::Encodable<ListCommitsResponse>
 for ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+}
+impl ::connectrpc::Encodable<PurgeRoomResponse>
+for __buffa::view::PurgeRoomResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<PurgeRoomResponse>
+for ::buffa::view::OwnedView<__buffa::view::PurgeRoomResponseView<'static>> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -379,6 +405,15 @@ pub const REPO_SERVICE_LIST_REACTIONS_SPEC: ::connectrpc::Spec = ::connectrpc::S
 /// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
 pub const REPO_SERVICE_LIST_COMMITS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListCommits",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the server-side `PurgeRoom` RPC.
+///
+/// The dispatcher surfaces this on
+/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+pub const REPO_SERVICE_PURGE_ROOM_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.repo.v1.RepoService/PurgeRoom",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -537,7 +572,7 @@ pub trait RepoService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             ::connectrpc::ServiceStream<
-                impl ::connectrpc::Encodable<RefEvent> + Send + use<Self>,
+                impl ::connectrpc::Encodable<RoomEvent> + Send + use<Self>,
             >,
         >,
     > + Send;
@@ -629,6 +664,24 @@ pub trait RepoService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<ListCommitsResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the PurgeRoom RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn purge_room<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, PurgeRoomRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<PurgeRoomResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -791,7 +844,7 @@ impl<S: RepoService> RepoServiceExt for S {
             .route_view_server_stream::<
                 _,
                 _,
-                RefEvent,
+                RoomEvent,
             >(
                 REPO_SERVICE_SERVICE_NAME,
                 "WatchRefs",
@@ -937,6 +990,31 @@ impl<S: RepoService> RepoServiceExt for S {
                 },
             )
             .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC)
+            .route_view(
+                REPO_SERVICE_SERVICE_NAME,
+                "PurgeRoom",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::PurgeRoomRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                PurgeRoomRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.purge_room(ctx, sreq)
+                                .await?
+                                .encode::<PurgeRoomResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(REPO_SERVICE_PURGE_ROOM_SPEC)
     }
 }
 /// Type-inference marker used by [`Router::add_service`](::connectrpc::Router::add_service).
@@ -1055,6 +1133,12 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
                         .with_spec(REPO_SERVICE_LIST_COMMITS_SPEC),
+                )
+            }
+            "PurgeRoom" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(REPO_SERVICE_PURGE_ROOM_SPEC),
                 )
             }
             _ => None,
@@ -1230,6 +1314,21 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                         .encode::<ListCommitsResponse>(format)
                 })
             }
+            "PurgeRoom" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        PurgeRoomRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::PurgeRoomRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        PurgeRoomRequest,
+                    >::from_parts(&req, &body);
+                    svc.purge_room(ctx, req).await?.encode::<PurgeRoomResponse>(format)
+                })
+            }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
         }
     }
@@ -1261,7 +1360,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     Ok(
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
-                                RefEvent,
+                                RoomEvent,
                                 _,
                                 _,
                             >(s, format)),
@@ -1570,7 +1669,7 @@ where
     ) -> Result<
         ::connectrpc::client::ServerStream<
             T::ResponseBody,
-            __buffa::view::RefEventView<'static>,
+            __buffa::view::RoomEventView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -1588,7 +1687,7 @@ where
     ) -> Result<
         ::connectrpc::client::ServerStream<
             T::ResponseBody,
-            __buffa::view::RefEventView<'static>,
+            __buffa::view::RoomEventView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -1779,6 +1878,43 @@ where
                 &self.config,
                 REPO_SERVICE_SERVICE_NAME,
                 "ListCommits",
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the PurgeRoom RPC. Sends a request to /mkit.repo.v1.RepoService/PurgeRoom.
+    pub async fn purge_room(
+        &self,
+        request: PurgeRoomRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::PurgeRoomResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.purge_room_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the PurgeRoom RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn purge_room_with_options(
+        &self,
+        request: PurgeRoomRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::PurgeRoomResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                REPO_SERVICE_SERVICE_NAME,
+                "PurgeRoom",
                 request,
                 options,
             )

@@ -12,9 +12,11 @@
 // Internal wire protocol (the worker -> DO via `stub.fetch_with_request`),
 // all JSON over HTTP to a `https://refstore/<op>` URL:
 //   POST /get    { "name": "<ref>" }                       -> { "exists", "value"? }
-//   POST /update { "name", "new", "expectation", "expected"?, "author"? }
+//   POST /update { "name", "new", "expectation", "expected"?, "author"?, "idem" }
 //                                                          -> { "committed", "conflict", "current"? }
 //   POST /list   { "prefix": "<prefix>" }                  -> { "refs": [ { "name", "value" } ] }
+//   POST /quota  { "author", "bytes" }                      -> { "allowed", "reason"? }
+//   POST /purge  (no body)                                 -> { "refs_deleted", "messages_deleted", "reactions_deleted" }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
 //
 // `expectation` is the proto wire number (1=ANY, 2=MISSING, 3=MATCH). The
@@ -28,21 +30,27 @@ use serde::{Deserialize, Serialize};
 // `wasm_bindgen` must be in scope: the `#[durable_object]` macro emits glue
 // that references it by name. `DurableObject` is the trait we implement.
 use worker::{
-    durable_object, wasm_bindgen, Date, DurableObject, Env, Request, Response, ResponseBuilder,
-    Result, State, WebSocket, WebSocketIncomingMessage, WebSocketPair,
+    Date, DurableObject, Env, Request, Response, ResponseBuilder, Result, State, WebSocket,
+    WebSocketIncomingMessage, WebSocketPair, durable_object, wasm_bindgen,
 };
 
-use crate::chat::{is_rate_limited, REACT_MIN_INTERVAL_MS};
+use crate::chat::{REACT_MIN_INTERVAL_MS, is_rate_limited};
 use crate::envelope::FRESHNESS_WINDOW_MS;
-use crate::refs::{evaluate_cas, CasDecision, ConflictReason, RefExpectation};
+use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
+use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
 use super::commit_index;
 use super::wire::{
     GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListEntry, ListReq, ListResp, MessagesReq,
-    MessagesResp, MsgEntry, PostReq, PostResp, ReactReq, ReactResp, ReactionEntry, ReactionsResp,
-    RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
+    MessagesResp, MsgEntry, PostReq, PostResp, PurgeResp, QuotaCheckReq, QuotaCheckResp, ReactReq,
+    ReactResp, ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq,
+    UpdateResp,
 };
+// `/watch` wire encoding: declared once (host+wasm target-independent) in
+// `crate::room_event` and shared with the WatchRefs Connect-streaming bridge
+// in `service.rs`, so a field rename can't desync producer/consumer.
+use crate::room_event;
 
 /// Default + max page size for `/messages` (the lobby backlog). A request for
 /// `limit=0` gets the default; anything above the max is clamped.
@@ -60,37 +68,6 @@ const MESSAGES_RETAINED: i64 = 1_000;
 /// bounds the DO's SQLite so a flood of (target, emoji, author) tuples can't
 /// grow it without limit; `list_reactions` reads at most this many.
 const REACTIONS_RETAINED: i64 = 5_000;
-
-/// A live frame broadcast to every `/watch` subscriber. The SAME socket carries
-/// commit / chat / reaction frames so the lobby renders one merged feed; the
-/// `kind` discriminator is the serde tag (set by the enum, not by hand), so a
-/// variant and its tag can't drift. Hex fields are decoded back to raw bytes by
-/// the worker before re-encoding into the proto where needed. Wire shape is
-/// `{"kind":"commit"|"chat"|"reaction", …variant fields}` — matched 1:1 by the
-/// client's `parseActivityFrame`.
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WatchFrame {
-    Commit {
-        name: String,
-        object_id: String,                 // 64-hex
-        author_pubkey: Option<String>,     // 64-hex
-    },
-    Chat {
-        message_id: String,                // 64-hex content address
-        author_pubkey: String,             // 64-hex
-        text: String,
-        created_at: i64,
-        seq: u64,
-    },
-    Reaction {
-        target_id: String,
-        emoji: String,
-        author_pubkey: String,             // 64-hex
-        active: bool,
-        count: u32,
-    },
-}
 
 /// The smallest string strictly greater than every string having `prefix` as a
 /// prefix — used as the exclusive upper bound of a prefix range scan. Clone the
@@ -126,28 +103,12 @@ struct PresenceAttachment {
     since: i64,
 }
 
-/// Live presence roster, broadcast to every `/watch` subscriber on join/leave.
-/// `kind: "presence"` distinguishes it from `"commit"` / `"chat"` frames so the
-/// one socket can carry all three.
-#[derive(Serialize)]
-struct PresenceJson {
-    kind: &'static str,
-    /// Distinct online keys (deduped by pubkey across tabs), earliest `since`.
-    members: Vec<PresenceMember>,
-    /// Connections with no identity yet — the "N viewers" count.
-    viewers: u32,
-}
-
-#[derive(Serialize)]
-struct PresenceMember {
-    pubkey: String,
-    since: i64,
-}
-
 /// A 64-char lowercase-hex Ed25519 pubkey. Shared with the worker so an invalid
 /// `?pubkey=` is treated as a viewer rather than trusted.
 pub(crate) fn is_valid_pubkey(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[durable_object]
@@ -215,6 +176,9 @@ impl DurableObject for RefStore {
                     if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
                         return Response::error(format!("storage init failed: {e}"), 500);
                     }
+                    if let Err(e) = self.ensure_update_idem_table() {
+                        return Response::error(format!("storage init failed: {e}"), 500);
+                    }
                 }
             }
             "/post" | "/messages" => {
@@ -228,6 +192,28 @@ impl DurableObject for RefStore {
                 }
             }
             "/list-commits" | "/record-commits" => {
+                if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
+            "/quota" => {
+                if let Err(e) = self.ensure_write_quota_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+            }
+            "/purge" => {
+                // A purge touches every table this DO owns, including ones a
+                // brand-new room may never have created — ensure all four so
+                // the DELETEs below are never against a missing table.
+                if let Err(e) = self.ensure_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                if let Err(e) = self.ensure_messages_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                if let Err(e) = self.ensure_reactions_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
                 if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
@@ -278,6 +264,11 @@ impl DurableObject for RefStore {
                 let body: RecordCommitsReq = req.json().await?;
                 self.handle_record_commits(body)
             }
+            "/quota" => {
+                let body: QuotaCheckReq = req.json().await?;
+                self.handle_quota_check(body)
+            }
+            "/purge" => self.handle_purge(),
             _ => Response::error("not found", 404),
         }
     }
@@ -366,6 +357,50 @@ impl RefStore {
         Response::from_json(&RecordCommitsResp { recorded })
     }
 
+    /// Wipe every table row this DO instance owns — the mutable-state half of
+    /// `PurgeRoom` (the worker purges the room's R2 prefixes separately, since
+    /// this DO owns no R2 access). Irreversible: there is no soft-delete or
+    /// undo. Counts are taken BEFORE the deletes so the response reports what
+    /// was actually removed, not zero.
+    fn handle_purge(&self) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        let refs_deleted = Self::count_rows(&sql, "refs");
+        let messages_deleted = Self::count_rows(&sql, "messages");
+        let reactions_deleted = Self::count_rows(&sql, "reactions");
+
+        sql.exec("DELETE FROM refs;", None)?;
+        sql.exec("DELETE FROM messages;", None)?;
+        sql.exec("DELETE FROM idem_keys;", None)?;
+        sql.exec("DELETE FROM reactions;", None)?;
+        sql.exec("DELETE FROM react_idem;", None)?;
+        sql.exec("DELETE FROM react_rate;", None)?;
+        sql.exec("DELETE FROM commits;", None)?;
+
+        Response::from_json(&PurgeResp {
+            refs_deleted,
+            messages_deleted,
+            reactions_deleted,
+        })
+    }
+
+    /// `SELECT COUNT(*)` over one of this DO's own hardcoded table names
+    /// (never user input — every call site passes a literal), so
+    /// string-formatting the identifier into the query is safe. Returns 0 on
+    /// any query failure rather than propagating an error, since this is only
+    /// used for a best-effort "how many rows did the purge remove" count.
+    fn count_rows(sql: &worker::SqlStorage, table: &str) -> u32 {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        sql.exec(&format!("SELECT COUNT(*) AS n FROM {table};"), None)
+            .and_then(|r| r.to_array::<Count>())
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|c| c.n.max(0) as u32)
+            .unwrap_or(0)
+    }
+
     /// Read a ref's current hex value, or None if absent.
     fn read_ref(&self, name: &str) -> Option<String> {
         #[derive(Deserialize)]
@@ -376,7 +411,10 @@ impl RefStore {
             .state
             .storage()
             .sql()
-            .exec("SELECT value FROM refs WHERE path = ? LIMIT 1;", vec![name.into()])
+            .exec(
+                "SELECT value FROM refs WHERE path = ? LIMIT 1;",
+                vec![name.into()],
+            )
             .ok()?
             .to_array()
             .ok()?;
@@ -385,7 +423,27 @@ impl RefStore {
 
     /// Apply the CAS update serially. Reads the current value, evaluates the
     /// pure CAS decision, and on commit upserts + broadcasts a RefEvent.
+    ///
+    /// Replay dedupe runs FIRST, mirroring `handle_post`/`handle_react`: a
+    /// re-submitted signed UpdateRef (same author + ref name + idempotency-key)
+    /// returns the ORIGINAL `(committed, conflict, current)` result instead of
+    /// re-evaluating the CAS against whatever the ref holds now. This is what
+    /// closes the `REF_EXPECTATION_ANY` replay hole — without it, a captured
+    /// signed ANY-update stays replayable (and re-clobbers the ref to the stale
+    /// value) for the whole envelope freshness window. UNLIKE chat/react, which
+    /// dedupe globally per author, the key here is `(author, name, idem)`: the
+    /// same idempotency key must not collide across two different refs.
     fn handle_update(&self, req: UpdateReq) -> Result<Response> {
+        let author = req.author.clone().unwrap_or_default();
+        let now = Date::now().as_millis() as i64;
+
+        if !req.idem.is_empty()
+            && !author.is_empty()
+            && let Some(resp) = self.update_idem_lookup(&author, &req.name, &req.idem)
+        {
+            return Response::from_json(&resp);
+        }
+
         let current = self.read_ref(&req.name);
         let expectation = RefExpectation::from_wire(req.expectation);
         let expected_bytes = req.expected.as_ref().and_then(|s| hex::decode(s).ok());
@@ -409,21 +467,25 @@ impl RefStore {
                 // Dual-write the denormalized commit index. Best-effort: a record
                 // failure must NOT fail the (already-committed) ref update — the
                 // index is rebuildable by backfill from R2.
-                if let Some(m) = &req.commit {
-                    if let Err(e) = commit_index::record(&sql, &req.new, &req.name, m) {
-                        worker::console_error!("record_commit failed for {}: {e}", req.name);
-                    }
+                if let Some(m) = &req.commit
+                    && let Err(e) = commit_index::record(&sql, &req.new, &req.name, m)
+                {
+                    worker::console_error!("record_commit failed for {}: {e}", req.name);
                 }
-                self.broadcast(&WatchFrame::Commit {
-                    name: req.name.clone(),
-                    object_id: req.new.clone(),
-                    author_pubkey: req.author.clone(),
-                });
-                Response::from_json(&UpdateResp {
+                self.broadcast(&room_event::commit_event(
+                    req.name.clone(),
+                    &req.new,
+                    req.author.as_deref(),
+                ));
+                let resp = UpdateResp {
                     committed: true,
                     conflict: false,
                     current: Some(req.new),
-                })
+                };
+                if !req.idem.is_empty() && !author.is_empty() {
+                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
+                }
+                Response::from_json(&resp)
             }
             CasDecision::Conflict(reason) => {
                 // On a precondition failure return the present value (if any)
@@ -432,14 +494,108 @@ impl RefStore {
                     ConflictReason::Missing => None,
                     _ => current,
                 };
-                Response::from_json(&UpdateResp {
+                let resp = UpdateResp {
                     committed: false,
                     conflict: true,
                     current,
-                })
+                };
+                if !req.idem.is_empty() && !author.is_empty() {
+                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
+                }
+                Response::from_json(&resp)
             }
             CasDecision::Invalid(msg) => Response::error(msg, 400),
         }
+    }
+
+    /// Idempotently create the `update_idem` replay-dedupe ledger for
+    /// UpdateRef, mirroring `idem_keys` (chat) / `react_idem` (React). Keyed on
+    /// `(author, name, idem)` — UNLIKE chat/react, which dedupe globally per
+    /// author, UpdateRef must include the ref `name` in the key since the same
+    /// idempotency key must not collide across different refs.
+    fn ensure_update_idem_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS update_idem (\
+               author TEXT NOT NULL, \
+               name TEXT NOT NULL, \
+               idem TEXT NOT NULL, \
+               committed INTEGER NOT NULL, \
+               conflict INTEGER NOT NULL, \
+               current TEXT, \
+               created_at INTEGER NOT NULL, \
+               PRIMARY KEY (author, name, idem));",
+            None,
+        )?;
+        // Index the time column so the per-update freshness prune
+        // (`DELETE … WHERE created_at < ?`) seeks the expired tail instead of
+        // full-scanning the whole room-wide ledger on every committed update.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS update_idem_created ON update_idem(created_at);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// A prior `(author, name, idem)` UpdateRef result, so a replay returns it
+    /// unchanged instead of re-running the CAS against the (possibly since
+    /// changed) current value. `None` on a first-seen key.
+    fn update_idem_lookup(&self, author: &str, name: &str, idem: &str) -> Option<UpdateResp> {
+        #[derive(Deserialize)]
+        struct Row {
+            committed: i64,
+            conflict: i64,
+            current: Option<String>,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT committed, conflict, current FROM update_idem \
+                 WHERE author = ? AND name = ? AND idem = ? LIMIT 1;",
+                vec![author.into(), name.into(), idem.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| UpdateResp {
+            committed: r.committed != 0,
+            conflict: r.conflict != 0,
+            current: r.current,
+        })
+    }
+
+    /// Record this `(author, name, idem)` → result for replay dedupe, then drop
+    /// entries older than the envelope freshness window (a replay that old
+    /// fails envelope verification, so its key is no longer needed).
+    fn record_update_idem(
+        &self,
+        author: &str,
+        name: &str,
+        idem: &str,
+        resp: &UpdateResp,
+        now: i64,
+    ) {
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "INSERT OR REPLACE INTO update_idem \
+               (author, name, idem, committed, conflict, current, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?);",
+            vec![
+                author.into(),
+                name.into(),
+                idem.into(),
+                i64::from(resp.committed).into(),
+                i64::from(resp.conflict).into(),
+                resp.current.clone().into(),
+                now.into(),
+            ],
+        );
+        let _ = sql.exec(
+            "DELETE FROM update_idem WHERE created_at < ?;",
+            vec![(now - FRESHNESS_WINDOW_MS).into()],
+        );
     }
 
     /// List refs whose path starts with `prefix` (empty = all).
@@ -472,8 +628,106 @@ impl RefStore {
         .map(|r| r.to_array().unwrap_or_default())
         .unwrap_or_default();
         rows.into_iter()
-            .map(|r| ListEntry { name: r.path, value: r.value })
+            .map(|r| ListEntry {
+                name: r.path,
+                value: r.value,
+            })
             .collect()
+    }
+
+    /// Idempotently create the `write_quota` table — the per-author
+    /// fixed-window write budget ledger for `PutObject`/`UpdateRef` (see
+    /// `crate::write_quota::evaluate_quota`). One row per author; the room
+    /// itself is implicit (this table lives in THIS room's DO instance).
+    fn ensure_write_quota_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS write_quota (\
+               author TEXT PRIMARY KEY, \
+               window_start INTEGER NOT NULL, \
+               ops INTEGER NOT NULL, \
+               bytes INTEGER NOT NULL);",
+            None,
+        )?;
+        // Seeks the stale tail so the opportunistic prune in
+        // `handle_quota_check` doesn't full-scan the whole per-room author
+        // set on every accepted write.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS write_quota_window ON write_quota(window_start);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Check-and-consume one author's write budget for this room, serially —
+    /// the DO's single-threaded execution makes this read-evaluate-write
+    /// atomic, so two writes from the same author can't both slip past the
+    /// cap (same requirement `handle_post`'s rate-limit check has). Called by
+    /// `AuthInterceptor` for `PutObject`/`UpdateRef` BEFORE the handler runs.
+    /// A rejected write leaves the persisted state untouched; an accepted one
+    /// persists the updated `(window_start, ops, bytes)` and prunes rows
+    /// whose window elapsed more than one window ago (bounded storage,
+    /// mirrors `idem_keys`/`react_idem`).
+    fn handle_quota_check(&self, req: QuotaCheckReq) -> Result<Response> {
+        let now = Date::now().as_millis() as i64;
+        let current = self.read_quota_state(&req.author);
+
+        match evaluate_quota(current, now, req.bytes) {
+            QuotaDecision::Allowed(state) => {
+                let sql = self.state.storage().sql();
+                sql.exec(
+                    "INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) \
+                     ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, \
+                       ops = excluded.ops, bytes = excluded.bytes;",
+                    vec![
+                        req.author.into(),
+                        state.window_start.into(),
+                        i64::from(state.ops).into(),
+                        (state.bytes as i64).into(),
+                    ],
+                )?;
+                let _ = sql.exec(
+                    "DELETE FROM write_quota WHERE window_start < ?;",
+                    vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
+                );
+                Response::from_json(&QuotaCheckResp {
+                    allowed: true,
+                    reason: None,
+                })
+            }
+            QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
+                allowed: false,
+                reason: Some(reason.to_string()),
+            }),
+        }
+    }
+
+    /// The author's persisted quota state in this room, or `None` if they've
+    /// never written here (or their row was pruned as stale) — the input to
+    /// `write_quota::evaluate_quota`.
+    fn read_quota_state(&self, author: &str) -> Option<QuotaState> {
+        #[derive(Deserialize)]
+        struct Row {
+            window_start: i64,
+            ops: i64,
+            bytes: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT window_start, ops, bytes FROM write_quota WHERE author = ? LIMIT 1;",
+                vec![author.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| QuotaState {
+            window_start: r.window_start,
+            ops: r.ops.max(0) as u32,
+            bytes: r.bytes.max(0) as u64,
+        })
     }
 
     /// Idempotently create the `messages` table — the room's chat log. `seq` is
@@ -533,15 +787,15 @@ impl RefStore {
         // request (same author + idempotency-key) returns the ORIGINAL result,
         // so a captured signature can't be amplified into duplicate messages and
         // a client retry is idempotent. A genuinely new post carries a fresh key.
-        if !req.idem.is_empty() {
-            if let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem) {
-                return Response::from_json(&PostResp {
-                    accepted: true,
-                    rate_limited: false,
-                    seq,
-                    created_at,
-                });
-            }
+        if !req.idem.is_empty()
+            && let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem)
+        {
+            return Response::from_json(&PostResp {
+                accepted: true,
+                rate_limited: false,
+                seq,
+                created_at,
+            });
         }
 
         let last = self.last_post_ms(&req.author);
@@ -580,7 +834,9 @@ impl RefStore {
             // here means the SELECT itself failed — surface it rather than
             // silently shipping a seq=0 that downstream can't order.
             None => {
-                worker::console_error!("post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0");
+                worker::console_error!(
+                    "post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0"
+                );
                 0
             }
         };
@@ -609,13 +865,13 @@ impl RefStore {
 
         // Use the typed `broadcast` helper (like the Commit path) so a serialize
         // failure SKIPS the frame rather than fanning out an empty string "".
-        self.broadcast(&WatchFrame::Chat {
-            message_id: req.id.clone(),
-            author_pubkey: req.author.clone(),
-            text: req.text.clone(),
-            created_at: now,
+        self.broadcast(&room_event::chat_event(
+            &req.id,
+            &req.author,
+            req.text.clone(),
+            now,
             seq,
-        });
+        ));
 
         Response::from_json(&PostResp {
             accepted: true,
@@ -645,7 +901,9 @@ impl RefStore {
             .ok()?
             .to_array()
             .ok()?;
-        rows.into_iter().next().map(|r| (r.seq as u64, r.created_at))
+        rows.into_iter()
+            .next()
+            .map(|r| (r.seq as u64, r.created_at))
     }
 
     /// Idempotently create the `reactions` table. One row per
@@ -715,10 +973,10 @@ impl RefStore {
 
         // 1) Replay dedupe: a re-submitted signed React (same author + idem)
         // returns the ORIGINAL result instead of toggling state again.
-        if !req.idem.is_empty() {
-            if let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem) {
-                return Response::from_json(&ReactResp { active, count });
-            }
+        if !req.idem.is_empty()
+            && let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem)
+        {
+            return Response::from_json(&ReactResp { active, count });
         }
 
         let had = self.reaction_exists(&req.target, &req.emoji, &req.author);
@@ -736,7 +994,11 @@ impl RefStore {
         if had {
             sql.exec(
                 "DELETE FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",
-                vec![req.target.clone().into(), req.emoji.clone().into(), req.author.clone().into()],
+                vec![
+                    req.target.clone().into(),
+                    req.emoji.clone().into(),
+                    req.author.clone().into(),
+                ],
             )?;
         } else {
             sql.exec(
@@ -792,13 +1054,13 @@ impl RefStore {
 
         // 5) Broadcast + respond. Typed `broadcast` (like Commit/Chat) so a
         // serialize failure skips the frame rather than fanning out "".
-        self.broadcast(&WatchFrame::Reaction {
-            target_id: req.target.clone(),
-            emoji: req.emoji.clone(),
-            author_pubkey: req.author.clone(),
+        self.broadcast(&room_event::reaction_event(
+            req.target.clone(),
+            req.emoji.clone(),
+            &req.author,
             active,
             count,
-        });
+        ));
 
         Response::from_json(&ReactResp { active, count })
     }
@@ -861,7 +1123,9 @@ impl RefStore {
             .ok()?
             .to_array()
             .ok()?;
-        rows.into_iter().next().map(|r| (r.active != 0, r.count.max(0) as u32))
+        rows.into_iter()
+            .next()
+            .map(|r| (r.active != 0, r.count.max(0) as u32))
     }
 
     /// The author's most recent React time (epoch-ms) — the rate-limit input.
@@ -904,7 +1168,11 @@ impl RefStore {
             .map(|r| r.to_array().unwrap_or_default())
             .unwrap_or_default();
         rows.into_iter()
-            .map(|r| ReactionEntry { target: r.target, emoji: r.emoji, author: r.author })
+            .map(|r| ReactionEntry {
+                target: r.target,
+                emoji: r.emoji,
+                author: r.author,
+            })
             .collect()
     }
 
@@ -968,11 +1236,11 @@ impl RefStore {
             .collect()
     }
 
-    /// Serialize a `WatchFrame` and fan it out to every `/watch` subscriber.
-    fn broadcast(&self, frame: &WatchFrame) {
-        match serde_json::to_string(frame) {
-            Ok(payload) => self.broadcast_str(&payload),
-            Err(e) => worker::console_error!("broadcast: failed to serialize WatchFrame: {e}"),
+    /// Serialize a `RoomEvent` and fan it out to every `/watch` subscriber.
+    fn broadcast(&self, event: &crate::proto::mkit::repo::v1::RoomEvent) {
+        match room_event::to_json(event) {
+            Some(payload) => self.broadcast_str(&payload),
+            None => worker::console_error!("broadcast: failed to serialize RoomEvent"),
         }
     }
 
@@ -1033,16 +1301,7 @@ impl RefStore {
                 None => viewers = viewers.saturating_add(1),
             }
         }
-        let members = by_key
-            .into_iter()
-            .map(|(pubkey, since)| PresenceMember { pubkey, since })
-            .collect();
-        if let Ok(payload) = serde_json::to_string(&PresenceJson {
-            kind: "presence",
-            members,
-            viewers,
-        }) {
-            self.broadcast_str(&payload);
-        }
+        let members = by_key.into_iter().collect();
+        self.broadcast(&room_event::presence_event(members, viewers));
     }
 }

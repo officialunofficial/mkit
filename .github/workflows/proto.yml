@@ -1,0 +1,168 @@
+name: "CI: Proto"
+
+# `buf lint` + `buf breaking` for every buf module in the repo (any
+# directory with a buf.yaml — currently apps/repo-worker/ and
+# rust/crates/mkit-trust-rpc/proto/). Before issue #693 no .proto in
+# the repo was gated in CI at all; this workflow is the merge gate the
+# epic #676 production-readiness review called for.
+#
+# When #677 (buf workspace + proto path restructure) lands, this
+# workflow's module-discovery loop keeps working unmodified — it finds
+# buf.yaml files generically rather than hardcoding module paths.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/proto.yml'
+      - '**/buf.yaml'
+      - '**/*.proto'
+  # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
+  # its required check (proto-gate) is never absent. The `lint` job is gated
+  # on the in-workflow paths-filter below instead — this avoids the
+  # "required-but-skipped" trap where a path-filtered trigger leaves a
+  # required status stuck pending on PRs that don't touch proto files.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BUF_VERSION: "1.66.0"
+
+jobs:
+  changes:
+    name: Detect proto-relevant changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      proto: ${{ steps.filter.outputs.proto }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706  # v4.0.2
+        id: filter
+        with:
+          filters: |
+            proto:
+              - '.github/workflows/proto.yml'
+              - '**/buf.yaml'
+              - '**/*.proto'
+
+  lint:
+    name: buf lint + breaking
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.proto == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # Full history: `buf breaking` compares each module against
+          # its state on `origin/main`.
+          fetch-depth: 0
+
+      - name: Install buf
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) buf_arch="x86_64" ;;
+            aarch64|arm64) buf_arch="aarch64" ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+          curl -sSL -o /usr/local/bin/buf \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-${buf_arch}"
+          chmod +x /usr/local/bin/buf
+          buf --version
+
+      - name: Ensure origin/main is fetched
+        run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+
+      - name: buf lint + breaking (every module)
+        run: |
+          set -euo pipefail
+          status=0
+          # NUL-delimited so module paths with spaces don't break word
+          # splitting (defensive; none exist today).
+          while IFS= read -r -d '' buf_yaml; do
+            dir="$(dirname "$buf_yaml")"
+            echo "::group::buf lint $dir"
+            if ! buf lint "$dir"; then status=1; fi
+            echo "::endgroup::"
+
+            echo "::group::buf breaking $dir (against origin/main)"
+            if git cat-file -e "origin/main:$dir/buf.yaml" 2>/dev/null; then
+              # When $buf_yaml itself changed since origin/main, pin the
+              # HISTORICAL side to the CURRENT buf.yaml (--against-config)
+              # instead of letting buf resolve origin/main's own
+              # (differently-configured) buf.yaml. Without this, a v2
+              # workspace module transitioning from unnamed to named (e.g.
+              # issue #719's `name:` additions) makes buf's workspace-level
+              # module-identity matching misalign between the two sides —
+              # verified to spuriously report every file in the renamed
+              # module (and, via matching drift, files in OTHER modules in
+              # the same workspace) as "deleted", with no actual breaking
+              # change present. Confirmed against buf 1.66.0 and 1.71.0;
+              # --against-config resolves it and still correctly catches
+              # real breaking changes (spot-checked by temporarily deleting
+              # an enum value and re-running).
+              #
+              # Only pass it when the config actually changed: unlike a
+              # true buf.yaml workspace (module `path:` == the dir buf.yaml
+              # lives in, e.g. rust/crates/mkit-rpc/proto nested under the
+              # repo-root buf.yaml), a standalone single-module buf.yaml
+              # like rust/crates/mkit-trust-rpc/buf.yaml has `path: proto`
+              # relative to ITS OWN location — passing --against-config
+              # there when nothing changed flips buf's input-resolution
+              # mode and errors ("did not contain modules found in
+              # workspace"), so this is opt-in per dir, not blanket.
+              against_config_args=()
+              if ! git diff --quiet origin/main -- "$buf_yaml" 2>/dev/null; then
+                against_config_args=(--against-config "$buf_yaml")
+                echo "$buf_yaml changed since origin/main — pinning historical config to current $buf_yaml"
+              fi
+              if ! buf breaking "$dir" --against ".git#branch=origin/main,subdir=$dir" "${against_config_args[@]+"${against_config_args[@]}"}"; then
+                status=1
+              fi
+            else
+              echo "no prior version of $dir on origin/main — new module, skipping breaking check"
+            fi
+            echo "::endgroup::"
+          done < <(git ls-files -z '**/buf.yaml' 'buf.yaml')
+          exit "$status"
+
+  # Stable required-check name for branch protection. Always runs on PRs
+  # (if: always()) so the status is never absent — closes the
+  # "required-but-skipped" trap. Passes when `lint` succeeded OR was
+  # legitimately skipped because the PR touched no proto-relevant paths;
+  # fails if `lint` actually failed or was cancelled.
+  proto-gate:
+    name: Proto CI gate
+    if: always() && github.event_name == 'pull_request'
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check lint job result
+        shell: bash
+        env:
+          LINT: ${{ needs.lint.result }}
+        run: |
+          echo "lint: ${LINT}"
+          case "${LINT}" in
+            success|skipped)
+              echo "Proto CI gate satisfied."
+              ;;
+            *)
+              echo "::error::lint job did not succeed (result=${LINT})"
+              exit 1
+              ;;
+          esac

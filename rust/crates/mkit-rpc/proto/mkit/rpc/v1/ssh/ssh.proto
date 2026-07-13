@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// mkit SSH transport wire protocol v1.
+//
+// The protocol mkit v0.1.0 speaks over its `ssh(1)` child process to
+// a remote `mkit serve <path>`. v1 is the only protocol; there is no
+// fallback. A future breaking revision will introduce a sibling
+// `ssh2.proto` rather than mutating the v1 schema in place.
+//
+// ## Wire framing
+//
+// Every message on the wire is a length-prefixed `SshFrame`:
+//
+//     [u32 LE length][N bytes protobuf-encoded SshFrame]
+//
+// The 4-byte length prefix is the encoded length of the SshFrame in
+// bytes (NOT including the prefix itself). Length is bounded by
+// `MAX_FRAME_BYTES = 1 MiB` for control frames; pack data flows
+// through a separate streaming channel (see PackChunk below) with
+// per-chunk caps.
+//
+// ## Transport
+//
+// The SSH child process (`ssh user@host -- mkit serve <path>`) receives
+// SshFrame messages on its stdin and emits SshFrame messages on its
+// stdout. The forced-command server pattern from SPEC-TRANSPORT §4.1
+// remains: trust is delegated to the user's `ssh(1)` configuration
+// (host-key verification, identity selection).
+//
+// ## Conversation flow
+//
+//   client -> server:    Hello{ proto = PROTOCOL_VERSION_1, ... }
+//   server -> client:    HelloResponse{ proto, server_id }
+//                         OR
+//   server -> client:    Error
+//
+//   then any sequence of:
+//
+//   client -> server:    ListRefs{ prefix }
+//   server -> client:    ListRefsResponse{ refs[] }    OR Error
+//
+//   client -> server:    ReadRef{ name }
+//   server -> client:    ReadRefResponse{ object_id }   OR Error
+//
+//   client -> server:    UpdateRef{ name, expected_id, new_id }
+//   server -> client:    UpdateRefResponse{}            OR Error
+//
+//   client -> server:    PackExists{ pack_id }
+//   server -> client:    PackExistsResponse{ exists }   OR Error
+//
+//   client -> server:    UploadPack{ pack_id, total_bytes }
+//   client -> server:    PackChunk{ pack_id, offset, data, last }
+//                         (... repeated until last=true ...)
+//   server -> client:    UploadPackResponse{}           OR Error
+//
+//   client -> server:    DownloadPack{ pack_id }
+//   server -> client:    DownloadPackHeader{ total_bytes }
+//   server -> client:    PackChunk{ pack_id, offset, data, last }
+//                         (... repeated until last=true ...)
+//                         OR Error before any chunk is sent
+//
+//   client -> server:    Close{}    (advisory; either side MAY just
+//                                    close the underlying stream)
+
+edition = "2023";
+
+package mkit.rpc.v1.ssh;
+
+import "mkit/rpc/v1/common.proto";
+import "mkit/common/v1/refs.proto";
+
+// ----------------------------------------------------------------------------
+// SshFrame — the union of every control / data message on the wire.
+
+message SshFrame {
+  oneof body {
+    // Connection lifecycle.
+    Hello hello = 1;
+    HelloResponse hello_response = 2;
+    Error error = 3;
+    Close close = 4;
+
+    // Refs.
+    ListRefs list_refs = 10;
+    ListRefsResponse list_refs_response = 11;
+    ReadRef read_ref = 12;
+    ReadRefResponse read_ref_response = 13;
+    UpdateRef update_ref = 14;
+    UpdateRefResponse update_ref_response = 15;
+
+    // Packs.
+    PackExists pack_exists = 20;
+    PackExistsResponse pack_exists_response = 21;
+    UploadPack upload_pack = 22;
+    UploadPackResponse upload_pack_response = 23;
+    DownloadPack download_pack = 24;
+    DownloadPackHeader download_pack_header = 25;
+    PackChunk pack_chunk = 26;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Connection lifecycle.
+
+message Hello {
+  ProtocolVersion proto = 1;
+
+  // Caller binary name and version, advisory. Logged by the server,
+  // not used for auth.
+  string client_id = 2;
+}
+
+message HelloResponse {
+  ProtocolVersion proto = 1;
+  string server_id = 2;
+}
+
+// Advisory close. Either side MAY simply close the underlying stream.
+message Close {
+  // Optional reason, advisory.
+  string reason = 1;
+}
+
+// ----------------------------------------------------------------------------
+// Refs.
+
+message ListRefs {
+  // Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
+  // capped at MAX_REF_NAME (4096 bytes).
+  string prefix = 1;
+}
+
+message ListRefsResponse {
+  repeated mkit.common.v1.RefEntry refs = 1;
+}
+
+message ReadRef {
+  string name = 1;
+}
+
+message ReadRefResponse {
+  // Empty bytes means the ref does not exist (distinguish from
+  // Error which means "lookup failed").
+  bytes object_id = 1;
+}
+
+// How the client wants the server to interpret `UpdateRef.expected_id`.
+// The shared `mkit.common.v1.RefExpectation` enum (not in common.proto —
+// that file is mkit-rpc-specific; RefExpectation is shared with
+// mkit.repo.v1 too, see mkit/common/v1/refs.proto): HTTP and S3
+// transports distinguish the three CAS variants via standard If-Match /
+// If-None-Match headers, so this enum is only needed where the wire is
+// protobuf.
+//
+// REQUIRED on every `UpdateRef`. A server MUST reject
+// `REF_EXPECTATION_UNSPECIFIED` (the protobuf default, sent when a
+// client omits the field) with `ERROR_CODE_INVALID_REQUEST`. mkit is
+// alpha (pre-1.0) and clients/servers move together; there is no
+// back-compat for the pre-`expectation` wire shape.
+//
+// Wire numbers are load-bearing. Do NOT renumber; new variants append.
+// (Defined in mkit/common/v1/refs.proto; see that file's comment.)
+
+// Compare-and-swap ref update. `expectation` selects which CAS variant
+// applies; `expected_id` carries the value to match (for `MATCH`) and
+// MUST be empty for `ANY` / `MISSING`. Atomic on the server.
+message UpdateRef {
+  string name = 1;
+  bytes expected_id = 2;
+  bytes new_id = 3;            // empty new_id deletes the ref
+  mkit.common.v1.RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
+}
+
+message UpdateRefResponse {
+  // Empty body is success. Server returns Error for CAS mismatch
+  // (ERROR_CODE_INVALID_REQUEST with details = current id) or any
+  // other failure.
+}
+
+// ----------------------------------------------------------------------------
+// Packs.
+
+message PackExists {
+  bytes pack_id = 1;  // raw 32-byte BLAKE3 digest
+}
+
+message PackExistsResponse {
+  bool exists = 1;
+}
+
+// Upload begins the streaming upload of a pack. `total_bytes` is
+// required: servers use it to reject oversized uploads before storage
+// and to verify the following PackChunk stream ends exactly at the
+// declared byte count.
+message UploadPack {
+  bytes pack_id = 1;
+  uint64 total_bytes = 2;
+}
+
+message UploadPackResponse {
+  // Empty body is success.
+}
+
+message DownloadPack {
+  bytes pack_id = 1;
+}
+
+// Server emits this once before the first PackChunk on a download.
+message DownloadPackHeader {
+  uint64 total_bytes = 1;
+}
+
+// Streaming pack data. Chunks arrive in offset order (ascending,
+// no gaps). The final chunk has `last = true`. Per-chunk data size
+// is bounded by MAX_FRAME_BYTES (1 MiB) less envelope overhead.
+message PackChunk {
+  bytes pack_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool last = 4;
+}

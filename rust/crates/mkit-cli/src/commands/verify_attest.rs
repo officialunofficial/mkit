@@ -25,20 +25,52 @@
 //!
 //! Exit code is 0 iff every listed attestation is bound to the requested
 //! commit and has `any_verified = true`, nonzero otherwise.
+//!
+//! `--format=json` emits one JSON object to stdout describing the
+//! outcome (in addition to the stderr prose report above, which stays
+//! unconditional):
+//!
+//! ```json
+//! {
+//!   "ok": <bool>,
+//!   "commit": "<64-hex>",
+//!   "error": "<string>|null",
+//!   "attestations": [
+//!     {
+//!       "id": "<64-hex>|null",
+//!       "error": "<string>|null",
+//!       "signatures": [
+//!         {"keyid": "...", "algorithm": "<string>|null", "verified": <bool>, "reason": "<string>|null"}
+//!       ]
+//!     }
+//!   ]
+//! }
+//! ```
+//!
+//! `error` at the attestation level covers read/decode/subject-mismatch
+//! failures (in which case `signatures` is empty); `error` at the
+//! top level is set whenever `ok` is `false`.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_attest::envelope;
 use mkit_attest::verify::{extract_primary_commit_hash, verify};
-use mkit_attest::{Algorithm, Registry, TrustRoot, store};
+use mkit_attest::{Algorithm, store};
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
 use mkit_core::{hash as hash_mod, refs};
 
 use crate::clap_shim;
 use crate::exit;
+use crate::format::JsonObject;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum VerifyAttestFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,6 +87,54 @@ struct Args {
     /// Filter signatures by algorithm.
     #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
+    /// Emit a machine-readable JSON result object to stdout alongside
+    /// the human report on stderr.
+    #[arg(long, value_enum, default_value = "default")]
+    format: VerifyAttestFormat,
+}
+
+/// One reported signature verdict, collected for the JSON envelope.
+struct SigRecord {
+    keyid: String,
+    algorithm: Option<String>,
+    verified: bool,
+    reason: Option<String>,
+}
+
+/// One reported attestation, collected for the JSON envelope. `error`
+/// covers read/decode/subject-mismatch failures (mutually exclusive
+/// with a populated `signatures`).
+struct AttRecord {
+    id: Option<Hash>,
+    error: Option<String>,
+    signatures: Vec<SigRecord>,
+}
+
+fn emit_json(commit: &Hash, ok: bool, error: Option<&str>, atts: &[AttRecord]) {
+    let mut items = Vec::with_capacity(atts.len());
+    for a in atts {
+        let mut obj = JsonObject::new();
+        obj.field_opt_hash("id", a.id.as_ref())
+            .field_opt_str("error", a.error.as_deref());
+        let mut sigs = Vec::with_capacity(a.signatures.len());
+        for s in &a.signatures {
+            let mut sobj = JsonObject::new();
+            sobj.field_str("keyid", &s.keyid)
+                .field_opt_str("algorithm", s.algorithm.as_deref())
+                .field_bool("verified", s.verified)
+                .field_opt_str("reason", s.reason.as_deref());
+            sigs.push(sobj.finish());
+        }
+        obj.field_raw("signatures", &format!("[{}]", sigs.join(",")));
+        items.push(obj.finish());
+    }
+    let mut top = JsonObject::new();
+    top.field_bool("ok", ok)
+        .field_hash("commit", commit)
+        .field_opt_str("error", error)
+        .field_raw("attestations", &format!("[{}]", items.join(",")));
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", top.finish());
 }
 
 #[must_use]
@@ -64,6 +144,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let json = matches!(parsed.format, VerifyAttestFormat::Json);
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -102,9 +183,20 @@ pub fn run(args: &[String]) -> u8 {
     ) {
         return code;
     }
+    note_if_missing(&trust_path);
+    // Below this point `commit_hash` is fixed, so error returns can
+    // populate a `--format=json` payload; shadow `emit_err` with a
+    // wrapper that also prints the JSON envelope when requested.
+    let err = |msg: &str, code: u8| -> u8 {
+        if json {
+            emit_json(&commit_hash, false, Some(msg), &[]);
+        }
+        emit_err(msg, code)
+    };
+
     let registry = match load_trust_roots(&trust_path) {
         Ok(r) => r,
-        Err((msg, code)) => return emit_err(&msg, code),
+        Err((msg, code)) => return err(&msg, code),
     };
 
     // --- Algorithm filter. ------------------------------------------
@@ -112,7 +204,7 @@ pub fn run(args: &[String]) -> u8 {
         Some(s) => match s.parse::<Algorithm>() {
             Ok(a) => Some(a),
             Err(_) => {
-                return emit_err(&format!("unknown algorithm filter '{s}'"), exit::USAGE);
+                return err(&format!("unknown algorithm filter '{s}'"), exit::USAGE);
             }
         },
         None => None,
@@ -121,19 +213,24 @@ pub fn run(args: &[String]) -> u8 {
     // --- Enumerate envelopes. ---------------------------------------
     let envelopes = match store::list(&layout, &commit_hash) {
         Ok(v) => v,
-        Err(e) => return emit_err(&format!("list attestations: {e}"), exit::NOINPUT),
+        Err(e) => return err(&format!("list attestations: {e}"), exit::NOINPUT),
     };
     // All `verify-attest` report lines are human-readable prose; the
     // verdict is conveyed via the exit code (OK / DATAERR /
-    // GENERAL_ERROR). Route the entire report to stderr so stdout
-    // stays clean for a future `--format=json` output mode.
+    // GENERAL_ERROR). Route the entire report to stderr — unconditional,
+    // regardless of `--format=json` — while stdout carries the JSON
+    // envelope (see `emit_json`).
     let mut report = std::io::stderr().lock();
     if envelopes.is_empty() {
-        let _ = writeln!(
-            report,
+        let msg = format!(
             "no attestations for commit {}",
             hash_mod::to_hex(&commit_hash)
         );
+        let _ = writeln!(report, "{msg}");
+        drop(report);
+        if json {
+            emit_json(&commit_hash, false, Some(&msg), &[]);
+        }
         return exit::GENERAL_ERROR;
     }
 
@@ -145,12 +242,18 @@ pub fn run(args: &[String]) -> u8 {
     );
 
     let mut all_ok = true;
+    let mut atts: Vec<AttRecord> = Vec::with_capacity(envelopes.len());
     for path in &envelopes {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
                 let _ = writeln!(report, "  {}: read error: {e}", path.display());
                 all_ok = false;
+                atts.push(AttRecord {
+                    id: None,
+                    error: Some(format!("read error: {e}")),
+                    signatures: Vec::new(),
+                });
                 continue;
             }
         };
@@ -164,6 +267,11 @@ pub fn run(args: &[String]) -> u8 {
                     hash_mod::to_hex(&att_id)
                 );
                 all_ok = false;
+                atts.push(AttRecord {
+                    id: Some(att_id),
+                    error: Some(format!("malformed envelope: {e}")),
+                    signatures: Vec::new(),
+                });
                 continue;
             }
         };
@@ -176,6 +284,11 @@ pub fn run(args: &[String]) -> u8 {
                     hash_mod::to_hex(&att_id)
                 );
                 all_ok = false;
+                atts.push(AttRecord {
+                    id: Some(att_id),
+                    error: Some(format!("subject error: {e}")),
+                    signatures: Vec::new(),
+                });
                 continue;
             }
         };
@@ -188,6 +301,15 @@ pub fn run(args: &[String]) -> u8 {
                 hash_mod::to_hex(&commit_hash)
             );
             all_ok = false;
+            atts.push(AttRecord {
+                id: Some(att_id),
+                error: Some(format!(
+                    "subject mismatch: statement names {}, requested {}",
+                    hash_mod::to_hex(&subject_hash),
+                    hash_mod::to_hex(&commit_hash)
+                )),
+                signatures: Vec::new(),
+            });
             continue;
         }
         let result = match verify(&env, &registry) {
@@ -199,6 +321,11 @@ pub fn run(args: &[String]) -> u8 {
                     hash_mod::to_hex(&att_id)
                 );
                 all_ok = false;
+                atts.push(AttRecord {
+                    id: Some(att_id),
+                    error: Some(format!("malformed envelope: {e}")),
+                    signatures: Vec::new(),
+                });
                 continue;
             }
         };
@@ -209,15 +336,25 @@ pub fn run(args: &[String]) -> u8 {
             result.signatures.len()
         );
         let mut any_shown = false;
+        // The JSON record carries EVERY signature (unfiltered) so an
+        // agent parsing it never loses data to `--algorithm`; only the
+        // human stderr report is filtered.
+        let mut sig_records = Vec::with_capacity(result.signatures.len());
         for sig in &result.signatures {
             let alg = Algorithm::from_keyid(&sig.keyid);
+            let alg_str = alg.map_or_else(|| "unknown".to_owned(), |a| a.to_string());
+            sig_records.push(SigRecord {
+                keyid: sig.keyid.clone(),
+                algorithm: alg.map(|_| alg_str.clone()),
+                verified: sig.verified,
+                reason: (!sig.verified).then(|| format!("{:?}", sig.reason)),
+            });
             if let (Some(filter_alg), Some(sig_alg)) = (filter, alg)
                 && filter_alg != sig_alg
             {
                 continue;
             }
             any_shown = true;
-            let alg_str = alg.map_or_else(|| "unknown".to_owned(), |a| a.to_string());
             let verdict = if sig.verified {
                 "verified".to_owned()
             } else {
@@ -229,6 +366,11 @@ pub fn run(args: &[String]) -> u8 {
                 short_keyid(&sig.keyid)
             );
         }
+        atts.push(AttRecord {
+            id: Some(att_id),
+            error: None,
+            signatures: sig_records,
+        });
         if !any_shown && filter.is_some() {
             let _ = writeln!(report, "    (no signatures matched --algorithm filter)");
         }
@@ -237,67 +379,44 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
+    drop(report);
     if all_ok {
-        let _ = writeln!(report, "ok: all attestations verified");
+        if json {
+            emit_json(&commit_hash, true, None, &atts);
+        }
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "ok: all attestations verified");
+        }
         exit::OK
     } else {
-        let _ = writeln!(report, "bad: at least one attestation failed verification");
+        if json {
+            emit_json(
+                &commit_hash,
+                false,
+                Some("at least one attestation failed verification"),
+                &atts,
+            );
+        }
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "bad: at least one attestation failed verification");
+        }
         exit::DATAERR
     }
 }
 
-/// Resolve the user-scoped default trust-roots path:
-/// `$XDG_CONFIG_HOME/mkit/trust-roots.toml`.
-fn default_trust_roots_path() -> PathBuf {
-    crate::config::xdg_config_home().join("mkit/trust-roots.toml")
-}
-
-/// Refuse to verify against an in-repo trust-roots file unless the user
-/// passed `--trust-roots` explicitly. Without this gate, a hostile
-/// cloned repo could ship `<repo>/.mkit/attest-trust-roots.toml` listing
-/// attacker keys and `mkit verify-attest` would print "ok".
-fn warn_if_unsafe_trust_roots(
-    trust_path: &Path,
-    mkit_dir: &Path,
-    user_provided_flag: bool,
-) -> Result<(), u8> {
-    if user_provided_flag {
-        return Ok(());
-    }
-    if trust_path.starts_with(mkit_dir) {
-        return Err(emit_err(
-            &format!(
-                "refusing to use in-repo trust-roots at {} — pass `--trust-roots` \
-                 explicitly or move the file to {}",
-                trust_path.display(),
-                default_trust_roots_path().display()
-            ),
-            exit::CONFIG_ERROR,
-        ));
-    }
-    if !trust_path.exists() {
-        // Print a hint, but do NOT silently fall back to the in-repo
-        // path. Empty registry → no signatures will pass; the loop
-        // below prints the per-attestation failure.
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "note: trust-roots file not found at {} — no keys loaded",
-            trust_path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`.
-fn short_keyid(keyid: &str) -> String {
-    match keyid.split_once(':') {
-        Some((prefix, body)) if body.len() > 16 => {
-            format!("{prefix}:{}…", &body[..16])
-        }
-        _ => keyid.to_owned(),
-    }
-}
+// The trust-roots file format (`[[trust_root]]` TOML blocks), the
+// in-repo path-fencing policy, and the keyid<->pubkey cross-check all
+// live in `commands/trust_roots.rs` now — shared with `mkit trust
+// add/list/remove` and `mkit verify --trusted` so the three never grow
+// separate trust-file formats (issue #693). Pull the names this module
+// still uses directly into scope; the `mod tests` block below resolves
+// them via `use super::*`.
+use super::trust_roots::{
+    default_trust_roots_path, load_registry as load_trust_roots, note_if_missing, short_keyid,
+    warn_if_unsafe_trust_roots,
+};
 
 fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (String, u8)> {
     if let Some(hex) = flag {
@@ -311,191 +430,15 @@ fn resolve_commit(layout: &RepoLayout, flag: Option<&str>) -> Result<Hash, (Stri
     }
 }
 
-/// Hand-rolled TOML-ish parser for the trust-roots file. Recognised
-/// grammar (a strict subset of TOML):
-///
-/// ```toml
-/// [[trust_root]]
-/// keyid = "..."
-/// kind  = "ed25519"
-/// pubkey_hex = "..."
-/// ```
-///
-/// Lines outside a `[[trust_root]]` block, comments (`#`), and blank
-/// lines are ignored. Missing-file case returns an empty registry —
-/// the caller's signatures will all report `UnknownKeyid`, which is
-/// the documented "no trust-roots configured" UX.
-fn load_trust_roots(path: &Path) -> Result<Registry, (String, u8)> {
-    let mut reg = Registry::new();
-    let text = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(reg);
-        }
-        Err(e) => {
-            return Err((format!("read {}: {e}", path.display()), exit::NOINPUT));
-        }
-    };
-
-    let mut in_block = false;
-    let mut keyid = String::new();
-    let mut kind = String::new();
-    let mut pubkey_hex = String::new();
-
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line == "[[trust_root]]" {
-            if in_block {
-                flush_trust_root(&mut reg, &keyid, &kind, &pubkey_hex);
-            }
-            in_block = true;
-            keyid.clear();
-            kind.clear();
-            pubkey_hex.clear();
-            continue;
-        }
-        if !in_block {
-            // Silently ignore top-level noise — keeps the parser tolerant.
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let key = k.trim();
-        let val = v.trim().trim_matches('"').to_owned();
-        match key {
-            "keyid" => keyid = val,
-            // `algorithm` is an alias for `kind` to match the wording
-            // in `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. Either field
-            // name parses to the same arm.
-            "kind" | "algorithm" => kind = val,
-            "pubkey_hex" => pubkey_hex = val,
-            _ => {} // tolerate unknown keys
-        }
-    }
-    if in_block {
-        flush_trust_root(&mut reg, &keyid, &kind, &pubkey_hex);
-    }
-    Ok(reg)
-}
-
-fn flush_trust_root(reg: &mut Registry, keyid: &str, kind: &str, pubkey_hex: &str) {
-    if keyid.is_empty() || pubkey_hex.is_empty() {
-        return;
-    }
-    let Some(pk_bytes) = hex_decode(pubkey_hex) else {
-        return;
-    };
-    // #223: cross-check the keyid against the declared pubkey so a
-    // trust-roots file that lists keyid `secp256k1:<A>` next to
-    // `pubkey_hex = <B>` (a copy-paste mix-up that would silently trust
-    // the wrong key) is rejected rather than loaded. Skip the entry on a
-    // mismatch — `verify-attest` then reports the keyid as
-    // `UnknownKeyid` instead of verifying against the wrong pubkey.
-    if !keyid_matches_pubkey(keyid, &pk_bytes) {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(
-            stderr,
-            "note: trust-root '{}' dropped — keyid does not match its pubkey_hex",
-            short_keyid(keyid)
-        );
-        return;
-    }
-    match kind {
-        "ed25519" if pk_bytes.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&pk_bytes);
-            reg.add(keyid.to_owned(), TrustRoot::Ed25519PubKey(arr));
-        }
-        "p256-sec1" | "p256" => {
-            // mkit-attest default features enable algo-p256, so the
-            // variant is always present in the public API.
-            reg.add(keyid.to_owned(), TrustRoot::P256PubKeySec1(pk_bytes));
-        }
-        "secp256k1" | "secp256k1-sec1" => {
-            reg.add(keyid.to_owned(), TrustRoot::Secp256k1PubKeySec1(pk_bytes));
-        }
-        // BLS12-381 threshold cohort public key — see
-        // `docs/specs/SPEC-RELEASE-THRESHOLD.md` §6. The `bls12381-thr`
-        // prefix matches the canonical algorithm tag returned by
-        // `mkit_attest::Algorithm::prefix`. Pinned to the 96-byte
-        // MinSig G2 compressed encoding; anything else is dropped.
-        #[cfg(feature = "bls-threshold")]
-        "bls12381-thr" if pk_bytes.len() == mkit_attest::BLS_THRESHOLD_PUBLIC_KEY_SIZE => {
-            reg.add(
-                keyid.to_owned(),
-                TrustRoot::Bls12381ThresholdPubKey(pk_bytes),
-            );
-        }
-        _ => {
-            // Unknown kind — skip.
-        }
-    }
-}
-
-/// Cross-check (#223) that the keyid is consistent with the declared
-/// public key bytes. The canonical keyid shape is `<prefix>:<body>`:
-///
-/// - `blake3:<hex>` — body is `blake3(pubkey)`; verify the digest.
-/// - `ed25519` / `secp256k1` / `p256` / `bls12381-thr:<hex>` — body is
-///   the raw lowercase-hex pubkey; verify it equals `pubkey_hex`.
-/// - Anything else (unknown prefix, no `:` separator) is left to the
-///   downstream `kind`-based loader and not cross-checked here — return
-///   `true` so forward-compatible keyids are not dropped.
-fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
-    let Some((prefix, body)) = keyid.split_once(':') else {
-        return true;
-    };
-    let body = body.to_ascii_lowercase();
-    match prefix {
-        "blake3" => {
-            let digest = mkit_core::hash::hash(pubkey);
-            body == mkit_core::hash::to_hex(&digest)
-        }
-        "ed25519" | "secp256k1" | "p256" | "bls12381-thr" => {
-            body == mkit_core::hash::to_hex_bytes(pubkey)
-        }
-        // Unknown / opaque (e.g. `sigstore:`) keyids carry no embedded
-        // pubkey to compare against.
-        _ => true,
-    }
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let hi = nibble(b[i])?;
-        let lo = nibble(b[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Some(out)
-}
-
-fn nibble(c: u8) -> Option<u8> {
-    Some(match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => 10 + c - b'a',
-        b'A'..=b'F' => 10 + c - b'A',
-        _ => return None,
-    })
-}
-
 use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::trust_roots::keyid_matches_pubkey;
     use clap::Parser;
     use std::fs;
+    use std::path::Path;
 
     /// Test-only adapter: drive the clap-derive parser with just the
     /// trailing args.

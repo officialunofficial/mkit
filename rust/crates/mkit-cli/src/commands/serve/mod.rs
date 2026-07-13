@@ -3,7 +3,7 @@
 //!
 //! The backing repo is accessed via `FileTransport`. Frames are
 //! length-prefixed protobuf [`SshFrame`] messages defined in
-//! `rust/crates/mkit-rpc/proto/ssh.proto` (buffa is the Rust
+//! `rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto` (buffa is the Rust
 //! runtime; the wire is protobuf 3 / edition 2023).
 
 use std::io::{Read, Write};
@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use clap::Parser;
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError};
+use mkit_rpc::mkit::common::v1::{RefEntry, RefExpectation};
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPackHeader, HelloResponse, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, RefExpectation, SshFrame, UploadPack, UploadPackResponse,
-    list_refs_response::RefEntry, ssh_frame,
+    ReadRefResponse, SshFrame, UploadPack, UploadPackResponse, ssh_frame,
 };
 use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
 use mkit_rpc::{FrameError, read_frame, write_frame};
@@ -96,6 +96,36 @@ struct ServeOpts {
         default_value_t = 60
     )]
     enc_handshake_timeout_secs: u64,
+
+    /// Host `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT)
+    /// over axum/HTTP on `addr` (e.g. `0.0.0.0:8443` or `127.0.0.1:7777`),
+    /// instead of speaking the SSH-frame protocol on stdin/stdout. Requires
+    /// the `http-transport` cargo feature. This is the self-hosted
+    /// `mkit+https://` remote (issue #700) — put a reverse proxy in front
+    /// for TLS in production; this listener speaks plaintext HTTP.
+    ///
+    /// FAIL-CLOSED, mirroring `--listen-enc`: refuses to bind unless
+    /// either a bearer token is configured (`--http-token` or the
+    /// `MKIT_API_TOKEN` env var — the same variable
+    /// `mkit-transport-http`'s client already sends, SPEC-TRANSPORT §5.2)
+    /// or `--unsafe-allow-any-http-peer` is passed.
+    #[arg(long = "http", value_name = "ADDR")]
+    http: Option<String>,
+
+    /// Bearer token required on every RPC's `Authorization: Bearer <token>`
+    /// header when `--http` is used. Falls back to the `MKIT_API_TOKEN`
+    /// environment variable when omitted. CLI-only/env-only — never read
+    /// from repo-local `.mkit/config`, matching the encrypted listener's
+    /// peer-authorization sourcing.
+    #[arg(long = "http-token", value_name = "TOKEN")]
+    http_token: Option<String>,
+
+    /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
+    /// check (fail-open). Prints a loud warning. Intended only for local
+    /// development — NEVER for production, since every RPC (including ref
+    /// writes and pack uploads) is unauthenticated.
+    #[arg(long = "unsafe-allow-any-http-peer", default_value_t = false)]
+    unsafe_allow_any_http_peer: bool,
 }
 
 // -- Per-connection resource caps -------------------------------------------
@@ -124,6 +154,10 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if let Some(addr) = opts.listen_enc.as_deref() {
+        if opts.http.is_some() {
+            eprintln!("mkit serve: --listen-enc and --http are mutually exclusive");
+            return exit::USAGE;
+        }
         return run_listen_enc(
             addr,
             repo_root,
@@ -132,6 +166,15 @@ pub fn run(args: &[String]) -> u8 {
             opts.unsafe_allow_any_enc_peer,
             opts.enc_idle_timeout_secs,
             opts.enc_handshake_timeout_secs,
+        );
+    }
+
+    if let Some(addr) = opts.http.as_deref() {
+        return http::run_listen_http(
+            addr,
+            repo_root,
+            opts.http_token.as_deref(),
+            opts.unsafe_allow_any_http_peer,
         );
     }
 
@@ -145,6 +188,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 mod enc;
+mod http;
 #[cfg(feature = "sparse-checkout")]
 mod sparse;
 
@@ -185,6 +229,19 @@ pub(crate) fn serve_loop(tx: &FileTransport, r: &mut impl Read, w: &mut impl Wri
     if !handshake(r, w) {
         return exit::PROTOCOL_ERROR;
     }
+
+    // Test-only fault injection for the mkit#703 SSH retry regression
+    // test (`tests/ssh_retry_e2e.rs`): return immediately after a
+    // successful `Hello`/`HelloResponse`, before answering any verb,
+    // so the process exits and the child pipe closes — simulating a
+    // mid-session connection drop that the client's `SshTransport`
+    // retry/reconnect path (SPEC-TRANSPORT §7) must recover from. A
+    // no-op — and never read — unless the hermetic harness explicitly
+    // sets this env var; production `mkit serve` never sets it.
+    if std::env::var_os("MKIT_SERVE_TEST_DIE_AFTER_HELLO").is_some() {
+        return exit::OK;
+    }
+
     let mut frame_count: u32 = 0;
     let mut byte_count: u64 = 0;
 

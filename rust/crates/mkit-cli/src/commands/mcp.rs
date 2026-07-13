@@ -343,13 +343,28 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "mkit_verify",
-        description: "Verify the Ed25519 signature on a commit, remix, or signed tag.",
+        description: "Verify the Ed25519 signature on a commit, remix, or signed tag. Pass \
+                      `trusted` (or `trust_roots`) to also cross-check the signer against the \
+                      trust-roots registry `mkit_trust_add`/`mkit trust list` manage, failing \
+                      even on a cryptographically valid signature from an unlisted key.",
         hints: (true, false, true),
         schema: || {
             schema(
                 vec![
                     repo_prop(),
                     ("revision", prop("Revision to verify (e.g. HEAD)")),
+                    (
+                        "trusted",
+                        json!({ "type": "boolean", "description": "Cross-check the signer against the default trust-roots registry" }),
+                    ),
+                    (
+                        "trust_roots",
+                        prop(
+                            "Path to a trust-roots TOML file OUTSIDE the repo (default: \
+                             $XDG_CONFIG_HOME/mkit/trust-roots.toml). Implies trusted=true. An \
+                             in-repo path is rejected.",
+                        ),
+                    ),
                 ],
                 &["repo_path", "revision"],
             )
@@ -606,9 +621,9 @@ fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOut
 /// * `predicate_file` (attest) is *repo data* — it must resolve INSIDE
 ///   the repo, so a prompt-injected agent can't slurp an outside file
 ///   into a signed attestation.
-/// * `trust_roots` (verify-attest) is *external authority* — it must
-///   resolve OUTSIDE the repo, so a hostile clone's planted
-///   `.mkit/attest-trust-roots.toml` can never be selected via the MCP
+/// * `trust_roots` (verify-attest, verify) is *external authority* — it
+///   must resolve OUTSIDE the repo, so a hostile clone's planted
+///   `.mkit/trust-roots.toml` can never be selected via the MCP
 ///   (the CLI's "explicit --trust-roots = user intent" gate assumes a
 ///   user, but here the value can come from repo-controlled prompt text;
 ///   see docs/THREAT-MODEL.md §"Trust-roots scope").
@@ -619,7 +634,7 @@ fn confine_path_args(name: &str, args: &Value, repo: &Path) -> Result<(), String
                 confine_path(repo, &f, Containment::Inside, "predicate_file")?;
             }
         }
-        "mkit_verify_attest" => {
+        "mkit_verify_attest" | "mkit_verify" => {
             if let Some(f) = opt_str(args, "trust_roots") {
                 confine_path(repo, &f, Containment::Outside, "trust_roots")?;
             }
@@ -781,6 +796,13 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             let rev = req_str(args, "revision")?;
             no_dash(&rev, "revision")?;
             out.extend(["verify".into(), rev]);
+            if args.get("trusted").and_then(Value::as_bool) == Some(true) {
+                out.push("--trusted".into());
+            }
+            if let Some(roots) = opt_str(args, "trust_roots") {
+                no_dash(&roots, "trust_roots")?;
+                out.extend(["--trust-roots".into(), roots]);
+            }
         }
         "mkit_verify_attest" => {
             out.push("verify-attest".into());

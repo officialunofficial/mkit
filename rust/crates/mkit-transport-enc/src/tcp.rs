@@ -331,11 +331,44 @@ pub fn connect_tcp_with_executor(
     signing_key: PrivateKey,
     executor: TokioExecutor,
 ) -> Result<EncTransport<TokioStream, TokioSink, TokioExecutor>, EncInitError> {
+    let session = dial_once(&executor, host, port, server_pubkey, signing_key.clone())?;
+
+    // Wire a redial hook so a `ConnectionFailed` mid-session (SPEC-TRANSPORT
+    // §7) can be retried against a freshly-dialed connection instead of
+    // failing on the first attempt — see `EncTransport`'s retry docs.
+    let reconnect_executor = executor.clone();
+    let reconnect_host = host.to_string();
+    let reconnect_pubkey = *server_pubkey;
+    let reconnect: crate::ReconnectFn<TokioStream, TokioSink> = std::sync::Arc::new(move || {
+        dial_once(
+            &reconnect_executor,
+            &reconnect_host,
+            port,
+            &reconnect_pubkey,
+            signing_key.clone(),
+        )
+    });
+
+    EncTransport::from_session_with_reconnect(session, executor, host, port, reconnect)
+}
+
+/// Dial the TCP socket and drive the encrypted-stream handshake to a
+/// raw, ready-to-use [`EncSession`] — no application `Hello` yet.
+/// Shared by the initial [`connect_tcp_with_executor`] dial and the
+/// redial closure it wires into [`EncTransport`] for retry, so the two
+/// paths cannot drift.
+fn dial_once(
+    executor: &TokioExecutor,
+    host: &str,
+    port: u16,
+    server_pubkey: &[u8; 32],
+    signing_key: PrivateKey,
+) -> Result<EncSession<TokioStream, TokioSink>, EncInitError> {
     let pool = acquire_network_buffer_pool();
     let ctx = TokioContext::new(pool);
     let host_owned = host.to_string();
     let server_pk = *server_pubkey;
-    let session = executor.handle().block_on(async move {
+    executor.handle().block_on(async move {
         let addr = resolve(&host_owned, port).await?;
         let tcp = TcpStream::connect(addr)
             .await
@@ -346,8 +379,7 @@ pub fn connect_tcp_with_executor(
         let peer = decode_peer_pubkey(&server_pk)?;
         let (sender, receiver) = dial(ctx, cfg, peer, stream, sink).await?;
         Ok::<_, EncInitError>(EncSession::new(sender, receiver))
-    })?;
-    EncTransport::from_session(session, executor, host, port)
+    })
 }
 
 /// Test-only: dial the TCP + encrypted-stream handshake with a
@@ -899,6 +931,133 @@ mod tests {
             result.is_err(),
             "a dialer using the wrong handshake namespace must never complete the \
              handshake against a server using the real one, got {result:?}"
+        );
+    }
+
+    /// SPEC-TRANSPORT §7 regression (mkit#703): the server accepts the
+    /// handshake + app `Hello` on the FIRST connection, then silently
+    /// drops the socket instead of answering `ListRefs` — a mid-session
+    /// `ConnectionFailed`. `EncTransport::list_refs` must retry against
+    /// a freshly redialed connection (the second accepted connection,
+    /// which answers normally) rather than failing outright. Before
+    /// mkit#703 this transport had no retry path at all: `stream_err`
+    /// collapsed every cipher failure to `ConnectionFailed` and nothing
+    /// ever attempted a second connection.
+    #[test]
+    #[ignore = "spawns real TCP and waits out the production backoff ladder; run via the serial --ignored CI lane"]
+    fn list_refs_retries_past_dropped_connection_via_reconnect() {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::Signer as _;
+        use mkit_core::protocol::Transport as _;
+        use mkit_rpc::mkit::common::v1::RefEntry;
+        use mkit_rpc::mkit::rpc::v1::ProtocolVersion;
+        use mkit_rpc::mkit::rpc::v1::ssh::{HelloResponse, ListRefsResponse, SshFrame, ssh_frame};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::thread;
+
+        let exec = TokioExecutor::new().expect("runtime");
+        let server_key = PrivateKey::from_seed(31415);
+        let server_pubkey = {
+            let encoded = server_key.public_key().encode();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(encoded.as_ref());
+            out
+        };
+        let client_key = PrivateKey::from_seed(27182);
+
+        let (addr_tx, addr_rx) = mpsc::channel();
+        let exec_for_server = exec.clone();
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let connection_count_for_server = connection_count.clone();
+        let _server = thread::spawn(move || {
+            let serve_fn = move |sess: EncSession<TokioStream, TokioSink>, _peer: PublicKey| {
+                let (mut sender, mut receiver) = sess.into_parts();
+                let attempt = connection_count_for_server.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    // App Hello — every connection gets a real
+                    // HelloResponse so the client's app-hello succeeds
+                    // whether this is the initial dial or the retry's
+                    // redial.
+                    let Ok(hello) = crate::recv_frame(&mut receiver).await else {
+                        return;
+                    };
+                    if !matches!(hello.body, Some(ssh_frame::Body::Hello(_))) {
+                        return;
+                    }
+                    let reply = SshFrame {
+                        body: Some(ssh_frame::Body::HelloResponse(Box::new(
+                            HelloResponse::default().with_proto(ProtocolVersion::ProtocolVersion1),
+                        ))),
+                        ..Default::default()
+                    };
+                    if crate::send_frame(&mut sender, &reply).await.is_err() {
+                        return;
+                    }
+
+                    let Ok(req) = crate::recv_frame(&mut receiver).await else {
+                        return;
+                    };
+                    if !matches!(req.body, Some(ssh_frame::Body::ListRefs(_))) {
+                        return;
+                    }
+
+                    if attempt == 0 {
+                        // First connection: drop without responding to
+                        // ListRefs — the client must observe this as
+                        // `ConnectionFailed` and retry via reconnect.
+                        return;
+                    }
+
+                    let resp = ListRefsResponse {
+                        refs: vec![
+                            RefEntry::default()
+                                .with_name("refs/heads/main")
+                                .with_object_id(vec![0x11u8; 32]),
+                        ],
+                        ..Default::default()
+                    };
+                    let resp_frame = SshFrame {
+                        body: Some(ssh_frame::Body::ListRefsResponse(Box::new(resp))),
+                        ..Default::default()
+                    };
+                    let _ = crate::send_frame(&mut sender, &resp_frame).await;
+                }
+            };
+            let _ = serve_tcp_with_addr_and_policy(
+                "127.0.0.1:0",
+                server_key,
+                PeerPolicy::AllowAny,
+                exec_for_server,
+                move |addr| {
+                    let _ = addr_tx.send(addr);
+                },
+                serve_fn,
+            );
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("listener address");
+
+        let transport = connect_tcp_with_executor(
+            &addr.ip().to_string(),
+            addr.port(),
+            &server_pubkey,
+            client_key,
+            exec,
+        )
+        .expect("initial connect + hello succeeds");
+
+        let refs = transport
+            .list_refs("")
+            .expect("list_refs must succeed after retrying past the dropped first connection");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "refs/heads/main");
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            2,
+            "must have redialed exactly once"
         );
     }
 

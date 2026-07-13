@@ -76,7 +76,7 @@ fi
 # (Hello + SignRequest). We deliberately do NOT bring in `protoc` or
 # any Python protobuf runtime — keeps the script dependency-free and
 # tests the wire bytes exactly. The schema is in
-# `rust/crates/mkit-rpc/proto/{common,signer}.proto`.
+# `rust/crates/mkit-rpc/proto/mkit/rpc/v1/{common.proto,signer/signer.proto}`.
 
 PAE='DSSEv1 28 application/vnd.in-toto+json 2 {}'
 printf '%s' "$PAE" > "$TMPDIR_LOCAL/pae.bin"

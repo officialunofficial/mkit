@@ -108,6 +108,7 @@ changelog_include = [
   "mkit-cli",
   "mkit-wasm",
   "mkit-transport-enc",
+  "mkit-transport-connect",
   "mkit-git-bridge",
 ]
 
@@ -153,6 +154,9 @@ version_group = "mkit"
 publish = false
 [[package]]
 name = "mkit-transport-enc"
+version_group = "mkit"
+[[package]]
+name = "mkit-transport-connect"
 version_group = "mkit"
 
 # Changelog grouping, aligned to the Conventional Commit types the

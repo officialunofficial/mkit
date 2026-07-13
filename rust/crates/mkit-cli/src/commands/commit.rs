@@ -21,9 +21,10 @@
 //! reasoning by analogy from git. Post-#102, the staging area is
 //! load-bearing: only paths in the index land in the commit's tree.
 
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mkit_core::index;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::{Commit, Identity, IdentityKind, Object, Tag};
@@ -39,7 +40,13 @@ use crate::clap_shim;
 use crate::config::Config;
 use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
 use crate::exit;
-use crate::format;
+use crate::format::{self, JsonObject};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CommitFormat {
+    Default,
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -103,6 +110,12 @@ struct CommitOptions {
     /// default; accepted for compatibility.
     #[arg(long = "no-edit")]
     no_edit: bool,
+    /// Emit a machine-readable JSON result object to stdout on success:
+    /// `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
+    /// "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
+    /// "is_merge":<bool>,"is_root":<bool>}`.
+    #[arg(long, value_enum, default_value = "default")]
+    format: CommitFormat,
 }
 
 #[must_use]
@@ -118,6 +131,7 @@ pub fn run(args: &[String]) -> u8 {
     // Accepted-for-compatibility no-ops: mkit always signs (`-S`) and has
     // no hooks (`--no-verify`); `--no-edit` matches mkit's default amend.
     let _ = (&opts.gpg_sign, opts.no_verify, opts.no_edit);
+    let json = matches!(opts.format, CommitFormat::Json);
 
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -426,10 +440,12 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
     // Capture parent shape before `parents` is moved into the commit, for
-    // the git-shaped summary (root = no parents, merge = >=2 parents).
+    // the git-shaped summary (root = no parents, merge = >=2 parents) and
+    // the `--format=json` payload.
     let is_root = parents.is_empty();
     let is_merge = parents.len() >= 2;
     let first_parent = parents.first().copied();
+    let parents_for_json = parents.clone();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -475,7 +491,34 @@ pub fn run(args: &[String]) -> u8 {
             Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
         }
     }
-    if let Err((m, c)) = advance_head(&layout, &commit_hash) {
+    // The tip this commit was actually built on, enforced as advance_head's
+    // CAS precondition (issue #658, Fix B) — which value counts as "the
+    // tip" depends on the mode:
+    //
+    // - `--amend`: NOT `parents` (that's the superseded commit's OWN
+    //   parents, one generation further back) — it's `pre_lock_head`,
+    //   already re-validated fresh against HEAD above (the staleness
+    //   check a few dozen lines up), i.e. the commit actually being
+    //   replaced.
+    // - merge-conclusion: NOT `first_parent` (`state.orig_head`) — that's
+    //   deliberately decoupled from live HEAD (see the parent-selection
+    //   comment above), so using it here would let this CAS silently pass
+    //   even when HEAD has moved. Read HEAD fresh, right here, at the
+    //   actual moment of the ref advance.
+    // - plain commit: `first_parent`, which IS a fresh HEAD read (done
+    //   above, inside this same lock hold) — nothing has mutated HEAD
+    //   between that read and here, so no re-read is needed.
+    let expected_tip = if amend_target.is_some() {
+        pre_lock_head
+    } else if merge_state.is_some() {
+        match refs::resolve_head(&layout) {
+            Ok(h) => h,
+            Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
+        }
+    } else {
+        first_parent
+    };
+    if let Err((m, c)) = advance_head(&layout, &commit_hash, expected_tip) {
         return emit_err(&m, c);
     }
     if let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
@@ -516,6 +559,27 @@ pub fn run(args: &[String]) -> u8 {
             old_tree,
             Some(tree_hash),
         );
+    }
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_hash("hash", &commit_hash)
+            .field_opt_str("branch", branch_name.as_deref())
+            .field_raw(
+                "parents",
+                &format::json_string_array(
+                    &parents_for_json
+                        .iter()
+                        .map(format::hex_hash)
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .field_hash("tree", &tree_hash)
+            .field_str("subject", msg.lines().next().unwrap_or(""))
+            .field_bool("is_merge", is_merge)
+            .field_bool("is_root", is_root);
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{}", obj.finish());
     }
     exit::OK
 }
@@ -790,21 +854,182 @@ fn resolve_amend_target(layout: &RepoLayout, store: &ObjectStore) -> Result<Comm
 /// journaled MMR under the repo's `refs-history.lock`. Detached HEAD
 /// advances bypass the journal: per-branch history is keyed on a
 /// branch name and a detached HEAD has none.
+///
+/// `expected` is the tip this commit was actually built on top of —
+/// `Some(parent)` for a normal advance, `None` for a root commit or an
+/// unborn branch's first commit — and is enforced as a CAS precondition
+/// (issue #658, Fix B): `Some(t)` becomes `RefWriteCondition::Match(t)`,
+/// `None` becomes `RefWriteCondition::Missing`. Before this, the
+/// branch-ref advance used `RefWriteCondition::Any`, an unconditional
+/// clobber: a concurrent writer (e.g. `branch -m` publishing a stale
+/// pre-commit tip under a new name, or another `commit`) could land
+/// between this commit composing its parent and this call executing,
+/// and `Any` would still "succeed" — silently discarding whichever
+/// commit didn't win, with no error to either side. See `run`'s
+/// call site for how `expected` is derived per commit mode (plain,
+/// `--amend`, merge-conclusion).
 fn advance_head(
     layout: &RepoLayout,
     commit_hash: &mkit_core::hash::Hash,
+    expected: Option<mkit_core::hash::Hash>,
 ) -> Result<(), (String, u8)> {
     let head = refs::read_head(layout).map_err(|e| (format!("read HEAD: {e}"), exit::DATAERR))?;
     match head {
-        Head::Branch(name) => super::write_ref_recording_history(
-            layout,
-            &name,
-            refs::RefWriteCondition::Any,
-            commit_hash,
-        )
-        .map_err(|e| (format!("write ref: {e}"), exit::CANTCREAT)),
+        Head::Branch(name) => {
+            let condition = match expected {
+                Some(h) => refs::RefWriteCondition::Match(h),
+                None => refs::RefWriteCondition::Missing,
+            };
+            super::write_ref_recording_history(layout, &name, condition, commit_hash).map_err(|e| {
+                match e {
+                    refs::RefError::Conflict(_) => (
+                        format!(
+                            "commit aborted: branch '{name}' moved underneath this commit \
+                             (a concurrent commit landed) — the commit object {} is durable \
+                             but currently unreferenced (GC-recoverable), nothing is corrupted; \
+                             re-run `mkit commit`",
+                            format::hex_hash(commit_hash)
+                        ),
+                        exit::TEMPFAIL,
+                    ),
+                    other => (format!("write ref: {other}"), exit::CANTCREAT),
+                }
+            })
+        }
         Head::Detached(_) => refs::write_head_detached(layout, commit_hash)
             .map_err(|e| (format!("update HEAD: {e}"), exit::CANTCREAT)),
+    }
+}
+
+/// Issue #658, Fix B — direct, deterministic tests of `advance_head`'s
+/// CAS enforcement. These exercise the mechanism itself (does it
+/// translate `expected` into the right [`refs::RefWriteCondition`], and
+/// does a mismatch surface as `TEMPFAIL` rather than a silent clobber)
+/// without depending on timing to reproduce a live cross-process race —
+/// `branch_rename_commit_race.rs` (a `mkit-cli` integration test) covers
+/// the genuine racing scenario end-to-end.
+#[cfg(test)]
+mod advance_head_tests {
+    use super::*;
+    use mkit_core::hash::hash;
+    use mkit_core::layout::RepoLayout;
+    use tempfile::TempDir;
+
+    fn fresh_repo() -> (TempDir, RepoLayout) {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        // On `--features history-mmr` builds, `advance_head` routes
+        // through `write_ref_recording_history`, which opens the object
+        // store (for the empty-journal backfill's `parent_of` walker)
+        // even though these tests never actually need a commit object
+        // read. `ObjectStore::init` (which also creates the common dir
+        // — it errors if the dir already exists) must run BEFORE
+        // `refs::init` for exactly that reason.
+        mkit_core::store::ObjectStore::init(&layout).unwrap();
+        refs::init(&layout).unwrap();
+        (dir, layout)
+    }
+
+    /// The core Fix B regression: if the branch moved to a value other
+    /// than `expected` since the caller captured it (a concurrent
+    /// writer landed in the window between `run`'s parent read and this
+    /// call), the advance must refuse — `TEMPFAIL`, matching the
+    /// existing amend-staleness error's tone — and the concurrently
+    /// landed value must survive completely untouched.
+    #[test]
+    fn advance_head_conflicts_when_branch_moved_since_expected_was_captured() {
+        let (_dir, layout) = fresh_repo();
+        let t0 = hash(b"t0");
+        // Seeded via the same `write_ref_recording_history` helper
+        // `advance_head` itself uses (not a raw `refs::write_ref`): on
+        // `--features history-mmr` builds a bare ref write with no
+        // journal entry makes the NEXT history-aware write try to
+        // backfill from `t0` as a real commit object, which it isn't
+        // here. `Missing` establishes a proper from-empty journal
+        // instead, matching how a real first commit would seed it.
+        super::super::write_ref_recording_history(
+            &layout,
+            "main",
+            refs::RefWriteCondition::Missing,
+            &t0,
+        )
+        .unwrap();
+
+        // A concurrent writer (e.g. another commit, or `update-ref`)
+        // advances "main" past what this commit's `expected` snapshot
+        // (`t0`) describes.
+        let moved = hash(b"moved-concurrently");
+        super::super::write_ref_recording_history(
+            &layout,
+            "main",
+            refs::RefWriteCondition::Match(t0),
+            &moved,
+        )
+        .unwrap();
+
+        let new_commit = hash(b"new-commit");
+        let (msg, code) = advance_head(&layout, &new_commit, Some(t0)).unwrap_err();
+        assert_eq!(code, exit::TEMPFAIL);
+        assert!(
+            msg.contains("moved") && msg.contains("commit aborted"),
+            "expected a clear conflict message, got: {msg}"
+        );
+        assert_eq!(
+            refs::read_ref(&layout, "main").unwrap(),
+            Some(moved),
+            "the concurrently-landed value must survive a refused advance untouched"
+        );
+    }
+
+    /// Normal case: `expected` matches the ref's current value, so the
+    /// `Match` CAS succeeds and the branch advances.
+    #[test]
+    fn advance_head_succeeds_when_expected_matches_current_value() {
+        let (_dir, layout) = fresh_repo();
+        let t0 = hash(b"t0");
+        super::super::write_ref_recording_history(
+            &layout,
+            "main",
+            refs::RefWriteCondition::Missing,
+            &t0,
+        )
+        .unwrap();
+
+        let c1 = hash(b"c1");
+        advance_head(&layout, &c1, Some(t0)).unwrap();
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c1));
+    }
+
+    /// Root commit / unborn-branch case: `expected = None` becomes
+    /// `RefWriteCondition::Missing`, which succeeds when the branch has
+    /// no ref yet.
+    #[test]
+    fn advance_head_missing_condition_succeeds_for_a_fresh_branch() {
+        let (_dir, layout) = fresh_repo();
+        let c1 = hash(b"root-commit");
+        advance_head(&layout, &c1, None).unwrap();
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c1));
+    }
+
+    /// If a concurrent writer raced to create the branch first (e.g.
+    /// another root commit landed), `Missing` must refuse rather than
+    /// silently overwrite it.
+    #[test]
+    fn advance_head_missing_condition_conflicts_when_branch_already_exists() {
+        let (_dir, layout) = fresh_repo();
+        let raced_in = hash(b"raced-in-first");
+        super::super::write_ref_recording_history(
+            &layout,
+            "main",
+            refs::RefWriteCondition::Missing,
+            &raced_in,
+        )
+        .unwrap();
+
+        let c1 = hash(b"root-commit");
+        let (_, code) = advance_head(&layout, &c1, None).unwrap_err();
+        assert_eq!(code, exit::TEMPFAIL);
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(raced_in));
     }
 }
 

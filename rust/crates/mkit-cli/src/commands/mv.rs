@@ -535,12 +535,12 @@ fn execute_move(m: &PlannedMove, force: bool) -> Result<(), u8> {
 fn apply_to_index(idx: &mut index::Index, m: &PlannedMove) {
     idx.entries[m.src_idx].status = EntryStatus::Removed;
     idx.entries[m.src_idx].object_hash = ZERO;
-    match idx.entries.iter().position(|e| e.path == m.target_rel) {
+    match idx.find_entry(&m.target_rel) {
         Some(j) => {
             idx.entries[j].status = m.status;
             idx.entries[j].object_hash = m.hash;
         }
-        None => idx.entries.push(IndexEntry {
+        None => idx.upsert_entry(IndexEntry {
             path: m.target_rel.clone(),
             status: m.status,
             object_hash: m.hash,
@@ -763,19 +763,18 @@ fn execute_dir_move(m: &PlannedDirMove) -> Result<(), u8> {
 fn apply_dir_to_index(idx: &mut index::Index, m: &PlannedDirMove) {
     for f in &m.files {
         if let Some(i) = idx
-            .entries
-            .iter()
-            .position(|e| e.path == f.src_rel && e.status != EntryStatus::Removed)
+            .find_entry(&f.src_rel)
+            .filter(|&i| idx.entries[i].status != EntryStatus::Removed)
         {
             idx.entries[i].status = EntryStatus::Removed;
             idx.entries[i].object_hash = ZERO;
         }
-        match idx.entries.iter().position(|e| e.path == f.target_rel) {
+        match idx.find_entry(&f.target_rel) {
             Some(j) => {
                 idx.entries[j].status = f.status;
                 idx.entries[j].object_hash = f.hash;
             }
-            None => idx.entries.push(IndexEntry {
+            None => idx.upsert_entry(IndexEntry {
                 path: f.target_rel.clone(),
                 status: f.status,
                 object_hash: f.hash,

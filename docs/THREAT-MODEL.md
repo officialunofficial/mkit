@@ -83,6 +83,19 @@ mkit defends:
   `.mkit/config` cannot select which key file is read, which binary
   is spawned as an external signer, which keystore backend/key ref is
   used, or what argv an external signer gets.
+- Unsigned/forged history on `clone`/`pull`/`fetch`. Every
+  commit/remix/tag a fetch newly introduces is run through
+  `mkit_core::sign::{verify_commit,verify_remix,verify_tag}` — the same
+  check `mkit verify <rev>` runs manually — before the remote-tracking
+  ref is published; a structurally invalid or missing signature aborts
+  the fetch and leaves local state untouched (issue #692). This is a
+  default, not a guarantee against every key an attacker could produce:
+  it proves the signature is well-formed over the object's own bytes,
+  not that the signing key is one the user trusts (no trust-root /
+  authorized-signer binding yet — separate follow-up work). Opt-out is
+  explicit and user-scoped only (`--no-verify-signatures` / the
+  user-scoped `pull.require_signed = false` config, never settable from
+  a cloned repo's own `.mkit/config` — see §4).
 
 mkit does NOT defend:
 
@@ -268,6 +281,7 @@ ignored.
 | `ssh.user_known_hosts_file`         | **User**  | Selects which file is the source of trust.                |
 | `ssh.identity_file`                 | **User**  | Selects which private key SSH presents.                   |
 | `user.identity`                     | **User**  | Author identity; cannot be repo-selected for signed data. |
+| `pull.require_signed`               | **User**  | Disables post-fetch signature verification (§3.1, #692).  |
 | `default_branch`                    | Repo      | UX default. No security weight.                           |
 | `remote_endpoint`                   | Repo      | Address; trust is on the user's transport config.         |
 | `remote_bucket`                     | Repo      | Address.                                                  |
@@ -314,14 +328,27 @@ unchanged.
 
 ## 5. Trust-roots scope
 
-`mkit verify-attest` loads its trust roots from
-`$XDG_CONFIG_HOME/mkit/trust-roots.toml` by default. The path is
-**not** repo-local for the same reason as §4: a hostile clone must
-not choose its own verifier.
+`mkit verify-attest` and `mkit verify --trusted` (issue #693) both load
+trust roots from `$XDG_CONFIG_HOME/mkit/trust-roots.toml` by default.
+The path is **not** repo-local for the same reason as §4: a hostile
+clone must not choose its own verifier. `mkit trust add/list/remove`
+manages the same file.
 
-A user can override the path on the command line for ad-hoc
-verification, but the override is per-invocation; there is no repo
-config knob that sets it.
+A user can override the path on the command line (`--trust-roots
+<path>`) for ad-hoc verification, but the override is per-invocation;
+there is no repo config knob that sets it. Both commands additionally
+refuse an in-repo trust-roots path unless `--trust-roots` was passed
+explicitly (`warn_if_unsafe_trust_roots` in
+`rust/crates/mkit-cli/src/commands/trust_roots.rs`) — a hostile clone
+that ships `.mkit/trust-roots.toml` listing attacker keys cannot get it
+selected implicitly.
+
+Without `--trusted`, `mkit verify` proves only that the object's
+embedded `signer` produced its signature — it does not consult trust
+roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
+attacker-controlled key is indistinguishable from a trusted one unless
+the caller opts into `--trusted`. `mkit clone`/`pull`/`fetch` do not run
+any verification by default; that remains a separate, tracked gap.
 
 ---
 
@@ -421,6 +448,22 @@ takes no defensive posture against them.
 - Recovery from a compromised signing key. There is no on-chain or
   in-band revocation; the user's recourse is to publish a new key
   and re-sign forward history.
+- A `.mkit/` directory served from a network filesystem (NFS, SMB/CIFS,
+  or most FUSE-backed network mounts). Every fail-closed exclusion
+  guarantee that depends on `mkit-core::repo_lock` — including
+  `SPEC-GC.md`'s GC-vs-writer guarantee and every lock in
+  `SPEC-CONCURRENCY.md`'s inventory — assumes `flock`/`fcntl` advisory
+  locking is coherent across all lock holders. That assumption holds on
+  a local filesystem; it is **not guaranteed** on NFS (locking is
+  commonly offloaded to an absent or inconsistent `rpc.statd`/NLM side
+  channel under NFSv3, and even NFSv4's in-protocol locking depends on
+  server/client support mkit does not verify) or on SMB/CIFS. mkit
+  performs no detection of the underlying filesystem type and has no
+  fallback locking strategy. Repositories that must be shared across
+  hosts should use one of mkit's network transports
+  (`docs/specs/SPEC-TRANSPORT.md`) instead of a shared network-mounted
+  `.mkit/` directory. See `rust/crates/mkit-core/src/repo_lock.rs`'s
+  module doc for the full caveat.
 
 ---
 

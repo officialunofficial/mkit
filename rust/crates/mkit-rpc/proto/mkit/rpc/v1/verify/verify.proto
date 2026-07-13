@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// mkit object-signature verification contract v1 (issue #692).
+//
+// `mkit clone`/`pull`/`fetch` reject a hostile remote's unsigned or forged
+// commit/remix/tag history by default (THREAT-MODEL §3.1): every object a
+// fetch newly introduces is run through this check before the
+// remote-tracking ref is published. mkit-cli's local dispatch
+// (rust/crates/mkit-cli/src/remote_dispatch/packmap.rs) calls the Rust
+// implementation of this contract directly today —
+// `mkit_core::sign::{verify_commit,verify_remix,verify_tag}`, the exact
+// check `mkit verify <rev>` runs manually.
+//
+// This schema is defined here, message-only (no bound RPC method — see
+// "Contract shape" below), so a future ConnectRPC-based transport (the
+// anonymous-multiplayer repo-worker included, see
+// apps/repo-worker/proto/mkit/repo/v1/repo.proto) can expose the identical
+// check over the wire instead of growing a divergent, per-transport
+// reimplementation. Nothing outside mkit-cli's in-process call consumes
+// this schema yet; it is published ahead of that consumer so the wire
+// contract is fixed before a second implementation has to match it.
+//
+// ## Contract shape
+//
+// Unlike signer.proto / ssh.proto (subprocess / ssh(1) frame streams),
+// this is not itself a length-prefixed wire protocol — it is the
+// request/response message pair a unary RPC method binds to once a
+// ConnectRPC (or other transport) service adopts it. mkit-rpc does not
+// generate service/client code; the binding lives with whichever service
+// definition imports these messages (e.g. a future `mkit.repo.v1`
+// addition).
+
+edition = "2023";
+
+package mkit.rpc.v1.verify;
+
+import "mkit/rpc/v1/common.proto";
+
+// Mirrors the signed variants of mkit_core::object::Object — Blob, Tree,
+// ChunkedBlob, and Delta carry no signature and are never sent here.
+enum ObjectKind {
+  OBJECT_KIND_UNSPECIFIED = 0;
+  OBJECT_KIND_COMMIT = 1;
+  OBJECT_KIND_REMIX = 2;
+  OBJECT_KIND_TAG = 3;
+}
+
+message VerifyRequest {
+  ObjectKind kind = 1;
+
+  // BLAKE3 object id (32 bytes) of the commit/remix/tag being verified.
+  // Advisory/echo: the verifier re-derives it from `encoded` (content
+  // addressing) and MUST reject a mismatch rather than trust this field.
+  bytes object_id = 2;
+
+  // The object's canonical encoding exactly as read from the store or a
+  // fetched pack (see SPEC-OBJECTS' commit/remix/tag wire format) — NOT
+  // re-serialized by the caller. The verifier decodes this itself so the
+  // check covers precisely the bytes that were stored or transmitted,
+  // never a caller's reconstruction of them.
+  bytes encoded = 3;
+}
+
+message VerifyResponse {
+  bool valid = 1;
+
+  // Set (`code != ERROR_CODE_UNSPECIFIED`) when `valid` is false. Same
+  // Error envelope every other mkit-rpc protocol uses; `message` carries
+  // the underlying mkit_core::sign::VerifyError's Display text (e.g.
+  // "signature missing", "signature invalid", "unsupported algorithm").
+  Error error = 2;
+}

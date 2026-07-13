@@ -323,22 +323,33 @@ fn load_raw_secret(
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+
+    /// Harden `path`'s permissions to `mode` (e.g. `0o600` for a key file,
+    /// `0o700` for its parent dir). Unix-only: `mkit_core::sign::load_raw_32`
+    /// only enforces permission bits under `#[cfg(unix)]` (see sign.rs), so
+    /// on other platforms this is a deliberate no-op rather than a call into
+    /// an API (`PermissionsExt::set_mode`) that doesn't exist there.
+    #[cfg(unix)]
+    fn set_secure_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(path).unwrap().permissions();
+        perm.set_mode(mode);
+        fs::set_permissions(path, perm).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn set_secure_mode(_path: &Path, _mode: u32) {}
 
     /// Helper: write a 32-byte raw key file with mode 0600 and parent
     /// dir 0700 so `mkit_core::sign::load_key` accepts it.
     fn write_ed25519_key(path: &Path, bytes: &[u8; 32]) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
-            let mut p = fs::metadata(parent).unwrap().permissions();
-            p.set_mode(0o700);
-            fs::set_permissions(parent, p).unwrap();
+            set_secure_mode(parent, 0o700);
         }
         fs::write(path, bytes).unwrap();
-        let mut perm = fs::metadata(path).unwrap().permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(path, perm).unwrap();
+        set_secure_mode(path, 0o600);
     }
 
     #[test]
@@ -460,16 +471,8 @@ mod tests {
         let mut secret = [0u8; 32];
         secret[31] = 3;
         fs::write(td.path().join(".mkit/keys/p256.key"), secret).unwrap();
-        let mut perm = fs::metadata(td.path().join(".mkit/keys/p256.key"))
-            .unwrap()
-            .permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(td.path().join(".mkit/keys/p256.key"), perm).unwrap();
-        let mut dperm = fs::metadata(td.path().join(".mkit/keys"))
-            .unwrap()
-            .permissions();
-        dperm.set_mode(0o700);
-        fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
+        set_secure_mode(&td.path().join(".mkit/keys/p256.key"), 0o600);
+        set_secure_mode(&td.path().join(".mkit/keys"), 0o700);
 
         let cfg = Config::with_defaults();
         let signer = build_signer(
@@ -487,16 +490,8 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         fs::create_dir_all(td.path().join(".mkit/keys")).unwrap();
         fs::write(td.path().join(".mkit/keys/secp256k1.key"), b"short").unwrap();
-        let mut perm = fs::metadata(td.path().join(".mkit/keys/secp256k1.key"))
-            .unwrap()
-            .permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(td.path().join(".mkit/keys/secp256k1.key"), perm).unwrap();
-        let mut dperm = fs::metadata(td.path().join(".mkit/keys"))
-            .unwrap()
-            .permissions();
-        dperm.set_mode(0o700);
-        fs::set_permissions(td.path().join(".mkit/keys"), dperm).unwrap();
+        set_secure_mode(&td.path().join(".mkit/keys/secp256k1.key"), 0o600);
+        set_secure_mode(&td.path().join(".mkit/keys"), 0o700);
 
         let cfg = Config::with_defaults();
         match build_signer(

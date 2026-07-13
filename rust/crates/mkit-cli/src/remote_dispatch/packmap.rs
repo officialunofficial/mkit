@@ -31,10 +31,12 @@
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
 //! them.
 
-use mkit_core::hash::Hash;
+use mkit_core::hash::{self, Hash};
+use mkit_core::object::Object;
 use mkit_core::pack::{self, PackReader};
 use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
 use mkit_core::refs;
+use mkit_core::sign::{verify_commit, verify_remix, verify_tag};
 use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
 
@@ -579,11 +581,27 @@ pub(crate) fn resolve_and_download_chain(
 /// one path that still does network I/O under that lock — an accepted
 /// trade, since it is a recovery path, not the routine one.
 ///
+/// # Signature verification (issue #692)
+///
+/// Once the closure is confirmed complete, every commit/remix/tag
+/// [`unpack_downloaded_packs`] just wrote — the newly-fetched delta, NOT
+/// the whole closure — is run through [`verify_new_object_signatures`]
+/// when `require_signed` is `true` (the CLI's default; `false` is the
+/// explicit `--no-verify-signatures` / `pull.require_signed = false`
+/// opt-out). A failure is [`DispatchError::UnsignedOrInvalidObject`],
+/// which — like [`DispatchError::ClosureTooLarge`] — is deliberately NOT
+/// a self-heal trigger: an invalid signature is not evidence of local
+/// staleness. On the self-heal path every re-downloaded object (the whole
+/// chain, not just the delta) is re-verified, since self-heal only runs
+/// when the local store's contents are already suspect.
+///
 /// # Errors
 /// [`DispatchError::RemoteMissingObject`] if the closure is still
 /// incomplete after self-heal (or immediately, when self-heal doesn't
 /// apply); pack-decode / store errors from the unpack; download errors
-/// from the self-heal retry.
+/// from the self-heal retry; [`DispatchError::UnsignedOrInvalidObject`]
+/// if `require_signed` is `true` and a newly-fetched object's signature
+/// does not verify.
 pub(crate) fn apply_fetched_chain(
     store: &ObjectStore,
     tx: &dyn Transport,
@@ -592,16 +610,17 @@ pub(crate) fn apply_fetched_chain(
     fetched: FetchedChain,
     tip: Hash,
     applied: &mut AppliedPacks,
+    require_signed: bool,
 ) -> Result<(), DispatchError> {
     let FetchedChain { chain, downloaded } = fetched;
     let skipped = chain.len() - downloaded.len();
-    unpack_downloaded_packs(store, downloaded, applied)?;
+    let stored = unpack_downloaded_packs(store, downloaded, applied)?;
 
     // Closure completeness. With skips this is the sole guarantee the
     // store is whole, and a `RemoteMissingObject` here is the ONLY
     // self-heal trigger.
     match super::verify_closure_present(store, &tip) {
-        Ok(()) => Ok(()),
+        Ok(()) => verify_new_object_signatures(store, &stored, require_signed),
         Err(e @ DispatchError::RemoteMissingObject(_)) if skipped > 0 => {
             eprintln!(
                 "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({e}); clearing it and re-fetching the full pack chain"
@@ -614,11 +633,53 @@ pub(crate) fn apply_fetched_chain(
             // self-heal makes those entries just as stale.
             applied.clear();
             let downloaded = download_pack_chain(tx, branch, &chain, applied)?;
-            unpack_downloaded_packs(store, downloaded, applied)?;
-            super::verify_closure_present(store, &tip)
+            let stored = unpack_downloaded_packs(store, downloaded, applied)?;
+            super::verify_closure_present(store, &tip)?;
+            verify_new_object_signatures(store, &stored, require_signed)
         }
         Err(e) => Err(e),
     }
+}
+
+/// Verify the Ed25519 signature on every commit/remix/tag in `stored` —
+/// the digests [`unpack_downloaded_packs`] just wrote, i.e. the objects
+/// this fetch actually introduced (issue #692). Uses the exact same check
+/// `mkit verify <rev>` runs manually
+/// ([`mkit_core::sign::verify_commit`]/`verify_remix`/`verify_tag`), so
+/// clone/pull/fetch cannot publish a remote-tracking ref to a hostile
+/// remote's unsigned or forged history (THREAT-MODEL §3.1) without the
+/// caller explicitly opting out. Blob/Tree/ChunkedBlob/Delta objects carry
+/// no signature and are skipped.
+///
+/// `require_signed = false` (the explicit opt-out) short-circuits to
+/// `Ok(())` without reading any object — a no-op, not a "verify but
+/// ignore the result".
+fn verify_new_object_signatures(
+    store: &ObjectStore,
+    stored: &[Hash],
+    require_signed: bool,
+) -> Result<(), DispatchError> {
+    if !require_signed {
+        return Ok(());
+    }
+    for h in stored {
+        let obj = store.read_object(h)?;
+        let result = match &obj {
+            Object::Commit(c) => verify_commit(c),
+            Object::Remix(r) => verify_remix(r),
+            Object::Tag(t) => verify_tag(t),
+            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+                continue;
+            }
+        };
+        if let Err(e) = result {
+            return Err(DispatchError::UnsignedOrInvalidObject {
+                hash: hash::to_hex(h),
+                reason: e.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Download every key in `chain` not already recorded in `applied`,
@@ -665,19 +726,34 @@ fn download_pack_chain(
 /// `store`, in order, inserting each newly-applied digest into `applied`
 /// as soon as its pack is successfully read. Pure local disk I/O — see
 /// [`apply_fetched_chain`] for the repo-lock contract this must run under.
+///
+/// Returns every hash newly written to `store` across all unpacked packs,
+/// in pack order — the exact set [`apply_fetched_chain`] hands to
+/// [`verify_new_object_signatures`] (issue #692) so the post-fetch
+/// signature check costs proportional to what THIS call fetched, not the
+/// tip's whole reachable closure.
 fn unpack_downloaded_packs(
     store: &ObjectStore,
     downloaded: Vec<(PackKey, Vec<u8>)>,
     applied: &mut AppliedPacks,
-) -> Result<(), DispatchError> {
+) -> Result<Vec<Hash>, DispatchError> {
+    let mut stored = Vec::new();
     for (key, pack) in downloaded {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
-        PackReader::read(&pack, store)?;
+        let report = PackReader::read(&pack, store)?;
+        // Honest progress (#711): real objects just landed in the local
+        // store, counted straight from the pack's own `UnpackReport` —
+        // never an estimate. See `crate::progress`.
+        let unpacked = (report.raw_count + report.delta_count) as usize;
+        if unpacked > 0 {
+            crate::progress::report(crate::progress::Event::ObjectsUnpacked(unpacked));
+        }
+        stored.extend(report.stored);
         applied.insert(&key);
     }
-    Ok(())
+    Ok(stored)
 }
 
 #[cfg(test)]

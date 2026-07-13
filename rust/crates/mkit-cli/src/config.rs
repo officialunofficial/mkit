@@ -60,13 +60,18 @@ pub const DEFAULT_P256_KEY_REF: &str = "software:default-p256";
 ///   user-trusted binary or key against attacker-chosen content,
 /// * mark a repo-controlled HTTP/S3 remote as trusted for ambient
 ///   environment credentials,
-/// * disable SSH host-key verification on `mkit push` (MITM).
+/// * disable SSH host-key verification on `mkit push` (MITM),
+/// * disable post-fetch commit/remix/tag signature verification
+///   (`pull.require_signed`, issue #692) — a hostile repo must not be able
+///   to switch off the one check that would otherwise reject its own
+///   unsigned/forged history on the next clone/pull/fetch.
 ///
 /// They are accepted from the user-scoped config only.
 pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
     "trusted_remote_endpoint",
     "signer",
+    "pull.require_signed",
     "key.backend",
     "key.default_ref",
     "key.ed25519_ref",
@@ -122,8 +127,35 @@ pub struct Config {
     pub ssh_strict_host_key_checking: String,
     pub ssh_user_known_hosts_file: String,
     pub ssh_identity_file: String,
+    /// Write-auth scheme for `mkit+https://` / `mkit+http://` remotes
+    /// (`mkit-transport-connect::ConnectTransport`). Empty/`"bearer"`
+    /// (default) sends `MKIT_API_TOKEN` as a Bearer token, unchanged from
+    /// #700/#701. `"envelope"` ADDITIONALLY signs every write RPC
+    /// (`UpdateRef`/`AdvanceRefs`/`UploadPack`) with an Ed25519 write
+    /// envelope, reusing the exact SAME signer resolution as commit
+    /// signing — [`Self::signer`] / [`Self::signing_key`] /
+    /// [`KeyConfig::ed25519_ref`](KeyConfig::ed25519_ref) — see
+    /// `remote_dispatch::envelope_signer_from_config`. Repo-safe: this
+    /// selects a wire-auth MODE, the same class of connection-shape
+    /// metadata as `remote_type`; the actual signer IDENTITY selectors
+    /// (`signer`, `signing_key`, `key.*`) stay user-scoped-only
+    /// ([`REPO_FORBIDDEN_KEYS`], unchanged) so a hostile repo cannot
+    /// redirect which key or backend does the signing — only whether
+    /// the already-user-controlled commit-signing identity is also used
+    /// to authenticate pushes to this remote.
+    pub transport_auth: String,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
+    /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
+    /// every newly-fetched commit/remix/tag's Ed25519 signature before
+    /// publishing the remote-tracking ref (issue #692). Empty (the
+    /// documented default) and any value except `"false"`/`"0"`/`"no"`/
+    /// `"off"` mean "verify, fail closed"; see
+    /// [`Config::pull_require_signed_or_default`]. User-scoped only — a
+    /// hostile repo config must not be able to silently disable the check
+    /// that protects the clone against exactly that repo (see
+    /// [`REPO_FORBIDDEN_KEYS`]).
+    pub pull_require_signed: String,
     /// `[key]` section. User-scoped keystore selectors.
     pub key: KeyConfig,
     /// `[attest]` section. Separate struct so new attest knobs don't
@@ -384,6 +416,31 @@ impl Config {
             "per-object" | "per_object" => mkit_core::store::SyncPolicy::PerObject,
             _ => mkit_core::store::SyncPolicy::Batch,
         }
+    }
+
+    /// Effective `pull.require_signed` (issue #692): `true` unless the
+    /// user-scoped config explicitly disabled it. Empty (unset, the
+    /// documented default) and any unrecognized value are treated as
+    /// "verify" — only an explicit falsy spelling opts out, so a typo in
+    /// the config file fails closed rather than silently disabling the
+    /// check.
+    #[must_use]
+    pub fn pull_require_signed_or_default(&self) -> bool {
+        !matches!(
+            self.pull_require_signed
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    }
+
+    /// `true` iff [`Self::transport_auth`] selects the Ed25519 write-envelope
+    /// auth mode (case-insensitive `"envelope"`). Empty (the default) and
+    /// any other value mean the unchanged bearer-token-only behavior.
+    #[must_use]
+    pub fn transport_auth_envelope(&self) -> bool {
+        self.transport_auth.trim().eq_ignore_ascii_case("envelope")
     }
 }
 
@@ -710,6 +767,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "user.email" => val.clone_into(&mut cfg.user_email),
         "trusted_remote_endpoint" => val.clone_into(&mut cfg.trusted_remote_endpoint),
         "signer" => val.clone_into(&mut cfg.signer),
+        "pull.require_signed" => val.clone_into(&mut cfg.pull_require_signed),
         "key.backend" => val.clone_into(&mut cfg.key.backend),
         "key.default_ref" => val.clone_into(&mut cfg.key.default_ref),
         "key.ed25519_ref" => val.clone_into(&mut cfg.key.ed25519_ref),
@@ -724,6 +782,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.strict_host_key_checking" => val.clone_into(&mut cfg.ssh_strict_host_key_checking),
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
+        "transport_auth" => val.clone_into(&mut cfg.transport_auth),
         "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
         "attest.signer" => val.clone_into(&mut cfg.attest.signer),
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
@@ -894,6 +953,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
+        ("transport_auth", cfg.transport_auth.as_str()),
     ] {
         if !v.is_empty() {
             out.push_str(k);
@@ -995,6 +1055,23 @@ pub fn resolve_remote(cfg: &LayeredConfig, name: &str) -> Option<ResolvedRemote>
         endpoint: endpoint.to_owned(),
         repo_chosen,
     })
+}
+
+/// Every remote name resolvable via [`resolve_remote`]: the flat
+/// `default` remote (when the flat `remote_endpoint` is set) plus every
+/// named `remote.<name>.url` entry. Sorted and deduplicated (a
+/// `BTreeSet` cannot contain a name twice), which is what makes `fetch
+/// --all` / `pull --all`'s iteration order deterministic. Used by
+/// `mkit fetch --all` / `mkit pull --all` to enumerate the remotes to
+/// sync in one invocation.
+#[must_use]
+pub fn configured_remote_names(cfg: &LayeredConfig) -> Vec<String> {
+    let mut names: std::collections::BTreeSet<String> =
+        cfg.merged.remotes.keys().cloned().collect();
+    if !cfg.merged.remote_endpoint.trim().is_empty() {
+        names.insert(DEFAULT_REMOTE_NAME.to_owned());
+    }
+    names.into_iter().collect()
 }
 
 /// Resolve the upstream (remote name, remote branch) for a local branch.
@@ -1176,6 +1253,45 @@ pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     // sees the old contents or the fully-updated file, never a torn one.
     write_atomic_user_config(&path, out.as_bytes())?;
     Ok(())
+}
+
+/// Remove a single user-scoped key from `$XDG_CONFIG_HOME/mkit/config`,
+/// mirroring [`write_user_kv`]'s read-modify-write-atomically shape but
+/// dropping the matching line instead of replacing it. Returns `true`
+/// iff a matching line was found and removed (a no-op unset — the key
+/// was already absent — returns `false` rather than erroring, so
+/// `mkit config --unset` on an already-unset key is idempotent).
+pub fn remove_user_kv(key: &str) -> Result<bool, ConfigError> {
+    let key = normalize_config_key(key);
+    let key = key.as_str();
+    let path = user_config_path();
+    let existing = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(ConfigError::Io(e)),
+    };
+    let mut out = String::new();
+    let mut removed = false;
+    for raw_line in existing.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            out.push_str(raw_line);
+            out.push('\n');
+            continue;
+        }
+        if let Some((k, _)) = line.split_once('=')
+            && normalize_config_key(k.trim()) == key
+        {
+            removed = true;
+            continue;
+        }
+        out.push_str(raw_line);
+        out.push('\n');
+    }
+    if removed {
+        write_atomic_user_config(&path, out.as_bytes())?;
+    }
+    Ok(removed)
 }
 
 /// Atomically write `bytes` to `path`: write into a sibling temp file,
@@ -1649,6 +1765,42 @@ mod tests {
         assert!(cfg.ssh_identity_file.is_empty());
     }
 
+    /// Issue #692: a hostile clone must not be able to switch off
+    /// post-fetch signature verification via its own repo-scoped config —
+    /// that would let it silently defang the exact check meant to reject
+    /// its own unsigned/forged history.
+    #[test]
+    fn repo_pull_require_signed_is_rejected() {
+        let cfg = layer(Some("pull.require_signed = false\n"), None);
+        assert!(cfg.pull_require_signed.is_empty());
+        assert!(cfg.pull_require_signed_or_default());
+    }
+
+    /// User-scoped config MAY opt out (e.g. scripted/CI use against a
+    /// remote the operator already trusts by other means).
+    #[test]
+    fn user_pull_require_signed_false_disables_verification() {
+        let cfg = layer(None, Some("pull.require_signed = false\n"));
+        assert_eq!(cfg.pull_require_signed, "false");
+        assert!(!cfg.pull_require_signed_or_default());
+    }
+
+    /// Unset, and any value other than the documented falsy spellings,
+    /// fail closed (verify).
+    #[test]
+    fn pull_require_signed_defaults_to_true_and_rejects_typos() {
+        assert!(Config::default().pull_require_signed_or_default());
+        let cfg = layer(None, Some("pull.require_signed = nope\n"));
+        assert!(cfg.pull_require_signed_or_default());
+        for falsy in ["false", "0", "no", "off", "FALSE", "Off"] {
+            let cfg = layer(None, Some(&format!("pull.require_signed = {falsy}\n")));
+            assert!(
+                !cfg.pull_require_signed_or_default(),
+                "{falsy} should disable verification"
+            );
+        }
+    }
+
     /// Hostile clone aims `attest.secp256k1_key_path` at a key file the
     /// victim happens to own (e.g. a wallet seed). Must be ignored.
     #[test]
@@ -1703,6 +1855,7 @@ mod tests {
                 "user.identity" => cfg.user_identity.as_str(),
                 "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
                 "signer" => cfg.signer.as_str(),
+                "pull.require_signed" => cfg.pull_require_signed.as_str(),
                 "key.backend" => cfg.key.backend.as_str(),
                 "key.default_ref" => cfg.key.default_ref.as_str(),
                 "key.ed25519_ref" => cfg.key.ed25519_ref.as_str(),

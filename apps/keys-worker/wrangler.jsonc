@@ -15,6 +15,15 @@
 
   "observability": { "enabled": true },
 
+  // Accepted/rejected-write telemetry for `PUT /name/<pubkey>` (`log_write`
+  // in src/lib.rs) — {procedure, signer_pubkey, bytes} on accept,
+  // {procedure, reason, status} on reject. Binding name mirrors
+  // apps/repo-worker/wrangler.jsonc so the two datasets share vocabulary.
+  // See #695.
+  "analytics_engine_datasets": [
+    { "binding": "WRITE_EVENTS", "dataset": "mkit_keys_write_events" }
+  ],
+
   // Production origin. keys.mkit.sh gives the web app a deterministic host for
   // its CSP `connect-src` and `VITE_KEYS_URL`. `custom_domain` auto-provisions
   // DNS + cert on the mkit.sh zone.
@@ -29,5 +38,45 @@
       "id": "8c063de4f5674d24811c5acf3ff82196",
       "preview_id": "83d3b7622f7041d59fe90145399db55b"
     }
-  ]
+  ],
+
+  // Named environments. `wrangler deploy --env staging` deploys an isolated
+  // Worker (`mkit-keys-staging`) with its own route and KV namespace, so
+  // staging writes never land in the production `mkit-keys-NAMES` namespace.
+  // `kv_namespaces` and `routes` are non-inheritable Wrangler keys and must be
+  // fully re-specified per environment — see
+  // https://developers.cloudflare.com/workers/wrangler/configuration/#non-inheritable-keys.
+  "env": {
+    "staging": {
+      "name": "mkit-keys-staging",
+
+      // Non-production route so auth/rate-limit changes can be validated
+      // against a real Cloudflare deployment before promotion to
+      // keys.mkit.sh. Update apps/web/src/security-policy.js CSP
+      // `connect-src` (and the web build's `VITE_KEYS_URL`) if the web app
+      // needs to target this host for end-to-end checks.
+      "routes": [{ "pattern": "staging-keys.mkit.sh", "custom_domain": true }],
+
+      // Dedicated staging namespace (created via `wrangler kv namespace
+      // create mkit-keys-NAMES-staging` [--preview]) — never the production
+      // `mkit-keys-NAMES` namespace referenced above.
+      "kv_namespaces": [
+        {
+          "binding": "NAMES",
+          "id": "9a3c344237924330853b743de2326ceb",
+          "preview_id": "9a6a858c9b104cebb3b09b14941248a1"
+        }
+      ],
+
+      // Dedicated staging dataset — `analytics_engine_datasets` is also a
+      // non-inheritable key (see link above), so without this the staging
+      // deployment's write-path logging would silently drop instead of
+      // mirroring it. Analytics Engine datasets need no explicit
+      // pre-creation (unlike KV): the first write_data_point call creates
+      // them.
+      "analytics_engine_datasets": [
+        { "binding": "WRITE_EVENTS", "dataset": "mkit_keys_write_events_staging" }
+      ]
+    }
+  }
 }

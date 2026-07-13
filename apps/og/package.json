@@ -7,7 +7,10 @@
     "build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "cf-typegen": "wrangler types",
-    "typecheck": "wrangler types && tsc --noEmit"
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@officialunofficial/og": "^0.3.1",
@@ -15,8 +18,10 @@
     "workers-og": "^0.0.27"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250620.0",
-    "typescript": "^6.0.3",
+    "@cloudflare/workers-types": "^5.20260712.1",
+    "@vitest/coverage-v8": "^4.1.8",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.8",
     "wrangler": "^4.99.0"
   }
 }

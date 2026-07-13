@@ -21,7 +21,7 @@ performs the scheme switch).
 
 The SSH wire format is defined in
 [`SPEC-RPC`](SPEC-RPC.md) and lives in the generated
-[`ssh.proto`](../../rust/crates/mkit-rpc/proto/ssh.proto) bindings.
+[`ssh.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto) bindings.
 This document covers the cross-transport contract: verbs, URL
 parsing, authentication, the forced-command server pattern, size
 caps, retry policy, and the error taxonomy.
@@ -47,6 +47,34 @@ internal `Mutex` so the trait object remains object-safe.
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
+
+### 1.1 Streaming pack transfer (additive, opt-in)
+
+`upload_pack_streaming(key, total_bytes, chunks)` and
+`download_pack_streaming(key)` are additive verbs alongside
+`upload_pack`/`download_pack`: they move a pack as a sequence of
+bounded-size `PackChunk { offset, data, last }` segments (the same
+shape `ssh.proto`'s `PackChunk` already defines) instead of one
+`Vec<u8>`, so a transport that forwards chunks straight to its own
+wire never holds more than roughly one chunk in memory regardless of
+total pack size. Both have default trait implementations expressed in
+terms of the whole-buffer verbs — buffer-then-delegate for upload,
+delegate-then-wrap-as-one-chunk for download — so **no transport is
+required to change**; a caller may always use the streaming entry
+point, even against a transport that has not opted into real
+streaming.
+
+The SSH and enc transports override both methods to expose the
+`PackChunk` frame loop they already ran internally for the
+whole-buffer path (§4.2, §6). HTTP does not yet override
+either — its JSON REST dialect (§5) has no chunked-body wire format,
+and inventing a bespoke one is explicitly out of scope: real HTTP
+pack streaming is planned to arrive via a client-streaming
+`UploadPack` / server-streaming `DownloadPack` RPC on the
+`mkit.transport.v1` Connect service
+([SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) §6), which reuses
+this same `PackChunk` shape on the wire. Until a Connect client lands,
+`HttpTransport` runs the default buffer-then-delegate implementation.
 
 `update_ref`'s condition is one of:
 
@@ -108,7 +136,7 @@ of any sibling tool.
 ## 4. SSH transport
 
 mkit's SSH transport spawns a long-lived `ssh(1)` child process and
-exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/ssh.proto)
+exchanges length-prefixed [`SshFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto)
 messages on its stdin/stdout. The framing layer is defined in
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing).
 
@@ -183,7 +211,10 @@ before any header is emitted.
 CAS intent is carried entirely by the `RefExpectation` enum in
 `UpdateRef.expectation`. `expected_id` carries the digest only when
 `expectation = REF_EXPECTATION_MATCH`; it is ignored for `ANY` /
-`MISSING`.
+`MISSING`. `RefExpectation` is defined once, in
+[`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto),
+and imported by `ssh.proto` — it is the same enum (same wire numbers)
+the `mkit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 
 | `RefWriteCondition` | `expectation`             | `expected_id`       | Semantics |
 |---|---|---|---|
@@ -283,9 +314,46 @@ read mid-stream rather than letting the `Vec` grow without bound.
 Both paths surface as `TransportError::RemoteError` with a message
 mentioning the client cap.
 
+### 4.5 Retry / reconnect
+
+`SshTransport` is connection-oriented (a single long-lived `ssh(1)`
+child), so honoring the §7 retry ladder for `ConnectionFailed` takes
+more than re-issuing the same request the way the HTTP transport does:
+a frame-level I/O failure can leave the child's stdin/stdout pipe
+mid-message, so the transport marks that connection `closed` and
+resuming writes/reads on it would desync every subsequent frame.
+`SshTransport` therefore reconnects before it retries — every verb is
+driven through [`mkit_core::protocol::retrying`], and each attempt
+that finds the connection `closed` first respawns `ssh` from the
+original `target`/`options` and redoes the `Hello` handshake before
+re-issuing the verb against the fresh child. `upload_pack` is
+content-addressed and safe to resend in full on the new connection;
+`update_ref` is not idempotent across retries per §7, so a retried CAS
+write that returns `RefConflict` still requires the caller's `read_ref`
+disambiguation.
+
+The encrypted transport (`mkit-transport-enc`) applies the identical
+pattern: `EncTransport` collapses every cipher-layer I/O failure to
+`ConnectionFailed`, marks the session dead, and (when the concrete
+transport wired a redial hook — `tcp::connect_tcp` does) reconnects and
+redoes the application `Hello` before retrying. See
+[SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md) for its retry section.
+
 ---
 
 ## 5. HTTP transport
+
+**Superseded as the active `mkit+https://` implementation.** As of
+mkit#701, `mkit-cli`'s `mkit+https://` / `mkit+http://` dispatch uses
+[`mkit-transport-connect`](../../rust/crates/mkit-transport-connect/) — a
+native ConnectRPC client for `mkit.transport.v1.TransportService` — not
+this JSON dialect. See
+[SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) for the canonical
+protocol. This section remains accurate documentation of the
+`mkit-transport-http` crate, which is still in the tree (its
+`sparse-checkout` §5.6 and `pack-shards` extensions are not yet covered by
+`mkit.transport.v1` — see SPEC-TRANSPORT-CONNECT §8) but is no longer
+constructed by `mkit-cli`'s remote dispatch for either scheme.
 
 The HTTP transport ([`mkit-transport-http`](../../rust/crates/mkit-transport-http/))
 speaks a simple JSON REST dialect against an mkit VCS Worker
@@ -426,15 +494,34 @@ surfaces `TransportError::AccessDenied`.
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
 | `Missing`    | `If-None-Match: *` | R2 honours this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how we get CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too — but multipart uploads break the equivalence, which is why §6.4 caps single-PUT size. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | R2 returns the body MD5 as the ETag on `PUT`; matching against that value is how we get CAS without server-side hash awareness. AWS S3 also returns body MD5 as the ETag for simple PUTs, so `Match` works on S3 too — but multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
 
 `409` and `412` → `RefConflict`; never retried.
 
+`upload_pack` carries no `RefWriteCondition` — packs are content-addressed
+and every write is either a plain unconditional `PUT` (below the
+single-PUT cap) or the multipart path of §6.7, which uses
+`If-None-Match: *` on `CompleteMultipartUpload` rather than any
+`Match(h)`-style condition. See §7.1 for the resulting CAS-guarantee
+note on large packs.
+
 ### 6.4 Limits
 
-- `S3_SINGLE_PUT_MAX = 5 GiB` — anything larger requires multipart
-  upload, deferred to a future revision.
-- `PACK_BODY_LIMIT = 4 GiB` for `download_pack`.
+- `S3_SINGLE_PUT_MAX = 5 GiB` — packs at or below this go through a
+  single `PUT`; anything larger goes through the multipart path (§6.7).
+- `PACK_BODY_LIMIT = 4 GiB` — the absolute pack-body ceiling enforced
+  on both `upload_pack` and `download_pack` (every transport that
+  ingests or emits pack bytes shares this limit; see
+  [`mkit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/mkit-core/src/protocol.rs)).
+  On a 64-bit target this is smaller than `S3_SINGLE_PUT_MAX`, so in
+  today's builds it — not the single-PUT cap — is what actually bounds
+  a pack's size; §6.7's multipart path exists for API correctness and
+  for targets/future revisions where `PACK_BODY_LIMIT` is raised or
+  not the binding constraint (e.g. a 32-bit target, where
+  `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
+  becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
+  streaming/constant-memory `Transport` redesign tracked elsewhere in
+  the production-readiness epic, out of scope here.
 - `REF_BODY_LIMIT = 256` bytes (a ref is 64 hex + newline; the
   256-byte ceiling accommodates trailing whitespace and trivial
   S3 metadata).
@@ -475,6 +562,45 @@ The `?sparse=<filter-hex>` URL query that HTTP uses (§5.6) is a no-op
 on S3 because the object key already encodes the filter hash. The
 client omits it so the SigV4 canonical request stays tight.
 
+### 6.7 Multipart upload
+
+`upload_pack` for a pack larger than `S3_SINGLE_PUT_MAX` (§6.4) uses
+the standard S3 multipart-upload API instead of a single `PUT`:
+
+1. `POST <key>?uploads` — `CreateMultipartUpload`. The response body's
+   `<UploadId>` addresses the rest of the sequence.
+2. `PUT <key>?partNumber=<n>&uploadId=<id>` once per fixed-size part
+   (`n` starting at 1), body = that part's raw bytes. The response
+   `ETag` header is recorded for step 3. Each part is retried
+   independently through the same backoff ladder as every other S3
+   call (§6.5/§7) — a transient failure on one part does not require
+   restarting the upload from part one.
+3. `POST <key>?uploadId=<id>` — `CompleteMultipartUpload`, body a
+   `<CompleteMultipartUpload>` manifest listing every part number and
+   its `ETag`. Carries `If-None-Match: *` (see §6.3's note on why
+   `Match(h)` doesn't apply here).
+4. On any terminal failure in steps 2–3 — a part exhausting its
+   retries, or `CompleteMultipartUpload` failing for a reason other
+   than `409`/`412` — `DELETE <key>?uploadId=<id>` (`AbortMultipartUpload`)
+   before returning the error, so a partial attempt does not leave
+   orphaned parts (and their storage cost) in the bucket. `409`/`412`
+   on `CompleteMultipartUpload` also triggers the abort (the object
+   was never materialized), but is not itself an error — see below.
+
+Every part except the last MUST be at least 5 MiB (an S3/R2 API
+requirement); the implementation's fixed part size (64 MiB in
+production) satisfies this for any part but the last.
+
+**Idempotency and the `409`/`412` case:** because pack objects are
+content-addressed and immutable, an existing object at the target key
+is guaranteed to hold identical bytes to whatever this upload would
+have produced. A `409`/`412` on `CompleteMultipartUpload` (the
+`If-None-Match: *` precondition losing a race against an earlier,
+identical upload of the same digest) is therefore treated as the
+idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
+not a caller-visible error — matching the single-PUT path's
+unconditional-overwrite behavior for the same scenario.
+
 ---
 
 ## 7. Retry / idempotency
@@ -484,8 +610,15 @@ backoff: `ConnectionFailed`, `ServerError{status >= 500}`, and
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s,
 8s, 16s` (5 attempts), with subsequent delays doubling and capped
 at 300 s. The ladder is exposed via
-[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs) and the
-classifier as [`is_retryable`].
+[`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs), the
+classifier as [`is_retryable`], and the retry loop itself as
+[`retrying`](../../rust/crates/mkit-core/src/protocol.rs) — a single
+transport-agnostic driver every transport's client wraps, so the
+ladder/classification policy is defined once instead of per crate.
+Request-oriented transports (HTTP, S3) satisfy this by re-issuing a
+fresh request per attempt; connection-oriented transports (SSH, enc)
+MUST reconnect before re-attempting once a prior attempt has left the
+connection in a possibly-desynced state — see §4.5.
 
 `update_ref` with `Missing` or `Match` is NOT idempotent across
 retries: a network timeout after the server applied the write looks
@@ -509,6 +642,20 @@ concerns.
 | HTTP   | `If-None-Match: *` enforced by the Worker | `If-Match: "<hex>"` enforced by the Worker | Yes |
 | S3     | `If-None-Match: *` enforced by R2 | `If-Match: "<md5-of-wire>"` enforced by R2 | Yes (on R2; S3 multipart breaks `Match` — see §6.3) |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` + 32-byte `expected_id` | Depends on server-side ref-store atomicity |
+
+`upload_pack` itself carries no `RefWriteCondition` (it addresses
+content by digest, not by a caller-supplied CAS condition), so the
+table above — `Missing` / `Match(h)` — describes `update_ref` only.
+For packs large enough to cross `S3_SINGLE_PUT_MAX` (§6.4), the S3
+transport's multipart path (§6.7) downgrades even the informal
+CAS-adjacent guarantee the single-PUT path gets for free: a plain
+`PUT` is atomic (the object either fully exists with the uploaded
+bytes or doesn't exist at all), while a multipart upload's
+`CompleteMultipartUpload` only supports `If-None-Match: *`
+(existence-only) — never `If-Match(h)` — because a multipart `ETag`
+is not the body MD5. This is an accepted downgrade specific to large
+S3/R2 packs; content-addressing (§8) makes it safe (see §6.7's
+idempotency note).
 
 ---
 
@@ -546,8 +693,7 @@ versioning.
 
 A native SSH implementation (with in-process host-key pinning) is a
 future enhancement; [`SSH-SECURITY.md`](../SSH-SECURITY.md) tracks the
-gaps inherited from delegating to `ssh(1)`. S3 multipart upload
-(for packs above the 5 GiB single-PUT cap) is similarly deferred.
+gaps inherited from delegating to `ssh(1)`.
 
 ---
 
@@ -566,6 +712,8 @@ These hold for every conformant transport, regardless of scheme:
 | A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
 | A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` shared by the SSH and enc-listener frame loops (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
+| `*_streaming` is additive — no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |
+| A `PackChunk` stream never ends silently without a `last = true` item | `upload_pack_streaming` (all overrides) rejects a stream that ends without one; `download_pack_streaming` overrides read the server's own `last` flag (§1.1, §4.2, §6) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 | A proxy cannot substitute a sparse-checkout filter | `?sparse=<filter-hex>` MUST equal `BLAKE3` of the canonicalised filter; server re-canonicalises and rejects with `409` (§5.6) |
 

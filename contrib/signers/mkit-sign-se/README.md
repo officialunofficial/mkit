@@ -28,23 +28,34 @@ Headline properties:
 `SignerFrame` messages on stdin/stdout. This is the same protocol
 all other mkit reference signers (`mkit-sign-file`, `mkit-sign-tpm`,
 `mkit-sign-ctap`) speak; the schema is shared
-([`signer.proto`](../../../rust/crates/mkit-rpc/proto/signer.proto)
-plus [`common.proto`](../../../rust/crates/mkit-rpc/proto/common.proto)).
+([`signer.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto)
+plus [`common.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/common.proto)).
 
 The Swift implementation links the canonical Apple-platform protobuf
 runtime — [SwiftProtobuf](https://github.com/apple/swift-protobuf),
 pinned to `1.30.0+` in `Package.swift`. Pre-generated `.pb.swift`
 sources are checked into `Sources/mkit-sign-se/Generated/` to avoid
 build-time codegen (SwiftPM has no clean equivalent of `build.rs`).
-To regenerate after a `.proto` change:
+
+These are the same bindings any third-party signer integrator gets by
+running [`buf generate`](https://buf.build/docs/generate) against the
+published `buf.build/officialunofficial/mkit-rpc` BSR module (issue
+#719) — no vendored mkit checkout or hand-rolled `protoc` invocation
+required. `rust/crates/mkit-rpc/proto/buf.gen.yaml` is the checked-in
+recipe; `mkit-sign-se`'s own copy is refreshed the same way, via
+`scripts/regen-mkit-sign-se-swift.sh`. To regenerate after a `.proto`
+change:
 
 ```console
-$ brew install swift-protobuf   # provides `protoc-gen-swift`
-$ protoc --swift_out=contrib/signers/mkit-sign-se/Sources/mkit-sign-se/Generated \
-         --proto_path=rust/crates/mkit-rpc/proto \
-         rust/crates/mkit-rpc/proto/common.proto \
-         rust/crates/mkit-rpc/proto/signer.proto
+$ brew install buf              # https://buf.build/docs/installation
+$ ./scripts/regen-mkit-sign-se-swift.sh   # from the repo root
 ```
+
+(Equivalent to running `buf generate rust/crates/mkit-rpc/proto
+--template rust/crates/mkit-rpc/proto/buf.gen.yaml` and copying the
+`common`/`signer` outputs into `Generated/` — no `protoc` or
+`protoc-gen-swift` install needed; `buf` fetches the Swift plugin as a
+remote plugin execution.)
 
 ### Capabilities
 
