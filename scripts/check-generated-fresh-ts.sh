@@ -26,6 +26,9 @@ if [ -n "${drift}" ]; then
     echo >&2
     echo "Drift detected in vendored codegen:" >&2
     echo "${drift}" >&2
+    echo >&2
+    echo "Full diff:" >&2
+    git --no-pager diff -- apps/web/vendor/mkit-repo-proto/generated >&2
     exit 1
 fi
 
