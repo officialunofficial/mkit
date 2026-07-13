@@ -21,6 +21,14 @@
 // bridge, whose end-to-end delivery is explicitly flagged as an unresolved
 // risk in the spec — chunked pack transfer replacing whole-pack buffering is
 // out of scope for this issue (see mkit#699 "Out of Scope").
+//
+// WRITE QUOTA: `update_ref`/`advance_refs` are gated entirely by
+// `AuthInterceptor::intercept_unary` (`worker_impl/auth.rs`) before either
+// handler below ever runs. `upload_pack` is the one exception — its handler
+// runs its OWN quota check (`enforce_write_quota`, also in auth.rs) right
+// after decoding the stream's `header` message, since that's the earliest
+// point the pack's declared size is known; see the call site below and
+// auth.rs's module docs for the full rationale.
 
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
@@ -90,8 +98,10 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<(), Conne
     Ok(())
 }
 
-/// Issue a JSON POST to the RefStore DO and decode the response.
-async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+/// Issue a JSON POST to the RefStore DO and decode the response. `pub(crate)`
+/// so `worker_impl/auth.rs`'s `enforce_write_quota` can drive the `/quota` op
+/// too (see that module's docs).
+pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,
     op: &str,
     body: &Req,
@@ -358,7 +368,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
     async fn upload_pack(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         mut requests: ::connectrpc::InboundStream<UploadPackRequest>,
     ) -> ServiceResult<UploadPackResponse> {
         // 1) First message MUST be `header` (SPEC-TRANSPORT-CONNECT §6.1).
@@ -378,6 +388,21 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
             return Err(ConnectError::resource_exhausted(format!(
                 "declared pack size {total_bytes} exceeds the {MAX_PACK_BYTES}-byte cap"
             )));
+        }
+
+        // 1b) Write-quota check, now that `header` has given us the pack's
+        // declared size — this is the earliest point in the stream a byte
+        // quota CAN be charged (see `worker_impl/auth.rs`'s
+        // `intercept_streaming` doc for why the check can't run there
+        // instead). Still runs before a single chunk is read or any R2 I/O
+        // happens, so a quota-exhausted author never pays for the transfer.
+        let author = ctx
+            .extensions()
+            .get::<super::auth::AuthorPubkey>()
+            .map(|a| a.0.clone())
+            .unwrap_or_default();
+        if let Some(err) = super::auth::enforce_write_quota(&self.env, &author, total_bytes).await {
+            return Err(err);
         }
 
         // 2) Chunks, in ascending contiguous offset order, ending with `last`.
