@@ -111,7 +111,7 @@ jobs:
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
         if: env.SHOULD_RUN == 'true'
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145  # v2
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
         with:
           tool: cargo-nextest
 
