@@ -70,7 +70,14 @@ export function parseDeferredFlags(markdown: string): DeferredEntry[] {
   }
 
   const entries: DeferredEntry[] = []
-  for (const bullet of bullets) {
+  for (const rawBullet of bullets) {
+    // docs/PARITY.md's prose em dashes are written as the `&mdash;` HTML
+    // entity per docs/STYLE-GUIDE.md, not the literal `—` character — treat
+    // both as the same delimiter so the entity form doesn't make every
+    // bullet look like it has no em dash at all (which would fold each
+    // bullet's trailing prose into `clause` below and fail the
+    // backtick-spans-only check for every entry).
+    const bullet = rawBullet.replaceAll('&mdash;', '—')
     const dashIdx = bullet.indexOf('—')
     const clause = (dashIdx === -1 ? bullet : bullet.slice(0, dashIdx)).trim()
     const spans = [...clause.matchAll(/`([^`]+)`/g)].map((m) => m[1]).filter((s): s is string => s !== undefined)
