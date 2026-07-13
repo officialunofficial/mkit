@@ -195,7 +195,7 @@ covered by `cargo test --lib`) for the `RoomEvent` build/encode/decode
 functions shared by the DO broadcast path and this bridge.
 
 **Delivery in local `wrangler dev` — VERIFIED (2026-07-11, issue #705); a
-real deployed-Worker trial is still pending (issue #803).** The #697 spike
+real deployed-Worker trial — VERIFIED (2026-07-13, issue #803).** The #697 spike
 that introduced this bridge reported a gap: a hand-rolled Connect-streaming
 test client against `WatchRefs` under local `wrangler dev` received *zero
 bytes, not even headers*, seconds after the bridge had already logged
@@ -227,24 +227,22 @@ it):
   correctly off the wire — this is the automated regression test PR #738's
   spike didn't have.
 
-**What was NOT verified: a real deployed Cloudflare Worker.** This session
-had real `wrangler` credentials for the org's Cloudflare account, but no
-authorization to run an actual `wrangler deploy` to production infrastructure
-(the harness's own safety guardrail blocked it — deploying to a live account,
-even under a disposable script name, is a production-modifying action outside
-this pass's scope). `wrangler dev --remote` — the documented fallback for
-edge-realistic testing without a full deploy — turned out to be a dead end
-independent of that: this wrangler version (4.110.0) has fully removed
-Durable Object support from `--remote` mode (`wrangler dev --remote is no
-longer supported for Durable Objects`), which is unusable for this Worker
-(every RPC except the unary `PutObject`/`GetObject` R2 path touches the
-RefStore DO). So the verification above is against local `wrangler dev`
-only — the same environment PR #738's spike used, just with the actual
-delivery gap it reported not reproducing. A maintainer with deploy
-authorization re-running the same manual trials against a real
-`wrangler deploy` (or the `mkit-repo-worker` Workers Builds deployment) would
-close out the last mile of confidence this pass couldn't reach — tracked as
-issue #803.
+**Real deployed Cloudflare Worker — VERIFIED (2026-07-13, issue #803).**
+`wrangler dev --remote` remains a dead end for this Worker independent of
+authorization: this wrangler version (4.110.0) has fully removed Durable
+Object support from `--remote` mode (`wrangler dev --remote is no longer
+supported for Durable Objects`), which every RPC except the unary
+`PutObject`/`GetObject` R2 path depends on (the RefStore DO). Instead, this
+was verified against `mkit-repo-worker-staging` (`staging-api.mkit.sh`,
+`wrangler deploy --env staging` — isolated storage, no production state
+touched): opened a real `WatchRefs` stream via `buf curl` against the live
+edge deployment, then drove two signed `UpdateRef` calls (via
+`src/bin/sign.rs`, a CAS-`ANY` write followed by a CAS-`MATCH` write against
+the first's `currentId`) against the same room. Both commit events arrived
+on the already-open stream — the first immediately after its RPC, the second
+back-to-back on the same connection without a reconnect — closing the last
+mile of confidence the local-`wrangler dev`-only verification above couldn't
+reach on its own.
 
 **Scope.** The bridge is single-subscriber-per-request, not bidi: each
 `WatchRefs` call opens its own worker→DO WebSocket, which is fine for a
