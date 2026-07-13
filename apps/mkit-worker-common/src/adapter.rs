@@ -32,6 +32,30 @@ pub fn to_http_method(method: WorkerMethod) -> http::Method {
     }
 }
 
+/// Header names that must never reach `connectrpc`'s dispatcher on a wasm32
+/// target: parsing either into a `RequestContext::deadline` calls
+/// `std::time::Instant::now()` (`connectrpc-0.8.1/src/response.rs`), which
+/// panics with "time not implemented on this platform" on
+/// wasm32-unknown-unknown — this target has no OS clock and Rust's std
+/// `Instant`/`SystemTime` have no JS-Date fallback (unlike `worker::Date`,
+/// which both Workers already use for their own envelope freshness checks).
+/// Any real ConnectRPC client that asserts a per-call timeout — e.g.
+/// `mkit-transport-connect::ConnectTransport`'s `with_default_timeout`
+/// (#701), not just a hand-crafted request — hits this unconditionally and
+/// takes the whole Worker down (`workerd` reports it as a hung request, not
+/// a clean 5xx). Stripping these headers means a Worker using this
+/// predicate simply never enforces a client-asserted deadline
+/// (`RequestContext::deadline()` sees `None`, matching the documented
+/// no-`DeadlinePolicy` behavior) — an accepted trade for a wasm32 target
+/// with no wall clock, not a change to the transport's write-auth contract.
+/// A single named predicate rather than each Worker hand-rolling its own
+/// closure: repo-worker originally passed `|_| true` here (keeping
+/// everything) while vcs-worker filtered correctly, a duplication-drift bug
+/// the shared `mkit-worker-common` crate exists to prevent — see mkit#797.
+pub fn is_deadline_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("connect-timeout-ms") || name.eq_ignore_ascii_case("grpc-timeout")
+}
+
 /// Copy `(name, value)` header pairs onto an `http::HeaderMap`, dropping
 /// any pair that isn't a valid HTTP header name/value rather than failing
 /// the whole request. `keep` lets a caller filter out headers the dispatch
@@ -208,6 +232,30 @@ mod tests {
             !k.eq_ignore_ascii_case("connect-timeout-ms")
         });
         assert!(headers.get("connect-timeout-ms").is_none());
+        assert_eq!(headers.get("x-public-key").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn is_deadline_header_matches_both_names_case_insensitively() {
+        assert!(is_deadline_header("connect-timeout-ms"));
+        assert!(is_deadline_header("Connect-Timeout-Ms"));
+        assert!(is_deadline_header("grpc-timeout"));
+        assert!(is_deadline_header("GRPC-TIMEOUT"));
+        assert!(!is_deadline_header("x-public-key"));
+        assert!(!is_deadline_header("connect-timeout"));
+    }
+
+    #[test]
+    fn is_deadline_header_strips_both_from_a_header_copy() {
+        let mut headers = http::HeaderMap::new();
+        let entries = vec![
+            ("connect-timeout-ms".to_string(), "5000".to_string()),
+            ("grpc-timeout".to_string(), "5S".to_string()),
+            ("x-public-key".to_string(), "abc123".to_string()),
+        ];
+        copy_headers_filtered(entries, &mut headers, |k| !is_deadline_header(k));
+        assert!(headers.get("connect-timeout-ms").is_none());
+        assert!(headers.get("grpc-timeout").is_none());
         assert_eq!(headers.get("x-public-key").unwrap(), "abc123");
     }
 

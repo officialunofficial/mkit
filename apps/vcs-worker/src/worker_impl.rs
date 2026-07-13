@@ -20,7 +20,8 @@ use std::sync::Arc;
 use connectrpc::{ConnectRpcService, Router};
 use mkit_worker_common::{
     adapter::{
-        copy_response_headers, dispatch_oneshot, http_request_from_worker, respond_buffered,
+        copy_response_headers, dispatch_oneshot, http_request_from_worker, is_deadline_header,
+        respond_buffered,
     },
     body_cap::{CappedBody, read_capped_body},
     cors::{cors_preflight_response, is_options_preflight, with_cors},
@@ -84,27 +85,9 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         CappedBody::TooLarge => return Ok(with_cors(body_too_large()?)),
     };
 
-    // Drop the Connect/gRPC client-deadline headers before they reach
-    // `connectrpc`'s dispatcher: parsing either into a
-    // `RequestContext::deadline` calls `std::time::Instant::now()`
-    // (`connectrpc-0.8.1/src/response.rs`), which panics with "time not
-    // implemented on this platform" on wasm32-unknown-unknown — this target
-    // has no OS clock and Rust's std `Instant`/`SystemTime` have no JS-Date
-    // fallback (unlike `worker::Date`, which this server already uses for
-    // its own envelope freshness check in `auth.rs`). Any real ConnectRPC
-    // client that asserts a per-call timeout — e.g.
-    // `mkit-transport-connect::ConnectTransport`'s `with_default_timeout`
-    // (#701), not just a hand-crafted request — hits this unconditionally
-    // and takes the whole Worker down (`workerd` reports it as a hung
-    // request, not a clean 5xx). Stripping the header here means this
-    // reference server simply never enforces a client-asserted deadline
-    // (`RequestContext::deadline()` sees `None`, matching the documented
-    // no-`DeadlinePolicy` behavior) — an accepted trade for a wasm32 target
-    // with no wall clock, not a change to the transport's write-auth
-    // contract.
-    let http_req = http_request_from_worker(&req, body, |k| {
-        !(k.eq_ignore_ascii_case("connect-timeout-ms") || k.eq_ignore_ascii_case("grpc-timeout"))
-    })?;
+    // See `is_deadline_header`'s doc comment: parsing `connect-timeout-ms`/
+    // `grpc-timeout` calls `Instant::now()`, which panics on wasm32.
+    let http_req = http_request_from_worker(&req, body, |k| !is_deadline_header(k))?;
 
     // `AuthInterceptor` needs its own `Env` to address the RefStore DO for
     // the write-quota check (`enforce_write_quota`), and `HealthServer` its

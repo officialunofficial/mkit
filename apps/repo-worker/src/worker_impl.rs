@@ -18,7 +18,8 @@ use bytes::Bytes;
 use connectrpc::{ConnectRpcService, Router};
 use mkit_worker_common::{
     adapter::{
-        copy_response_headers, dispatch_oneshot, http_request_from_worker, respond_streamed,
+        copy_response_headers, dispatch_oneshot, http_request_from_worker, is_deadline_header,
+        respond_streamed,
     },
     body_cap::{CappedBody, read_capped_body},
     cors::{cors_preflight_response, is_options_preflight, with_cors},
@@ -123,7 +124,9 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         CappedBody::TooLarge => return Ok(with_cors(body_too_large()?)),
     };
 
-    let http_req = http_request_from_worker(&req, body, |_| true)?;
+    // See `is_deadline_header`'s doc comment: parsing `connect-timeout-ms`/
+    // `grpc-timeout` calls `Instant::now()`, which panics on wasm32.
+    let http_req = http_request_from_worker(&req, body, |k| !is_deadline_header(k))?;
 
     // Read the admin secret BEFORE `env` moves into `RepoServer::new` below.
     // `env.secret()` is `Err` when the binding doesn't exist (never
