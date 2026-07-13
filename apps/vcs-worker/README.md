@@ -67,6 +67,32 @@ Both envelope kinds are open-write (same posture as repo-worker): any valid
 Ed25519 key may write. A valid signature proves request integrity +
 same-author, never authority.
 
+- **Per-key write quota.** A valid Ed25519 signature proves a *distinct* key,
+  not a *throttled* one, and a fresh key is free to mint — so `UpdateRef`,
+  `AdvanceRefs`, and `UploadPack` are additionally metered per author: at most
+  `WRITE_QUOTA_MAX_OPS` writes and `WRITE_QUOTA_MAX_BYTES` of `UploadPack`
+  bytes per author in a rolling `WRITE_QUOTA_WINDOW_MS` window (see
+  [`src/write_quota.rs`](src/write_quota.rs), ported from
+  `apps/repo-worker/src/write_quota.rs`). Unlike repo-worker's per-room
+  ledger, this service has a single global RefStore DO instance, so the
+  budget is keyed on `author` alone. `AuthInterceptor`
+  (`src/worker_impl/auth.rs`) checks-and-consumes the budget for `UpdateRef`/
+  `AdvanceRefs` against the RefStore DO (`POST /quota`,
+  `src/worker_impl/refstore.rs`) BEFORE the handler runs. `UploadPack`'s quota
+  check instead runs inside its own handler (`src/worker_impl/service.rs`),
+  right after decoding the stream's `header` message (the earliest point the
+  pack's declared size is known — the streaming `Interceptor::
+  intercept_streaming` runs before any message arrives, so it can't charge
+  bytes itself), still before any chunk is read or stored. Either way, the
+  counter lives in the DO's serial state rather than a Worker-global that
+  would race across isolates. Over-quota writes are rejected with Connect
+  `resource_exhausted`. A DO-unreachable quota check fails OPEN (logged,
+  write proceeds) rather than turning a transient infra hiccup into an outage
+  for every writer — every OTHER outcome (including the DO reachable and
+  reporting the budget exceeded) fails CLOSED. This is application-layer
+  defense; pair with a Cloudflare Rate Limiting rule keyed on `X-Public-Key`
+  at the edge for defense in depth (not configured here).
+
 ### Known limitations
 
 - **Replay within the freshness window** (±5 min) — same caveat as
@@ -197,10 +223,10 @@ ConnectRPC, `POST /mkit.transport.v1.TransportService/<Method>`:
 |---|---|---|---|
 | `ListRefs` | unary | read | DO prefix scan → `{refs}`. |
 | `ReadRef` | unary | read | DO read → `{exists, object_id}`. |
-| `UpdateRef` | unary | write | Single-ref CAS (`ANY`/`MISSING`/`MATCH`) → empty body, or Connect `failed_precondition` on conflict. |
-| `AdvanceRefs` | unary | write | Atomic two-ref CAS (head + packmap), evaluated inside one serial DO fetch → `{outcome}`. |
+| `UpdateRef` | unary | write, quota-gated | Single-ref CAS (`ANY`/`MISSING`/`MATCH`) → empty body, or Connect `failed_precondition` on conflict. |
+| `AdvanceRefs` | unary | write, quota-gated | Atomic two-ref CAS (head + packmap), evaluated inside one serial DO fetch → `{outcome}`. |
 | `PackExists` | unary | read | R2 head → `{exists}`. |
-| `UploadPack` | client-streaming | write (streaming envelope) | Verifies `header`-then-`chunk*` framing, offset contiguity, `BLAKE3(received) == pack_id`; idempotent content-addressed R2 put. |
+| `UploadPack` | client-streaming | write (streaming envelope), quota-gated | Verifies `header`-then-`chunk*` framing, offset contiguity, `BLAKE3(received) == pack_id`; idempotent content-addressed R2 put. |
 | `DownloadPack` | server-streaming | read | R2 get → a 2-item `(header, chunk)` stream carrying the whole pack (see "Known limitations"); Connect `not_found` if absent. |
 
 ## RefStore Durable Object
@@ -208,12 +234,14 @@ ConnectRPC, `POST /mkit.transport.v1.TransportService/<Method>`:
 **One global instance** (`env.durable_object("REFSTORE").id_from_name("root")`)
 — this service has no per-room/per-project split; a Worker deployment IS one
 repository. SQLite `refs(path TEXT PRIMARY KEY, value TEXT)`. Internal JSON
-wire protocol (`POST /get | /update | /list | /advance`) — see
+wire protocol (`POST /get | /update | /list | /advance | /quota`) — see
 `src/worker_impl/wire.rs`. `AdvanceRefs` evaluates BOTH ref preconditions
 before writing EITHER ref (packmap checked first, matching
 `Transport::advance_refs`'s default precedence) — a true atomic transaction
 inside the DO's single serial `fetch`, never the packmap-then-head fallback a
-non-transactional backend would need.
+non-transactional backend would need. The per-key write-quota ledger
+(`write_quota` table, `POST /quota`) lives here too — see "Per-key write
+quota" above.
 
 ## Build & run
 

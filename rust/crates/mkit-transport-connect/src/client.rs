@@ -5,6 +5,7 @@
 use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use connectrpc::client::{ClientConfig, HttpClient};
@@ -13,8 +14,8 @@ use http::header::AUTHORIZATION;
 use mkit_core::hash::Hash;
 use mkit_core::protocol::async_shim::Executor as _;
 use mkit_core::protocol::{
-    AdvanceOutcome as CoreAdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey,
-    RefWriteCondition, Transport, TransportError, TransportResult,
+    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE,
+    PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
 };
 use mkit_core::refs::Ref;
 use url::{Host, Url};
@@ -52,19 +53,31 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// Native ConnectRPC client for `mkit.transport.v1.TransportService` — the
 /// implementation behind `mkit+https://` (SPEC-TRANSPORT-CONNECT).
 ///
-/// Unlike `mkit-transport-http`, this transport does **not** implement its
-/// own retry/backoff ladder: SPEC-TRANSPORT-CONNECT §7.3 defers that to a
-/// shared Connect interceptor (mkit#703) wrapping the generated client, so
-/// every call here is a single attempt. Callers that need SPEC-TRANSPORT
-/// §7 retry semantics today get them from `mkit_core::protocol::
-/// is_retryable` / `BackoffIterator` applied to this transport's returned
-/// [`TransportError`], exactly as any other transport-agnostic caller
-/// would.
+/// Every `Transport` method is driven through the shared
+/// [`mkit_core::protocol::retrying`] / [`BackoffIterator`] ladder — the same
+/// driver `mkit-transport-http`/`-ssh`/`-enc` use (mkit#703) — so a
+/// transient `ConnectionFailed` or 5xx/429-equivalent (`unavailable` /
+/// `resource_exhausted`, see `crate::error::map_connect_error`) is
+/// retried up to [`mkit_core::protocol::BACKOFF_MAX_ATTEMPTS`] times before
+/// surfacing to the caller, instead of failing on the first attempt. Each
+/// retry re-invokes the whole async call from scratch (a fresh request, and
+/// for `download_pack`, a fresh stream), matching the shared driver's
+/// contract that `op` must be self-contained per attempt. Mutating CAS ops
+/// (`update_ref`/`advance_refs`) are safe to wrap unconditionally because
+/// [`mkit_core::protocol::is_retryable`] already excludes
+/// `TransportError::RefConflict` — a CAS conflict is never retried here;
+/// retrying that is caller-level policy.
 pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
     executor: TokioExecutor,
     /// See [`Self::with_atomic_advance`].
     atomic_advance: bool,
+    /// Retry-delay ladder factory. Production uses the spec ladder; tests
+    /// inject a shorter ladder so retry assertions stay fast.
+    backoff: fn() -> BackoffIterator,
+    /// Sleep hook between retry attempts. Production sleeps for the full
+    /// delay; tests inject a no-op or recorder.
+    sleep: fn(Duration),
 }
 
 // Manual Debug: `HttpClient` doesn't implement it, and a bearer token (if
@@ -230,6 +243,8 @@ impl ConnectTransport {
             client: TransportServiceClient::new(transport, config),
             executor,
             atomic_advance: false,
+            backoff: BackoffIterator::new,
+            sleep: thread::sleep,
         })
     }
 
@@ -245,6 +260,10 @@ impl ConnectTransport {
 
     /// Like [`Self::connect_for_test`], with an optional envelope signer —
     /// used by this crate's own envelope integration test.
+    ///
+    /// Uses a fast, no-sleep retry ladder (see [`test_backoff`]/[`no_sleep`])
+    /// so existing happy-path integration tests aren't slowed down by the
+    /// production 1s-32s ladder if a call happens to classify as retryable.
     #[doc(hidden)]
     #[must_use]
     pub fn connect_for_test_with_signer(
@@ -259,7 +278,26 @@ impl ConnectTransport {
             ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
             atomic_advance: false,
+            backoff: test_backoff,
+            sleep: no_sleep,
         }
+    }
+
+    /// Like [`Self::connect_for_test_with_signer`], with explicit retry
+    /// hooks — used by this crate's deterministic retry test to inject a
+    /// short, fixed-attempt ladder and assert on the resulting attempt
+    /// count.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn connect_for_test_with_retry(
+        base_uri: Uri,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+    ) -> Self {
+        let mut transport = Self::connect_for_test_with_signer(base_uri, None);
+        transport.backoff = backoff;
+        transport.sleep = sleep;
+        transport
     }
 
     /// Declare that the remote deployment's `AdvanceRefs` commits the
@@ -279,7 +317,33 @@ impl ConnectTransport {
         self.atomic_advance = atomic;
         self
     }
+
+    /// Drive `op` through the standard 5-attempt backoff ladder shared by
+    /// every `mkit` transport. `op` is re-invoked from scratch on every
+    /// attempt — every `Transport` method below builds and sends its
+    /// request(s) *inside* the closure passed here (a fresh RPC call, or
+    /// for `download_pack`, a fresh stream) rather than assuming any state
+    /// from a failed prior attempt is still valid.
+    ///
+    /// Thin wrapper over the transport-agnostic
+    /// [`mkit_core::protocol::retrying`] — mirrors
+    /// `HttpTransport::retrying`/`SshTransport::retrying`/`EncTransport::
+    /// retrying`'s shape byte for byte, adapted to this transport's
+    /// `TransportResult<T>`-returning async calls instead of an HTTP
+    /// `Response`.
+    fn retrying<T>(&self, op: impl FnMut() -> TransportResult<T>) -> TransportResult<T> {
+        mkit_core::protocol::retrying(op, self.backoff, self.sleep)
+    }
 }
+
+/// Short, deterministic retry ladder for tests: 5 attempts, 1ms apart,
+/// capped at 1ms. Mirrors `mkit-transport-http`'s `test_backoff`.
+fn test_backoff() -> BackoffIterator {
+    BackoffIterator::with(Duration::from_millis(1), Duration::from_millis(1), 5)
+}
+
+/// No-op sleep hook for tests — retry assertions run at full speed.
+fn no_sleep(_delay: Duration) {}
 
 fn bytes_to_hash(bytes: &[u8]) -> TransportResult<Hash> {
     <[u8; 32]>::try_from(bytes).map_err(|_| TransportError::InvalidResponse)
@@ -360,12 +424,14 @@ impl Transport for ConnectTransport {
             return Err(TransportError::PayloadTooLarge(bytes.len()));
         }
         let requests = build_upload_requests(bytes, key);
-        self.executor.block_on(async {
-            self.client
-                .upload_pack(requests)
-                .await
-                .map(|_| ())
-                .map_err(|e| map_connect_error(e, ErrorContext::Upload))
+        self.retrying(|| {
+            self.executor.block_on(async {
+                self.client
+                    .upload_pack(requests.clone())
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| map_connect_error(e, ErrorContext::Upload))
+            })
         })
     }
 
@@ -374,76 +440,87 @@ impl Transport for ConnectTransport {
         // server-streaming `.message()` read here hits a rustc HRTB/GAT
         // limitation against the `Send`-bound trait method, not an actual
         // thread-safety issue.
-        self.executor.block_on_local(async {
-            let mut stream = self
-                .client
-                .download_pack(DownloadPackRequest {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
+        //
+        // The whole stream (request through final chunk) is re-issued from
+        // scratch on every retry attempt — a partially-read stream from a
+        // failed prior attempt is never resumed.
+        self.retrying(|| {
+            self.executor.block_on_local(async {
+                let mut stream = self
+                    .client
+                    .download_pack(DownloadPackRequest {
+                        pack_id: Some(key.as_bytes().to_vec()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
 
-            let first = stream
-                .message()
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                .ok_or(TransportError::InvalidResponse)?;
-            let total_bytes = match first.to_owned_message().body {
-                Some(DownloadBody::Header(h)) => h.total_bytes.unwrap_or(0),
-                _ => return Err(TransportError::InvalidResponse),
-            };
-            if total_bytes > PACK_BODY_LIMIT {
-                return Err(TransportError::PayloadTooLarge(
-                    usize::try_from(total_bytes).unwrap_or(usize::MAX),
-                ));
-            }
-
-            let mut buf: Vec<u8> =
-                Vec::with_capacity(usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE));
-            loop {
-                let next = stream
+                let first = stream
                     .message()
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .ok_or(TransportError::InvalidResponse)?;
-                match next.to_owned_message().body {
-                    Some(DownloadBody::Chunk(c)) => {
-                        let offset = c.offset.unwrap_or(0);
-                        if offset != buf.len() as u64 {
-                            return Err(TransportError::InvalidResponse);
-                        }
-                        let data = c.data.unwrap_or_default();
-                        if buf.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
-                            return Err(TransportError::PayloadTooLarge(buf.len() + data.len()));
-                        }
-                        buf.extend_from_slice(&data);
-                        if c.last.unwrap_or(false) {
-                            break;
-                        }
-                    }
+                let total_bytes = match first.to_owned_message().body {
+                    Some(DownloadBody::Header(h)) => h.total_bytes.unwrap_or(0),
                     _ => return Err(TransportError::InvalidResponse),
+                };
+                if total_bytes > PACK_BODY_LIMIT {
+                    return Err(TransportError::PayloadTooLarge(
+                        usize::try_from(total_bytes).unwrap_or(usize::MAX),
+                    ));
                 }
-            }
-            if buf.len() as u64 != total_bytes {
-                return Err(TransportError::InvalidResponse);
-            }
-            Ok(buf)
+
+                let mut buf: Vec<u8> = Vec::with_capacity(
+                    usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE),
+                );
+                loop {
+                    let next = stream
+                        .message()
+                        .await
+                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                        .ok_or(TransportError::InvalidResponse)?;
+                    match next.to_owned_message().body {
+                        Some(DownloadBody::Chunk(c)) => {
+                            let offset = c.offset.unwrap_or(0);
+                            if offset != buf.len() as u64 {
+                                return Err(TransportError::InvalidResponse);
+                            }
+                            let data = c.data.unwrap_or_default();
+                            if buf.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
+                                return Err(TransportError::PayloadTooLarge(
+                                    buf.len() + data.len(),
+                                ));
+                            }
+                            buf.extend_from_slice(&data);
+                            if c.last.unwrap_or(false) {
+                                break;
+                            }
+                        }
+                        _ => return Err(TransportError::InvalidResponse),
+                    }
+                }
+                if buf.len() as u64 != total_bytes {
+                    return Err(TransportError::InvalidResponse);
+                }
+                Ok(buf)
+            })
         })
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.executor.block_on(async {
-            let resp = self
-                .client
-                .pack_exists(PackExistsRequest {
-                    pack_id: Some(key.as_bytes().to_vec()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                .into_owned();
-            Ok(resp.exists.unwrap_or(false))
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let resp = self
+                    .client
+                    .pack_exists(PackExistsRequest {
+                        pack_id: Some(key.as_bytes().to_vec()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                    .into_owned();
+                Ok(resp.exists.unwrap_or(false))
+            })
         })
     }
 
@@ -454,63 +531,69 @@ impl Transport for ConnectTransport {
         hash: &Hash,
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
-        self.executor.block_on(async {
-            self.client
-                .update_ref(UpdateRefRequest {
-                    name: Some(name.to_owned()),
-                    expectation: Some(expectation.into()),
-                    expected_id,
-                    new_id: Some(hash.to_vec()),
-                    ..Default::default()
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))
+        self.retrying(|| {
+            self.executor.block_on(async {
+                self.client
+                    .update_ref(UpdateRefRequest {
+                        name: Some(name.to_owned()),
+                        expectation: Some(expectation.into()),
+                        expected_id: expected_id.clone(),
+                        new_id: Some(hash.to_vec()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))
+            })
         })
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
-        self.executor.block_on(async {
-            let resp = self
-                .client
-                .read_ref(ReadRefRequest {
-                    name: Some(name.to_owned()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                .into_owned();
-            if resp.exists.unwrap_or(false) {
-                let id = resp.object_id.ok_or(TransportError::InvalidResponse)?;
-                Ok(Some(bytes_to_hash(&id)?))
-            } else {
-                Ok(None)
-            }
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let resp = self
+                    .client
+                    .read_ref(ReadRefRequest {
+                        name: Some(name.to_owned()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                    .into_owned();
+                if resp.exists.unwrap_or(false) {
+                    let id = resp.object_id.ok_or(TransportError::InvalidResponse)?;
+                    Ok(Some(bytes_to_hash(&id)?))
+                } else {
+                    Ok(None)
+                }
+            })
         })
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
-        self.executor.block_on(async {
-            let resp = self
-                .client
-                .list_refs(ListRefsRequest {
-                    prefix: Some(prefix.to_owned()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                .into_owned();
-            resp.refs
-                .into_iter()
-                .map(|e| {
-                    let name = e.name.ok_or(TransportError::InvalidResponse)?;
-                    let object_id = e.object_id.ok_or(TransportError::InvalidResponse)?;
-                    Ok(Ref {
-                        name,
-                        hash: Some(bytes_to_hash(&object_id)?),
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let resp = self
+                    .client
+                    .list_refs(ListRefsRequest {
+                        prefix: Some(prefix.to_owned()),
+                        ..Default::default()
                     })
-                })
-                .collect()
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                    .into_owned();
+                resp.refs
+                    .into_iter()
+                    .map(|e| {
+                        let name = e.name.ok_or(TransportError::InvalidResponse)?;
+                        let object_id = e.object_id.ok_or(TransportError::InvalidResponse)?;
+                        Ok(Ref {
+                            name,
+                            hash: Some(bytes_to_hash(&object_id)?),
+                        })
+                    })
+                    .collect()
+            })
         })
     }
 
@@ -525,31 +608,33 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<CoreAdvanceOutcome> {
         let (head_expectation, head_expected_id) = condition_to_wire(head_condition);
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
-        self.executor.block_on(async {
-            let resp = self
-                .client
-                .advance_refs(AdvanceRefsRequest {
-                    head_ref: Some(head_ref.to_owned()),
-                    head_expectation: Some(head_expectation.into()),
-                    head_expected_id,
-                    head_new_id: Some(head_value.to_vec()),
-                    packmap_ref: Some(packmap_ref.to_owned()),
-                    packmap_expectation: Some(packmap_expectation.into()),
-                    packmap_expected_id,
-                    packmap_new_id: Some(packmap_value.to_vec()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                .into_owned();
-            match resp.outcome.and_then(|o| o.as_known()) {
-                Some(ProtoAdvanceOutcome::Committed) => Ok(CoreAdvanceOutcome::Committed),
-                Some(ProtoAdvanceOutcome::HeadConflict) => Ok(CoreAdvanceOutcome::HeadConflict),
-                Some(ProtoAdvanceOutcome::PackmapConflict) => {
-                    Ok(CoreAdvanceOutcome::PackmapConflict)
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let resp = self
+                    .client
+                    .advance_refs(AdvanceRefsRequest {
+                        head_ref: Some(head_ref.to_owned()),
+                        head_expectation: Some(head_expectation.into()),
+                        head_expected_id: head_expected_id.clone(),
+                        head_new_id: Some(head_value.to_vec()),
+                        packmap_ref: Some(packmap_ref.to_owned()),
+                        packmap_expectation: Some(packmap_expectation.into()),
+                        packmap_expected_id: packmap_expected_id.clone(),
+                        packmap_new_id: Some(packmap_value.to_vec()),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                    .into_owned();
+                match resp.outcome.and_then(|o| o.as_known()) {
+                    Some(ProtoAdvanceOutcome::Committed) => Ok(CoreAdvanceOutcome::Committed),
+                    Some(ProtoAdvanceOutcome::HeadConflict) => Ok(CoreAdvanceOutcome::HeadConflict),
+                    Some(ProtoAdvanceOutcome::PackmapConflict) => {
+                        Ok(CoreAdvanceOutcome::PackmapConflict)
+                    }
+                    _ => Err(TransportError::InvalidResponse),
                 }
-                _ => Err(TransportError::InvalidResponse),
-            }
+            })
         })
     }
 

@@ -494,22 +494,29 @@ push_branch`'s re-baseline gate already requires `supports_atomic_advance()
 the packmap-compaction optimization, not a correctness gap. Revisit once
 mkit#699 ships a confirmed-transactional backend.
 
-Retry/backoff for this transport is deliberately NOT implemented as a
-from-scratch ladder (unlike `mkit-transport-http`'s built-in one): every
-call is a single attempt. SPEC-TRANSPORT-CONNECT §7.3 defers retry to a
-shared Connect interceptor (mkit#703) that wraps the generated client —
-the same `is_retryable` classification and `BackoffIterator` ladder
-(SPEC-TRANSPORT §7) still apply, just translated through §5's
-Connect-code mapping instead of read directly off an HTTP status or
-`TransportError`, once that interceptor lands.
+Every `Transport` method `ConnectTransport` implements is driven through
+the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
+`mkit-transport-http`/`-ssh`/`-enc` share (mkit#703, mkit#790): a
+transient `ConnectionFailed` or the Connect codes §5 maps onto a
+5xx/429-equivalent (`unavailable`, `resource_exhausted`) is retried per
+SPEC-TRANSPORT §7's `is_retryable` classification, read off the
+`TransportError` §5's client-side mapping produces rather than directly
+off an HTTP status. Each retry re-issues the whole RPC from scratch
+(including, for `DownloadPack`, a fresh stream) — nothing from a failed
+prior attempt is reused. Mutating CAS ops (`UpdateRef`/`AdvanceRefs`) are
+safe to retry unconditionally because `is_retryable` excludes
+`TransportError::RefConflict`; a CAS conflict is never retried here — that
+stays caller-level policy.
 
-The regression test
-(`rust/crates/mkit-transport-connect/tests/roundtrip.rs`) drives every
-`Transport` verb — including multi-chunk `UploadPack`/`DownloadPack`
-streaming and all three `AdvanceOutcome` variants — through a real
-in-process `TransportService` server (memory-backed, not R2/DO), per
-this issue's testing decision: a real server, not a mock standing in for
-one.
+The regression tests
+(`rust/crates/mkit-transport-connect/tests/roundtrip.rs`,
+`tests/retry.rs`) drive every `Transport` verb — including multi-chunk
+`UploadPack`/`DownloadPack` streaming, all three `AdvanceOutcome`
+variants, and the retry ladder itself (a flaky in-process server that
+fails the first N calls with a retryable error class, and a
+non-retryable-error/ladder-exhaustion pair) — through a real in-process
+`TransportService` server (memory-backed, not R2/DO), per this issue's
+testing decision: a real server, not a mock standing in for one.
 
 ---
 
@@ -524,7 +531,8 @@ Explicitly deferred to sibling issues:
 - Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
   `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`
   extensions, not just core-verb parity — see §7.3).
-- The shared retry/backoff Connect interceptor (mkit#703).
+- ~~The shared retry/backoff Connect interceptor (mkit#703).~~ Implemented
+  directly in `ConnectTransport` (mkit#790) — see §7.3.
 - S3 multipart upload (unrelated transport; not superseded by this
   document at all).
 - Migrating `mkit.repo.v1.WatchRefs` to real Connect server-streaming
