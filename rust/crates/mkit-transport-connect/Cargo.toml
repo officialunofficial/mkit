@@ -65,6 +65,14 @@ buffa-types = "0.8.1"
 # Only pulled in by the `server` feature — see `[features]`.
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
 
+# The standard `grpc.health.v1.Health` service (mkit#796), mounted
+# alongside `TransportService` in `router()`. Only pulled in by the
+# `server` feature: it unconditionally depends on `connectrpc/server`
+# (see its own Cargo.toml), which is exactly what this crate's `server`
+# feature already turns on, so there is no additional dependency-graph
+# cost beyond the crate itself.
+connectrpc-health = { version = "0.8", optional = true }
+
 # Async runtime driving the ConnectRPC client (and, under `server`, the axum
 # server too). The `Transport` trait (mkit_core::protocol::Transport) is
 # synchronous; `mkit_core::protocol::async_shim::Executor` bridges the
@@ -145,7 +153,7 @@ default = []
 # e.g. `mkit-cli`'s unconditional `remote_dispatch` dependency) doesn't pay
 # axum/hyper-server's compile cost. Turn on directly, or transitively via
 # `mkit-cli`'s `http-transport` feature.
-server = ["dep:axum", "connectrpc/server", "connectrpc/axum"]
+server = ["dep:axum", "connectrpc/server", "connectrpc/axum", "dep:connectrpc-health"]
 
 # `tests/e2e.rs` drives a real `mkit_transport_connect::serve` (this crate's
 # OWN server API, not just connectrpc's), so it needs the `server` feature

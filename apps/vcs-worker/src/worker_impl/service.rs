@@ -56,11 +56,17 @@ use super::wire::{
     ListResp, UpdateReq, UpdateResp,
 };
 
-const STORAGE_BUCKET: &str = "STORAGE";
+/// `pub(crate)`: reused by `super::health`'s cheap R2 reachability probe
+/// (mkit#796) so the health checker addresses the SAME bucket binding this
+/// service does, rather than a second hand-copied literal.
+pub(crate) const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
 /// The single, global RefStore DO instance name — one Worker deployment
 /// serves one mkit repository (SPEC-TRANSPORT-CONNECT §7.1), unlike
-/// apps/repo-worker's per-`room` instancing.
+/// apps/repo-worker's per-`room` instancing. `super::health`'s cheap DO
+/// reachability probe (mkit#796) goes through this same `do_call`, so it
+/// addresses this same single global instance rather than a
+/// health-check-specific DO.
 const REFSTORE_INSTANCE: &str = "root";
 
 /// Cap on a pack's declared/observed size. This reference server buffers the
@@ -110,8 +116,13 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<(), Conne
     Ok(())
 }
 
-/// Issue a JSON POST to the RefStore DO and decode the response. `pub(crate)`
-/// so `worker_impl/auth.rs`'s `enforce_write_quota` can drive the `/quota` op
+/// Issue a JSON POST to the RefStore DO and decode the response.
+///
+/// `pub(crate)` so `super::health`'s cheap DO reachability probe
+/// (mkit#796) reuses the exact same DO-call plumbing (retry-free, one
+/// round trip) rather than a second copy — mirrors apps/repo-worker's
+/// identical `pub(crate)` rationale on its own `do_call` — and so
+/// `worker_impl/auth.rs`'s `enforce_write_quota` can drive the `/quota` op
 /// too (see that module's docs).
 pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,

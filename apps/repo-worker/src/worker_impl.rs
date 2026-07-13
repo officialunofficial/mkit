@@ -17,14 +17,17 @@ use worker::{Context, Env, Method, Request, Response, Result, event};
 
 pub mod auth;
 pub mod commit_index;
+pub mod health;
 pub mod refstore;
 pub mod service;
 pub mod wire;
 
 use auth::AuthInterceptor;
+use health::HealthServer;
 use service::RepoServer;
 
 // Surface the proto extension trait + DO type to this module.
+use crate::proto::grpc::health::v1::HealthExt;
 use crate::proto::mkit::repo::v1::RepoServiceExt;
 // Reuse the canonical room validator (same one the unary path enforces via
 // `service::check_room`) so the streaming /watch route can't address a DO with
@@ -175,6 +178,7 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // calls), and separately reaches the `WRITE_EVENTS` Analytics Engine
     // binding for accepted/rejected-write telemetry (see worker_impl/auth.rs).
     let router: Router = Arc::new(RepoServer::new(env.clone())).register(Router::new());
+    let router: Router = Arc::new(HealthServer::new(env.clone())).register(router);
     // Default compression policy (gzip large responses). The wasm client now
     // re-asserts `content-encoding` from the gzip magic and decompresses, so the
     // earlier "browser strips the header → client decodes raw gzip" bug is fixed

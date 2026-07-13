@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc_health::{HealthClient, wire::HealthCheckRequest as HealthCheckReq};
 use mkit_core::hash::hash;
 use mkit_transport_connect::proto::mkit::transport::v1::{
     AdvanceOutcome, DownloadPackRequest, PackExistsRequest, ReadRefRequest, RefExpectation,
@@ -24,6 +25,7 @@ type Client = TransportServiceClient<HttpClient>;
 
 async fn start_server() -> (
     Client,
+    http::Uri,
     tempfile::TempDir,
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<std::io::Result<()>>,
@@ -42,11 +44,12 @@ async fn start_server() -> (
     ));
 
     let uri: http::Uri = format!("http://{addr}").parse().expect("uri");
-    let client = TransportServiceClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+    let client =
+        TransportServiceClient::new(HttpClient::plaintext(), ClientConfig::new(uri.clone()));
     // `repo` (the TempDir guard) is returned so callers keep it alive until
     // after `shutdown()` — dropping it deletes the on-disk repo, which must
     // not happen while the server task might still be serving a request.
-    (client, repo, shutdown_tx, handle)
+    (client, uri, repo, shutdown_tx, handle)
 }
 
 async fn shutdown(
@@ -62,7 +65,7 @@ async fn shutdown(
 
 #[tokio::test]
 async fn push_then_pull_round_trip() {
-    let (client, _repo, shutdown_tx, handle) = start_server().await;
+    let (client, _uri, _repo, shutdown_tx, handle) = start_server().await;
 
     // list_refs on an empty repo is empty, not an error.
     let refs = client
@@ -182,7 +185,7 @@ async fn push_then_pull_round_trip() {
 
 #[tokio::test]
 async fn update_ref_cas_conflict_surfaces_as_failed_precondition() {
-    let (client, _repo, shutdown_tx, handle) = start_server().await;
+    let (client, _uri, _repo, shutdown_tx, handle) = start_server().await;
 
     let first = hash(b"first");
     client
@@ -214,7 +217,7 @@ async fn update_ref_cas_conflict_surfaces_as_failed_precondition() {
 
 #[tokio::test]
 async fn update_ref_rejects_unspecified_expectation() {
-    let (client, _repo, shutdown_tx, handle) = start_server().await;
+    let (client, _uri, _repo, shutdown_tx, handle) = start_server().await;
 
     let err = client
         .update_ref(
@@ -231,7 +234,7 @@ async fn update_ref_rejects_unspecified_expectation() {
 
 #[tokio::test]
 async fn download_pack_missing_digest_is_not_found() {
-    let (client, _repo, shutdown_tx, handle) = start_server().await;
+    let (client, _uri, _repo, shutdown_tx, handle) = start_server().await;
 
     // Establishing a Connect server-streaming call returns `Ok` once HTTP
     // headers arrive (200 OK, Connect's normal streaming-response status);
@@ -255,7 +258,7 @@ async fn download_pack_missing_digest_is_not_found() {
 
 #[tokio::test]
 async fn advance_refs_reports_head_conflict_as_typed_outcome_not_error() {
-    let (client, _repo, shutdown_tx, handle) = start_server().await;
+    let (client, _uri, _repo, shutdown_tx, handle) = start_server().await;
 
     let packmap_id = hash(b"packmap-v1");
     let head_id = hash(b"head-v1");
@@ -311,6 +314,53 @@ async fn advance_refs_reports_head_conflict_as_typed_outcome_not_error() {
         resp.outcome.and_then(|o| o.as_known()),
         Some(AdvanceOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT)
     );
+
+    shutdown(shutdown_tx, handle).await;
+}
+
+/// mkit#796: `mkit serve --http` mounts the standard `grpc.health.v1.Health`
+/// service (via `connectrpc_health`) alongside `TransportService`. A real
+/// `HealthClient` — not just the in-crate `Checker` unit tests in
+/// `src/health.rs` — must see `SERVING` for both the whole-process entry
+/// and the `mkit.transport.v1.TransportService` name over the wire, since
+/// this is what an operator's `grpc_health_probe` / load-balancer probe
+/// actually calls.
+#[tokio::test]
+async fn health_check_reports_serving() {
+    let (_client, uri, _repo, shutdown_tx, handle) = start_server().await;
+
+    let health = HealthClient::new(HttpClient::plaintext(), ClientConfig::new(uri));
+
+    // Whole-process entry (empty service name).
+    let resp = health
+        .check(HealthCheckReq::default())
+        .await
+        .expect("health check (whole process)")
+        .into_owned();
+    assert_eq!(resp.status, connectrpc_health::wire::ServingStatus::SERVING);
+
+    // The registered TransportService by name.
+    let resp = health
+        .check(HealthCheckReq {
+            service:
+                mkit_transport_connect::proto::mkit::transport::v1::TRANSPORT_SERVICE_SERVICE_NAME
+                    .to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("health check (TransportService)")
+        .into_owned();
+    assert_eq!(resp.status, connectrpc_health::wire::ServingStatus::SERVING);
+
+    // An unregistered service name is NotFound, not a bogus status.
+    let err = health
+        .check(HealthCheckReq {
+            service: "acme.NoSuchService".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unknown service must be rejected");
+    assert_eq!(err.code, connectrpc::ErrorCode::NotFound);
 
     shutdown(shutdown_tx, handle).await;
 }

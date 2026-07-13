@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Stage the ConnectRPC TransportService server stubs + buffa message modules
-// into $OUT_DIR for `connectrpc::include_generated!()`.
+// Stage the ConnectRPC TransportService + grpc.health.v1.Health server stubs
+// + buffa message modules into $OUT_DIR for `connectrpc::include_generated!()`.
 //
 // Default path: copy the pre-generated sources committed under generated/ into
 // $OUT_DIR — NO protoc required. Cloudflare Workers Builds (and CI) ship no
@@ -9,10 +9,20 @@
 // Worker building with zero system dependencies. Mirrors apps/repo-worker.
 //
 // Regeneration path: set MKIT_TRANSPORT_CODEGEN=1 to run connectrpc-build
-// against the CANONICAL repo-root proto (proto/mkit/transport/v1/transport.proto)
-// instead (requires protoc >= 27 on PATH or via PROTOC). After editing
-// transport.proto, run scripts/regen-transport-proto.sh from the repo root to
-// refresh generated/ for this crate, then commit.
+// against the CANONICAL repo-root protos (proto/mkit/transport/v1/transport.proto
+// and proto/grpc/health/v1/health.proto — mkit#796) instead (requires protoc
+// >= 27 on PATH or via PROTOC). After editing either proto, run
+// scripts/regen-transport-proto.sh from the repo root to refresh generated/
+// for this crate, then commit.
+//
+// grpc.health.v1.health.proto is compiled here (not via the
+// `connectrpc-health` crate) because that crate's Cargo.toml unconditionally
+// depends on `connectrpc` with `features = ["server"]`, which pulls in
+// `tokio/net` + `hyper-util/server` + `dep:libc` — none of which build for
+// wasm32-unknown-unknown. Vendoring the standard proto and hand-writing the
+// `Health` trait impl (see src/worker_impl/service.rs) keeps this Worker's
+// dependency graph wasm-clean while staying wire-compatible with
+// `grpc_health_probe` / kubelet gRPC probes / service meshes.
 
 use std::path::{Path, PathBuf};
 
@@ -34,10 +44,15 @@ fn main() {
             .canonicalize()
             .expect("canonical proto root not found: expected proto/ at repo root");
         let proto = canonical_root.join("mkit/transport/v1/transport.proto");
+        let health_proto = canonical_root.join("grpc/health/v1/health.proto");
         println!("cargo:rerun-if-changed={}", proto.display());
+        println!("cargo:rerun-if-changed={}", health_proto.display());
 
         connectrpc_build::Config::new()
-            .files(&[proto.to_str().expect("proto path is valid UTF-8")])
+            .files(&[
+                proto.to_str().expect("proto path is valid UTF-8"),
+                health_proto.to_str().expect("proto path is valid UTF-8"),
+            ])
             .includes(&[canonical_root.to_str().expect("proto root is valid UTF-8")])
             .include_file("_connectrpc.rs")
             .compile()

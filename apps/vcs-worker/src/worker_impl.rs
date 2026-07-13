@@ -20,13 +20,16 @@ use worker::send::SendFuture;
 use worker::{Context, Env, Method, Request, Response, Result, event};
 
 pub mod auth;
+pub mod health;
 pub mod refstore;
 pub mod service;
 pub mod wire;
 
 use auth::AuthInterceptor;
+use health::HealthServer;
 use service::{MAX_PACK_BYTES, TransportServer};
 
+use crate::proto::grpc::health::v1::HealthExt;
 use crate::proto::mkit::transport::v1::TransportServiceExt;
 
 /// The RefStore Durable Object, re-exported so worker-build/wrangler find it.
@@ -145,11 +148,13 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     }
 
     // `AuthInterceptor` needs its own `Env` to address the RefStore DO for
-    // the write-quota check (`enforce_write_quota`) — clone before `env` is
-    // moved into `TransportServer::new`. Cheap (see `worker::Env`'s doc note
-    // on apps/repo-worker's identical pattern).
+    // the write-quota check (`enforce_write_quota`), and `HealthServer` its
+    // own for the liveness probe — clone before `env` is moved into
+    // `TransportServer::new`. Cheap (see `worker::Env`'s doc note on
+    // apps/repo-worker's identical pattern).
     let auth_interceptor = AuthInterceptor::new(env.clone());
-    let router: Router = Arc::new(TransportServer::new(env)).register(Router::new());
+    let router: Router = Arc::new(TransportServer::new(env.clone())).register(Router::new());
+    let router: Router = Arc::new(HealthServer::new(env)).register(router);
     let svc = ConnectRpcService::new(router).with_interceptor(auth_interceptor);
 
     let http_resp = SendFuture::new(async move {

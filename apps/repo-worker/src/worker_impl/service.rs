@@ -41,7 +41,10 @@ use crate::room_event;
 use crate::storage_error::StorageOp;
 use std::collections::HashSet;
 
-const STORAGE_BUCKET: &str = "STORAGE";
+/// `pub(crate)`: reused by `super::health`'s cheap R2 reachability probe
+/// (mkit#796) so the health checker addresses the SAME bucket binding this
+/// service does, rather than a second hand-copied literal.
+pub(crate) const STORAGE_BUCKET: &str = "STORAGE";
 const REFSTORE_BINDING: &str = "REFSTORE";
 
 /// PutObject `bytes` cap (mirrors the worker-level body cap in worker_impl.rs).
