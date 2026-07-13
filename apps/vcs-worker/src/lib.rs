@@ -12,6 +12,7 @@
 pub mod envelope;
 pub mod hashing;
 pub mod refs;
+pub mod storage_error;
 
 /// Generated buffa messages + ConnectRPC TransportService server stubs.
 pub mod proto {
