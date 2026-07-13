@@ -49,6 +49,7 @@ use crate::proto::mkit::transport::v1::{
     UpdateRefResponse, UploadPackRequest, UploadPackResponse,
 };
 use crate::refs::{is_valid_digest, is_valid_ref_name, is_valid_ref_prefix};
+use crate::storage_error::StorageOp;
 
 use super::wire::{
     AdvanceOutcome as WireAdvanceOutcome, AdvanceReq, AdvanceResp, GetReq, GetResp, ListReq,
@@ -67,11 +68,22 @@ const REFSTORE_INSTANCE: &str = "root";
 /// docs), so this cap bounds worst-case isolate memory, not just wire size.
 pub(crate) const MAX_PACK_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
-fn ce_internal(msg: impl Into<String>) -> ConnectError {
-    ConnectError::internal(msg)
-}
 fn ce_invalid(msg: impl Into<String>) -> ConnectError {
     ConnectError::invalid_argument(msg)
+}
+
+/// Map a failed storage/DO operation to a client-facing `ConnectError`,
+/// logging the real error — which may embed R2/DO SDK detail (bucket keys,
+/// JS exception text, etc.) — server-side ONLY via `console_error!`. This is
+/// the single seam every R2/DO call in this file goes through instead of the
+/// former `ConnectError::internal(format!("R2 put: {e}"))`-style raw leaks
+/// (issue #794). See `crate::storage_error` for the exhaustive
+/// `StorageOp -> message` mapping (host-testable there) that this just logs
+/// through.
+fn ce_storage(op: StorageOp, e: impl std::fmt::Display) -> ConnectError {
+    let (log_line, client_err) = crate::storage_error::describe_and_map(op, e);
+    worker::console_error!("{log_line}");
+    client_err
 }
 
 /// R2 object key for a pack: `packs/{hex(pack_id)}`.
@@ -85,7 +97,7 @@ fn pack_key(pack_id: &[u8]) -> String {
 async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<(), ConnectError> {
     let bucket = env
         .bucket(STORAGE_BUCKET)
-        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
     bucket
         .put(key, bytes)
         .only_if(worker::Conditional {
@@ -94,7 +106,7 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<(), Conne
         })
         .execute()
         .await
-        .map_err(|e| ce_internal(format!("R2 put: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::R2Put, e))?;
     Ok(())
 }
 
@@ -106,25 +118,26 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     op: &str,
     body: &Req,
 ) -> Result<Resp, ConnectError> {
-    let payload = serde_json::to_string(body).map_err(|e| ce_internal(e.to_string()))?;
+    let payload =
+        serde_json::to_string(body).map_err(|e| ce_storage(StorageOp::RequestSerialize, e))?;
     let ns = env
         .durable_object(REFSTORE_BINDING)
-        .map_err(|e| ce_internal(format!("REFSTORE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreBinding, e))?;
     let stub = ns
         .id_from_name(REFSTORE_INSTANCE)
         .and_then(|id| id.get_stub())
-        .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreStub, e))?;
 
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_body(Some(payload.into()));
     let req = WorkerRequest::new_with_init(&format!("https://refstore{op}"), &init)
-        .map_err(|e| ce_internal(e.to_string()))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreRequest, e))?;
 
     let mut resp = stub
         .fetch_with_request(req)
         .await
-        .map_err(|e| ce_internal(format!("REFSTORE fetch: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreFetch, e))?;
 
     if resp.status_code() >= 400 {
         let msg = resp.text().await.unwrap_or_default();
@@ -132,7 +145,7 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     }
     resp.json::<Resp>()
         .await
-        .map_err(|e| ce_internal(format!("refstore decode: {e}")))
+        .map_err(|e| ce_storage(StorageOp::RefstoreDecode, e))
 }
 
 fn hex_to_bytes_opt(s: &Option<String>) -> Option<Vec<u8>> {
@@ -352,11 +365,11 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         SendFuture::new(async move {
             let bucket = env
                 .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+                .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
             let exists = bucket
                 .head(pack_key(&pack_id))
                 .await
-                .map_err(|e| ce_internal(format!("R2 head: {e}")))?
+                .map_err(|e| ce_storage(StorageOp::R2Head, e))?
                 .is_some();
             Ok(Response::new(PackExistsResponse {
                 exists: Some(exists),
@@ -479,19 +492,19 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         let bytes = SendFuture::new(async move {
             let bucket = env
                 .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+                .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
             match bucket.get(key).execute().await {
                 Ok(Some(obj)) => {
                     let bytes = obj
                         .body()
-                        .ok_or_else(|| ce_internal("R2 object had no body"))?
+                        .ok_or_else(|| ce_storage(StorageOp::R2Read, "missing body"))?
                         .bytes()
                         .await
-                        .map_err(|e| ce_internal(format!("R2 read: {e}")))?;
+                        .map_err(|e| ce_storage(StorageOp::R2Read, e))?;
                     Ok(bytes)
                 }
                 Ok(None) => Err(ConnectError::not_found("pack not found")),
-                Err(e) => Err(ce_internal(format!("R2 get: {e}"))),
+                Err(e) => Err(ce_storage(StorageOp::R2Get, e)),
             }
         })
         .await?;
