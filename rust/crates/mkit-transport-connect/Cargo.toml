@@ -51,7 +51,7 @@ mkit-core = { version = "0.3", path = "../mkit-core" }
 # unlike on wasm — re-enabled explicitly since `default-features = false`
 # drops it). `json` keeps the buffa-generated message types' serde derives
 # (matches every other connectrpc consumer in this workspace).
-connectrpc = { version = "0.8", default-features = false, features = [
+connectrpc = { version = "0.8.1", default-features = false, features = [
     "client",
     "client-tls",
     "streaming",
@@ -60,7 +60,7 @@ connectrpc = { version = "0.8", default-features = false, features = [
     "json",
 ] }
 buffa = "0.8.1"
-buffa-types = "0.8"
+buffa-types = "0.8.1"
 
 # Only pulled in by the `server` feature — see `[features]`.
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
@@ -117,7 +117,7 @@ webpki-roots = "1"
 rustls = { version = "0.23", features = ["ring"] }
 
 [build-dependencies]
-connectrpc-build = "0.8"
+connectrpc-build = "0.8.0"
 
 [dev-dependencies]
 tempfile = "3"
@@ -134,7 +134,7 @@ hex = "0.4"
 # directly against `connectrpc::server`/`Router` (the client-side regression
 # gate — SPEC-TRANSPORT-CONNECT's testing decision) independent of this
 # crate's own `server` feature, so `server` is listed unconditionally here.
-connectrpc = { version = "0.8", default-features = false, features = [
+connectrpc = { version = "0.8.1", default-features = false, features = [
     "client",
     "client-tls",
     "server",

@@ -1126,6 +1126,36 @@ describe('parseActivityFrame decodes the RoomEvent proto3-JSON oneof (mkit#705)'
     expect(f).toEqual({ kind: 'presence', presence: { members: [{ pubkeyHex: 'ab', since: 100 }], viewers: 2 } })
   })
 
+  // mkit#795: `created_at`/`since` were ambiguous epoch-ms int64 fields with no unit in their name; the server now
+  // also sends unambiguous `createdAtUnixMs`/`sinceUnixMs` siblings, which the client must prefer.
+  it('prefers createdAtUnixMs over the deprecated createdAt when a chat frame carries both', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({
+        chat: {
+          messageId: hexToB64('ab'),
+          authorPubkey: hexToB64('cd'),
+          text: 'gm',
+          createdAt: 1, // stale/deprecated value a real client would never see diverge from createdAtUnixMs
+          createdAtUnixMs: 123,
+          seq: 7,
+        },
+      }),
+    )
+    expect(f).toEqual({
+      kind: 'chat',
+      message: { messageIdHex: 'ab', authorPubkeyHex: 'cd', text: 'gm', createdAt: 123, seq: 7 },
+    })
+  })
+
+  it('prefers sinceUnixMs over the deprecated since when a presence frame carries both', () => {
+    const f = parseActivityFrame(
+      JSON.stringify({
+        presence: { members: [{ authorPubkey: hexToB64('ab'), since: 1, sinceUnixMs: 100 }], viewers: 2 },
+      }),
+    )
+    expect(f).toEqual({ kind: 'presence', presence: { members: [{ pubkeyHex: 'ab', since: 100 }], viewers: 2 } })
+  })
+
   it('returns null for malformed or incomplete frames', () => {
     expect(parseActivityFrame('not json')).toBeNull()
     expect(parseActivityFrame(JSON.stringify({ commit: { name: 'main' } }))).toBeNull() // commit missing object id

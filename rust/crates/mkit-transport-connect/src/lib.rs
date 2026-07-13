@@ -55,7 +55,7 @@ pub mod proto {
     ::connectrpc::include_generated!();
 }
 
-pub use client::{ConnectTransport, DEFAULT_TIMEOUT, TOKEN_ENV};
+pub use client::{ConnectTransport, PACK_TRANSFER_TIMEOUT, TOKEN_ENV, UNARY_TIMEOUT};
 pub use envelope::EnvelopeSigner;
 #[cfg(feature = "server")]
 pub use error::map_transport_error;

@@ -38,6 +38,7 @@ use crate::refs::{
     is_valid_expected_id_len, is_valid_ref_name, is_valid_ref_prefix, is_valid_room,
 };
 use crate::room_event;
+use crate::storage_error::StorageOp;
 use std::collections::HashSet;
 
 /// `pub(crate)`: reused by `super::health`'s cheap R2 reachability probe
@@ -61,11 +62,22 @@ impl RepoServer {
 
 // --- helpers ---------------------------------------------------------------
 
-fn ce_internal(msg: impl Into<String>) -> connectrpc::ConnectError {
-    connectrpc::ConnectError::internal(msg)
-}
 fn ce_invalid(msg: impl Into<String>) -> connectrpc::ConnectError {
     connectrpc::ConnectError::invalid_argument(msg)
+}
+
+/// Map a failed storage/DO operation to a client-facing `ConnectError`,
+/// logging the real error — which may embed R2/DO SDK detail (bucket keys,
+/// JS exception text, etc.) — server-side ONLY via `console_error!`. This is
+/// the single seam every R2/DO call in this file goes through instead of the
+/// former `ConnectError::internal(format!("R2 put: {e}"))`-style raw leaks
+/// (issue #794).
+/// See `crate::storage_error` for the exhaustive `StorageOp -> message`
+/// mapping (host-testable there) that this just logs through.
+fn ce_storage(op: StorageOp, e: impl std::fmt::Display) -> connectrpc::ConnectError {
+    let (log_line, client_err) = crate::storage_error::describe_and_map(op, e);
+    worker::console_error!("{log_line}");
+    client_err
 }
 
 /// Reject an empty or malformed `room` with `invalid_argument`. Every handler
@@ -107,7 +119,7 @@ async fn put_addressed(
 ) -> Result<bool, connectrpc::ConnectError> {
     let bucket = env
         .bucket(STORAGE_BUCKET)
-        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
     let stored = bucket
         .put(key, bytes)
         .only_if(worker::Conditional {
@@ -116,7 +128,7 @@ async fn put_addressed(
         })
         .execute()
         .await
-        .map_err(|e| ce_internal(format!("R2 put: {e}")))?
+        .map_err(|e| ce_storage(StorageOp::R2Put, e))?
         .is_some();
     Ok(stored)
 }
@@ -172,25 +184,26 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     op: &str,
     body: &Req,
 ) -> Result<Resp, connectrpc::ConnectError> {
-    let payload = serde_json::to_string(body).map_err(|e| ce_internal(e.to_string()))?;
+    let payload =
+        serde_json::to_string(body).map_err(|e| ce_storage(StorageOp::RequestSerialize, e))?;
     let ns = env
         .durable_object(REFSTORE_BINDING)
-        .map_err(|e| ce_internal(format!("REFSTORE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreBinding, e))?;
     let stub = ns
         .id_from_name(room)
         .and_then(|id| id.get_stub())
-        .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreStub, e))?;
 
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_body(Some(payload.into()));
     let req = WorkerRequest::new_with_init(&format!("https://refstore{op}"), &init)
-        .map_err(|e| ce_internal(e.to_string()))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreRequest, e))?;
 
     let mut resp = stub
         .fetch_with_request(req)
         .await
-        .map_err(|e| ce_internal(format!("REFSTORE fetch: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreFetch, e))?;
 
     if resp.status_code() >= 400 {
         let msg = resp.text().await.unwrap_or_default();
@@ -198,7 +211,7 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     }
     resp.json::<Resp>()
         .await
-        .map_err(|e| ce_internal(format!("refstore decode: {e}")))
+        .map_err(|e| ce_storage(StorageOp::RefstoreDecode, e))
 }
 
 /// Open + accept a WebSocket to the room DO's `/watch` endpoint — the same
@@ -212,29 +225,32 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
 async fn open_watch_socket(env: Env, room: String) -> Result<WebSocket, connectrpc::ConnectError> {
     let ns = env
         .durable_object(REFSTORE_BINDING)
-        .map_err(|e| ce_internal(format!("REFSTORE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreBinding, e))?;
     let stub = ns
         .id_from_name(&room)
         .and_then(|id| id.get_stub())
-        .map_err(|e| ce_internal(format!("REFSTORE stub: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreStub, e))?;
 
     let mut req = WorkerRequest::new("https://refstore/watch", Method::Get)
-        .map_err(|e| ce_internal(e.to_string()))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreRequest, e))?;
     req.headers_mut()
-        .map_err(|e| ce_internal(e.to_string()))?
+        .map_err(|e| ce_storage(StorageOp::RefstoreRequest, e))?
         .set("upgrade", "websocket")
-        .map_err(|e| ce_internal(e.to_string()))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreRequest, e))?;
 
     let resp = stub
         .fetch_with_request(req)
         .await
-        .map_err(|e| ce_internal(format!("REFSTORE watch fetch: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreWatchFetch, e))?;
 
-    let ws = resp
-        .websocket()
-        .ok_or_else(|| ce_internal("REFSTORE /watch did not upgrade to a websocket"))?;
+    let ws = resp.websocket().ok_or_else(|| {
+        ce_storage(
+            StorageOp::RefstoreWatchAccept,
+            "REFSTORE /watch did not upgrade to a websocket",
+        )
+    })?;
     ws.accept()
-        .map_err(|e| ce_internal(format!("REFSTORE watch accept: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::RefstoreWatchAccept, e))?;
     Ok(ws)
 }
 
@@ -253,7 +269,7 @@ async fn bridge_watch_socket(
     let mut events = match ws.events() {
         Ok(events) => events,
         Err(e) => {
-            let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket events: {e}"))));
+            let _ = tx.unbounded_send(Err(ce_storage(StorageOp::WatchSocket, e)));
             return;
         }
     };
@@ -273,7 +289,7 @@ async fn bridge_watch_socket(
             }
             Ok(WebsocketEvent::Close(_)) => break,
             Err(e) => {
-                let _ = tx.unbounded_send(Err(ce_internal(format!("watch socket error: {e}"))));
+                let _ = tx.unbounded_send(Err(ce_storage(StorageOp::WatchSocket, e)));
                 break;
             }
         }
@@ -292,7 +308,7 @@ async fn bridge_watch_socket(
 async fn purge_prefix(env: &Env, prefix: &str) -> Result<u32, connectrpc::ConnectError> {
     let bucket = env
         .bucket(STORAGE_BUCKET)
-        .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+        .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
     let mut deleted = 0u32;
     let mut cursor: Option<String> = None;
     loop {
@@ -303,13 +319,13 @@ async fn purge_prefix(env: &Env, prefix: &str) -> Result<u32, connectrpc::Connec
         let page = list
             .execute()
             .await
-            .map_err(|e| ce_internal(format!("R2 list: {e}")))?;
+            .map_err(|e| ce_storage(StorageOp::R2List, e))?;
         let keys: Vec<String> = page.objects().into_iter().map(|o| o.key()).collect();
         if !keys.is_empty() {
             bucket
                 .delete_multiple(keys.clone())
                 .await
-                .map_err(|e| ce_internal(format!("R2 delete_multiple: {e}")))?;
+                .map_err(|e| ce_storage(StorageOp::R2Delete, e))?;
             deleted = deleted.saturating_add(keys.len() as u32);
         }
         if !page.truncated() {
@@ -394,16 +410,16 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         SendFuture::new(async move {
             let bucket = env
                 .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+                .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
             let key = object_key(&room, &object_id);
             match bucket.get(&key).execute().await {
                 Ok(Some(obj)) => {
                     let bytes = obj
                         .body()
-                        .ok_or_else(|| ce_internal("R2 object had no body"))?
+                        .ok_or_else(|| ce_storage(StorageOp::R2Read, "missing body"))?
                         .bytes()
                         .await
-                        .map_err(|e| ce_internal(format!("R2 read: {e}")))?;
+                        .map_err(|e| ce_storage(StorageOp::R2Read, e))?;
                     Ok(Response::new(GetObjectResponse {
                         found: Some(true),
                         bytes: Some(bytes),
@@ -415,7 +431,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     bytes: Some(Vec::new()),
                     ..Default::default()
                 })),
-                Err(e) => Err(ce_internal(format!("R2 get: {e}"))),
+                Err(e) => Err(ce_storage(StorageOp::R2Get, e)),
             }
         })
         .await
@@ -575,21 +591,25 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
     // lifetime parameters at all. That receiver, not the WebSocket or its
     // event stream, is what crosses the `ServiceStream<RoomEvent>` boundary.
     //
-    // VERIFIED end-to-end (2026-07-11, issue #705): the bridge AND response
-    // delivery both work. PR #738 (the #697 spike) proved the bridge itself
-    // but reported delivery to a Connect client as an unverified/failing gap
-    // ("zero bytes, not even headers") under local `wrangler dev`. Re-running
-    // that exact scenario in this pass — repeated trials against a fresh
-    // local `wrangler dev` instance (wrangler 4.110.0 / worker-rs 0.8.5 /
+    // VERIFIED in `wrangler dev` / local Miniflare (2026-07-11/12, issue
+    // #705); a real deployed-Worker trial is still pending (#803) — this is
+    // NOT yet verified end-to-end against production infrastructure. PR
+    // #738 (the #697 spike) proved the bridge itself but reported delivery
+    // to a Connect client as an unverified/failing gap ("zero bytes, not
+    // even headers") under local `wrangler dev`. Re-running that exact
+    // scenario in this pass — repeated trials against a fresh local
+    // `wrangler dev` instance (wrangler 4.110.0 / worker-rs 0.8.5 /
     // connectrpc 0.8.0), including incremental multi-event delivery and
     // `Accept-Encoding: gzip` negotiation like a real browser client — did
     // NOT reproduce that gap: headers and body both arrive, and each
     // broadcast event is pushed to the client within tens of milliseconds of
     // the triggering RPC, not buffered until stream end. See the README
-    // "WatchRefs / streaming" section for the full writeup, repro script, and
-    // the one verification this pass could NOT complete (a real `wrangler
-    // deploy`/custom-domain edge deployment — blocked by this session's
-    // production-deploy guardrail, not by anything in the code).
+    // "WatchRefs / streaming" section for the full writeup and repro script.
+    // The one verification this pass could NOT complete — a real `wrangler
+    // deploy`/custom-domain edge deployment, blocked by this session's
+    // production-deploy guardrail, not by anything in the code — is tracked
+    // as issue #803 (do not upgrade this comment back to "verified
+    // end-to-end" until that trial actually runs against a deployed Worker).
     async fn watch_refs(
         &self,
         _ctx: RequestContext,
@@ -727,6 +747,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                     text: Some(m.text),
                     created_at: Some(m.created_at),
                     seq: Some(m.seq),
+                    created_at_unix_ms: Some(m.created_at),
                     ..Default::default()
                 })
                 .collect();
@@ -890,7 +911,7 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             //    the next read is fully local.
             let bucket = env
                 .bucket(STORAGE_BUCKET)
-                .map_err(|e| ce_internal(format!("STORAGE binding: {e}")))?;
+                .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
             let head: Vec<u8> = if !start_id.is_empty() {
                 start_id
             } else {
@@ -927,12 +948,12 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 let bytes = match bucket.get(object_key(&room, &current)).execute().await {
                     Ok(Some(obj)) => obj
                         .body()
-                        .ok_or_else(|| ce_internal("R2 object had no body"))?
+                        .ok_or_else(|| ce_storage(StorageOp::R2Read, "missing body"))?
                         .bytes()
                         .await
-                        .map_err(|e| ce_internal(format!("R2 read: {e}")))?,
+                        .map_err(|e| ce_storage(StorageOp::R2Read, e))?,
                     Ok(None) => break,
-                    Err(e) => return Err(ce_internal(format!("R2 get: {e}"))),
+                    Err(e) => return Err(ce_storage(StorageOp::R2Get, e)),
                 };
                 let Some(m) = crate::commit_log::extract_commit_meta(&bytes) else {
                     break;

@@ -212,15 +212,26 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // forward each Connect envelope frame to the client as `svc.oneshot`
     // produces it, not wait for the stream to end.
     //
-    // KNOWN GAP (2026-07-11): switching to `from_stream` here made the
-    // bridge itself provably work under `wrangler dev` (see the `watch_refs`
-    // doc comment) but did NOT get a byte of the response back to a test
-    // client — `curl -N`/`fetch()` against `WatchRefs` still see zero bytes,
-    // even after the bridge logged real `RefEvent`s flowing through it. Not
-    // yet root-caused: could be a `wrangler dev`/miniflare-local limitation
-    // for wasm-worker `ReadableStream` responses, or a remaining issue in
-    // this adapter — unverified against a real deployed Worker (no deploy
-    // credentials in this environment). See README "WatchRefs / streaming".
+    // RESOLVED, then re-verified under `wrangler dev` only (2026-07-11 →
+    // 2026-07-12, issue #705 / PR #763). This comment used to record a
+    // "KNOWN GAP" here: an earlier pass (PR #738, the #697 spike) switched
+    // to `from_stream` and got the bridge itself provably working under
+    // `wrangler dev`, but reported that a test client still saw zero bytes
+    // back from `WatchRefs` — `curl -N`/`fetch()` receiving nothing even
+    // after the bridge logged real `RefEvent`s flowing through it, not yet
+    // root-caused. PR #763 re-ran that exact repro against the SAME adapter
+    // code (this file, unmodified from the gap report) and did NOT reproduce
+    // it: 20+ manual trials against a fresh local `wrangler dev` instance
+    // delivered every event, every time (see the `watch_refs` doc comment in
+    // `worker_impl/service.rs` and the README "WatchRefs / streaming"
+    // section for the full writeup). The likely explanation for the original
+    // "zero bytes" finding was a test-harness artifact (a `curl -N ...&
+    // sleep; kill` pattern can lose buffered-but-unflushed bytes on
+    // `SIGTERM`), not a bug in this adapter or in `wrangler dev` itself.
+    // What remains UNVERIFIED is a real deployed Cloudflare Worker (an
+    // actual `wrangler deploy`) — every pass so far has been local
+    // `wrangler dev`/Miniflare only; see issue #803 for that outstanding
+    // follow-up trial.
     let body_stream = http_resp.into_body().into_data_stream().map(
         |item: std::result::Result<Bytes, std::convert::Infallible>| {
             // `ConnectRpcBody`'s `Error` is `Infallible`, so `item` is always

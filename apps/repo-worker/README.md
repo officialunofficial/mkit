@@ -194,7 +194,8 @@ walkthrough, and [`src/room_event.rs`](src/room_event.rs) (host-testable,
 covered by `cargo test --lib`) for the `RoomEvent` build/encode/decode
 functions shared by the DO broadcast path and this bridge.
 
-**End-to-end delivery — VERIFIED (2026-07-11, issue #705).** The #697 spike
+**Delivery in local `wrangler dev` — VERIFIED (2026-07-11, issue #705); a
+real deployed-Worker trial is still pending (issue #803).** The #697 spike
 that introduced this bridge reported a gap: a hand-rolled Connect-streaming
 test client against `WatchRefs` under local `wrangler dev` received *zero
 bytes, not even headers*, seconds after the bridge had already logged
@@ -242,7 +243,8 @@ only — the same environment PR #738's spike used, just with the actual
 delivery gap it reported not reproducing. A maintainer with deploy
 authorization re-running the same manual trials against a real
 `wrangler deploy` (or the `mkit-repo-worker` Workers Builds deployment) would
-close out the last mile of confidence this pass couldn't reach.
+close out the last mile of confidence this pass couldn't reach — tracked as
+issue #803.
 
 **Scope.** The bridge is single-subscriber-per-request, not bidi: each
 `WatchRefs` call opens its own worker→DO WebSocket, which is fine for a
