@@ -144,8 +144,13 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         }
     }
 
+    // `AuthInterceptor` needs its own `Env` to address the RefStore DO for
+    // the write-quota check (`enforce_write_quota`) — clone before `env` is
+    // moved into `TransportServer::new`. Cheap (see `worker::Env`'s doc note
+    // on apps/repo-worker's identical pattern).
+    let auth_interceptor = AuthInterceptor::new(env.clone());
     let router: Router = Arc::new(TransportServer::new(env)).register(Router::new());
-    let svc = ConnectRpcService::new(router).with_interceptor(AuthInterceptor);
+    let svc = ConnectRpcService::new(router).with_interceptor(auth_interceptor);
 
     let http_resp = SendFuture::new(async move {
         svc.oneshot(http_req)

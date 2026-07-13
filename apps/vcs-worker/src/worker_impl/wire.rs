@@ -12,6 +12,7 @@
 //   POST /update  UpdateReq  -> UpdateResp
 //   POST /list    ListReq    -> ListResp
 //   POST /advance AdvanceReq -> AdvanceResp
+//   POST /quota   QuotaCheckReq -> QuotaCheckResp
 //
 // `expectation` is the proto wire number (1=ANY, 2=MISSING, 3=MATCH). Hex
 // fields are 64-char lowercase hex of a 32-byte object id.
@@ -91,4 +92,21 @@ pub enum AdvanceOutcome {
 #[derive(Serialize, Deserialize)]
 pub struct AdvanceResp {
     pub outcome: AdvanceOutcome,
+}
+
+/// Check-and-consume one author's rolling write budget (see
+/// `crate::write_quota::evaluate_quota`). Unlike apps/repo-worker's per-room
+/// quota, this Worker serves a single global repository (one RefStore DO
+/// instance — see wrangler.jsonc), so the ledger is keyed on `author` alone,
+/// with no room dimension.
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckReq {
+    pub author: String,
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct QuotaCheckResp {
+    pub allowed: bool,
+    pub reason: Option<String>,
 }

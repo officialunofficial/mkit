@@ -23,7 +23,7 @@ worker = { version = "0.8", features = ["http"] }
 
 # See apps/repo-worker/Cargo.toml for the full rationale (pinned to the same
 # connectrpc/buffa versions so the pair never drifts).
-connectrpc = { version = "0.8", default-features = false, features = ["gzip", "json"] }
+connectrpc = { version = "0.8.1", default-features = false, features = ["gzip", "json"] }
 buffa = "0.8.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,7 +50,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [build-dependencies]
-connectrpc-build = "0.8"
+connectrpc-build = "0.8.0"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
