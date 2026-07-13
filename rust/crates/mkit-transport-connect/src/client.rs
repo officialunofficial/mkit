@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use connectrpc::client::{ClientConfig, HttpClient};
+use connectrpc::client::{CallOptions, ClientConfig, HttpClient};
 use http::Uri;
 use http::header::AUTHORIZATION;
 use mkit_core::hash::Hash;
@@ -36,11 +36,25 @@ use crate::proto::mkit::transport::v1::{
 /// dialect to this Connect client needs no operator-facing config change.
 pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
 
-/// Default per-call timeout. Matches `mkit-transport-http::DEFAULT_TIMEOUT`
-/// — generous enough for a large pack transfer over a slow link, bounded
-/// enough that a hung peer can't wedge a caller indefinitely.
+/// Default timeout for cheap unary RPCs — `ListRefs`, `ReadRef`,
+/// `UpdateRef`, `AdvanceRefs`, `PackExists`. These touch only ref/metadata
+/// storage (no pack body on the wire), so a hung peer should fail fast
+/// rather than tie up a caller for the multi-minute budget a pack transfer
+/// needs. 20s is generous relative to any real ref-store round trip while
+/// still bounding a stuck request to a duration a human retry loop can
+/// tolerate; override via [`ConnectTransport::with_unary_timeout`] if a
+/// deployment's ref store is reachable only over a slower path.
 #[allow(clippy::duration_suboptimal_units)]
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+pub const UNARY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Default timeout for pack-transfer RPCs — `UploadPack`, `DownloadPack`.
+/// Matches `mkit-transport-http::DEFAULT_TIMEOUT` — generous enough for a
+/// large pack transfer over a slow link, bounded enough that a hung peer
+/// can't wedge a caller indefinitely. Override via
+/// [`ConnectTransport::with_pack_transfer_timeout`] for deployments moving
+/// unusually large packs over unusually slow links.
+#[allow(clippy::duration_suboptimal_units)]
+pub const PACK_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Per-`UploadPack`-chunk data cap. Mirrors
 /// `mkit_rpc::helpers::CHUNK_DATA_MAX` (the SSH/enc wire's per-frame pack
@@ -72,6 +86,12 @@ pub struct ConnectTransport {
     executor: TokioExecutor,
     /// See [`Self::with_atomic_advance`].
     atomic_advance: bool,
+    /// Per-call timeout applied to `ListRefs`/`ReadRef`/`UpdateRef`/
+    /// `AdvanceRefs`/`PackExists`. See [`Self::with_unary_timeout`].
+    unary_timeout: Duration,
+    /// Per-call timeout applied to `UploadPack`/`DownloadPack`. See
+    /// [`Self::with_pack_transfer_timeout`].
+    pack_transfer_timeout: Duration,
     /// Retry-delay ladder factory. Production uses the spec ladder; tests
     /// inject a shorter ladder so retry assertions stay fast.
     backoff: fn() -> BackoffIterator,
@@ -87,6 +107,8 @@ impl std::fmt::Debug for ConnectTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectTransport")
             .field("atomic_advance", &self.atomic_advance)
+            .field("unary_timeout", &self.unary_timeout)
+            .field("pack_transfer_timeout", &self.pack_transfer_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -231,7 +253,15 @@ impl ConnectTransport {
         };
         let transport = EnvelopeTransport::new(transport, signer);
 
-        let mut config = ClientConfig::new(uri).with_default_timeout(DEFAULT_TIMEOUT);
+        // The underlying `ClientConfig` default is a defense-in-depth
+        // fallback only: every RPC below sets an explicit per-call
+        // [`CallOptions::with_timeout`] from `unary_timeout` /
+        // `pack_transfer_timeout`, which always takes precedence (see
+        // `connectrpc::client`'s `effective_options`). Seeded with the more
+        // conservative (longer) `PACK_TRANSFER_TIMEOUT` so a future call
+        // added here without an explicit per-call override fails safe
+        // (generous, not premature) rather than the reverse.
+        let mut config = ClientConfig::new(uri).with_default_timeout(PACK_TRANSFER_TIMEOUT);
         if let Some(token) = &token
             && let Ok(value) = http::HeaderValue::from_str(&format!("Bearer {token}"))
         {
@@ -243,6 +273,8 @@ impl ConnectTransport {
             client: TransportServiceClient::new(transport, config),
             executor,
             atomic_advance: false,
+            unary_timeout: UNARY_TIMEOUT,
+            pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
             sleep: thread::sleep,
         })
@@ -278,6 +310,8 @@ impl ConnectTransport {
             ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
             atomic_advance: false,
+            unary_timeout: UNARY_TIMEOUT,
+            pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: test_backoff,
             sleep: no_sleep,
         }
@@ -315,6 +349,28 @@ impl ConnectTransport {
     #[must_use]
     pub fn with_atomic_advance(mut self, atomic: bool) -> Self {
         self.atomic_advance = atomic;
+        self
+    }
+
+    /// Override the per-call timeout applied to cheap unary RPCs
+    /// (`ListRefs`, `ReadRef`, `UpdateRef`, `AdvanceRefs`, `PackExists`).
+    /// Defaults to [`UNARY_TIMEOUT`]. Independent of
+    /// [`Self::with_pack_transfer_timeout`] — changing one does not affect
+    /// the other.
+    #[must_use]
+    pub fn with_unary_timeout(mut self, timeout: Duration) -> Self {
+        self.unary_timeout = timeout;
+        self
+    }
+
+    /// Override the per-call timeout applied to pack-transfer RPCs
+    /// (`UploadPack`, `DownloadPack`). Defaults to
+    /// [`PACK_TRANSFER_TIMEOUT`]. Independent of
+    /// [`Self::with_unary_timeout`] — changing one does not affect the
+    /// other.
+    #[must_use]
+    pub fn with_pack_transfer_timeout(mut self, timeout: Duration) -> Self {
+        self.pack_transfer_timeout = timeout;
         self
     }
 
@@ -426,8 +482,9 @@ impl Transport for ConnectTransport {
         let requests = build_upload_requests(bytes, key);
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
                 self.client
-                    .upload_pack(requests.clone())
+                    .upload_pack_with_options(requests.clone(), options)
                     .await
                     .map(|_| ())
                     .map_err(|e| map_connect_error(e, ErrorContext::Upload))
@@ -446,12 +503,16 @@ impl Transport for ConnectTransport {
         // failed prior attempt is never resumed.
         self.retrying(|| {
             self.executor.block_on_local(async {
+                let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
                 let mut stream = self
                     .client
-                    .download_pack(DownloadPackRequest {
-                        pack_id: Some(key.as_bytes().to_vec()),
-                        ..Default::default()
-                    })
+                    .download_pack_with_options(
+                        DownloadPackRequest {
+                            pack_id: Some(key.as_bytes().to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
 
@@ -510,12 +571,16 @@ impl Transport for ConnectTransport {
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.unary_timeout);
                 let resp = self
                     .client
-                    .pack_exists(PackExistsRequest {
-                        pack_id: Some(key.as_bytes().to_vec()),
-                        ..Default::default()
-                    })
+                    .pack_exists_with_options(
+                        PackExistsRequest {
+                            pack_id: Some(key.as_bytes().to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -533,14 +598,18 @@ impl Transport for ConnectTransport {
         let (expectation, expected_id) = condition_to_wire(condition);
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.unary_timeout);
                 self.client
-                    .update_ref(UpdateRefRequest {
-                        name: Some(name.to_owned()),
-                        expectation: Some(expectation.into()),
-                        expected_id: expected_id.clone(),
-                        new_id: Some(hash.to_vec()),
-                        ..Default::default()
-                    })
+                    .update_ref_with_options(
+                        UpdateRefRequest {
+                            name: Some(name.to_owned()),
+                            expectation: Some(expectation.into()),
+                            expected_id: expected_id.clone(),
+                            new_id: Some(hash.to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map(|_| ())
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))
@@ -551,12 +620,16 @@ impl Transport for ConnectTransport {
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.unary_timeout);
                 let resp = self
                     .client
-                    .read_ref(ReadRefRequest {
-                        name: Some(name.to_owned()),
-                        ..Default::default()
-                    })
+                    .read_ref_with_options(
+                        ReadRefRequest {
+                            name: Some(name.to_owned()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -573,12 +646,16 @@ impl Transport for ConnectTransport {
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.unary_timeout);
                 let resp = self
                     .client
-                    .list_refs(ListRefsRequest {
-                        prefix: Some(prefix.to_owned()),
-                        ..Default::default()
-                    })
+                    .list_refs_with_options(
+                        ListRefsRequest {
+                            prefix: Some(prefix.to_owned()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -610,19 +687,23 @@ impl Transport for ConnectTransport {
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
         self.retrying(|| {
             self.executor.block_on(async {
+                let options = CallOptions::default().with_timeout(self.unary_timeout);
                 let resp = self
                     .client
-                    .advance_refs(AdvanceRefsRequest {
-                        head_ref: Some(head_ref.to_owned()),
-                        head_expectation: Some(head_expectation.into()),
-                        head_expected_id: head_expected_id.clone(),
-                        head_new_id: Some(head_value.to_vec()),
-                        packmap_ref: Some(packmap_ref.to_owned()),
-                        packmap_expectation: Some(packmap_expectation.into()),
-                        packmap_expected_id: packmap_expected_id.clone(),
-                        packmap_new_id: Some(packmap_value.to_vec()),
-                        ..Default::default()
-                    })
+                    .advance_refs_with_options(
+                        AdvanceRefsRequest {
+                            head_ref: Some(head_ref.to_owned()),
+                            head_expectation: Some(head_expectation.into()),
+                            head_expected_id: head_expected_id.clone(),
+                            head_new_id: Some(head_value.to_vec()),
+                            packmap_ref: Some(packmap_ref.to_owned()),
+                            packmap_expectation: Some(packmap_expectation.into()),
+                            packmap_expected_id: packmap_expected_id.clone(),
+                            packmap_new_id: Some(packmap_value.to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -709,6 +790,29 @@ mod tests {
             .unwrap()
             .with_atomic_advance(true);
         assert!(t.supports_atomic_advance());
+    }
+
+    // -- per-verb-class timeouts (mkit#798) ------------------------------
+
+    #[test]
+    fn timeouts_default_to_the_named_constants() {
+        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj").unwrap();
+        assert_eq!(t.unary_timeout, UNARY_TIMEOUT);
+        assert_eq!(t.pack_transfer_timeout, PACK_TRANSFER_TIMEOUT);
+        assert!(
+            t.unary_timeout < t.pack_transfer_timeout,
+            "the unary class must default shorter than the pack-transfer class"
+        );
+    }
+
+    #[test]
+    fn with_unary_timeout_and_with_pack_transfer_timeout_override_independently() {
+        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj")
+            .unwrap()
+            .with_unary_timeout(Duration::from_millis(5))
+            .with_pack_transfer_timeout(Duration::from_secs(600));
+        assert_eq!(t.unary_timeout, Duration::from_millis(5));
+        assert_eq!(t.pack_transfer_timeout, Duration::from_secs(600));
     }
 
     // -- condition_to_wire() --------------------------------------------
