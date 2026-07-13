@@ -4,14 +4,25 @@
 // the RepoService implementation, and the `#[event(fetch)]` adapter that
 // bridges `worker::Request` <-> `http::Request` and drives the connectrpc
 // Router. Gated out of host builds (the macros emit `#[wasm_bindgen]`).
+//
+// The CORS handling, body-size cap, and worker::Request<->http::Request
+// fetch-adapter skeleton are shared with apps/vcs-worker via
+// `mkit-worker-common` (mkit#797) — this module wires those generic pieces
+// together with repo-worker's OWN business logic (the auth interceptor,
+// the RefStore DO, the RepoService/HealthServer registration, and the
+// streamed response bridge WatchRefs needs), which stays here.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use connectrpc::{ConnectRpcService, Router};
-use futures_util::StreamExt;
-use http_body_util::{BodyExt, Full};
-use tower::ServiceExt;
+use mkit_worker_common::{
+    adapter::{
+        copy_response_headers, dispatch_oneshot, http_request_from_worker, respond_streamed,
+    },
+    body_cap::{CappedBody, read_capped_body},
+    cors::{cors_preflight_response, is_options_preflight, with_cors},
+};
 use worker::send::SendFuture;
 use worker::{Context, Env, Method, Request, Response, Result, event};
 
@@ -49,27 +60,13 @@ const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created
      idempotency-key, x-admin-token, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
-/// Append the permissive `Access-Control-Allow-Origin: *` header to a response.
-/// Browser clients hit this worker cross-origin (the demo web app on a
-/// different origin), so every response — success or error — must carry it.
-fn with_cors(resp: Response) -> Response {
-    let mut resp = resp;
-    let _ = resp.headers_mut().set("Access-Control-Allow-Origin", "*");
-    resp
-}
-
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // CORS preflight: answer OPTIONS with a 204 + the allow-* headers BEFORE
     // any routing, so browsers can complete the preflight for the signed-write
     // headers (X-Public-Key, …) regardless of the eventual route.
-    if req.method() == Method::Options {
-        let headers = worker::Headers::new();
-        let _ = headers.set("Access-Control-Allow-Origin", "*");
-        let _ = headers.set("Access-Control-Allow-Headers", CORS_ALLOW_HEADERS);
-        let _ = headers.set("Access-Control-Allow-Methods", CORS_ALLOW_METHODS);
-        let _ = headers.set("Access-Control-Max-Age", "86400");
-        return Ok(Response::empty()?.with_status(204).with_headers(headers));
+    if is_options_preflight(&req) {
+        return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
     }
 
     // WatchRefs streaming fallback: `GET /watch/<room>` opens a raw WebSocket
@@ -118,51 +115,15 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Read raw body + method/uri/headers up front. The envelope auth
     // interceptor needs the raw body, and `Full<Bytes>` is the simplest
     // `http_body::Body<Data = Bytes>` (error = Infallible) that satisfies the
-    // ConnectRpcService bound.
-    // H2: cap the request body. Reject by Content-Length BEFORE buffering, so an
-    // oversized POST is refused in O(1) instead of `req.bytes()` materializing the
-    // whole payload in the isolate first (the only large input is PutObject
-    // `bytes`). The post-buffer check below is the backstop for chunked/
-    // unknown-length requests where Content-Length is absent.
-    if let Ok(Some(len)) = req.headers().get("content-length")
-        && len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES)
-    {
-        return Ok(with_cors(body_too_large()?));
-    }
-    let body = req.bytes().await.unwrap_or_default();
-    if body.len() > MAX_BODY_BYTES {
-        return Ok(with_cors(body_too_large()?));
-    }
-
-    let method = match req.method() {
-        Method::Get => http::Method::GET,
-        Method::Post => http::Method::POST,
-        Method::Put => http::Method::PUT,
-        Method::Delete => http::Method::DELETE,
-        Method::Options => http::Method::OPTIONS,
-        Method::Head => http::Method::HEAD,
-        Method::Patch => http::Method::PATCH,
-        _ => http::Method::POST,
+    // ConnectRpcService bound. Cap it first (see `mkit_worker_common::body_cap`
+    // for the Content-Length-then-post-buffer check) — the only large input is
+    // PutObject `bytes`.
+    let body: Bytes = match read_capped_body(&mut req, MAX_BODY_BYTES).await? {
+        CappedBody::Ok(body) => body,
+        CappedBody::TooLarge => return Ok(with_cors(body_too_large()?)),
     };
-    let uri = req.url()?.to_string();
 
-    let mut http_req = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .body(Full::new(Bytes::from(body)))
-        .map_err(|e| worker::Error::RustError(format!("build http request: {e}")))?;
-
-    {
-        let headers = http_req.headers_mut();
-        for (k, v) in req.headers().entries() {
-            if let (Ok(name), Ok(val)) = (
-                http::header::HeaderName::try_from(k.as_str()),
-                http::header::HeaderValue::try_from(v.as_str()),
-            ) {
-                headers.insert(name, val);
-            }
-        }
-    }
+    let http_req = http_request_from_worker(&req, body, |_| true)?;
 
     // Read the admin secret BEFORE `env` moves into `RepoServer::new` below.
     // `env.secret()` is `Err` when the binding doesn't exist (never
@@ -187,14 +148,10 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
         ConnectRpcService::new(router).with_interceptor(AuthInterceptor::new(env, admin_token));
 
     // The dispatch touches JS-backed (`!Send`) worker handles inside handlers;
-    // wrap in SendFuture so it satisfies ConnectRpcService's `Future: Send`
-    // bound (sound under single-threaded wasm).
-    let http_resp = SendFuture::new(async move {
-        svc.oneshot(http_req)
-            .await
-            .expect("ConnectRpcService error is Infallible")
-    })
-    .await;
+    // `dispatch_oneshot` wraps it in `SendFuture` so it satisfies
+    // ConnectRpcService's `Future: Send` bound (sound under single-threaded
+    // wasm) — see `mkit_worker_common::adapter`.
+    let http_resp = dispatch_oneshot(svc, http_req).await;
 
     let status = http_resp.status().as_u16();
     let resp_headers = http_resp.headers().clone();
@@ -202,15 +159,15 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // Stream the response body chunk-by-chunk rather than buffering it whole.
     // A unary response is a single chunk either way, but a server-streaming
     // RPC (`WatchRefs`) produces an OPEN-ENDED body — it only reaches EOF
-    // when the client disconnects — so the previous `.collect()`-then-
-    // `from_bytes` would block forever waiting for a terminal chunk that
-    // never comes, and the client would never see a single byte. Bridging a
-    // borrowed `WebSocket::events()` into a `'static + Send` `ServiceStream`
-    // (see `worker_impl/service.rs::watch_refs`) is necessary but not
-    // SUFFICIENT for Connect server-streaming on Workers — this half, the
-    // generic HTTP adapter's response side, is the other half: it has to
-    // forward each Connect envelope frame to the client as `svc.oneshot`
-    // produces it, not wait for the stream to end.
+    // when the client disconnects — so buffering-then-replying would block
+    // forever waiting for a terminal chunk that never comes, and the client
+    // would never see a single byte. Bridging a borrowed `WebSocket::events()`
+    // into a `'static + Send` `ServiceStream` (see
+    // `worker_impl/service.rs::watch_refs`) is necessary but not SUFFICIENT
+    // for Connect server-streaming on Workers — this half, the generic HTTP
+    // adapter's response side (`mkit_worker_common::adapter::respond_streamed`),
+    // is the other half: it has to forward each Connect envelope frame to the
+    // client as `svc.oneshot` produces it, not wait for the stream to end.
     //
     // RESOLVED, then re-verified under `wrangler dev` only (2026-07-11 →
     // 2026-07-12, issue #705 / PR #763). This comment used to record a
@@ -220,8 +177,9 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // back from `WatchRefs` — `curl -N`/`fetch()` receiving nothing even
     // after the bridge logged real `RefEvent`s flowing through it, not yet
     // root-caused. PR #763 re-ran that exact repro against the SAME adapter
-    // code (this file, unmodified from the gap report) and did NOT reproduce
-    // it: 20+ manual trials against a fresh local `wrangler dev` instance
+    // logic (now living in `mkit_worker_common::adapter::respond_streamed`,
+    // unmodified in behavior from the gap report) and did NOT reproduce it:
+    // 20+ manual trials against a fresh local `wrangler dev` instance
     // delivered every event, every time (see the `watch_refs` doc comment in
     // `worker_impl/service.rs` and the README "WatchRefs / streaming"
     // section for the full writeup). The likely explanation for the original
@@ -232,21 +190,8 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // actual `wrangler deploy`) — every pass so far has been local
     // `wrangler dev`/Miniflare only; see issue #803 for that outstanding
     // follow-up trial.
-    let body_stream = http_resp.into_body().into_data_stream().map(
-        |item: std::result::Result<Bytes, std::convert::Infallible>| {
-            // `ConnectRpcBody`'s `Error` is `Infallible`, so `item` is always
-            // `Ok`; `unwrap_or_default()` just avoids matching a variant that
-            // can't exist while giving the closure a concrete `Result` type.
-            Ok::<Vec<u8>, worker::Error>(item.unwrap_or_default().to_vec())
-        },
-    );
-    let mut out = Response::from_stream(body_stream)?.with_status(status);
-    let out_headers = out.headers_mut();
-    for (k, v) in resp_headers.iter() {
-        if let Ok(val) = v.to_str() {
-            let _ = out_headers.set(k.as_str(), val);
-        }
-    }
+    let mut out = respond_streamed(status, http_resp.into_body())?;
+    copy_response_headers(&resp_headers, &mut out);
     Ok(with_cors(out))
 }
 

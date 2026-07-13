@@ -1,17 +1,30 @@
 name: "CI: Workers"
 
-# apps/repo-worker, apps/keys-worker, and apps/vcs-worker are standalone
-# Cargo packages (each with its own [package]/[workspace]) — none is a
-# member of rust/Cargo.toml, so cargo fmt/clippy/nextest in
-# cloudbuild/ci.yaml never touches them. This workflow is their dedicated
-# gate: fmt, clippy, `cargo test --lib` for all three crates, a
-# wasm32-unknown-unknown build for keys-worker (repo-worker and vcs-worker
-# already get an incidental wasm build via the codegen-freshness check in
-# cloudbuild/codegen.yaml — not duplicated here), and `buf lint` against
-# apps/repo-worker/proto (apps/repo-worker/buf.yaml is otherwise dormant; no
-# CI surface runs it today). vcs-worker has no app-local buf.yaml — it
-# compiles against the repo-root `proto/` module, already covered by
-# buf.yml/proto.yml — so there is no per-app buf lint step for it here.
+# apps/repo-worker, apps/keys-worker, apps/vcs-worker, and
+# apps/mkit-worker-common are standalone Cargo packages (each with its own
+# [package]/[workspace]) — none is a member of rust/Cargo.toml, so cargo
+# fmt/clippy/nextest in cloudbuild/ci.yaml never touches them. This workflow
+# is their dedicated gate: fmt, clippy, `cargo test --lib` for all four
+# crates, a wasm32-unknown-unknown build for keys-worker and
+# mkit-worker-common (repo-worker and vcs-worker already get an incidental
+# wasm build via the codegen-freshness check in cloudbuild/codegen.yaml —
+# not duplicated here), and `buf lint` against apps/repo-worker/proto
+# (apps/repo-worker/buf.yaml is otherwise dormant; no CI surface runs it
+# today). vcs-worker has no app-local buf.yaml — it compiles against the
+# repo-root `proto/` module, already covered by buf.yml/proto.yml — so
+# there is no per-app buf lint step for it here.
+#
+# apps/mkit-worker-common (mkit#797) holds the CORS/body-cap/fetch-adapter
+# glue shared by repo-worker and vcs-worker. It gets the SAME per-crate
+# treatment as keys-worker rather than being folded into repo-worker's or
+# vcs-worker's steps: it has no other CI footprint (no codegen-freshness
+# check touches it, since it emits no generated proto code), and both
+# consumer crates already build/test it transitively via their own `cargo
+# test`/wasm32 build steps below — but that transitive coverage wouldn't
+# catch a `cargo fmt`/`clippy` violation scoped to files ONLY this crate
+# touches, or a case where a change compiles fine as a dependency but fails
+# clippy/fmt on its own (e.g. an unused-in-context import). Explicit
+# per-crate steps close that gap at negligible extra CI cost.
 #
 # Deploys live elsewhere (Cloudflare Workers Builds on merge to main, same
 # model as apps/web) — this workflow is validation only.
@@ -24,6 +37,7 @@ on:
       - 'apps/repo-worker/**'
       - 'apps/keys-worker/**'
       - 'apps/vcs-worker/**'
+      - 'apps/mkit-worker-common/**'
       - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
@@ -68,6 +82,7 @@ jobs:
               - 'apps/repo-worker/**'
               - 'apps/keys-worker/**'
               - 'apps/vcs-worker/**'
+              - 'apps/mkit-worker-common/**'
               - 'proto/mkit/transport/v1/**'
 
   ci:
@@ -102,6 +117,7 @@ jobs:
             apps/repo-worker -> apps/repo-worker/target
             apps/keys-worker -> apps/keys-worker/target
             apps/vcs-worker -> apps/vcs-worker/target
+            apps/mkit-worker-common -> apps/mkit-worker-common/target
           prefix-key: "rust-ci-workers"
           cache-on-failure: false
           cache-bin: false
@@ -121,6 +137,26 @@ jobs:
       - name: buf lint (apps/repo-worker/proto)
         working-directory: apps/repo-worker
         run: buf lint
+
+      - name: mkit-worker-common - Check formatting
+        working-directory: apps/mkit-worker-common
+        run: cargo fmt --check
+
+      - name: mkit-worker-common - Clippy
+        working-directory: apps/mkit-worker-common
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: mkit-worker-common - Test
+        working-directory: apps/mkit-worker-common
+        run: cargo test
+
+      # mkit-worker-common has no other CI footprint (unlike repo-worker/
+      # vcs-worker, no codegen-freshness check incidentally builds it for
+      # wasm32) — build it explicitly, mirroring keys-worker's identical
+      # rationale below.
+      - name: mkit-worker-common - wasm32 build
+        working-directory: apps/mkit-worker-common
+        run: cargo build --target wasm32-unknown-unknown
 
       - name: repo-worker - Check formatting
         working-directory: apps/repo-worker

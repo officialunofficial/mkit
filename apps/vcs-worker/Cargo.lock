@@ -872,10 +872,24 @@ dependencies = [
  "http-body",
  "http-body-util",
  "mkit-core",
+ "mkit-worker-common",
  "rand_core",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
+ "worker",
+]
+
+[[package]]
+name = "mkit-worker-common"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
  "tower",
  "worker",
 ]
