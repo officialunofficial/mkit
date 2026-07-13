@@ -110,10 +110,14 @@ jobs:
       # but no CI image installs buf (cloudbuild/Dockerfile.ci installs protoc
       # only) — this is the first CI surface to exercise it. `buf breaking` is
       # deliberately out of scope here (companion buf-lint/breaking issue).
+      # Pinned to match cloudbuild/codegen.yaml's _BUF_VERSION and
+      # web.yml's Setup buf step — see web.yml's comment for why the
+      # action's own default (1.50.0) must not be used.
       - name: Install buf
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
         with:
           github_token: ${{ github.token }}
+          version: '1.66.0'
 
       - name: buf lint (apps/repo-worker/proto)
         working-directory: apps/repo-worker

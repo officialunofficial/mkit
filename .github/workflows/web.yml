@@ -102,8 +102,18 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pin the buf CLI version explicitly — the action's own default
+      # (1.50.0) is older than cloudbuild/codegen.yaml's _BUF_VERSION
+      # (1.66.0, used by the Rust codegen-freshness check) and produces
+      # DIFFERENT generated output for the same .proto: buf 1.50.0 drops
+      # repo.proto/refs.proto's leading file-header comment block that
+      # newer buf preserves, so this job's freshness check would flag
+      # false drift against output committed with a newer local buf.
+      # Keep this in sync with cloudbuild/codegen.yaml's _BUF_VERSION.
       - name: Setup buf
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
+        with:
+          version: '1.66.0'
 
       - name: Install web dependencies
         working-directory: apps/web
