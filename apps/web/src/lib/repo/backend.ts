@@ -28,8 +28,8 @@ export type RefUpdate = { name: string; objectIdHex: string; authorPubkeyHex: st
 
 /**
  * One stored chat message — mirrors the proto `ChatMessage`. `createdAt` is server epoch-ms, sourced from the wire's
- * unambiguous `createdAtUnixMs` field (falling back to the deprecated `createdAt` field for an old cached worker
- * build — see mkit#795); `seq` is the monotonic per-room order used to merge chat against commits in the lobby feed.
+ * unambiguous `createdAtUnixMs` field (falling back to the deprecated `createdAt` field for an old cached worker build
+ * — see mkit#795); `seq` is the monotonic per-room order used to merge chat against commits in the lobby feed.
  */
 export type ChatMessageEntry = {
   messageIdHex: string
