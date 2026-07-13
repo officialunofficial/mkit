@@ -1,15 +1,15 @@
 # mkit-transport-connect
 
 Both halves of `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT)
-— the implementation behind the `mkit+https://` (and loopback-only
-`mkit+http://`) remote scheme — live in this crate:
+&mdash; the implementation behind the `mkit+https://` (and loopback-only
+`mkit+http://`) remote scheme &mdash; live in this crate:
 
 - **Client** ([`ConnectTransport`]): a non-wasm ConnectRPC client
   implementing the `Transport` trait (`docs/specs/SPEC-TRANSPORT.md`) itself
   over the same `mkit.transport.v1` service. `mkit-cli`'s `remote_dispatch`
   constructs this for `mkit+https://` / loopback `mkit+http://`, replacing
   `mkit-transport-http`'s bespoke JSON dialect there. This is the crate's
-  mandatory baseline — always compiled, no cargo feature needed.
+  mandatory baseline &mdash; always compiled, no cargo feature needed.
 - **Server** ([`serve`]/[`router`]/[`TransportServer`]): an
   axum-hosted [ConnectRPC] server generic over any
   [`mkit_core::protocol::Transport`] backend (today,
@@ -25,19 +25,19 @@ Both halves of `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT)
 
 See `docs/specs/SPEC-TRANSPORT-CONNECT.md` for the full normative wire
 contract: verb-to-RPC mapping, CAS semantics, the `TransportError` <->
-Connect-code mapping (both directions — `src/error.rs`), and the
+Connect-code mapping (both directions &mdash; `src/error.rs`), and the
 `UploadPack`/`DownloadPack` streaming design.
 
 ## Codegen
 
 `build.rs` compiles directly against the CANONICAL proto
 (`<repo-root>/proto/mkit/transport/v1/transport.proto`, referenced by a
-workspace-relative path) — there is no second copy, so this crate and any
+workspace-relative path) &mdash; there is no second copy, so this crate and any
 future consumer of the same proto cannot drift. Mirrors `mkit-repo-client`'s
 "zero-duplication" approach.
 
 - **Default path**: `build.rs` stages the pre-generated sources committed
-  under `generated/` into `$OUT_DIR` — no `protoc` required. This keeps
+  under `generated/` into `$OUT_DIR` &mdash; no `protoc` required. This keeps
   Cloudflare Workers Builds, CI, and docs.rs (whose images lack a `protoc`
   new enough for the `edition = "2023"` proto) building with zero system
   dependencies.
@@ -78,14 +78,14 @@ crate has no system dependency beyond a working TLS/TCP stack.
 `Transport` is a synchronous, object-safe trait (`&self` methods, no
 `async`). Both the server (wrapping the backend `Transport`) and
 `ConnectTransport` (the client) bridge this to `connectrpc`'s async API via
-`mkit_core::protocol::async_shim::Executor` — a dedicated tokio runtime,
+`mkit_core::protocol::async_shim::Executor` &mdash; a dedicated tokio runtime,
 mirroring `mkit-transport-enc`'s `tcp::TokioExecutor`.
 
 ## No built-in retry ladder
 
 Unlike `mkit-transport-http`, the client does **not** implement its own
 retry/backoff loop. SPEC-TRANSPORT-CONNECT §7.3 defers that to a shared
-Connect interceptor wrapping the generated client (tracked separately) —
+Connect interceptor wrapping the generated client (tracked separately) &mdash;
 every call here is a single attempt. Callers that need SPEC-TRANSPORT §7
 retry semantics apply `mkit_core::protocol::is_retryable` /
 `BackoffIterator` to this transport's returned `TransportError` themselves.
@@ -95,9 +95,9 @@ extensions have no `mkit.transport.v1` equivalent yet.
 ## Testing
 
 `tests/roundtrip.rs` proves the client against a real (in-process)
-`TransportService` server — a `connectrpc` hyper server on an ephemeral
+`TransportService` server &mdash; a `connectrpc` hyper server on an ephemeral
 loopback port, implementing the generated `TransportService` trait over an
-in-memory `mkit-transport-memory::MemoryTransport` backend — driving a full
+in-memory `mkit-transport-memory::MemoryTransport` backend &mdash; driving a full
 upload/download/ref/advance round trip through the generated codebase. This
 is the regression gate SPEC-TRANSPORT-CONNECT's testing decisions call for:
 a real server, not a mock standing in for one. It builds its own connectrpc

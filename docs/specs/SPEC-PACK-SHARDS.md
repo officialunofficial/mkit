@@ -5,12 +5,12 @@ status: stable-normative
 audience: implementers of pack producers and consumers; transport implementers
 ---
 
-# SPEC-PACK-SHARDS — erasure-coded pack delivery
+# SPEC-PACK-SHARDS &mdash; erasure-coded pack delivery
 
-Status: **Normative** for mkit v0.x — the in-process codec and the
+Status: **Normative** for mkit v0.x &mdash; the in-process codec and the
 wire/transport delivery surface are both implemented. Tracks issue
 [#159](https://github.com/officialunofficial/mkit/issues/159).
-Scope: a wire-level encoding *of* a pack — the on-disk packfile format
+Scope: a wire-level encoding *of* a pack &mdash; the on-disk packfile format
 (SPEC-PACKFILE) is unchanged.
 
 This spec covers the manifest, per-shard envelope, encoder/decoder
@@ -34,7 +34,7 @@ reconstruct the original pack. With `(N, K) = (16, 4)`:
 * Up to 4 shards may be lost (or arrive slowest, and be ignored)
   without affecting reconstruction
 * Mirror networks, partial caches, and high-latency clients all
-  benefit — a cache holding 18 of 20 shards is still useful
+  benefit &mdash; a cache holding 18 of 20 shards is still useful
 
 Out of scope: small packs. Below the size threshold in §6, the
 fixed-cost overhead exceeds the redundancy benefit.
@@ -85,27 +85,27 @@ For the v0 default `(16, 4)` config the manifest is `717` bytes:
 
 `version` was bumped `0x01` → `0x02` by issue
 [#661](https://github.com/officialunofficial/mkit/issues/661), which
-switched the Reed-Solomon hasher from `Sha256` to `Blake3` (§4) — a
+switched the Reed-Solomon hasher from `Sha256` to `Blake3` (§4) &mdash; a
 hard cutover, not dual-hasher support. `0x01` (the pre-#661
 `ReedSolomon<Sha256>` scheme) is retired **permanently** and MUST NOT
 be reused for a different wire meaning: a `0x01` manifest's
 `commitment` can never check out against the `Blake3`-based decoder,
 so a decoder that sees `0x01` MUST reject it with a version-specific
-error rather than the generic unrecognised-version error, so a caller
+error rather than the generic unrecognized-version error, so a caller
 stuck on an old producer gets an actionable message (re-shard with a
 current mkit) instead of an opaque failure.
 
 Decoders MUST:
 
 * Reject inputs shorter than the 5-byte prologue, or with a magic
-  that is not `b"MKSH"`, or with an unrecognised version.
+  that is not `b"MKSH"`, or with an unrecognized version.
 * Reject `minimum_shards == 0` or `extra_shards == 0`.
 * Reject a `shard_hashes_len` that does not equal
   `minimum_shards + extra_shards`.
 * Reject any input that exceeds `MANIFEST_MAX_BYTES` (1 MiB).
 * Reject trailing bytes after the last hash.
 
-The manifest is itself content-addressed by `pack_hash` — i.e. the
+The manifest is itself content-addressed by `pack_hash` &mdash; that is, the
 publish path is `/packs/<lower-hex(pack_hash)>/shards.manifest`.
 
 ---
@@ -118,14 +118,14 @@ field    type        description
 index    u16         Shard index in [0, T). The receiver MUST reject
                      a shard whose index ≥ T or whose index does not
                      match the URL it was fetched from.
-bytes    Vec<u8>     Codec-serialised commonware `Chunk`. Opaque at
+bytes    Vec<u8>     Codec-serialized commonware `Chunk`. Opaque at
                      the transport layer.
 ```
 
 The `bytes` field carries the commonware `Chunk` (shard payload +
 shard index + Merkle multi-proof) in its native
 `commonware_codec::Codec` form. mkit does **not** introduce a second
-framing — the codec output is already self-describing.
+framing &mdash; the codec output is already self-describing.
 
 **Integrity:** before passing a shard to the decoder, the receiver
 computes `BLAKE3(bytes)` and compares against
@@ -146,13 +146,13 @@ a self-consistent shard set with a different `commitment`.
 
 The implementation lives in `mkit_core::pack_shard` and wraps
 [`commonware-coding`](https://docs.rs/commonware-coding) **v2026.5.0**
-(ALPHA stability — pinned exactly in `Cargo.toml`).
+(ALPHA stability &mdash; pinned exactly in `Cargo.toml`).
 
 The reference scheme is `commonware_coding::ReedSolomon<Blake3>`.
 Producers and consumers MUST use the same scheme and digest. The
 `commonware-parallel` execution strategy (`Sequential` vs a `Rayon`
 thread pool) is a caller-selectable performance parameter, not part
-of the wire contract — see `encode_pack_to_shards_with_strategy` /
+of the wire contract &mdash; see `encode_pack_to_shards_with_strategy` /
 `decode_pack_from_shards_with_strategy` and issue
 [#653](https://github.com/officialunofficial/mkit/issues/653).
 
@@ -205,21 +205,21 @@ the `mkit_core::pack_shard::ShardError` rustdoc for the full taxonomy.
 
 This SPEC ships in two stages.
 
-### In-process codec — shipped
+### In-process codec &mdash; shipped
 
 * `mkit-core::pack_shard` module behind the `pack-shards` feature
-  flag (default off — the commonware dep stack is large)
+  flag (default off &mdash; the commonware dep stack is large)
 * `Config`, `Shard`, `ShardSet`, `ShardError`
-* `encode_pack_to_shards` / `decode_pack_from_shards`
+* `encode_pack_to_shards`/`decode_pack_from_shards`
 * Round-trip, lossy round-trip, tamper-detection, and
   insufficient-shards tests
 
-### Wire format & transport delivery — shipped (this surface)
+### Wire format and transport delivery &mdash; shipped (this surface)
 
 * **Manifest wire format pinned**: see §2.1.
-  `encode_manifest` / `decode_manifest` in `mkit_core::pack_shard`.
+  `encode_manifest`/`decode_manifest` in `mkit_core::pack_shard`.
 * **HTTP transport**: `Accept-Pack-Shards: <N>+<K>` request header;
-  `X-Pack-Shards: <N>+<K>` response header signalling shard mode.
+  `X-Pack-Shards: <N>+<K>` response header signaling shard mode.
   Shard URLs at `/packs/<lower-hex(pack_hash)>/shards/<index>`,
   manifest at `/packs/<hex>/shards.manifest`. Behind
   `--features pack-shards` on `mkit-transport-http`. Parallel-fetch
@@ -232,8 +232,8 @@ This SPEC ships in two stages.
   Behind `--features pack-shards` on `mkit-transport-s3`. The
   client unconditionally tries the manifest first; only a `404`
   (no manifest published) falls back to the monolithic pack key. A
-  present-but-undecodable manifest — any other error status, or a
-  malformed `200` body — propagates instead of falling back: it is
+  present-but-undecodable manifest &mdash; any other error status, or a
+  malformed `200` body &mdash; propagates instead of falling back: it is
   indistinguishable from tampering, and silently downgrading to the
   monolithic pack would mask that. This mirrors the HTTP transport's
   posture, whose shard path is entered only after the server
@@ -255,7 +255,7 @@ This SPEC ships in two stages.
   monolithic vs parallel-shard vs sequential-shard transfer on a
   100 MiB pack with jittered network sleeps. Not gated on CI.
 
-### Direct-upload negotiation & streaming — out of scope for this SPEC
+### Direct-upload negotiation and streaming &mdash; out of scope for this SPEC
 
 * Sharded uploads via the `Transport` trait directly (today, shards
   are published out-of-band by the operator).
@@ -307,7 +307,7 @@ packs. The v0 default `(16, 4)` was picked to balance:
 | A self-consistent substitute shard *set* is detected | commonware BMT `commitment` in the manifest; per-shard Merkle proof checked by `ReedSolomon::check` (§2, §3, §4.2 step 2e) |
 | Any `minimum_shards` of the `T` shards suffice; fewer fail loudly | `checked.len() >= minimum_shards` requirement, typed `ShardError` short-circuit (§4.2 step 3) |
 | The manifest is the content-addressed root of trust | fetched first, published at `/packs/<hex(pack_hash)>/shards.manifest` (§2) |
-| A failed sharded fetch degrades, never corrupts; an undecodable manifest never silently downgrades | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: only a manifest `404` falls back to the monolithic pack key — a present-but-undecodable manifest propagates as `InvalidResponse` on both S3 and HTTP (§5) |
+| A failed sharded fetch degrades, never corrupts; an undecodable manifest never silently downgrades | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: only a manifest `404` falls back to the monolithic pack key &mdash; a present-but-undecodable manifest propagates as `InvalidResponse` on both S3 and HTTP (§5) |
 | Per-shard memory is bounded | each shard buffered whole under `PACK_BODY_LIMIT` (§5) |
 
 Sharding is an encoding *of* a pack, not a new pack format (see Scope,

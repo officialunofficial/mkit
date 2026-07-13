@@ -5,7 +5,7 @@ status: draft-normative
 audience: implementers of the git→mkit import bridge and its verifiers
 ---
 
-# SPEC-GIT-IMPORT — importer-signed git→mkit translation (v1)
+# SPEC-GIT-IMPORT &mdash; importer-signed git→mkit translation (v1)
 
 Status: **Normative** for the git→mkit import direction.
 Scope: the mapping from git objects to mkit v1 objects under the
@@ -21,7 +21,7 @@ objects losslessly through carrier headers; import is a *signed
 translation across a trust boundary*: every imported commit and tag
 is a new mkit object signed by the **importer**, attributing the
 original author and binding the original git bytes as provenance.
-The result is a **downstream fork** — its mkit hashes are a function
+The result is a **downstream fork** &mdash; its mkit hashes are a function
 of the importer's signing key, and two importers of the same upstream
 produce unrelated mkit histories by design (§6).
 
@@ -43,7 +43,7 @@ git gitlink (160000)      → REFUSED (per-ref)
 
 The importer's Ed25519 signature asserts exactly: *"I vouch that
 these bytes are my translator's faithful output for the named
-upstream object."* It is never an authorship claim — original
+upstream object."* It is never an authorship claim &mdash; original
 authorship rides in the `author`/`tagger` Identity (§3.2), and
 SPEC-SIGNING §6 already separates attribution from the verification
 key. A git GPG/SSH signature on the source commit/tag is **carried in
@@ -56,7 +56,7 @@ The mapping is defined for mkit object schema `0x01` and is pinned by
 an **import-spec version** recorded in the per-remote state (§6).
 Implementations MUST refuse to incrementally extend an import whose
 recorded import-spec version they do not implement (forcing an
-explicit re-import) — translation-rule drift between versions would
+explicit re-import) &mdash; translation-rule drift between versions would
 silently fork hashes for the same key.
 
 Import is a pure function of *(upstream git bytes, importer signing
@@ -67,9 +67,9 @@ key**, and a crashed import is resumed by re-running it.
 
 ### 1.3 Non-goals (v1)
 
-- Bidirectional sync (permanent — restating SPEC-GIT-BRIDGE §1.3).
+- Bidirectional sync (permanent &mdash; restating SPEC-GIT-BRIDGE §1.3).
 - SHA-256 git repositories (whole-import refusal).
-- Shallow import: structurally impossible — an mkit parent hash is
+- Shallow import: structurally impossible &mdash; an mkit parent hash is
   the BLAKE3 of the translated parent, which requires the full
   closure. The staging mirror is always a full clone.
 - Escaping schemes for git-legal/mkit-illegal names or refs
@@ -88,9 +88,9 @@ read objects with `git cat-file --batch` (git owns wire protocol,
 auth, and pack storage; the bridge owns only translation). Commit
 order MUST be a topological parents-first order (`git rev-list
 --reverse --topo-order`). The inbound parser MUST be tolerant of
-everything git accepts — multi-line continuation headers (`gpgsig`,
+everything git accepts &mdash; multi-line continuation headers (`gpgsig`,
 `mergetag`), unknown headers, the `encoding` header, malformed
-person lines in historic commits — because this is an
+person lines in historic commits &mdash; because this is an
 untrusted-input boundary; tolerance means *parse and carry or refuse
 loudly*, never crash or silently alter.
 
@@ -105,7 +105,7 @@ loudly*, never crash or silently alter.
 git blob bytes map verbatim. Content at or below the 1 MiB chunking
 threshold becomes one mkit blob; above it, the pinned FastCDC
 chunker (SPEC-FASTCDC) produces chunk blobs + a `chunk_size = 0`
-manifest — exactly the writer-side rule, so imported stores are
+manifest &mdash; exactly the writer-side rule, so imported stores are
 exportable (SPEC-GIT-BRIDGE §4 refusals never trigger on them).
 SPEC-FASTCDC leaves the threshold an implementer choice; for
 importers `CHUNK_THRESHOLD = 1 MiB` is **normative** (a different
@@ -136,14 +136,14 @@ Pinned rules:
   after the `author ` keyword+space through **the last `>` byte that
   is preceded anywhere on the line by a `<`** (interior spacing,
   doubled spaces, missing space before `<`, and stray `<`/`>` inside
-  the slice all preserved — no recomposition, so historic
+  the slice all preserved &mdash; no recomposition, so historic
   malformations hash identically across implementations). Lines with
   no such byte (no `<` at all, or `<` with no closing `>` anywhere
   after it) use the bracket-less rule: the remainder after `author `,
   with one trailing match of the pattern *space, decimal seconds,
   space, `+` or `-`, four digits* stripped. A person line from which
   no timestamp can be parsed (no token after the identity slice, or
-  no trailing pattern on a bracket-less line) refuses the ref —
+  no trailing pattern on a bracket-less line) refuses the ref &mdash;
   commits and tags always need a timestamp. Payloads that would be
   empty or exceed 4096 bytes refuse per-ref.
 - The committer line, both timezones, the author timestamp, `gpgsig`,
@@ -153,12 +153,12 @@ Pinned rules:
 - Negative (pre-1970) committer timestamps refuse per-ref (mkit
   timestamps are u64).
 - More than 1000 parents refuses per-ref (`MAX_PARENTS`).
-- The importer signs under `COMMIT_DOMAIN` — **no new signing domain**.
+- The importer signs under `COMMIT_DOMAIN` &mdash; **no new signing domain**.
   Commits carry no domain marker and `verify_commit` hardcodes the
   commit domain; a separate import domain would make imported commits
   unverifiable everywhere. Distinguishability comes from the
   git-import/v1 predicate, the DSSE keyid, and the dedicated import
-  key (§4) — the same principle SPEC-GIT-BRIDGE §11 pins for export.
+  key (§4) &mdash; the same principle SPEC-GIT-BRIDGE §11 pins for export.
 
 ### 3.3 Trees
 
@@ -168,7 +168,7 @@ mkit byte-lex order. Canonical modes map `100644→0x01`, `40000→0x02`,
 normalize to their canonical equivalent's mkit mode, enumerated
 exhaustively: `100664→0x01`, `100640→0x01`, `100600→0x01`,
 `040000→0x02` (zero-padded directory). Any other mode string refuses
-per-ref. Normalization is declared-lossy (warned once per ref) —
+per-ref. Normalization is declared-lossy (warned once per ref) &mdash;
 except in a state dir whose recorded `direction` is `fork` (§6),
 where a normalized tree could not reproduce its original sha1 and
 the affected ref MUST refuse instead.
@@ -178,7 +178,7 @@ mkit cannot decode: entry names that collide byte-equal after the
 re-sort (a file and a directory of one name) refuse per-ref, and
 trees nesting beyond 128 levels (mkit's `MAX_TREE_DEPTH` defense)
 refuse per-ref. Entry names are validated by SPEC-OBJECTS §4.1
-(deserialize-time rules — non-negotiable): names that are `.git`/
+(deserialize-time rules &mdash; non-negotiable): names that are `.git`/
 `.mkit` case-insensitive, end in dot/space, are Windows device stems
 (`aux.c`-class), exceed 255 bytes, or contain backslash refuse the
 ref.
@@ -191,7 +191,7 @@ original `tagger` line maps to the tagger Identity by the §3.2 rule
 and the mkit tag `timestamp` is the tagger epoch, negative-refused
 like commits; git tag GPG signatures ride in the retained raw bytes
 only). Historic tagger-less tags (git v0.99 era) take the PINNED
-sentinel `Identity::Opaque("(no tagger)")` and timestamp `0` — any
+sentinel `Identity::Opaque("(no tagger)")` and timestamp `0` &mdash; any
 other choice would fork tag hashes across implementations. The tag
 name must satisfy the mkit single-segment tag grammar
 (SPEC-GIT-BRIDGE §7.1) or the tag refuses. Lightweight tags map to
@@ -223,7 +223,7 @@ everything was skipped.
   at first import. Import and pull MUST refuse under a different
   available key, naming the pinned key and the designated-importer
   model (§6). Key rotation means a fresh import under a new remote
-  name (new hashes — a new fork), never a silent re-derive.
+  name (new hashes &mdash; a new fork), never a silent re-derive.
 - Collaborative tracking of one upstream REQUIRES sharing the import
   key (an org/bot key): teammates otherwise produce unrelated forks.
   Cross-machine discovery of "someone already imported this" is
@@ -260,29 +260,29 @@ Three layers, from authoritative to advisory:
    SHOULD skip re-minting for a head whose recorded imported state is
    unchanged (mirroring SPEC-GIT-BRIDGE §11's guidance).
 2. **Retained raw bytes**: the original git commit and tag object
-   bytes in their FRAMED form — `"<type> <len>\0" + body` — stored
+   bytes in their FRAMED form &mdash; `"<type> <len>\0" + body` &mdash; stored
    under the per-remote state dir, keyed by their sha1 preimage purely
    as a **lookup key** (this framing is normative for both retention
    and the `content_digest` input; body-only would fork digests across
-   implementations). Small (commits/tags only — trees/blobs are
+   implementations). Small (commits/tags only &mdash; trees/blobs are
    recoverable from the staging mirror and re-derivable from the mkit
    twins). **Consistent with SPEC-GIT-BRIDGE §2/§11: sha1 here is a
    locator, never a security proof.** Keying storage by sha1 does not
-   make the retained bytes trustworthy on its own — an adversary who
+   make the retained bytes trustworthy on its own &mdash; an adversary who
    can compute a sha1 collision (practical for chosen-prefix collisions
    since 2020) could in principle plant different bytes under the same
    key. What actually establishes trust is described in point 3 below.
 3. **The proof surface is the mkit-side signed attestation, not the
    sha1-addressed storage.** The head attestation (this section's
    opening paragraphs) has a BLAKE3 subject digest over the *mkit*
-   commit — the same "locator vs. subject" split SPEC-GIT-BRIDGE §11
-   uses for the export direction — and an Ed25519 signature over that
+   commit &mdash; the same "locator vs. subject" split SPEC-GIT-BRIDGE §11
+   uses for the export direction &mdash; and an Ed25519 signature over that
    subject. That signature is the actual proof surface: it transitively
    pins the imported closure because parents are inside the signed
    commit bytes (this section's opening paragraph). `content_digest`
    = BLAKE3(raw git commit bytes) is carried as an **advisory** field,
    excluded from signing bytes (SPEC-OBJECTS §5.1) and therefore
-   **malleable in isolation** — a signature-preserving sibling with a
+   **malleable in isolation** &mdash; a signature-preserving sibling with a
    forged slot is constructible. Verifiers MUST treat `content_digest`
    as a hint for locating/diffing retained bytes, never as something
    the signature vouches for.
@@ -292,7 +292,7 @@ here still functions as a lookup key over data an adversary may control
 (untrusted upstream Git history), every sha1 computed over upstream
 bytes in the bridge/import path MUST use a collision-detecting SHA-1
 construction (rejecting known cryptanalytic collision patterns), not a
-plain SHA-1 implementation — matching real Git's own practice for
+plain SHA-1 implementation &mdash; matching real Git's own practice for
 exactly this reason. `mkit-git-bridge`'s current dependency (`sha1 =
 "0.11"`) is a plain implementation and does not meet this requirement.
 
@@ -306,7 +306,7 @@ non-normative except for the binding semantics below):
 - `dest` (export-direction dirs)/`source`: the canonical remote
   identity (§8), immutable after first use. One state dir = one
   upstream. Fork-direction dirs record `dest` informationally only
-  (last push target) — fork pushes lease against a fresh observation
+  (last push target) &mdash; fork pushes lease against a fresh observation
   per SPEC-GIT-BRIDGE §14.1, so they are not destination-bound.
 - `direction`: `import`, `export`, or `fork` (passthrough-enabled).
   A state dir MUST NOT serve import and plain export simultaneously;
@@ -315,7 +315,7 @@ non-normative except for the binding semantics below):
 - `signer`: the pinned importer pubkey (§4).
 - `import-spec-version` (§1.2).
 - The staging mirror (`repo.git`): for import it is **durable
-  state**, not a disposable cache — it is the byte-perfect original
+  state**, not a disposable cache &mdash; it is the byte-perfect original
   archive backing §5.2 and the passthrough object source. Deleting
   it forces a re-clone but loses nothing else.
 - The sha1↔blake3 map: rebuildable cache under the pinned key, exact
@@ -328,7 +328,7 @@ Before translating, an import MUST run two checks:
 
 1. **State-dir identity check** (structural): if any state dir in
    this repository records the same canonical remote identity (§8),
-   refuse unless it is the one being used — this catches re-imports
+   refuse unless it is the one being used &mdash; this catches re-imports
    regardless of how far upstream has advanced.
 2. **Content probe** (best-effort): walking back from each upstream
    head through first parents (bounded; until the first hit or the
@@ -340,7 +340,7 @@ Before translating, an import MUST run two checks:
    store scan is an acceptable lookup mechanism (imports are rare,
    interactive operations); an index is permitted but not required.
 
-The probe is best-effort (content_digest is advisory) — it catches
+The probe is best-effort (content_digest is advisory) &mdash; it catches
 the realistic accident, not an adversary.
 
 ---
@@ -357,7 +357,7 @@ the realistic accident, not an adversary.
   tracking ref, reusing the native FF machinery and guards.
   Divergence refuses with the executable hint
   (`mkit merge <remote>/<branch>` / `mkit rebase`); integration is
-  **native** — imported commits are ordinary mkit objects.
+  **native** &mdash; imported commits are ordinary mkit objects.
 - Local work on top of imported history merges/rebases natively;
   replays preserve original authorship (the native replay rule).
 
@@ -371,7 +371,7 @@ normalization, `remote_identity(dest)`:
 1. scp-style `[user@]host:path` rewrites to `ssh://host/path`
    (honesty note: a home-relative scp path and an absolute ssh:// path
    can be different repos on a generic server; the conflation only
-   widens the guard — fail-closed). IPv6 literals keep their
+   widens the guard &mdash; fail-closed). IPv6 literals keep their
    brackets: `[::1]:path` → `ssh://[::1]/path`;
 2. scheme and host lowercase; userinfo dropped; default ports
    stripped per scheme (`ssh` 22, `https` 443, `http` 80, `git`
@@ -387,7 +387,7 @@ Equivalence examples (all one identity):
 (SPEC-GIT-BRIDGE §14.2) compares canonical identities: plain
 (non-passthrough) export MUST refuse a destination whose identity
 matches any recorded import source. This is a safety net against
-accidents, not a security boundary — mirrors and redirects are
+accidents, not a security boundary &mdash; mirrors and redirects are
 undetectable; the push lease remains the backstop.
 
 ---
@@ -405,19 +405,19 @@ reserved tree-entry name, negative timestamp, out-of-grammar tag
 name) pin their TYPED refusal in `REFUSALS.txt` alongside the
 success vectors.
 
-1. **Plain commit** (author == committer, UTC) — the baseline.
-2. **Committer ≠ author with non-UTC zones** — committer-timestamp
+1. **Plain commit** (author == committer, UTC) &mdash; the baseline.
+2. **Committer ≠ author with non-UTC zones** &mdash; committer-timestamp
    rule + provenance recovery.
-3. **gpgsig commit** (multi-line continuation header) — tolerant
+3. **gpgsig commit** (multi-line continuation header) &mdash; tolerant
    parse, signature in retained bytes only.
-4. **latin-1 message with `encoding` header** — verbatim bytes.
-5. **Historic mode `100664` tree** — normalize-declared-lossy.
-6. **Octopus merge** (≥3 parents) — order preserved.
-7. **Annotated tag** (tagger, message) — TAG_DOMAIN importer
+4. **latin-1 message with `encoding` header** &mdash; verbatim bytes.
+5. **Historic mode `100664` tree** &mdash; normalize-declared-lossy.
+6. **Octopus merge** (≥3 parents) &mdash; order preserved.
+7. **Annotated tag** (tagger, message) &mdash; TAG_DOMAIN importer
    signature.
-8. **Signed git tag** — GPG block in retained bytes; mkit tag
+8. **Signed git tag** &mdash; GPG block in retained bytes; mkit tag
    verifies under the importer key.
-9. **> 1 MiB blob** — FastCDC manifest equals the writer-side rule.
+9. **> 1 MiB blob** &mdash; FastCDC manifest equals the writer-side rule.
 
 Refusal vectors (assert the typed refusal, not bytes): gitlink tree,
 `aux.c` tree name, negative timestamp, `v1.0+build` ref name,
@@ -441,11 +441,11 @@ MUST `verify_commit`/`verify_tag` under the test key.
 | Invariant | Enforced by |
 |---|---|
 | Re-running an import reproduces byte-identical mkit objects | import is a pure function of *(upstream bytes, importer key, import-spec version)*; RFC 8032 signing is deterministic (§1.2) |
-| Two importers under the same key produce identical hashes; under different keys, unrelated forks — never a silent mix | hashes are a function of the signing key (§1.2); the pinned key refuses imports under any other key (§4) |
+| Two importers under the same key produce identical hashes; under different keys, unrelated forks &mdash; never a silent mix | hashes are a function of the signing key (§1.2); the pinned key refuses imports under any other key (§4) |
 | Translation-rule drift can never silently fork hashes for one key | recorded import-spec version; unimplemented versions refuse incremental extension (§1.2) |
 | Every imported commit/tag carries a verifiable importer vouch, never an authorship claim | importer Ed25519 under the existing `COMMIT_DOMAIN`/`TAG_DOMAIN`; attribution rides in the author/tagger Identity (§1.1, §3.2, §3.4) |
 | Historic malformations (person lines, modes, tagger-less tags) hash identically across implementations | byte-exact identity-slice rule, exhaustive mode-spelling table, pinned `(no tagger)` sentinel (§3.2, §3.3, §3.4) |
-| Untrusted upstream input is never silently altered | parse-and-carry or typed per-ref refusal — the §3 refusal matrix; never crash or normalize undeclared (§2, §3) |
+| Untrusted upstream input is never silently altered | parse-and-carry or typed per-ref refusal &mdash; the §3 refusal matrix; never crash or normalize undeclared (§2, §3) |
 | Imported stores are always exportable | normative 1 MiB threshold + writer-side FastCDC rule, so SPEC-GIT-BRIDGE §4 refusals never trigger (§3.1) |
 | The translation is byte-auditable after the fact | framed raw commit/tag bytes retained sha1-addressed; head attestation transitively pins the signed closure (§5.1, §5.2) |
 | A forged `content_digest` cannot defeat verification | the slot is advisory and excluded from signing bytes; the mkit-side signed attestation (BLAKE3 subject + Ed25519 signature), not the sha1-addressed retained bytes, is the proof surface (§5.3) |
@@ -453,6 +453,6 @@ MUST `verify_commit`/`verify_tag` under the test key.
 | Re-importing an already-imported upstream in the same store is caught | state-dir identity check (structural) + content probe (best-effort) (§6.1) |
 | An upstream force-push never silently rewrites local work | tracking refs move with a loud warning; the current branch advances only by fast-forward (§7) |
 
-The content probe (§6.1) is explicitly best-effort — it catches the
+The content probe (§6.1) is explicitly best-effort &mdash; it catches the
 realistic accident, not an adversary; the pinned-key refusal (§4) is
 the structural guarantee.

@@ -11,7 +11,7 @@ terraform init
 
 ## Plan / apply
 
-The token needs **Zone WAF Write** + **Zone Read**. Get the zone ID from the
+The token needs **Zone WAF Write** and **Zone Read**. Get the zone ID from the
 Cloudflare dashboard (Overview → API section) or:
 
 ```bash

@@ -4,10 +4,10 @@ mkit ships a small number of **bounded property tests** that exercise the
 binary parsers from adversarial inputs. They live in the `mkit-fuzz`
 crate at `rust/fuzz/` and run in two modes:
 
-- `cd rust && cargo test --manifest-path fuzz/Cargo.toml` — plain unit-test
+- `cd rust && cargo test --manifest-path fuzz/Cargo.toml` &mdash; plain unit-test
   harness over the target bodies; stable Rust, no extra tooling. CI runs
   this.
-- `cd rust/fuzz && cargo +nightly fuzz run <target>` — libfuzzer-sys
+- `cd rust/fuzz && cargo +nightly fuzz run <target>` &mdash; libfuzzer-sys
   harness for coverage-guided runs. Same target bodies, same
   guardrails.
 
@@ -26,8 +26,8 @@ from recurring.
 | `fuzz_targets/software_key_record.rs` | `EncryptedKeyRecord::decode` |
 | `fuzz_targets/git_commit_parse.rs` | `mkit-git-bridge gitparse::parse_commit` (untrusted upstream bytes, SPEC-GIT-IMPORT §2) |
 | `fuzz_targets/git_tag_parse.rs` | `mkit-git-bridge gitparse::parse_tag` |
-| `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` + `map_mode` |
-| `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) + `Arbitrary`-driven encode/decode roundtrip |
+| `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` plus `map_mode` |
+| `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) plus `Arbitrary`-driven encode/decode roundtrip |
 | `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
@@ -36,10 +36,10 @@ Targets that exercise crate-private parser surfaces should expose a minimal
 
 ## What is **not** fuzzed (deferred)
 
-- **`restore` (symlink resolution)** — the file-system side-effect
+- **`restore` (symlink resolution)** &mdash; the file-system side-effect
   surface made it too easy to accidentally create symlink cycles.
-  Revisit once we have a virtual-FS shim to sandbox the target.
-- **SSH / URL parser wire decoding** — covered by crate-level unit
+  Revisit once a virtual-FS shim exists to sandbox the target.
+- **SSH / URL parser wire decoding** &mdash; covered by crate-level unit
   tests for now.
 
 ## Invariants per target
@@ -53,7 +53,7 @@ All targets share the same base invariants:
 
 Target-specific invariants:
 
-- **Packfile**: declared entry count + declared entry lengths are
+- **Packfile**: declared entry count plus declared entry lengths are
   bounds-checked against the actual input length *before* the parser
   allocates the entries vector. The most important regression case is
   "pack header claims count = 9 999 999, body is 0 bytes": the parser
@@ -74,7 +74,7 @@ cargo test --manifest-path fuzz/Cargo.toml
 ```
 
 That runs the target bodies as ordinary unit tests with a seeded
-PRNG — ~30 cases total, each wall-clock capped so a regression that
+PRNG &mdash; ~30 cases total, each wall-clock capped so a regression that
 introduces an accidental loop aborts rather than hanging CI.
 
 For coverage-guided runs (nightly toolchain required):
@@ -93,7 +93,7 @@ cargo +nightly fuzz run rpc_decode
 The default in-process harness is a bespoke splitmix64 loop
 (`run_iterated_unit` in `src/lib.rs`). The `rpc_decode` target's unit
 test instead drives the shared body through
-[`minifuzz`](https://docs.rs/commonware-invariants) — the same
+[`minifuzz`](https://docs.rs/commonware-invariants) &mdash; the same
 in-process property-test harness upstream commonware uses for its own
 in-tree tests. It is a mutational fuzzer (smarter than uniform-random
 bytes) yet still a plain `#[test]` on stable, and on failure prints a
@@ -105,16 +105,16 @@ commonware 2026.5.x train); the libfuzzer binaries never link it. The
 same six guardrails apply: `with_search_limit(MAX_ITER)` caps iterations,
 `with_seed(RNG_SEED)` keeps the run deterministic, and the body still
 truncates to `MAX_INPUT` and runs under the per-iteration wall-clock cap.
-This is a pilot — the other targets stay on the splitmix loop until the
-pattern proves out (`commonware-invariants` is ALPHA upstream).
+This is a pilot &mdash; the other targets stay on the splitmix loop until the
+pattern proves out (`commonware-invariants` is alpha upstream).
 
-## Guardrails (NON-NEGOTIABLE)
+## Guardrails (non-negotiable)
 
 Every target body must satisfy all six:
 
 1. **At most 100 iterations per invocation.**
 2. **Every iteration's input is at most 64 KiB.**
-3. **Bounded allocations.** Input cap (2) + per-op output caps inside
+3. **Bounded allocations.** Input cap (2) plus per-op output caps inside
    `mkit-core` keep the worst-case heap under ~1 MiB per iteration:
    - `delta::decode` caps its initial `Vec::with_capacity` at
      `result_len.min(base.len() + 2 * stream.len())` so a 9-byte
@@ -136,24 +136,24 @@ Every target body must satisfy all six:
    aborts the remainder.**
 5. **No `loop {}` or `while true {}` without a bounded iteration
    counter.**
-6. **Seeded deterministic PRNG.** Inputs are synthesised from a fixed
+6. **Seeded deterministic PRNG.** Inputs are synthesized from a fixed
    `u64` seed (`RNG_SEED`) so any failure reproduces exactly. Most targets
    use a splitmix64 PRNG (`run_iterated_unit`); the `rpc_decode` pilot
    drives the body through `minifuzz`, whose ChaCha8 sampler is seeded with
-   the same constant via `with_seed` — also deterministic — plus a
+   the same constant via `with_seed` &mdash; also deterministic &mdash; plus a
    splitmix64 large-input sweep so the 8 KiB–64 KiB range stays covered
    (see the [In-process minifuzz](#in-process-minifuzz-rpc_decode-pilot)
    section).
 
 ## Known limitations
 
-- PRNG-driven coverage is shallow — 100 iterations of random bytes
+- PRNG-driven coverage is shallow &mdash; 100 iterations of random bytes
   will not find bugs that require deeply structured input. The fixed
   seed cases exist to cover the structurally interesting shapes
   (oversize counts, truncated headers, invalid modes, etc.) that
   random bytes rarely hit. Coverage-guided `cargo fuzz` runs fill in
   the rest.
-- Fuzz outputs are only checked for "no panic, no runaway". We do not
+- Fuzz outputs are only checked for "no panic, no runaway". This does not
   diff against a reference decoder.
 
 ## Adding a new target
@@ -170,5 +170,5 @@ Use this checklist before landing a new target:
       one structural malformation, and one bounds-stress case
       (oversize-count / oversize-length style).
 
-If you cannot satisfy the guardrails, do not land the target — leave
+If you cannot satisfy the guardrails, do not land the target &mdash; leave
 a note in this file explaining why it was deferred.

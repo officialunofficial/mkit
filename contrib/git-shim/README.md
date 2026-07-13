@@ -1,7 +1,7 @@
 # `git` alias shim (opt-in)
 
 `mkit` exposes a git-compatible CLI surface (see [`docs/PARITY.md`](../../docs/PARITY.md)),
-so existing git habits — and AI agents that emit `git <cmd>` — can drive it.
+so existing git habits &mdash; and AI agents that emit `git <cmd>` &mdash; can drive it.
 This directory provides an **opt-in** shim that forwards `git` to `mkit`.
 
 **It is never installed automatically and never shadows the real `git`.** You
@@ -19,7 +19,7 @@ alias git=mkit          # interactive shells only
 ```
 
 To also cover scripts and non-interactive tools, put the shim on your `PATH`
-**as `git`**, ahead of the real one — for a single project or a dedicated
+**as `git`**, ahead of the real one &mdash; for a single project or a dedicated
 environment, not system-wide:
 
 ```sh

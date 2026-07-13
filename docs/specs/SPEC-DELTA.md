@@ -5,7 +5,7 @@ status: stable
 audience: implementers of compatible packfile readers and writers
 ---
 
-# SPEC-DELTA — mkit v1 delta instruction format
+# SPEC-DELTA &mdash; mkit v1 delta instruction format
 
 Status: **Normative** for mkit v1.
 Scope: the byte layout of the delta instruction stream referenced by
@@ -20,7 +20,7 @@ Resolves red-team R-19 (no delta format spec, no version byte).
 Delta streams appear exclusively inside packfile entries. The
 enclosing entry provides:
 
-- `base_hash` (32 bytes) — the BLAKE3 of the full serialised base
+- `base_hash` (32 bytes) &mdash; the BLAKE3 of the full serialized base
   object (including its SPEC-OBJECTS prologue).
 - Byte range containing the delta stream.
 
@@ -41,7 +41,7 @@ object (§8) supplies a `result_size` field; pack entries do not.
 ```
 
 The `stream_version` byte is required: readers use it to reject any
-future format they don't recognise.
+future format they don't recognize.
 
 Readers MUST reject `stream_version != 0x01` with
 `UnsupportedDeltaVersion`. The Rust API surfaces this as
@@ -72,7 +72,7 @@ discriminates only "truncated input" (`UnexpectedEof`) from
 
 Two opcodes, distinguished by the top bit of the first byte:
 
-### 3.1 `COPY` — top bit set
+### 3.1 `COPY` &mdash; top bit set
 
 ```
 [u8 opcode]             opcode & 0x80 != 0; remaining 7 bits reserved, MUST be 0 in v1
@@ -89,7 +89,7 @@ to the reconstruction buffer.
 Currently v1 always emits `opcode == 0x80` with low 7 bits zero. Any
 other COPY opcode byte is reserved.
 
-### 3.2 `INSERT` — top bit clear, non-zero length
+### 3.2 `INSERT` &mdash; top bit clear, non-zero length
 
 ```
 [u8 length]             1 .. 127
@@ -99,7 +99,7 @@ other COPY opcode byte is reserved.
 Total size: `1 + length` bytes. Semantics: append `literal` to the
 reconstruction buffer.
 
-`length == 0` (i.e. the opcode byte itself is 0) is illegal and MUST be
+`length == 0` (that is, the opcode byte itself is 0) is illegal and MUST be
 rejected with `DeltaCorrupt`. This reserves the all-zero byte sequence,
 which is both a robustness check and prevents a trivial stream that
 produces empty output.
@@ -150,7 +150,7 @@ at a huge base would otherwise trip a multi-gigabyte reservation
 (see `mkit-core` `delta::compute_cap_hint` and finding G5). This is
 implementation guidance, not a wire-format requirement; conformant
 decoders are free to size their output buffer however they like
-provided behaviour matches the pseudo-code above.
+provided behavior matches the pseudo-code above.
 
 ---
 
@@ -169,11 +169,11 @@ reconstructed bytes equal the target.
 
 ---
 
-## 6. What the delta stream is NOT
+## 6. What the delta stream is not
 
 - **Not signed.** The delta bytes are not covered by any commit
   signature. Integrity comes from:
-  1. The packfile trailer (SPEC-PACKFILE §8) — end-to-end pack hash.
+  1. The packfile trailer (SPEC-PACKFILE §8) &mdash; end-to-end pack hash.
   2. The reconstructed object's hash matching the path under which it
      is stored in the object store.
   3. The commit signature over the reconstructed tree hash etc.
@@ -236,7 +236,7 @@ are inline byte arrays so any framing drift trips immediately.
     `DeltaCorrupt` (`rejects_copy_with_reserved_low_bits`).
 11. **Reject COPY with `length == 0`** → `DeltaCorrupt`
     (`rejects_copy_with_zero_length`).
-12. **Truncated header / COPY / INSERT** → `UnexpectedEof`
+12. **Truncated header/COPY/INSERT** → `UnexpectedEof`
     (`rejects_truncated_header`, `rejects_truncated_copy`,
     `rejects_truncated_insert`).
 13. **`encode` rejects > u32 lengths** → `DeltaLengthOverflow`

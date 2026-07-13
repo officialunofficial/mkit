@@ -21,7 +21,7 @@ We aim to:
   report, coordinated with you on disclosure timing.
 
 If you do not hear back within the acknowledgement window, please nudge
-us — notifications can drop.
+us &mdash; notifications can drop.
 
 ## Supported versions
 
@@ -47,7 +47,7 @@ fixes. Read the CHANGELOG before upgrading.
 We will not pursue legal action against researchers who follow this
 process in good faith, including accidental disclosure during testing.
 
-## Local attack surface — initial posture
+## Local attack surface &mdash; initial posture
 
 The initial release narrows the local attack surface around keys and
 config. Briefly:
@@ -57,7 +57,7 @@ config. Briefly:
   now user-scoped only. A `<repo>/.mkit/config` that tries to set
   them is rejected with a warning and the value is ignored.
 - **Key file handling.** Key files are opened with `O_NOFOLLOW`,
-  written atomically (tmp + fsync + rename + parent fsync), and
+  written atomically (tmp plus fsync plus rename plus parent fsync), and
   owner-checked against the running euid. Parent directory is
   enforced `0700`.
 - **Trust roots scope-corrected.** `mkit verify-attest` defaults to
@@ -92,7 +92,7 @@ License Exception TSU). A §740.13(e) notification has been provided to BIS
 
 In scope:
 
-- The `mkit` binary and the Rust workspace under `rust/crates/` —
+- The `mkit` binary and the Rust workspace under `rust/crates/` &mdash;
   including the library crates published to crates.io (`mkit-core`,
   `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, the
   `mkit-transport-*` crates).

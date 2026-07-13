@@ -5,11 +5,11 @@ status: stable-normative
 audience: integrators implementing an mkit external signer or mkit-server
 ---
 
-# SPEC-RPC — mkit cross-system wire protocol v1
+# SPEC-RPC &mdash; mkit cross-system wire protocol v1
 
-mkit speaks to processes outside its address space — external signers
+mkit speaks to processes outside its address space &mdash; external signers
 running as subprocesses, and remote `mkit-server` instances reached
-over `ssh(1)` — using a single shared wire protocol.
+over `ssh(1)` &mdash; using a single shared wire protocol.
 
 The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/proto/):
 
@@ -18,17 +18,17 @@ The schemas live in [`rust/crates/mkit-rpc/proto/`](../../rust/crates/mkit-rpc/p
 | `common.proto` | Shared types: `Algorithm`, `KeyForm`, `ErrorCode`, `Error`, `ProtocolVersion` |
 | `signer.proto` | External-signer protocol (`SignerFrame` oneof). See [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) for prose. |
 | `ssh.proto` | SSH transport protocol (`SshFrame` oneof). See [SPEC-TRANSPORT](SPEC-TRANSPORT.md) for prose. |
-| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`, issue #692). **Not** a framed protocol under §1/§4 below — it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
+| `verify.proto` | Object-signature verification contract (`VerifyRequest`/`VerifyResponse`, issue #692). **Not** a framed protocol under §1/§4 below &mdash; it is message-only, with no `oneof`-dispatched frame and no bound RPC method yet. `mkit-cli`'s local dispatch (`rust/crates/mkit-cli/src/remote_dispatch/packmap.rs`) calls the Rust implementation directly (`mkit_core::sign::{verify_commit,verify_remix,verify_tag}`); the schema exists so a future ConnectRPC transport (for example `apps/repo-worker`) can bind the identical check to a service method instead of reimplementing it. |
 
 `ssh.proto` imports the CAS enum (`RefExpectation`) and the ref-listing
 type (`RefEntry`) from
 [`mkit/common/v1/refs.proto`](../../proto/mkit/common/v1/refs.proto) at
-the repo root — a vocabulary shared with `mkit.repo.v1` (the
+the repo root &mdash; a vocabulary shared with `mkit.repo.v1` (the
 `apps/repo-worker` multiplayer demo protocol), so the two wire
 protocols cannot desync on CAS semantics. See that file's header
 comment for its own versioning contract.
 
-Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) — the only
+Protocol-version integer is `1` (`PROTOCOL_VERSION_1`) &mdash; the only
 value mkit currently speaks. Wire-breaking changes (renumbering or
 removing a field) are made by introducing a sibling `signer2.proto` /
 `ssh2.proto` package and bumping to a new `ProtocolVersion` value,
@@ -42,7 +42,7 @@ Registry on every tagged release (the named module at
 pushed by the `buf-push` job in `.github/workflows/crates-publish.yml`;
 see [docs/RELEASE.md](../RELEASE.md#buf_token)). Integrators generate
 typed bindings in their own language with `buf generate` against a
-pinned module ref instead of vendoring this repo — the checked-in
+pinned module ref instead of vendoring this repo &mdash; the checked-in
 `rust/crates/mkit-rpc/proto/buf.gen.yaml` is the reference codegen
 recipe (Swift today; add other languages the same way).
 
@@ -59,12 +59,12 @@ Both protocols use the same length-prefixed framing:
 ```
 
 - **Length prefix**: 4 bytes, little-endian unsigned integer, encoded
-  length of the protobuf body in bytes — does NOT include the prefix
+  length of the protobuf body in bytes &mdash; does NOT include the prefix
   itself.
 - **Body**: a single protobuf-encoded `SignerFrame` (signer protocol)
   or `SshFrame` (SSH protocol), per the `oneof body { ... }`
   definitions in the .proto files. The Rust reference implementations
-  use the `buffa` runtime, but any protobuf 3 / edition 2023 toolchain
+  use the `buffa` runtime, but any protobuf 3/edition 2023 toolchain
   emitting the same wire bytes is conformant.
 - **Cap**: `MAX_FRAME_BYTES = 1 MiB` (`1024 * 1024`, exported from
   `mkit-rpc` as a constant of the same name). Receivers MUST close
@@ -74,7 +74,7 @@ Both protocols use the same length-prefixed framing:
   1 MiB use a streaming pattern (see `PackChunk` in `ssh.proto`).
 
 Receivers MUST validate the length prefix against the cap before
-allocating buffers — there is no streaming decode of a single frame.
+allocating buffers &mdash; there is no streaming decode of a single frame.
 
 A truncated length prefix or body is a connection-fatal protocol
 error. There is no recovery; the receiving side MUST close the
@@ -93,7 +93,7 @@ patch releases:
 
 - New enum values for `Algorithm`, `KeyForm`, `ErrorCode` (existing
   consumers see them as unknown variants and fall back to
-  `ERROR_CODE_UNSPECIFIED` / a no-op).
+  `ERROR_CODE_UNSPECIFIED`/a no-op).
 - New optional fields on existing messages (Edition 2023 default
   semantics).
 - New oneof variants on `SignerFrame::body` and `SshFrame::body`
@@ -117,7 +117,7 @@ the next available number.
 | `ALGORITHM_UNSPECIFIED` | 0 | Treated as "request invalid". |
 | `ALGORITHM_ED25519` | 1 | RFC 8032 raw signing. Default for commit/ref. |
 | `ALGORITHM_SECP256K1` | 2 | ECDSA over SHA-256. DSSE-compatible. |
-| `ALGORITHM_P256` | 3 | ECDSA P-256 / secp256r1 / prime256v1 over SHA-256. |
+| `ALGORITHM_P256` | 3 | ECDSA P-256/secp256r1/prime256v1 over SHA-256. |
 | `ALGORITHM_ED25519_WEBAUTHN` | 4 | Ed25519 wrapped in a WebAuthn assertion (CTAP signers). |
 | `ALGORITHM_BLS12381_THRESHOLD` | 5 | BLS12-381 threshold signature (variant `MinSig`); see `docs/specs/SPEC-RELEASE-THRESHOLD.md`. |
 
@@ -125,7 +125,7 @@ the next available number.
 
 | Name | Wire | Used by |
 |---|---|---|
-| `KEY_FORM_UNSPECIFIED` | 0 | — |
+| `KEY_FORM_UNSPECIFIED` | 0 | &mdash; |
 | `KEY_FORM_RAW_BYTES` | 1 | `mkit-sign-file` (32-byte seed/scalar on disk). |
 | `KEY_FORM_PKCS8_DER` | 2 | Reserved; no signer ships with v0.1.0. |
 | `KEY_FORM_OPAQUE_HANDLE` | 3 | `mkit-sign-tpm`, `mkit-sign-ctap`. The bytes in `key_ref` are interpreted by the signer (TPM persistent handle, CTAP credentialId, …). |
@@ -138,12 +138,12 @@ the next available number.
 | `ERROR_CODE_INVALID_REQUEST` | 1 | Structurally bad request. Connection MAY continue. |
 | `ERROR_CODE_UNSUPPORTED_ALGORITHM` | 2 | Signer doesn't speak the algorithm. |
 | `ERROR_CODE_UNSUPPORTED_KEY_FORM` | 3 | Signer doesn't accept the key form. |
-| `ERROR_CODE_KEY_NOT_FOUND` | 4 | Named key (handle / path) was absent. |
-| `ERROR_CODE_USER_DECLINED` | 5 | User cancelled (touched cancel on hardware key, refused TPM auth). |
-| `ERROR_CODE_AUTHENTICATION_REQUIRED` | 6 | Signer needs PIN / biometric — see `PinPrompt`. |
+| `ERROR_CODE_KEY_NOT_FOUND` | 4 | Named key (handle/path) was absent. |
+| `ERROR_CODE_USER_DECLINED` | 5 | User canceled (touched cancel on hardware key, refused TPM auth). |
+| `ERROR_CODE_AUTHENTICATION_REQUIRED` | 6 | Signer needs PIN/biometric &mdash; see `PinPrompt`. |
 | `ERROR_CODE_HARDWARE_ERROR` | 7 | Vendor-specific hardware fault; `details` carries the raw code. |
 | `ERROR_CODE_TIMEOUT` | 8 | User presence check timed out. |
-| `ERROR_CODE_INTERNAL` | 99 | Unmapped — `message` MUST be set. |
+| `ERROR_CODE_INTERNAL` | 99 | Unmapped &mdash; `message` MUST be set. |
 
 `Error.message` is human-readable English, suitable for direct UI
 display. Producers SHOULD keep it under 1 KiB so receivers can render
@@ -170,19 +170,19 @@ A signer or server is mkit-rpc-compliant if and only if:
 
 Reference implementations (all in this repository):
 
-- [`contrib/signers/mkit-sign-file/`](../../contrib/signers/mkit-sign-file/) —
-  `KEY_FORM_RAW_BYTES`, Ed25519 / secp256k1 / P-256.
-- [`contrib/signers/mkit-sign-ctap/`](../../contrib/signers/mkit-sign-ctap/) —
-  FIDO2/WebAuthn signer, P-256 / Ed25519-WebAuthn.
-- [`contrib/signers/mkit-sign-tpm/`](../../contrib/signers/mkit-sign-tpm/) —
+- [`contrib/signers/mkit-sign-file/`](../../contrib/signers/mkit-sign-file/) &mdash;
+  `KEY_FORM_RAW_BYTES`, Ed25519/secp256k1/P-256.
+- [`contrib/signers/mkit-sign-ctap/`](../../contrib/signers/mkit-sign-ctap/) &mdash;
+  FIDO2/WebAuthn signer, P-256/Ed25519-WebAuthn.
+- [`contrib/signers/mkit-sign-tpm/`](../../contrib/signers/mkit-sign-tpm/) &mdash;
   TPM 2.0 P-256 signer.
-- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs) —
+- [`rust/crates/mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs) &mdash;
   `mkit serve` SSH server (consumes `ssh.proto`).
 
 The Swift `contrib/signers/mkit-sign-se/` (Apple Secure Enclave)
 binary is a conforming v1 reference signer: it speaks the
 length-prefixed protobuf wire (its `Package.swift` depends on
-swift-protobuf, with generated `common.pb.swift` / `signer.pb.swift`),
+swift-protobuf, with generated `common.pb.swift`/`signer.pb.swift`),
 and is listed alongside the other reference signers in
 [`SPEC-EXTERNAL-SIGNER`](SPEC-EXTERNAL-SIGNER.md) §8. It wires through
 the `external` signer selector like any other mkit-rpc signer.
@@ -199,7 +199,7 @@ choice is deliberate:
   explicit-presence; adding optional fields or oneof variants is a
   wire-compatible patch-level change.
 - **Cross-language.** mkit ships in Rust, but external signers may
-  ship in any language with a protobuf 3 / edition 2023
+  ship in any language with a protobuf 3/edition 2023
   implementation. JSON parsing edge cases (number precision, escape
   handling, key ordering) are not in the contract.
 - **Bounded sizes by construction.** Length-prefixed framing with a
@@ -210,11 +210,11 @@ choice is deliberate:
   derivative.
 
 The Rust reference implementations currently generate their protobuf
-bindings with the `buffa` runtime — this is a reference-implementation
+bindings with the `buffa` runtime &mdash; this is a reference-implementation
 detail, not a specification requirement, and this document does not
 pin a version (a version pinned in prose drifts silently from whatever
 the workspace actually builds against). Other languages, and other
-Rust implementations, can use any protobuf 3 / edition 2023 toolchain
+Rust implementations, can use any protobuf 3/edition 2023 toolchain
 that emits the wire bytes defined by the `.proto` files listed at the
 top of this document (§1); conformance is defined by those bytes,
 never by which codegen tool produced them.
@@ -230,8 +230,8 @@ never by which codegen tool produced them.
 | A truncated frame is never mis-parsed as a shorter one | truncation is connection-fatal; the receiver MUST close the stream, no recovery (§1) |
 | No request is processed before version agreement | first frame MUST be `Hello` with `PROTOCOL_VERSION_1`; `HelloResponse` echoes it before any other processing (§2, §4) |
 | Every error is machine-actionable | `Error` frames MUST carry a known non-zero `ErrorCode` and non-empty `message`; `ERROR_CODE_UNSPECIFIED` is itself a protocol error (§3.3, §4) |
-| A receiver never mistakes a missing `ErrorCode` for an ordinary unmapped one | `mkit_rpc::helpers::rpc_error_to_transport` (shared by every `SshFrame`-based transport client) classifies `code = 0` / absent `code` as `TransportError::ProtocolError`, distinct from the generic `RemoteError` a legitimate-but-unmapped code produces (§3.3, §4) |
-| Wire numbers never change meaning | `Algorithm` / `KeyForm` / `ErrorCode` integers are append-only, never renumbered; field renumbering/removal requires a sibling `*2.proto` + `ProtocolVersion` bump (§2, §3.1) |
+| A receiver never mistakes a missing `ErrorCode` for an ordinary unmapped one | `mkit_rpc::helpers::rpc_error_to_transport` (shared by every `SshFrame`-based transport client) classifies `code = 0`/absent `code` as `TransportError::ProtocolError`, distinct from the generic `RemoteError` a legitimate-but-unmapped code produces (§3.3, §4) |
+| Wire numbers never change meaning | `Algorithm`/`KeyForm`/`ErrorCode` integers are append-only, never renumbered; field renumbering/removal requires a sibling `*2.proto` + `ProtocolVersion` bump (§2, §3.1) |
 | v1 additions cannot break existing peers | new enum values fall back to unknown-variant handling; new oneof variants are rejected with `ERROR_CODE_INVALID_REQUEST` (§2) |
 | Bulk data never violates the frame cap | flows over 1 MiB use the streaming pattern (`PackChunk`) instead of a bigger frame (§1) |
 | Programs never couple to vendor-opaque bytes | `Error.details` MUST NOT be pattern-matched (§3.3) |

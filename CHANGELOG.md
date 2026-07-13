@@ -16,10 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `buf.build/officialunofficial/mkit-rpc` and
   `buf.build/officialunofficial/mkit-repo` on every tagged release (new
   `buf-push` job in `crates-publish.yml`, dormant until `BUF_TOKEN` /
-  `BUF_PUBLISH_ENABLED` are provisioned — see `docs/RELEASE.md`). Third-party
+  `BUF_PUBLISH_ENABLED` are provisioned &mdash; see `docs/RELEASE.md`). Third-party
   signer integrators (HSM/TPM vendors, custodial signing services) and
   `RepoService` clients can now `buf generate` typed bindings from a pinned
-  tag instead of vendoring this repo — see the checked-in `buf.gen.yaml`
+  tag instead of vendoring this repo &mdash; see the checked-in `buf.gen.yaml`
   reference recipes in each module's proto directory.
   `contrib/signers/mkit-sign-se`'s checked-in Swift bindings are now
   regenerated via `scripts/regen-mkit-sign-se-swift.sh` (`buf generate`, not
@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mkit serve --http <addr>`: self-hosted Connect remote (SPEC-TRANSPORT-CONNECT).**
   `mkit serve` can now host `mkit.transport.v1.TransportService` over
   axum/HTTP instead of the SSH-frame protocol, behind the new
-  `http-transport` cargo feature — an operator without SSH access or a
+  `http-transport` cargo feature &mdash; an operator without SSH access or a
   cloud object store can run a real, testable `mkit+https://` remote
   against a local repository (server-side half of the `mkit-transport-connect`
   crate, behind that crate's own `server` cargo feature; generic over any
@@ -41,23 +41,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream (offset contiguity, declared-vs-received length, BLAKE3) before
   ever touching storage, so a rejected upload never creates or overwrites
   the destination pack, and a download either completes or fails before
-  any message is sent — never a partial stream. **Fail-closed**, mirroring
+  any message is sent &mdash; never a partial stream. **Fail-closed**, mirroring
   `--listen-enc`: refuses to bind unless `--http-token`/`MKIT_API_TOKEN`
   (checked in constant time on every unary and streaming RPC) or the
   explicit `--unsafe-allow-any-http-peer` development escape is supplied;
   `Ctrl-C`/`SIGTERM` drain in-flight requests before exiting. The
   `mkit.transport.v1` proto (`proto/mkit/transport/v1/transport.proto`) is
   generated via `buffa`/`connectrpc-build`, vendored under `generated/`
-  the same way `mkit-repo-client`/`apps/repo-worker` already do — see
+  the same way `mkit-repo-client`/`apps/repo-worker` already do &mdash; see
   `docs/specs/SPEC-TRANSPORT-CONNECT.md`. A hosted reference-Worker
   deployment is a separate, later change
   ([#699](https://github.com/officialunofficial/mkit/issues/699)).
 - **Honest transfer-progress reporting for `clone`/`push`/`pull`/`fetch`
   ([#711](https://github.com/officialunofficial/mkit/issues/711)).**
   These commands now stream a live progress line on stderr while the
-  network transfer runs — `Writing objects: N objects, B bytes` while
+  network transfer runs &mdash; `Writing objects: N objects, B bytes` while
   building/uploading the outgoing pack, `Unpacking objects: N objects`
-  while applying a downloaded one — using only real counts (objects
+  while applying a downloaded one &mdash; using only real counts (objects
   actually staged/unpacked, bytes actually handed to the transport).
   mkit still never fabricates git's `Enumerating/Counting/Compressing
   objects` or `Total N (delta D)` lines, per `docs/PARITY.md`: mkit's
@@ -73,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client for `mkit.transport.v1.TransportService`, generated from
   `proto/mkit/transport/v1/transport.proto` via the same vendored-codegen
   pattern `mkit-repo-client`/`apps/repo-worker` use (no `protoc` needed on
-  the default build path; `MKIT_REPO_CODEGEN=1` +
+  the default build path; `MKIT_REPO_CODEGEN=1` plus
   `scripts/regen-transport-proto.sh` to regenerate). `mkit-cli`'s
   `remote_dispatch` now constructs this transport for `mkit+https://` /
   loopback `mkit+http://`, replacing `mkit-transport-http`'s bespoke JSON
@@ -101,10 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now stays in bounded memory (roughly one chunk at a time) regardless
   of total pack size, instead of requiring the whole pack materialized
   up front. `mkit-transport-http` keeps the default buffer-then-delegate
-  behavior for now — real HTTP pack streaming arrives via the
+  behavior for now &mdash; real HTTP pack streaming arrives via the
   `mkit.transport.v1` Connect service's client-/server-streaming
   `UploadPack`/`DownloadPack` RPCs (SPEC-TRANSPORT-CONNECT §6, pending
-  #698/#701) — but its per-retry full-body clone in `upload_pack` is
+  #698/#701) &mdash; but its per-retry full-body clone in `upload_pack` is
   fixed separately: the request body is now `Bytes` (refcounted) instead
   of `Vec<u8>`, so a retried upload shares the same buffer across every
   attempt instead of copying it again per retry
@@ -124,10 +124,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--author`/`--grep` are plain substring matches rather than regexes
   (mkit identities are opaque, not free-text names) and `--since`/
   `--until` use a small explicit date grammar rather than git's
-  `approxidate` — documented divergences, not gaps.
+  `approxidate` &mdash; documented divergences, not gaps.
 - **Windows release target (`x86_64-pc-windows-msvc`) and PowerShell
-  installer.** `release.yml`'s build matrix now ships a fifth leg —
-  `windows-latest`, `.zip` archive instead of `.tar.gz`, `mkit.exe` — built
+  installer.** `release.yml`'s build matrix now ships a fifth leg &mdash;
+  `windows-latest`, `.zip` archive instead of `.tar.gz`, `mkit.exe` &mdash; built
   with the `backend-windows-credential` keystore feature (already the
   default on Windows via `mkit-cli`'s `[target.'cfg(windows)'.dependencies]`
   stanza), matching parity with the already-tested `windows-credential` leg
@@ -135,16 +135,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archive goes through the same cosign keyless signing and mkit-native DSSE
   release attestation as every other target. New `install.ps1` at the repo
   root is the native-Windows counterpart to `install.sh` (same trust model:
-  cosign-required by default, downgrade guard, atomic install) — served at
+  cosign-required by default, downgrade guard, atomic install) &mdash; served at
   `https://mkit.sh/install.ps1` alongside the existing `install.sh`. New
   `contrib/scoop/mkit.json` manifest template (mirrors
   `contrib/homebrew/mkit.rb`) un-defers the Scoop-manifest checklist item in
-  `docs/RELEASE.md`. `install.sh` itself still targets Darwin/Linux only —
+  `docs/RELEASE.md`. `install.sh` itself still targets Darwin/Linux only &mdash;
   it now points MINGW/MSYS/Cygwin users at `install.ps1` instead of failing
   with an unsupported-OS error. Known gap: `mkit self update` does not yet
   support the Windows install (it hardcodes `.tar.gz`/tar+gzip extraction
   and resolves its state dir via `$HOME`, which is commonly unset on native
-  Windows) — Windows users should reinstall via `install.ps1` or a future
+  Windows) &mdash; Windows users should reinstall via `install.ps1` or a future
   Scoop bucket instead of `mkit self update` for now
   ([#714](https://github.com/officialunofficial/mkit/issues/714), part of
   [#676](https://github.com/officialunofficial/mkit/issues/676)).
@@ -154,15 +154,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sigstore-native) over every `dist/*.tar.gz` and `dist/*.zip` archive
   (including the Windows leg), staged alongside the existing cosign
   signatures and the mkit-native DSSE attestation as
-  `mkit-X.Y.Z.provenance.jsonl`. This is additive — it does not replace
-  cosign or the mkit-native attestation — but gives downstream tooling
+  `mkit-X.Y.Z.provenance.jsonl`. This is additive &mdash; it does not replace
+  cosign or the mkit-native attestation &mdash; but gives downstream tooling
   (`gh attestation verify`, `slsa-verifier`) a recognized, off-the-shelf
   provenance format to check against instead of parsing mkit's bespoke DSSE
   predicate. See `docs/RELEASE.md` ("Verify the SLSA build provenance
   attestation").
 - **Packfile v2: per-entry zstd compression (SPEC-PACKFILE §3.3, §3.4).**
   `PackWriter`/`PackReader` transparently compress/decompress pack
-  entries — two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
+  entries &mdash; two new entry types, `0x03` zstd-raw and `0x04` zstd-delta,
   each carrying its own independent zstd frame (no shared dictionary,
   no whole-pack stream, so existing framing/caps/trailer semantics are
   unchanged and decompression memory is bounded to one entry at a
@@ -174,7 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `version = 2` the moment it has at least one; `0x03`/`0x04` are
   illegal inside a `version = 1` pack and rejected as `InvalidEntryType`
   if seen there. Old (pre-v2) readers hitting a v2 pack fail closed
-  with `UnsupportedVersion` — the intended behavior, not a bug. Decode
+  with `UnsupportedVersion` &mdash; the intended behavior, not a bug. Decode
   is bomb-guarded: the claimed decompressed length is checked against
   the 1 GiB object cap *before* any decompression allocation,
   decompression is capacity-bounded to that claim, and the actual
@@ -183,31 +183,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZstdEntryTruncated` / `ZstdDecompress` variants). On a synthetic
   6-commit / 4-file-per-commit text corpus (files 8–48 KiB, <100 KB
   cap), pack bytes went from 655,764 (v1 uncompressed) to 184,881 (v2
-  compressed) — a 3.55x reduction (71.8% saved); see
+  compressed) &mdash; a 3.55x reduction (71.8% saved); see
   `rust/benches/benches/pack_compression.rs`. New direct `zstd`
   dependency on `mkit-core` (behind a `pack-zstd` feature, on by
-  default) — already present transitively via the `commonware-storage`
+  default) &mdash; already present transitively via the `commonware-storage`
   dependency stack at the same resolved version (0.13.3), so this adds
   no new supply-chain root. `mkit-wasm` and `apps/repo-worker` (both
   compile to wasm32-unknown-unknown) opt out (`default-features =
   false`) since `zstd-sys` cannot target that platform.
 - **`mkit-core`: CAS-guarded ref delete.** New public `refs` primitives
   `delete_ref_if_matches` and (on `--features history-mmr`)
-  `delete_ref_with_history_if_matches` — a `delete_ref`/
+  `delete_ref_with_history_if_matches` &mdash; a `delete_ref`/
   `delete_ref_with_history` that only removes the ref (and, on
   history-mmr builds, its journal) when its current on-disk value is
   exactly the caller-supplied `expected` hash, using the same per-ref
   `cas_lock_name` lock `update_ref`'s `Match` arm already takes.
   `mkit branch -m` now routes its source-branch drop (and, on a lost
   race, its destination rollback) through these instead of an
-  unconditional delete — see the Fixed entry below
+  unconditional delete &mdash; see the Fixed entry below
   ([#658](https://github.com/officialunofficial/mkit/issues/658)).
 - **`mkit blame --porcelain` / `--line-porcelain`.** git's grouped
   machine-readable blame: a per-line header (`<id> <orig> <final>
   [<group-len>]`) plus a metadata block (author/committer, `author-time`/
-  `-tz`, `summary`, `boundary` on a file-history root, and `filename`) —
+  `-tz`, `summary`, `boundary` on a file-history root, and `filename`) &mdash;
   once per commit for `--porcelain`, for every line under `--line-porcelain`
-  — with each content line tab-prefixed. Pinned against git 2.50.1 for the
+  &mdash; with each content line tab-prefixed. Pinned against git 2.50.1 for the
   in-scope fields. Documented divergences, consistent with `--format=json`
   and the `log` precedent: 64-hex ids; `author`/`committer` carry mkit's
   Identity (empty `*-mail`, `+0000` tz, single UTC author = committer);
@@ -229,13 +229,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and overwrite locally-modified tracked paths with the target's version;
   untracked files are still preserved. Used by `bisect run`.
 - **`mkit self update`.** The binary can now update itself in place from a
-  signed GitHub Release — but only when installer-managed (the
+  signed GitHub Release &mdash; but only when installer-managed (the
   `.mkit-installed-tag` receipt written by `install.sh` sits next to the
   executable); Homebrew/cargo installs are refused with channel-specific
   guidance. The downloaded archive is verified against the **mkit-native
   release attestation** (below) using release-attestation public keys
-  embedded in the binary at build time — no `cosign`, no GitHub
-  attestation API — plus the sha256 sidecar as defense-in-depth, and the
+  embedded in the binary at build time &mdash; no `cosign`, no GitHub
+  attestation API &mdash; plus the sha256 sidecar as defense-in-depth, and the
   staged binary must pass a `version` self-check before an atomic
   same-directory swap. Downgrade policy mirrors the installer (`latest`
   never downgrades; explicit `--version` pins need `--allow-downgrade`),
@@ -247,15 +247,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digests of all release tarballs, predicate
   `.../spec/predicate/release/v1` `{"tag": "vX.Y.Z"}`, signed with a
   dedicated Ed25519 release key (public rotation set checked in at
-  `docs/keys/release-attest.pub`; custody + rotation runbook in
+  `docs/keys/release-attest.pub`; custody plus rotation runbook in
   `docs/RELEASE.md`). `release.yml` self-verifies the envelope against the
   checked-in public key before publishing, and the envelope is covered by
   the cosign-signed `SHA256SUMS`. Produced by the new internal
   `mkit-release-attest` tool crate (publish = false).
 - **`mkit blame` line ranges and revision argument.** `blame` now accepts
-  `-L`/`--lines` to restrict output to a line range — `<start>,<end>`,
+  `-L`/`--lines` to restrict output to a line range &mdash; `<start>,<end>`,
   `<start>,+<n>` (n lines forward), `<start>,-<n>` (n lines back, ending at
-  start), `<start>,`, `,<end>`, and a bare `<start>` — and an optional
+  start), `<start>,`, `,<end>`, and a bare `<start>` &mdash; and an optional
   `[<rev>]` argument (`mkit blame <rev> <file>`) to blame the file as of any
   revision instead of only `HEAD`. Range semantics and diagnostics match
   `git blame -L`: inclusive bounds, inverted ranges swap, over-long ends
@@ -264,10 +264,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty range`, `file <f> has only N lines`).
 - **`mkit blame -w` / `--ignore-whitespace`.** Ignores whitespace when
   matching lines across revisions (like `git blame -w`, ignoring *all*
-  whitespace), so a whitespace-only edit — reindent, tab↔space, spacing
-  tweak — no longer steals attribution; output still shows the file's
+  whitespace), so a whitespace-only edit &mdash; reindent, tab↔space, spacing
+  tweak &mdash; no longer steals attribution; output still shows the file's
   current bytes.
-- **`mkit blame -M` / `-C` move & copy detection.** `-M` (`--find-moves`)
+- **`mkit blame -M` / `-C` move and copy detection.** `-M` (`--find-moves`)
   credits a block moved *within* the file to its origin commit; `-C`
   (`--find-copies`, repeatable, implies `-M`) credits a block copied *from
   another file*, resolving the true origin by blaming the source file.
@@ -275,22 +275,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every file in the parent commit. Detection is block-based over normalized
   keys: the longest contiguous block above git's default thresholds (20 for
   `-M`, 40 for `-C`) is credited, so a moved block beside genuinely-new
-  lines is split out and — combined with `-w` — a block copied with a
+  lines is split out and &mdash; combined with `-w` &mdash; a block copied with a
   whitespace change is still detected. Configured through a typed
   `MoveDetection`/`CopyDetection` API that can't express an invalid
   "enabled but zero-threshold" state. Detection is **merge-aware** (#499):
   at a merge both `-M` moves and `-C -C` copies are traced against **every
   relevant parent's tree**, so a block moved or copied in from a
-  non-first-parent side is credited to that side's origin — matching
+  non-first-parent side is credited to that side's origin &mdash; matching
   `git blame -M`/`-C`, which credits the merge parent whose tree holds the
   source (a block whose source is only in the merge's own tree stays on the
   merge, as in git). The `-C`-at-a-merge gaps from the initial #499 landing
   are now closed by implementing git's actual per-parent candidate
   mechanism (from git 2.50.1's `blame.c`, each shape pinned by a test with
   its git recipe): the `-M`/`-C` pass runs against **every real parent** in
-  commit order, first-found-wins. A parent that contains the blamed file —
+  commit order, first-found-wins. A parent that contains the blamed file &mdash;
   and whose copy of it is not byte-identical to an earlier parent's (git
-  dedups those) — keeps its *porigin*: it supplies the within-file `-M`
+  dedups those) &mdash; keeps its *porigin*: it supplies the within-file `-M`
   source, and its `-C` candidates are the files *modified between that
   parent and the merge*. A porigin-less parent (deleted the file, holds a
   duplicate blob, or the file is newly added by the merge) has no `-M`
@@ -299,7 +299,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this mechanism, plus the shapes they missed: an unchanged source on the
   first parent is invisible (block stays on the merge) even when another
   parent deleted the file; the same source *modified* at the merge credits
-  the first parent — at plain `-C` level 1 too; a parent that deleted the
+  the first parent &mdash; at plain `-C` level 1 too; a parent that deleted the
   blamed file can still supply the `-C -C` copy source from its tree; and
   a file newly added by the merge searches every real parent, first
   included (under `--first-parent`, only the first). Documented divergences from git
@@ -314,31 +314,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parent at *every* walk step, not only at the commit that creates the
   blamed file. So a block copied into a persisting file from a source that
   was *unmodified* in the introducing commit is credited to that source's
-  origin — previously `-C -C -C` was approximated as `-C -C` and missed it.
+  origin &mdash; previously `-C -C -C` was approximated as `-C -C` and missed it.
   Pinned against git 2.50.1.
 - **`mkit blame -C` copy tie-break now matches git.** When two
   equally-similar copy sources exist, blame credits the source that traces
-  to the older (ancestor) commit — git's push-blame-furthest-back bias —
+  to the older (ancestor) commit &mdash; git's push-blame-furthest-back bias &mdash;
   instead of the first candidate in path order. The ordering is topological
   (mkit commits can share a whole-second timestamp, so ancestry, not time,
   is authoritative), pinned against git 2.50.1.
 - **`mkit blame --ignore-rev` / `--ignore-revs-file`.** Skip "noise"
-  commits — mass reformats, license-header sweeps, renames — during
+  commits &mdash; mass reformats, license-header sweeps, renames &mdash; during
   attribution, like `git blame --ignore-rev`. A line that would be credited
   to an ignored commit falls through to the commit that previously changed
   it; a line the ignored commit genuinely inserted stays put (git's default,
   no marker). The fall-through is **merge-aware** (#499): at an ignored merge
   a line the first parent can't pair (it dropped that line) falls through
-  across to the next parent that does — first-parent-wins, matching `git blame
+  across to the next parent that does &mdash; first-parent-wins, matching `git blame
   --ignore-rev` at a merge. `--ignore-rev` is repeatable and accepts any revision (short
   hash, ref, `HEAD~2`); `--ignore-revs-file` reads full hex object names one
-  per line, skipping blank lines and `#` comments (including inline) — both
+  per line, skipping blank lines and `#` comments (including inline) &mdash; both
   verified against real `git`. Unknown or malformed inputs reproduce git's
   messages (`cannot find revision <rev> to ignore`, `invalid object name:
   <token>`, `could not open object name list: <path>`), though mkit returns
   its sysexits-style exit codes rather than git's blanket `128`. mkit does
   not auto-read `.git-blame-ignore-revs` or a `blame.ignoreRevsFile` config
-  key — pass the file explicitly.
+  key &mdash; pass the file explicitly.
 - **`mkit blame --reverse <start>..<end>`.** Walks history *forward*
   instead of backward, like `git blame --reverse`: blames the `<start>`
   version of the file and attributes each line to the **last** commit in
@@ -352,7 +352,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<start>` where git prints a cryptic "dig up from" message; a line that
   never survives a step is shown without git's leading `^` boundary marker
   (mkit's tab format has no `^`); and the range is followed along `<end>`'s
-  **first-parent** chain only (mkit blame is first-parent only — a `<start>`
+  **first-parent** chain only (mkit blame is first-parent only &mdash; a `<start>`
   reached solely through a merge's second parent errors rather than
   resolving; the full-history walk in #458 would lift this).
 
@@ -365,7 +365,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`rename-gate`, `crates-owners`, `reproducible-build`, `mutation-score`,
   `state-machine`, `supply-chain`, `typos`, `pr-title`) plus their configs
   (`typos.toml`, `scripts/verify-rename.sh`). Also removed the completed
-  `docs/MERKELIZATION-PLAN.md` (the work shipped — see
+  `docs/MERKELIZATION-PLAN.md` (the work shipped &mdash; see
   `docs/specs/SPEC-MERKLE-OBJECTS.md` and ADR 0001). The license grant
   (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`), `SECURITY.md`,
   `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, and the `geiger` unsafe-code
@@ -381,9 +381,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was already fully separate from this module's BLAKE3 `shard_hashes`
   envelope check, which is unchanged). `MANIFEST_VERSION` is bumped
   `0x01` → `0x02` since the wire-visible `ShardSet::commitment` value
-  changes; this is a **hard cutover, not dual-hasher support** — a
+  changes; this is a **hard cutover, not dual-hasher support** &mdash; a
   `0x01` manifest is rejected with a version-specific error ("manifest
-  version 0x01 (Sha256-era) — re-shard with a current mkit") instead of
+  version 0x01 (Sha256-era) &mdash; re-shard with a current mkit") instead of
   the generic unsupported-version message, and `0x01` is retired
   permanently. Producers and consumers on different `pack-shards`-era
   mkit versions cannot interoperate; re-shard with a current build.
@@ -391,7 +391,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale "`Sequential` parallel strategy" phrasing (left over from #653,
   which made the strategy a caller-selectable parameter) is corrected
   alongside it ([#661](https://github.com/officialunofficial/mkit/issues/661)).
-- **SPEC-WORKTREE.md + worktree parity docs (#493 Phase 4).** New
+- **SPEC-WORKTREE.md plus worktree parity docs (#493 Phase 4).** New
   normative spec covering the common-dir/per-worktree state split, the
   `mkitdir:` pointer-file format, the `worktrees/` registry, discovery
   (and its fail-closed matrix), the lock model, and cross-tree gc
@@ -399,17 +399,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a scope amendment recording the deliberate divergences (per-tree
   stash; `move`/`lock`/`repair` remain follow-ups); SKILL.md, the man
   page, and the bash/zsh/fish completions gain the `worktree` command.
-- **Cross-worktree gc + the lock split (#493 Phase 3).** `mkit gc` is
+- **Cross-worktree gc plus the lock split (#493 Phase 3).** `mkit gc` is
   worktree-aware: root collection unions HEAD, staging index,
   `ORIG_HEAD`, in-progress merge/cherry-pick/revert/rebase state,
   conflict sidecars, and the tree-local stash across the main tree AND
   every registered linked tree (including prunable-but-unpruned
-  entries — until `worktree prune` reaps a state dir, whatever it pins
+  entries &mdash; until `worktree prune` reaps a state dir, whatever it pins
   stays pinned), and fails closed if the registry or any sibling's
   state cannot be read. gc's "shared lock spanning trees" is the union
   of all per-tree worktree locks, acquired in deterministic order
   (main first, then registry ids ascending), so gc serializes against
-  worktree/index mutations in every tree — a gc run blocks (then
+  worktree/index mutations in every tree &mdash; a gc run blocks (then
   TEMPFAILs) while any sibling is mid-mutation. The Phase 2 interim
   refusal of gc-with-linked-worktrees is lifted. Tree-locality of
   `status`/`reset --hard`/`clean`/`rm`/`stash` across trees is pinned
@@ -426,17 +426,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A branch may be checked out in at most one tree: `worktree add`,
   `checkout`/`switch`, `branch -d`, and `branch -m` all refuse with
   `already checked out at '<path>'` (branch moves are single-writer
-  through the history-MMR ref path). Registry mutations serialise on a
+  through the history-MMR ref path). Registry mutations serialize on a
   new common-dir `worktrees.lock`; `add` orders its writes so a crash
   leaves at worst a prunable orphan, never a live tree pointing at
   half-built state.
-- **Linked-worktree on-disk model + discovery (#493 Phase 1).**
+- **Linked-worktree on-disk model plus discovery (#493 Phase 1).**
   `mkit_core::layout` gains the linked-worktree groundwork: a linked
   tree's `.mkit` is a pointer FILE (`mkitdir: <path>`, the analog of
   git's `gitdir:` file) naming its per-tree state dir under the main
   repository's `.mkit/worktrees/<id>/` (with `commondir` and a
   `mkitdir` back-pointer inside, git-style); `layout::discover`
-  resolves it — a `.mkit` directory or absent `.mkit` still yields the
+  resolves it &mdash; a `.mkit` directory or absent `.mkit` still yields the
   classic single-worktree layout byte-identically, while a malformed,
   oversized, or dangling pointer fails closed with a typed
   `DiscoverError`. The CLI's `commands::resolve_layout` now performs
@@ -465,18 +465,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CommitHistory::common_dir()` replaces `CommitHistory::mkit_dir()`),
   `mkit_attest::store`, and `mkit_git_bridge::map::state_dir`. In the
   classic single-worktree layout every resolved path is byte-identical
-  to before — zero behavior or on-disk change; goldens unchanged. The
+  to before &mdash; zero behavior or on-disk change; goldens unchanged. The
   CLI resolves its layout once per command through
   `commands::resolve_layout`, the future discovery seam.
 
-- **buffa 0.8.1 + connectrpc 0.8.0 everywhere.** The main workspace and
+- **buffa 0.8.1 plus connectrpc 0.8.0 everywhere.** The main workspace and
   `contrib/signers` move buffa 0.8.0 → 0.8.1 (runtime-only patch; vendored
   codegen verified byte-identical). The ConnectRPC pair
-  (`mkit-repo-client` + `apps/repo-worker`) finally leaves its 0.7 pin:
+  (`mkit-repo-client` plus `apps/repo-worker`) finally leaves its 0.7 pin:
   connectrpc 0.8 ships on buffa ^0.8.1, so both crates now match the rest
   of the repo on a single buffa version (the workspace lockfile drops the
   entire duplicate 0.7 dependency tree). Vendored ConnectRPC codegen was
-  regenerated with the 0.8 toolchain — ~4,300 lines smaller thanks to
+  regenerated with the 0.8 toolchain &mdash; ~4,300 lines smaller thanks to
   buffa 0.8's `impl_default_instance!` runtime macros, fused
   `put_*_field` writers, and shared `check_wire_type`/`map_codec` helpers
   (wire output is byte-identical). Handler traits now return
@@ -488,7 +488,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file's whole ancestor subgraph instead of only the first-parent chain:
   at a merge, each line is credited to the first parent that still contains
   it, so a line merged in from a side branch is attributed to the commit
-  that actually wrote it rather than to the merge commit — matching
+  that actually wrote it rather than to the merge commit &mdash; matching
   `git blame`'s default. **This changes output for histories with merges**;
   the new `--first-parent` flag (like `git blame --first-parent`) restores
   the previous first-parent-only attribution and composes with
@@ -507,7 +507,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-addresses all history. Content addressing is preserved (the id is
   still a deterministic function of canonical content) and stays
   tamper-evident (read recomputes the root), and the serialized wire
-  format and `schema_version = 0x01` are unchanged — the break is in
+  format and `schema_version = 0x01` are unchanged &mdash; the break is in
   object identity only. Cross-format safety is a **mandatory
   `.mkit/format` repo marker** (`bmt-v1`): a pre-merkle repository is
   rejected at open (`IncompatibleRepoFormat`) instead of silently
@@ -519,7 +519,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#414](https://github.com/officialunofficial/mkit/pull/414)).
 - **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded
-  `match_lines` function is now private — line matching is an internal,
+  `match_lines` function is now private &mdash; line matching is an internal,
   size-checked detail of `blame_file_with`. Both are pre-1.0 API breaks; no
   in-workspace consumers were affected. (release-plz's `semver_check`
   enforces the matching version bump at release time.)
@@ -534,7 +534,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (`mkit-attest`):** `Subject` gained a new required field,
   `digest_sha256_hex`, and `sha256_hex()` was added to compute it. Every
   subject now carries a `sha256` digest alongside `blake3` (SPEC-ATTESTATIONS
-  §4.2) — both digests of the identical underlying bytes — so cosign,
+  §4.2) &mdash; both digests of the identical underlying bytes &mdash; so cosign,
   `gh attestation verify`, and the SLSA verifier (all of which only read
   the in-toto/SLSA `DigestSet` `sha256` key) can read mkit attestations.
   `sha2` moves from optional (gated behind `algo-secp256k1`/`algo-p256`) to
@@ -548,7 +548,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the commit.** #637 serialized `Match`-conditioned ref writes under a
   shared per-ref lock, but `commit`'s ref advance still used
   `RefWriteCondition::Any` (an unconditional clobber) and `branch -m`'s
-  delete of the renamed-away source ref was unconditional too — neither
+  delete of the renamed-away source ref was unconditional too &mdash; neither
   side went through `Match`, so the shared lock never engaged between
   them. A rename could read a branch's tip, let a concurrent `commit`
   land on top of it via its own CAS, and then delete the ref anyway,
@@ -588,7 +588,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SPEC-EXTERNAL-SIGNER §4 specifies an in-band PIN round trip so a
   hardware signer can request a PIN mid-sign without it ever touching
   argv, but `ExternalSigner` only wrote `Hello`/`SignRequest` and
-  rejected any `PinPrompt` frame with `ExternalSignerBadResponse` —
+  rejected any `PinPrompt` frame with `ExternalSignerBadResponse` &mdash;
   the only way to supply a PIN was the reference CTAP signer's plain
   `--pin` flag, readable by any other local user via `ps` /
   `/proc/<pid>/cmdline` (the same exposure class `docs/THREAT-MODEL.md`
@@ -596,7 +596,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the child's stdin open for the whole sign conversation and
   answers a `PinPrompt` via a new `PinProvider` trait (default
   `TtyPinProvider`: an interactive terminal prompt, best-effort
-  no-echo via `stty` on Unix — never argv or an environment variable),
+  no-echo via `stty` on Unix &mdash; never argv or an environment variable),
   bounded to 8 round trips per conversation. `mkit-sign-ctap` now
   requests a PIN in-band when the authenticator needs one and prints a
   deprecation warning to stderr when `--pin` is passed
@@ -615,12 +615,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`clone`/`pull`/`fetch` now verify commit/remix/tag signatures and
   fail closed by default.** Previously the only signature check was the
-  manual, single-revision `mkit verify <rev>` — a hostile remote
+  manual, single-revision `mkit verify <rev>` &mdash; a hostile remote
   (THREAT-MODEL §3.1) could push an entirely unsigned or forged history
   and every `clone`/`pull`/`fetch` would accept it with zero indication
   anything was wrong. Every commit/remix/tag a fetch newly introduces is
   now run through `mkit_core::sign::{verify_commit,verify_remix,verify_tag}`
-  — the exact check `mkit verify` runs manually — before the
+  &mdash; the exact check `mkit verify` runs manually &mdash; before the
   remote-tracking ref is published; a structurally invalid or missing
   signature aborts with exit 65 and leaves local refs/working tree
   untouched. Only the newly-fetched delta is checked (bounded per-fetch
@@ -628,11 +628,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately excluded from the applied-pack self-heal retry. Opt out
   per invocation with `--no-verify-signatures`, or persistently via the
   **user-scoped** `pull.require_signed = false` config key (added to
-  `REPO_FORBIDDEN_KEYS` — a cloned repo's own config cannot disable the
+  `REPO_FORBIDDEN_KEYS` &mdash; a cloned repo's own config cannot disable the
   check that protects the clone against exactly that repo). A new
   message-only `mkit.rpc.v1.verify` proto (`verify.proto`, co-located
   with `signer.proto`) documents the verification contract so a future
-  ConnectRPC transport (e.g. `apps/repo-worker`) can bind the identical
+  ConnectRPC transport (for example, `apps/repo-worker`) can bind the identical
   check instead of reimplementing it
   ([#692](https://github.com/officialunofficial/mkit/issues/692)).
 
@@ -643,7 +643,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a documented-but-absent security control). They are now mapped into
   `SshOptions` and passed to the child as
   `-o StrictHostKeyChecking=… -o UserKnownHostsFile=… -i …`, matching
-  `docs/SSH-SECURITY.md` §3. Pure producer-side wiring — the transport
+  `docs/SSH-SECURITY.md` §3. Pure producer-side wiring &mdash; the transport
   already consumed `SshOptions`
   ([#389](https://github.com/officialunofficial/mkit/issues/389)).
 
@@ -654,7 +654,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hardened after multi-agent review** (16 findings, all resolved):
   worktree snapshots for `status`/`diff`/safety checks moved to an
   in-memory `EphemeralSink` (no flush cost, no garbage objects, and no
-  visible-but-unflushed object can poison content-addressed dedup —
+  visible-but-unflushed object can poison content-addressed dedup &mdash;
   `SyncPolicy::None` removed); per-file write barriers are real on
   every platform (fdatasync/FlushFileBuffers, not just Apple's
   F_BARRIERFSYNC) so batch durability no longer assumes ext4
@@ -673,7 +673,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Batched durability (`WriteBatch`)**: object writes from one command
   (`add`, `commit`, pack unpack, `stash`) are staged invisibly and made
-  durable together at a single commit point — exactly **2 full flushes
+  durable together at a single commit point &mdash; exactly **2 full flushes
   per command** (one over staged data, one terminal device flush)
   instead of 2 per object, with per-file/per-dir writeback barriers
   issued from a scoped-thread pool. Same crash invariant as before,
@@ -687,7 +687,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Index v2 stat cache**: `.mkit/index` entries now carry
   `mtime_ns`+`size` (SPEC-INDEX v2; v1 indexes read fine and upgrade on
   first write). `add`/`status`/`commit -a` prove unchanged files by
-  stat instead of re-reading and re-hashing content — O(stat), with
+  stat instead of re-reading and re-hashing content &mdash; O(stat), with
   git's racy-clean rule applied at read time. `status` with an
   unchanged 100 MiB file: 113ms → 13ms.
 - **Zero-copy ingest**: chunk and small-blob writes stream
@@ -710,7 +710,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md) pins the
   inbound mapping: a git upstream imports as a downstream fork whose
   every commit/tag is signed by a dedicated, per-state-dir-pinned
-  import key (per-key deterministic — same key + upstream ⇒ same
+  import key (per-key deterministic &mdash; same key plus upstream ⇒ same
   hashes anywhere), original authorship preserved in the author
   identity, original git bytes retained for audit, and a
   `git-import/v1` attestation minted per head. `mkit git pull`
@@ -733,13 +733,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#330](https://github.com/officialunofficial/mkit/pull/330)).
   New normative spec [`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md)
   pins a byte-deterministic mkit→git object mapping (BLAKE3/SHA-1
-  translation with mkit-only fields — signer, signature, identity,
-  annotation slots — carried in `mkit-*` commit/tag headers), so the
+  translation with mkit-only fields &mdash; signer, signature, identity,
+  annotation slots &mdash; carried in `mkit-*` commit/tag headers), so the
   original signed mkit objects are reconstructible bit-exactly from a
   mirror and their Ed25519 signatures re-verify (shallow and deep
   verification modes are specified). New `mkit-git-bridge` crate
   implements the mapping with golden vectors under
-  `rust/tests/golden/git-bridge/`, round-trip + determinism +
+  `rust/tests/golden/git-bridge/`, round-trip plus determinism plus
   differential-vs-real-git tests (`git hash-object` id agreement,
   `git fsck --strict`). The exporter pushes with per-ref
   `--force-with-lease` from rebuildable state under `.mkit/git/`,
@@ -749,7 +749,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own renegotiation rule. Closes the export-bridge foundation scope of the
   git-interop exploration.
 
-- **`mkit mcp` — a local Model Context Protocol server in the CLI.**
+- **`mkit mcp` &mdash; a local Model Context Protocol server in the CLI.**
   `mkit mcp [--repository <path>]` speaks newline-delimited JSON-RPC
   over stdio so LLM agents can drive local repositories through
   structured tool calls: the git-parity set (status, diffs, log, show,
@@ -769,14 +769,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mkit_rpc::frame_decode_options()` applies a 16-deep recursion limit
   and the 1 MiB `MAX_FRAME_BYTES` size cap at the protobuf decode
   itself (buffa `DecodeOptions`), in `read_frame` and in the encrypted
-  transport's record decodes — so the bound holds even on paths where
+  transport's record decodes &mdash; so the bound holds even on paths where
   the cipher layer, not the length prefix, does the framing.
 - **`rpc_decode` fuzz target**: SignerFrame / SshFrame wire decode
   never panics on arbitrary bytes, plus an `Arbitrary`-driven owned
   encode/decode roundtrip property (new opt-in `arbitrary` feature on
   mkit-rpc, from buffa `generate_arbitrary` codegen). Adopts
   commonware-invariants minifuzz for the `rpc_decode` target.
-- **`mkit` Agent Skill + crates/docs MCP server** — a published Agent
+- **`mkit` Agent Skill plus crates/docs MCP server** &mdash; a published Agent
   Skill (`SKILL.md`) teaching agents to drive the `mkit` CLI, plus a
   release-gated documentation MCP server indexing the source, SPEC
   docs, and CLI reference at each pinned release
@@ -814,9 +814,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A software key record whose data-encryption key was sealed by one
   protector but opened with another previously surfaced a redacted,
   unactionable message. A new structured `Error::ProtectorMismatch {
-  required, got }` reports e.g. "software key record is sealed with the
+  required, got }` reports, for example, "software key record is sealed with the
   `macos-keychain` protector but was opened with the `software`
-  protector — its encrypted data-encryption key can only be unwrapped
+  protector &mdash; its encrypted data-encryption key can only be unwrapped
   by the protector that sealed it". Protector identifiers are surfaced
   (they are not sensitive) while the existing path/label redaction is
   preserved. The message names the software-record DEK protector, not a
@@ -833,9 +833,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New `git-bridge/v1` attestation predicate** (SPEC-GIT-BRIDGE §11;
   [#330](https://github.com/officialunofficial/mkit/pull/330)):
   `mkit git export` mints one DSSE/in-toto attestation per exported
-  head, signed with the exporter's configured signer — subject is the
-  mkit commit (BLAKE3) + ref name; the predicate carries the
-  `gitCommit` SHA-1 as a locator (not a proof — SHA-1 is git's naming
+  head, signed with the exporter's configured signer &mdash; subject is the
+  mkit commit (BLAKE3) plus ref name; the predicate carries the
+  `gitCommit` SHA-1 as a locator (not a proof &mdash; SHA-1 is git's naming
   function, never a security boundary here), the mirror URL, and
   schema/spec versions. Bridge attestations are distinguishable from
   author signatures by predicate type and keyid; they assert "this
@@ -845,7 +845,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   translated history that fails reconstruction fails closed.
 - **Advisory triage**: `RUSTSEC-2025-0055` (tracing-subscriber 0.2
   ANSI-escape logging) is ignored in `deny.toml` and the audit
-  workflow — it reaches the tree only transitively via
+  workflow &mdash; it reaches the tree only transitively via
   `commonware-runtime → arkworks (ark-r1cs-std) → tracing-subscriber
   0.2`, is arkworks-internal logging not on mkit's logging path, and
   has no reachable fix. Flagged for re-justification by 2026-08-21.
@@ -857,7 +857,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Annotated and signed tags** (`mkit tag -a` / `-s` / `-m`,
   [#230](https://github.com/officialunofficial/mkit/issues/230)). Adds
   a new storable object type `tag` (`object_type = 0x07`) carrying the
-  tagged object's hash + type, the tagger identity, a message, a
+  tagged object's hash plus type, the tagger identity, a message, a
   timestamp, the signer public key, and a 64-byte signature. `-a`
   creates an unsigned annotated tag; `-s` creates a signed tag whose
   signature is Ed25519 over the canonical tag bytes under a **new,
@@ -866,55 +866,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lightweight `mkit tag <name>` is unchanged. `mkit verify <rev>` now
   verifies signed tags (resolving a tag name to its tag object), and
   `mkit cat` surfaces annotated-tag metadata. The new object type is an
-  **additive** allocation within object schema v1 — no existing object
+  **additive** allocation within object schema v1 &mdash; no existing object
   layout, signing bytes, hash, or golden vector changes. New golden
   vectors are pinned under `rust/tests/golden/tags/`. Specs:
   [`docs/specs/SPEC-OBJECTS.md`](docs/specs/SPEC-OBJECTS.md) §6a,
   [`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md) §4a.
-- **`mkit-keystore` crate** — pluggable signing-key vault subsystem
+- **`mkit-keystore` crate** &mdash; pluggable signing-key vault subsystem
   (PR [#109](https://github.com/officialunofficial/mkit/pull/109),
   hardened in
   [#135](https://github.com/officialunofficial/mkit/pull/135) and a
   long tail of review-feedback follow-ups). Ships with backends for
   software (encrypted-at-rest, the foundation backend), software-raw,
-  macOS Keychain, Windows Credential Store, Linux Secret Service,
+  Linux Secret Service, macOS Keychain, Windows Credential Store,
   systemd-creds, and YubiKey (PIV and OpenPGP applets). Public
   interface and threat model are documented in
   [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md).
-- **`mkit key …` subcommand family** — `generate`, `list`, `import`,
+- **`mkit key …` subcommand family** &mdash; `generate`, `list`, `import`,
   `export`, and `delete` against any built-in keystore backend, with
   `--backend`/`--label`/`--algorithm` selectors and a `--json`
   output mode on `list`.
-- **`<backend>:<label>` key-reference routing** — commit signing,
+- **`<backend>:<label>` key-reference routing** &mdash; commit signing,
   attestation signing, and the `mkit key …` commands resolve their
   signing key through user-scoped `key.default_ref`,
   `key.ed25519_ref`, `key.secp256k1_ref`, and `key.p256_ref`
   selectors. Repo-local config cannot override these for security
   reasons; the selector keys are accepted from
   `$XDG_CONFIG_HOME/mkit/config` and explicit flags only.
-- **`mkit-rpc` crate** — shared length-prefixed framing and wire
+- **`mkit-rpc` crate** &mdash; shared length-prefixed framing and wire
   schemas (`signer.proto`, `common.proto`) used by the external
   signer subprocess protocol and reserved for future agent
   protocols. See [`docs/specs/SPEC-RPC.md`](docs/specs/SPEC-RPC.md).
-- **`mkit status --porcelain=v1`** — machine-readable status output
+- **`mkit status --porcelain=v1`** &mdash; machine-readable status output
   matching the `git status --porcelain=v1` shape, plus the mkit-
   specific `T` (mode change) status letter as the only extension.
-- **`mkit log --format=json`** — JSONL output (one commit per line)
+- **`mkit log --format=json`** &mdash; JSONL output (one commit per line)
   with `hash`, `parents`, `tree`, `author`, `timestamp`, `title`,
   and `message`.
-- **`--format=json` on `blame`, `branch`, `remote`, `config`** —
+- **`--format=json` on `blame`, `branch`, `remote`, `config`** &mdash;
   machine-readable output across the remaining read-style commands.
-- **`mkit commit -a` / `-am <msg>`** — Git-style "stage tracked
+- **`mkit commit -a` / `-am <msg>`** &mdash; Git-style "stage tracked
   modifications and tracked deletions before committing" shortcut.
 - **Criterion-based benchmark suite** under `rust/benches/` with a
   `render-charts` binary emitting buffa-style SVG charts; powers the
   Performance section of the README.
-- **CLI port to `clap-derive`** — every subcommand is now parsed by
+- **CLI port to `clap-derive`** &mdash; every subcommand is now parsed by
   a derive-based parser routed through a sysexits-aware shim in
   `mkit-cli/src/clap_shim.rs`, replacing the prior hand-rolled
   parsers.
 - **Cooperative SIGINT/SIGTERM shutdown**
-  ([#111](https://github.com/officialunofficial/mkit/pull/111)) —
+  ([#111](https://github.com/officialunofficial/mkit/pull/111)) &mdash;
   long-running operations poll a graceful-shutdown flag set by
   `signal-hook` and exit with `tempfail` (75) at natural checkpoints.
 - **Writing style guide** at
@@ -932,7 +932,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of recursively snapshotting the worktree.
   ([#102](https://github.com/officialunofficial/mkit/issues/102))
   Pre-fix, `mkit add` and `mkit rm` wrote to the index but `mkit
-  commit` ignored it — a half-state that surprised any user reasoning
+  commit` ignored it &mdash; a half-state that surprised any user reasoning
   by analogy from git. Post-fix, `mkit add` (or `mkit add .`) is
   required before `mkit commit`; an empty index is now a hard error.
   The "snapshot the whole worktree" workflow is `mkit add . && mkit
@@ -950,7 +950,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Keystore vault follow-up hardening**
-  ([#135](https://github.com/officialunofficial/mkit/pull/135)) —
+  ([#135](https://github.com/officialunofficial/mkit/pull/135)) &mdash;
   protector AAD binding, length-prefixed encrypted-record AAD,
   authenticated software metadata, zeroizing transient secret
   buffers, software metadata authentication, no-clobber imports,
@@ -959,7 +959,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across `946975e`, `524d3fc`, and `a5b382c`.
 - **Silent failure exits** in several subcommands now return proper
   sysexits-aware codes instead of exiting 1 with no diagnostic.
-- **`mkit commit` index follow-ups** — preserve executable modes on
+- **`mkit commit` index follow-ups** &mdash; preserve executable modes on
   `-a`/`-am`, stage tracked deletions on `add .`, clear stale index
   path conflicts, and keep the index aligned with committed trees
   after PR
@@ -967,7 +967,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review.
 - **`mkit rebase` preflights its signing key** so the operation fails
   early instead of midway through a replay when no key is configured.
-- **Benchmark chart axes** are now apples-to-apples wallclock + ops/s
+- **Benchmark chart axes** are now apples-to-apples wallclock plus ops/s
   across the criterion and `git2`/git-CLI comparison rows.
 
 ## [0.1.0] - 2026-05-07
@@ -980,24 +980,24 @@ prior to publication.
 
 ### Added
 
-- **mkit-core** — content-addressed object model (BLAKE3 hashing,
+- **mkit-core** &mdash; content-addressed object model (BLAKE3 hashing,
   canonical objects, refs, packs), FastCDC chunker, delta encoding,
   Bao verified streaming, Ed25519 commit signing.
-- **mkit-attest** — DSSE + in-toto v1 attestations with multi-algorithm
+- **mkit-attest** &mdash; DSSE plus in-toto v1 attestations with multi-algorithm
   signers (Ed25519, secp256k1, P-256) and an RFC 8785 JCS encoder.
-- **mkit-cli** — the `mkit` binary, with subcommands for init, add,
+- **mkit-cli** &mdash; the `mkit` binary, with subcommands for init, add,
   commit, log, status, branch, checkout, merge, cherry-pick, rebase,
   push, pull, fetch, clone, attest, verify-attest, keygen, config.
-- **Transports** — memory (test), file (local), http (REST + rustls),
+- **Transports** &mdash; memory (test), file (local), http (REST plus rustls),
   s3 (SigV4 over rustls, R2-compatible), ssh (forced-command server
   pattern over `ssh(1)`).
-- **mkit-wasm** — wasm-bindgen surface for browsers and Cloudflare
+- **mkit-wasm** &mdash; wasm-bindgen surface for browsers and Cloudflare
   Workers, published to npm as `@makechain/mkit-wasm`.
-- **External signers** — reference implementations under `contrib/`
+- **External signers** &mdash; reference implementations under `contrib/`
   for FIDO2/WebAuthn (CTAP-HID), TPM 2.0 P-256, and a raw-key file
   signer for development.
-- **Release pipeline** — cosign keyless OIDC signing, CycloneDX SBOMs,
-  reproducible-build smoke tests, MSRV checks on Linux + macOS.
+- **Release pipeline** &mdash; cosign keyless OIDC signing, CycloneDX SBOMs,
+  reproducible-build smoke tests, MSRV checks on Linux plus macOS.
 
 ### Security
 
@@ -1008,8 +1008,8 @@ prior to publication.
 - `mkit verify-attest` defaults to `$XDG_CONFIG_HOME/mkit/trust-roots.toml`
   rather than a repo-local path; in-repo trust-roots require an
   explicit `--trust-roots` flag.
-- Key files are opened with `O_NOFOLLOW`, written via tmp + fsync +
-  rename + parent fsync, owner-checked against the running euid, and
+- Key files are opened with `O_NOFOLLOW`, written via tmp plus fsync plus
+  rename plus parent fsync, owner-checked against the running euid, and
   parent directory mode is enforced `0700`.
 - HTTP and S3 transports require an explicit user-scoped
   `trusted_remote_endpoint` before they will use ambient environment

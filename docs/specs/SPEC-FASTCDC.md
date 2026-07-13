@@ -5,7 +5,7 @@ status: stable
 audience: implementers of compatible chunkers; anyone reproducing chunked_blob hashes across producers
 ---
 
-# SPEC-FASTCDC — mkit v1 content-defined chunking
+# SPEC-FASTCDC &mdash; mkit v1 content-defined chunking
 
 Status: **Normative** for mkit v1 (content-defined chunking of large
 files).
@@ -26,7 +26,7 @@ a `chunked_blob` object (SPEC-OBJECTS §7).
 This lets edits near the end of a large file reuse most of the
 prior version's chunks, which is critical for dedup across pack
 transfers (see SPEC-PACKFILE §3.2 delta vs. SPEC-OBJECTS §7 chunked
-dedup — these are complementary layers).
+dedup &mdash; these are complementary layers).
 
 ---
 
@@ -101,7 +101,7 @@ derivation in §5 uses `log2(avg_size)`); `min_size < avg_size <
 max_size` MUST hold strictly. mkit's v1 constants satisfy "all three
 are powers of two", but the format only requires this of `avg_size`.
 
-Files of size ≤ `min_size` are NOT chunked — `cut` returns the full
+Files of size ≤ `min_size` are NOT chunked &mdash; `cut` returns the full
 input length, so the caller stores the file as a single `blob`. The
 threshold for taking the chunked path is an implementer choice; in
 mkit-core the worktree picks `CHUNK_THRESHOLD = 1 MiB`
@@ -120,11 +120,11 @@ chunking) whose hash lands in the parent tree. Every caller routes
 through it, so a given file produces the same object/hash regardless of
 the path that computes it:
 
-- `worktree::{hash_file, build_tree}` — diff, status, tree, and the
+- `worktree::{hash_file, build_tree}` &mdash; diff, status, tree, and the
   `rm`/`checkout` dirty-checks;
-- `mkit add` (`add_one` / `stage_tracked_changes`) — staging into the
+- `mkit add` (`add_one` / `stage_tracked_changes`) &mdash; staging into the
   index;
-- `worktree::build_tree_from_index` — the commit/index tree build now
+- `worktree::build_tree_from_index` &mdash; the commit/index tree build now
   accepts a `ChunkedBlob` under a regular-file (Blob/Executable) entry,
   so committing a > 1 MiB file no longer fails with a "non-blob object"
   error.
@@ -140,7 +140,7 @@ worktree round-trip is covered by
 `worktree::tests::large_file_becomes_chunked_blob`, the index-path
 acceptance by `worktree::tests::from_index_accepts_chunked_blob_for_file_entry`,
 and the full add → commit → status/diff/rm → checkout → cat round-trip
-by the `chunked_blob_roundtrip` integration suite in mkit-cli.
+by the `chunked_blob_roundtrip` unit test in `mkit-core::serialize`.
 
 ---
 
@@ -254,8 +254,7 @@ The vectors below are exercised by
    (`boundary_stability_single_byte_insert`). The shifted-chunks
    identity test is subsumed by this regression.
 8. **Iterator total covers the input**: chunk lengths sum to the
-   input length (`iterator_total_bytes_matches_input`,
-   `fastcdc_iterator_total_equals_input_length`).
+   input length (`fastcdc_iterator_total_equals_input_length`).
 9. **Different `avg_size` yields different boundaries**: a chunker
    with `(8K, 32K, 128K)` does not produce the v1 boundaries
    (`different_avg_size_yields_different_boundaries`).
@@ -267,7 +266,7 @@ The vectors below are exercised by
 
 ## 9. Future work (non-v1)
 
-- Per-file-type tuning (e.g. larger `avg_size` for media files) is
+- Per-file-type tuning (for example, larger `avg_size` for media files) is
   out of scope.
 - A sliding-window gear hash implementation variant would produce
   different boundaries; not a v1 alternative.
@@ -278,7 +277,7 @@ The vectors below are exercised by
 
 | Invariant | Enforced by |
 |---|---|
-| Chunk boundaries — and therefore `chunked_blob` hashes — are a pure function of the input bytes | frozen seed (§3), parameters (§4), and mask derivation (§5); any change requires a format-version bump (§2) |
+| Chunk boundaries &mdash; and therefore `chunked_blob` hashes &mdash; are a pure function of the input bytes | frozen seed (§3), parameters (§4), and mask derivation (§5); any change requires a format-version bump (§2) |
 | Every implementation derives the identical gear table | the `"MKITFCDC"` + splitmix64 procedure (§3); gear-table digest pin and uniqueness/non-zero checks (§8.1) |
 | `avg_size` is a power of two; `min_size < avg_size < max_size` holds strictly | normative parameter constraint (§4) |
 | Input of ≤ `min_size` bytes is a single chunk, never a `chunked_blob` | `cut` returns the full input length (§4, §5) |

@@ -5,7 +5,7 @@ status: draft-normative
 audience: implementers of light-client verifiers and mirror-attestation services
 ---
 
-# SPEC-HISTORY-PROOF — mkit commit-history MMR and inclusion proofs
+# SPEC-HISTORY-PROOF &mdash; mkit commit-history MMR and inclusion proofs
 
 Status: **Draft.** In-memory and journaled-persistence MMR are
 implemented; the wire and on-disk formats are not yet frozen (§5).
@@ -16,7 +16,7 @@ verify "commit `X` was the `N`-th commit on branch `Y` at root `R`".
 
 This document is normative for the `mkit-core::history` module and for
 any future on-disk or on-wire consumer. It does **not** mandate a wire
-`Commit` field or an attestation predicate — those belong to
+`Commit` field or an attestation predicate &mdash; those belong to
 proto-field integration and `mkit-attest` respectively (see §5).
 
 ---
@@ -29,34 +29,34 @@ the branch tip. That is `O(depth)` hash work and requires the
 verifier to fetch every commit on the chain. The signature alone
 proves authorship, not membership.
 
-For the light-client use cases enumerated in issue #157 —
+For the light-client use cases enumerated in issue #157 &mdash;
 
 - attestation envelopes that ship a single commit plus its membership
   proof, without the surrounding pack;
 - mirror servers that prove they have replicated a branch up to a tip
   without re-uploading the objects;
 - a future Cloudflare-Worker hook that verifies branch-membership
-  before accepting a deployment trigger —
+  before accepting a deployment trigger &mdash;
 
-we need an authenticated data structure whose root commits to the
+this design needs an authenticated data structure whose root commits to the
 *sequence* of commits on a branch and whose inclusion proofs are
 `O(log n)` in branch depth. A Merkle Mountain Range (MMR) is the
 canonical fit: append-only, dense leaf indices, stable positions, root
 hash compresses arbitrary history into one digest.
 
 mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.5.0`:
-- `merkle::mmr::mem::Mmr` for the in-memory mem-only flavour
+- `merkle::mmr::mem::Mmr` for the in-memory mem-only flavor
   ([`CommitHistory::open`]).
-- `merkle::mmr::full::Mmr` for the journaled persisted flavour
+- `merkle::mmr::full::Mmr` for the journaled persisted flavor
   ([`CommitHistory::open_at`]). The on-disk layout is normatively
   defined in §4 below.
 
 The wire shape of the inclusion proof is byte-for-byte the wire shape
 of that crate's `merkle::mmr::Proof` at the same version (see §2
-below). We accept that crate's ALPHA stability marker: while
+below). mkit accepts that crate's ALPHA stability marker: while
 `history-mmr` remains an opt-in, default-off feature (§5), this
 document's wire and on-disk formats are not yet frozen against upstream
-changes to that crate — see §4 and §5.
+changes to that crate &mdash; see §4 and §5.
 
 [cw-mmr]: https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/
 
@@ -71,10 +71,10 @@ and primitive to mkit's existing [`hash::Hash`](../../rust/crates/mkit-core/src/
 
 The MMR's hashing schedule is *not* the same as `hash::hash()`:
 commonware's `Hasher` trait injects each node's MMR position into the
-parent / leaf digest input (see commonware's `merkle::hasher` module).
+parent/leaf digest input (see commonware's `merkle::hasher` module).
 That domain separation is what binds a leaf digest to its position in
 the tree, and removing it would break inclusion proofs. Treat the
-MMR's internal hash schedule as opaque — consumers should only ever
+MMR's internal hash schedule as opaque &mdash; consumers should only ever
 compare 32-byte digests, never reconstruct them.
 
 ### 2.2 `InclusionProof`
@@ -100,13 +100,13 @@ commonware-storage `merkle::proof`:
    first entry of `digests` is a single accumulator digest produced
    by left-folding those peaks with `Hash(acc || peak)`. If no such
    peaks exist (the proven leaf is in the tallest mountain), this
-   entry is **absent** — the list starts directly at step 2.
+   entry is **absent** &mdash; the list starts directly at step 2.
 2. The digests of peaks entirely *after* the proven range, in peak
    iteration order (descending height).
 3. The sibling digests required to reconstruct the proven range's
-   own peak, in depth-first / forward-consumption order.
+   own peak, in depth-first/forward-consumption order.
 
-The codec used to serialise `InclusionProof` over the wire is
+The codec used to serialize `InclusionProof` over the wire is
 commonware-codec's `Write` / `Read` impls for `Proof`. In summary:
 
 ```text
@@ -115,7 +115,7 @@ InclusionProof ::= varint(leaves)
                 || digests.len() × digest32
 ```
 
-— where `varint` is the commonware-codec variable-length `u64` encoding
+&mdash; where `varint` is the commonware-codec variable-length `u64` encoding
 and `digest32` is the raw 32 bytes of a BLAKE3 digest. Mkit does NOT
 re-frame this; consumers MUST use commonware-codec at the same pinned
 version.
@@ -143,9 +143,9 @@ existing `history-mmr` feature builds.
 
 ### 2.4 Position semantics
 
-A commit's `Position(n)` is its **0-based leaf index** — the value
+A commit's `Position(n)` is its **0-based leaf index** &mdash; the value
 returned by `CommitHistory::append`. It is NOT the MMR's internal node
-position (commonware calls that `Position`; we hide the distinction at
+position (commonware calls that `Position`; mkit hides the distinction at
 the mkit boundary by exposing only leaf indices). The first append on
 an empty history returns `Position(0)`; the *n*-th append returns
 `Position(n − 1)`. Positions never shift because the MMR is
@@ -188,7 +188,7 @@ The verifier:
 
 Failure modes that MUST return `false` (not panic):
 
-- Tampered sibling / peak digest.
+- Tampered sibling/peak digest.
 - `position` does not match the leaf the proof was built for.
 - `commit_hash` is not the hash that was actually appended at that
   position.
@@ -199,7 +199,7 @@ Failure modes that MUST return `false` (not panic):
 
 The reference implementation lives at
 [`mkit-core::history::verify_inclusion`](../../rust/crates/mkit-core/src/history.rs).
-Its acceptance tests cover the 1000-commit / position-712
+Its acceptance tests cover the 1000-commit/position-712
 round-trip and the bit-flip tamper case.
 
 ---
@@ -231,10 +231,10 @@ key/value blobs (used for pinned-node bookkeeping). mkit MUST NOT
 write into these directories itself; all mutation goes through
 `commonware-storage`'s `mmr::full::Mmr` API.
 
-### 4.2 Branch-name sanitisation
+### 4.2 Branch-name sanitization
 
 commonware partition names are restricted to `[A-Za-z0-9_-]+`. mkit
-ref names may contain `.`, `/`, and `_`, so the sanitiser
+ref names may contain `.`, `/`, and `_`, so the sanitizer
 in [`mkit_core::history`] uses a hex-escape encoding:
 
 - `[A-Za-z0-9-]` → unchanged.
@@ -243,9 +243,9 @@ in [`mkit_core::history`] uses a hex-escape encoding:
 
 This encoding is injective on the [`validate_ref_name`] domain, so
 two distinct valid ref names always map to distinct partition tokens.
-Implementations MUST use the same sanitiser; cross-implementation
+Implementations MUST use the same sanitizer; cross-implementation
 consumers can rely on it to derive partition names from ref names
-without further normalisation.
+without further normalization.
 
 ### 4.3 Update protocol
 
@@ -253,12 +253,12 @@ A ref advance on a `history-mmr`-enabled mkit goes through
 [`refs::update_ref_with_history_and_backfill`] (`mkit-cli`'s
 production call site, via `write_ref_recording_history`) or its
 non-backfilling sibling [`refs::update_ref_with_history`] (used
-directly by callers that don't need the v0.1.x migration shim, e.g.
-`mkit-core`'s own tests). Both share one locked critical section —
+directly by callers that don't need the v0.1.x migration shim, for example,
+`mkit-core`'s own tests). Both share one locked critical section &mdash;
 the atomic boundary of the durable couple:
 
 1. Acquire `<mkit_dir>/refs-history-<branch>.lock` via `repo_lock::RepoLock`.
-2. [`CommitHistory::reopen`] — re-derive the caller's `CommitHistory`
+2. [`CommitHistory::reopen`] &mdash; re-derive the caller's `CommitHistory`
    handle from the current on-disk journal. The handle is typically
    opened (via `open_at`) *before* this lock is taken (the caller has
    no lock yet at that point), so another process could have appended
@@ -267,16 +267,16 @@ the atomic boundary of the durable couple:
    what is truly on disk, not a stale in-memory view.
 3. Read the branch's current (pre-this-write) ref value, if any, and
    branch on the (now-fresh) journal's state:
-   - **Empty journal, ref already has a value** — this is either a
+   - **Empty journal, ref already has a value** &mdash; this is either a
      v0.1.x-era repo migrating for the first time or a crash on the
      branch's very first tracked write (§4.5 covers both). The
      backfilling entry point invokes
      [`mkit_core::history::rebuild_from_chain`] here, still inside the
      lock; the non-backfilling entry point leaves the journal
      untouched (documented gap, see below).
-   - **Non-empty journal** — crash-recovery check: verify the last
+   - **Non-empty journal** &mdash; crash-recovery check: verify the last
      leaf already matches the ref's current value via an inclusion
-     proof. A mismatch means a prior call's step 5 never landed — heal
+     proof. A mismatch means a prior call's step 5 never landed &mdash; heal
      by appending the ref's current value directly, since it is
      precisely the one missing leaf; no parent-chain walk is needed.
 4. CAS-write `<mkit_dir>/refs/heads/<branch>`.
@@ -286,10 +286,10 @@ the atomic boundary of the durable couple:
 6. Drop the lock.
 
 Steps 3's two branches, step 4, and step 5 all run inside the SAME
-lock acquisition from step 1 — this is the fix for issue #638 / INV-18.
+lock acquisition from step 1 &mdash; this is the fix for issue #638/INV-18.
 Earlier builds ran the empty-journal check and the backfill loop in
 `mkit-cli` *before* taking the lock, which let two ref-only writers on
-the same never-before-journaled branch (e.g. two concurrent
+the same never-before-journaled branch (for example, two concurrent
 `update-ref` calls, which deliberately skip the worktree lock) both
 observe an empty journal and both independently backfill, corrupting
 the journal's leaf positions.
@@ -318,9 +318,9 @@ On reopen via `CommitHistory::open_at`:
   message attached. The repo administrator MUST intervene; mkit
   does not attempt to fabricate digests.
 - A missing `history/<branch>/` directory is treated as "first
-  open" and an empty MMR is initialised. For a branch with an existing
+  open" and an empty MMR is initialized. For a branch with an existing
   ref value but no journal yet, this is the entry point to the rebuild
-  shim — see §4.5.
+  shim &mdash; see §4.5.
 
 mkit's own contract is narrower than commonware's: **reopening a
 half-written journal MUST NOT panic, MUST NOT silently expose stale
@@ -336,7 +336,7 @@ journaled MMR. Its production call site is `mkit-cli`'s
 repo (read-only, so this part is fine to do before the lock) and
 passes a `parent_of` closure backed by `ObjectStore::read_object` into
 [`refs::update_ref_with_history_and_backfill`]. That function's step 3
-(§4.3) — running inside the `refs-history-<branch>.lock` acquisition —
+(§4.3) &mdash; running inside the `refs-history-<branch>.lock` acquisition &mdash;
 checks whether the journal is empty and the branch already has a ref
 value on disk, and if so invokes
 [`mkit_core::history::rebuild_from_chain(history, current, parent_of)`],
@@ -349,13 +349,13 @@ which:
 3. Calls [`CommitHistory::append`] for each entry in order.
 
 This same call degenerates safely to a single append when `current`
-is a root commit — which is exactly what happens when the "empty
+is a root commit &mdash; which is exactly what happens when the "empty
 journal" case is not a deep v0.1.x migration but a crash on the
 branch's very first tracked write (§4.3): `rebuild_from_chain` just
 walks the one-commit chain and appends it, no different in effect
 from the §4.3 step-3 heal that the non-empty case uses. This is why
 `update_ref_with_history_and_backfill` itself does not need to
-distinguish the two sub-cases of an empty journal — it always calls
+distinguish the two sub-cases of an empty journal &mdash; it always calls
 `rebuild_from_chain` when the journal is empty and a ref value
 exists. Only the `parent_of` walker differs by caller:
 `mkit-core::refs` has no `ObjectStore` access, so it takes the walker
@@ -365,7 +365,7 @@ as a generic closure parameter rather than constructing one itself;
 
 The shim is one-shot (subsequent `open_at` calls find a non-empty
 journal and skip it). Cost is `O(n)` BLAKE3 hashes for an `n`-commit
-branch, plus a single `journal.sync()` (fsync) for the whole batch —
+branch, plus a single `journal.sync()` (fsync) for the whole batch &mdash;
 `rebuild_from_chain` accumulates every backfilled leaf via
 [`CommitHistory::append_no_sync`] and defers the fsync to one call at
 the end, the same pattern git adopted with `core.fsyncMethod=batch`
@@ -381,10 +381,10 @@ proceeding with a silently incomplete journal.
 
 The empty-journal check and the backfill loop itself both run inside
 `update_ref_with_history_and_backfill`'s `refs-history-<branch>.lock`
-acquisition (§4.2 step 1), not before it — see §4.6. Running them
+acquisition (§4.3 step 1), not before it. Running them
 unlocked let two ref-only writers on the same never-before-journaled
-branch (e.g. two concurrent `update-ref` calls, which deliberately
-skip the worktree lock per §4.1) both observe an empty journal and
+branch (for example, two concurrent `update-ref` calls, which deliberately
+skip the worktree lock) both observe an empty journal and
 both independently backfill, corrupting the journal's leaf positions.
 
 ## 5. Feature-flag status and stability
@@ -394,9 +394,9 @@ opt-in `history-mmr` feature flag (default off), matching Git's
 `extensions.*` model of named, independently-gated capabilities rather
 than a numbered release sequence:
 
-- **In-memory MMR** — `mem`-backed MMR, `CommitHistory::{open, append,
+- **In-memory MMR** &mdash; `mem`-backed MMR, `CommitHistory::{open, append,
   root, prove}`, `verify_inclusion()` (§1–§3).
-- **Journaled persistence** — via
+- **Journaled persistence** &mdash; via
   `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`,
   with `Bagging::ForwardFold`: `CommitHistory::open_at`,
   `refs::update_ref_with_history`, `rebuild_from_chain` (§4).
@@ -404,7 +404,7 @@ than a numbered release sequence:
 This document does not mandate, and `mkit-core::history` does not
 implement, a wire `Commit.history_root` proto field, a corresponding
 signing-bytes layout, or an `mkit-attest` `commit_in_branch` predicate
-bundling `(commit, position, proof)` — those require their own updates
+bundling `(commit, position, proof)` &mdash; those require their own updates
 to SPEC-OBJECTS and SPEC-ATTESTATIONS respectively and are out of
 scope here. `history-mmr` stays opt-in as long as that wire/attestation
 surface doesn't exist; nothing outside the flag depends on today's
@@ -412,14 +412,14 @@ on-disk or wire bytes.
 
 The feature deliberately does *not*:
 
-- touch `rust/crates/mkit-rpc/proto/` — no `Commit` field yet,
+- touch `rust/crates/mkit-rpc/proto/` &mdash; no `Commit` field yet,
   no wire-breaking change yet;
-- touch `rust/crates/mkit-core/src/sign.rs` — signing bytes unchanged,
+- touch `rust/crates/mkit-core/src/sign.rs` &mdash; signing bytes unchanged,
   no golden-vector churn;
-- expose any CLI surface — the module is feature-gated behind
+- expose any CLI surface &mdash; the module is feature-gated behind
   `history-mmr` (default off) and only compiles when consumers opt in.
 
-Stability call: commonware-storage is ALPHA. We pin to an exact
+Stability call: commonware-storage is ALPHA. mkit pins to an exact
 `=2026.5.0` and accept that future minor versions may change the
 proof's `digests` layout *and* the on-disk partition shape described
 in §4. The wire format documented in §2 and the on-disk format
@@ -438,8 +438,8 @@ with no separate compatibility break to manage.
 | A leaf digest cannot be replayed at another position | commonware's hasher injects the node's MMR position into every digest (§2.1) |
 | The root binds the commit *sequence* and its length | `root = Blake3(leaf_count_be_u64 \|\| fold(peak_digests))` (§2.3) |
 | Producers and verifiers compute the same root | peak bagging pinned to `Bagging::ForwardFold` on both sides (§2.3) |
-| A tampered digest, wrong position, wrong commit, foreign root, mismatched `leaves`, or truncated/over-long `digests` never verifies | `verify_inclusion` returns `false` — never panics — per the enumerated failure modes (§3) |
-| Two distinct branches never share a history partition | the hex-escape sanitiser is injective on the `validate_ref_name` domain (§4.2) |
+| A tampered digest, wrong position, wrong commit, foreign root, mismatched `leaves`, or truncated/over-long `digests` never verifies | `verify_inclusion` returns `false` &mdash; never panics &mdash; per the enumerated failure modes (§3) |
+| Two distinct branches never share a history partition | the hex-escape sanitizer is injective on the `validate_ref_name` domain (§4.2) |
 | A ref advance, the empty-journal check, the v0.1.x backfill, and the MMR append cannot interleave with another writer | all run under `<mkit_dir>/refs-history-<branch>.lock`; the handle is re-derived from disk (`CommitHistory::reopen`) after the lock is taken, even if it was opened before (§4.3) |
 | An appended leaf is durable before the update returns | `CommitHistory::append` calls `Journaled::sync` (§4.3) |
 | A backfill fsyncs once for the whole batch, not once per commit | `rebuild_from_chain` accumulates leaves via `CommitHistory::append_no_sync` and calls `CommitHistory::sync` once at the end (§4.5) |

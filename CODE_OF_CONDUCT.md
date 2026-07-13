@@ -1,20 +1,20 @@
 # Code of Conduct
 
 The mkit project adopts the [Contributor Covenant, version 2.1][cc].
-Participation in this project — issues, pull requests, discussions,
-reviews, and any other community space tied to the repository — is
+Participation in this project &mdash; issues, pull requests, discussions,
+reviews, and any other community space tied to the repository &mdash; is
 governed by that document.
 
 The canonical text lives at:
 
 - <https://www.contributor-covenant.org/version/2/1/code_of_conduct/>
 
-We do not vendor the text here. Read it upstream so you always see the
+This project does not vendor the text here. Read it upstream so you always see the
 current normative version.
 
 ## Reporting
 
-To report behaviour you believe violates the Covenant, email the
+To report behavior you believe violates the Covenant, email the
 maintainers privately at:
 
 - <conduct@officialunofficial.com>
@@ -27,9 +27,9 @@ issue with the report contents.
 ## Enforcement
 
 Maintainers will respond to confirmed violations following the
-Covenant's [Community Impact Guidelines][cig] — correction, warning,
+Covenant's [Community Impact Guidelines][cig] &mdash; correction, warning,
 temporary ban, or permanent ban, scaled to the impact of the
-behaviour. We will not reproduce those guidelines here; read them at
+behavior. Those guidelines are not reproduced here; read them at
 the link.
 
 ---

@@ -5,13 +5,13 @@ status: stable-normative
 audience: implementers of compatible mkit object stores
 ---
 
-# SPEC-MERKLE-OBJECTS — merkelized Tree and ChunkedBlob identity
+# SPEC-MERKLE-OBJECTS &mdash; merkelized Tree and ChunkedBlob identity
 
 Status: **Normative** for mkit v1.
 Scope: the Binary Merkle Tree construction used to compute `Tree` and
 `ChunkedBlob` object ids.
 
-mkit content-addresses two object types — `Tree` and `ChunkedBlob` — by a
+mkit content-addresses two object types &mdash; `Tree` and `ChunkedBlob` &mdash; by a
 **Binary Merkle Tree (BMT) root** rather than by `BLAKE3` of their
 serialized bytes. Every other object type (`Blob`, `Commit`, `Remix`,
 `Tag`) keeps the flat scheme of [SPEC-OBJECTS](SPEC-OBJECTS.md) §10
@@ -32,12 +32,12 @@ The Merkle primitive is a **stateless Binary Merkle Tree** built with the
 canonical `BLAKE3` hasher, identical in construction to
 `commonware_storage::bmt` (the Commonware house primitive; mkit vendors
 the identical construction over the `blake3` crate so object identity has
-no `std`/`zstd` dependency and compiles to `wasm32` — a native test
+no `std`/`zstd` dependency and compiles to `wasm32` &mdash; a native test
 cross-verifies the two roots byte-for-byte).
 
 BMT is chosen over the MMR family because an object's child set is **fixed
 and known up front**, so the append-only / range-proof properties of an
-MMR add no value — the same reasoning the Commonware/makechain
+MMR add no value &mdash; the same reasoning the Commonware/makechain
 `transactions_root` commitment uses.
 
 ### 1.1 Construction
@@ -91,7 +91,7 @@ L[0]        = domain_digest(b"mkit-cblob-meta-v1", le64(total_size) ‖ le32(chu
 L[1..=N]    = chunks[0], chunks[1], ..., chunks[N-1]   (raw 32-byte chunk ids)
 ```
 
-- Chunk `i` is at BMT **position `i + 1`** — position 0 is the metadata
+- Chunk `i` is at BMT **position `i + 1`** &mdash; position 0 is the metadata
   leaf. Inclusion-proof builders apply this `+1` offset.
 - The metadata leaf binds `total_size` and `chunk_size`, neither of which
   is derivable from the chunk list; without it they could be forged (a

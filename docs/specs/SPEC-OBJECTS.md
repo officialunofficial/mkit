@@ -5,7 +5,7 @@ status: stable
 audience: implementers of compatible tools producing or consuming mkit on-disk objects
 ---
 
-# SPEC-OBJECTS — mkit v1 on-disk object format
+# SPEC-OBJECTS &mdash; mkit v1 on-disk object format
 
 Status: **Normative** for mkit v1.
 Scope: `.mkit/objects/` content and the byte layout of every object type.
@@ -37,12 +37,12 @@ valid. Readers MUST accept `0x01..=0x07`.
 
 `delta` objects are **pack-only**. They MUST NOT appear in the object store
 and MUST NOT be served by `downloadObject`-style APIs. Deltas are resolved
-during pack unpacking into a materialised base type (`blob`, `tree`,
+during pack unpacking into a materialized base type (`blob`, `tree`,
 `commit`, etc.).
 
 ---
 
-## 2. V1 prologue — every object
+## 2. V1 prologue &mdash; every object
 
 Every stored object begins with:
 
@@ -58,7 +58,7 @@ The prologue applies to **all seven object types**. Rationale:
 
 1. Without a version byte, any field addition silently shifts every
    hash.
-2. Partial prologue (commit + remix only) leaves four object types
+2. Partial prologue (commit and remix only) leaves four object types
    unversioned and makes readers branch on type before they can detect a
    future format change. All-types prologue lets the prologue itself be
    the single branching point.
@@ -117,12 +117,12 @@ Normative:
 - Forbidden exact names: `"."`, `".."`.
 - Forbidden trailing characters: `.` (`0x2E`) and SPACE (`0x20`). Windows
   silently strips these, which would alias one entry onto another of the
-  same bare name. Applies to the last byte of `name` only — interior
+  same bare name. Applies to the last byte of `name` only &mdash; interior
   dots and spaces are accepted.
 - Forbidden case-insensitively: the bare names `.mkit` and `.git`. ASCII
   case-folding only; names containing non-ASCII bytes are not folded
   (they remain constrained by every other rule above). This is a
-  Git CVE-2021-21300 family defence.
+  Git CVE-2021-21300 family defense.
 - Forbidden Windows reserved device names, case-insensitively, with or
   without an extension: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
   `LPT1`-`LPT9`. Comparison is against the stem (the bytes before the
@@ -148,7 +148,7 @@ when ordering is canonical.
 0x04    executable   regular file, executable bit set (POSIX 0o755)
 ```
 
-Mode `0x04` is new in v1 (previously absent; see red-team R-41 — silent
+Mode `0x04` is new in v1 (previously absent; see red-team R-41 &mdash; silent
 data-loss bug for any POSIX workflow). Writers MUST emit `0x04` for any
 file with the POSIX executable bit set at staging time. Non-POSIX hosts
 MAY round-trip `0x04` bytes opaquely.
@@ -159,7 +159,7 @@ Any other mode byte → `InvalidEntryMode`.
 
 mkit detects **exact** renames: because every blob is named by its BLAKE3
 content id, a deletion and an addition that share an object id are the same
-bytes at two paths — an exact move (git's `similarity index 100%`), found
+bytes at two paths &mdash; an exact move (git's `similarity index 100%`), found
 by an O(n) hash match with no heuristic and no false positives. `status`
 and `diff` render these as `R` by default (`--no-renames` opts out),
 scoped per diff as git does.
@@ -202,7 +202,7 @@ but readers MUST NOT reject non-UTF-8 message bytes (matching every
 existing implementation; load-bearing for histories imported from
 systems with legacy encodings).
 
-### 5.1 `message_hash` / `content_digest`
+### 5.1 `message_hash`/`content_digest`
 
 These remain **core fields** on `Commit` but are
 **NOT part of the commit signing bytes** (see SPEC-SIGNING §3). They are
@@ -245,7 +245,7 @@ repeat source_count:
 ```
 
 Naming: the 32-byte source identifier is called `upstream_id` in v1 (the
-byte layout is unchanged — the name transition is cosmetic).
+byte layout is unchanged &mdash; the name transition is cosmetic).
 
 ### 6.1 Source sort invariant
 
@@ -263,7 +263,7 @@ interprets it.
 ## 6a. Tag (`0x07`)
 
 An **annotated / signed tag** object (issue #230). Lightweight tags are
-*not* objects — they are a bare `refs/tags/<name>` ref pointing straight
+*not* objects &mdash; they are a bare `refs/tags/<name>` ref pointing straight
 at a commit (see SPEC-REFS). A tag object is created only by
 `mkit tag -a` (annotated) or `mkit tag -s` (signed); in both cases the
 `refs/tags/<name>` ref points at the **tag object hash**, and the tag
@@ -274,7 +274,7 @@ object's `target` field points at the tagged object.
 [32 bytes target]                         hash of the tagged object
 [u8 target_type]                          ObjectType of target (0x01..=0x05, 0x07; NOT 0x06 delta)
 [u32 LE name_len]                         1..=4096
-[name_len bytes name]                     short tag name (e.g. "v1.0.0"); no \0 / \\
+[name_len bytes name]                     short tag name (for example "v1.0.0"); no \0/\\
 [Identity tagger]                         see §9
 [u32 LE message_len]
 [message_len bytes message]               UTF-8, NOT null-terminated; may be empty
@@ -290,13 +290,13 @@ Rules:
   target type lets a verifier display the tag without fetching the
   target.
 - `name` is the **short** ref name, not a full `refs/tags/...` path.
-  Empty, over 4096 bytes, or containing `\0` / `/` / `\\` →
+  Empty, over 4096 bytes, or containing `\0`/`/`/`\\` →
   `TagNameInvalid`. The full ref-name grammar (SPEC-REFS) is enforced at
   ref-write time; the object layer enforces only this floor so the wire
   form is unambiguous.
 - An **annotated, unsigned** tag carries an all-zero `signature`
   (`0x00`×64). A verifier MUST treat an all-zero signature as
-  "unsigned" — it does not verify as a valid Ed25519 signature, so
+  "unsigned" &mdash; it does not verify as a valid Ed25519 signature, so
   `mkit verify` on an unsigned annotated tag fails the signature check.
 - A **signed** tag's `signature` is `Ed25519.sign(signer_seed,
   tag_signing_hash)` (SPEC-SIGNING §4a). `signer` is the verification
@@ -304,7 +304,7 @@ Rules:
   commit `author` vs `signer`, SPEC-SIGNING §6).
 
 The tag object is content-addressed like every other object; its hash is
-`BLAKE3(serialised tag bytes)`.
+`BLAKE3(serialized tag bytes)`.
 
 ---
 
@@ -341,7 +341,7 @@ unchanged; only the byte→id function differs. See
 ## 8. Delta (`0x06`)
 
 Pack-only. See SPEC-DELTA for the instruction format and SPEC-PACKFILE
-for framing. The on-disk layout (if ever serialised alone, which
+for framing. The on-disk layout (if ever serialized alone, which
 implementations SHOULD NOT do) is:
 
 ```
@@ -354,7 +354,7 @@ implementations SHOULD NOT do) is:
 
 ---
 
-## 9. Identity — tagged union
+## 9. Identity &mdash; tagged union
 
 ```
 [u8 kind]
@@ -367,7 +367,7 @@ Kinds:
 ```
 0x01    ed25519         len MUST be 32; payload = raw 32-byte Ed25519 public key
 0x02    did_key         len >= 1;       payload = UTF-8 `did:key:...` string, minus the scheme prefix
-                                        (i.e. the multibase-encoded key material, starting with 'z')
+                                        (that is, the multibase-encoded key material, starting with 'z')
 0x03    opaque          len >= 1;       payload = arbitrary bytes defined by adapter
 ```
 
@@ -377,9 +377,9 @@ Rules:
 - `len > 4096` → `IdentityTooLarge`.
 - Unknown `kind` → `UnknownIdentityKind`.
 - Two identities compare equal iff `kind` and `payload` bytes are
-  byte-equal. No case-folding, no canonicalisation.
+  byte-equal. No case-folding, no canonicalization.
 
-Identity serialisation is used in **both** the on-wire serialised commit
+Identity serialization is used in **both** the on-wire serialized commit
 and the signing bytes (see SPEC-SIGNING). The bytes are identical in both
 contexts. This means the identity length is variable at signing time,
 which is why the `len` field is always explicit.
@@ -404,7 +404,7 @@ Objects > 1 GiB MUST be rejected.
 `.mkit/` directory: presence of `.mkit/objects` is the repository marker.
 A conforming repository MUST also carry a `.mkit/format` file declaring
 the object-addressing format (`bmt-v1`); an implementation MUST refuse to
-open a repository whose marker is absent or unrecognised
+open a repository whose marker is absent or unrecognized
 (`IncompatibleRepoFormat`) rather than mis-read a pre-merkle store under
 the current id rule. See SPEC-INDEX for the `.mkit/index` sidecar.
 
@@ -420,10 +420,10 @@ ordering invariant:
 > entry MUST only be written after every object it references is
 > durable.
 
-Within that invariant, implementations MAY amortise durability across a
+Within that invariant, implementations MAY amortize durability across a
 multi-object command (batched mode: stage objects as temp files, issue
 one full flush, then rename all and flush the touched shard
-directories — the design of git's `core.fsyncMethod=batch`). Per-object
+directories &mdash; the design of git's `core.fsyncMethod=batch`). Per-object
 flushing remains a conforming, stricter schedule. Batched mode's
 directory flushes carry the dirent ordering on metadata-journaling
 filesystems in ordered-data mode; deployments on filesystems without
@@ -459,7 +459,7 @@ an existing type's layout.
 
 Merkle object addressing (`Tree`/`ChunkedBlob` keyed by BMT root,
 [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) likewise leaves every
-type's **bytes** unchanged — only the bytes→id function changes — so
+type's **bytes** unchanged &mdash; only the bytes→id function changes &mdash; so
 `schema_version` is NOT bumped. The break it does introduce (every
 `Tree`/`ChunkedBlob` and thus every `Commit` re-addresses) is guarded
 instead by the mandatory `.mkit/format` = `bmt-v1` repository marker
@@ -467,7 +467,7 @@ instead by the mandatory `.mkit/format` = `bmt-v1` repository marker
 no migration is provided.
 
 Future versions MUST increment `schema_version` and MUST preserve the
-`"MKT1"` magic prefix. The magic byte string is normative — readers are
+`"MKT1"` magic prefix. The magic byte string is normative &mdash; readers are
 allowed to route on `magic` before consulting `schema_version`, enabling
 multi-version readers.
 
@@ -475,12 +475,12 @@ multi-version readers.
 
 ## 13. Test vectors (implementer MUST produce)
 
-1. **Empty blob id**: `Blob` is a flat type (§10) — its id is
+1. **Empty blob id**: `Blob` is a flat type (§10) &mdash; its id is
    `BLAKE3(prologue{0x01,MKT1,0x01} ‖ u32(0))`, a 10-byte total input.
    Record the resulting hex digest.
 2. **Empty tree id**: `Tree` is a **merkelized** type (§10 /
-   SPEC-MERKLE-OBJECTS) — its id is the domain-wrapped Merkle root over
-   its (empty) entry set, **not** `BLAKE3` of the serialised prologue
+   SPEC-MERKLE-OBJECTS) &mdash; its id is the domain-wrapped Merkle root over
+   its (empty) entry set, **not** `BLAKE3` of the serialized prologue
    bytes. The empty tree's id is pinned as a real, common object:
 
    ```
@@ -488,17 +488,17 @@ multi-version readers.
    ```
 
    (`mkit-core::merkle::TREE_EMPTY_ID`; the empty BMT root is
-   `H(leaf_count ‖ H(""))`, not `H(0 ‖ 0)` — see SPEC-MERKLE-OBJECTS §4.)
+   `H(leaf_count ‖ H(""))`, not `H(0 ‖ 0)` &mdash; see SPEC-MERKLE-OBJECTS §4.)
 3. **Canonical single-file tree**: one entry `{name="README.md",
-   mode=0x01, object_hash=<id of §13.1>}`. Record the serialised bytes,
+   mode=0x01, object_hash=<id of §13.1>}`. Record the serialized bytes,
    and separately record the object's id computed per the merkelized
-   rule (§10 / SPEC-MERKLE-OBJECTS) — the two are different values; do
-   not conflate "the serialised bytes' flat BLAKE3" with "the object id"
+   rule (§10 / SPEC-MERKLE-OBJECTS) &mdash; the two are different values; do
+   not conflate "the serialized bytes' flat BLAKE3" with "the object id"
    for this type.
 4. **Identity round-trip**: encode `Identity{kind=0x01, len=32,
    payload=[0xAA; 32]}` → must be exactly 35 bytes.
 5. **Root commit with zero message_hash/content_digest and Ed25519
-   identity**: serialise and record signing bytes hex +
+   identity**: serialize and record signing bytes hex +
    cross-domain-verification-negative hex.
 6. **Remix with two sources (identical upstream_id, distinct
    commit_hash)**: verify sort orders by secondary key.
@@ -507,13 +507,13 @@ multi-version readers.
    **merkelized** (§10 / SPEC-MERKLE-OBJECTS): its id is the
    domain-wrapped Merkle root over its chunk leaves plus the metadata
    leaf, not a flat `BLAKE3` of these 118 bytes. Record both the
-   serialised bytes and the merkelized id separately.
+   serialized bytes and the merkelized id separately.
 8. **Annotated tag** (`target_type=0x03`, ed25519 tagger, non-empty
-   message, all-zero signature): `Tag` is a flat type — record
-   serialised bytes + `BLAKE3` of those bytes as the id.
+   message, all-zero signature): `Tag` is a flat type &mdash; record
+   serialized bytes + `BLAKE3` of those bytes as the id.
 9. **Signed tag** (same shape, signed with seed `[0x07;32]` over the
-   `mkit.tag\0` domain — a permanent domain separator per
-   SPEC-CONVENTIONS §4): record serialised bytes, the canonical tag
+   `mkit.tag\0` domain &mdash; a permanent domain separator per
+   SPEC-CONVENTIONS §4): record serialized bytes, the canonical tag
    signing bytes, the signing hash, and the 64-byte Ed25519 signature.
 
 Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
@@ -530,7 +530,7 @@ mechanism that enforces or detects each:
 
 | Invariant | Enforced by |
 |---|---|
-| Every stored object is one of the seven known types under `"MKT1"` / `schema_version 0x01` | prologue rejection: `InvalidObjectType` / `InvalidMagic` / `UnsupportedObjectVersion` (§2) |
+| Every stored object is one of the seven known types under `"MKT1"`/`schema_version 0x01` | prologue rejection: `InvalidObjectType`/`InvalidMagic`/`UnsupportedObjectVersion` (§2) |
 | An object's bytes always match its id | read-time recomputation under the type-dependent id rule → `HashMismatch`; for merkelized types this also proves the child set present and correctly ordered (§10) |
 | No stored object exceeds 1 GiB | storage-layer rejection (§3, §10) |
 | An object encodes exactly its declared layout, nothing more | trailing-byte rule → `TrailingData` (§11) |
@@ -538,12 +538,12 @@ mechanism that enforces or detects each:
 | Tree entry names cannot alias, escape, or shadow repo metadata | name grammar → `InvalidEntryName` (§4.1); mode whitelist → `InvalidEntryMode` (§4.2) |
 | Remix sources are canonical and duplicate-free | `(upstream_id, commit_hash)` sort → `InvalidSourceOrder` (§6.1) |
 | Collection counts are bounded | `TooManyEntries` ≤ 1 000 000 (§4); `TooManyParents` ≤ 1 000 (§5.2); `source_count` ≤ 10 000 (§6); `TooManyChunks` ≤ 1 000 000 (§7) |
-| Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity` / `IdentityTooLarge` / `UnknownIdentityKind` (§9) |
+| Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity`/`IdentityTooLarge`/`UnknownIdentityKind` (§9) |
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |
 | Reassembled `ChunkedBlob` content is exactly `total_size` bytes | reassembly length check (§7) |
 | A merkle-addressing reader never mis-reads a pre-merkle store | mandatory `.mkit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
-| A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file + rename write and the ordering invariant (§10.1) |
+| A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file and rename write and the ordering invariant (§10.1) |
 
 These are format-level guarantees. Signature guarantees are specified in
 SPEC-SIGNING; per-object tamper evidence for merkelized types in

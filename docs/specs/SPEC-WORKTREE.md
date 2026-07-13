@@ -5,7 +5,7 @@ status: draft-normative
 audience: implementers of repository layout, discovery, and gc
 ---
 
-# SPEC-WORKTREE — linked working trees
+# SPEC-WORKTREE &mdash; linked working trees
 
 Status: **Normative** for the state/locking/discovery model specified
 here; **Draft** because §5's out-of-scope surface (`worktree
@@ -73,7 +73,7 @@ mkitdir: <path>\n
   (`MAX_POINTER_FILE_BYTES`).
 - MUST be a **regular file**. Readers MUST reject a symlinked pointer
   (likewise `commondir` and the back-pointer): the size cap is checked
-  against the file itself, and following a hostile link (e.g.
+  against the file itself, and following a hostile link (for example
   `.mkit -> /dev/zero` in an untarred tree) would turn discovery into
   an unbounded read.
 - Writers MUST produce the canonical form (prefix `mkitdir: `, one
@@ -81,12 +81,12 @@ mkitdir: <path>\n
 
 ### 2.2 State-dir metadata files
 
-- `commondir` — path from the state dir back to the common dir;
+- `commondir` &mdash; path from the state dir back to the common dir;
   absolute or relative to the state dir. `worktree add` writes
   `../..\n`. When ABSENT, readers MUST default to `../..` (the layout
   `worktree add` produces). Same single-line/size rules as the pointer
   file.
-- `mkitdir` — the absolute path of the linked tree's pointer file (the
+- `mkitdir` &mdash; the absolute path of the linked tree's pointer file (the
   back-pointer `worktree prune` verifies). Same single-line/size rules.
 
 ### 2.3 Worktree ids
@@ -149,7 +149,7 @@ This document originates the `worktree.lock`/`worktrees.lock` primitives
 and their per-command holder details below; the total lock order across
 *all* mkit locks (including `refs-history-<branch>.lock` and the
 file-transport's `refs/.lock`), and the enumeration of every writer, is
-owned by SPEC-CONCURRENCY — see that document for the authoritative
+owned by SPEC-CONCURRENCY &mdash; see that document for the authoritative
 order. This section states only the two locks this document defines and how the
 commands specified here use them.
 
@@ -160,10 +160,10 @@ commands specified here use them.
 
 Per-command holders:
 
-- gc takes the registry lock first (freezing the worktree set — a
+- gc takes the registry lock first (freezing the worktree set &mdash; a
   concurrent `worktree add` cannot register a tree between root
   collection and the sweep), then every tree's `worktree.lock` in
-  deterministic order — main tree first, then registry ids ascending —
+  deterministic order &mdash; main tree first, then registry ids ascending &mdash;
   and holds them all through the sweep.
 - `checkout`/`switch` hold the registry lock across the
   branch-checked-out-elsewhere guard and the HEAD write, making
@@ -180,7 +180,7 @@ Per-command holders:
 
 Shared sources are read once: the strict refs walk, attestations, and
 the recovery log. Per-tree sources are unioned over the main tree and
-**every** registry entry whose state dir exists — including prunable
+**every** registry entry whose state dir exists &mdash; including prunable
 entries (until `worktree prune` reaps a state dir, whatever it pins
 stays pinned): HEAD, staging index, `ORIG_HEAD`, in-progress
 merge/cherry-pick/revert/rebase state, conflict sidecars, and the
@@ -194,7 +194,7 @@ root source (#409); gc may delete it freely.
 ### 4.5 `worktree add` write ordering (crash safety)
 
 1. state dir fully populated (`commondir`, `mkitdir` back-pointer,
-   `HEAD`) — before any pointer to it exists;
+   `HEAD`) &mdash; before any pointer to it exists;
 2. branch ref creation (new-branch form), through the history-recording
    ref path;
 3. the tree: pointer file, then materialization via the shared
@@ -206,7 +206,7 @@ tree before the state dir for the same reason.
 
 ## 5. Out of scope (v1)
 
-`worktree move` / `lock` / `repair` (follow-ups), submodule interplay
+`worktree move`/`lock`/`repair` (follow-ups), submodule interplay
 (submodules are a non-goal), and sharing a repository between mkit
 versions with and without worktree support while linked trees exist.
 

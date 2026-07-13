@@ -5,16 +5,16 @@ status: draft
 audience: implementers of verifiable server-side sparse-checkout for mkit transports (HTTP/S3)
 ---
 
-# SPEC-SPARSE-CHECKOUT — verifiable server-side sparse delivery
+# SPEC-SPARSE-CHECKOUT &mdash; verifiable server-side sparse delivery
 
 Status: **Draft.** Normative for the `mkit-core::sparse` module's
 in-memory byte layouts, the `application/x-mkit-sparse` wire format,
 the per-tree on-disk bitmap cache layout, and the HTTP
-`/<project>/trees/<hex>/sparse` + S3 `sparse/<tree>/<filter>` endpoint
+`/<project>/trees/<hex>/sparse` and S3 `sparse/<tree>/<filter>` endpoint
 shapes. Draft because §11 leaves one property unguaranteed and the SSH
 transport does not implement this protocol at all (§10).
 
-Scope: the `SparseManifest` + `SparseProof` + `SparseResponse` types
+Scope: the `SparseManifest`, `SparseProof`, and `SparseResponse` types
 produced by `mkit-core::sparse::build_sparse`, the verifier algorithm in
 `mkit-core::sparse::verify_sparse`, the encode/decode pair for the
 network envelope, the on-disk cache layout under
@@ -27,7 +27,7 @@ Resolves issue #158.
 
 ## 1. Motivation
 
-`mkit sparse-checkout` today filters which paths a client materialises
+`mkit sparse-checkout` today filters which paths a client materializes
 from a tree **on the client side**. The server delivers the full tree
 object; the client picks the paths it cares about. That works fine for
 the file transport (the server is the local filesystem; there's no
@@ -49,7 +49,7 @@ against the manifest and rejects any mismatch.
 
 The authenticated bitmap is
 [`commonware-storage::AuthenticatedBitMap`](https://docs.rs/commonware-storage)
-v`2026.5.0` — an ALPHA-tier std-only crate that provides a Merkleized
+v`2026.5.0` &mdash; an ALPHA-tier std-only crate that provides a Merkleized
 bitmap with per-bit inclusion proofs. mkit pins the version and
 re-exports its `Proof` type rather than forking the wire format.
 
@@ -66,14 +66,14 @@ typically as a header before the streamed entries.
 offset  size  field           value
 0       32    tree_hash       BLAKE3 of source Tree (see §2.4)
 32      32    bitmap_root     SHA-256 root of the AuthenticatedBitMap
-64      32    filter_hash     BLAKE3 of the canonicalised filter (see §2.3)
+64      32    filter_hash     BLAKE3 of the canonicalized filter (see §2.3)
 96      8     leaf_count      u64 LE — total leaves in the source tree
 ```
 
 All hash fields are 32 bytes raw. Integers are little-endian. Hash
 algorithms differ deliberately: BLAKE3 for mkit-side commitments
 (matches the rest of the project), SHA-256 for the bitmap root (that's
-what `commonware-storage` produces and we don't re-hash to avoid
+what `commonware-storage` produces, and mkit does not re-hash it to avoid
 fork-divergence with upstream).
 
 `leaf_count` MUST be ≤ `MAX_LEAVES` = 1,000,000. Mirrors SPEC-OBJECTS
@@ -96,13 +96,13 @@ mmr_proof     variable                commonware-storage::merkle::Proof
 The bitmap is laid out **little-endian per byte**: bit `i` lives at
 `bitmap_bytes[i / 8] >> (i % 8) & 1`. This matches the upstream
 `commonware-utils::bitmap::BitMap` byte layout. The verifier MUST
-treat the bitmap as opaque bytes — it does *not* decode bits before
+treat the bitmap as opaque bytes &mdash; it does *not* decode bits before
 checking the root.
 
 `mmr_proof` is the inclusion proof for **bit 0** of the bitmap. For
 trees with `leaf_count ≤ 256` (one chunk) this is the partial-chunk
 reconstruction proof (single digest); for larger trees it's a
-multi-digest MMR-style proof. The verifier does not use this proof —
+multi-digest MMR-style proof. The verifier does not use this proof &mdash;
 the byte-level reconstruction in §3 is sufficient because the verifier
 has the full bitmap. The field exists so a future streamed-transport
 variant could switch to per-bit proofs without a wire-format change.
@@ -142,13 +142,13 @@ tree_hash = BLAKE3(serialize(Object::Tree(t)))
 
 where `serialize` is the workspace-canonical
 `mkit_core::serialize::serialize` recipe (v1 prologue + length-prefixed
-entries — see SPEC-OBJECTS §4). This is the same hash the rest of the
+entries &mdash; see SPEC-OBJECTS §4). This is the same hash the rest of the
 codebase uses to address a tree object: commits' `tree_hash`, remix
 roots, and the object store all key trees by this value.
 
 Verifiers MAY cross-check the manifest's `tree_hash` against any
-independently-known commitment to the source tree — a parent commit's
-`tree_hash`, a merge-base tree, the local object store — and reject on
+independently-known commitment to the source tree &mdash; a parent commit's
+`tree_hash`, a merge-base tree, the local object store &mdash; and reject on
 mismatch.
 
 ---
@@ -163,7 +163,7 @@ returns true iff **all** of:
    proportional to either bound.
 2. **Filter binding.** `manifest.filter_hash == hash_filter(filter)`.
 3. **Bitmap shape.** `proof.bitmap_bytes.len() ==
-   ceil(manifest.leaf_count / 8)`. Reject any trailing bytes — they
+   ceil(manifest.leaf_count / 8)`. Reject any trailing bytes &mdash; they
    would allow an attacker to encode bits the manifest never committed
    to.
 4. **Set-bit count.** The number of `1` bits in `proof.bitmap_bytes`
@@ -178,7 +178,7 @@ returns true iff **all** of:
    against `manifest.bitmap_root` byte-for-byte.
 
 The verifier cannot independently verify that `delivered_entries[i].name`
-is the canonical name at leaf-index `i` of the source tree — it doesn't
+is the canonical name at leaf-index `i` of the source tree &mdash; it doesn't
 have the source tree (that's the whole point of sparse delivery). A
 future transport extension could cross-check the leaf-index → name
 mapping once it has assembled enough of the tree structure to know
@@ -264,7 +264,7 @@ Body:           {"filter": ["<utf8 path>", "<utf8 path>", ...]}
 - `<tree-hex>` is the 64-character lowercase hex of
   `BLAKE3(serialize(Object::Tree(t)))`.
 - `<filter-hex>` is the 64-character lowercase hex of
-  `hash_filter(filter)` — see §2.3. The server MUST recanonicalise the
+  `hash_filter(filter)` &mdash; see §2.3. The server MUST recanonicalize the
   body filter and refuse with **HTTP 409** if it disagrees with the
   query, which surfaces client-side as `TransportError::RefConflict`.
 - Successful response status is `200 OK` with body
@@ -325,7 +325,7 @@ recomputing the bitmap root from `bitmap_bytes` and comparing to
 
 A cache hit for the same `(tree_hash, filter_hash)` skips the
 expensive bitmap-root reconstruction inside the upstream
-`MerkleizedBitMap` runtime — the slowest part of `verify_sparse` on
+`MerkleizedBitMap` runtime &mdash; the slowest part of `verify_sparse` on
 a large tree.
 
 Encoder + decoder live in
@@ -333,13 +333,13 @@ Encoder + decoder live in
 CLI helper that owns the file I/O lives in
 `mkit_cli::sparse_cache::{store, load, cache_path}`, fronted by
 `mkit_cli::sparse_cache::load_or_build`, the cache-aware entry point
-`mkit checkout --sparse` / `mkit clone --sparse` call instead of
+`mkit checkout --sparse`/`mkit clone --sparse` call instead of
 `build_sparse` + `verify_sparse` directly (§9).
 
 A stale cache (cache hit for the same tree but a different filter) is
 NOT silently returned: `mkit_cli::sparse_cache::load` returns
 `CacheError::FilterMismatch`. `load_or_build` treats that, a
-wire-decode failure (corrupt entry), and any I/O error identically —
+wire-decode failure (corrupt entry), and any I/O error identically &mdash;
 all three are a cache miss: it falls through to a fresh
 `build_sparse` + `verify_sparse`, which rewrites the cache entry, and
 surfaces no error to the caller for the cache read itself (the cache
@@ -347,7 +347,7 @@ is best-effort; only a fresh-build/verify failure is an error).
 
 ## 9. CLI surface
 
-`mkit checkout --sparse <pattern>...` — switch HEAD with a verifiable
+`mkit checkout --sparse <pattern>...` &mdash; switch HEAD with a verifiable
 sparse subset. The patterns are interpreted exactly like the existing
 `mkit sparse-checkout` config patterns (leading `/` stripped, trailing
 `/` directory-only, `!` negation). The CLI:
@@ -356,7 +356,7 @@ sparse subset. The patterns are interpreted exactly like the existing
   2. Calls `sparse_cache::load_or_build(repo_root, tree, filter)`
      (§8), which first tries the on-disk cache for
      `(tree_hash(tree), hash_filter(filter))`:
-     - **Hit:** the `build_sparse` + `verify_sparse` Merkle-bitmap
+     - **Hit:** the `build_sparse` and `verify_sparse` Merkle-bitmap
        reconstruction is skipped entirely.
      - **Miss** (including a stale filter or a corrupt entry): runs
        `build_sparse(tree, filter)` to construct the manifest, runs
@@ -364,35 +364,34 @@ sparse subset. The patterns are interpreted exactly like the existing
        (self-consistency check at the seam), then persists the
        bitmap to `.mkit/sparse/<tree-hex>.bitmap`, overwriting
        whatever was cached for this tree.
-  3. Materialises only the matching files via the existing
-     restore-side sparse-pattern path — unaffected by hit vs. miss,
-     since materialisation walks the tree by pattern directly rather
+  3. Materializes only the matching files via the existing
+     restore-side sparse-pattern path &mdash; unaffected by hit vs. miss,
+     since materialization walks the tree by pattern directly rather
      than through the manifest/proof.
 
-`mkit clone --sparse <pattern>...` — clone, persist the patterns to
+`mkit clone --sparse <pattern>...` &mdash; clone, persist the patterns to
 `.mkit/sparse-checkout`, then run the same cache-aware
-`load_or_build + materialise` pipeline against the freshly-cloned
+`load_or_build + materialize` pipeline against the freshly-cloned
 HEAD.
 
 The CLI patterns and the existing `.mkit/sparse-checkout` config file
 are kept in sync by `clone --sparse`. `checkout --sparse` does NOT
-persist the patterns — by design — so a one-off sparse view doesn't
+persist the patterns &mdash; by design &mdash; so a one-off sparse view doesn't
 sticky-write the user's persistent sparse-checkout state. Use `mkit
 sparse-checkout set <pattern>...` to persist.
 
 ## 10. Implementation
 
-`mkit-core::sparse` provides the in-memory `build_sparse` /
+`mkit-core::sparse` provides the in-memory `build_sparse`/
 `verify_sparse` API and the manifest/proof byte layouts (§2), feature-gated
 as `sparse-checkout`, default off. The HTTP transport (§6) and S3
 transport (§7) both implement the §5 wire envelope via
 `HttpTransport::fetch_sparse_tree` and `S3Transport::fetch_sparse_tree`,
-backed by the server-side reference helpers
-`mkit_cli::commands::serve::build_sparse_response_from_tree` and
-`build_sparse_response_from_store` — the HTTP/S3 reference servers
+backed by the server-side reference helper
+`mkit_cli::commands::serve::build_sparse_response_from_tree` &mdash; the HTTP/S3 reference servers
 themselves live outside the workspace (the Cloudflare Worker is in
-`apps/web/`); §6 + §7 document exactly what they need to do. The
-on-disk bitmap cache (§8) and `mkit checkout --sparse` /
+`apps/web/`); §6 and §7 document exactly what they need to do. The
+on-disk bitmap cache (§8) and `mkit checkout --sparse`/
 `mkit clone --sparse` (§9) are implemented.
 
 The SSH transport does not carry sparse delivery. Its protobuf-framed
@@ -406,7 +405,7 @@ Anti-goals (called out in #158 and still preserved):
   transport and for clients that don't want to participate in the
   authenticated-bitmap protocol.
 * This document does NOT define an HTTP/S3 server reference
-  implementation — only the contract such a server MUST honour. The
+  implementation &mdash; only the contract such a server MUST honor. The
   Cloudflare Worker in `apps/web/` is the reference deployment.
 
 ## 11. Invariants
@@ -418,15 +417,15 @@ Anti-goals (called out in #158 and still preserved):
 | entries added or dropped vs. the commitment | set-bit count must equal `delivered_entries.len()` (§3 step 4) |
 | extra bits smuggled past the committed range | bitmap length must be exactly `ceil(leaf_count / 8)`; trailing envelope bytes refused (§3 step 3, §5) |
 | bitmap bytes forged | reconstructed root compared byte-for-byte against `manifest.bitmap_root` (§3 step 6) |
-| wrong source tree served | `tree_hash` is the canonical SPEC-OBJECTS hash, cross-checkable against commits / the object store (§2.4) |
-| query/body filter disagreement (HTTP) | server recanonicalises and refuses with 409 (§6) |
+| wrong source tree served | `tree_hash` is the canonical SPEC-OBJECTS hash, cross-checkable against commits/the object store (§2.4) |
+| query/body filter disagreement (HTTP) | server recanonicalizes and refuses with 409 (§6) |
 | cached bitmap reused for a different filter | `load` returns `CacheError::FilterMismatch`; caller treats it as a miss (§8) |
-| allocation-exhaustion input | `MAX_LEAVES` / `MAX_FILTER_PATHS` checked before any proportional allocation (§3 step 1, §4); envelope capped at 16 MiB before parsing (§5) |
+| allocation-exhaustion input | `MAX_LEAVES`/`MAX_FILTER_PATHS` checked before any proportional allocation (§3 step 1, §4); envelope capped at 16 MiB before parsing (§5) |
 
 Two properties hold by contract rather than by a check: the transports
 are trust-thin, so callers MUST run `verify_sparse` before trusting any
 delivered entry (§6, §7), and the verifier MUST NOT panic on any caller
-input — all failures return `false` (§3). One property is deliberately
+input &mdash; all failures return `false` (§3). One property is deliberately
 NOT guaranteed: the verifier cannot confirm that a delivered entry's
-name is the canonical name at its leaf index — a future transport
+name is the canonical name at its leaf index &mdash; a future transport
 extension could add that cross-check (§3).

@@ -5,7 +5,7 @@ status: draft
 audience: implementers of mkit encrypted-stream clients and servers
 ---
 
-# SPEC-TRANSPORT-ENC — mkit encrypted-stream transport
+# SPEC-TRANSPORT-ENC &mdash; mkit encrypted-stream transport
 
 `mkit-transport-enc` is the encrypted-stream sibling of
 `mkit-transport-ssh`. It implements the same seven-verb
@@ -21,9 +21,9 @@ transport for environments where shelling out to OpenSSH is awkward
 source of truth for verb-level framing across SSH and encrypted paths.
 
 The transport has two forms: a deterministic in-process scaffold
-(`EncSession` / `from_session`) exercised by the in-tree round-trip
-test suite, and the real TCP transport used in production — URL
-parsing, `connect_tcp` / `serve_tcp`, the `mkit-cli/enc-transport`
+(`EncSession`/`from_session`) exercised by the in-tree round-trip
+test suite, and the real TCP transport used in production &mdash; URL
+parsing, `connect_tcp`/`serve_tcp`, the `mkit-cli/enc-transport`
 feature gate, and the `mkit serve --listen-enc <addr>` listener. §6
 describes the TCP transport's mechanics and its current limitations.
 
@@ -44,7 +44,7 @@ query-parameter `pubkey=<…>` in one of two equivalent encodings:
   MUST be zero; otherwise the parser rejects the URL to prevent
   two distinct strings from decoding to the same payload.
 
-Trust is established by out-of-band knowledge of this key — there is
+Trust is established by out-of-band knowledge of this key &mdash; there is
 no fall-back to a TOFU-style first-use cache, and no CA chain. If the
 server's actual key during handshake differs from the URL-advertised
 key, the dialer aborts with `EncInitError::PeerRejected` (mapped from
@@ -95,7 +95,7 @@ static keypair. mkit chose ed25519 (over BLS) for the in-process scaffold becaus
 
 A later revision may add BLS as an optional alternative (the
 `commonware_stream::encrypted` API is generic over `Signer`), but the
-default — and the only form covered by the in-process scaffold's CLI — is ed25519.
+default &mdash; and the only form covered by the in-process scaffold's CLI &mdash; is ed25519.
 
 ### 2.3 Properties
 
@@ -105,18 +105,18 @@ documented guarantees):
 - **Mutual authentication** via static-key signatures over the
   handshake transcript.
 - **Forward secrecy** via ephemeral X25519.
-- **Per-record nonce derivation** — ChaCha20-Poly1305 nonces are a
+- **Per-record nonce derivation** &mdash; ChaCha20-Poly1305 nonces are a
   monotonic counter, never transmitted on the wire.
-- **Session uniqueness** — `SynAck` is transcript-bound to `Syn`,
+- **Session uniqueness** &mdash; `SynAck` is transcript-bound to `Syn`,
   preventing replay across sessions.
-- **Handshake timeout** — see §2.1.
+- **Handshake timeout** &mdash; see §2.1.
 
 Not provided (also inherited):
 
-- **Anonymity** — peer identities are exchanged in cleartext during
+- **Anonymity** &mdash; peer identities are exchanged in cleartext during
   the handshake. mkit clients embed `mkit/<version>` in the
-  application-level Hello frame anyway, so we lose nothing.
-- **Padding** — message lengths leak. Pack-upload chunks are 800 KiB
+  application-level Hello frame anyway, so nothing is lost.
+- **Padding** &mdash; message lengths leak. Pack-upload chunks are 800 KiB
   each, so the leak ceiling is "this verb is or isn't a pack body
   chunk", which the SSH transport also reveals.
 
@@ -130,7 +130,7 @@ in [`ssh.proto`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto). Ve
 semantics, error mapping, ref-CAS encoding, and pack-streaming chunk
 boundaries are byte-for-byte identical to SPEC-TRANSPORT §4.
 
-### 3.1 Framing — encrypted records, not length-prefixed bytes
+### 3.1 Framing &mdash; encrypted records, not length-prefixed bytes
 
 The one deliberate departure from the SSH transport's wire is the
 inner framing. `mkit-transport-ssh` wraps each `SshFrame` in a 4-byte
@@ -141,7 +141,7 @@ because SSH's stdin/stdout pipe is an unframed byte stream.
 `commonware-stream::encrypted` already frames each ciphertext record
 (one varint length prefix per `Sender::send` call), so the inner
 SshFrame rides as a **single protobuf payload per encrypted record**
-— no second length prefix. One `SshFrame` send produces exactly one
+&mdash; no second length prefix. One `SshFrame` send produces exactly one
 `Sender::send`, and one `Receiver::recv` returns exactly one
 `SshFrame`'s worth of bytes.
 
@@ -159,7 +159,7 @@ Concretely:
 └──────────────────────────────────────────────┘
 ```
 
-The 1 MiB ceiling on `MAX_FRAME_BYTES` is enforced twice — once by
+The 1 MiB ceiling on `MAX_FRAME_BYTES` is enforced twice &mdash; once by
 `commonware-stream` via `max_message_size` (see §2.1), once by every
 `SshFrame` consumer that already exists. Either layer will reject a
 non-conforming peer.
@@ -200,12 +200,12 @@ depending on wall-clock time or a multi-threaded executor.
 
 | Test | What it pins |
 |---|---|
-| `hello_and_list_refs_roundtrip_over_ciphertext` | End-to-end: encrypted handshake → app Hello → ListRefs round-trip → assert two refs decoded. Also captures bytes leaving the dialer's `Sink` and asserts the literal `"refs/heads/"` plaintext does NOT appear in the capture — the bytes on wire are ChaCha20-Poly1305 ciphertext. |
+| `hello_and_list_refs_roundtrip_over_ciphertext` | End-to-end: encrypted handshake → app Hello → ListRefs round-trip → assert two refs decoded. Also captures bytes leaving the dialer's `Sink` and asserts the literal `"refs/heads/"` plaintext does NOT appear in the capture &mdash; the bytes on wire are ChaCha20-Poly1305 ciphertext. |
 | `handshake_rejection_surfaces_peer_rejected` | Server's bouncer unconditionally returns `false`; client's `dial` MUST resolve to an error and the server-side outcome MUST be `EncryptedError::PeerRejected`. |
 | `peer_rejected_error_maps_to_init_error` | Pure unit test: `EncryptedError::PeerRejected(_) → EncInitError::PeerRejected`. Catches regressions in the `From` impl even if a future commonware release moves which side surfaces the rejection. |
 | `url::parse_enc_url::*` (~25 cases) | URL parser: pins accepted forms (`mkit+enc://[user@]host[:port][/path]?pubkey=<hex\|b64url>`), both pubkey encodings, and rejection of bad inputs (missing prefix / pubkey, port overflow, CRLF / NUL injection, `..` path segments, b64 trailing-bit ambiguity, duplicate / unknown query params). |
 | `tcp::executor_handles_repeated_block_on` | `TokioExecutor::block_on` is safe to call repeatedly: a task spawned during the first `block_on` is still alive when a later `block_on` awaits it, so a refactor that drops and rebuilds the runtime between calls fails the test. |
-| `tcp_e2e::list_refs_round_trip_over_real_tcp` (gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent — bytes on wire are ChaCha20-Poly1305 ciphertext. |
+| `tcp_e2e::list_refs_round_trip_over_real_tcp` (gated on `--features tcp`) | End-to-end TCP: real `TcpListener` on a free port, real `connect_tcp` dialer via an in-test byte-sniffing proxy. Asserts (a) `Transport::list_refs` round-trip succeeds and (b) the proxy never observes the literal `"refs/heads/"` prefix the client sent &mdash; bytes on wire are ChaCha20-Poly1305 ciphertext. |
 
 ---
 
@@ -225,7 +225,7 @@ single-roundtrip; verb calls block_on a per-call future through the
 upstream `pub(crate)` types aren't reachable from outside the runtime
 crate.
 
-`remote_dispatch::open` recognises the `mkit+enc://` scheme behind the
+`remote_dispatch::open` recognizes the `mkit+enc://` scheme behind the
 `mkit-cli/enc-transport` cargo feature; default builds remain SSH-only.
 
 `mkit serve --listen-enc <addr>` spawns an async accept loop via
@@ -233,13 +233,13 @@ crate.
 **fail-closed** (issue #178): it refuses to bind unless the operator
 supplies `--enc-authorized-peers <PATH>` (an allowlist of client public
 keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape that prints
-a loud warning). `serve_tcp_with_policy` consults a `PeerPolicy` —
+a loud warning). `serve_tcp_with_policy` consults a `PeerPolicy` &mdash;
 `AllowAny` (dev / the explicit unsafe escape) or
 `Allowlist(HashSet<[u8;32]>)` built from the `--enc-authorized-peers`
 file (one client pubkey per line, 64-hex or 43-char url-safe base64;
 `#` comments and blank lines ignored). The bare `serve_tcp` retains
 `AllowAny` for the direct e2e harness only. The allowlist bouncer
-rejects any unlisted dialer at the handshake — a rejected peer never
+rejects any unlisted dialer at the handshake &mdash; a rejected peer never
 receives a `HelloResponse`, list-refs, packs, or update-ref.
 
 The server identity is a **stable** raw-32 key loaded/auto-created from
@@ -264,7 +264,7 @@ pool; the pool is cached process-wide. This exists because
 ### 6.2 Known limitations
 
 Server and client identities are stable raw-32 key files on disk
-(`--enc-server-key` / `MKIT_ENC_CLIENT_KEY`), not yet routed through
+(`--enc-server-key`/`MKIT_ENC_CLIENT_KEY`), not yet routed through
 `mkit-keystore` the way SSH host keys and signing keys are; keystore
 integration would also let the public `connect_tcp` signature take a
 keystore-backed key type instead of a raw one. The allowlist is a flat
@@ -277,8 +277,8 @@ session), so it follows the same reconnect-before-retry pattern as
 `SshTransport` (SPEC-TRANSPORT §4.5) rather than the request-per-attempt
 shape HTTP/S3 use. Orphan rules prevent mapping
 `commonware_stream::encrypted::Error` variants individually, so
-`stream_err` collapses every cipher-layer I/O failure — a send, a
-receive, a decrypt — to `TransportError::ConnectionFailed`; any such
+`stream_err` collapses every cipher-layer I/O failure &mdash; a send, a
+receive, a decrypt &mdash; to `TransportError::ConnectionFailed`; any such
 failure can leave the session's per-record nonce counters desynced
 between client and peer, so resuming on the same session is never safe
 once a failure is observed.
@@ -286,14 +286,14 @@ once a failure is observed.
 Every verb is driven through [`mkit_core::protocol::retrying`]. A
 `ConnectionFailed` marks the session `dead`; the next attempt calls
 `ensure_connected`, which redials through the transport's `ReconnectFn`
-(when one is wired — `tcp::connect_tcp` wires a real redial closure
-that reruns the full dial + `commonware_stream::encrypted::dial`
+(when one is wired &mdash; `tcp::connect_tcp` wires a real redial closure
+that reruns the full dial and `commonware_stream::encrypted::dial`
 handshake) and redoes the application `Hello`/`HelloResponse` exchange
 before the verb is re-issued against the fresh session. A transport
 built directly from an already-established session with no redial
-capability (e.g. the in-process test harness) has no `ReconnectFn`
+capability (for example the in-process test harness) has no `ReconnectFn`
 wired, so a dead session surfaces `ConnectionFailed` immediately
-instead of retrying — matching pre-retry behavior for those callers.
+instead of retrying &mdash; matching pre-retry behavior for those callers.
 As with SSH, `upload_pack` is safe to resend in full on the fresh
 session; `update_ref` is not idempotent across retries per
 SPEC-TRANSPORT §7, so a retried CAS write still requires the caller's
@@ -316,11 +316,11 @@ record layer needs a hard break that the application-level
 | Invariant | Enforced by |
 |---|---|
 | The peer is the key the URL advertises, or no session exists | `?pubkey=` carried out-of-band in the URL; mismatch → `EncInitError::PeerRejected`; no TOFU cache, no CA fallback (§1) |
-| Two distinct URL strings cannot decode to the same pubkey | hex (exactly 64 chars) or unpadded b64url (43 chars, trailing 2 bits zero) — ambiguous encodings rejected at parse (§1) |
+| Two distinct URL strings cannot decode to the same pubkey | hex (exactly 64 chars) or unpadded b64url (43 chars, trailing 2 bits zero) &mdash; ambiguous encodings rejected at parse (§1) |
 | Mutual authentication and forward secrecy | static-key signatures over the handshake transcript; ephemeral X25519 (§2.3) |
 | No nonce reuse, no cross-session replay | per-record counter nonces never on the wire; `SynAck` transcript-bound to `Syn` (§2.3) |
 | No cross-application replay of handshakes | `namespace = b"mkit/transport-enc/v1"` transcript binding (§2.1) |
-| No frame exceeds 1 MiB — enforced twice | `max_message_size = mkit_rpc::MAX_FRAME_BYTES` at the record layer (§2.1) and by every existing `SshFrame` consumer (§3.1) |
+| No frame exceeds 1 MiB &mdash; enforced twice | `max_message_size = mkit_rpc::MAX_FRAME_BYTES` at the record layer (§2.1) and by every existing `SshFrame` consumer (§3.1) |
 | One `SshFrame` per encrypted record, no framing ambiguity | single protobuf payload per `Sender::send`; no second length prefix (§3.1) |
 | No verb exchanged before version agreement | post-handshake `Hello`/`HelloResponse` with `PROTOCOL_VERSION_1`; disagreement closes the connection (§3.2) |
 | The listener is fail-closed: an unlisted peer gets nothing | binding requires `--enc-authorized-peers` (or the loud `--unsafe-allow-any-enc-peer` escape); rejected peers never receive a `HelloResponse`, refs, or packs (§6.1) |

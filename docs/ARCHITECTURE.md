@@ -1,4 +1,4 @@
-# ARCHITECTURE — mkit code map
+# ARCHITECTURE &mdash; mkit code map
 
 Status: **Informative**. Audience: contributors and integrators who
 need to find where something lives and how the pieces connect.
@@ -10,7 +10,7 @@ This document is the index. Normative shape lives in `SPEC-*.md`.
 ## 1. Workspace layout
 
 The Rust workspace lives under `rust/`. Crate boundaries match
-responsibility boundaries — there is no "common" or "utils" crate.
+responsibility boundaries &mdash; there is no "common" or "utils" crate.
 
 | Crate                          | Path                                  | Purpose                                                                |
 |--------------------------------|---------------------------------------|------------------------------------------------------------------------|
@@ -21,8 +21,8 @@ responsibility boundaries — there is no "common" or "utils" crate.
 | `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
-| `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest + rustls transport with bearer auth and `If-Match` CAS         |
-| `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 + S3-compatible)                       |
+| `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest plus rustls transport with bearer auth and `If-Match` CAS         |
+| `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`specs/SPEC-TRANSPORT-ENC.md`) |
 | `mkit-cli`                     | `rust/crates/mkit-cli/`               | The `mkit` binary; thin glue over the library crates                   |
@@ -34,7 +34,7 @@ responsibility boundaries — there is no "common" or "utils" crate.
 | `mkit-sign-ctap` (contrib)     | `contrib/signers/mkit-sign-ctap/`     | FIDO2/WebAuthn roaming-authenticator signer                            |
 
 The `contrib/signers/*` crates form a separate sibling Cargo
-workspace under `contrib/signers/` — they are **not** members of the
+workspace under `contrib/signers/` &mdash; they are **not** members of the
 `rust/` workspace (out-of-tree members break release-plz publishing).
 They share package metadata, lint config, and dependency pins by
 inheriting from `contrib/signers/Cargo.toml`, and they are not part of
@@ -167,7 +167,7 @@ mkit attest ──► spawn binary at attest.external_signer_path
             ──► exit 0 on success
 ```
 
-Argv comes from `attest.external_signer_args` (user-scoped config —
+Argv comes from `attest.external_signer_args` (user-scoped config &mdash;
 see `THREAT-MODEL.md` §4) or per-invocation flags. Every reference
 signer in `contrib/signers/` is a conformance test for this
 contract.
@@ -191,7 +191,7 @@ trait, then read `docs/specs/SPEC-TRANSPORT.md` for the verb set. Use
 ### "I'm adding a new signer algorithm or implementation."
 For an in-tree algorithm, edit `mkit-attest`'s `Algorithm` enum and
 the verifier dispatch. For an out-of-tree signer (HSM, KMS, hardware
-token), implement `docs/specs/SPEC-EXTERNAL-SIGNER.md` and ship a binary —
+token), implement `docs/specs/SPEC-EXTERNAL-SIGNER.md` and ship a binary &mdash;
 see `contrib/signers/mkit-sign-file/` for a minimal example.
 
 ### "I'm changing the wire format."
@@ -210,17 +210,17 @@ the change affects.
 
 ## 7. Cross-references
 
-- `specs/SPEC-OBJECTS.md` — on-disk object format
+- `specs/SPEC-OBJECTS.md` &mdash; on-disk object format
 - `specs/SPEC-MERKLE-OBJECTS.md` &mdash; `Tree`/`ChunkedBlob` BMT-root addressing
-- `specs/SPEC-PACKFILE.md` — packfile wire format
-- `specs/SPEC-DELTA.md` — delta encoding
-- `specs/SPEC-FASTCDC.md` — content-defined chunking
-- `specs/SPEC-REFS.md` — ref names, CAS variants
-- `specs/SPEC-INDEX.md` — repo-local index
-- `specs/SPEC-TRANSPORT.md` — seven-verb wire protocol
-- `specs/SPEC-SIGNING.md` — commit / remix signing
-- `specs/SPEC-ATTESTATIONS.md` — DSSE + in-toto v1
-- `specs/SPEC-EXTERNAL-SIGNER.md` — external signer subprocess protocol
-- `SSH-SECURITY.md` — SSH trust model (informative)
-- `THREAT-MODEL.md` — security boundaries (informative)
-- `FUZZ.md` — fuzz harness conventions
+- `specs/SPEC-PACKFILE.md` &mdash; packfile wire format
+- `specs/SPEC-DELTA.md` &mdash; delta encoding
+- `specs/SPEC-FASTCDC.md` &mdash; content-defined chunking
+- `specs/SPEC-REFS.md` &mdash; ref names, CAS variants
+- `specs/SPEC-INDEX.md` &mdash; repo-local index
+- `specs/SPEC-TRANSPORT.md` &mdash; seven-verb wire protocol
+- `specs/SPEC-SIGNING.md` &mdash; commit / remix signing
+- `specs/SPEC-ATTESTATIONS.md` &mdash; DSSE plus in-toto v1
+- `specs/SPEC-EXTERNAL-SIGNER.md` &mdash; external signer subprocess protocol
+- `SSH-SECURITY.md` &mdash; SSH trust model (informative)
+- `THREAT-MODEL.md` &mdash; security boundaries (informative)
+- `FUZZ.md` &mdash; fuzz harness conventions

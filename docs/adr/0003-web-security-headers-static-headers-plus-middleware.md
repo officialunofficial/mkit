@@ -1,4 +1,4 @@
-# ADR 0003 — Web security headers via static `_headers` plus worker middleware
+# ADR 0003 &mdash; Web security headers via static `_headers` plus worker middleware
 
 - Status: Accepted
 - Date: 2026-06-22
@@ -6,9 +6,9 @@
 
 ## Context
 
-The mkit web app (`mkit/web`) is a Cloudflare Worker that prerenders pages to
+The mkit web app (`apps/web`) is a Cloudflare Worker that prerenders pages to
 static assets. Prerendered pages are served directly by the Cloudflare Assets
-binding and **bypass the worker** — so worker-only response middleware never
+binding and **bypass the worker** &mdash; so worker-only response middleware never
 runs for those routes, and any security headers it sets are absent on the most
 common (static) paths. Relying on middleware alone leaves prerendered routes
 uncovered.
@@ -28,7 +28,7 @@ uncovered.
 ## Consequences
 
 - Security headers (incl. HSTS) are present on every route regardless of whether
-  the worker runs — the static-asset bypass no longer drops them.
+  the worker runs &mdash; the static-asset bypass no longer drops them.
 - Two places define the header set (`public/_headers` and the worker
   middleware); they must be kept in sync, asserted by
   `apps/web/src/security-headers.test.ts`.

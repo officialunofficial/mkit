@@ -5,7 +5,7 @@ status: draft-normative
 audience: implementers of mkit.transport.v1 Connect servers and clients (reference Worker, `mkit serve`, native CLI transport)
 ---
 
-# SPEC-TRANSPORT-CONNECT — mkit.transport.v1, the canonical Connect remote protocol
+# SPEC-TRANSPORT-CONNECT &mdash; mkit.transport.v1, the canonical Connect remote protocol
 
 Status: **Draft** for mkit v1. This document has not yet had maintainer
 sign-off on the RPC shapes it defines (the acceptance gate for the
@@ -17,54 +17,54 @@ generated service over axum/hyper; and the reference Worker (§7.1,
 mkit#699, `apps/vcs-worker`) hosts it over `workers-rs` against R2 +
 a Durable Object. The client and the Worker have now been verified
 talking to each other over a real local `mkit+https://`-equivalent
-deployment (`wrangler dev`, loopback `mkit+http://`) — including real
-`mkit push`/`clone`/`pull` — via `ConnectTransport`'s new envelope-signing
+deployment (`wrangler dev`, loopback `mkit+http://`) &mdash; including real
+`mkit push`/`clone`/`pull` &mdash; via `ConnectTransport`'s new envelope-signing
 auth mode; see "Reference implementation" below and
 `apps/vcs-worker/README.md` "Known limitations". A real DEPLOYED
 Cloudflare Worker (not just `wrangler dev`) remains unverified.
-Scope: the `mkit.transport.v1.TransportService` Connect service — its
+Scope: the `mkit.transport.v1.TransportService` Connect service &mdash; its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
-and pack-transfer streaming design — and how the three planned
+and pack-transfer streaming design &mdash; and how the three planned
 deployment targets (reference Worker, `mkit serve`, native CLI client)
 consume one generated codebase. It does not cover S3 multipart, the
 `WatchRefs` live-feed migration, or any server/client implementation;
 those are separate, later changes (§8).
 
 Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
-the ACTIVE implementation behind `mkit+https://` / `mkit+http://` in
-`mkit-cli` — `mkit-transport-connect` is what `remote_dispatch` now
+the ACTIVE implementation behind `mkit+https://`/`mkit+http://` in
+`mkit-cli` &mdash; `mkit-transport-connect` is what `remote_dispatch` now
 constructs for those schemes. SPEC-TRANSPORT §5 is not yet deleted: the
 `mkit-transport-http` crate remains in the tree (unused by `mkit-cli`'s
 dispatch) because its `sparse-checkout` and `pack-shards` extensions
 (SPEC-TRANSPORT §5.6 and the `pack-shards` cargo feature) have no
-`mkit.transport.v1` equivalent yet — full retirement waits on that gap
+`mkit.transport.v1` equivalent yet &mdash; full retirement waits on that gap
 being resolved, not just core-verb parity.
 
 Reference implementation: `mkit-transport-connect` (the native CLI
 client, §7.3) against `mkit-transport-connect/tests/roundtrip.rs`'s
-in-process server — real HTTP, real protobuf framing, real Connect
+in-process server &mdash; real HTTP, real protobuf framing, real Connect
 streaming, backed by `mkit-transport-memory` rather than R2/a Durable
 Object; this is also the implementation `mkit serve --http` (§7.2)
 hosts directly. [`apps/vcs-worker`](../../apps/vcs-worker) (mkit#699)
 implements the unary and client-streaming RPCs
 (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`/`UploadPack`)
-against this proto over R2 + a Durable Object; `DownloadPack`
+against this proto over R2 and a Durable Object; `DownloadPack`
 (server-streaming) conforms to the wire shape but whole-pack-buffers
-rather than incrementally streaming — see its README "Known
-limitations" — so §6.3's owned-mpsc-channel bridge and its unresolved
+rather than incrementally streaming &mdash; see its README "Known
+limitations" &mdash; so §6.3's owned-mpsc-channel bridge and its unresolved
 end-to-end delivery risk remain unverified by that implementation. Every
 RPC has been manually verified against a real local `wrangler dev`
-instance (real R2/DO emulation, real Ed25519-signed envelopes) — see
+instance (real R2/DO emulation, real Ed25519-signed envelopes) &mdash; see
 `apps/vcs-worker/README.md` "Known limitations" for the trial writeup,
 including a SECOND pass driving the real `mkit` CLI (`push`/`clone`/
 `pull`) end to end against this exact server through `ConnectTransport`'s
 new envelope-signing auth mode (§7.3). `ConnectTransport` now supports
 BOTH the bearer-token scheme (SPEC-TRANSPORT §5.2, unchanged, used by
 `mkit serve --http`) and this server's Ed25519 write envelope (§7.1) as
-independent, additive auth modes — see §7.3. No AUTOMATED test drives
+independent, additive auth modes &mdash; see §7.3. No AUTOMATED test drives
 this client/server pair yet (the `wrangler dev` verification above is
 manual, matching `apps/vcs-worker`'s existing testing posture for
-wasm-only glue) — that remains the open item on the testing axis.
+wasm-only glue) &mdash; that remains the open item on the testing axis.
 `apps/repo-worker`
 remains the closest OTHER existing analog (a Connect service on
 Cloudflare Workers) but implements the unrelated `mkit.repo.v1.RepoService`
@@ -89,29 +89,31 @@ This module shares the repo-root `buf.yaml` workspace (mkit#677, "buf
 workspace + proto path restructure") alongside `rust/crates/mkit-rpc/proto`
 (`mkit.rpc.v1`) and `apps/repo-worker/proto` (`mkit.repo.v1`). `buf
 lint` / `buf breaking` run from the repo root against the whole
-workspace — see `CONTRIBUTING.md`'s "Protobuf schemas (buf)" section.
+workspace &mdash; see `CONTRIBUTING.md`'s "Protobuf schemas (buf)" section.
 
 `buf breaking` is configured with `breaking.use: [FILE]` from this
 module's first commit onward, so every subsequent change to
-`transport.proto` is checked against the immediately prior version —
+`transport.proto` is checked against the immediately prior version &mdash;
 there is no grace period after this document merges.
 
 A follow-up (tracked as mkit#679) extracts `RefExpectation` and
 `RefEntry` into a shared `mkit/common/v1/refs.proto` imported by
-`mkit.rpc.v1.ssh`, `mkit.repo.v1`, and this package — the buf
+`mkit.rpc.v1.ssh`, `mkit.repo.v1`, and this package &mdash; the buf
 workspace (§1) now makes that cross-module import resolvable. Until
 that extraction lands, `mkit.transport.v1.RefExpectation` and
 `RefEntry` are byte-for-byte duplicates of the `mkit.rpc.v1.ssh`
-originals — the same "duplicate now, wire numbers pinned, extract
-later" pattern `mkit.repo.v1.RefExpectation` already uses (see the
-comment at `apps/repo-worker/proto/mkit/repo/v1/repo.proto:38-40`).
+originals. `mkit.rpc.v1.ssh` and `mkit.repo.v1` have already completed
+this extraction and both import the shared `mkit/common/v1/refs.proto`
+definitions rather than duplicating them (see the comment at
+`apps/repo-worker/proto/mkit/repo/v1/repo.proto:20-23`); `mkit.transport.v1`
+is the one package still pending the same move.
 
 ---
 
 ## 2. Verb-to-RPC mapping
 
 `TransportService` maps one-to-one onto the verbs of the
-[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait — the
+[`Transport`](../../rust/crates/mkit-core/src/protocol.rs) trait &mdash; the
 same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 
 | `Transport` trait method | RPC | Shape |
@@ -119,19 +121,19 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 | `list_refs(prefix)` | `ListRefs` | unary |
 | `read_ref(name)` | `ReadRef` | unary |
 | `update_ref(name, condition, hash)` | `UpdateRef` | unary |
-| `write_ref(name, hash)` (default impl: `update_ref(.., Any, ..)`) | *(none — client calls `UpdateRef` with `expectation = REF_EXPECTATION_ANY`)* | — |
+| `write_ref(name, hash)` (default impl: `update_ref(.., Any, ..)`) | *(none &mdash; client calls `UpdateRef` with `expectation = REF_EXPECTATION_ANY`)* | &mdash; |
 | `advance_refs(..)` | `AdvanceRefs` | unary |
 | `pack_exists(key)` | `PackExists` | unary |
 | `upload_pack(bytes, key)` | `UploadPack` | client-streaming |
 | `download_pack(key)` | `DownloadPack` | server-streaming |
-| `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none — client calls `UploadPack`)* | — |
-| `download_blob(key)` (default impl: delegates to `download_pack`) | *(none — client calls `DownloadPack`)* | — |
+| `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
+| `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
 
 `write_ref` and the blob verbs are `Transport`-trait-level default
 methods that delegate to another trait method **before any transport
 implementation runs** (see `protocol.rs`'s doc comments on each). The
 wire therefore never distinguishes "pack" from "auxiliary blob," or
-"unconditional write" from "CAS write with `expectation = ANY`" — a
+"unconditional write" from "CAS write with `expectation = ANY`" &mdash; a
 Connect server implementing the seven wire RPCs above (§2's table)
 gets every `Transport` trait verb for free through the client-side
 default impls, exactly as every other transport already does.
@@ -141,7 +143,7 @@ Endpoints follow the standard Connect convention:
 
 ---
 
-## 3. CAS semantics — `UpdateRef`
+## 3. CAS semantics &mdash; `UpdateRef`
 
 Identical in spirit to [SPEC-TRANSPORT §4.2.1](SPEC-TRANSPORT.md#421-updateref-cas-encoding)
 and `mkit.repo.v1.RepoService.UpdateRef`, expressed as a Connect
@@ -154,7 +156,7 @@ unary call instead of an `SshFrame` or a JSON body:
 | `Match(h)` | `REF_EXPECTATION_MATCH` | 32-byte digest `h` | Current ref value MUST equal `h`. |
 
 A conforming server MUST reject `REF_EXPECTATION_UNSPECIFIED` (the
-proto zero value) with Connect code `invalid_argument` — mkit is
+proto zero value) with Connect code `invalid_argument` &mdash; mkit is
 alpha (pre-1.0); there is no back-compat surface for a client that
 omits `expectation`.
 
@@ -164,7 +166,7 @@ carrier for the current ref value, per SPEC-TRANSPORT §4.2.1) and
 client-consumed), `UpdateRefResponse` on this service carries **no**
 current-value field at all: a CAS failure is a Connect error
 (`failed_precondition`), full stop. This is a deliberate
-simplification, not an oversight — SPEC-TRANSPORT §7 already requires
+simplification, not an oversight &mdash; SPEC-TRANSPORT §7 already requires
 callers to disambiguate a possibly-lost write with a follow-up
 `read_ref` after any ambiguous failure (timeout, retry), so a second
 value-carrying channel on the CAS-conflict path adds a field no
@@ -179,7 +181,7 @@ conflict." This document reuses that requirement unchanged.
 
 ---
 
-## 4. Atomic two-ref advance — `AdvanceRefs`
+## 4. Atomic two-ref advance &mdash; `AdvanceRefs`
 
 `Transport::advance_refs` updates a branch's head ref and its packmap
 ref together, each under its own CAS precondition, so the
@@ -213,7 +215,7 @@ message AdvanceRefsRequest {
 | `PackmapConflict` | `ADVANCE_OUTCOME_PACKMAP_CONFLICT` | The packmap precondition failed; a concurrent pusher advanced the chain first. |
 
 A conflict is carried as a **successful** RPC with `outcome !=
-ADVANCE_OUTCOME_COMMITTED`, not a Connect error — unlike `UpdateRef`,
+ADVANCE_OUTCOME_COMMITTED`, not a Connect error &mdash; unlike `UpdateRef`,
 `advance_refs`'s Rust signature already returns a typed enum rather
 than a boolean success/CAS-conflict split (see
 `protocol.rs`'s `AdvanceOutcome`), so the wire follows the same shape
@@ -224,7 +226,7 @@ Per `Transport::supports_atomic_advance`'s doc comment, a server
 backed by a transactional ref store (a single Durable Object
 transaction, a database transaction) SHOULD commit both writes
 atomically and MUST advertise this out-of-band to the client (the
-Connect service itself carries no `supports_atomic_advance` RPC — a
+Connect service itself carries no `supports_atomic_advance` RPC &mdash; a
 deployment either documents its guarantee or a client configuration
 flag records it, mirroring how `Transport::supports_atomic_advance()`
 is a Rust-level trait method today, not a wire negotiation). A
@@ -235,11 +237,11 @@ uses that fallback.
 
 ---
 
-## 5. Error taxonomy — `TransportError` to Connect code
+## 5. Error taxonomy &mdash; `TransportError` to Connect code
 
 Connect carries structured errors natively (a code plus a message),
-so — unlike the SSH wire's hand-rolled `mkit.rpc.v1.Error` message,
-needed because raw stdio framing has no ambient error channel — this
+so &mdash; unlike the SSH wire's hand-rolled `mkit.rpc.v1.Error` message,
+needed because raw stdio framing has no ambient error channel &mdash; this
 service defines **no** custom error message type. Every
 [`TransportError`](../../rust/crates/mkit-core/src/protocol.rs) variant
 maps onto a standard Connect code:
@@ -250,17 +252,17 @@ maps onto a standard Connect code:
 | `AccessDenied` | `permission_denied` | Any RPC, when the deployment's auth layer (§7) rejects the caller. |
 | `RefConflict` | `failed_precondition` | `UpdateRef` / the relevant half of `AdvanceRefs` on a CAS mismatch. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
-| `ConnectionFailed` | *(not server-raised — client-observed transport failure, e.g. TCP reset, deadline exceeded)* | — |
+| `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
 | `ServerError{status}` | `unavailable` (5xx-equivalent) or `resource_exhausted` (429-equivalent) | Deployment-specific overload / backend failure. |
-| `InvalidResponse` | *(not server-raised — client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | — |
+| `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
-| `InsecureScheme` | *(not applicable — URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | — |
-| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) — also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, `unauthenticated`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
+| `InsecureScheme` | *(not applicable &mdash; URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | &mdash; |
+| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, `unauthenticated`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
 
 A conforming client's Connect-to-`TransportError` mapping is the
 mechanical inverse of this table, with `RemoteError(String)` as the
-fallback arm for any Connect code not otherwise listed — the mapping
+fallback arm for any Connect code not otherwise listed &mdash; the mapping
 is total in both directions, never a partial match. `is_retryable`
 (SPEC-TRANSPORT §7) continues to apply unchanged once translated:
 `unavailable` and `resource_exhausted` are retryable, everything else
@@ -274,7 +276,7 @@ is not.
 carry [`PackChunk`](../../proto/mkit/transport/v1/transport.proto),
 which duplicates
 [`mkit.rpc.v1.ssh.PackChunk`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/ssh/ssh.proto)'s
-field layout exactly (`pack_id`, `offset`, `data`, `last` — same
+field layout exactly (`pack_id`, `offset`, `data`, `last` &mdash; same
 numbers, same types). This is a deliberate wire-identical duplication,
 not a new chunking format: the bytes a client streams over Connect are
 parseable by anything that already speaks the SSH/enc `PackChunk`
@@ -289,9 +291,9 @@ messages in ascending contiguous `offset` order, ending with a
 `chunk.last = true` message (an empty pack still sends one `last =
 true` chunk with empty `data`, matching the SSH wire's convention).
 
-The server MUST reject the stream — before returning
+The server MUST reject the stream &mdash; before returning
 `UploadPackResponse`, and MUST NOT create or overwrite the destination
-pack on rejection — if:
+pack on rejection &mdash; if:
 
 - the first message is not `header`;
 - any `chunk.pack_id` does not match `header.pack_id`;
@@ -313,14 +315,14 @@ then a sequence of `chunk` messages ending with `chunk.last = true`.
 If the requested `pack_id` is absent, the server returns
 `not_found` before sending any message (never a zero-chunk stream).
 
-### 6.3 Streaming on Cloudflare Workers — design answer and open risk
+### 6.3 Streaming on Cloudflare Workers &mdash; design answer and open risk
 
 The reference Worker (§7.1) is the one deployment target where
 Connect streaming has a known, previously-hit failure mode:
-`apps/repo-worker/README.md` §"WatchRefs / streaming (fallback)"
+`apps/repo-worker/README.md` §"WatchRefs / streaming (issue #705, building on the #697 spike)"
 documents that `worker::WebSocket::events()` returns a **borrowed**
 `EventStream<'ws>`, which cannot satisfy a generated server-streaming
-trait method's `'static + Send` `ServiceStream<T>` bound — that
+trait method's `'static + Send` `ServiceStream<T>` bound &mdash; that
 constraint is why `mkit.repo.v1.RepoService.WatchRefs` is served over
 a hand-rolled WebSocket instead of Connect server-streaming today.
 
@@ -331,7 +333,7 @@ events (there, a Durable Object `/watch` WebSocket; for `DownloadPack`,
 a chunked read from R2/filesystem) into an **owned**
 `futures_channel::mpsc` channel, drained by a
 `wasm_bindgen_futures::spawn_local` task, so the channel's `Receiver`
-— not the borrowed source stream — is what gets boxed into the
+&mdash; not the borrowed source stream &mdash; is what gets boxed into the
 generated trait's `ServiceStream<PackChunk>`. Because the channel is
 owned (no borrowed lifetime), it satisfies `'static + Send` with zero
 `unsafe` code. A conforming reference-Worker implementation of
@@ -343,7 +345,7 @@ The spike also identified a companion requirement: a Worker's fetch
 handler that buffers the entire response body before returning it
 (`http_resp.into_body().collect().await.to_bytes()`, the pattern
 `apps/repo-worker`'s unary path uses today) defeats streaming
-end-to-end regardless of how the RPC handler itself produces chunks —
+end-to-end regardless of how the RPC handler itself produces chunks &mdash;
 the response construction MUST use a true streaming response
 (`Response::from_stream` or equivalent) instead of collect-then-return.
 
@@ -352,7 +354,7 @@ mechanically (the DO WebSocket opens, drains real events, and
 translates them correctly inside `wasm_bindgen_futures::spawn_local`)
 and verified `cargo check --target wasm32-unknown-unknown` compiles
 clean, but did **not** verify client-visible delivery end-to-end over
-HTTP — a test client received zero bytes even after the bridge
+HTTP &mdash; a test client received zero bytes even after the bridge
 processed a real event, against a local `wrangler dev` run, with the
 root cause (a `wrangler dev` limitation vs. a remaining adapter bug)
 not isolated. This document specifies the bridge as the correct
@@ -361,12 +363,12 @@ design is proven to deliver bytes to a real client yet. The reference
 Worker issue (mkit#699) and the streaming pack transfer issue
 (mkit#702) MUST re-verify end-to-end delivery (ideally against a real
 Cloudflare deployment, not only `wrangler dev`) before either is
-considered done — a proto/spec review is not a substitute for that
+considered done &mdash; a proto/spec review is not a substitute for that
 runtime verification.
 
 `mkit serve` (§7.2) and the native CLI client (§7.3) run outside
 Workers (axum/hyper and Tokio respectively) and are not subject to the
-non-`'static` `WebSocket::events()` constraint at all — the bridge
+non-`'static` `WebSocket::events()` constraint at all &mdash; the bridge
 above is a Workers-specific workaround, not a general requirement of
 this protocol.
 
@@ -374,47 +376,47 @@ this protocol.
 
 ## 7. Deployment targets
 
-One proto, one generated codebase, three consumers — no per-target
+One proto, one generated codebase, three consumers &mdash; no per-target
 dialect:
 
 ### 7.1 Reference Worker
 
-A `connectrpc` + `workers-rs` service
+A `connectrpc` and `workers-rs` service
 ([`apps/vcs-worker`](../../apps/vcs-worker), mkit#699), reusing
 `apps/repo-worker`'s proven patterns: vendored `generated/` staged by
 `build.rs` (`MKIT_TRANSPORT_CODEGEN=1` to regenerate via
 `connectrpc-build` against the canonical
 `proto/mkit/transport/v1/transport.proto`, no protoc dependency on the
-default build path — Cloudflare Workers Builds and CI images lack a
+default build path &mdash; Cloudflare Workers Builds and CI images lack a
 protoc new enough for `edition = "2023"`), R2 for pack storage, and a
 single global Durable Object for ref CAS (one Worker deployment = one
-repository — no per-project room split). Unlike `repo-worker`'s
+repository &mdash; no per-project room split). Unlike `repo-worker`'s
 open-write demo, `UpdateRef`/`AdvanceRefs`/`UploadPack` are gated behind
 a signed write envelope (mkit#699's chosen mechanism: the SAME
 canonical-string Ed25519 envelope `repo-worker`'s `Interceptor` already
-uses for its writes, not a bearer token — see `apps/vcs-worker/README.md`
+uses for its writes, not a bearer token &mdash; see `apps/vcs-worker/README.md`
 "Auth" for the client-streaming adaptation `UploadPack` needs). This is
 still an open-write / same-author-not-authority trust model, same as
 `repo-worker`'s; this server itself does not implement
 `mkit-transport-http`'s `MKIT_API_TOKEN` bearer scheme (SPEC-TRANSPORT
-§5.2) — a production deployment wanting bearer-token gating on THIS
+§5.2) &mdash; a production deployment wanting bearer-token gating on THIS
 server would need a follow-up change (§7.3's client-side envelope auth
 mode does not add server-side bearer support). See
 `apps/vcs-worker/README.md` "Known limitations" for two bugs this
 envelope-auth verification pass found and fixed in this server's HTTP
 bridge (a wasm32 `Instant::now()` panic on any client-asserted deadline
 header, and `ListRefs` not stripping the request `prefix` from returned
-names per SPEC-REFS §4) — neither is an auth change; both were blocking
+names per SPEC-REFS §4) &mdash; neither is an auth change; both were blocking
 any real Connect client, not just an envelope-signing one, from working
 against this server at all.
 
 ### 7.2 `mkit serve`
 
 The same generated `TransportService` trait, served over axum/hyper
-(mkit#700) instead of `workers-rs` — `connectrpc` supports both
+(mkit#700) instead of `workers-rs` &mdash; `connectrpc` supports both
 server backends from one generated trait, so the RPC handler logic is
 shareable in principle even though the two deployments' storage
-backends differ (R2 + DO vs. local filesystem + `flock`, per
+backends differ (R2 and DO vs. local filesystem and `flock`, per
 [SPEC-WORKTREE](SPEC-WORKTREE.md)/[SPEC-CONCURRENCY](SPEC-CONCURRENCY.md)).
 This gives the CLI's `serve` command an HTTP mode alongside its
 existing SSH-frame stdio and `--listen-enc` modes
@@ -441,7 +443,7 @@ per instance), mirroring `mkit-transport-enc`'s `TokioExecutor`.
 
 This crate is now the implementation `mkit-cli`'s `remote_dispatch`
 constructs for the `mkit+https://` scheme (and loopback-only
-`mkit+http://`), replacing `mkit-transport-http` there — see
+`mkit+http://`), replacing `mkit-transport-http` there &mdash; see
 `rust/crates/mkit-cli/src/remote_dispatch/mod.rs`. `mkit-transport-http`
 itself is NOT deleted (its `sparse-checkout`/`pack-shards` extensions
 have no `mkit.transport.v1` equivalent yet, §8), so SPEC-TRANSPORT §5 is
@@ -449,7 +451,7 @@ marked superseded rather than removed.
 
 **Auth modes** (mkit#699 follow-up, closing the gap this document
 originally flagged in "Reference implementation" above):
-`ConnectTransport` supports two independent, additive write-auth modes —
+`ConnectTransport` supports two independent, additive write-auth modes &mdash;
 a deployment can require either, both, or neither:
 
 - **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
@@ -458,26 +460,26 @@ a deployment can require either, both, or neither:
   (SPEC-TRANSPORT §5.2) and is what `mkit serve --http` (§7.2) expects.
 - **Ed25519 write envelope** (new): a native, non-wasm reimplementation
   of the SAME canonical-string envelope §7.1's reference Worker (and
-  `apps/repo-worker` before it) verify —
+  `apps/repo-worker` before it) verify &mdash;
   `rust/crates/mkit-transport-connect/src/envelope.rs`'s
   `EnvelopeTransport<T: ClientTransport>` wraps the inner transport and,
   for `UpdateRef`/`AdvanceRefs` (unary, body-bound digest) and
   `UploadPack` (streaming, establishment-only, no body digest), attaches
   `X-Public-Key`/`X-Signature`/`X-Digest`/`X-Created-At`/
   `Idempotency-Key` headers signed via an `EnvelopeSigner`
-  implementation (BLAKE3 digest, raw Ed25519 sign — no SPEC-SIGNING
+  implementation (BLAKE3 digest, raw Ed25519 sign &mdash; no SPEC-SIGNING
   domain prefix, matching the server's plain-envelope contract exactly).
   `mkit-cli` resolves the signer via a new `transport_auth = envelope`
   config key (repo-safe, mirrors `remote_type`): when set, it reuses the
   EXACT commit-signing signer resolution (`signer` = `""`/`"legacy"` →
   the repo key file at `signing_key`, via `mkit_attest::RepoKeySigner`;
   `signer = "keystore"` → `key.ed25519_ref` via `mkit_keystore::KeySigner`)
-  rather than a parallel key path — the write envelope authenticates
+  rather than a parallel key path &mdash; the write envelope authenticates
   with the SAME Ed25519 identity that already signs the user's commits.
   See `rust/crates/mkit-cli/src/remote_dispatch/{mod.rs,envelope_signer.rs}`.
 
 Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
-local `wrangler dev` instance of `apps/vcs-worker` — see
+local `wrangler dev` instance of `apps/vcs-worker` &mdash; see
 `apps/vcs-worker/README.md` "Known limitations".
 
 One deliberate gap from full HTTP-transport parity: `ConnectTransport::
@@ -488,7 +490,7 @@ supports_atomic_advance()` always returned `true`. SPEC-TRANSPORT-CONNECT
 documented; since no reference Connect server (mkit#699) exists yet to
 confirm a transactional `AdvanceRefs`, the safe default means pushes over
 `mkit+https://` take the ordered (non-atomic) `advance_refs` fallback and
-do not re-baseline/reset the packmap chain — `remote_dispatch::
+do not re-baseline/reset the packmap chain &mdash; `remote_dispatch::
 push_branch`'s re-baseline gate already requires `supports_atomic_advance()
 == true` before resetting (mkit#521), so this is a (temporary) loss of
 the packmap-compaction optimization, not a correctness gap. Revisit once
@@ -502,19 +504,19 @@ transient `ConnectionFailed` or the Connect codes §5 maps onto a
 SPEC-TRANSPORT §7's `is_retryable` classification, read off the
 `TransportError` §5's client-side mapping produces rather than directly
 off an HTTP status. Each retry re-issues the whole RPC from scratch
-(including, for `DownloadPack`, a fresh stream) — nothing from a failed
+(including, for `DownloadPack`, a fresh stream) &mdash; nothing from a failed
 prior attempt is reused. Mutating CAS ops (`UpdateRef`/`AdvanceRefs`) are
 safe to retry unconditionally because `is_retryable` excludes
-`TransportError::RefConflict`; a CAS conflict is never retried here — that
+`TransportError::RefConflict`; a CAS conflict is never retried here &mdash; that
 stays caller-level policy.
 
 The regression tests
 (`rust/crates/mkit-transport-connect/tests/roundtrip.rs`,
-`tests/retry.rs`) drive every `Transport` verb — including multi-chunk
+`tests/retry.rs`) drive every `Transport` verb &mdash; including multi-chunk
 `UploadPack`/`DownloadPack` streaming, all three `AdvanceOutcome`
 variants, and the retry ladder itself (a flaky in-process server that
 fails the first N calls with a retryable error class, and a
-non-retryable-error/ladder-exhaustion pair) — through a real in-process
+non-retryable-error/ladder-exhaustion pair) &mdash; through a real in-process
 `TransportService` server (memory-backed, not R2/DO), per this issue's
 testing decision: a real server, not a mock standing in for one.
 
@@ -527,19 +529,19 @@ Explicitly deferred to sibling issues:
 
 - The reference Worker implementation (mkit#699).
 - `mkit serve`'s HTTP mode (mkit#700).
-- ~~The native CLI Connect client (mkit#701).~~ Implemented — see §7.3.
+- ~~The native CLI Connect client (mkit#701).~~ Implemented &mdash; see §7.3.
 - Fully deleting `mkit-transport-http` and SPEC-TRANSPORT §5 (waits on a
   `mkit.transport.v1` equivalent for its `sparse-checkout`/`pack-shards`
-  extensions, not just core-verb parity — see §7.3).
+  extensions, not just core-verb parity &mdash; see §7.3).
 - ~~The shared retry/backoff Connect interceptor (mkit#703).~~ Implemented
-  directly in `ConnectTransport` (mkit#790) — see §7.3.
+  directly in `ConnectTransport` (mkit#790) &mdash; see §7.3.
 - S3 multipart upload (unrelated transport; not superseded by this
   document at all).
 - Migrating `mkit.repo.v1.WatchRefs` to real Connect server-streaming
   using the bridge pattern in §6.3 (a `mkit.repo.v1` change, not a
-  `mkit.transport.v1` one — tracked separately).
+  `mkit.transport.v1` one &mdash; tracked separately).
 - End-to-end runtime verification of the `DownloadPack` streaming
-  bridge (§6.3's known risk) — this is a proto/design review gate, not
+  bridge (§6.3's known risk) &mdash; this is a proto/design review gate, not
   a working-server acceptance gate.
 - Generated TypeScript (`connect-es`) clients for this service (M2
   scope, tracked with mkit#706).
@@ -558,9 +560,9 @@ Explicitly deferred to sibling issues:
 
 The acceptance gate for this document itself is static, not behavioral:
 
-- `buf lint` (`STANDARD` category) against `proto/mkit/transport/v1/transport.proto` — zero errors, zero lint exceptions.
+- `buf lint` (`STANDARD` category) against `proto/mkit/transport/v1/transport.proto` &mdash; zero errors, zero lint exceptions.
 - `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
-- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) — verified by generating and compiling the full client + server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.8.1` / `connectrpc 0.8` / `connectrpc-build 0.8`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
+- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.8.1`/`connectrpc 0.8`/`connectrpc-build 0.8`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
 - Explicit maintainer sign-off on the RPC shapes in this document, per the originating issue's Testing Decisions.
 
 mkit#699/#700/#701 each own their own runtime test anchors (integration
@@ -568,7 +570,7 @@ tests against a real or locally-hosted server); this document is not
 amended to list them. mkit#701 (§7.3) is the first to land one:
 `rust/crates/mkit-transport-connect/tests/roundtrip.rs` runs a real
 in-process `TransportService` server and drives every `Transport` verb
-through it via the generated client — see §7.3 for what it does and
+through it via the generated client &mdash; see §7.3 for what it does and
 does not prove (a memory-backed in-process server, not the R2/DO
 reference Worker).
 
@@ -581,7 +583,7 @@ reference Worker).
 | Every `Transport` trait verb has exactly one corresponding wire RPC, or is a documented client-side default-impl delegation with no independent wire shape. | §2's mapping table; `protocol.rs`'s default-impl doc comments. |
 | `RefExpectation`'s wire numbers (`ANY=1`, `MISSING=2`, `MATCH=3`) never change, even after mkit#679 extracts a shared proto. | `buf breaking` (`FILE` category, §1); the `RefExpectation` doc comment matching `ssh.proto`'s "do NOT renumber" contract. |
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
-| `DownloadPack` never sends a partial stream silently — it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
+| `DownloadPack` never sends a partial stream silently &mdash; it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
-| An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 — matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
+| An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |

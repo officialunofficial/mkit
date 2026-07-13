@@ -5,7 +5,7 @@ status: stable
 audience: implementers of compatible packfile readers and writers; transport implementers
 ---
 
-# SPEC-PACKFILE — mkit packfile format (v1 + v2)
+# SPEC-PACKFILE &mdash; mkit packfile format (v1 + v2)
 
 Status: **Normative** for mkit v1 and v2.
 Scope: the byte layout of a `.mkit`-produced packfile, used for
@@ -14,7 +14,7 @@ transport upload/download and for bundle exchange.
 Resolves red-team R-05 (no spec at all) and R-06 (magic rename risk).
 Version 2 (§3.3, §3.4) adds per-entry zstd compression (issue #646);
 it does not change header framing, caps, ordering, or trailer
-semantics from v1 — only two new entry types.
+semantics from v1 &mdash; only two new entry types.
 
 ---
 
@@ -29,24 +29,24 @@ offset  size          field
 …       32            trailer             BLAKE3(all preceding bytes)
 ```
 
-The **trailer** is computed over bytes `[0 .. trailer_offset)` — i.e.
+The **trailer** is computed over bytes `[0 .. trailer_offset)` &mdash; that is,
 everything written before the trailer itself. It is not a signature.
 Its purpose is defense-in-depth against bit-rot on transports that do
-not guarantee byte-exact delivery (e.g. S3 after a proxy).
+not guarantee byte-exact delivery (for example S3 after a proxy).
 
 The first four bytes MUST be the ASCII literal `"MKIT"`. Any reader
 encountering something else MUST fail with `InvalidMagic`.
 
 **Version byte rule:** the first four bytes MUST remain `"MKIT"` in
-every future version. Format evolution is signalled by the `version`
-field. A reader seeing `"MKIT"` + unknown version MUST fail
+every future version. Format evolution is signaled by the `version`
+field. A reader seeing `"MKIT"` plus unknown version MUST fail
 `UnsupportedPackVersion` (not `InvalidMagic`), so clients can
 distinguish "wrong tool" from "too-new pack".
 
 **Writer version-selection rule (v2):** `PackWriter` decides `version`
 per pack, not per build. It emits `version = 1` when the finished pack
 contains zero compressed entries (`0x03`/`0x04`), and `version = 2`
-when it contains at least one — even if the pack is otherwise a mix of
+when it contains at least one &mdash; even if the pack is otherwise a mix of
 compressed and uncompressed entries. This is the simplest correct
 rule: a v1-capable reader can consume any pack that doesn't actually
 use the v2-only entry types, and any pack that does is unambiguously
@@ -77,7 +77,7 @@ bounds-check every `payload_len` against the remaining packfile tail
 ## 3. Entry types
 
 ```
-0x00    raw          payload = serialised mkit object (see SPEC-OBJECTS)
+0x00    raw          payload = serialized mkit object (see SPEC-OBJECTS)
 0x02    delta        payload = [32 base_hash] [instructions]  (see SPEC-DELTA)
 0x03    zstd-raw     v2 only. payload = [4 uncompressed_len][zstd frame]
 0x04    zstd-delta   v2 only. payload = [32 base_hash][4 uncompressed_len][zstd frame]
@@ -89,11 +89,11 @@ Notes:
   MUST reject it with `InvalidEntryType`.
 - `0x03` and `0x04` are legal ONLY inside a `version = 2` pack. A
   reader encountering `0x03`/`0x04` inside a `version = 1`-declared
-  pack MUST reject it with `InvalidEntryType` — it is exactly as
+  pack MUST reject it with `InvalidEntryType` &mdash; it is exactly as
   invalid there as any other unrecognized type, not silently accepted
   or reinterpreted. (§9 note: this is a stricter-than-strictly-necessary
-  rule — nothing about the byte layout of `0x03`/`0x04` depends on the
-  header version — but pinning entry-type legality to the declared
+  rule &mdash; nothing about the byte layout of `0x03`/`0x04` depends on the
+  header version &mdash; but pinning entry-type legality to the declared
   version keeps "which entry types can appear here" a single,
   header-derived fact instead of something a reader has to discover
   per-entry.)
@@ -102,12 +102,12 @@ Notes:
 ### 3.1 `raw` (0x00)
 
 Payload is exactly the bytes you would get from SPEC-OBJECTS
-serialisation, starting with the object prologue. Unpackers insert
+serialization, starting with the object prologue. Unpackers insert
 these bytes into the object store verbatim (writing
-`.mkit/objects/<dd>/<rr...>`) after verifying the object's id — computed
+`.mkit/objects/<dd>/<rr...>`) after verifying the object's id &mdash; computed
 per the type-dependent rule in SPEC-OBJECTS §10 (a flat BLAKE3 digest of
-the serialised bytes for most object types; the domain-wrapped Merkle
-root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) — matches the
+the serialized bytes for most object types; the domain-wrapped Merkle
+root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) &mdash; matches the
 expected storage path. It is never simply `BLAKE3(bytes)` for every
 type.
 
@@ -124,10 +124,10 @@ Payload:
 previous `raw` entry in the same pack or already present in the
 destination object store. If unresolvable → `DeltaBaseMissing`.
 
-Delta payloads reconstruct a full serialised object (with its
+Delta payloads reconstruct a full serialized object (with its
 SPEC-OBJECTS prologue). The reconstructed bytes are then run through
 the same type-dependent id rule as a `raw` entry (SPEC-OBJECTS §10 /
-SPEC-MERKLE-OBJECTS) to produce the object's storage path — never a
+SPEC-MERKLE-OBJECTS) to produce the object's storage path &mdash; never a
 flat `BLAKE3(bytes)` for a reconstructed `Tree` or `ChunkedBlob`.
 
 Readers MUST validate every `raw` payload and every reconstructed delta
@@ -147,7 +147,7 @@ Payload:
 
 Decompressing the zstd frame MUST yield exactly `uncompressed_len`
 bytes, and those bytes are byte-for-byte what a `0x00 raw` entry's
-payload would be for the same object — a fully serialised SPEC-OBJECTS
+payload would be for the same object &mdash; a fully serialized SPEC-OBJECTS
 object, prologue included. A `0x03` entry is otherwise handled
 identically to `0x00`: the decompressed bytes are validated as a
 canonical storable object and hashed to produce the storage path.
@@ -156,7 +156,7 @@ canonical storable object and hashed to produce the storage path.
 entry carries its own independent zstd frame; there is no shared
 dictionary and no whole-pack compression stream. This keeps every
 other section of this spec (§2 framing, §5 caps, §6 parsing model, §8
-trailer) unchanged — a reader can still bounds-check, cap, and hash
+trailer) unchanged &mdash; a reader can still bounds-check, cap, and hash
 the pack exactly as before, treating each entry's payload as an
 opaque, independently-sized blob. It also bounds decompression memory
 to one entry at a time regardless of pack size.
@@ -166,14 +166,14 @@ all (an all-`0x00`/`0x02` pack is always valid, and stays `version =
 1`, see §1). When a writer does apply compression, this spec pins the
 decision rule so independent implementations produce comparable
 packs: compress a candidate payload of `raw_len` bytes only when
-`raw_len >= 64` (skip tiny payloads — compression's per-entry framing
+`raw_len >= 64` (skip tiny payloads &mdash; compression's per-entry framing
 overhead and CPU cost isn't worth it below this) **and** `4 +
 zstd_compressed_len < raw_len` (strictly smaller on the wire than
-sending it uncompressed — the same "strictly smaller or don't bother"
+sending it uncompressed &mdash; the same "strictly smaller or don't bother"
 posture as the delta-preference heuristic in §3, mirrored here for
 consistency). mkit's own writer uses zstd compression level 3 (the
 library default); this spec does not mandate a specific level, since
-the byte layout is level-independent — any level a compliant zstd
+the byte layout is level-independent &mdash; any level a compliant zstd
 decoder can read is valid.
 
 **Decoder bomb-guarding is normative, not a suggestion.** Before
@@ -181,13 +181,13 @@ allocating a decompression buffer, a reader MUST check the claimed
 `uncompressed_len` against the object-store size cap
 (`mkit_core::store::MAX_RAW_OBJECT_SIZE`, 1 GiB) and reject
 oversized claims before allocating anything for them. Decompression
-MUST then be bounded to at most `uncompressed_len` bytes (e.g. via a
+MUST then be bounded to at most `uncompressed_len` bytes (for example via a
 capacity-bounded decompress call, not an unbounded stream copy) so a
 truncated `uncompressed_len` claim can't be used to force an
 over-large allocation. After decompression, the reader MUST compare
 the actual decompressed byte count against the claimed
-`uncompressed_len` and reject on any mismatch (too few bytes — a
-truncated/short frame — or too many). A pack that fails either check
+`uncompressed_len` and reject on any mismatch (too few bytes &mdash; a
+truncated/short frame &mdash; or too many). A pack that fails either check
 MUST NOT have any of its entries written to the object store, exactly
 like any other rejected pack (§6, §8).
 
@@ -202,14 +202,14 @@ Payload:
 ```
 
 `base_hash` is identical in placement and semantics to `0x02`'s
-`base_hash` (§3.2) and is deliberately left **uncompressed** — a
+`base_hash` (§3.2) and is deliberately left **uncompressed** &mdash; a
 reader resolving delta-base ordering (§4) or pre-fetching bases
 (`delta_base_hashes`-style scans) never needs to decompress an entry
 just to discover which object it depends on.
 
 Decompressing the zstd frame MUST yield exactly `uncompressed_len`
 bytes, and those bytes are byte-for-byte what a `0x02` entry's payload
-would be *after* its 32-byte `base_hash` prefix — i.e. a SPEC-DELTA
+would be *after* its 32-byte `base_hash` prefix &mdash; that is, a SPEC-DELTA
 stream (SPEC-DELTA). Once decompressed, a `0x04` entry is handled
 identically to `0x02`: the same base-resolution rule (§4), the same
 `DeltaBaseMissing` failure mode, and the same reconstruct-then-hash
@@ -217,29 +217,29 @@ storage path.
 
 The writer compression policy and decoder bomb-guarding rules in §3.3
 apply here identically, with one adjustment: the payload being
-measured/compressed for the `raw_len >= 64` / `4 +
+measured/compressed for the `raw_len >= 64`/`4 +
 zstd_compressed_len < raw_len` decision is the delta **stream only**
 (post-`base_hash`), matching what §3.3 says about the reconstructed
-`0x02` payload — `base_hash` is never a candidate for compression
+`0x02` payload &mdash; `base_hash` is never a candidate for compression
 since it is fixed-size, already-random-looking (a BLAKE3 digest), and
 needed uncompressed for cheap base discovery.
 
 Writers MAY emit all-`raw` packs for simplicity; readers MUST handle
 both mixes. `PackWriter`'s raw-vs-delta choice is policy-free at the
-writer level — it accepts whatever entries the caller pushes and does
+writer level &mdash; it accepts whatever entries the caller pushes and does
 not itself decide raw vs. delta. That choice lives in callers above
 the writer: mkit's own transfer-planning path (`transfer.rs`'s
 `try_delta`) already ships a "prefer delta when it is strictly smaller
 on the wire than raw" gate (`HASH_LEN + delta_stream.len() <
-target_bytes.len()`), so — correcting an earlier draft of this
-section — that heuristic is not purely hypothetical future work; it is
+target_bytes.len()`), so &mdash; correcting an earlier draft of this
+section &mdash; that heuristic is not purely hypothetical future work; it is
 live, informative (not normative) caller policy today. A future
 revision MAY promote it to a normative rule; this document does not
 pin its exact thresholds since a conforming writer is free to use a
 different one, or none, and still produce a valid pack.
 
 Compression (§3.3, §3.4), by contrast, IS writer-internal as of v2:
-`PackWriter::push_raw` / `push_delta` decide per-entry whether to emit
+`PackWriter::push_raw`/`push_delta` decide per-entry whether to emit
 the compressed or uncompressed variant, per the fixed rule in §3.3.
 Callers do not choose compression per entry the way they choose
 delta-vs-raw.
@@ -274,21 +274,21 @@ Normative, for both v1 and v2 packs:
 - Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
 
 These are policy caps, not wire limits. Implementations MUST fail with
-`TooManyObjects` / `PackfileTooLarge` on violation rather than
+`TooManyObjects`/`PackfileTooLarge` on violation rather than
 silently truncating.
 
 **These caps are measured on the wire (compressed) size.** For a
-`0x03`/`0x04` entry, `payload_len` is the on-wire length — the
-`uncompressed_len` prefix plus the zstd frame — exactly as framed in
+`0x03`/`0x04` entry, `payload_len` is the on-wire length &mdash; the
+`uncompressed_len` prefix plus the zstd frame &mdash; exactly as framed in
 §2, not the decompressed size. §3.3's separate `MAX_RAW_OBJECT_SIZE`
 (1 GiB) check applies only to the *decompressed* side and is enforced
 independently at decode time; it is not folded into `MAX_TOTAL_PAYLOAD`
 or `entry_count`.
 
 **S3 single-PUT limit:** AWS S3 and Cloudflare R2 enforce a 5 GiB single-
-object cap; our 4 GiB cap stays under it. Larger packs require
+object cap; the 4 GiB pack cap stays under it. Larger packs require
 multipart upload, which remains a future-version candidate (red-team
-R-14) — v2 was spent on compression (§3.3, §3.4), not multipart.
+R-14) &mdash; v2 was spent on compression (§3.3, §3.4), not multipart.
 
 **Known future relaxations** (not part of v1 or v2): streaming packs,
 multipart upload, removal of the 10M entry count. Each requires a
@@ -304,7 +304,7 @@ This is a deliberate simplification. Consequences:
 
 - Memory = packfile size (4 GiB worst-case on the wire; per-entry
   decompression of a `0x03`/`0x04` entry adds at most one
-  `MAX_RAW_OBJECT_SIZE` (1 GiB) buffer at a time — see §3.3).
+  `MAX_RAW_OBJECT_SIZE` (1 GiB) buffer at a time &mdash; see §3.3).
 - Random access to entries is O(n) scan since no entry index exists.
 
 A future version may add a trailing index; neither v1 nor v2 does.
@@ -370,18 +370,18 @@ mkit v1 is the first version. The format rule going forward is:
 - `version` values are monotonically assigned; gaps are allowed but
   reservations SHOULD be documented here before use.
 - Reserved version codes:
-  - `0` — never emitted; reserved to distinguish "all-zero buffer" from
+  - `0` &mdash; never emitted; reserved to distinguish "all-zero buffer" from
     a real pack.
-  - `2` — **consumed.** Per-entry zstd compression, `0x03`/`0x04`
+  - `2` &mdash; **consumed.** Per-entry zstd compression, `0x03`/`0x04`
     entry types (§3.3, §3.4; issue #646). A pre-v2 reader that has not
     taken this spec revision correctly fails closed on a `version = 2`
-    header with `UnsupportedPackVersion` — it does not attempt to
+    header with `UnsupportedPackVersion` &mdash; it does not attempt to
     parse `0x03`/`0x04` entries it doesn't know about. That IS the
     intended behavior, not a bug to work around: v2 packs are only
-    exchanged between peers that both understand them (e.g. after a
+    exchanged between peers that both understand them (for example after a
     capability negotiation at a higher layer), and there is
     deliberately no graceful degradation path in-band.
-  - `3`, `4` — still reserved for future format work (streaming index,
+  - `3`, `4` &mdash; still reserved for future format work (streaming index,
     multipart, etc.).
 
 ---
@@ -395,7 +395,7 @@ rather than on-disk goldens, so any framing drift fails the test suite
 immediately. Reader-error vectors map to `PackError` variants on the
 Rust API surface; the spec-level names below stay protocol-neutral.
 
-1. **Empty pack**: header + `entry_count=0` + trailer. Length
+1. **Empty pack**: header, `entry_count=0`, and trailer. Length
    = 12 + 32 = 44 bytes. Pinned by `empty_pack_pin_bytes` and
    `empty_pack_is_44_bytes`.
 2. **Single-raw pack**: a `Blob{ data: b"hi" }` round-trips through
@@ -434,12 +434,12 @@ Rust API surface; the spec-level names below stay protocol-neutral.
     golden byte-layout pin
     `pack_v2_compressed_raw_pin_bytes_roundtrip` (`golden_pack.rs`).
 14. **Minimal v2 pack, compressed-delta entry**: same shape as #13 for
-    a `0x04` entry — raw base + delta stream compressed against a
+    a `0x04` entry &mdash; raw base plus delta stream compressed against a
     highly-compressible target. Pinned by
     `compressed_delta_entry_roundtrips` and
     `pack_v2_compressed_delta_pin_bytes_roundtrip`.
 15. **`0x03`/`0x04` entry inside a `version = 1`-declared pack** →
-    `InvalidEntryType` (`rejects_v2_entry_type_in_v1_pack`) — the
+    `InvalidEntryType` (`rejects_v2_entry_type_in_v1_pack`) &mdash; the
     entry-type/version legality rule in §3 is enforced, not just
     documented.
 16. **Tampered zstd frame decompressing to the wrong length** →
@@ -448,7 +448,7 @@ Rust API surface; the spec-level names below stay protocol-neutral.
     rejected before any decompression allocation
     (`rejects_decompressed_len_over_object_cap`).
 18. **Pre-existing v1 golden vectors decode unchanged** after the v2
-    writer/reader changes — `v1_pack_still_reads_bit_identical`
+    writer/reader changes &mdash; `v1_pack_still_reads_bit_identical`
     re-runs vectors #1–#12 above and asserts byte-identical output,
     the no-regression guardrail for the format this revision does not
     otherwise touch.
@@ -478,7 +478,7 @@ verification fails.
 | No malformed or pack-only object reaches the object store | canonical SPEC-OBJECTS deserialization gate; `Object::Delta` payloads rejected (§3) |
 | Every delta is resolvable when encountered | ordering rule: base precedes its delta in-pack or pre-exists in the store; else `DeltaBaseMissing`; no buffering of undefined chains; `0x04`'s uncompressed `base_hash` needs no decompression to check (§4) |
 | Resource use is bounded on the wire | `entry_count ≤ 10M` → `TooManyObjects`; payload sum ≤ 4 GiB → `PackfileTooLarge`, never silent truncation (§5) |
-| Resource use is bounded on decompression | claimed `uncompressed_len` checked against `MAX_RAW_OBJECT_SIZE` (1 GiB) before any decompression allocation; decompression capacity-bounded to the claim; actual decompressed length re-checked against the claim exactly → `DecompressedSizeOverCap` / `DecompressedSizeMismatch` (§3.3) |
+| Resource use is bounded on decompression | claimed `uncompressed_len` checked against `MAX_RAW_OBJECT_SIZE` (1 GiB) before any decompression allocation; decompression capacity-bounded to the claim; actual decompressed length re-checked against the claim exactly → `DecompressedSizeOverCap`/`DecompressedSizeMismatch` (§3.3) |
 | No hidden trailing data | bytes between the entry list and the trailer are rejected even if the trailer hashes them (§6) |
 | Pack identity is deterministic and byte-exact | key = lowercase hex `BLAKE3(pack_bytes)` over the whole pack including the trailer; byte-exact comparison (§7) |
 | Streaming unpack cannot leave corrupt state | trailer verified at end-of-stream; partially-stored objects retroactively rejected (§11) |

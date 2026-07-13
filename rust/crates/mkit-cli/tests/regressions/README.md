@@ -2,7 +2,7 @@
 
 Each `*.txt` file here is a **minimal failing operation sequence** distilled from a
 `tests/state_machine.rs` failure. `replay_checked_in_regressions` parses every `*.txt` in this
-directory and replays it through the same harness, asserting the invariant battery now holds — so a
+directory and replays it through the same harness, asserting the invariant battery now holds &mdash; so a
 once-found bug stays covered even if the proptest strategy or proptest's own seed format changes.
 
 This is deliberately independent of proptest's `proptest-regressions/` persistence (which stores

@@ -17,7 +17,7 @@ This page is divided into two main sections:
 # Writing general documentation
 
 The "general" documentation covers the mechanics and formatting
-guidelines that apply across mkit prose — the README, `docs/`,
+guidelines that apply across mkit prose &mdash; the README, `docs/`,
 `CONTRIBUTING.md`, advisories, release notes, and any other narrative
 text in the repository.
 
@@ -113,7 +113,7 @@ FreeBSD. Spell "macOS" with a lowercase "m" and capital "OS".
 
 ### Referencing transports
 
-mkit ships several transport schemes — `mkit+file://`, `mkit+https://`,
+mkit ships several transport schemes &mdash; `mkit+file://`, `mkit+https://`,
 `mkit+s3://`, `mkit+ssh://`, `mkit+enc://`. Reference them by their full scheme,
 formatted as inline code, the first time they appear on a page. After
 that, "the SSH transport" or "the S3 transport" is acceptable.
@@ -131,7 +131,7 @@ consistently and link to the relevant SPEC document on first use.
 mkit uses BLAKE3 as its content-address primitive. Refer to a full
 hash as a **digest** or **object ID**, and to a shortened form as a
 **short hash**. Object IDs are bare 64-character lowercase hex with no
-prefix — when showing examples, use a realistic-looking 64-hex digest,
+prefix &mdash; when showing examples, use a realistic-looking 64-hex digest,
 not `xxxxxxxx`.
 
 ### Abbreviations
@@ -181,8 +181,8 @@ API documentation section.
 ### Use Oxford commas
 
 Generally, use Oxford commas. If a sentence ends up with too many
-commas, refactor it — split it in two, swap a comma for an em dash
-or a colon, or simplify the structure — rather than dropping the
+commas, refactor it &mdash; split it in two, swap a comma for an em dash
+or a colon, or simplify the structure &mdash; rather than dropping the
 Oxford comma.
 
 One exception is in section headings, where you may omit it for
@@ -218,7 +218,7 @@ Prefer splitting a phrase into two separate sentences. The goal is
 documentation that reads easily.
 
 In rare cases when you need to keep the structure, [use em
-dashes](#use-mdash) (—) or connecting words ("then", "however",
+dashes](#use-mdash) (&mdash;) or connecting words ("then", "however",
 "so") rather than commas to glue two independent clauses together.
 
 - Correct: BLAKE3 is parallelizable. The benches reflect a single
@@ -297,7 +297,7 @@ Action (CTA).
 Use **relative links** when referencing another file in the
 repository (`./specs/SPEC-OBJECTS.md`, `../README.md`). When linking from
 prose into the Rust API docs, prefer a stable docs.rs URL or an
-intra-doc rustdoc link inside the source — not a path into
+intra-doc rustdoc link inside the source &mdash; not a path into
 `rust/target/doc/`.
 
 ### Accessibility
@@ -334,7 +334,7 @@ When you want an em dash, write `&mdash;` instead of `-`, `--`, or
 the literal `—` character. Markdown renders the entity reliably; the
 hyphen variants render as plain hyphens, and the literal `—`
 character is the most common variant inserted by AI-assisted
-writing — flag it during review.
+writing &mdash; flag it during review.
 
 ### Referencing keyboard shortcuts
 
@@ -428,17 +428,17 @@ Get straight to the point.
   "attestation envelope"); when the spec term is the accurate one,
   expand or link it on first use.
 - **Exact verbs on prompts and buttons.** A confirmation names the
-  action it performs — "Delete branch", "Overwrite key" — never
+  action it performs &mdash; "Delete branch", "Overwrite key" &mdash; never
   "Yes" or "OK". Prompt copy is a complete sentence saying what
   happens and why, not a bare imperative.
 - **Same state, same words.** Never word one state differently on
   two surfaces (CLI vs web demo vs a JSON `message` field). Route a
   repeated string through one helper instead of hand-writing it per
   call site.
-- **Sentence case everywhere** — headings, labels, buttons, table
+- **Sentence case everywhere** &mdash; headings, labels, buttons, table
   headers. Title Case only for real proper nouns.
 - **Parity wins over style.** Output pinned byte-for-byte to git's
-  (the `COMMIT_EDITMSG` template, porcelain formats — see
+  (the `COMMIT_EDITMSG` template, porcelain formats &mdash; see
   [PARITY.md](PARITY.md)) keeps git's wording even where it breaks
   these rules.
 
@@ -472,50 +472,50 @@ These terms are used consistently throughout the mkit
 documentation. When in doubt, link to the canonical definition (the
 relevant `SPEC-*.md` page) on first use.
 
-- **Object** — a content-addressed unit stored in the repository.
+- **Object** &mdash; a content-addressed unit stored in the repository.
   Subtypes are **blob**, **tree**, and **commit** (see
   [SPEC-OBJECTS](specs/SPEC-OBJECTS.md)).
-- **Digest** / **object ID** — the BLAKE3 hash that names an
+- **Digest** / **object ID** &mdash; the BLAKE3 hash that names an
   object. Always 32 bytes; rendered as bare 64-character lowercase
   hex with no prefix.
-- **Pack** — a single-file container holding many objects, used
+- **Pack** &mdash; a single-file container holding many objects, used
   for transport and on-disk storage (see
   [SPEC-PACKFILE](specs/SPEC-PACKFILE.md)).
-- **Index** — the staging area for the next commit, plus the
+- **Index** &mdash; the staging area for the next commit, plus the
   cache of file metadata that tracks the working tree (see
   [SPEC-INDEX](specs/SPEC-INDEX.md)).
-- **Ref** — a named pointer into the object graph, usually
+- **Ref** &mdash; a named pointer into the object graph, usually
   resolving to a commit (see [SPEC-REFS](specs/SPEC-REFS.md)).
-- **Working tree** — the user-visible files on disk that the
+- **Working tree** &mdash; the user-visible files on disk that the
   index and HEAD describe.
-- **Transport** — the protocol that moves packs between
+- **Transport** &mdash; the protocol that moves packs between
   repositories. mkit transports are `mkit+file`, `mkit+https`,
   `mkit+s3`, `mkit+ssh`, and `mkit+enc` (see
   [SPEC-TRANSPORT](specs/SPEC-TRANSPORT.md)).
-- **Signer** — a component that produces a signature over a payload
+- **Signer** &mdash; a component that produces a signature over a payload
   using a private key. Built-in signers live in `mkit-attest`;
   external signers (TPM, secure element, CTAP, file) live under
   `contrib/signers/` (see [SPEC-EXTERNAL-SIGNER](specs/SPEC-EXTERNAL-SIGNER.md)).
-- **Witness** — a third party that signs an attestation about a
+- **Witness** &mdash; a third party that signs an attestation about a
   commit or another artifact. Witness signatures are attached as
   additional DSSE signatures on the same envelope.
-- **Statement** — the in-toto v1 payload that an attestation
+- **Statement** &mdash; the in-toto v1 payload that an attestation
   describes (subject + predicate). See [SPEC-ATTESTATIONS](specs/SPEC-ATTESTATIONS.md).
-- **Envelope** — a Dead Simple Signing Envelope (DSSE) wrapping a
+- **Envelope** &mdash; a Dead Simple Signing Envelope (DSSE) wrapping a
   Statement, carrying one or more signatures.
-- **Predicate** — the payload type carried inside a Statement.
+- **Predicate** &mdash; the payload type carried inside a Statement.
   mkit is predicate-agnostic: any in-toto predicate URI is allowed.
-- **Crate** — a Rust compilation unit. mkit's Rust workspace
+- **Crate** &mdash; a Rust compilation unit. mkit's Rust workspace
   publishes several crates under `rust/crates/`.
-- **Library** — an overarching name for code that callers depend
+- **Library** &mdash; an overarching name for code that callers depend
   on as part of their applications. Examples: an mkit crate, an
   npm package, a system shared library.
-- **Archive** — a compressed bundle of files (a `.tar.gz`,
+- **Archive** &mdash; a compressed bundle of files (a `.tar.gz`,
   `.zip`, and so on). mkit release artifacts are archives.
-- **Bundle** — a self-contained release artifact that includes
+- **Bundle** &mdash; a self-contained release artifact that includes
   one or more packs plus a manifest. Distinct from a JavaScript
   bundle, which mkit does not produce.
-- **Golden vector** — a pinned input/output pair that locks a
+- **Golden vector** &mdash; a pinned input/output pair that locks a
   format. Golden vectors live under `rust/tests/golden/` and
   changing one is a breaking format change.
 
@@ -549,7 +549,7 @@ mkit-specific conventions on top of stock rustdoc:
 - **Intra-doc links**: link items with rustdoc's
   `` [`Type`] `` syntax (or `` [`crate::path::Type`] ``). Do not
   write raw `https://docs.rs/...` URLs when an intra-doc link
-  works — they outlive renames and `cargo doc` validates them.
+  works &mdash; they outlive renames and `cargo doc` validates them.
 - **Cross-crate links**: from a crate, link sibling crates by
   their published name (`` [`mkit_core::Object`] ``). rustdoc
   resolves these at build time.
@@ -610,8 +610,8 @@ unless the chart caption says otherwise.
 In Rust, the unit of async work is a **future**. A future is
 either:
 
-- **Pending** — the task has not produced a value yet.
-- **Ready** — the executor will, on the next poll, observe the
+- **Pending** &mdash; the task has not produced a value yet.
+- **Ready** &mdash; the executor will, on the next poll, observe the
   final value.
 
 On the receiving side:
@@ -633,7 +633,7 @@ For API documentation, the caller usually wants to know:
 
 - What the future resolves to.
 - What `Send`/`Sync` bounds it carries, if relevant.
-- Whether cancelling the future (dropping it before completion)
+- Whether canceling the future (dropping it before completion)
   is safe and what state it leaves behind.
 
 Typically write:

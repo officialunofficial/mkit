@@ -5,14 +5,14 @@ status: draft-normative
 audience: implementers of any lock-taking mkit-core/mkit-cli code path; reviewers of concurrency-sensitive changes
 ---
 
-# SPEC-CONCURRENCY — the total mkit lock order
+# SPEC-CONCURRENCY &mdash; the total mkit lock order
 
 Status: **Normative** for lock naming, location, and acquisition order.
 **Draft** because §3.1 documents an open coordination gap this document
 does not resolve. See SPEC-CONVENTIONS §2 for what draft/normative mean.
 
 Scope: this document is the single owner of the total lock order across
-*every* lock any mkit process takes — repo-local locks defined in
+*every* lock any mkit process takes &mdash; repo-local locks defined in
 SPEC-WORKTREE §4.3, the ref-history locks defined in `mkit-core::refs`,
 and the file-transport's own CAS lock defined in SPEC-TRANSPORT. Any
 other `SPEC-*.md` document that mentions a lock cross-references this
@@ -38,10 +38,10 @@ document points here.
 | `worktree.lock` | each tree's state dir | per-tree | that tree's worktree/index read-modify-write | SPEC-WORKTREE §4.3 |
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ref-write + history-MMR-append critical section for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
-| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.2 |
+| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own `Match` CAS critical section (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 
-The recovery log (`.mkit/recovery-log`) has **no dedicated lock** — see
+The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
 
 ## 3. Cross-subsystem interactions
@@ -50,7 +50,7 @@ The recovery log (`.mkit/recovery-log`) has **no dedicated lock** — see
 
 `<root>/.mkit/refs/.lock` (last row of §2) serializes the file
 transport's own `Match` CAS critical section against **other file
-transport instances pointed at the same root** — nothing more. It does
+transport instances pointed at the same root** &mdash; nothing more. It does
 not coordinate with `worktree.lock`, `worktrees.lock`, or
 `refs-history-<branch>.lock` in any way, because the file transport has
 no knowledge of those locks or of the `RepoLayout` abstraction they're
@@ -62,7 +62,7 @@ is *simultaneously* being served by `mkit serve` (a file-transport
 listener) over that same directory is not coordinated against by the
 transport's lock, and vice versa. mkit's supported deployment shape for
 the file transport is a bare/shared remote a worktree-owning process
-does not also mutate directly — see SPEC-TRANSPORT's scope note.
+does not also mutate directly &mdash; see SPEC-TRANSPORT's scope note.
 Running local worktree commands directly against a live `mkit serve`
 root is unsupported; nothing detects or rejects it.
 
@@ -75,15 +75,15 @@ dedicated lock of their own. Correctness instead relies on lock
 
 - Every producer (`commit --amend`, `reset`, `rebase`, `stash pop`)
   calls `record` while already holding *its own tree's* `worktree.lock`
-  — the same lock it took for the read-modify-write the recovery entry
+  &mdash; the same lock it took for the read-modify-write the recovery entry
   is about.
 - `mkit gc` calls `expire` while holding `worktrees.lock` **and every
   registered tree's `worktree.lock`** (SPEC-WORKTREE §4.3's holder
-  list) — a strict superset of any single producer's one lock.
+  list) &mdash; a strict superset of any single producer's one lock.
 
 Because gc's lock set always contains whichever single `worktree.lock`
 a producer would be holding, a producer's `record` append and gc's
-`expire` rewrite can never interleave — without a separate recovery-log
+`expire` rewrite can never interleave &mdash; without a separate recovery-log
 lock being necessary. `ops::recovery`'s module doc calls this "the repo
 lock" generically rather than naming a specific lock file, precisely
 because the guarantee comes from lock containment, not from a
@@ -94,7 +94,7 @@ dedicated primitive.
 `mkit-cli`'s `write_ref_recording_history` backfills a branch's
 history-MMR journal from the object store the first time a
 never-before-journaled branch is written (a v0.1.x-era repo enabling
-`history-mmr`, or a crash on a branch's first tracked write) — see
+`history-mmr`, or a crash on a branch's first tracked write) &mdash; see
 SPEC-HISTORY-PROOF §4.5.
 
 The empty-journal check and the backfill loop MUST both run *inside*
@@ -107,9 +107,9 @@ writer reopens the journal after acquiring the same lock and finds it
 already non-empty, skipping straight to its own append.
 
 Checking before the lock is acquired is insufficient: two ref-only
-writers on the same never-before-journaled branch — e.g. two
+writers on the same never-before-journaled branch &mdash; for example, two
 concurrent `update-ref` calls, which deliberately skip `worktree.lock`
-— could both observe an empty journal and both independently backfill,
+&mdash; could both observe an empty journal and both independently backfill,
 writing to overlapping journal leaf positions from two disagreeing
 in-memory MMR states (invariant INV-18).
 
@@ -123,14 +123,14 @@ worktrees.lock  ≺  per-tree worktree.lock(s)  ≺  refs-history-<branch>.lock(
 ```
 
 `refs-<ref>.lock` (the `cas_write` CAS lock) and
-`<root>/.mkit/refs/.lock` (the file-transport lock) are leaves — no
+`<root>/.mkit/refs/.lock` (the file-transport lock) are leaves &mdash; no
 documented code path takes either alongside any other lock in this
 table, so they have no ordering constraint relative to the chain above.
 
 Per-command lock sets (extends SPEC-WORKTREE §4.3's holder list with
 the history lock):
 
-| Command / path | Lock set, in acquisition order |
+| Command/path | Lock set, in acquisition order |
 |---|---|
 | `add`, `commit`, `merge`, `checkout`, `rebase`, `cherry-pick`, `revert`, `reset`, `restore`, `rm`, `mv`, `stash`, `sparse-checkout`, `update-ref` | this tree's `worktree.lock`, then (if the command moves a branch ref and history-mmr is enabled) that branch's `refs-history-<branch>.lock` |
 | `checkout`/`switch` (branch-checked-out-elsewhere guard), `branch -d`/`-m` | `worktrees.lock`, then (branch-moving forms) `refs-history-<branch>.lock` |
@@ -140,7 +140,7 @@ the history lock):
 
 A process that violates this order and blocks on two locks acquired in
 opposite order by two racing processes will each time out independently
-(`repo_lock`'s default 5s timeout) rather than deadlock indefinitely —
+(`repo_lock`'s default 5s timeout) rather than deadlock indefinitely &mdash;
 but SHOULD NOT rely on the timeout as a substitute for correct
 ordering; a timed-out multi-lock command leaves its already-acquired
 locks released (RAII drop) but may leave mid-sequence on-disk state

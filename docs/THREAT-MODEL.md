@@ -1,4 +1,4 @@
-# THREAT-MODEL — mkit security boundaries
+# THREAT-MODEL &mdash; mkit security boundaries
 
 Status: **Informative**. Companion document to `SECURITY.md` and the
 SPEC-* normative specs. Audience: integrators, auditors, and
@@ -18,7 +18,7 @@ mkit is a content-addressed VCS with cryptographic signing
 (`specs/SPEC-ATTESTATIONS.md`, `specs/SPEC-EXTERNAL-SIGNER.md`). mkit defends:
 
 - The integrity of objects, packs, refs, and attestations stored in a
-  repository — content addressing plus signed commits and DSSE
+  repository &mdash; content addressing plus signed commits and DSSE
   envelopes detect tampering.
 - The integrity of signatures produced by `mkit commit`, `mkit attest`,
   and external signers reachable through the documented protocol.
@@ -29,7 +29,7 @@ mkit does NOT defend:
 
 - The semantics of an attestation predicate. mkit moves bytes; the
   consumer decides what they mean.
-- Any property a signer chooses not to provide (e.g. timestamping
+- Any property a signer chooses not to provide (for example, timestamping
   unless the signer binds a transparency log entry).
 - The host kernel, the user's TTY, the user's shell history, or any
   other process running as the same UID as `mkit`.
@@ -48,7 +48,7 @@ across one of these lines MUST treat the input as untrusted.
 | Local user ↔ same-host other UID             | the running user      | other UIDs on the host                      |
 | Transport peer (network)                     | the peer the user     | every other host on the path                |
 |                                              | configured            |                                             |
-| Release pipeline runner                      | the workflow YAML     | any artefact a third-party action emits     |
+| Release pipeline runner                      | the workflow YAML     | any artifact a third-party action emits     |
 
 The "remote repo author" line is load-bearing. A user who runs
 `mkit clone` accepts the remote's content into the working tree;
@@ -59,7 +59,7 @@ file path, external signer binary, or trust-roots file.
 
 ## 3. Attacker models
 
-For each attacker we enumerate what mkit claims to defend and what
+For each attacker, this document enumerates what mkit claims to defend and what
 it does not. "Defend" means the design intends a security property
 and the implementation has tests or fuzz coverage backing it.
 
@@ -85,17 +85,17 @@ mkit defends:
   used, or what argv an external signer gets.
 - Unsigned/forged history on `clone`/`pull`/`fetch`. Every
   commit/remix/tag a fetch newly introduces is run through
-  `mkit_core::sign::{verify_commit,verify_remix,verify_tag}` — the same
-  check `mkit verify <rev>` runs manually — before the remote-tracking
+  `mkit_core::sign::{verify_commit,verify_remix,verify_tag}` &mdash; the same
+  check `mkit verify <rev>` runs manually &mdash; before the remote-tracking
   ref is published; a structurally invalid or missing signature aborts
   the fetch and leaves local state untouched (issue #692). This is a
   default, not a guarantee against every key an attacker could produce:
   it proves the signature is well-formed over the object's own bytes,
   not that the signing key is one the user trusts (no trust-root /
-  authorized-signer binding yet — separate follow-up work). Opt-out is
+  authorized-signer binding yet &mdash; separate follow-up work). Opt-out is
   explicit and user-scoped only (`--no-verify-signatures` / the
   user-scoped `pull.require_signed = false` config, never settable from
-  a cloned repo's own `.mkit/config` — see §4).
+  a cloned repo's own `.mkit/config` &mdash; see §4).
 
 mkit does NOT defend:
 
@@ -122,7 +122,7 @@ mkit defends:
   (submodules), unknown tree modes, duplicate/illegal tree entry
   names, negative or overflowing timestamps, oversized author
   payloads, and mkit-illegal ref names refuse per-ref with a warning
-  — a hostile object cannot silently produce a misleading mkit twin
+  &mdash; a hostile object cannot silently produce a misleading mkit twin
   (SPEC-GIT-IMPORT §3).
 - Translation provenance. Every translated commit/tag is signed by
   the local IMPORT key, original raw bytes are retained
@@ -147,10 +147,10 @@ mkit does NOT defend:
   imports faithfully.
 - SHA-1 strength beyond its locator role. Object identity inside
   mkit is BLAKE3; sha1 is a locator for the git side. Fork-audit
-  byte-checks (re-derivation + raw-bytes hashing) detect a swapped
+  byte-checks (re-derivation plus raw-bytes hashing) detect a swapped
   object for everything they check; sha1 collisions elsewhere are
   out of scope (SPEC-GIT-BRIDGE §14.3).
-- A user who shares the import key with an untrusted party — the
+- A user who shares the import key with an untrusted party &mdash; the
   designated-importer model (SPEC-GIT-IMPORT §4) makes that key the
   root of the imported history's authenticity.
 
@@ -168,7 +168,7 @@ mkit defends:
 
 mkit does NOT defend against:
 
-- A different-UID attacker who can read `/proc/<mkit-pid>/mem` (e.g.
+- A different-UID attacker who can read `/proc/<mkit-pid>/mem` (for example,
   Linux without `kernel.yama.ptrace_scope = 1`).
 
 ### 3.3 Local same-host attacker who later gains code execution as the user
@@ -190,9 +190,9 @@ Attacker is on the network path between the client and the remote.
 
 mkit defends:
 
-- HTTPS — via the system rustls trust store and TLS as configured
+- HTTPS &mdash; via the system rustls trust store and TLS as configured
   by the user.
-- SSH — via the user's `ssh(1)` configuration (see
+- SSH &mdash; via the user's `ssh(1)` configuration (see
   `SSH-SECURITY.md`). mkit does not implement its own SSH. A
   per-repo `ssh.user_known_hosts_file` and `ssh.identity_file`
   scoped to user config (§4) let a careful user pin trust without
@@ -206,15 +206,15 @@ mkit does NOT defend:
 #### 3.4.1 Encrypted transport (`mkit+enc://`) peer authentication
 
 The encrypted-stream transport uses two independent, *directional*
-authentication mechanisms — do not conflate them:
+authentication mechanisms &mdash; do not conflate them:
 
-- **Server-to-client** — the `?pubkey=<…>` value in the client's
+- **Server-to-client** &mdash; the `?pubkey=<…>` value in the client's
   `mkit+enc://<host>:<port>?pubkey=<key>` URL pins the **server's**
   static ed25519 key. The client's `dial` aborts the handshake if the
   remote's actual key does not match. This authenticates the SERVER to
   the CLIENT (there is no TOFU; see SPEC-TRANSPORT-ENC §1). It does
   **not** say anything about who the client is.
-- **Client-to-server** — authentication of the dialing client is the
+- **Client-to-server** &mdash; authentication of the dialing client is the
   job of the server's bouncer **allowlist**, not of `?pubkey=`. Issue
   #178 makes `mkit serve --listen-enc` **fail-closed**: it refuses to
   bind without an `--enc-authorized-peers` allowlist (or the explicit
@@ -226,14 +226,14 @@ authentication mechanisms — do not conflate them:
 
 The server identity is a stable key file (so pinned client `?pubkey=`
 values survive restarts) and the allowlist / identity key paths are
-user-scoped or CLI-only — never read from repo-local `.mkit/config`
+user-scoped or CLI-only &mdash; never read from repo-local `.mkit/config`
 (§4), so a hostile clone can neither authorize itself as a peer nor
 swap the server identity.
 
 ### 3.5 Compromised release pipeline runner
 
 Attacker has code execution on the GitHub Actions runner that
-produces release artefacts.
+produces release artifacts.
 
 mkit defends:
 
@@ -246,7 +246,7 @@ mkit defends:
 mkit does NOT defend:
 
 - A compromise of the GitHub Actions OIDC issuer or Sigstore root.
-  Defence is transitive.
+  Defense is transitive.
 
 ---
 
@@ -257,8 +257,8 @@ attacker model: a hostile clone can write `<repo>/.mkit/config` but
 it cannot write the user-scoped file at
 `$XDG_CONFIG_HOME/mkit/config` (`~/.config/mkit/config` by default).
 
-Security-sensitive keys — anything that selects a key path or an
-external process — live ONLY in user scope. A repo config that
+Security-sensitive keys &mdash; anything that selects a key path or an
+external process &mdash; live only in user scope. A repo config that
 attempts to set them is rejected with a warning; the value is
 ignored.
 
@@ -312,10 +312,10 @@ and SSH-bearing remotes.
 The gate is enforced at a single transport-dispatch choke point
 (`remote_dispatch::open_trusted`), which runs the per-endpoint check
 *before* it constructs any credential-bearing transport. The check is
-keyed on the **resolved endpoint plus its provenance** — `repo_chosen`
+keyed on the **resolved endpoint plus its provenance** &mdash; `repo_chosen`
 (selected by repo-scoped config: the flat `remote_endpoint` or a
 `remote.<name>.url` entry) versus user-chosen (user-scoped config or an
-explicit CLI argument) — never on a remote *name*. This means the same
+explicit CLI argument) &mdash; never on a remote *name*. This means the same
 fence applies uniformly whether the credential-bearing endpoint comes
 from the legacy single-remote field or from a named remote: a hostile
 clone cannot smuggle ambient credentials to a new host by hiding the
@@ -339,12 +339,12 @@ A user can override the path on the command line (`--trust-roots
 there is no repo config knob that sets it. Both commands additionally
 refuse an in-repo trust-roots path unless `--trust-roots` was passed
 explicitly (`warn_if_unsafe_trust_roots` in
-`rust/crates/mkit-cli/src/commands/trust_roots.rs`) — a hostile clone
+`rust/crates/mkit-cli/src/commands/trust_roots.rs`) &mdash; a hostile clone
 that ships `.mkit/trust-roots.toml` listing attacker keys cannot get it
 selected implicitly.
 
 Without `--trusted`, `mkit verify` proves only that the object's
-embedded `signer` produced its signature — it does not consult trust
+embedded `signer` produced its signature &mdash; it does not consult trust
 roots at all (SPEC-SIGNING §6.1). A signature from an unlisted,
 attacker-controlled key is indistinguishable from a trusted one unless
 the caller opts into `--trusted`. `mkit clone`/`pull`/`fetch` do not run
@@ -359,14 +359,14 @@ any verification by default; that remains a separate, tracked gap.
 | Format                  | raw 32-byte Ed25519 seed (no PEM, no DER, no password wrap in v1) |
 | Permissions             | mode `0600`, MUST be set on creation                              |
 | Owner                   | euid of the running process; mismatch is a hard failure           |
-| Open flag               | `O_NOFOLLOW` — symlink in the path is a hard failure              |
+| Open flag               | `O_NOFOLLOW` &mdash; symlink in the path is a hard failure              |
 | Parent directory        | `0700`, owner-checked                                             |
 | Write strategy          | tempfile in same directory, fsync, atomic rename, fsync of parent |
-| Zeroisation             | seed buffers scrubbed at generation and file-I/O boundaries       |
+| Zeroization             | seed buffers scrubbed at generation and file-I/O boundaries       |
 
 `KeyPair::generate` scrubs its local seed buffer after constructing the
 keypair. `KeyPair::from_seed` takes `[u8;32]`; callers that own long-lived
-secret buffers must use a zeroising owner before and after the call.
+secret buffers must use a zeroizing owner before and after the call.
 
 The same protections apply to the secp256k1 and P-256 key files
 selected via `attest.secp256k1_key_path` and `attest.p256_key_path`.
@@ -396,7 +396,7 @@ Security assumptions:
 - `software-raw:<label>` is the explicit raw-file compatibility backend. It
   keeps deterministic raw-key behavior for compatibility tests and migration
   workflows and is not the secure default.
-- macOS Keychain, Windows Credential Manager, Linux Secret Service, and
+- Linux Secret Service, macOS Keychain, Windows Credential Manager, and
   `systemd-creds` store extractable 32-byte signing secrets behind their
   platform protection boundary. They do not claim hardware binding,
   non-extractability, or user presence unless a future implementation changes
@@ -450,9 +450,9 @@ takes no defensive posture against them.
   and re-sign forward history.
 - A `.mkit/` directory served from a network filesystem (NFS, SMB/CIFS,
   or most FUSE-backed network mounts). Every fail-closed exclusion
-  guarantee that depends on `mkit-core::repo_lock` — including
+  guarantee that depends on `mkit-core::repo_lock` &mdash; including
   `SPEC-GC.md`'s GC-vs-writer guarantee and every lock in
-  `SPEC-CONCURRENCY.md`'s inventory — assumes `flock`/`fcntl` advisory
+  `SPEC-CONCURRENCY.md`'s inventory &mdash; assumes `flock`/`fcntl` advisory
   locking is coherent across all lock holders. That assumption holds on
   a local filesystem; it is **not guaranteed** on NFS (locking is
   commonly offloaded to an absent or inconsistent `rpc.statd`/NLM side
@@ -469,7 +469,7 @@ takes no defensive posture against them.
 
 ## 8. Verification gates
 
-The following tests, fuzz targets, and CI gates are how we keep this
+The following tests, fuzz targets, and CI gates keep this
 document honest. A change that weakens any of these requires a
 matching update here.
 
@@ -485,17 +485,17 @@ matching update here.
 - `cargo fuzz` targets cover delta decode, pack reader, the object
   deserializer, and the encrypted software key record parser (`docs/FUZZ.md`).
 - Integration tests assert that a hostile `<repo>/.mkit/config`
-  cannot set any user-scoped key (warning + ignored). Per-key
+  cannot set any user-scoped key (warning plus ignored). Per-key
   coverage lives in `rust/crates/mkit-cli/tests/repo_config_forbidden_keys.rs`,
   and the in-process meta-test
   `every_forbidden_key_is_actually_dropped_from_repo_scope` iterates
   the entire `REPO_FORBIDDEN_KEYS` list against a sentinel value.
   The exact stderr warning shape is pinned by an `insta` snapshot.
 - Integration tests assert key-file owner / mode / `O_NOFOLLOW`
-  behaviour and the atomic-write contract.
+  behavior and the atomic-write contract.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
-  jobs for macOS/Windows/Linux with opt-in live native-backend roundtrips,
+  jobs for Linux/macOS/Windows with opt-in live native-backend roundtrips,
   `cargo deny`, reproducible-build smoke, `mkit version` byte-exact assertion.
 
 ---

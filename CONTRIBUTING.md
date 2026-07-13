@@ -1,7 +1,7 @@
 # Contributing to mkit
 
-Thanks for taking the time. mkit is a security-sensitive project — a
-Git-like content-addressed VCS with cryptographic attestations — so
+Thanks for taking the time. mkit is a security-sensitive project &mdash; a
+Git-like content-addressed VCS with cryptographic attestations &mdash; so
 every contribution lands under the same review bar that the
 maintainers hold themselves to. This document describes that bar and
 how to clear it efficiently.
@@ -25,7 +25,7 @@ Advisories. Full policy: [SECURITY.md](SECURITY.md).
 | Attestations (in-toto v1, DSSE, signers) | `rust/crates/mkit-attest/` |
 | Transports | `rust/crates/mkit-transport-{memory,file,http,s3,ssh,enc}/` |
 | External signers (TPM, SE, CTAP, file) | `contrib/signers/` |
-| On-disk + wire format specs | `docs/specs/SPEC-*.md` |
+| On-disk plus wire format specs | `docs/specs/SPEC-*.md` |
 | Golden vectors | `rust/tests/golden/` |
 | Fuzz harness | `rust/fuzz/` |
 
@@ -43,7 +43,7 @@ cargo clippy --all-targets -- -D warnings    # CI-enforced
 ```
 
 `cargo t` shells out to `cargo nextest run` via the workspace
-`.cargo/config.toml` alias — nextest is up to 3× faster than the
+`.cargo/config.toml` alias &mdash; nextest is up to 3× faster than the
 in-process `cargo test` on the mkit workspace because each test runs
 in its own process. Install with `cargo install cargo-nextest --locked`
 if `cargo t` errors with "no such subcommand".
@@ -66,23 +66,23 @@ history:
 1. Reproduce the bug as a failing test (`cargo t` shows it red).
 2. Apply the fix.
 3. Re-run; test goes green.
-4. Commit test + fix together so the test's failing state is preserved
+4. Commit test plus fix together so the test's failing state is preserved
    in the diff context of the fix.
 
 Reviewers check this by running `git checkout <PR-parent> && cargo t
-<new-test-name>` — if the new test passes at the parent, the test
+<new-test-name>` &mdash; if the new test passes at the parent, the test
 doesn't actually demonstrate the bug.
 
 For new features (not bug fixes), tests aren't required to fail at any
-specific commit, but they MUST cover the documented behaviour. Three
+specific commit, but they MUST cover the documented behavior. Three
 test classes earn their keep:
 
-- **Example tests** (`#[test]`) — pin specific inputs/outputs; cite
+- **Example tests** (`#[test]`) &mdash; pin specific inputs/outputs; cite
   golden vectors where they exist.
-- **Property tests** (`proptest!`) — encode round-trip invariants. The
+- **Property tests** (`proptest!`) &mdash; encode round-trip invariants. The
   `serialize.rs` blob/commit round-trip and `chunker.rs` determinism
   property tests are the canonical examples.
-- **Snapshot tests** (`insta::assert_snapshot!`) — pin human-readable
+- **Snapshot tests** (`insta::assert_snapshot!`) &mdash; pin human-readable
   output (CLI, JSON envelopes, formatted text). Update with
   `cargo insta review` after deliberate output changes.
 
@@ -98,8 +98,8 @@ export RUSTC_WRAPPER=sccache                   # in your shell rc / .envrc
 ```
 
 CI does not currently use sccache (the GitHub Actions cache backend
-that powers `SCCACHE_GHA_ENABLED` has had transient outages we don't
-want to gate the build on). Local sccache still gives you faster
+that powers `SCCACHE_GHA_ENABLED` has had transient outages this
+project doesn't want to gate the build on). Local sccache still gives you faster
 incremental rebuilds.
 
 ### Workspace layout
@@ -107,10 +107,10 @@ incremental rebuilds.
 The Cargo workspace root is `rust/Cargo.toml`. Most crates live under
 `rust/crates/`. Three reference signers live outside the `rust/`
 tree under `contrib/signers/`, which is its own separate Cargo
-workspace (`contrib/signers/Cargo.toml`) — they are deliberately NOT
+workspace (`contrib/signers/Cargo.toml`) &mdash; they are deliberately NOT
 members of the `rust/` workspace and do NOT participate in
 `cargo {test,clippy,build} --workspace` from `rust/`. Build and test
-them on their own, e.g. `cargo test` from `contrib/signers/`. The
+them on their own, for example `cargo test` from `contrib/signers/`. The
 split exists because out-of-tree workspace members break release-plz
 publishing (#225), as noted in `rust/Cargo.toml`.
 
@@ -163,11 +163,11 @@ buf lint                                          # schema style/consistency
 buf breaking --against '.git#branch=main'         # wire-compat vs. main
 ```
 
-`mkit-rpc`'s protos are wire-frozen (v1 SPEC-RPC promise) — `buf
+`mkit-rpc`'s protos are wire-frozen (v1 SPEC-RPC promise) &mdash; `buf
 breaking`'s `FILE` category is the mechanical enforcement of that
 promise; a genuine break means a new `signer2.proto` /`ssh2.proto`
 sibling, not an edit in place. Generated Rust is vendored, not built
-fresh from `.proto` — see `rust/crates/mkit-rpc/README.md` and
+fresh from `.proto` &mdash; see `rust/crates/mkit-rpc/README.md` and
 `scripts/regen-rpc-proto.sh` / `scripts/regen-repo-proto.sh` after
 schema edits.
 
@@ -184,8 +184,8 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 | `CI: Docs` | every PR | rustdoc broken-link gate (`-D warnings`) |
 | `CI: Web` / `CI: MCP` | push/PR, path-filtered | run only when `apps/web/**` / `apps/mcp/**` change; each has an always-run gate job so a required check is always present |
 | `CI: Third-party notices` | push/PR, path-filtered | runs `cargo about generate` against `rust/about.toml`'s accepted-license policy when the dependency graph changes; same tool `Release: *`'s `third-party-notices` job uses to build `THIRD-PARTY-NOTICES` |
-| `CI: Buf` | every PR; push `main` | `buf lint` + `buf breaking` (via `bufbuild/buf-action`) against the repo-root `buf.yaml` workspace (all three proto modules). Unconditional — no path filter, no skip gate — so it can never read "skipped" as green. |
-| `Security: Rust` | PR, weekly, dispatch | `cargo audit` + `cargo deny` |
+| `CI: Buf` | every PR; push `main` | `buf lint` plus `buf breaking` (via `bufbuild/buf-action`) against the repo-root `buf.yaml` workspace (all three proto modules). Unconditional &mdash; no path filter, no skip gate &mdash; so it can never read "skipped" as green. |
+| `Security: Rust` | PR, weekly, dispatch | `cargo audit` plus `cargo deny` |
 | `Nightly: Fuzz` | scheduled, dispatch | fuzz harnesses |
 | `Release: *` | signed `v*` tag (or dispatch) | crates.io publish, binaries, MCP corpus seed |
 | `Meta: Actionlint` | push/PR | workflow lint |
@@ -193,13 +193,13 @@ the Actions tab self-groups: `CI:` (build/test/lint/coverage/docs), `Security:`,
 ¹ Path-filtered: a docs/MCP/web-only push to `main` doesn't trigger the full
 Rust matrix or coverage.
 
-The toolchain + protoc + cargo-cache setup shared by the Rust CI workflows is
-the `.github/actions/setup-rust` composite action — bump the pinned action SHAs
+The toolchain plus protoc plus cargo-cache setup shared by the Rust CI workflows is
+the `.github/actions/setup-rust` composite action &mdash; bump the pinned action SHAs
 or the protoc version there, in one place, rather than per workflow.
 
 ## Commit conventions
 
-We use [Conventional Commits](https://www.conventionalcommits.org/) with
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) with
 the scopes you'll see in `git log`. Common scopes: `core`, `attest`,
 `cli`, `transport`, `wasm`, `ci`, `docs`, `release`, `fuzz`, `metadata`.
 
@@ -218,11 +218,11 @@ body explains **why**, not what; `git diff` covers the latter.
 
 Every PR is held to:
 
-1. **Tests pass** — `cargo test --workspace` on Linux + macOS.
-2. **No new clippy warnings** — `clippy --all-targets -- -D warnings`.
-3. **Formatted** — `cargo fmt --check`.
-4. **No new RUSTSEC advisories** — `cargo deny check advisories`.
-5. **Spec changes are versioned** — anything that mutates an on-disk
+1. **Tests pass** &mdash; `cargo test --workspace` on Linux plus macOS.
+2. **No new clippy warnings** &mdash; `clippy --all-targets -- -D warnings`.
+3. **Formatted** &mdash; `cargo fmt --check`.
+4. **No new RUSTSEC advisories** &mdash; `cargo deny check advisories`.
+5. **Spec changes are versioned** &mdash; anything that mutates an on-disk
    or wire format requires a corresponding `docs/specs/SPEC-*.md` change
    and, where applicable, a new golden vector under
    `rust/tests/golden/`.
@@ -231,7 +231,7 @@ Every PR is held to:
 7. **Public API changes** require a CHANGELOG entry under the
    "Unreleased" heading and a SemVer impact note.
 
-## What we will not merge
+## What this project will not merge
 
 - Code that handles private key material without `Zeroize` on
   ephemeral buffers.
@@ -250,10 +250,10 @@ Every PR is held to:
 Bug reports should include:
 
 - mkit version (`mkit version`).
-- OS + arch (`uname -a` on \*nix).
+- OS plus arch (`uname -a` on \*nix).
 - Minimal reproduction (if it touches on-disk state, attach the repo
   with private material redacted).
-- Expected vs. observed behaviour.
+- Expected vs. observed behavior.
 
 Feature requests should include the user story and at least one
 alternative you considered.
@@ -266,7 +266,7 @@ Before requesting review:
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
 - [ ] `cargo t` (or `cargo nextest run --workspace`) passes
 - [ ] CHANGELOG entry under "Unreleased" if user-visible
-- [ ] Spec + golden vector updated if format changed
+- [ ] Spec plus golden vector updated if format changed
 - [ ] No new dependencies added without justification in the PR body
 - [ ] If this PR fixes a bug, a regression test demonstrating it lives
       in this diff (see "Test-first discipline" above)
@@ -281,7 +281,7 @@ additional terms or conditions), matching the project's outbound license.
 
 Do not include third-party code unless it is already licensed under
 MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, or another permissive
-license compatible with our dual-license — and preserve attribution.
+license compatible with the project's dual-license &mdash; and preserve attribution.
 
-We do not require a Developer Certificate of Origin (DCO) sign-off or a
+This project does not require a Developer Certificate of Origin (DCO) sign-off or a
 Contributor License Agreement (CLA).

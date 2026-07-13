@@ -1,4 +1,4 @@
-# ADR 0001 — Merkelize ChunkedBlob and Tree (identity = domain-bound BMT root)
+# ADR 0001 &mdash; Merkelize ChunkedBlob and Tree (identity = domain-bound BMT root)
 
 - Status: Accepted (pre-1.0, breaking, no migration)
 - Date: 2026-06-20
@@ -34,7 +34,7 @@ inclusion of any chunk/entry is provable and completeness is verifiable for free
   migration (pre-1.0). Old repos are rejected loudly at open via `.mkit/format`.
 - Only `commonware-codec` becomes non-optional in `mkit-core`. The BMT is **vendored** over
   `blake3` (`mkit-core/src/merkle.rs`) so `mkit-core` stays wasm32-clean; `commonware-storage`/
-  `-cryptography` are **dev-dependencies** — a byte-for-byte cross-check oracle, not runtime deps.
+  `-cryptography` are **dev-dependencies** &mdash; a byte-for-byte cross-check oracle, not runtime deps.
   Inclusion proofs are hand-rolled and **provisional** (no in-tree consumer; see
   `specs/SPEC-MERKLE-OBJECTS.md` §5). A `no_std` upstream `bmt` is tracked by commonwarexyz/monorepo#4090.
 - Golden vectors for Tree/ChunkedBlob (and git-bridge round-trips) are regenerated.
