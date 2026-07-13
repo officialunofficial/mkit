@@ -15,6 +15,17 @@
 # (`cd apps/web && bun install`) so protoc-gen-es is under
 # apps/web/node_modules/.bin.
 #
+# `--include-imports`: repo.proto imports mkit/common/v1/refs.proto (#679's
+# RefExpectation/RefEntry extraction), which lives in the repo-root `proto`
+# workspace module, not this one. Plain `buf generate` only emits output for
+# files in the target module, so without this flag the imported refs types
+# compile fine but never get a repo_pb.ts sibling — repo_pb.ts's `import
+# "../../common/v1/refs_pb"` then points at a file that doesn't exist. The
+# Rust codegen path (rust/crates/mkit-repo-client/build.rs) avoids this by
+# passing both proto files explicitly to connectrpc-build; buf's equivalent
+# is generating with imports included. refs.proto itself imports nothing
+# further, so this pulls in exactly the one extra file, not a wider tree.
+#
 # NOTE: only `protoc-gen-es` runs here — `@connectrpc/protoc-gen-connect-es`
 # (latest: 1.7.0) does not support Protobuf Editions yet, and repo.proto is
 # `edition = "2023"`. Connect-ES v2 doesn't need it anyway: protoc-gen-es
@@ -43,7 +54,7 @@ mkdir -p "$GEN_DIR"
 
 (
     cd apps/repo-worker
-    PATH="$(pwd)/../web/node_modules/.bin:$PATH" buf generate
+    PATH="$(pwd)/../web/node_modules/.bin:$PATH" buf generate --include-imports
 )
 
 echo "refreshed $GEN_DIR:"
