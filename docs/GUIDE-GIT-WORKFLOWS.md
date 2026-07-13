@@ -12,7 +12,7 @@ One model to keep in mind: an import is a **downstream fork**, not a
 mirror. Every translated commit is signed by a dedicated import key
 ("I vouch for this translation"); original git authorship rides in
 the author identity field, and the original git bytes are retained
-for audit. Hashes are a function of (upstream, import key) — same
+for audit. Hashes are a function of (upstream, import key) &mdash; same
 key, same upstream, same hashes, on any machine.
 
 ## 1. Migrate a git repository to mkit
@@ -26,18 +26,18 @@ $ mkit verify HEAD     # ordinary signed mkit history
 
 This initializes a fresh mkit repo in `repo/`, imports every branch
 and tag, and checks out the upstream default branch. From here it is
-a normal mkit repository — commit, branch, merge, push to mkit
+a normal mkit repository &mdash; commit, branch, merge, push to mkit
 remotes. The first import generates `.mkit/keys/git-import.key` with
 a loud notice; backups of that key matter if you ever want to reuse
 or share the import mapping (see §4).
 
 If the old repository keeps receiving pushes during a transition
-window, this is journey 2 — pull from it until the cutover, then
+window, this is journey 2 &mdash; pull from it until the cutover, then
 stop.
 
 Disk expectation: roughly 2–3× the upstream `.git` (a staging mirror
 under `.mkit/git/<name>/repo.git` plus the translated store). The
-staging mirror is durable state, not a cache — keep it.
+staging mirror is durable state, not a cache &mdash; keep it.
 
 ## 2. Track a git upstream
 
@@ -80,7 +80,7 @@ $ mkit git format-patch upstream/main..HEAD -o patches/
 0002-Extend-feature-file.patch
 ```
 
-The output is `git am`-able mbox — a maintainer on plain git applies
+The output is `git am`-able mbox &mdash; a maintainer on plain git applies
 it directly. Patches are text-only (binary changes refuse loudly)
 and merges are skipped; keep contribution branches linear.
 
@@ -92,7 +92,7 @@ $ mkit git export --passthrough --remote-name upstream git@github.com:you/repo.g
 
 Fork mode (SPEC-GIT-BRIDGE §14) re-emits imported objects as their
 ORIGINAL git sha1s and bridge-translates only your native commits on
-top. The pushed branch sits directly on the upstream's own commits —
+top. The pushed branch sits directly on the upstream's own commits &mdash;
 merge bases exist, diffs show only your work, and the GitHub PR flow
 works. `--remote-name` must be the state that imported the upstream
 (its map carries the original objects); the state's direction
@@ -105,15 +105,15 @@ all referenced content from the mkit twins (§14.3).
 
 ### What is refused, and why
 
-- **Plain `mkit git export` toward an imported-from upstream** — the
+- **Plain `mkit git export` toward an imported-from upstream** &mdash; the
   origin guard (§14.2). A plain export is a fresh translation that
   shares no sha1s with the upstream; pushing it there would replace
   the upstream's history with a disconnected mirror that happens to
   pass its lease. Passthrough through the importing state is the
   supported path.
 - **Passthrough through a different state than the one that imported
-  the destination** — same disconnection, same guard.
-- **Native `mkit push`/`pull` against `git+…` remotes** — the
+  the destination** &mdash; same disconnection, same guard.
+- **Native `mkit push`/`pull` against `git+…` remotes** &mdash; the
   dispatch matrix points at `mkit git` commands; the object models
   do not interoperate silently.
 
@@ -125,7 +125,7 @@ and upstream reproduces identical mkit hashes independently. Without
 it they produce an unrelated fork (and `mkit git fetch` refuses a
 mismatched key against pinned state). The usual setup is one
 designated importer (a person or CI job) whose imported history
-everyone else pulls over normal mkit transport — see SPEC-GIT-IMPORT
+everyone else pulls over normal mkit transport &mdash; see SPEC-GIT-IMPORT
 §4 before sharing key material.
 
 ## 5. State, recovery, and hygiene
@@ -135,8 +135,8 @@ mirror (durable), the blake3↔sha1 map (rebuildable cache), recorded
 ref state, direction/source/dest/key bindings, and retained raw git
 bytes (`raw/`, audit evidence). An interrupted import/fetch leaves a
 crash marker; the next run discards the map cache and re-translates
-every ref from scratch (recorded ref state is kept — it carries tag
-ownership and prune memory) — determinism makes the rebuild exact,
+every ref from scratch (recorded ref state is kept &mdash; it carries tag
+ownership and prune memory) &mdash; determinism makes the rebuild exact,
 including for fork-mode state. A missing or corrupt map without a
 marker triggers the same rebuild.
 

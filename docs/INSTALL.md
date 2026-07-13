@@ -19,13 +19,13 @@ verify the result.
 
 | Use case                              | Channel                              | Command                                                                                              |
 |---------------------------------------|--------------------------------------|------------------------------------------------------------------------------------------------------|
-| CLI on a dev machine (macOS/Linux)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
+| CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CLI on a dev machine (Windows)        | Release archive (PowerShell installer) | `irm https://mkit.sh/install.ps1 \| iex` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
-Pick the leftmost channel that satisfies your constraints — release
+Pick the leftmost channel that satisfies your constraints &mdash; release
 archives are the lowest-overhead path for end users, source builds the
 right answer for contributors and air-gapped CI.
 
@@ -64,13 +64,13 @@ cargo test --workspace       # all crates, all tests
 | Crate                                | Role                                                       |
 |--------------------------------------|------------------------------------------------------------|
 | `mkit-core`                          | object model, store, chunker, packs, refs, transports, ops |
-| `mkit-attest`                        | DSSE + in-toto v1, multi-algo signers                      |
-| `mkit-keystore`                      | key vault interface + backends                             |
+| `mkit-attest`                        | DSSE plus in-toto v1, multi-algo signers                      |
+| `mkit-keystore`                      | key vault interface plus backends                             |
 | `mkit-git-bridge`                    | git import/export bridge                                   |
 | `mkit-rpc`                           | shared stdio framing for subprocess protocols              |
 | `mkit-cli`                           | the `mkit` binary                                          |
 | `mkit-transport-{memory,file,http,s3,ssh}` | one crate per transport scheme                       |
-| `mkit-transport-enc`                 | mkit+enc:// encrypted transport                            |
+| `mkit-transport-enc`                 | `mkit+enc://` encrypted transport                          |
 | `mkit-wasm`                          | wasm-bindgen surface for browsers / Workers (npm-only, not on crates.io) |
 
 ## From GitHub Releases
@@ -80,12 +80,12 @@ strict-semver `v*.*.*` tags after verifying the tag is an annotated GPG-signed
 tag from an allowlisted release signer and points at a commit reachable from
 `main`. It then produces a per-target archive plus signing material:
 
-- `mkit-<version>-<target>.tar.gz` (or `.zip` for Windows) — the archive
+- `mkit-<version>-<target>.tar.gz` (or `.zip` for Windows) &mdash; the archive
   (binary, licenses, README, optional changelog, `share/man/man1/mkit.1`,
   shell completions, and per-archive `SHA256SUMS`).
-- `mkit-<version>-<target>.tar.gz.sha256` — archive-level checksum.
-- `mkit-<version>-<target>.tar.gz.cosign.bundle` — keyless OIDC
-  signature (Sigstore Fulcio + Rekor).
+- `mkit-<version>-<target>.tar.gz.sha256` &mdash; archive-level checksum.
+- `mkit-<version>-<target>.tar.gz.cosign.bundle` &mdash; keyless OIDC
+  signature (Sigstore Fulcio plus Rekor).
 
 Targets shipped today:
 
@@ -93,12 +93,12 @@ Targets shipped today:
 - `x86_64-apple-darwin` (macOS, Intel)
 - `x86_64-unknown-linux-gnu` (Linux x86_64)
 - `aarch64-unknown-linux-gnu` (Linux arm64)
-- `x86_64-pc-windows-msvc` (Windows x86_64) — `.zip` archive, `mkit.exe`,
+- `x86_64-pc-windows-msvc` (Windows x86_64) &mdash; `.zip` archive, `mkit.exe`,
   built with the `backend-windows-credential` keystore backend (Windows
   Credential Manager) enabled.
 
 If you want "latest", use the hosted installer for your platform:
-`curl mkit.sh | sh` (macOS/Linux; or the explicit
+`curl mkit.sh | sh` (Linux/macOS; or the explicit
 `curl -sSfL https://mkit.sh/install.sh | sh`), or
 `irm https://mkit.sh/install.ps1 | iex` (native Windows PowerShell). Either
 resolves the current tag, fetches the matching archive for your platform,
@@ -107,7 +107,7 @@ a pinned artifact.
 
 > [!NOTE]
 > Like any `curl | sh` (or `irm | iex`), the *installer script* is trusted
-> on download — cosign verifies the downloaded **binary**, not the script
+> on download &mdash; cosign verifies the downloaded **binary**, not the script
 > itself. Both scripts are served over HTTPS from `mkit.sh`;
 > `https://mkit.sh/install.sh` / `https://mkit.sh/install.ps1` and the
 > byte-identical
@@ -115,7 +115,7 @@ a pinned artifact.
 > [`raw.githubusercontent.com/.../main/install.ps1`](https://raw.githubusercontent.com/officialunofficial/mkit/main/install.ps1)
 > are the same files. If you'd rather not trust the hosted script, read it
 > first (`curl -sSfL https://mkit.sh/install.sh | less`) or skip it and use
-> the pinned release + cosign steps below.
+> the pinned release plus cosign steps below.
 
 **Download a pinned release for your platform:**
 
@@ -225,18 +225,18 @@ export default {
 External signers are separate binaries that mkit drives over the
 [v1 stdio protocol](specs/SPEC-EXTERNAL-SIGNER.md). Wire one up with
 `attest.external_signer_path` in `.mkit/config`. Each signer ships its
-own README with setup, hardware notes, and troubleshooting — the lines
+own README with setup, hardware notes, and troubleshooting &mdash; the lines
 below cover only how to install the binary.
 
 The signer crates live under
 [`contrib/signers/`](../contrib/signers/), outside the top-level
 Cargo workspace at `rust/`. They inherit workspace settings via
 `workspace = "../../../rust"` in their own `Cargo.toml`, so the
-canonical install path is `git clone` + `cargo install --path .` from
+canonical install path is `git clone` plus `cargo install --path .` from
 the signer directory rather than `cargo install --git URL --bin …`
 against the repository root.
 
-### `mkit-sign-file` — file-backed reference (any platform)
+### `mkit-sign-file` &mdash; file-backed reference (any platform)
 
 Pure software signer for development and as the wire-protocol contract
 test:
@@ -249,7 +249,7 @@ cargo install --path .
 
 See [`contrib/signers/mkit-sign-file`](../contrib/signers/mkit-sign-file).
 
-### `mkit-sign-se` — Apple Secure Enclave (macOS, Swift)
+### `mkit-sign-se` &mdash; Apple Secure Enclave (macOS, Swift)
 
 P-256 only, optional biometric gate:
 
@@ -262,7 +262,7 @@ cp .build/release/mkit-sign-se /usr/local/bin/
 Setup, biometric notes, and `attest.external_signer_path` wiring live
 in [`contrib/signers/mkit-sign-se/README.md`](../contrib/signers/mkit-sign-se/README.md).
 
-### `mkit-sign-tpm` — TPM 2.0 persistent handle (Linux / Windows)
+### `mkit-sign-tpm` &mdash; TPM 2.0 persistent handle (Linux/Windows)
 
 P-256, talks to the platform TPM via `tss-esapi`:
 
@@ -279,7 +279,7 @@ the binary builds without `--features tpm2` for tooling/CI checks
 only. Full requirements and `swtpm` test recipe in
 [`contrib/signers/mkit-sign-tpm/README.md`](../contrib/signers/mkit-sign-tpm/README.md).
 
-### `mkit-sign-ctap` — FIDO2 / WebAuthn over CTAP-HID
+### `mkit-sign-ctap` &mdash; FIDO2 / WebAuthn over CTAP-HID
 
 P-256, speaks Protocol **v1.1** (WebAuthn wrapping mode); works with
 YubiKey, Nitrokey, SoloKey, etc.:
@@ -305,7 +305,7 @@ mkit 0.3.0
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
 contract-tested in
 [`.github/workflows/rust.yml`](../.github/workflows/rust.yml) under the
-`Version contract` step — if you ever see anything else, the binary
+`Version contract` step &mdash; if you ever see anything else, the binary
 on your `PATH` is not a release build of this repo.
 
 Run `mkit --help` to enumerate subcommands, then jump into the
@@ -324,9 +324,9 @@ mkit self update --version v0.4.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform and
-verifies the **mkit-native release attestation** — a DSSE/in-toto
+verifies the **mkit-native release attestation** &mdash; a DSSE/in-toto
 envelope over the archives' BLAKE3 digests, signed by the release key
-whose public half is embedded in your binary — entirely in-process
+whose public half is embedded in your binary &mdash; entirely in-process
 (no `cosign` needed, unlike the install script). It refuses silent
 downgrades, swaps the binary atomically, and rewrites the same
 receipts `install.sh` writes, so the two stay interchangeable.

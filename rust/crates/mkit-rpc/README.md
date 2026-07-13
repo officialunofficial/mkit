@@ -9,12 +9,12 @@ length-prefixed framing.
 `mkit-rpc` owns the schemas mkit uses to talk to processes outside its own
 address space:
 
-- **External signers** (`signer.proto`) — `mkit-cli` ↔ a subprocess signer
+- **External signers** (`signer.proto`) &mdash; `mkit-cli` ↔ a subprocess signer
   (file, `FIDO2`, TPM, future hardware backends). See
   `docs/specs/SPEC-EXTERNAL-SIGNER.md` and `contrib/signers/README.md`.
-- **SSH transport** (`ssh.proto`) — `mkit-cli` ↔ a remote `mkit-server` over
+- **SSH transport** (`ssh.proto`) &mdash; `mkit-cli` ↔ a remote `mkit-server` over
   an `ssh(1)` child process. See `docs/specs/SPEC-TRANSPORT.md`.
-- **Signature verification** (`verify.proto`) — the `VerifyRequest`/
+- **Signature verification** (`verify.proto`) &mdash; the `VerifyRequest`/
   `VerifyResponse` contract `mkit clone`/`pull`/`fetch` check every
   newly-fetched commit/remix/tag against (issue #692). Message-only today
   (no bound RPC method): `mkit-cli`'s local dispatch
@@ -24,8 +24,8 @@ address space:
   (`apps/repo-worker`) can bind the identical check to a service method
   instead of reimplementing it.
 
-Shared vocabulary (`common.proto`) — algorithms, key forms, error codes,
-protocol-version negotiation — is re-exported at the crate root for
+Shared vocabulary (`common.proto`) &mdash; algorithms, key forms, error codes,
+protocol-version negotiation &mdash; is re-exported at the crate root for
 convenience.
 
 ## Wire framing

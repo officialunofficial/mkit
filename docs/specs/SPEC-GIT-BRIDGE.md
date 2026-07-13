@@ -5,7 +5,7 @@ status: draft-normative
 audience: implementers of the mkit→git export bridge and its verifiers
 ---
 
-# SPEC-GIT-BRIDGE — deterministic mkit→git translation (v1)
+# SPEC-GIT-BRIDGE &mdash; deterministic mkit→git translation (v1)
 
 Status: **Normative** for the mkit→git export direction.
 Scope: the byte-level mapping from mkit v1 objects (SPEC-OBJECTS) to
@@ -70,7 +70,7 @@ with a new mapping section; they do not alter the v1 mapping.
 ### 1.4 Determinism requirement
 
 Every choice in this mapping is a pure function of the source object
-bytes — except in **fork (passthrough) mode** (§14), where the output
+bytes &mdash; except in **fork (passthrough) mode** (§14), where the output
 is a pure function of *(mkit store, import map)*: the import map is
 itself deterministic given the importer key and upstream bytes
 (SPEC-GIT-IMPORT §1.2), but exporters without that import state MUST
@@ -104,7 +104,7 @@ git blob body = the mkit blob's `data` bytes, verbatim.
 
 A plain blob whose `data` exceeds the 1 MiB chunking threshold MUST
 be refused: a conformant writer stores such content chunked, and §9's
-reconstruction would re-chunk it into a manifest — the round trip
+reconstruction would re-chunk it into a manifest &mdash; the round trip
 would not be bit-exact. (This is the plain-blob mirror of §4 item 2;
 non-default-threshold writers are out of v1 scope.)
 
@@ -125,7 +125,7 @@ round-trips bit-exactly **iff** the source manifest is exactly what a
 conformant mkit writer produces. A bridge MUST therefore refuse, with
 an actionable error naming the object, any manifest that:
 
-1. has `chunk_size != 0` (fixed-size chunking — legal under
+1. has `chunk_size != 0` (fixed-size chunking &mdash; legal under
    SPEC-OBJECTS §7, never emitted by mkit writers, no general
    inverse);
 2. has `total_size` at or below the 1 MiB chunking threshold (a
@@ -208,11 +208,11 @@ headers appear in mkit parent order (which always matches the `parent`
 line order). `mkit-message-hash` / `mkit-content-digest` are emitted
 iff the corresponding 32-byte slot is non-zero (SPEC-OBJECTS §5.1
 defines zero as "absent"). All other `mkit-*` headers are always
-emitted — including an all-zero `mkit-signature` (the object layer
+emitted &mdash; including an all-zero `mkit-signature` (the object layer
 accepts unsigned commits structurally; the bridge translates what is
 stored and never invents or strips signatures).
 
-Header values are lowercase hex or base64 (§6.3) — never raw bytes —
+Header values are lowercase hex or base64 (§6.3) &mdash; never raw bytes &mdash;
 so no value can contain `\n` and header continuation lines are never
 produced. Git preserves unknown commit headers through object
 transfer, which is the property this carrier relies on; porcelain
@@ -221,7 +221,7 @@ drops them, which is consistent with the mirror model: the mkit side
 is primary, and a git-side rewrite produces commits that are simply
 not bridge-translated objects.
 
-The message is the mkit commit's `message` bytes verbatim — no
+The message is the mkit commit's `message` bytes verbatim &mdash; no
 trailing-newline normalization, no trailer injection. (mkit messages
 are length-prefixed, so an empty message is representable; the git
 body after the blank separator line is then empty.)
@@ -245,8 +245,8 @@ normative because it is part of the hashed git bytes.
 - name, by identity kind:
   - `ed25519` (0x01): `mkit:ed25519:` + 64 lowercase hex of the key.
   - `did_key` (0x02): `did:key:` + the payload bytes verbatim
-    (conformant readers validate the payload as printable ASCII —
-    `Identity::is_valid` in mkit-core — and multibase text cannot
+    (conformant readers validate the payload as printable ASCII &mdash;
+    `Identity::is_valid` in mkit-core &mdash; and multibase text cannot
     contain `<` `>`; if a payload nevertheless contains a forbidden
     byte, fall through to the opaque rule below applied to the
     payload).
@@ -305,8 +305,8 @@ preserves the distinction (`05`) for reconstruction.
 
 The git `tag` header value cannot contain `\n`. mkit tag-object
 names only exclude `{0x00, '/', '\\'}` (SPEC-OBJECTS §6a), so the
-bridge MUST refuse — for **every** translated tag object, however it
-is referenced — a name that is not a single mkit ref *segment*
+bridge MUST refuse &mdash; for **every** translated tag object, however it
+is referenced &mdash; a name that is not a single mkit ref *segment*
 satisfying all of: the SPEC-REFS §3 segment charset
 (`[0-9A-Za-z._-]`), not `.` / `..` / `HEAD`, no `.lock` suffix, and
 the git-side dot rules of §12.1. In practice every tag reachable from
@@ -315,7 +315,7 @@ the check exists for tag objects referenced any other way.
 
 ---
 
-## 8. Remix (`0x04`) — refused, carrier reserved
+## 8. Remix (`0x04`) &mdash; refused, carrier reserved
 
 Translating remixes is **deliberately out of scope for v1**. The
 mapping is tractable (a remix is structurally a commit plus a sorted
@@ -341,7 +341,7 @@ rather than a breaking change to the v1 mapping.
 Reconstruction maps a bridge-emitted git object back to exact mkit v1
 object bytes. It exists so verifiers can check the §1.1 lossless
 claim and re-verify carried signatures; it is **not an import path**
-— it is only defined on objects the §3–§7 mapping can emit, and MUST
+&mdash; it is only defined on objects the §3–§7 mapping can emit, and MUST
 fail loudly on anything else (missing `mkit-*` headers, unknown
 headers in the `mkit-*` namespace, a `tag`/`commit` without
 `mkit-schema`, git modes with no mkit equivalent such as `160000`,
@@ -374,7 +374,7 @@ translated history is mkit-side, in two pinned modes:
 
 **Shallow (default).** For a single git commit/tag, rebuild the mkit
 signing bytes (SPEC-SIGNING §3/§4a) directly from the carried
-headers + message + timestamp — this requires no other objects — and
+headers + message + timestamp &mdash; this requires no other objects &mdash; and
 check the Ed25519 signature (`verify_strict`) under the appropriate
 domain. Shallow verification proves the carried fields are exactly
 what the original signer signed; it does *not* prove the surrounding
@@ -401,7 +401,7 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
   `https://github.com/officialunofficial/mkit/spec/predicate/git-bridge/v1`
   (the SPEC-ATTESTATIONS §6.4 project-controlled URI scheme).
 - `subject[0]`: `name` = the full mkit ref name; `digest` =
-  `{"blake3": "<64hex mkit hash of the ref head — a commit, or a tag
+  `{"blake3": "<64hex mkit hash of the ref head &mdash; a commit, or a tag
   object for annotated-tag refs>"}`. The git-side id rides in
   the predicate, not the subject: SPEC-ATTESTATIONS's v1 Statement
   encoder is deliberately blake3-only, and the SHA-1 is a locator,
@@ -422,14 +422,14 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
 ```
 
   Field semantics: `gitCommit` locates the translated head on the
-  mirror (locator, never a proof — §2; for annotated-tag refs it is
-  the SHA-1 of the translated git *tag object* — the field name stays
+  mirror (locator, never a proof &mdash; §2; for annotated-tag refs it is
+  the SHA-1 of the translated git *tag object* &mdash; the field name stays
   for predicate stability); `mirror` is the git remote
   the head was exported to, as configured (a locator, not an identity
   claim); `refName` is the full mkit ref whose head is attested;
   `schemaVersion` is the mkit object `schema_version` the translated
   history carries (§1.2); `specVersion` is the version of this
-  predicate's own shape, i.e. the `git-bridge/v1` definition.
+  predicate's own shape, that is, the `git-bridge/v1` definition.
 
 The attestation is signed with the exporter's configured signer
 (SPEC-ATTESTATIONS signer plumbing, unchanged). An exporter MAY skip
@@ -437,16 +437,16 @@ attestation minting when explicitly requested (no key material is
 consulted in that case); a mirror without bridge attestations is
 merely unattested, not invalid. Exporters SHOULD also skip re-minting
 for a head whose recorded exported state is unchanged and whose claim
-is already published — fresh envelopes for old claims add no
+is already published &mdash; fresh envelopes for old claims add no
 information and (with nondeterministic signature schemes) would grow
 the published set on every run. **Distinguishability
 from author signatures comes from the predicate type and the DSSE
-keyid — not from a signing domain.** Verifier guidance: a
+keyid &mdash; not from a signing domain.** Verifier guidance: a
 `git-bridge/v1` attestation asserts "this exporter translated this
 mkit commit to this git commit", never authorship of the content.
 
 git-bridge/v1 attestations are minted **only for heads this bridge
-translated** — a fork-mode head whose tip is a passthrough (original
+translated** &mdash; a fork-mode head whose tip is a passthrough (original
 upstream) commit gets no translation claim (its provenance is the
 import side's git-import/v1 attestation); a fork-mode head whose tip
 is a bridge-translated local commit is attested as usual.
@@ -456,16 +456,16 @@ Bridge attestations are stored like any attestation
 git mirror under the ref `refs/mkit/attestations` as a flat tree:
 one entry per published envelope, name = `<64hex attestation
 id>.dsse` (the BLAKE3 of the envelope bytes, matching the local
-store's naming — naming by git sha would collide when two refs share
+store's naming &mdash; naming by git sha would collide when two refs share
 a head), content = the DSSE envelope bytes, committed by a synthetic
 commit whose author/committer line is the fixed string
 `mkit-git-bridge <bridge@mkit.invalid> <ts> +0000` with `<ts>` = the
 newest exported head's timestamp (deterministic; deliberately not
-the exporter's identity — the envelopes inside the tree carry the
+the exporter's identity &mdash; the envelopes inside the tree carry the
 signed identity claims). Consumers locate a head's attestations by
 the `gitCommit` field inside the envelopes' predicates. Note for
 consumers: non-standard ref namespaces are not fetched by `git
-clone` defaults — document the explicit refspec
+clone` defaults &mdash; document the explicit refspec
 (`+refs/mkit/attestations:refs/mkit/attestations`).
 
 **Multi-exporter limitation.** The attestations ref forms a linear
@@ -491,7 +491,7 @@ segment starting with `.`) are *mostly* but not entirely git-legal. The
 bridge MUST refuse (per-ref, same granularity as §8) any ref name where
 a segment:
 
-- ends with `.` (git rejects; mkit allows a trailing dot — only a
+- ends with `.` (git rejects; mkit allows a trailing dot &mdash; only a
   *leading* dot is mkit-illegal too, per SPEC-REFS §3), or
 - contains `..` anywhere (git rejects; mkit allows `a..b`).
 
@@ -509,13 +509,13 @@ internal state are never exported.
 - Exports are **incremental**: objects already present in the mirror
   (by SHA-1) are not rewritten; ref updates use git's compare-and-swap
   (`--force-with-lease=<ref>:<expected>` against the last value this
-  bridge state recorded, or — when no state is recorded for a ref —
+  bridge state recorded, or &mdash; when no state is recorded for a ref &mdash;
   against the mirror's current value observed via `ls-remote`, which
   is what keeps wiped state rebuildable, §12.3). The push is
   `--atomic`: either every ref in the export lands or none does, so
   recorded state can never go stale for a subset of refs.
   **Threat note:** this presence check trusts the mirror's own SHA-1
-  namespace — consistent with §2's "SHA-1 is a locator, never a
+  namespace &mdash; consistent with §2's "SHA-1 is a locator, never a
   proof" doctrine, a consumer of the mirror who does not independently
   re-verify against the signed `git-bridge/v1` attestation (§11) is
   trusting whatever bytes the mirror happens to have at that SHA-1,
@@ -545,7 +545,7 @@ The blake3↔sha1 map and per-ref last-exported state live under
 explicitly non-normative). Because translation is deterministic, the
 cache is disposable: deleting it and re-deriving from the object
 store MUST yield identical mappings **for every object still in the
-store**. Entries for objects that `mkit gc` has since pruned (e.g.
+store**. Entries for objects that `mkit gc` has since pruned (for example,
 rewritten-away commits past the recovery window) remain permanently
 correct but are not re-derivable; their loss is harmless because
 nothing in the store references them. Implementations MUST treat
@@ -556,7 +556,7 @@ recorded expectation the bridge seeds the lease from the mirror's
 observed value, so deleting the whole state directory and
 re-exporting against the same mirror works. The state directory is
 bound to one destination (recorded at first export); pointing the
-same `--remote-name` at a different mirror is refused — use one
+same `--remote-name` at a different mirror is refused &mdash; use one
 state name per mirror.
 
 ---
@@ -612,7 +612,7 @@ plain export, normatively:
 - The state dir is not dest-bound: each push records the destination
   informationally only, and the lease expectation comes from a FRESH
   `ls-remote` observation of that destination (an absent ref means
-  "must not exist" — recorded leases from other destinations never
+  "must not exist" &mdash; recorded leases from other destinations never
   apply).
 - An observation-seeded lease passes unconditionally, so fork-mode
   push MUST be fast-forward-only: for every branch, the observed
@@ -631,7 +631,7 @@ Consequences, all normative:
 - Local trees reuse original sha1s for any imported child object
   (blobs, subtrees) via the same rule, so unchanged content keeps
   upstream ids exactly as plain git would.
-- Imported chunked manifests passthrough as the ORIGINAL blob sha1 —
+- Imported chunked manifests passthrough as the ORIGINAL blob sha1 &mdash;
   flattening never runs, so chunk-boundary exactness is structural.
 
 ### 14.2 Origin guard
@@ -658,7 +658,7 @@ segment is not bridge-shaped). The pinned third verification mode,
    checks its importer signature against the pinned importer key
    (SPEC-GIT-IMPORT §4), and checks the retained raw bytes hash to
    the claimed sha1; for imported ref TIPS it additionally requires a
-   recorded `git-import/v1` attestation (head-scoped — §5 of
+   recorded `git-import/v1` attestation (head-scoped &mdash; §5 of
    SPEC-GIT-IMPORT mints per head; per-commit envelope verification
    is `verify-attest`'s job);
 3. for imported trees/blobs referenced by bridge objects: re-derives

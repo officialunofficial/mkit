@@ -44,18 +44,19 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI runs the above matrix on ubuntu-latest + macos-latest
+CI runs the above matrix on ubuntu-latest and macos-latest
 (`.github/workflows/rust.yml`). A weekly job runs `cargo audit` and
-`cargo deny check` (`.github/workflows/rust-security.yml`). A
-reproducible-build smoke test diffs two sequential release builds
-(`.github/workflows/reproducible-build.yml`).
+`cargo deny check` (`.github/workflows/rust-security.yml`). Release
+binaries are independently reproducible from the pinned toolchain and
+`Cargo.lock`; see [Reproducibility](../docs/RELEASE.md#reproducibility)
+for the verification steps.
 
 ## Contracts
 
-- Every on-disk / wire byte is pinned by golden vectors under
+- Every on-disk/wire byte is pinned by golden vectors under
   `tests/golden/`. Any change must update both the vector and the
   relevant `docs/specs/SPEC-*.md` in the same PR.
-- `mkit version` emits exactly `mkit <X.Y.Z>\n` — asserted by both a
+- `mkit version` emits exactly `mkit <X.Y.Z>\n` &mdash; asserted by both a
   snapshot test in `crates/mkit-cli/tests/version_snapshot.rs` and a CI
   step that runs the release binary.
 - Fuzz harnesses enforce the six guardrails documented in

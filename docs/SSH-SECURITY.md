@@ -92,7 +92,7 @@ ssh -o StrictHostKeyChecking=yes \
     user@host mkit serve /path
 ```
 
-A per-repo known-hosts file lets you scope trust to a specific remote —
+A per-repo known-hosts file lets you scope trust to a specific remote &mdash;
 if the upstream's host key rotates, only pushes from this repo are
 affected, not every SSH session on your machine.
 
@@ -100,14 +100,14 @@ affected, not every SSH session on your machine.
 
 ## 4. Known limitations
 
-- **No native SSH.** We do not ship a libssh2-style in-process client,
-  and we do not implement the SSH transport from scratch. This keeps
+- **No native SSH.** mkit does not ship a libssh2-style in-process client,
+  and does not implement the SSH transport from scratch. This keeps
   the mkit binary small and compliance with the host's crypto policy
   transitive; it also means every SSH surface area (algorithm choice,
   agent behavior, quirks with specific OpenSSH versions) is out of
   mkit's control.
 - **No fingerprint pinning in config.** You can point at a
-  `UserKnownHostsFile`, but the file itself is the source of truth —
+  `UserKnownHostsFile`, but the file itself is the source of truth &mdash;
   mkit does not store a hash in `.mkit/config`.
 - **No known-hosts auto-rotation.** If the upstream rotates its host
   key, the user's ssh will prompt or reject depending on
@@ -120,13 +120,13 @@ affected, not every SSH session on your machine.
 
 ---
 
-## 5. Push authorisation (server side)
+## 5. Push authorization (server side)
 
 mkit core does not define a push-auth protocol. For `mkit+ssh://` the
 idiomatic integration is the same one Git forges have used for a
 decade:
 
-1. User generates one Ed25519 key (`mkit keygen` — the seed doubles as
+1. User generates one Ed25519 key (`mkit keygen` &mdash; the seed doubles as
    an `id_ed25519` for OpenSSH 8.0+; see `docs/specs/SPEC-SIGNING.md` §8).
 2. Server runs `sshd` with:
 
@@ -145,7 +145,7 @@ decade:
 
 No custom handshake, no nonce opcode, no new domain separator. SSH's
 KEX handshake already signs a per-session nonce with the client's
-private key — that's the transport-level proof of possession. The
+private key &mdash; that's the transport-level proof of possession. The
 forge's only responsibility is the `pubkey → account` mapping plus a
 shell that execs `mkit serve` with the resolved path.
 
@@ -158,8 +158,8 @@ as `%f` / user as `%u`); see `sshd_config(5)` for the full token list.
 
 Candidate future work (non-binding):
 
-- A native SSH implementation (e.g. via `russh`), so mkit owns
-  host-key verification and we can ship fingerprint pinning in
+- A native SSH implementation (for example, via `russh`), so mkit owns
+  host-key verification and can ship fingerprint pinning in
   `.mkit/config`.
 - Server-side read deadline on the hello handshake.
 - `mkit fingerprint` CLI for verifying and storing remote host keys.
@@ -173,7 +173,7 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 | Threat                                    | mitigated by                       |
 |-------------------------------------------|------------------------------------|
 | MitM on first connection                  | user's `StrictHostKeyChecking`     |
-| Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` + known_hosts |
+| Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` plus known_hosts |
 | Wrong binary on remote (legacy rename)    | OP_HELLO, §7.4 (fails loud)         |
 | Future-proto mkit client ↔ older server   | OP_HELLO STATUS_UNSUPPORTED reply   |
 | Slow-loris client against `mkit serve`    | **NOT mitigated** (§4)             |

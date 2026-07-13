@@ -35,7 +35,7 @@ After each `v*.*.*` release is published on `officialunofficial/mkit`:
    - `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`
    - `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
    - `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
-5. Commit + push to the tap repo.
+5. Commit and push to the tap repo.
 
 ## User install flow
 
@@ -47,7 +47,7 @@ mkit version
 
 ## Automation (TODO)
 
-Once a tap repo exists we can automate this with
+Once a tap repo exists, this can be automated with
 [`dawidd6/action-homebrew-bump-formula`](https://github.com/dawidd6/action-homebrew-bump-formula)
 or a hand-rolled job in `release.yml` that opens a PR against the tap repo.
 Each release is still promoted by hand to keep the publication boring and

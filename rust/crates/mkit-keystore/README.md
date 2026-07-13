@@ -9,14 +9,14 @@ independent and continues to own canonical object signing bytes.
 
 ## Backends (each behind its own Cargo feature)
 
-- `software` — the default, always-available backend: a raw key file on
+- `software` &mdash; the default, always-available backend: a raw key file on
   disk.
-- `backend-macos-keychain` — `macOS` Keychain Services.
-- `backend-linux-secret-service` — the Secret Service D-Bus API (GNOME
+- `backend-macos-keychain` &mdash; `macOS` Keychain Services.
+- `backend-linux-secret-service` &mdash; the Secret Service D-Bus API (GNOME
   Keyring, `KWallet`).
-- `backend-systemd-creds` — `systemd-creds`-sealed credentials on Linux.
-- `backend-windows-credential` — Windows Credential Manager.
-- `backend-yubikey` — `YubiKey` via `OpenPGP` card / PIV (`card-backend-pcsc`,
+- `backend-systemd-creds` &mdash; `systemd-creds`-sealed credentials on Linux.
+- `backend-windows-credential` &mdash; Windows Credential Manager.
+- `backend-yubikey` &mdash; `YubiKey` via `OpenPGP` card/PIV (`card-backend-pcsc`,
   `yubikey`).
 
 `bls-threshold` (requires `attest`) additionally exposes a `SoftwareKeystore`
@@ -24,5 +24,5 @@ API for encrypted-at-rest BLS12-381 threshold signing shares
 (`store_bls_share` / `load_bls_share` / `list_bls_shares`).
 
 External hardware signers that don't fit a native OS keystore API (Secure
-Enclave, TPM 2.0, `FIDO2`/`WebAuthn`) are driven as subprocesses instead — see
+Enclave, TPM 2.0, `FIDO2`/`WebAuthn`) are driven as subprocesses instead &mdash; see
 `contrib/signers/README.md` and `docs/specs/SPEC-EXTERNAL-SIGNER.md`.

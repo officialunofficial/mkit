@@ -5,7 +5,7 @@ status: stable-advisory
 audience: implementers of the staging area; advisory and local-only (not exchanged between peers)
 ---
 
-# SPEC-INDEX — mkit repo-local index file
+# SPEC-INDEX &mdash; mkit repo-local index file
 
 Status: **Advisory** for mkit. Local-only; not exchanged between
 peers. See SPEC-CONVENTIONS §2 for the maturity/bindingness status
@@ -16,15 +16,15 @@ Scope: the on-disk layout of `.mkit/index`, used by the staging area.
 
 ## 1. Role
 
-`.mkit/index` (the `INDEX_FILE` constant) is the staging area — a list
+`.mkit/index` (the `INDEX_FILE` constant) is the staging area &mdash; a list
 of paths that will be included in the next commit, each paired with an
 object hash, a status byte, and a stat cache that lets `add`/`status`
 prove a worktree file unchanged in O(stat) instead of O(content).
-It is repo-local; it is never serialised to a transport and never
+It is repo-local; it is never serialized to a transport and never
 signed.
 
 Because it is local-only, its stability requirements are weaker than
-commit / pack / ref formats: an implementation change here never
+commit/pack/ref formats: an implementation change here never
 affects wire compatibility with any other peer.
 
 ---
@@ -77,7 +77,7 @@ These rules are **looser** than SPEC-OBJECTS §4.1: per-segment Windows
 reserved-name, trailing dot/space, and case-insensitive `.mkit`/`.git`
 checks are NOT enforced at the index layer. Staging code that needs to
 guarantee a clean commit MUST additionally validate via the
-SPEC-OBJECTS §4.1 grammar before writing the tree object — the index
+SPEC-OBJECTS §4.1 grammar before writing the tree object &mdash; the index
 itself is local-only and a more permissive checkpoint.
 
 ---
@@ -98,9 +98,9 @@ all five defined codes. Any other value → `IndexError::BadStatus(byte)`.
 
 ---
 
-## 4. Stat cache & the racy-clean rule
+## 4. Stat cache and the racy-clean rule
 
-The stat cache is an **optimisation, never a source of truth**: an
+The stat cache is an **optimization, never a source of truth**: an
 implementation MAY ignore it entirely (treat every entry as
 `mtime_ns = 0`) without changing any observable result, only cost.
 
@@ -115,7 +115,7 @@ A consumer MAY skip re-reading and re-hashing a worktree file and reuse
 5. the live file's mode class matches `status` (a plain blob has the
    exec bits clear; an executable has any set; on platforms where the
    exec bit is not observable, both classes match). Symlink entries
-   never stat-match — targets are re-read.
+   never stat-match &mdash; targets are re-read.
 
 **Racy-clean (normative):** a file modified within the filesystem's
 timestamp granularity of when it was hashed can carry the same
@@ -123,7 +123,7 @@ mtime+size with different bytes. Readers MUST therefore treat as
 *uncached* any entry whose `mtime_ns` is not safely older than the
 index file's own mtime. The window is judged PER ENTRY: the tight
 window (10ms) applies only when both the index file's mtime and the
-entry's recorded mtime show sub-second precision — this follows the
+entry's recorded mtime show sub-second precision &mdash; this follows the
 common coarse-clock granularity on the platforms mkit targets; an
 entry with a whole-second mtime (vfat/SMB mounts, tar/touch-truncated
 timestamps) keeps the conservative 1-second window. Racy entries are
@@ -135,8 +135,8 @@ Producers record all four cache fields from the metadata of the
 **opened file descriptor** used for hashing (not a separate pre-open
 `stat`), closing the window where the path is swapped between stat and
 read. Consumers that *heal* the cache after verifying an entry clean
-(e.g. `status`) MUST likewise record the hash-time observation, never
-a stat taken after verification — verify-then-stat can pair a fresh
+(for example, `status`) MUST likewise record the hash-time observation, never
+a stat taken after verification &mdash; verify-then-stat can pair a fresh
 stat with a stale hash.
 Commands that rebuild the index from a tree (commit's post-commit sync,
 checkout) SHOULD carry the cache over from the outgoing index for
@@ -144,14 +144,14 @@ entries whose path, status, and `object_hash` are unchanged.
 
 ---
 
-## 5. Atomicity & versioning
+## 5. Atomicity and versioning
 
 Writes use atomic-rename: write to a sibling tempfile (named
 `.<file>.tmp.<pid>.<seq>`), `fsync` the tempfile, `rename(2)` into
 place, then `fsync` the parent directory so the rename itself is
 durable across power loss. The `.mkit/` directory is created if absent.
 (The index write is deliberately NOT part of the object store's batched
-durability schedule — it is one of the durable pointers that schedule
+durability schedule &mdash; it is one of the durable pointers that schedule
 orders itself against; see SPEC-OBJECTS §10.1.)
 
 Readers tolerate:
@@ -162,8 +162,8 @@ Readers tolerate:
   is hit only by pathological repos.
 
 Version handling: readers MUST accept exactly the current version byte
-`0x02` and MUST reject any other value — including any byte that was
-ever emitted by an older mkit — with `IndexError::UnsupportedVersion(byte)`.
+`0x02` and MUST reject any other value &mdash; including any byte that was
+ever emitted by an older mkit &mdash; with `IndexError::UnsupportedVersion(byte)`.
 There is no dual-version read compatibility: the index is local-only
 and advisory (§1), so an implementation change here carries no
 cross-peer compatibility obligation, and mkit does not maintain
@@ -171,7 +171,7 @@ migration shims for its own local, unreleased state files (see
 SPEC-CONVENTIONS §2's note on versioning).
 
 Additionally, readers MUST reject a `count` header that cannot possibly
-fit in the remaining buffer (each entry is at minimum 67 bytes —
+fit in the remaining buffer (each entry is at minimum 67 bytes &mdash;
 1 status + 32 hash + 32 stat cache + 2 path_len + 0 path). A 9-byte
 buffer declaring `count = u32::MAX` is rejected as `IndexError::Corrupt`
 before the entry-allocation loop runs.
@@ -186,7 +186,7 @@ path.
 ## 6. Test vectors
 
 1. **Empty index**: magic + version + `count=0` = 9 bytes. Record
-   BLAKE3 of those bytes (informative — index is never hashed for
+   BLAKE3 of those bytes (informative &mdash; index is never hashed for
    protocol purposes).
 2. **Single entry**: path = "hello.txt", status = blob,
    `mtime_ns = 0x0102030405060708`, `size = 11`, pinned ino/ctime.
@@ -210,7 +210,7 @@ current format explicitly: `index_empty.bin` / `index_3entries.bin`
 carry the entries above and must round-trip byte-for-byte
 (deserialize → serialize is the identity). Entries within a serialized
 index MUST appear in the order they were added to the in-memory
-`Index` — the format does not require path-sorted output, so
+`Index` &mdash; the format does not require path-sorted output, so
 byte-identity is a property of a specific fixture's construction, not
 a general "any two logically-equal indexes serialize identically"
 guarantee. The generator `examples/generate_refs_index_goldens.rs`
@@ -230,7 +230,7 @@ re-emits each filename byte-identically and records every BLAKE3 in
   sidecar files (out of scope for this spec).
 - No dual-version read compatibility (see §5). If a future change to
   this format is ever needed, it ships as a new current version with
-  no obligation to keep reading the old one — this is a local,
+  no obligation to keep reading the old one &mdash; this is a local,
   advisory file with no installed base to protect.
 
 ---
@@ -245,10 +245,10 @@ re-emits each filename byte-identically and records every BLAKE3 in
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
 | No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, no NUL or backslash, not `.mkit`/`.git` → `IndexError::InvalidPath` / `Corrupt` (§2) |
 | Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
-| The stat cache never changes an observable result | cache is an optimisation only — all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
+| The stat cache never changes an observable result | cache is an optimization only &mdash; all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
 | A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); absent or zero-length file reads as empty (§5) |
 
 The index is local-only and advisory: never transported, never signed,
 no merkle structure (§1, §7). Nothing above is load-bearing for history
-integrity — that lives in SPEC-OBJECTS.
+integrity &mdash; that lives in SPEC-OBJECTS.

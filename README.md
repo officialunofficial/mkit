@@ -8,8 +8,8 @@
 
 A content-addressed version control toolkit written in Rust.
 
-`mkit` is a generic content-addressed VCS — Git-like commits, refs,
-and transports — with a native, predicate-agnostic attestation
+`mkit` is a generic content-addressed VCS &mdash; Git-like commits, refs,
+and transports &mdash; with a native, predicate-agnostic attestation
 subsystem (in-toto v1 Statements in DSSE envelopes) that lets any
 downstream service attach witness signatures to commits. Golden
 vectors under [`rust/tests/golden/`](rust/tests/golden/) pin the v1
@@ -88,15 +88,15 @@ Requires Rust 1.95 (rustup picks it up from `rust/rust-toolchain.toml`
 on first build). Drops `mkit` into `~/.cargo/bin/`.
 
 > [!WARNING]
-> Do **not** run `cargo install mkit` — the `mkit` name on crates.io
+> Do **not** run `cargo install mkit` &mdash; the `mkit` name on crates.io
 > belongs to an unrelated project. The CLI is published as **`mkit-cli`**
 > (`cargo install mkit-cli`), and is also available via the release
 > archives / `install.sh` above or `--git` from this repository.
 
 ### From GitHub Releases
 
-Cosign-signed archives for macOS (arm64 + x86_64), Linux (x86_64 +
-arm64), and Windows (x86_64) on every `v*.*.*` tag:
+Cosign-signed archives for Linux (x86_64 plus arm64), macOS (arm64 plus
+x86_64), and Windows (x86_64) on every `v*.*.*` tag:
 
 ```sh
 VERSION=0.3.0
@@ -105,7 +105,7 @@ curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSIO
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 ```
 
-Verification steps — cosign bundle, `SHA256SUMS`, SBOM — are in
+Verification steps &mdash; cosign bundle, `SHA256SUMS`, SBOM &mdash; are in
 [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### WASM (npm)
@@ -125,7 +125,7 @@ External signers are separate binaries that mkit drives over the
 [v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md). The signer crates
 live under [`contrib/signers/`](contrib/signers/) outside the
 top-level Cargo workspace at `rust/`, so the install path is
-`git clone` + `cargo install --path .`:
+`git clone` plus `cargo install --path .`:
 
 ```sh
 git clone https://github.com/officialunofficial/mkit
@@ -146,14 +146,14 @@ Each signer ships its own README under
 Signing keys live in a pluggable keystore vault. Out of the box mkit
 recognizes:
 
-- **software** / **software-raw** — encrypted-at-rest software vault
+- **software** / **software-raw** &mdash; encrypted-at-rest software vault
   on disk; the cross-platform foundation backend.
 - **macos-keychain**, **windows-credential**, **linux-secret-service**
-  — native OS keychains where available.
-- **systemd-creds** — systemd's encrypted credential store on Linux
+  &mdash; native OS keychains where available.
+- **systemd-creds** &mdash; systemd's encrypted credential store on Linux
   hosts that have it.
-- **yubikey** — hardware-backed via PIV / OpenPGP applets.
-- **external signers** — separate subprocess binaries speaking the
+- **yubikey** &mdash; hardware-backed via PIV / OpenPGP applets.
+- **external signers** &mdash; separate subprocess binaries speaking the
   [v1 stdio protocol](docs/specs/SPEC-EXTERNAL-SIGNER.md); reference
   signers under [`contrib/signers/`](contrib/signers/).
 
@@ -162,7 +162,7 @@ signing, attestation signing, and SSH push-auth share key references.
 The normative interface is in
 [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md); end-user overview
 in [`docs/keystore.md`](docs/keystore.md). The backends a given
-binary supports depend on enabled build features — see
+binary supports depend on enabled build features &mdash; see
 [`docs/CLI.md`](docs/CLI.md) §"Config keys".
 
 ## Architecture
@@ -199,18 +199,18 @@ Workspace crates:
 | `mkit-core` | hash, object, serialize, store, sign, chunker, delta, pack, refs, index, worktree, ignore, repo_lock, ops, protocol |
 | `mkit-attest` | JCS, in-toto v1 Statement, DSSE envelope, signers, verify |
 | `mkit-git-bridge` | deterministic mkit↔git bridge: export mirroring, importer-signed import, fork-mode publishing ([`docs/specs/SPEC-GIT-BRIDGE.md`](docs/specs/SPEC-GIT-BRIDGE.md), [`docs/specs/SPEC-GIT-IMPORT.md`](docs/specs/SPEC-GIT-IMPORT.md), [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md)) |
-| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) — see [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) |
-| `mkit-rpc` | shared wire schemas + length-prefixed framing for stdio subprocess protocols (external signers) |
+| `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) &mdash; see [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) |
+| `mkit-rpc` | shared wire schemas plus length-prefixed framing for stdio subprocess protocols (external signers) |
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
 | `mkit-cli` | the `mkit` binary |
 | `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
 | `mkit-fuzz` (at `rust/fuzz/`, not `rust/crates/`) | bounded property tests (cargo-fuzz compatible) |
 
-Each transport implements the same trait — `list_refs`, `read_ref`,
-`write_ref`, `pack_exists`, `download_pack`, `upload_pack` — described
+Each transport implements the same trait &mdash; `list_refs`, `read_ref`,
+`write_ref`, `pack_exists`, `download_pack`, `upload_pack` &mdash; described
 in [`docs/specs/SPEC-TRANSPORT.md`](docs/specs/SPEC-TRANSPORT.md). The URL scheme
 picks the transport: `mkit+ssh://`, `mkit+enc://`, `mkit+s3://`,
-`mkit+https://`, `mkit+file://`. There is no "smart" fallback — the scheme is part of
+`mkit+https://`, `mkit+file://`. There is no "smart" fallback &mdash; the scheme is part of
 the contract. Deeper layering notes in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -228,7 +228,7 @@ Object kinds (full schema in
 |--------------|------------------------------------------------------------|
 | Blob         | File contents (or chunked via FastCDC for large files)     |
 | Tree         | Directory snapshot                                         |
-| Commit       | Tree + parents + Ed25519 signature + author Identity       |
+| Commit       | Tree plus parents plus Ed25519 signature plus author Identity       |
 | Remix        | Signed derivative of one or more commits                   |
 | ChunkedBlob  | Index of FastCDC chunks for blobs over the chunk threshold |
 | Delta        | Bsdiff-like delta between two blobs (pack-internal)        |
@@ -274,7 +274,7 @@ verifiers). Anything that produces a valid DSSE envelope with an
 in-toto v1 Statement can attest to an mkit commit; conversely, mkit's
 attestations are consumable by any standards-compliant verifier.
 Multi-signer envelopes (one envelope, N signatures) work out of the
-box — see [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) §6.
+box &mdash; see [`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) §6.
 
 Multi-algo attestation flow:
 
@@ -286,24 +286,24 @@ mkit attest --algorithm ed25519 \
 mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
 ```
 
-## Identity & push auth
+## Identity and push auth
 
-`.mkit/keys/default.key` is a raw Ed25519 seed. The same seed covers:
+**.mkit/keys/default.key** is a raw Ed25519 seed. The same seed covers:
 
 - commit / remix signing ([`docs/specs/SPEC-SIGNING.md`](docs/specs/SPEC-SIGNING.md));
 - DSSE attestation signing via the `repo-key` signer
   ([`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md) §6.2);
-- SSH transport authentication — OpenSSH 8.0+ accepts a raw Ed25519
+- SSH transport authentication &mdash; OpenSSH 8.0+ accepts a raw Ed25519
   seed as `id_ed25519`, so the same key authenticates `mkit push`
   over `mkit+ssh://`.
 
 For `mkit+ssh://` push authorization the idiomatic pattern is Git's:
 server `sshd` runs an `AuthorizedKeysCommand` that maps an incoming
 pubkey to an account, and `mkit serve` executes as that account. mkit
-core ships **no custom push-auth protocol** — SSH's KEX already does
+core ships **no custom push-auth protocol** &mdash; SSH's KEX already does
 the nonce/signature exchange, and `AuthorizedKeysCommand` is the
 standard server-side hook for `pubkey → account`. A downstream
-service can wire its own identity model (e.g. pubkey → on-chain
+service can wire its own identity model (for example, pubkey → on-chain
 owner address) through that hook without changing the wire protocol.
 See [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) for the transport
 trust model.
@@ -329,7 +329,7 @@ POSIX conventions documented in [`docs/CLI.md`](docs/CLI.md):
 
 mkit names every object by a **BLAKE3** hash and splits large files
 into content-defined chunks, so a small edit to a large file costs the
-edit — not the file — on disk, on the wire, and in wall-clock time.
+edit &mdash; not the file &mdash; on disk, on the wire, and in wall-clock time.
 
 The comparison that matters is end to end: real `add`, `commit`, and
 `push` operations measured head to head against Git with `hyperfine`.
@@ -338,8 +338,8 @@ Those results, with full methodology, live on the
 ahead on large files and their edits, and runs roughly even with Git
 on everyday operations.
 
-Component microbenchmarks — signature throughput by algorithm, and
-object-commit/pack-create against `git2` and the `git` CLI — live in
+Component microbenchmarks &mdash; signature throughput by algorithm, and
+object-commit/pack-create against `git2` and the `git` CLI &mdash; live in
 [`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
 hardware, kernel, filesystem, and cache warmth; reproduce locally with:
 
@@ -363,20 +363,20 @@ series.
 
 | Doc | Audience |
 |---|---|
-| [`docs/INSTALL.md`](docs/INSTALL.md) | End users — install channels, verification, hardware signers |
-| [`docs/CLI.md`](docs/CLI.md) | End users — subcommands, env vars, exit codes |
-| [`docs/keystore.md`](docs/keystore.md) | End users — keystore overview, picking a backend |
-| [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users — migrate from git, track a git upstream, push work back |
-| [`docs/specs/`](docs/specs/README.md) | Implementers + integrators — the wire-format and subsystem specifications, indexed with one-line summaries |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors — module layering and design notes |
-| [`docs/PARITY.md`](docs/PARITY.md) | Contributors — v1 scope gate, machine-output contract, and tracked divergences (the per-command matrix is the web `/parity` page) |
-| [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors — benchmarking and profiling workflow |
-| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors — fuzz harness conventions |
-| [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors — writing style for docs and commits |
-| [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators — SSH transport trust model |
-| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators + reviewers — trust boundaries and security assumptions |
-| [`apps/repo-worker/README.md#run-your-own-instance-self-hosting`](apps/repo-worker/README.md#run-your-own-instance-self-hosting) | Operators — self-hosting the anonymous-multiplayer repo server: Cloudflare plan/cost requirements, R2 bucket + route overrides |
-| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers — release runbook: checklist, signing, reproducibility, supply chain, crates.io |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | End users &mdash; install channels, verification, hardware signers |
+| [`docs/CLI.md`](docs/CLI.md) | End users &mdash; subcommands, env vars, exit codes |
+| [`docs/keystore.md`](docs/keystore.md) | End users &mdash; keystore overview, picking a backend |
+| [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users &mdash; migrate from git, track a git upstream, push work back |
+| [`docs/specs/`](docs/specs/README.md) | Implementers plus integrators &mdash; the wire-format and subsystem specifications, indexed with one-line summaries |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors &mdash; module layering and design notes |
+| [`docs/PARITY.md`](docs/PARITY.md) | Contributors &mdash; v1 scope gate, machine-output contract, and tracked divergences (the per-command matrix is the web `/parity` page) |
+| [`docs/PROFILING.md`](docs/PROFILING.md) | Contributors &mdash; benchmarking and profiling workflow |
+| [`docs/FUZZ.md`](docs/FUZZ.md) | Contributors &mdash; fuzz harness conventions |
+| [`docs/STYLE-GUIDE.md`](docs/STYLE-GUIDE.md) | Contributors &mdash; writing style for docs and commits |
+| [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) | Operators &mdash; SSH transport trust model |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Operators plus reviewers &mdash; trust boundaries and security assumptions |
+| [`apps/repo-worker/README.md#run-your-own-instance-self-hosting`](apps/repo-worker/README.md#run-your-own-instance-self-hosting) | Operators &mdash; self-hosting the anonymous-multiplayer repo server: Cloudflare plan/cost requirements, R2 bucket plus route overrides |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | Maintainers &mdash; release runbook: checklist, signing, reproducibility, supply chain, crates.io |
 
 ## Build
 

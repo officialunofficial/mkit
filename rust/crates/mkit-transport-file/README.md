@@ -19,8 +19,8 @@ backend for `mkit+file://` remotes and for repositories served via
 
 ## CAS atomicity guarantees
 
-| Variant    | Mechanism                                                        | Race behaviour |
+| Variant    | Mechanism                                                        | Race behavior |
 | ---------- | ----------------------------------------------------------------- | --------------- |
 | `Any`      | `write_atomic`: tmp file → `fsync` → `rename` → parent           | Last writer wins; `rename(2)` is atomic on POSIX, so no half-written file is ever exposed. |
 | `Missing`  | `write_create_new`: same tmp+fsync, then a hard-link              | Only the first writer succeeds; the loser gets `AlreadyExists` → `RefConflict`. |
-| `Match(H)` | OS file-lock + in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same root, via `std::fs::File::lock` on `<root>/.mkit/refs/.lock`, held for the read-compare-write and released on `Drop` (including on panic). |
+| `Match(H)` | OS file-lock and in-process `Mutex` around read-then-`write_atomic` | Atomic across processes on the same root, via `std::fs::File::lock` on `<root>/.mkit/refs/.lock`, held for the read-compare-write and released on `Drop` (including on panic). |

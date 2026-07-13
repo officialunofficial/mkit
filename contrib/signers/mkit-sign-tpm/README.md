@@ -1,4 +1,4 @@
-# mkit-sign-tpm — TPM 2.0 P-256 external signer for mkit
+# mkit-sign-tpm &mdash; TPM 2.0 P-256 external signer for mkit
 
 `mkit-sign-tpm` is a pure-Rust binary that implements the mkit external
 signer v1 wire protocol ([`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md))
@@ -10,7 +10,7 @@ Headline properties:
 - **P-256 only.** Every modern TPM 2.0 implements NIST P-256 (ECC-256);
   some add secp256k1 or BrainpoolP256, but this signer deliberately
   rejects any `algorithm` other than `ALGORITHM_P256` with an `Error`
-  frame (`ERROR_CODE_UNSUPPORTED_ALGORITHM`) — protocol simplicity beats
+  frame (`ERROR_CODE_UNSUPPORTED_ALGORITHM`) &mdash; protocol simplicity beats
   curve-zoo support.
 - **Non-extractable private key.** The signing scalar is generated
   inside the TPM during `keygen` and persisted to an owner-hierarchy
@@ -28,8 +28,8 @@ Headline properties:
 - A TPM 2.0 device (`/dev/tpmrm0` or `/dev/tpm0`) OR the `swtpm`
   simulator.
 - The `tpm2-tss` native library:
-  - **Debian / Ubuntu**: `sudo apt install libtss2-dev`
-  - **Fedora / RHEL**: `sudo dnf install tpm2-tss-devel`
+  - **Debian/Ubuntu**: `sudo apt install libtss2-dev`
+  - **Fedora/RHEL**: `sudo dnf install tpm2-tss-devel`
   - **Arch**: `sudo pacman -S tpm2-tss`
 - Rust 1.95+ (inherits the workspace `rust-toolchain`).
 
@@ -37,7 +37,7 @@ Headline properties:
 
 The `tss-esapi` crate supports the Windows TBS (TPM Base Services)
 TCTI. Build with `--features tpm2` plus `tss-esapi`'s `tbs` feature
-once it's wired into this crate — currently untested; contributions
+once it's wired into this crate &mdash; currently untested; contributions
 welcome.
 
 ### macOS
@@ -74,7 +74,7 @@ Then run this signer; it picks up `TCTI` from the environment.
 $ cd contrib/signers
 # All cargo commands below run inside the contrib/signers/ workspace.
 # Default build — pure-Rust helpers only, no tss-esapi link.
-# Useful on macOS / CI where libtss2-dev isn't installed.
+# Useful on macOS/CI where libtss2-dev isn't installed.
 $ cargo build -p mkit-sign-tpm --release
 
 # Full build — links tss-esapi, can actually talk to a TPM.
@@ -121,7 +121,7 @@ applications.
 
 `--auth-policy owner` (the default) uses the TPM's empty-password
 owner auth. Non-default policies (password, PCR-binding) are a
-documented TODO for this crate — the TPM itself can enforce them, but
+documented TODO for this crate &mdash; the TPM itself can enforce them, but
 the CLI surface is still minimal.
 
 ### `sign`
@@ -129,7 +129,7 @@ the CLI surface is still minimal.
 Enters the external-signer v1 protocol loop. The wire is
 **length-prefixed protobuf `SignerFrame` messages** (4-byte
 little-endian length prefix, `MAX_FRAME_BYTES = 1 MiB`) on stdin and
-stdout — NOT a JSON line protocol. See
+stdout &mdash; NOT a JSON line protocol. See
 [`docs/specs/SPEC-EXTERNAL-SIGNER.md`](../../../docs/specs/SPEC-EXTERNAL-SIGNER.md)
 and [`docs/specs/SPEC-RPC.md`](../../../docs/specs/SPEC-RPC.md); the schema is
 [`rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`](../../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto).
@@ -161,11 +161,11 @@ supports_certificate_chain = false
 requires_user_presence = false
 ```
 
-The signer loops on stdin, processing successive `Hello` / `SignRequest`
+The signer loops on stdin, processing successive `Hello` and `SignRequest`
 pairs until the caller closes the stream; a clean EOF on the length
 prefix is a graceful shutdown.
 
-**Exit / error model** (per SPEC-EXTERNAL-SIGNER §7):
+**Exit/error model** (per SPEC-EXTERNAL-SIGNER §7):
 
 - **Per-request failures are `Error` frames, not process exits.** A
   `SignRequest` whose `algorithm` is not `ALGORITHM_P256` is answered
@@ -175,14 +175,14 @@ prefix is a graceful shutdown.
   `ERROR_CODE_INVALID_REQUEST`; a TPM failure yields
   `ERROR_CODE_HARDWARE_ERROR`. The signer **keeps running** after an
   error frame so mkit can issue further requests on the same connection.
-- **The process exits non-zero only for setup-phase failures** — bad
+- **The process exits non-zero only for setup-phase failures** &mdash; bad
   argv, TPM unreachable at startup, or a fatal framing error (oversize
   or truncated frame). In that case the signer MUST NOT have emitted a
   partial stdout frame.
 
 The signature is the 64-byte compact `r ‖ s` big-endian form the spec
-requires, low-S normalised. TPM 2.0 does not implement RFC 6979, so
-signatures are non-deterministic — the verifier still accepts them,
+requires, low-S normalized. TPM 2.0 does not implement RFC 6979, so
+signatures are non-deterministic &mdash; the verifier still accepts them,
 but byte-identical round-trips across invocations are not expected
 (same shape as the Secure Enclave signer).
 
@@ -190,7 +190,7 @@ but byte-identical round-trips across invocations are not expected
 
 Enumerates persistent handles in the `0x81000000`+ range that the TPM
 reports as ECC; prints `<handle>\t<compressed-pubkey-hex>` for each.
-This is a best-effort scan — the TPM exposes handle ranges, not
+This is a best-effort scan &mdash; the TPM exposes handle ranges, not
 per-handle ownership, so keys created by other applications may also
 appear.
 
@@ -203,15 +203,15 @@ Evicts the persistent handle from the TPM. Irreversible.
 ## Wiring mkit to use it
 
 mkit drives external signers through three **user-scoped** config keys
-(`$XDG_CONFIG_HOME/mkit/config`, never per-repo `.mkit/config` — a
+(`$XDG_CONFIG_HOME/mkit/config`, never per-repo `.mkit/config` &mdash; a
 hostile repo must not be able to point your attestations at an arbitrary
 binary):
 
-- `attest.signer = external` — select the external signer.
-- `attest.external_signer_path = /absolute/path/to/binary` — the binary
+- `attest.signer = external` &mdash; select the external signer.
+- `attest.external_signer_path = /absolute/path/to/binary` &mdash; the binary
   to spawn. MUST be absolute (mkit rejects relative paths to close the
   `$PATH` resolution race).
-- `attest.external_signer_args = sign|--handle|0x81010001` — argv tokens
+- `attest.external_signer_args = sign|--handle|0x81010001` &mdash; argv tokens
   passed verbatim, **pipe-separated** (no shell interpolation).
 
 ```console
@@ -245,9 +245,9 @@ argv default.
 - **Default auth is owner-hierarchy empty-password.** This matches
   the TPM's default configuration on most Linux distros. For
   higher-assurance deployments, bind the key to PCR values or a
-  password auth policy at `keygen` time — neither is implemented in
+  password auth policy at `keygen` time &mdash; neither is implemented in
   v1 of this CLI, but the TPM itself supports both via the
-  `tss-esapi` API we depend on. Contributions welcome.
+  `tss-esapi` API this crate depends on. Contributions welcome.
 - **Device loss = key loss.** TPM-bound keys are tied to the specific
   TPM chip. A motherboard replacement, BIOS clear, or `tpm2_clear`
   invalidates every persistent handle irrecoverably. **Export and
@@ -258,7 +258,7 @@ argv default.
   code-execution sink (same class as `git config core.editor`). For
   any deployment where the local user account is less trusted than
   the user who configured mkit, install the binary on a root-owned,
-  non-user-writable path (e.g. `/usr/local/bin/`).
+  non-user-writable path (for example `/usr/local/bin/`).
 
 ---
 
@@ -295,7 +295,7 @@ failing.
 
 Reference implementation for TPM 2.0 signers. Alongside `mkit-sign-se`
 (Apple Secure Enclave) it is a blueprint for platform-specific signers
-— same protobuf `SignerFrame` wire and subcommand surface, different
+&mdash; same protobuf `SignerFrame` wire and subcommand surface, different
 secret store. Follow-ups: PCR-bound auth policies, Windows TBS TCTI
 wiring, optional attestation-key quote export for stronger endorsement
 chains.

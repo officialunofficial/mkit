@@ -2,10 +2,10 @@
 spec: SPEC-SIGNING
 version: 1
 status: stable-normative
-audience: implementers of compatible commit / remix signers and verifiers
+audience: implementers of compatible commit/remix signers and verifiers
 ---
 
-# SPEC-SIGNING — mkit v1 signature domains
+# SPEC-SIGNING &mdash; mkit v1 signature domains
 
 Status: **Normative** for mkit v1. See SPEC-CONVENTIONS §1 for the
 RFC 2119/8174 boilerplate this document's MUST/SHOULD language relies
@@ -15,7 +15,7 @@ named library function.
 Scope: the exact bytes covered by an Ed25519 signature on a commit or
 remix, and the domain separator used.
 
-This document resolves red-team risks R-04 (no version / magic in signing
+This document resolves red-team risks R-04 (no version/magic in signing
 bytes) and R-17 (cross-domain signature confusion).
 
 ---
@@ -26,11 +26,11 @@ bytes) and R-17 (cross-domain signature confusion).
   signing layer). Output: 32 bytes.
 - **Signature:** Ed25519 per RFC 8032 only. mkit-core does NOT support
   any other signature algorithm; multi-algorithm signing (if any) lives
-  in `mkit-attest` / SPEC-ATTESTATIONS and is out of scope here.
+  in `mkit-attest`/SPEC-ATTESTATIONS and is out of scope here.
   Public key 32 bytes, seed 32 bytes, signature 64 bytes.
 - **Signers sign a BLAKE3 digest of the signing bytes (§2.1), not the
   raw signing bytes.** This is PureEdDSA (RFC 8032's `Sign`/`Verify` as
-  defined — no HashEdDSA prehashing indirection) applied to a
+  defined &mdash; no HashEdDSA prehashing indirection) applied to a
   32-byte *message* that happens to itself be a hash. It is
   deliberately **not** Ed25519ph (RFC 8032 §5.1, the "prehash" variant):
   Ed25519ph runs the message through SHA-512 internally as part of the
@@ -41,29 +41,29 @@ bytes) and R-17 (cross-domain signature confusion).
   object's raw signing bytes, purely so a signer implementation (in
   particular a hardware or remote signer, SPEC-EXTERNAL-SIGNER) only
   ever needs to handle a fixed-size 32-byte input regardless of object
-  size — it never streams or buffers a variable-length message.
+  size &mdash; it never streams or buffers a variable-length message.
   **Security consequence, stated explicitly:** because the signed
   message is a hash rather than the object itself, this construction's
-  unforgeability reduces to two independent assumptions instead of one —
+  unforgeability reduces to two independent assumptions instead of one &mdash;
   Ed25519's EUF-CMA security *and* BLAKE3's collision resistance (an
   attacker who can find `signing_bytes ≠ signing_bytes'` with
   `BLAKE3(domain ‖ signing_bytes) = BLAKE3(domain ‖ signing_bytes')` can
   transplant a valid signature onto different object content). BLAKE3
   has no known collision weakness and this reduction is the same one
   every hash-then-sign scheme accepts (this is exactly what
-  Ed25519ph's `dom2`-wrapped SHA-512 prehash also relies on) — but it is
+  Ed25519ph's `dom2`-wrapped SHA-512 prehash also relies on) &mdash; but it is
   a real, stated precondition, not a free property of "PureEdDSA."
 - **Verification acceptance predicate:** a signature `(R, S)` over
   message `M` under public key `A` is accepted if and only if all of
-  the following hold — this is RFC 8032 §5.1.7's verification
+  the following hold &mdash; this is RFC 8032 §5.1.7's verification
   procedure with its optional additional checks made mandatory:
   1. `A` and `R` each decode as **canonical** encodings of points on
      the curve (the top bit is the sign bit; the remaining 255 bits,
      interpreted little-endian, MUST be strictly less than the field
      prime `p = 2²⁵⁵ - 19`; an encoding using a value ≥ p is rejected
      rather than reduced mod `p`).
-  2. `A` and `R` are **not** low-order points (i.e. not in the curve's
-     order-8 torsion subgroup) — this is the "small-order key/point"
+  2. `A` and `R` are **not** low-order points (that is, not in the curve's
+     order-8 torsion subgroup) &mdash; this is the "small-order key/point"
      rejection.
   3. `S` is **canonical**: interpreted as a little-endian integer,
      `0 ≤ S < L` where `L` is the order of the curve's prime-order
@@ -75,13 +75,13 @@ bytes) and R-17 (cross-domain signature confusion).
   A verifier that only performs check 4 (the "batch-friendly"/default
   RFC 8032 verification equation, which tolerates non-canonical and
   low-order `R`/`A`/`S` by implicitly reducing them) is **not**
-  conformant with this specification — checks 1–3 MUST also be
+  conformant with this specification &mdash; checks 1–3 MUST also be
   enforced. This is the same acceptance criterion as the widely-used
   `ed25519-dalek` crate's `verify_strict` function, which is offered
   here purely as a cross-reference for implementers, not as this
   predicate's definition; `verify_strict` is **not** identical to the
   ZIP-215 acceptance criterion (ZIP-215 is deliberately *more*
-  permissive — cofactored, accepting some non-canonical and torsion
+  permissive &mdash; cofactored, accepting some non-canonical and torsion
   points that this predicate rejects) and this document does not claim
   ZIP-215 compatibility.
 - No batched verification. Each verify is independent.
@@ -100,7 +100,7 @@ TAG_DOMAIN      = "mkit.tag\x00"          (9 bytes)
 ```
 
 The terminal `\x00` is part of the domain string. Disjointness here does
-not depend on it — the §2.1 length prefix already makes every domain
+not depend on it &mdash; the §2.1 length prefix already makes every domain
 string self-delimiting, so no well-formed domain can be a prefix of
 another regardless of the terminator. The `\x00` is retained because it
 makes that prefix-freeness property visually obvious to a reader
@@ -126,7 +126,7 @@ digest = BLAKE3(u16_le(domain.len) || domain || signing_bytes)
 ```
 
 Where `domain` is the full domain string *including* the trailing
-`\x00`. This is the shape we commit to on the wire and in test vectors.
+`\x00`. This is the shape mkit commits to on the wire and in test vectors.
 
 The length prefix makes the `(domain, signing_bytes)` boundary explicit. A
 verifier MUST NOT use BLAKE3 `derive_key`, bare `BLAKE3(domain ||
@@ -154,24 +154,24 @@ Where `PROLOGUE` is the 6 bytes defined in SPEC-OBJECTS §2:
 
 **Included fields, in order:**
 
-1. Object prologue (6 bytes) — binds the signature to the object type
+1. Object prologue (6 bytes) &mdash; binds the signature to the object type
    and schema version.
-2. `tree_hash` (32 bytes) — content the commit points at.
-3. `parent_count` (4 LE) and `parent_count` × `parent_hash` (32 each) —
+2. `tree_hash` (32 bytes) &mdash; content the commit points at.
+3. `parent_count` (4 LE) and `parent_count` × `parent_hash` (32 each) &mdash;
    commit history.
-4. `Identity author` (variable; see SPEC-OBJECTS §9) — length-prefixed,
+4. `Identity author` (variable; see SPEC-OBJECTS §9) &mdash; length-prefixed,
    so field length ambiguity is impossible.
-5. `message_len` (4 LE) and message bytes — length-prefixed.
+5. `message_len` (4 LE) and message bytes &mdash; length-prefixed.
 6. `timestamp` (8 LE).
-7. `signer` (32 bytes) — the public key that will verify the signature.
+7. `signer` (32 bytes) &mdash; the public key that will verify the signature.
 
 **Excluded fields and why:**
 
-- `signature` (64 bytes) — a signature cannot cover itself.
-- `message_hash` (32 bytes) — optional off-chain annotation field;
+- `signature` (64 bytes) &mdash; a signature cannot cover itself.
+- `message_hash` (32 bytes) &mdash; optional off-chain annotation field;
   irrelevant to core commit identity. Including it would mean any
   downstream re-computation shifts the commit hash.
-- `content_digest` (32 bytes) — same reasoning: downstream pack-digest
+- `content_digest` (32 bytes) &mdash; same reasoning: downstream pack-digest
   annotation. Not a commit identity input.
 
 These two exclusions resolve red-team R-45. They are the only commit-
@@ -252,14 +252,14 @@ domain string `"mkit.commit\x00"`; remix signing input begins with
 signing input begins with `u16_le(9)` followed by the 9-byte string
 `"mkit.tag\x00"`.
 
-- All three domain *lengths* (12 / 11 / 9) differ, so the 2-byte LE
+- All three domain *lengths* (12/11/9) differ, so the 2-byte LE
   length prefix alone already distinguishes them before any domain byte
   is read.
 - All three domain strings share the 5-byte prefix `"mkit."` (bytes
-  0–4) and then diverge at byte index 5 — `'c'` (0x63) for
+  0–4) and then diverge at byte index 5 &mdash; `'c'` (0x63) for
   `"mkit.commit\x00"`, `'r'` (0x72) for `"mkit.remix\x00"`, and `'t'`
-  (0x74) for `"mkit.tag\x00"` — giving a second, independent separator
-  once the length check is bypassed (e.g. by a hypothetical
+  (0x74) for `"mkit.tag\x00"` &mdash; giving a second, independent separator
+  once the length check is bypassed (for example by a hypothetical
   length-collision in some future fourth domain).
 
 Because the domain length and the first differing domain byte occur strictly
@@ -268,11 +268,11 @@ constants), no user input can make one domain's hash input equal another's.
 BLAKE3 is collision-resistant, so distinct inputs have cryptographically
 distinct digests.
 
-Therefore, a signature over any one of the commit / remix / tag domain
+Therefore, a signature over any one of the commit/remix/tag domain
 digests cannot be replayed as a signature over either of the other two.
 
-This is the defence against R-17. The previous scheme used only the
-ObjectType tag byte (0x03/0x04) as separator — one byte of domain — and
+This is the defense against R-17. The previous scheme used only the
+ObjectType tag byte (0x03/0x04) as separator &mdash; one byte of domain &mdash; and
 was fragile. v1 uses ≥ 11 bytes of high-entropy ASCII plus a null
 terminator.
 
@@ -299,7 +299,7 @@ invariant.
 
 ### 6.1 Trust binding (application policy)
 
-The algorithm above proves only that `signer` produced `C.signature` —
+The algorithm above proves only that `signer` produced `C.signature` &mdash;
 it says nothing about whether `signer` is a key the caller has any
 reason to accept. `mkit verify <rev>` implements exactly the five steps
 above and nothing more: a signature from a freshly generated,
@@ -311,8 +311,8 @@ form) is the shipped instance of the "application policy" this section
 defers to: it runs the algorithm above unchanged, then additionally
 looks up `signer` in a caller-supplied trust-roots registry (the same
 `[[trust_root]]` TOML format `mkit verify-attest` reads, managed via
-`mkit trust add/list/remove`) and fails closed — a nonzero exit, distinct
-from a bad-signature failure — when `signer` is not a registered
+`mkit trust add/list/remove`) and fails closed &mdash; a nonzero exit, distinct
+from a bad-signature failure &mdash; when `signer` is not a registered
 Ed25519 key. See `rust/crates/mkit-cli/src/commands/verify.rs` and
 `docs/THREAT-MODEL.md` §5.
 
@@ -357,7 +357,7 @@ Loaders MUST enforce on POSIX:
 - Open with `O_NOFOLLOW`. ELOOP → `KeyPathIsSymlink(path)`.
 - Reject if any of the three ancestor directories is a symlink →
   `KeyPathIsSymlink(dir)`.
-- `fstat` the open file descriptor (not the path — closes a TOCTOU
+- `fstat` the open file descriptor (not the path &mdash; closes a TOCTOU
   rename(2) window).
 - File mode `& 0o077 != 0` → `InsecureKeyPermissions{actual}`.
 - File owner uid ≠ process euid → `InsecureKeyOwner{actual, euid}`.
@@ -374,7 +374,7 @@ domain).
 
 On non-POSIX hosts the symlink, owner, and mode checks degrade to
 no-ops; implementations SHOULD use the host's equivalent access
-restriction (e.g. keep keys under `%USERPROFILE%` so default Windows
+restriction (for example keep keys under `%USERPROFILE%` so default Windows
 ACLs apply).
 
 ---
@@ -384,15 +384,15 @@ ACLs apply).
 The Ed25519 seed in `.mkit/keys/default.key` MAY be reused for other
 Ed25519 roles in the wider mkit ecosystem:
 
-- **Commit / remix / tag signing** (this document, §§3-4a) — the
+- **Commit/remix/tag signing** (this document, §§3-4a) &mdash; the
   message signed is always `BLAKE3(domain ‖ signing_bytes)` for one of
   the three domains in §2.
 - **DSSE attestation signing** via the `repo-key` signer
-  (`SPEC-ATTESTATIONS.md` §6.2) — the message signed there is the raw
+  (`SPEC-ATTESTATIONS.md` §6.2) &mdash; the message signed there is the raw
   DSSE pre-authentication-encoding (PAE) byte string, not a domain
   digest from this document.
 - **SSH transport authentication** when pushing to `mkit+ssh://`
-  servers — the message signed there is whatever byte string the SSH
+  servers &mdash; the message signed there is whatever byte string the SSH
   protocol itself defines for public-key authentication (RFC 4252
   §7), entirely outside mkit's control.
 
@@ -415,7 +415,7 @@ is a real, open gap: cross-protocol domain separation is not analyzed
 here. Until that analysis exists, treat cross-protocol key reuse as
 convenient but **unproven** rather than as a stated security property.
 
-Nothing in the protocol REQUIRES a single key — separate signing and
+Nothing in the protocol REQUIRES a single key &mdash; separate signing and
 transport keys are valid, and are the safer default until the
 cross-protocol analysis above is complete.
 
@@ -456,15 +456,15 @@ cross-protocol analysis above is complete.
 - No PQ (post-quantum) signatures in v1. Ed25519 only.
 - No signer rotation at the core level. A new `signer` = a new commit.
 - No timestamp authority. `timestamp` is self-reported and unverified.
-- No partial / threshold signatures.
-- No nested signatures (signing a signature) — always sign a BLAKE3
+- No partial/threshold signatures.
+- No nested signatures (signing a signature) &mdash; always sign a BLAKE3
   digest directly.
 
 ---
 
 ## 11. Invariants
 
-Properties that MUST hold for every v1 commit / remix / tag signature,
+Properties that MUST hold for every v1 commit/remix/tag signature,
 and the mechanism that enforces or detects each.
 
 | Invariant | Enforced by |
@@ -473,8 +473,8 @@ and the mechanism that enforces or detects each.
 | Flipping any covered field (tree, parents, author, message, timestamp, signer, tag target/type/name) invalidates the signature | signing bytes cover every identity field of the object (§3, §4, §4a) |
 | No field-boundary ambiguity in signing bytes | every variable-length field is length-prefixed (`Identity`, `message_len`, `parent_count`, `name_len`) (§3, §4, §4a) |
 | A signature is bound to one object type and schema version | the 6-byte PROLOGUE leads the signing bytes (§3) |
-| `message_hash` / `content_digest` annotations never shift the signing hash (R-45) | both fields excluded from signing bytes (§3) |
-| Malleable / non-canonical signatures are rejected identically by all verifiers | the §1 acceptance predicate's checks 1–3 (non-canonical/low-order `R` or `A`, non-canonical or out-of-range `S` all fail) (§1) |
+| `message_hash`/`content_digest` annotations never shift the signing hash (R-45) | both fields excluded from signing bytes (§3) |
+| Malleable/non-canonical signatures are rejected identically by all verifiers | the §1 acceptance predicate's checks 1–3 (non-canonical/low-order `R` or `A`, non-canonical or out-of-range `S` all fail) (§1) |
 | An annotated-but-unsigned tag never passes verification | all-zero signature fails the strict Ed25519 check (§4a) |
 | The verification key is the object's own `signer` field, never caller-supplied | verifier rebuilds signing bytes and parses `signer` from the object (§6) |
 | `author == signer` is never assumed | a verifier MUST NOT accept on identity match; pairing is application policy (§6) |

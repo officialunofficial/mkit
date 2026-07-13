@@ -1,4 +1,4 @@
-# ADR 0002 — MCP documentation server is intentionally public and unauthenticated
+# ADR 0002 &mdash; MCP documentation server is intentionally public and unauthenticated
 
 - Status: Accepted
 - Date: 2026-06-22
@@ -6,11 +6,11 @@
 
 ## Context
 
-The crates/docs MCP server (`mkit/mcp`, deployed as a Cloudflare Worker) lets
+The crates/docs MCP server (`apps/mcp`, deployed as a Cloudflare Worker) lets
 agents search the mkit source, SPEC docs, and CLI reference at a pinned
 release. Its entire corpus is version-pinned content built into a D1 database
-at deploy time. The data is public information — the same source and docs are
-already in the open repository — and the server performs only read-only
+at deploy time. The data is public information &mdash; the same source and docs are
+already in the open repository &mdash; and the server performs only read-only
 lookups over it.
 
 ## Decision
@@ -27,7 +27,7 @@ lookups over it.
 
 - No auth surface to operate, rotate, or leak; the only state is a redeployable,
   reproducible D1 index.
-- The corpus is exactly as sensitive as the public repository — already
+- The corpus is exactly as sensitive as the public repository &mdash; already
   published. Releasing a new docs version is a redeploy, not a data-protection
   event.
 - If a future tool needs writes, privileged data, or per-caller policy, that

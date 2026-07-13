@@ -5,25 +5,25 @@ status: draft-normative
 audience: implementers and integrators producing or verifying mkit release-party threshold signatures
 ---
 
-# SPEC-RELEASE-THRESHOLD — BLS12-381 threshold signatures for mkit releases
+# SPEC-RELEASE-THRESHOLD &mdash; BLS12-381 threshold signatures for mkit releases
 
 Status: **Draft**. The signer/verifier pair and the keystore-backed share
 storage (issue #160) are implemented in `mkit-attest`/`mkit-keystore`
-behind the `bls-threshold` Cargo feature — see §6. The release-party
+behind the `bls-threshold` Cargo feature &mdash; see §6. The release-party
 ceremony CLI (`contrib/release-party/`) that drives the dealer/aggregator
 flow in §5 does not exist yet; this document stays draft until it does.
 
 This spec is normative for the wire bytes a threshold-signed release
 ships and the verifier path that consumes them. It is **not** a
-replacement for `SPEC-ATTESTATIONS.md` — DSSE envelope shape, in-toto
-v1 Statement shape, JCS canonicalisation, and `attestation_id`
+replacement for `SPEC-ATTESTATIONS.md` &mdash; DSSE envelope shape, in-toto
+v1 Statement shape, JCS canonicalization, and `attestation_id`
 construction are all inherited unchanged. This document only describes
 the signer/verifier pair that produces a single signature standing in
 for M maintainers.
 
 ---
 
-## 1. Motivation — "release party"
+## 1. Motivation &mdash; "release party"
 
 mkit's release process today (`docs/RELEASE.md`) is cut by one human
 running `git tag -s vX.Y.Z`. The cosign keyless signatures come from
@@ -35,13 +35,13 @@ signatures over the [`commonware-cryptography`](https://docs.rs/commonware-crypt
 crate provide:
 
 - N shares dealt by a trusted dealer (implemented) or DKG-generated (not
-  yet implemented — §2.2). M-of-N partial signatures recover a single
+  yet implemented &mdash; §2.2). M-of-N partial signatures recover a single
   signature.
 - Verifiers check **one** signature against **one** aggregated public
-  key — no per-maintainer dispatch on the consumer side.
+  key &mdash; no per-maintainer dispatch on the consumer side.
 - Adding or rotating maintainers happens through key resharing without
   changing the verifier-side public key (resharing tooling not yet
-  implemented — §2.2, §5.3).
+  implemented &mdash; §2.2, §5.3).
 
 The "release party" framing: a release is cut by M-of-N maintainers
 each posting their partial signature to a coordination channel; an
@@ -62,7 +62,7 @@ end-to-end (§5) are the one piece not yet built.
   bundle.
 - BLS is **not** for commit signing. Ed25519 stays canonical at the
   commit layer (`docs/specs/SPEC-SIGNING.md`). The threshold scheme exists
-  for release-cadence artefacts only.
+  for release-cadence artifacts only.
 
 ---
 
@@ -77,7 +77,7 @@ maintainer their `Share`, plus the cohort's public `Sharing<MinSig>`
 
 Trust assumptions in this phase:
 
-1. The dealer is honest at the moment of dealing — they do not retain
+1. The dealer is honest at the moment of dealing &mdash; they do not retain
    the unsplit secret after distribution and do not collude with any
    M-1 maintainers.
 2. Share distribution to maintainers happens over a confidential
@@ -87,7 +87,7 @@ Trust assumptions in this phase:
 
 The dealer assumption is **explicitly time-bounded**: it holds for the
 window between key generation and the first DKG resharing.
-Public commitment to the cohort public key (e.g. published in the
+Public commitment to the cohort public key (for example published in the
 project README and pinned in trust-roots TOML) closes the window: any
 future deal that doesn't match the published key is rejected.
 
@@ -174,7 +174,7 @@ BLS signer subprocess can use it.
 `MinSig` (signature in G1, public key in G2) over `MinPk` (the
 reverse). Rationale: each release ships one aggregated signature in
 the SLSA bundle; the public key is registered once in the verifier
-trust root and amortised across every release. We minimise the
+trust root and amortized across every release. This minimizes the
 signature side (48 bytes vs. 96).
 
 ### 3.6 Ciphersuite
@@ -189,13 +189,13 @@ BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_
 
 This identifies, per
 [draft-irtf-cfrg-bls-signature](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/):
-the curve (BLS12-381), the signature group (G1, i.e. `MinSig`), the
+the curve (BLS12-381), the signature group (G1, that is, `MinSig`), the
 hash-to-curve suite (`XMD:SHA-256_SSWU_RO_`, an
 [RFC 9380](https://www.rfc-editor.org/rfc/rfc9380) expand-message-XMD
 construction with SHA-256 and the Simplified Shallue–van de Woestijne–
 Ulas map), and the proof-of-possession scheme (`POP_`, which requires
 each participating key to have a separately-verified proof of
-possession before it may contribute to an aggregate — closing the
+possession before it may contribute to an aggregate &mdash; closing the
 rogue-key attack that plain BLS aggregation is vulnerable to without
 one). This is a real, standard IETF ciphersuite; it is not an mkit- or
 commonware-specific construction, and any BLS12-381 implementation
@@ -213,15 +213,15 @@ NAMESPACE = b"mkit-attest/dsse/v1"
 
 `mkit_attest::BLS_THRESHOLD_NAMESPACE` exposes the constant. Signing
 and verification combine the namespace and the message (the DSSE PAE,
-§4) via a unique, unambiguous encoding — not bare concatenation — before
+§4) via a unique, unambiguous encoding &mdash; not bare concatenation &mdash; before
 that combined value is hash-to-curve'd per §3.6. The namespace separates
 the maintainer-set BLS key from any other context that might share the
-same shares — a release signature cannot be replayed as a vote, a
+same shares &mdash; a release signature cannot be replayed as a vote, a
 commit endorsement, or any other BLS message under a different
 namespace.
 
 The `dsse/v1` suffix names the current, and so far only, application
-namespace this key is used under — it is not a compatibility-era label
+namespace this key is used under &mdash; it is not a compatibility-era label
 (see SPEC-CONVENTIONS §4). If a distinct application use of this key
 is ever introduced, it gets its own distinctly-named namespace
 constant; there is no plan to migrate this namespace's bytes to a
@@ -247,13 +247,13 @@ The verifier:
    `V::Public::decode`); reject on decode failure.
 3. Reject if `signature.len() != 48`.
 4. Decode `signature` as a G1 point; reject on decode failure.
-5. Run `ops::verify_message::<MinSig>(&pk, NAMESPACE, pae, &sig)` —
+5. Run `ops::verify_message::<MinSig>(&pk, NAMESPACE, pae, &sig)` &mdash;
    the single BLS verify against the namespaced hash-to-curve. The
    internal computation is one optimal-ate pairing check.
 
 Failure of any step is fatal: the verifier MUST NOT accept the
 signature. Pass/fail is binary; there is no per-share verdict at the
-aggregated layer (that's a feature, not a bug — the aggregate is the
+aggregated layer (that's a feature, not a bug &mdash; the aggregate is the
 unit of consensus).
 
 `mkit_attest::bls_threshold_verify` exposes this as a single function.
@@ -280,7 +280,7 @@ release-party deal --maintainers alice,bob,carol,dave \
 
 Output:
 
-- `cohort.json` — the cohort `Sharing<MinSig>` (public polynomial,
+- `cohort.json` &mdash; the cohort `Sharing<MinSig>` (public polynomial,
   mode, total) and the keyid (`bls12381-thr:<hex>`). Public; committed
   to the repo and pinned in trust-roots TOML.
 - Four encrypted share files, one per maintainer, transported out of
@@ -290,10 +290,10 @@ Output:
 ### 5.2 Per-release (every `vX.Y.Z`)
 
 1. The release coordinator (could be any maintainer) builds the
-   release artefacts and computes the DSSE PAE for the in-toto v1
+   release artifacts and computes the DSSE PAE for the in-toto v1
    Statement claiming the release tag as subject.
 2. Coordinator posts the PAE bytes to a coordination channel (Signal
-   group, GitHub Actions issue comment, OpenBao audit-log channel —
+   group, GitHub Actions issue comment, OpenBao audit-log channel &mdash;
    pick one, document it).
 3. Each maintainer pulls the PAE, runs
    `release-party sign --share ~/.mkit/release-share.json
@@ -317,7 +317,7 @@ Output:
 Not yet implemented (§2.2). The high-level shape: a quorum of current
 holders runs the keysharing protocol to mint a new share set; the
 public key **does not change**, so existing trust-roots TOML pins keep
-working. Maintainer set churn is invisible at the verifier layer — by
+working. Maintainer set churn is invisible at the verifier layer &mdash; by
 design.
 
 ---
@@ -349,18 +349,18 @@ replace the single-host trusted dealer.
 
 ## 7. Open questions
 
-- **Share serialisation at rest.** The
+- **Share serialization at rest.** The
   software backend stores each share as a
   `commonware_codec::Encode`-encoded `Share` wrapped in a
   `BlsShareRecord` (magic `MKITKSB1`, `XChaCha20-Poly1305`,
   protector-managed DEK). The record's AAD binds the share to the
-  cohort public key, holder index, M-of-N threshold, and total — so
+  cohort public key, holder index, M-of-N threshold, and total &mdash; so
   a swapped 1-of-N share cannot be passed off as 3-of-N. Round-trip
-  through age / OpenBao is unblocked: those tools wrap arbitrary
-  bytes and our wire format is opaque to them. See `SPEC-KEYSTORE.md`
+  through age/OpenBao is unblocked: those tools wrap arbitrary
+  bytes, and the wire format is opaque to them. See `SPEC-KEYSTORE.md`
   §"BLS12-381 threshold share storage".
 - **Coordination channel.** Signal vs. GitHub issue comment vs.
-  OpenBao audit log — each has different trust-root assumptions. The
+  OpenBao audit log &mdash; each has different trust-root assumptions. The
   CLI implementation will pick one; the spec stays neutral.
 - **Rotation cadence.** Annual? Triggered by maintainer churn? An
   operational question with implications that don't affect wire bytes.
@@ -378,7 +378,7 @@ replace the single-host trusted dealer.
 | Malformed key or signature bytes never reach the pairing | fixed sizes (96-byte G2 key, 48-byte G1 signature) and point-decode rejection, verifier steps 1–4 (§3.2, §3.3, §4) |
 | A release signature cannot be replayed as any other BLS message | the pinned hash-to-curve namespace `mkit-attest/dsse/v1` (§3.7) |
 | The DSSE `keyid` resolves to the intended cohort key, not an attacker-supplied one | trust-root registry maps `bls12381-thr:<hex>` to pinned public-key bytes (§3.3, §4) |
-| A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README + trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
+| A re-deal that doesn't match the published cohort key is rejected | public commitment to the cohort key (README and trust-roots TOML pin), bounding the trusted-dealer window (§2.1) |
 | Maintainer rotation never invalidates existing verifier pins | resharing keeps the aggregated public key unchanged (§1, §5.3) |
 | A stored 1-of-N share cannot be passed off as M-of-N (or swapped across cohorts) | `BlsShareRecord` AAD binds the share to cohort key, holder index, threshold, and total (§7) |
 | Envelope shape, Statement shape, and `attestation_id` never diverge from ordinary attestations | inherited unchanged from SPEC-ATTESTATIONS; this spec defines only the signer/verifier pair (scope statement, preamble) |

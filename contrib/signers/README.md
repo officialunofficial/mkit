@@ -3,7 +3,7 @@
 Third-party signer implementations for mkit's `external` signer slot
 live here. They all speak the same wire protocol:
 
-> [**SPEC-EXTERNAL-SIGNER.md**](../../docs/specs/SPEC-EXTERNAL-SIGNER.md) — v1
+> [**SPEC-EXTERNAL-SIGNER.md**](../../docs/specs/SPEC-EXTERNAL-SIGNER.md) &mdash; v1
 > length-prefixed protobuf [`SignerFrame`](../../rust/crates/mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto)
 > messages over stdin/stdout. Schema is `mkit-rpc/proto/mkit/rpc/v1/signer/signer.proto`
 > (with `common.proto` for shared types); the Rust runtime is `buffa`.
@@ -18,14 +18,14 @@ Write your signer to that spec and mkit will drive it via
 
 | Path                                          | Status                  | Summary                                                                             |
 |-----------------------------------------------|-------------------------|-------------------------------------------------------------------------------------|
-| [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519 / secp256k1 / P-256. Not production.               |
-| [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only. SwiftProtobuf on the v1 wire. Non-extractable key; optional Touch ID / Face ID gating. |
-| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256. WebAuthn-wrapping mode — see SPEC-EXTERNAL-SIGNER §14. |
+| [`mkit-sign-file/`](mkit-sign-file/)          | **reference** (Rust)    | Raw 32-byte key on disk. Ed25519/secp256k1/P-256. Not production.               |
+| [`mkit-sign-se/`](mkit-sign-se/README.md)     | **reference** (Swift)   | Apple Secure Enclave, P-256 only. SwiftProtobuf on the v1 wire. Non-extractable key; optional Touch ID/Face ID gating. |
+| [`mkit-sign-ctap/`](mkit-sign-ctap/)          | **reference** (Rust)    | FIDO2/WebAuthn roaming authenticator over CTAP-HID (YubiKey, Nitrokey, SoloKey). P-256. WebAuthn-wrapping mode &mdash; see SPEC-EXTERNAL-SIGNER §14. |
 | [`mkit-sign-tpm/`](mkit-sign-tpm/README.md)   | **reference** (Rust)    | TPM 2.0 persistent-handle P-256 key. Linux/Windows-native. `tss-esapi` under the hood. |
-| `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 + Ed25519. User button confirmation.             |
+| `ledger/` *(planned)*                         | not yet                 | Ledger Nano X/S via HID. secp256k1 and Ed25519. User button confirmation.             |
 | `wallet-bridge/` *(planned)*                  | not yet                 | JSON-RPC bridge to a running browser wallet. secp256k1, `personal_sign`.            |
 
-`mkit-sign-file` is the one integrators should read first — it's the
+`mkit-sign-file` is the one integrators should read first &mdash; it's the
 shortest demonstration of the v1 wire protocol, and its end-to-end
 test is the contract test any conforming implementation should pass.
 `mkit-sign-tpm` (TPM 2.0) and `mkit-sign-ctap` (FIDO2/WebAuthn) are
@@ -34,7 +34,7 @@ rest of the `ledger` / wallet-bridge lineup: argv subcommand shape,
 hardware-handle storage, "reject non-native algorithms explicitly"
 stance, and a self-contained `tests/e2e.sh` that proves wire-format
 conformance without a built `mkit`. `mkit-sign-ctap` additionally
-demonstrates the **WebAuthn-wrapping mode** — for signers that cannot
+demonstrates the **WebAuthn-wrapping mode** &mdash; for signers that cannot
 sign arbitrary bytes (WebAuthn authenticators, some browser wallets)
 and need to wrap the PAE inside a per-ceremony transport (here:
 `clientDataJSON`).
@@ -79,7 +79,7 @@ target/release/mkit-sign-file
 ```
 
 The signers are their own Cargo workspace (`contrib/signers/Cargo.toml`),
-so run `cargo test` from `contrib/signers/` to exercise the end-to-end test —
+so run `cargo test` from `contrib/signers/` to exercise the end-to-end test &mdash;
 it is NOT covered by `cargo test --workspace` in `rust/`.
 
 ### Usage
@@ -102,7 +102,7 @@ $ #   (c) env:    export MKIT_SIGN_FILE_KEY=/tmp/mkit-ref.key
 $ mkit config attest.external_signer_args "--key|/tmp/mkit-ref.key"
 ```
 
-The argv pass-through (a/b) is the recommended path — it works for
+The argv pass-through (a/b) is the recommended path &mdash; it works for
 any signer binary without env-var plumbing and supports per-invocation
 overrides via `--external-signer-arg`. The pipe (`|`) is used on disk
 because commas are reserved for `--additional-signer` multi-sig specs.
@@ -116,7 +116,7 @@ request by hand at the shell. To exercise a signer outside `mkit`:
 
 - Use the contract test at
   [`mkit-sign-file/tests/end_to_end.rs`](mkit-sign-file/tests/end_to_end.rs).
-  It spawns the binary, writes a `Hello` + `SignRequest` frame,
+  It spawns the binary, writes a `Hello` and `SignRequest` frame,
   reads the response, and verifies the signature with
   `mkit_attest::verify_signature`.
 - Port that test to your language; if it passes, your signer is
@@ -130,7 +130,7 @@ Pure-Rust binary that drives a FIDO2/WebAuthn roaming authenticator
 over CTAP-HID. Supports the three canonical brands (YubiKey,
 Nitrokey, SoloKey) via the `ctap-hid-fido2` crate. Populates the
 `webauthn` field of the v1 `SignResponse` with the wrapping material
-(authenticator data + clientDataJSON) the authenticator signed over.
+(authenticator data and clientDataJSON) the authenticator signed over.
 
 ### Build
 
@@ -181,13 +181,13 @@ match and exits 0 with a skip message when none is present.
 2. Copy `mkit-sign-file/tests/end_to_end.rs` as a contract test. It
    spawns the binary as a subprocess, pipes a request in, and
    verifies the signature via `mkit_attest::verify_signature`. Port
-   the same checks to your language of choice — if the test passes,
+   the same checks to your language of choice &mdash; if the test passes,
    your signer is protocol-conforming.
-3. Handle the permission + locking / user-confirmation bits that are
+3. Handle the permission and locking/user-confirmation bits that are
    relevant to your platform:
-   - Secure Enclave: biometric gate (LAContext / Face ID / Touch ID).
+   - Secure Enclave: biometric gate (LAContext/Face ID/Touch ID).
    - Ledger: user presses both buttons.
-   - WebAuthn: user gesture + optional user verification (PIN).
+   - WebAuthn: user gesture and optional user verification (PIN).
    - Wallet bridge: the wallet's own `personal_sign` prompt.
 4. Decide your keyid convention. `<algorithm-prefix>:<hex>` is the
    default and easy to verify; platform-specific schemes like
@@ -201,7 +201,7 @@ match and exits 0 with a skip message when none is present.
 
 The external signer runs as a child process under mkit's user. It
 holds the key. mkit trusts it completely for the duration of a
-signing call — there's no sandbox beyond OS user isolation. Treat
+signing call &mdash; there's no sandbox beyond OS user isolation. Treat
 the `attest.external_signer_path` config key as a code-execution sink
 (same class as `git config core.editor` or shell-profile hooks) and
 make sure the binary is on a non-user-writable path in any environment
