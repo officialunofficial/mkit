@@ -104,6 +104,14 @@ jobs:
 
       - name: Setup buf
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
+        with:
+          # Pin the installed buf CLI to match proto.yml's BUF_VERSION, not
+          # the buf-setup-action's own stale default (1.50.0) -- the two
+          # versions differ in how leading detached file-comments are
+          # captured in FileDescriptorSet source_code_info, which changes
+          # protoc-gen-es's output and made this freshness check flap
+          # depending on which buf a contributor's machine happened to have.
+          version: '1.66.0'
 
       - name: Install web dependencies
         working-directory: apps/web
