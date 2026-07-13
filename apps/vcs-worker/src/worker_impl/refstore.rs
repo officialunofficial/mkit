@@ -13,16 +13,23 @@
 //
 // Internal wire protocol (the worker -> DO via `stub.fetch_with_request`),
 // JSON over HTTP to a `https://refstore/<op>` URL — see wire.rs for the
-// exact request/response shapes.
+// exact request/response shapes. This also includes `/quota`: the
+// per-author rolling write-quota ledger (`write_quota` table,
+// `handle_quota_check`) gating `UpdateRef`/`AdvanceRefs`/`UploadPack`, ported
+// from apps/repo-worker/src/worker_impl/refstore.rs's identical table minus
+// the room dimension (see `crate::write_quota`'s module docs).
 
 use serde::Deserialize;
-use worker::{DurableObject, Env, Request, Response, Result, State, durable_object, wasm_bindgen};
+use worker::{
+    Date, DurableObject, Env, Request, Response, Result, State, durable_object, wasm_bindgen,
+};
 
 use super::wire::{
     AdvanceOutcome, AdvanceReq, AdvanceResp, GetReq, GetResp, ListEntry, ListReq, ListResp,
-    UpdateReq, UpdateResp,
+    QuotaCheckReq, QuotaCheckResp, UpdateReq, UpdateResp,
 };
 use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
+use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
 
 /// The smallest string strictly greater than every string having `prefix` as
 /// a prefix — used as the exclusive upper bound of a prefix range scan.
@@ -80,6 +87,13 @@ impl DurableObject for RefStore {
             "/advance" => {
                 let body: AdvanceReq = req.json().await?;
                 self.handle_advance(body)
+            }
+            "/quota" => {
+                if let Err(e) = self.ensure_write_quota_table() {
+                    return Response::error(format!("storage init failed: {e}"), 500);
+                }
+                let body: QuotaCheckReq = req.json().await?;
+                self.handle_quota_check(body)
             }
             _ => Response::error("not found", 404),
         }
@@ -259,5 +273,103 @@ impl RefStore {
                 value: r.value,
             })
             .collect()
+    }
+
+    /// Idempotently create the `write_quota` table — the per-author
+    /// fixed-window write budget ledger for `UpdateRef`/`AdvanceRefs`/
+    /// `UploadPack` (see `crate::write_quota::evaluate_quota`). One row per
+    /// author; ported from apps/repo-worker's identical table, minus the
+    /// room dimension (this Worker has exactly one RefStore DO instance for
+    /// the whole deployment — see module docs).
+    fn ensure_write_quota_table(&self) -> Result<()> {
+        let sql = self.state.storage().sql();
+        sql.exec(
+            "CREATE TABLE IF NOT EXISTS write_quota (\
+               author TEXT PRIMARY KEY, \
+               window_start INTEGER NOT NULL, \
+               ops INTEGER NOT NULL, \
+               bytes INTEGER NOT NULL);",
+            None,
+        )?;
+        // Seeks the stale tail so the opportunistic prune in
+        // `handle_quota_check` doesn't full-scan the whole author set on
+        // every accepted write.
+        sql.exec(
+            "CREATE INDEX IF NOT EXISTS write_quota_window ON write_quota(window_start);",
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Check-and-consume one author's write budget, serially — the DO's
+    /// single-threaded execution makes this read-evaluate-write atomic, so
+    /// two writes from the same author can't both slip past the cap. Called
+    /// by `AuthInterceptor` for `UpdateRef`/`AdvanceRefs` and by the
+    /// `upload_pack` handler for `UploadPack` (see `worker_impl/auth.rs` and
+    /// `worker_impl/service.rs`), always BEFORE the corresponding storage
+    /// write. A rejected write leaves the persisted state untouched; an
+    /// accepted one persists the updated `(window_start, ops, bytes)` and
+    /// prunes rows whose window elapsed more than one window ago (bounded
+    /// storage, mirrors apps/repo-worker's identical prune).
+    fn handle_quota_check(&self, req: QuotaCheckReq) -> Result<Response> {
+        let now = Date::now().as_millis() as i64;
+        let current = self.read_quota_state(&req.author);
+
+        match evaluate_quota(current, now, req.bytes) {
+            QuotaDecision::Allowed(state) => {
+                let sql = self.state.storage().sql();
+                sql.exec(
+                    "INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) \
+                     ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, \
+                       ops = excluded.ops, bytes = excluded.bytes;",
+                    vec![
+                        req.author.into(),
+                        state.window_start.into(),
+                        i64::from(state.ops).into(),
+                        (state.bytes as i64).into(),
+                    ],
+                )?;
+                let _ = sql.exec(
+                    "DELETE FROM write_quota WHERE window_start < ?;",
+                    vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
+                );
+                Response::from_json(&QuotaCheckResp {
+                    allowed: true,
+                    reason: None,
+                })
+            }
+            QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
+                allowed: false,
+                reason: Some(reason.to_string()),
+            }),
+        }
+    }
+
+    /// The author's persisted quota state, or `None` if they've never
+    /// written (or their row was pruned as stale) — the input to
+    /// `write_quota::evaluate_quota`.
+    fn read_quota_state(&self, author: &str) -> Option<QuotaState> {
+        #[derive(Deserialize)]
+        struct Row {
+            window_start: i64,
+            ops: i64,
+            bytes: i64,
+        }
+        let rows: Vec<Row> = self
+            .state
+            .storage()
+            .sql()
+            .exec(
+                "SELECT window_start, ops, bytes FROM write_quota WHERE author = ? LIMIT 1;",
+                vec![author.into()],
+            )
+            .ok()?
+            .to_array()
+            .ok()?;
+        rows.into_iter().next().map(|r| QuotaState {
+            window_start: r.window_start,
+            ops: r.ops.max(0) as u32,
+            bytes: r.bytes.max(0) as u64,
+        })
     }
 }
