@@ -53,10 +53,32 @@ modules:
         # `RefEvent` (a broadcast event, reused conceptually across the
         # stream), not `WatchRefsResponse`. Keep the spec'd name.
         - RPC_RESPONSE_STANDARD_NAME
-  # mkit.common.v1 (shared RefExpectation/RefEntry, #679) and
+  # mkit.common.v1 (shared RefExpectation/RefEntry, #679),
   # mkit.transport.v1 (the canonical Connect remote protocol, #698 /
-  # SPEC-TRANSPORT-CONNECT) — the repo-root shared proto tree.
+  # SPEC-TRANSPORT-CONNECT), and grpc.health.v1 (the standard
+  # Connect/gRPC health-checking protocol, #796) — the repo-root shared
+  # proto tree.
   - path: proto
+    lint:
+      # grpc.health.v1.health.proto (mkit#796) is vendored VERBATIM from
+      # https://github.com/grpc/grpc-proto — it is the standard
+      # `grpc.health.v1.Health` service every `grpc_health_probe` /
+      # kubelet gRPC probe / service mesh assumes byte-for-byte. Scoped
+      # to just that subpath so mkit.common.v1 / mkit.transport.v1 keep
+      # full lint enforcement.
+      ignore_only:
+        ENUM_VALUE_PREFIX:
+          - proto/grpc/health/v1
+        ENUM_ZERO_VALUE_SUFFIX:
+          - proto/grpc/health/v1
+        SERVICE_SUFFIX:
+          - proto/grpc/health/v1
+        RPC_REQUEST_RESPONSE_UNIQUE:
+          - proto/grpc/health/v1
+        RPC_REQUEST_STANDARD_NAME:
+          - proto/grpc/health/v1
+        RPC_RESPONSE_STANDARD_NAME:
+          - proto/grpc/health/v1
 breaking:
   use:
     - FILE

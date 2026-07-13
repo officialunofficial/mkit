@@ -1352,6 +1352,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "connectrpc-health"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f2e1465af10410a742a0cd398ad0ade118b15aee9ff0561bc81bcf25cc544b0"
+dependencies = [
+ "buffa",
+ "connectrpc",
+ "futures",
+ "http-body",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "console"
 version = "0.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3228,6 +3244,7 @@ dependencies = [
  "bytes",
  "connectrpc",
  "connectrpc-build",
+ "connectrpc-health",
  "ed25519-dalek 2.2.0",
  "futures",
  "getrandom 0.4.2",
@@ -5123,6 +5140,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

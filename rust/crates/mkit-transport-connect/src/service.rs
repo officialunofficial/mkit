@@ -29,7 +29,12 @@ use crate::refs_convert::condition_from_wire;
 /// Run a blocking [`Transport`] call on tokio's blocking thread pool and
 /// translate its [`TransportError`](mkit_core::protocol::TransportError)
 /// into a [`ConnectError`] per SPEC-TRANSPORT-CONNECT §5.
-async fn blocking<T, F, R>(transport: Arc<T>, f: F) -> Result<R, ConnectError>
+///
+/// `pub(crate)` so [`crate::health`]'s [`Transport`]-backed health checker
+/// (mkit#796) reuses the exact same spawn_blocking + error-mapping path
+/// every RPC handler in this file already goes through, rather than a
+/// second hand-rolled copy.
+pub(crate) async fn blocking<T, F, R>(transport: Arc<T>, f: F) -> Result<R, ConnectError>
 where
     T: Transport + Send + Sync + 'static,
     F: FnOnce(&T) -> mkit_core::protocol::TransportResult<R> + Send + 'static,

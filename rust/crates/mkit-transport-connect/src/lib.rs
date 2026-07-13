@@ -36,6 +36,8 @@ mod executor;
 #[cfg(feature = "server")]
 mod hashutil;
 #[cfg(feature = "server")]
+mod health;
+#[cfg(feature = "server")]
 mod pack;
 #[cfg(feature = "server")]
 mod refs_convert;
@@ -80,7 +82,9 @@ use mkit_core::protocol::Transport;
 use proto::mkit::transport::v1::TransportServiceExt as _;
 
 /// Build a [`connectrpc::Router`] hosting `mkit.transport.v1.TransportService`
-/// over `transport`.
+/// over `transport`, plus the standard `grpc.health.v1.Health` service
+/// (mkit#796) reporting SERVING once a cheap read against `transport`
+/// succeeds (see `src/health.rs`'s `TransportChecker`, crate-private).
 ///
 /// Combine with other `connectrpc`/axum routes via `Router::merge` before
 /// calling [`connectrpc::Router::into_axum_router`], or use [`serve`] for
@@ -91,7 +95,14 @@ pub fn router<T>(transport: Arc<T>) -> connectrpc::Router
 where
     T: Transport + Send + Sync + 'static,
 {
-    Arc::new(TransportServer::new(transport)).register(connectrpc::Router::new())
+    use connectrpc_health::HealthExt as _;
+
+    let router =
+        Arc::new(TransportServer::new(Arc::clone(&transport))).register(connectrpc::Router::new());
+    let health_service = Arc::new(connectrpc_health::HealthService::new(
+        health::TransportChecker::new(transport),
+    ));
+    health_service.register(router)
 }
 
 /// Serve `mkit.transport.v1.TransportService` over `listener`, backed by
