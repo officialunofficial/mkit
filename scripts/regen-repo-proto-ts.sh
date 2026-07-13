@@ -21,7 +21,17 @@
 # alone emits the `RepoService` GenService descriptor that
 # `@connectrpc/connect`'s `createClient()` consumes directly. See
 # apps/repo-worker/buf.gen.yaml for the full explanation.
-
+#
+# TWO `buf generate` calls, not one: repo.proto imports
+# mkit/common/v1/refs.proto (RefEntry/RefExpectation, extracted in #734),
+# which lives in the repo-root `proto` buf module, a DIFFERENT module from
+# apps/repo-worker/proto. protoc-gen-es emits a real `import … from
+# "../../common/v1/refs_pb"` for that cross-module reference (unlike the Rust
+# codegen, which is handed both files in one `connectrpc_build::Config`
+# call — see apps/repo-worker/build.rs) — so refs_pb.ts must be generated
+# separately, into the SAME generated/ tree, or the emitted import 404s at
+# typecheck. `--path` scopes that second call to just refs.proto so it
+# doesn't also emit mkit.transport.v1 (out of scope for this vendored dir).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -44,6 +54,8 @@ mkdir -p "$GEN_DIR"
 (
     cd apps/repo-worker
     PATH="$(pwd)/../web/node_modules/.bin:$PATH" buf generate
+    PATH="$(pwd)/../web/node_modules/.bin:$PATH" buf generate ../../proto \
+        --path ../../proto/mkit/common/v1/refs.proto --template buf.gen.yaml
 )
 
 echo "refreshed $GEN_DIR:"
