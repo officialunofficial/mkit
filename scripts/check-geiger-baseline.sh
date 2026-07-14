@@ -15,9 +15,20 @@
 # Why first-party crates have non-zero counts today:
 #   mkit-cli   — `getpwuid_r` opt-in in config::home_dir_for_euid
 #                (lib.rs:9-17 documents the exception)
-#   mkit-core  — single `libc::geteuid()` call in sign.rs:406
+#   mkit-core  — two `#[allow(unsafe_code)]` callsites, both documented in
+#                lib.rs's own header comment: `sign::load_key`'s
+#                `libc::geteuid()` POSIX uid check, and
+#                `batch::RealSyncer::file_barrier`'s
+#                `libc::fcntl(.., F_BARRIERFSYNC)` on macOS/iOS (added by
+#                #587). The ceiling counts unsafe EXPRESSIONS (see above),
+#                not blocks, hence 3 rather than 2.
 #
 # All other first-party crates MUST stay at 0.
+#
+# mkit-transport-memory is deliberately NOT in ceiling_for()/
+# EXPECTED_CRATES below: it's a dev-only dependency of mkit-cli (used by
+# its integration tests, not the production binary), so it's never
+# reachable from geiger's scan of mkit-cli's normal dependency graph.
 #
 # Bash 3.2-compatible (so the script runs on macOS dev machines
 # without installing bash 5).
@@ -26,30 +37,31 @@ set -euo pipefail
 
 ceiling_for() {
     case "$1" in
-        mkit-cli)             echo 23 ;;
-        mkit-core)            echo 1  ;;
-        mkit-keystore)        echo 0  ;;
-        mkit-attest)          echo 0  ;;
-        mkit-rpc)             echo 0  ;;
-        mkit-transport-file)  echo 0  ;;
-        mkit-transport-http)  echo 0  ;;
-        mkit-transport-memory) echo 0 ;;
-        mkit-transport-s3)    echo 0  ;;
-        mkit-transport-ssh)   echo 0  ;;
-        mkit-transport-enc)   echo 0  ;;
-        mkit-git-bridge)      echo 0  ;;
-        *)                    echo "UNKNOWN" ;;
+        mkit-cli)               echo 23 ;;
+        mkit-core)              echo 3  ;;
+        mkit-keystore)          echo 0  ;;
+        mkit-attest)            echo 0  ;;
+        mkit-rpc)               echo 0  ;;
+        mkit-transport-file)    echo 0  ;;
+        mkit-transport-http)    echo 0  ;;
+        mkit-transport-s3)      echo 0  ;;
+        mkit-transport-ssh)     echo 0  ;;
+        mkit-transport-enc)     echo 0  ;;
+        mkit-transport-connect) echo 0  ;;
+        mkit-git-bridge)        echo 0  ;;
+        *)                      echo "UNKNOWN" ;;
     esac
 }
 
 # All first-party crates we expect to see in geiger's output. Used
 # to flag the case where a crate disappears entirely (deletion,
-# unreachable from mkit-cli).
+# unreachable from mkit-cli). mkit-transport-memory is intentionally
+# excluded — see the dev-only-dependency note above.
 EXPECTED_CRATES=(
     mkit-cli mkit-core mkit-keystore mkit-attest mkit-rpc
-    mkit-transport-file mkit-transport-http mkit-transport-memory
+    mkit-transport-file mkit-transport-http
     mkit-transport-s3 mkit-transport-ssh
-    mkit-transport-enc mkit-git-bridge
+    mkit-transport-enc mkit-transport-connect mkit-git-bridge
 )
 
 # Run from the crate that pulls every other first-party crate. mkit-cli
