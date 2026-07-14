@@ -113,10 +113,8 @@ pub(super) fn stage_tracked_changes(
         // hashes consistent (#203). Symlinks are always a single Blob of
         // their target path.
         let (status, h, stat) = if meta.file_type().is_file() {
-            let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
-                .map_err(|e| format!("read {}: {e}", abs.display()))?;
-            let h =
-                worktree::store_file_object(&batch, &bytes).map_err(|e| format!("store: {e}"))?;
+            let (h, opened_meta) = worktree::hash_file_with_metadata(&batch, &abs)
+                .map_err(|e| format!("read/store {}: {e}", abs.display()))?;
             let stat = worktree::stat_cache_fields(&opened_meta);
             (file_status_from_meta(&opened_meta, entry.status), h, stat)
         } else if meta.file_type().is_symlink() {
@@ -172,6 +170,21 @@ fn file_status_from_meta(_meta: &std::fs::Metadata, previous: EntryStatus) -> En
         EntryStatus::Executable
     } else {
         EntryStatus::Blob
+    }
+}
+
+/// Map a [`worktree::WorktreeError`] from `hash_file_with_metadata` to a
+/// sysexits-style code, preserving the read-vs-write distinction the
+/// two-step `read_regular_file_bounded` + `store_file_object` call used
+/// to make explicit (`NOINPUT` vs `CANTCREAT`) now that both steps are
+/// folded into one streaming call.
+fn worktree_err_exit_code(e: &worktree::WorktreeError) -> u8 {
+    match e {
+        worktree::WorktreeError::Io(_) | worktree::WorktreeError::FileTooLarge(_) => exit::NOINPUT,
+        worktree::WorktreeError::Object(_) | worktree::WorktreeError::Store(_) => exit::CANTCREAT,
+        worktree::WorktreeError::InvalidSymlinkTarget(_) | worktree::WorktreeError::InvalidUtf8 => {
+            exit::DATAERR
+        }
     }
 }
 
@@ -368,10 +381,10 @@ fn add_one(
     // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
     // Blob of their target path.
     let (status, h, stat) = if meta.file_type().is_file() {
-        let (opened_meta, bytes) = worktree::read_regular_file_bounded(&abs)
-            .map_err(|e| emit_err(&format!("read {}: {e}", abs.display()), exit::NOINPUT))?;
-        let h = worktree::store_file_object(sink, &bytes)
-            .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
+        let (h, opened_meta) = worktree::hash_file_with_metadata(sink, &abs).map_err(|e| {
+            let code = worktree_err_exit_code(&e);
+            emit_err(&format!("{}: {e}", abs.display()), code)
+        })?;
         let stat = worktree::stat_cache_fields(&opened_meta);
         (
             file_status_from_meta(&opened_meta, previous_status),

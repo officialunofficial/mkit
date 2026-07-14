@@ -542,6 +542,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller constructing a `Subject` (`git.rs`, `git_import.rs`,
   `self_update.rs`, `release-attest`) was updated.
 
+### Performance
+
+- **Streaming chunked-blob ingest and checkout** (#828): `add`/`build_tree`
+  no longer read a large file's entire contents into memory before
+  `FastCdc`-chunking it &mdash; a new `chunker::ChunkReader` streams the
+  content-defined cut algorithm off a `Read` source, keeping at most one
+  chunker window (256 KiB) resident regardless of file size (byte-identical
+  boundaries to the in-memory `ChunkIterator`, pinned by proptest).
+  `worktree::hash_file_with_metadata` is now the single streaming-capable
+  entry point shared by `mkit add` and `build_tree`. Checkout got the
+  matching fix: `restore_blob` streams each `ChunkedBlob` chunk straight to
+  the destination file via a new `create_tmp_for_write`/`finish_atomic_write`
+  pair instead of concatenating the whole reassembled file into one buffer
+  first. Object hashes, chunk boundaries, and file contents are unchanged &mdash;
+  this only bounds ingest/checkout memory, laying the groundwork for
+  supporting files larger than today's 1 GiB cap.
+
 ### Fixed
 
 - **`branch -m` racing `commit` on the same branch could silently lose
