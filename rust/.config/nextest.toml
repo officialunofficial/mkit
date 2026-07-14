@@ -54,6 +54,21 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(crash_recovery) or binary(lock_contention)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# branch_rename_commit_race races a real rename against a real concurrent
+# commit and asserts the outcome, so it legitimately takes ~40s even
+# running alone (confirmed by an isolated rerun) — comfortably past the
+# 10s slow-test warning and uncomfortably close to the default 60s / ci
+# 120s kill envelope under the contention of a full parallel run. Not a
+# hang; give it the same generous per-test ceiling as the other
+# real-timing-dependent suites above.
+[[profile.default.overrides]]
+filter = 'binary(branch_rename_commit_race)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(branch_rename_commit_race)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
 # real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect
