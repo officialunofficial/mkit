@@ -32,10 +32,18 @@
 // The glue here is verified the same way theirs is: the wasm32 build, each
 // Worker's own integration tests (against fakes, not real `worker::` I/O),
 // and a manual `wrangler dev` pass.
+//
+// `health` (mkit#813, deferred step 7 of mkit#797) adds the R2-HEAD half of
+// the `grpc.health.v1.Health` reachability probe and the `service`-field
+// match decision — see that module's doc comment for what's deliberately
+// NOT here (the `impl Health` trait itself and the RefStore DO probe, both
+// blocked from full sharing by real per-crate/per-Worker differences, not
+// scope timidity).
 
 pub mod adapter;
 pub mod body_cap;
 pub mod cors;
+pub mod health;
 
 pub use adapter::{
     copy_response_headers, dispatch_oneshot, http_request_from_worker, respond_buffered,
@@ -43,3 +51,4 @@ pub use adapter::{
 };
 pub use body_cap::{CappedBody, body_len_exceeds, content_length_exceeds, read_capped_body};
 pub use cors::{cors_preflight_response, is_options_preflight, with_cors};
+pub use health::{HEALTH_PROBE_KEY, r2_head_probe, service_name_matches};

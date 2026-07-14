@@ -8,10 +8,19 @@
 // on `connectrpc` with `features = ["server"]`, which pulls in `tokio/net` +
 // `hyper-util/server` + `dep:libc` — none of which build for
 // wasm32-unknown-unknown.
+//
+// The R2-HEAD half of the probe and the `service`-field match decision are
+// shared with apps/repo-worker via `mkit_worker_common::health` (mkit#813).
+// The RefStore DO round trip and the `impl Health` trait itself stay here:
+// `do_call` addresses one fixed DO instance, unlike repo-worker's per-room
+// addressing, and the generated `Health` trait is a nominally distinct type
+// per Worker crate — see `mkit_worker_common::health`'s doc comment for why
+// that isn't shared.
 
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
+use mkit_worker_common::health::{r2_head_probe, service_name_matches};
 use worker::Env;
 use worker::send::SendFuture;
 
@@ -22,12 +31,6 @@ use crate::proto::mkit::transport::v1::TRANSPORT_SERVICE_SERVICE_NAME;
 
 use super::service::{STORAGE_BUCKET, do_call};
 use super::wire::{ListReq, ListResp};
-
-/// R2 key this checker HEADs. Never written by any real handler — a `None`
-/// result IS the successful case (the bucket answered; nothing needs to
-/// exist there). Namespaced away from `packs/…` so it can never collide
-/// with a real pack digest.
-const HEALTH_PROBE_KEY: &str = "__mkit-health-check__";
 
 pub struct HealthServer {
     env: Env,
@@ -46,14 +49,7 @@ impl HealthServer {
 /// for `PackExists` / `ListRefs` — this just doesn't require anything to be
 /// found.
 async fn probe(env: &Env) -> ServingStatus {
-    let env_r2 = env.clone();
-    let r2_ok = SendFuture::new(async move {
-        let Ok(bucket) = env_r2.bucket(STORAGE_BUCKET) else {
-            return false;
-        };
-        bucket.head(HEALTH_PROBE_KEY).await.is_ok()
-    })
-    .await;
+    let r2_ok = r2_head_probe(env, STORAGE_BUCKET).await;
 
     let env_do = env.clone();
     let do_ok = SendFuture::new(async move {
@@ -84,7 +80,7 @@ impl Health for HealthServer {
         request: ServiceRequest<'_, HealthCheckRequest>,
     ) -> ServiceResult<HealthCheckResponse> {
         let service = request.service;
-        if !(service.is_empty() || service == TRANSPORT_SERVICE_SERVICE_NAME) {
+        if !service_name_matches(service, TRANSPORT_SERVICE_SERVICE_NAME) {
             return Err(ConnectError::not_found(format!(
                 "unknown service {service}"
             )));
