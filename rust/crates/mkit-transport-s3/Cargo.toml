@@ -48,6 +48,13 @@ test-small-multipart-caps = []
 [dev-dependencies]
 mockito = "1"
 serde_json = "1"
+# tests/transport_minio.rs: a real MinIO container, proving this crate's
+# SigV4 signing is accepted by a genuine independent S3-API
+# implementation rather than only the in-process mockito stub
+# transport_mockito.rs uses. `blocking` on both: this crate's tests are
+# plain `#[test]`, not async.
+testcontainers = { version = "0.27", features = ["blocking"] }
+testcontainers-modules = { version = "0.15", features = ["minio", "blocking"] }
 
 # Multipart-upload round-trip test, gated behind `test-small-multipart-caps`
 # (see that feature's doc comment above) so a plain `cargo test` doesn't
