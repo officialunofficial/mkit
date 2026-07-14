@@ -110,6 +110,28 @@ test classes earn their keep:
   output (CLI, JSON envelopes, formatted text). Update with
   `cargo insta review` after deliberate output changes.
 
+For CLI black-box tests specifically (`mkit-cli`'s `tests/`), reach for
+the right tool by what the test actually needs:
+
+- **`Repo` builder** (`tests/common/mod.rs`) &mdash; the default for
+  anything driving a real repo: sandboxed temp dir, fixed signing key,
+  `.ok()`/`.run()` helpers, the invariant battery, and the conflict/
+  fault-injection builders. Most CLI integration tests belong here.
+- **`assert_cmd` + `predicates` + `assert_fs`** &mdash; simple black-box
+  cases whose fluent `.assert().success().stdout(predicate!(...))` chain
+  reads more directly than a manual `Output` + `assert!` pair (see
+  `tests/blackbox_assert_cmd_demo.rs`). Not a replacement for `Repo` —
+  reach for `Repo` first when a test needs its invariant battery or
+  builders.
+- **`trycmd`** (`tests/cmd/*.trycmd`, driven by `tests/cli_transcripts.rs`)
+  &mdash; short, fully deterministic transcripts (exact error text, not
+  just an exit code) where the fixture file doubles as human-readable
+  documentation. Update with `TRYCMD=overwrite cargo test --test
+  cli_transcripts` after a deliberate message change, same workflow as
+  `cargo insta review`. Not for anything with a non-deterministic hash/
+  timestamp, or for full `--help`/`version` output &mdash; those stay on
+  `insta` (`help_snapshot.rs`).
+
 Run `cargo-mutants` locally against `mkit-core` and `mkit-attest` to
 surface logic that no test pins down; aim to add tests that close those
 gaps over time. `mutants.yml`'s `mutants-diff` job also runs this
