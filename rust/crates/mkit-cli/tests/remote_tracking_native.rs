@@ -878,11 +878,169 @@ fn deeply_nested_sibling_survives_rename() {
     }
 }
 
+/// #789 review finding 4: exercises `merge_tree_into`'s recursive arm
+/// during a *restore* — not just the ordinary extraction path the other
+/// sibling tests above already cover. Sibling `a/b/c` is configured, so
+/// `a/b` is a retained ancestor directory that survives extraction (it
+/// still holds `c/`). Remote `a` also has a branch namespace `b/main`,
+/// so extraction pulls an ordinary, unprotected `refs/remotes/a/b/main`
+/// out from underneath that same retained ancestor and into
+/// `tmp/b/main`. An occupied destination forces the phase-4 failure, so
+/// the restore has to merge `tmp/b/main` back into `src/b/`, which still
+/// exists (holding `c/`) — exactly the "recurse into a like-named
+/// directory that already exists at the destination" arm
+/// `merge_tree_into` carries for this reason.
+#[test]
+fn selective_move_restore_recurses_into_retained_ancestors() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    // Unprotected content nested under the retained ancestor `a/b`.
+    refs::write_remote_ref(&layout, "a", "b/main", &tip).unwrap();
+    // Sibling two levels down forces `a/b` to be recursed into (as an
+    // ancestor of the protected root) rather than moved/removed whole.
+    refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/b/c", "mkit+file:///tmp/nowhere-c"]);
+
+    // Occupied, non-empty destination forces the final rename (phase 4)
+    // to fail, driving the restore path.
+    let taken = layout.remotes_dir().join("taken");
+    std::fs::create_dir_all(&taken).unwrap();
+    std::fs::write(taken.join("occupied.txt"), b"pre-existing\n").unwrap();
+
+    let out = r.ok(&["remote", "rename", "a", "taken"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not move tracking refs"),
+        "expected a warning for the failed selective move: {stderr}"
+    );
+
+    // Full restore: both of `a`'s own refs resolve back at their
+    // original paths, including the one nested under the retained
+    // ancestor `a/b`.
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a", "main").unwrap(),
+        Some(tip),
+        "a's own tracking ref must be restored"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a", "b/main").unwrap(),
+        Some(tip),
+        "a's branch-namespace ref nested under the retained ancestor a/b \
+         must be restored via merge_tree_into's recursive arm"
+    );
+    // Sibling untouched throughout.
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a/b/c", "main").unwrap(),
+        Some(tip),
+        "sibling a/b/c must be unaffected by the failed move"
+    );
+    // The pre-existing occupant at the destination is untouched.
+    assert!(taken.join("occupied.txt").exists());
+    // No `.rename.tmp.*` debris left under the root.
+    let stray_temp = std::fs::read_dir(layout.remotes_dir())
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(".rename.tmp."));
+    assert!(!stray_temp, "no temp dir should remain after a failed move");
+}
+
+/// #789 review finding 3 (should-fix, minimum bar): documents and pins
+/// the destination-side nesting boundary that `move_state_dir`'s
+/// `protected` set does not cover — a configured sibling nesting under
+/// the DESTINATION of a rename, rather than under `old`'s own directory
+/// prefix. Remotes `a` and `a/x` (sibling nested under `a`); `rename a
+/// a/b` succeeds first (`a` is `old`, so `a/x` is correctly protected
+/// and left in place, landing the result at `a/b` with the sibling still
+/// at `a/x`). The round trip `rename a/b a` computes `protected` from
+/// `a/b` (`old`), which has no nested siblings of its own — `a/x` nests
+/// under `a` (`new`), invisible to that computation — so the move takes
+/// the ordinary fast path and lands on the now-occupied `a/` directory
+/// (still holding `x/`), failing closed via the same restore contract
+/// rather than merging into the sibling or dragging it along. This is
+/// the documented boundary of what nesting handles (see
+/// `move_state_dir`'s doc).
+#[test]
+fn rename_round_trip_into_sibling_fails_closed() {
+    let r = Repo::new();
+    r.commit_file("a.txt", b"a\n", "base");
+    let layout = RepoLayout::single(r.path());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    refs::write_remote_ref(&layout, "a", "main", &tip).unwrap();
+    refs::write_remote_ref(&layout, "a/x", "main", &tip).unwrap();
+
+    r.ok(&["remote", "add", "a", "mkit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "a/x", "mkit+file:///tmp/nowhere-x"]);
+
+    // First leg: `a` -> `a/b`. `a/x` is a sibling of `old` ("a"), so it
+    // is protected and this succeeds cleanly.
+    let out = r.ok(&["remote", "rename", "a", "a/b"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("could not move"),
+        "first rename must not degrade: {stderr}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a/b", "main").unwrap(),
+        Some(tip)
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a/x", "main").unwrap(),
+        Some(tip),
+        "sibling a/x must survive the first rename"
+    );
+
+    // Second leg (the round trip): `a/b` -> `a`. `a/x` nests under `a`
+    // (the DESTINATION), not under `a/b` (`old`), so it is invisible to
+    // `nested_sibling_names(remotes, "a/b")` and the move takes the
+    // ordinary fast path — landing on the now-occupied `a/` directory
+    // (still holding `x/`) and failing closed.
+    let out = r.ok(&["remote", "rename", "a/b", "a"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not move tracking refs"),
+        "expected the fail-closed warning: {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "warn-only contract: exit stays 0 even though the round trip degrades: {out:?}"
+    );
+
+    // Fail-closed = nothing moved, nothing lost: a/b's refs remain
+    // resolvable at their pre-round-trip path.
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a/b", "main").unwrap(),
+        Some(tip),
+        "a/b's tracking ref must remain resolvable at a/b after the failed round trip"
+    );
+    // The sibling a/x is untouched throughout.
+    assert_eq!(
+        refs::read_remote_ref(&layout, "a/x", "main").unwrap(),
+        Some(tip),
+        "sibling a/x must be untouched by the failed round trip"
+    );
+    // No temp debris left behind.
+    let stray_temp = std::fs::read_dir(layout.remotes_dir())
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .any(|e| e.file_name().to_string_lossy().starts_with(".rename.tmp."));
+    assert!(
+        !stray_temp,
+        "no temp dir should remain after the failed round trip"
+    );
+}
+
 /// #660 regression guard: with no configured sibling nested under the
-/// target, both the selective-removal and selective-move helpers are
-/// never invoked (`nested_sibling_names` returns empty) — the
+/// target, `move_state_dir`'s selective path is never invoked
+/// (`nested_sibling_names` returns empty, so `protected` is empty) — the
 /// pre-existing whole-directory fast paths (`remove_dir_all`,
-/// `rename_state_dir`) still run unchanged and still fully clean up.
+/// `move_state_dir`'s whole-directory rename) still run unchanged and
+/// still fully clean up.
 #[test]
 fn no_sibling_fast_path_unchanged() {
     let r = Repo::new();
