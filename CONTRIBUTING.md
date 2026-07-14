@@ -112,7 +112,11 @@ test classes earn their keep:
 
 Run `cargo-mutants` locally against `mkit-core` and `mkit-attest` to
 surface logic that no test pins down; aim to add tests that close those
-gaps over time.
+gaps over time. `mutants.yml`'s `mutants-diff` job also runs this
+automatically on every PR (`--in-diff`, scoped to `mkit-core`/
+`mkit-attest`/`mkit-keystore`'s changed lines), plus a weekly full sweep
+of `mkit-attest` alone — see that workflow's header comment for why the
+full sweep doesn't (yet) cover `mkit-core`/`mkit-keystore`.
 
 Optional but recommended for repeated local rebuilds:
 

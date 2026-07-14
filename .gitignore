@@ -11,6 +11,8 @@ zig-out/
 /rust/Cargo.lock.bak
 /rust/fuzz/corpus/
 /rust/fuzz/artifacts/
+/rust/mutants.out/
+/rust/mutants.out.old/
 
 # Test-generated private keys (older path; retained to avoid accidental leaks)
 mkit/test-key
