@@ -431,6 +431,23 @@ jobs:
           artifact-name: sbom.cdx.json
           upload-artifact: false
 
+      # Schema-validates the generated SBOM (plus a non-empty-components
+      # sanity check) before it ships as a real release artifact — see
+      # scripts/validate-sbom.sh for why. cyclonedx-cli ships as a single
+      # self-contained binary per release (no package-manager action for
+      # it in common use), so fetch it directly rather than adding a new
+      # third-party GitHub Action to this trust boundary.
+      - name: Install cyclonedx-cli
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /usr/local/bin/cyclonedx \
+            https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.32.0/cyclonedx-linux-x64
+          chmod +x /usr/local/bin/cyclonedx
+          cyclonedx --version
+
+      - name: Validate SBOM
+        run: bash scripts/validate-sbom.sh sbom.cdx.json
+
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
