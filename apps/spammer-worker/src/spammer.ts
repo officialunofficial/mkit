@@ -120,6 +120,24 @@ export class Spammer extends DurableObject<Env> {
       case "status": {
         return jsonResponse(await this.statusPayload(), 200);
       }
+      case "reset-content": {
+        // Immediate, synchronous revert to content.ts's curated static pool —
+        // no network/wasm call, just a storage delete, so it takes effect on
+        // the very next tick. The escape hatch for "the stored AI-refreshed
+        // pool drifted off-brand" without waiting for CONTENT_REFRESH_EVERY_N_TICKS
+        // or a redeploy.
+        await this.ctx.storage.delete(CONTENT_POOLS_STORAGE_KEY);
+        return jsonResponse({ ...(await this.statusPayload()), contentPoolReset: true }, 200);
+      }
+      case "refresh-content": {
+        // Manual, on-demand AI content refresh — the only way to get a fresh
+        // AI-generated pool now that the automatic per-tick trigger is
+        // opt-in (env.AI_CONTENT_AUTO_REFRESH). Awaited (not fire-and-forget)
+        // since this is an explicit, infrequent admin action, not hot-path.
+        const refreshed = await refreshContentPools(this.env.AI);
+        if (refreshed) await this.ctx.storage.put(CONTENT_POOLS_STORAGE_KEY, refreshed);
+        return jsonResponse({ ...(await this.statusPayload()), contentRefreshed: refreshed !== null }, 200);
+      }
       default:
         return jsonResponse({ error: `unknown action: ${action}` }, 400);
     }
@@ -181,7 +199,19 @@ export class Spammer extends DurableObject<Env> {
       // this keep running after `alarm()` returns without delaying this
       // tick's own reschedule or emit — see ai-content.ts's doc comment for
       // why this must never sit on the hot per-tick path.
-      if (nextState.tick % CONTENT_REFRESH_EVERY_N_TICKS === 0) {
+      //
+      // OPT-IN, default off: env.AI_CONTENT_AUTO_REFRESH must be exactly
+      // "true" (not just "AI binding present") for this to fire at all. A
+      // live run against lobby-v2 showed the model can drift away from the
+      // curated pool's honest, mkit-aware voice into inventing a fictional
+      // dev-team narrative for EMPTY-TREE commits (no real file changes) —
+      // e.g. "Add prop 'size' to Button component." with no diff behind it,
+      // which reads as misleading chat roleplay rather than a real
+      // demonstration of mkit's signing/content-addressing. The tightened
+      // prompt in ai-content.ts should prevent a repeat, but auto-refresh
+      // stays opt-in until that's proven, rather than firing unprompted on
+      // every worker's very first tick (tick 0 % N === 0).
+      if (this.env.AI_CONTENT_AUTO_REFRESH === "true" && nextState.tick % CONTENT_REFRESH_EVERY_N_TICKS === 0) {
         this.ctx.waitUntil(this.refreshContentPoolsInBackground());
       }
 

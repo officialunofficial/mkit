@@ -16,4 +16,13 @@
 // yet in a given environment.
 interface Env {
   CONTROL_TOKEN?: string;
+  /**
+   * Opt-in gate for the automatic per-tick Workers AI content refresh
+   * (`spammer.ts`'s `alarm()`) — must be exactly "true" to fire; unset (the
+   * default, deliberately not declared in wrangler.jsonc's `vars`) means the
+   * refresh never runs on its own. A manual refresh is still always
+   * available via `/control?action=refresh-content`. See spammer.ts's
+   * `alarm()` doc comment for why this defaults off.
+   */
+  AI_CONTENT_AUTO_REFRESH?: string;
 }
