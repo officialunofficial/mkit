@@ -49,11 +49,14 @@ use std::io::{IsTerminal, Write};
 /// or estimate.
 #[derive(Debug, Clone, Copy)]
 pub enum Event {
-    /// `count` objects were appended to the outgoing pack (push side,
-    /// `push_branch_with_depth`'s `plan.raw` / `plan.deltas` loops).
+    /// `count` objects were appended to the outgoing pack(s) (push side,
+    /// `build_and_upload_packs`'s `plan.raw` / `plan.deltas` loops).
     ObjectsPacked(usize),
-    /// The finished pack (`bytes` long) was handed to
-    /// `Transport::upload_pack` — the upload is complete.
+    /// A finished pack (`bytes` long) was handed to
+    /// `Transport::upload_pack` — that pack's upload is complete. Fires
+    /// once per pack; a push whose plan exceeds a single pack's payload
+    /// cap fires this more than once, and `bytes` accumulates across
+    /// calls (issue #831) rather than reporting only the last pack.
     PackUploaded(u64),
     /// `count` objects were unpacked from one downloaded pack (pull/fetch
     /// side, `unpack_downloaded_packs`) — real counts from the pack's own
@@ -97,7 +100,10 @@ impl Reporter {
                 }
             }
             Event::PackUploaded(bytes) => {
-                self.bytes = bytes;
+                // Accumulate, not overwrite: a multi-pack push (#831)
+                // fires this once per pack, and the reported total must
+                // cover every pack uploaded so far, not just the last one.
+                self.bytes = self.bytes.saturating_add(bytes);
                 self.emit();
             }
         }
@@ -236,6 +242,20 @@ mod tests {
         report(Event::ObjectsPacked(1));
         report(Event::PackUploaded(128));
         report(Event::ObjectsUnpacked(3));
+    }
+
+    /// issue #831: a multi-pack push fires `PackUploaded` once per
+    /// pack. The reported byte total must accumulate across those
+    /// calls, not report only the last pack (the bug this test pins).
+    #[test]
+    fn pack_uploaded_accumulates_across_multiple_packs() {
+        let mut rep = Reporter::new("Writing objects", None);
+        rep.record(Event::PackUploaded(100));
+        assert_eq!(rep.bytes, 100);
+        rep.record(Event::PackUploaded(50));
+        assert_eq!(rep.bytes, 150, "second pack's bytes must add, not replace");
+        rep.record(Event::PackUploaded(25));
+        assert_eq!(rep.bytes, 175);
     }
 
     /// A disabled guard (`enabled: false`) installs no reporter, so

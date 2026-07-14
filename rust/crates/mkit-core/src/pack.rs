@@ -345,6 +345,21 @@ impl PackWriter {
         self.entry_count as usize
     }
 
+    /// Sum of wire payload bytes pushed so far — the quantity the
+    /// writer's own internal cap check compares against
+    /// [`MAX_TOTAL_PAYLOAD`]. Measured post-compression (SPEC-PACKFILE
+    /// §5): each `push_raw`/`push_delta` call adds the *wire* payload
+    /// length, not the caller's uncompressed input length. Callers
+    /// deciding whether to seal a pack before pushing another entry can
+    /// use a conservative uncompressed-length estimate against this
+    /// value — the actual wire cost is never more than that estimate,
+    /// since compression is only ever applied when it's strictly
+    /// smaller (see `maybe_compress`).
+    #[must_use]
+    pub fn total_payload(&self) -> u64 {
+        self.total_payload
+    }
+
     /// Serialise the pack: header + entries + trailer. Entries are
     /// already in `self.buf` (streamed in by `push_raw`/`push_delta`);
     /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
@@ -1059,6 +1074,41 @@ mod tests {
         assert_eq!(report.delta_count, 0);
         assert_eq!(report.stored, vec![h]);
         assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    #[test]
+    fn total_payload_tracks_wire_sum_for_mixed_raw_and_delta() {
+        // issue #831: push-side pack-splitting decisions read
+        // `total_payload()` to decide when to seal a pack, so it must
+        // track the writer's real running wire-payload sum — checked
+        // here against both a plain raw entry and a delta entry, and
+        // bounded by the uncompressed input sizes (compression only
+        // ever makes the wire payload smaller, never larger).
+        let mut w = PackWriter::new();
+        assert_eq!(w.total_payload(), 0);
+
+        // Incompressible (random-ish) bytes so `maybe_compress` doesn't
+        // shrink them — keeps the assertion exact rather than "at most".
+        let raw = write_blob_via_serialize(&incompressible_bytes(0xA11C_E000, 2048));
+        let raw_hash = hash::hash(&raw);
+        w.push_raw(raw_hash, &raw).unwrap();
+        assert_eq!(w.total_payload(), raw.len() as u64);
+
+        let base = write_blob_via_serialize(&incompressible_bytes(0xB0BA_1000, 2048));
+        let base_hash = hash::hash(&base);
+        let target = write_blob_via_serialize(&incompressible_bytes(0xC0FF_EE00, 2048));
+        let stream = delta::encode(&base, &target).unwrap();
+        let before_delta = w.total_payload();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let delta_wire_len = w.total_payload() - before_delta;
+
+        // The writer never emits more wire bytes than the caller handed
+        // it (delta payload = base_hash + stream, uncompressed worst
+        // case), and `total_payload` must equal the sum of what was
+        // actually appended so far.
+        assert!(delta_wire_len <= (hash::HASH_LEN + stream.len()) as u64);
+        assert_eq!(w.total_payload(), before_delta + delta_wire_len);
+        assert!(w.total_payload() <= raw.len() as u64 + (hash::HASH_LEN + stream.len()) as u64);
     }
 
     #[test]

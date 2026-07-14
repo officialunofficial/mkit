@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use applied_packs::AppliedPacks;
 
-use mkit_core::hash::Hash;
+use mkit_core::hash::{HASH_LEN, Hash};
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::restore;
@@ -606,9 +606,11 @@ pub fn push_branch_tracked(
     Ok(tip)
 }
 
-/// Push one branch: upload a single delta-compressed pack carrying every
-/// object reachable from `tip` that the remote lacks, durably advertise it
-/// via the `refs/mkit/packmap/<branch>` metadata ref, then CAS-write
+/// Push one branch: upload one or more delta-compressed packs carrying
+/// every object reachable from `tip` that the remote lacks — split
+/// across multiple packs when the plan's payload exceeds a single
+/// pack's cap (issue #831) — durably advertise them as one node on the
+/// `refs/mkit/packmap/<branch>` metadata ref, then CAS-write
 /// `refs/heads/<branch>` under `condition`.
 ///
 /// Objects already present at the remote's current tip are never re-sent
@@ -696,6 +698,34 @@ pub fn push_branch_with_depth(
     condition: refs::RefWriteCondition,
     rebaseline_threshold: usize,
 ) -> Result<(), DispatchError> {
+    push_branch_with_limits(
+        tx,
+        store,
+        branch,
+        tip,
+        condition,
+        rebaseline_threshold,
+        pack::MAX_TOTAL_PAYLOAD,
+    )
+}
+
+/// [`push_branch_with_depth`] with an explicit per-pack payload cap in
+/// place of the format's hardcoded [`pack::MAX_TOTAL_PAYLOAD`] (issue
+/// #831). Semantics are otherwise identical — see [`push_branch`].
+///
+/// This is the payload-cap test seam, mirroring the #547
+/// `rebaseline_threshold` pattern: integration tests inject a tiny cap
+/// (a few KiB) to exercise multi-pack splitting in-process without
+/// moving a multi-GiB plan through it.
+pub fn push_branch_with_limits(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+) -> Result<(), DispatchError> {
     // Diff against the remote's CURRENT tip so we send only what it lacks
     // and can delta against bases it already holds. Planning is an
     // optimization; the head CAS below remains authoritative.
@@ -762,39 +792,25 @@ pub fn push_branch_with_depth(
         plan = transfer::plan_pack(store, tip, None)?;
     }
 
-    // Build the pack from the deterministic plan: raws first (non-blobs
-    // before blobs), then deltas (their bases are external — resolved from
-    // the fetcher's store via earlier packs — so no in-pack ordering is
-    // required, SPEC-PACKFILE §4).
-    let mut w = PackWriter::new();
-    for h in &plan.raw {
-        let bytes = store.read(h)?;
-        w.push_raw(*h, &bytes)?;
-        // Honest progress (#711): one real object just got staged into
-        // the outgoing pack. Never git's fabricated
-        // Enumerating/Counting/Compressing lines — see `crate::progress`.
-        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
-    }
-    for d in &plan.deltas {
-        w.push_delta(&d.base, &d.stream)?;
-        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
-    }
-    let pack = w.finish()?;
-    let pack_key = pack::pack_key(&pack);
-    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
-    // Upload is complete — report the real byte count handed to the
-    // transport, not an estimate.
-    crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
+    // Build the plan into one or more payload-bounded packs (splitting
+    // when the plan exceeds `pack_payload_cap`, issue #831) and upload
+    // each as it's sealed. Raws first (non-blobs before blobs), then
+    // deltas (their bases are external — resolved from the fetcher's
+    // store via earlier packs, never a base introduced earlier in THIS
+    // push — so no in-pack ordering is required across the split,
+    // SPEC-PACKFILE §4).
+    let pack_keys = build_and_upload_packs(tx, store, &plan, pack_payload_cap)?;
 
-    // Chain the pack onto the packmap AND move the head together (#408): a
-    // transactional transport applies both atomically, the default does
-    // packmap-then-head. Either way the head never lands past a packmap that
-    // can't reconstruct it. `Append`'s `self_contained` lets a full-closure
-    // push reset a broken chain (unconditionally, on any transport);
-    // `ResetSelfContained` proactively resets a healthy chain that has grown
-    // too deep, and is only ever chosen above when the transport is
-    // atomic-capable AND the head write is CAS-conditioned. A failed advance
-    // leaves the head untouched.
+    // Chain the pack(s) onto the packmap AND move the head together
+    // (#408): a transactional transport applies both atomically, the
+    // default does packmap-then-head. Either way the head never lands
+    // past a packmap that can't reconstruct it. `Append`'s
+    // `self_contained` lets a full-closure push reset a broken chain
+    // (unconditionally, on any transport); `ResetSelfContained`
+    // proactively resets a healthy chain that has grown too deep, and
+    // is only ever chosen above when the transport is atomic-capable
+    // AND the head write is CAS-conditioned. A failed advance leaves
+    // the head untouched.
     let action = if rebaseline {
         ChainAction::ResetSelfContained
     } else {
@@ -802,7 +818,105 @@ pub fn push_branch_with_depth(
             self_contained: plan.self_contained,
         }
     };
-    advance_packmap(tx, branch, pack_key, action, resolved_chain, condition, tip)
+    advance_packmap(
+        tx,
+        branch,
+        &pack_keys,
+        action,
+        resolved_chain,
+        condition,
+        tip,
+    )
+}
+
+/// Build `plan`'s entries into one or more packs, each staying under
+/// `payload_cap` bytes of wire payload, uploading each pack to `tx` as
+/// soon as it's sealed. Returns the ordered pack keys — build order is
+/// apply order, threaded straight into [`advance_packmap`].
+///
+/// A single linear left-to-right pass over the plan's already-ordered
+/// `raw ++ deltas` sequence is enough: [`transfer::plan_pack`] never
+/// deltas an entry against a base introduced earlier in THIS push
+/// (every delta's base is already on the remote from a prior push), so
+/// packs can be sealed independently the instant one would exceed the
+/// cap — no intra-push base-ordering hazard to preserve across the
+/// split.
+///
+/// Sizing uses a conservative *uncompressed* upper bound per entry
+/// (`bytes.len()` for a raw, `HASH_LEN + stream.len()` for a delta)
+/// checked against [`PackWriter::total_payload`]'s real (compressed)
+/// running total, so a sealed pack never exceeds `payload_cap` — it may
+/// under-fill when compression bites, yielding more packs than the
+/// theoretical minimum, never fewer. Peak memory is one pack buffer
+/// (bounded by `payload_cap`), not every pack held at once.
+///
+/// The caller only reaches this with a non-empty `plan` (an empty plan
+/// takes the head-only fast path before this is called), so the final
+/// seal always has at least one entry and this always returns at least
+/// one key.
+fn build_and_upload_packs(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    plan: &transfer::PackPlan,
+    payload_cap: u64,
+) -> Result<Vec<Hash>, DispatchError> {
+    let mut pack_keys = Vec::new();
+    let mut w = PackWriter::new();
+
+    for h in &plan.raw {
+        let bytes = store.read(h)?;
+        if should_seal(&w, bytes.len() as u64, payload_cap) {
+            seal_pack(tx, &mut w, &mut pack_keys)?;
+        }
+        w.push_raw(*h, &bytes)?;
+        // Honest progress (#711): one real object just got staged into
+        // the outgoing pack. Never git's fabricated
+        // Enumerating/Counting/Compressing lines — see `crate::progress`.
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
+    }
+    for d in &plan.deltas {
+        let bound = (HASH_LEN + d.stream.len()) as u64;
+        if should_seal(&w, bound, payload_cap) {
+            seal_pack(tx, &mut w, &mut pack_keys)?;
+        }
+        w.push_delta(&d.base, &d.stream)?;
+        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
+    }
+
+    seal_pack(tx, &mut w, &mut pack_keys)?;
+    Ok(pack_keys)
+}
+
+/// Would pushing an entry of (conservative, uncompressed) size
+/// `add_bound` into `w` exceed `payload_cap`? Never true for an empty
+/// writer — a single entry over the cap (only reachable with a
+/// test-injected tiny cap; production entries are bounded well under
+/// [`pack::MAX_TOTAL_PAYLOAD`] by [`mkit_core::store::MAX_RAW_OBJECT_SIZE`])
+/// lands alone in its own pack rather than looping forever.
+fn should_seal(w: &PackWriter, add_bound: u64, payload_cap: u64) -> bool {
+    w.entry_count() > 0 && w.total_payload().saturating_add(add_bound) > payload_cap
+}
+
+/// Finish `w`, upload it, record its key, and replace `w` with a fresh
+/// empty writer so the caller can keep pushing entries into the next
+/// pack.
+fn seal_pack(
+    tx: &dyn Transport,
+    w: &mut PackWriter,
+    pack_keys: &mut Vec<Hash>,
+) -> Result<(), DispatchError> {
+    if crate::signal::is_shutdown() {
+        return Err(DispatchError::Interrupted);
+    }
+    let sealed = std::mem::replace(w, PackWriter::new());
+    let pack = sealed.finish()?;
+    let pack_key = pack::pack_key(&pack);
+    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+    // Upload is complete — report the real byte count handed to the
+    // transport, not an estimate.
+    crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
+    pack_keys.push(pack_key);
+    Ok(())
 }
 
 /// [`pull_all_with`] with signature verification on — the CLI's default

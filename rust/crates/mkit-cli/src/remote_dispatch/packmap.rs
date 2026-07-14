@@ -11,7 +11,7 @@
 //! *advance* and the fetch-side *resolve / fetch* logic — which share the
 //! same chain-walk integrity rules — sit next to each other:
 //!
-//! * push side: [`advance_packmap`] (chains a new pack on, gated by a CAS
+//! * push side: [`advance_packmap`] (chains one or more new packs on, gated by a CAS
 //!   on the packmap ref).
 //! * fetch side: [`resolve_pack_chain`] (walk + integrity check),
 //!   [`resolve_and_download_chain`] (network-only: walk + download, no
@@ -287,8 +287,10 @@ pub(crate) enum ChainAction {
     ResetSelfContained,
 }
 
-/// Chain `pack_key` onto the branch's packmap and CAS-advance the
-/// `refs/mkit/packmap/<branch>` pointer to the new node.
+/// Chain `pack_keys` (in apply order — a push over the payload cap
+/// produces more than one, see [`super::build_and_upload_packs`]) onto
+/// the branch's packmap, recorded as a single new node, and CAS-advance
+/// the `refs/mkit/packmap/<branch>` pointer to it.
 ///
 /// This MUST succeed before the branch ref is moved: the invariant is
 /// "if `refs/heads/<branch>` resolves to T, the packmap reconstructs
@@ -304,8 +306,9 @@ pub(crate) enum ChainAction {
 /// chain that fetch cannot walk:
 ///
 /// * No prior packmap → start a fresh chain (`prev = None`).
-/// * Prior chain fully walks → append (`prev = prior`). If our pack is
-///   already anywhere in the chain the push is idempotent and we stop.
+/// * Prior chain fully walks → append (`prev = prior`). If every key in
+///   our set is already somewhere in the chain the push is idempotent
+///   and we stop.
 /// * Prior chain broken at any depth → we must not append a chain whose tail
 ///   can't be resolved. If `self_contained` (this pack reconstructs the whole
 ///   closure with no external base) we **reset** to a fresh chain — the only
@@ -342,12 +345,17 @@ pub(crate) enum ChainAction {
 pub(crate) fn advance_packmap(
     tx: &dyn Transport,
     branch: &str,
-    pack_key: Hash,
+    pack_keys: &[Hash],
     action: ChainAction,
     resolved: Option<ResolvedChain>,
     head_condition: refs::RefWriteCondition,
     tip: Hash,
 ) -> Result<(), DispatchError> {
+    debug_assert!(
+        !pack_keys.is_empty(),
+        "advance_packmap requires at least one pack key — callers only reach this with a \
+         non-empty plan"
+    );
     let packmap_name = packmap_ref(branch);
     let head_name = format!("refs/heads/{branch}");
     // Consumed by (at most) the first iteration that reaches the "resolve
@@ -403,13 +411,29 @@ pub(crate) fn advance_packmap(
                         _ => resolve_pack_chain(tx, branch, p),
                     };
                     match packs {
-                        // Idempotency: a previous attempt already advertised this pack.
-                        // The packmap is already correct, so only the head still needs
-                        // to move — commit it alone.
-                        Ok(packs) if packs.contains(&pack_key) => {
-                            return commit_head(tx, &head_name, head_condition, &tip, branch);
+                        // Idempotency: a previous attempt already advertised
+                        // EVERY key in our set (any position — the node
+                        // that carried them was written atomically before
+                        // its ref CAS, so a committed prior attempt from
+                        // THIS push contributed all keys at once, already
+                        // in apply order; determinism — same plan, same
+                        // greedy split, same pack bytes — means a retry
+                        // regenerates the identical key set). The packmap
+                        // is already correct, so only the head still needs
+                        // to move — commit it alone. Partial overlap can
+                        // only arise from a different push that happened
+                        // to produce byte-identical packs for a subset;
+                        // appending a fresh node in that case is harmless
+                        // (fetch applies content-addressed objects
+                        // idempotently, and the applied-packs record skips
+                        // already-applied digests).
+                        Ok(packs) => {
+                            let have: std::collections::HashSet<&Hash> = packs.iter().collect();
+                            if pack_keys.iter().all(|k| have.contains(k)) {
+                                return commit_head(tx, &head_name, head_condition, &tip, branch);
+                            }
+                            Some(p) // healthy chain — append onto it
                         }
-                        Ok(_) => Some(p), // healthy chain — append onto it
                         // Broken chain: a self-contained pack can reset to escape it;
                         // a delta push must block (its bases live in the broken tail).
                         // Transient transport errors propagate (don't reset on a blip).
@@ -419,7 +443,7 @@ pub(crate) fn advance_packmap(
                 }
             },
         };
-        let node = transfer::encode_packlist(prev, &[pack_key])?;
+        let node = transfer::encode_packlist(prev, pack_keys)?;
         let node_key = pack::pack_key(&node);
         tx.upload_blob(&node, &PackKey::from_hash(node_key))?;
         // CAS off the packmap's CURRENT value (`prior`), independent of the
@@ -839,5 +863,149 @@ mod tests {
             resolve_pack_chain(&tx, "main", ghost).unwrap_err(),
             DispatchError::PackChainInvalid { .. }
         ));
+    }
+
+    // ---- advance_packmap — multi-key (issue #831) -------------------
+
+    fn decode_node_at(tx: &MemoryTransport, key: Hash) -> transfer::PackListNode {
+        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        transfer::decode_packlist(&bytes).unwrap()
+    }
+
+    #[test]
+    fn advance_packmap_multi_key_first_push_writes_one_node_in_order() {
+        let tx = MemoryTransport::new();
+        let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
+        let tip = h("tip");
+
+        advance_packmap(
+            &tx,
+            "main",
+            &[k1, k2, k3],
+            ChainAction::Append {
+                self_contained: true,
+            },
+            None,
+            refs::RefWriteCondition::Missing,
+            tip,
+        )
+        .unwrap();
+
+        let pm_head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        let node = decode_node_at(&tx, pm_head);
+        assert_eq!(node.prev, None, "first push has no prior chain");
+        assert_eq!(
+            node.packs,
+            vec![k1, k2, k3],
+            "all keys land on ONE node, in build/apply order"
+        );
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    }
+
+    #[test]
+    fn advance_packmap_single_key_matches_pre_831_shape() {
+        // Regression: the common case (a push that fits one pack) must
+        // still produce exactly the one-pack node it always did.
+        let tx = MemoryTransport::new();
+        let k1 = h("only-key");
+        let tip = h("tip");
+
+        advance_packmap(
+            &tx,
+            "main",
+            &[k1],
+            ChainAction::Append {
+                self_contained: true,
+            },
+            None,
+            refs::RefWriteCondition::Missing,
+            tip,
+        )
+        .unwrap();
+
+        let pm_head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        assert_eq!(decode_node_at(&tx, pm_head).packs, vec![k1]);
+    }
+
+    #[test]
+    fn advance_packmap_is_idempotent_when_every_key_already_chained() {
+        // A retried push (e.g. a lost head-CAS race after the packmap
+        // already landed) must not append a redundant node when the
+        // prior chain already carries every key this attempt would add
+        // — only the head still needs to move.
+        let tx = MemoryTransport::new();
+        let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
+        let prior_head = h("prior-node");
+        put_node(&tx, prior_head, None, &[k1, k2, k3]);
+        tx.update_ref(
+            &packmap_ref("main"),
+            refs::RefWriteCondition::Missing,
+            &prior_head,
+        )
+        .unwrap();
+        let tip = h("tip");
+
+        advance_packmap(
+            &tx,
+            "main",
+            &[k1, k2, k3],
+            ChainAction::Append {
+                self_contained: true,
+            },
+            None,
+            refs::RefWriteCondition::Missing,
+            tip,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tx.read_ref(&packmap_ref("main")).unwrap(),
+            Some(prior_head),
+            "idempotent retry must not write a new node"
+        );
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip));
+    }
+
+    #[test]
+    fn advance_packmap_appends_when_only_some_keys_already_chained() {
+        // Partial overlap is NOT idempotency — a different push that
+        // happened to produce one identical pack is not the same push
+        // retried. A fresh node carrying the full new set is appended.
+        let tx = MemoryTransport::new();
+        let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
+        let prior_head = h("prior-node");
+        put_node(&tx, prior_head, None, &[k1]);
+        tx.update_ref(
+            &packmap_ref("main"),
+            refs::RefWriteCondition::Missing,
+            &prior_head,
+        )
+        .unwrap();
+        let tip = h("tip");
+
+        advance_packmap(
+            &tx,
+            "main",
+            &[k1, k2, k3],
+            ChainAction::Append {
+                self_contained: true,
+            },
+            None,
+            refs::RefWriteCondition::Missing,
+            tip,
+        )
+        .unwrap();
+
+        let new_head = tx.read_ref(&packmap_ref("main")).unwrap().unwrap();
+        assert_ne!(new_head, prior_head, "a new node must be appended");
+        let node = decode_node_at(&tx, new_head);
+        assert_eq!(node.prev, Some(prior_head));
+        assert_eq!(node.packs, vec![k1, k2, k3]);
+
+        // The chain still resolves and flattens both nodes' packs.
+        assert_eq!(
+            resolve_pack_chain(&tx, "main", new_head).unwrap(),
+            vec![k1, k1, k2, k3],
+        );
     }
 }
