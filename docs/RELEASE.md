@@ -148,7 +148,31 @@ Run top to bottom. Do not skip steps.
 ### Smoke test
 
 On at least one Linux box, one macOS box, and one Windows box (or
-`windows-latest` via `gh workflow run`):
+`windows-latest` via `gh workflow run`), download the archive for your
+platform, then run the mechanized checklist below instead of the steps by
+hand:
+
+```sh
+# Linux / macOS
+scripts/release-smoke.sh --archive mkit-X.Y.Z-<target>.tar.gz --version X.Y.Z
+```
+
+```powershell
+# Windows
+.\scripts\release-smoke.ps1 -Archive mkit-X.Y.Z-x86_64-pc-windows-msvc.zip -Version X.Y.Z
+```
+
+The script covers every item below in one pass **except** the "Windows
+only" `install.ps1` one-liner check, which still needs to be run by hand
+against a fresh PowerShell session: cosign signature, the `SHA256SUMS`
+entry, `mkit version`/`mkit.exe version` against the tag, the bundled man
+page and completions, a basic `mkit init` → `mkit keygen` → add a file →
+`mkit commit` flow, and (unless `--skip-npm`/`-SkipNpm`) `npm view
+@makechain/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the same
+script used for a pre-flight dry run against a locally packaged archive
+before tagging (missing sidecars like the cosign bundle are skipped with a
+warning, not a failure, in that case) &mdash; this checklist is the spec of
+record the script implements, so if the two ever disagree, fix the script:
 
 - [ ] Download the archive for your platform.
 - [ ] Verify the cosign signature (see [below](#verify-a-downloaded-archive)).

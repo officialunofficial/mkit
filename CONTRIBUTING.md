@@ -57,6 +57,30 @@ cargo deny check                                      # licenses, sources, advis
 cargo audit                                           # RUSTSEC advisories
 ```
 
+### Local CI
+
+The root [`justfile`](../justfile) mirrors the gates CI actually runs
+([`cloudbuild/ci.yaml`](../cloudbuild/ci.yaml),
+[`cloudbuild/security.yaml`](../cloudbuild/security.yaml),
+[`cloudbuild/docs.yaml`](../cloudbuild/docs.yaml),
+[`cloudbuild/geiger.yaml`](../cloudbuild/geiger.yaml), and
+[`rust.yml`](../.github/workflows/rust.yml)'s `build-and-test`/
+`windows-smoke` jobs) so you can check whether a change would pass CI
+before pushing, instead of finding out from a red PR check. Install
+[`just`](https://github.com/casey/just#installation), then, from the repo
+root:
+
+```sh
+just ci            # host-appropriate subset (Linux/macOS/Windows + security/docs/geiger)
+just --list        # see every ci-* target and what it mirrors
+```
+
+Run an individual `ci-*` target (`just ci-linux`, `just ci-security`, ...)
+to check one gate in isolation. The `keystore-backends` matrix (native
+macOS Keychain/Windows Credential Manager/Linux Secret Service backends)
+isn't mirrored here &mdash; it stays `workflow_dispatch`-only on GitHub Actions
+by design; see `docs/RELEASE.md`'s pre-release checklist.
+
 ## Test-first discipline
 
 Every bug fix PR MUST include a regression test that fails on the
