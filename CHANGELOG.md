@@ -514,8 +514,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mis-reading every `Tree`/`ChunkedBlob`. Pre-1.0 API/format break, no
   migration. New normative spec
   [`docs/specs/SPEC-MERKLE-OBJECTS.md`](docs/specs/SPEC-MERKLE-OBJECTS.md) pins the
-  construction; see also ADR
-  [`docs/adr/0001-merkelize-chunkedblob-and-tree.md`](docs/adr/0001-merkelize-chunkedblob-and-tree.md)
+  construction
   ([#414](https://github.com/officialunofficial/mkit/pull/414)).
 - **BREAKING (`mkit-core`):** in the `blame` module, the public type alias
   `BlameResult2<T>` was renamed to `BlameOutcome<T>`, and the unbounded

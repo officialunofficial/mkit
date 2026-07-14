@@ -272,8 +272,7 @@ pub fn attest_verify(envelope_json: &str, pubkey_hex: &str, algo: &str) -> bool 
 // DSSE attestation. mkit's core commit signing is Ed25519-only, but
 // attestations are P-256-capable, and platform passkeys (Touch ID /
 // Face ID / Android biometric) only ever produce P-256 (ES256), so
-// the passkey lifecycle lands here. See
-// docs/research/passkey-signing-demo.md.
+// the passkey lifecycle lands here.
 //
 // A passkey does NOT sign arbitrary bytes: the authenticator signs
 // `authenticatorData || SHA-256(clientDataJSON)` where the DSSE PAE

@@ -53,7 +53,7 @@ bls-threshold = [
 # reaches it within one build — so leaving this edge on defaults would
 # silently drag `zstd-sys` back into mkit-wasm's build even though
 # mkit-wasm's own `mkit-core` edge already opts out. Every OTHER
-# consumer of mkit-attest (mkit-cli, mkit-keystore, release-attest)
+# consumer of mkit-attest (mkit-cli, mkit-keystore)
 # also depends on mkit-core directly with default features on, so
 # their builds are unaffected — the union still includes `pack-zstd`
 # there via that direct edge.

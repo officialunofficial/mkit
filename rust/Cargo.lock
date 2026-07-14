@@ -3690,16 +3690,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mkit-release-attest"
-version = "0.3.0"
-dependencies = [
- "mkit-attest",
- "mkit-core",
- "serde_json",
- "zeroize",
-]
-
-[[package]]
 name = "mkit-repo-client"
 version = "0.1.0"
 dependencies = [

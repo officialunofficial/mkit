@@ -1487,10 +1487,9 @@ the per-section requirements above remain normative.
 - Golden vectors and verification-equivalence tests: **shipped** for
   deterministic software/software-raw signers; hardware/OS ECDSA
   verification-equivalence coverage does not yet cover every backend.
-- Threat model and user-facing docs: `docs/keystore.md` is the end-user
-  overview; `docs/THREAT-MODEL.md` does not yet document per-backend malware,
-  disk-extraction, backup-exfiltration, and side-channel assumptions for
-  every backend in §6.
+- Threat model docs: `docs/THREAT-MODEL.md` does not yet document per-backend
+  malware, disk-extraction, backup-exfiltration, and side-channel assumptions
+  for every backend in §6.
 
 ## 16. Design decisions and defaults
 

@@ -5,12 +5,10 @@
 //!                  [--format human|json]
 //! ```
 //!
-//! Updates the running binary in place from GitHub Releases,
-//! verifying the **mkit-native release attestation** (a DSSE/in-toto
-//! envelope over the BLAKE3 digests of the release tarballs — see
-//! `docs/RELEASE.md`) against the release-attestation public keys
-//! embedded in this binary at build time. Verification is fully
-//! in-process: no `cosign`, no GitHub attestation API.
+//! Updates the running binary in place from GitHub Releases. The
+//! downloaded archive is checked against its sha256 sidecar asset
+//! when the release publishes one; verification is fully in-process:
+//! no `cosign`, no GitHub attestation API.
 //!
 //! Management contract (shared with `install.sh`):
 //!
@@ -51,7 +49,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use mkit_attest::{Registry, TrustRoot};
 use mkit_core::hash;
 use sha2::Digest as _;
 
@@ -59,17 +56,6 @@ use crate::clap_shim;
 use crate::cli::CLI_VERSION;
 use crate::exit;
 use crate::format::json_escape;
-
-/// Embedded release-attestation public keys (rotation set). This is a
-/// crate-local copy of `docs/keys/release-attest.pub` so `cargo publish`
-/// can package it; the `embedded_keys_match_docs_copy` test keeps the
-/// two in sync.
-const RELEASE_ATTEST_PUB: &str = include_str!("../../keys/release-attest.pub");
-
-/// Predicate type URI the release attestation must carry
-/// (SPEC-ATTESTATIONS §6.4; emitted by `mkit-release-attest sign`).
-const PREDICATE_TYPE_RELEASE_V1: &str =
-    "https://github.com/officialunofficial/mkit/spec/predicate/release/v1";
 
 /// Target triple this binary was built for — release archives are
 /// named `mkit-<version>-<triple>.tar.gz`. Emitted by `build.rs`.
@@ -80,7 +66,6 @@ const DEFAULT_API_BASE: &str = "https://api.github.com/repos/officialunofficial/
 
 /// Read caps, defense-in-depth against a hostile or broken origin.
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_DSSE_BYTES: u64 = 1024 * 1024;
 const MAX_SHA256_BYTES: u64 = 4 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 /// Cap on the extracted binary (the archive is ~4 MB compressed today;
@@ -185,8 +170,6 @@ pub struct UpdateEnv {
     pub api_base: String,
     /// Bearer token for the API + asset downloads.
     pub token: Option<String>,
-    /// Release-attestation trust roots (Ed25519 public keys).
-    pub trust_keys: Vec<[u8; 32]>,
     /// Canonicalized path of the binary to replace.
     pub exe_path: PathBuf,
     /// Receipt state dir (`installed-tag` lives here).
@@ -223,8 +206,6 @@ impl UpdateEnv {
         Ok(Self {
             api_base: api_base.trim_end_matches('/').to_owned(),
             token,
-            trust_keys: parse_pubkeys(RELEASE_ATTEST_PUB)
-                .map_err(|e| (format!("embedded release keys: {e}"), exit::CONFIG_ERROR))?,
             exe_path,
             state_dir,
             current_version: CLI_VERSION.to_owned(),
@@ -418,7 +399,6 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
     // --- Fetch release metadata + assets. ----------------------------
     let release = fetch_release_by_tag(&client, env, &target_tag)?;
     let archive_name = format!("mkit-{target_bare}-{}.tar.gz", env.target);
-    let dsse_name = format!("mkit-{target_bare}.release.dsse");
 
     let archive_url = asset_url(&release, &archive_name).ok_or_else(|| {
         (
@@ -426,39 +406,19 @@ pub fn run_update(opts: &Opts, env: &UpdateEnv) -> Result<Outcome, (String, u8)>
             exit::UNAVAILABLE,
         )
     })?;
-    let dsse_url = asset_url(&release, &dsse_name).ok_or_else(|| {
-        (
-            format!(
-                "release {target_tag} predates the mkit-native release attestation \
-                 ({dsse_name} not among its assets); it cannot be verified by self update — \
-                 use install.sh (cosign path) instead"
-            ),
-            exit::UNAVAILABLE,
-        )
-    })?;
 
     eprintln!("downloading mkit {target_tag} ({})...", env.target);
     let archive_bytes = download(&client, env, &archive_url, MAX_ARCHIVE_BYTES)?;
-    let dsse_bytes = download(&client, env, &dsse_url, MAX_DSSE_BYTES)?;
 
     // --- Verify. ------------------------------------------------------
-    // (a) sha256 sidecar — pure defense-in-depth (same origin as the
-    // archive); absence is tolerated, mismatch is not.
+    // sha256 sidecar — same origin as the archive, so this is
+    // defense-in-depth rather than a strong authenticity guarantee;
+    // absence is tolerated, mismatch is not.
     if let Some(sha_url) = asset_url(&release, &format!("{archive_name}.sha256")) {
         let sha_body = download(&client, env, &sha_url, MAX_SHA256_BYTES)?;
         verify_sha256_sidecar(&archive_bytes, &sha_body, &archive_name)
             .map_err(|e| (e, exit::DATAERR))?;
     }
-    // (b) the mkit-native attestation — REQUIRED.
-    let keyid = verify_release_attestation(
-        &dsse_bytes,
-        &env.trust_keys,
-        &target_tag,
-        &archive_name,
-        &archive_bytes,
-    )
-    .map_err(|e| (format!("release attestation: {e}"), exit::DATAERR))?;
-    eprintln!("verified release attestation (keyid {keyid})");
 
     // --- Extract + pre-swap validation. -------------------------------
     let binary = extract_binary(
@@ -781,96 +741,6 @@ fn verify_sha256_sidecar(archive: &[u8], sidecar: &[u8], archive_name: &str) -> 
     }
 }
 
-/// Parse the `ed25519:<64-hex>` rotation-set file (crate-embedded copy
-/// of `docs/keys/release-attest.pub`).
-fn parse_pubkeys(text: &str) -> Result<Vec<[u8; 32]>, String> {
-    let mut keys = Vec::new();
-    for (lineno, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let hex = line
-            .strip_prefix("ed25519:")
-            .ok_or_else(|| format!("line {}: expected `ed25519:<64-hex>`", lineno + 1))?;
-        keys.push(hash::from_hex(hex).map_err(|_| format!("line {}: bad hex", lineno + 1))?);
-    }
-    if keys.is_empty() {
-        return Err("no keys found".to_owned());
-    }
-    Ok(keys)
-}
-
-/// keyid convention from SPEC-ATTESTATIONS §6.3.
-fn keyid_for_pubkey(pubkey: &[u8; 32]) -> String {
-    format!(
-        "{}{}",
-        mkit_attest::KEYID_PREFIX,
-        hash::to_hex(&hash::hash(pubkey))
-    )
-}
-
-/// Verify the release DSSE for ONE downloaded archive: envelope
-/// signature against the trust set, release predicate type, predicate
-/// tag, and a subject whose name is `archive_name` with the archive's
-/// BLAKE3 digest. (A *subset* check — the attestation covers every
-/// target's archive; we hold one of them.) Returns the verifying keyid.
-pub fn verify_release_attestation(
-    dsse_bytes: &[u8],
-    trust_keys: &[[u8; 32]],
-    tag: &str,
-    archive_name: &str,
-    archive_bytes: &[u8],
-) -> Result<String, String> {
-    let mut registry = Registry::new();
-    for pk in trust_keys {
-        registry.add(keyid_for_pubkey(pk), TrustRoot::Ed25519PubKey(*pk));
-    }
-    let result = mkit_attest::verify_envelope(dsse_bytes, &registry)
-        .map_err(|e| format!("envelope: {e}"))?;
-    let Some(verified) = result.signatures.iter().find(|s| s.verified) else {
-        return Err(
-            "no signature verified against the release-attestation keys embedded in this \
-             binary — the release may be signed with a newer (rotated) key; reinstall via \
-             install.sh"
-                .to_owned(),
-        );
-    };
-
-    let env = mkit_attest::envelope::decode(dsse_bytes).map_err(|e| format!("envelope: {e}"))?;
-    let stmt: serde_json::Value =
-        serde_json::from_slice(&env.payload).map_err(|e| format!("statement: {e}"))?;
-
-    if stmt["predicateType"] != PREDICATE_TYPE_RELEASE_V1 {
-        return Err(format!(
-            "predicateType is {}, expected {PREDICATE_TYPE_RELEASE_V1}",
-            stmt["predicateType"]
-        ));
-    }
-    if stmt["predicate"]["tag"] != tag {
-        return Err(format!(
-            "predicate tag is {}, expected \"{tag}\" — the attestation belongs to a \
-             different release",
-            stmt["predicate"]["tag"]
-        ));
-    }
-
-    let digest = hash::to_hex(&hash::hash(archive_bytes));
-    let subjects = stmt["subject"]
-        .as_array()
-        .ok_or_else(|| "statement has no subject array".to_owned())?;
-    let matched = subjects.iter().any(|s| {
-        s["name"].as_str() == Some(archive_name)
-            && s["digest"]["blake3"].as_str() == Some(digest.as_str())
-    });
-    if !matched {
-        return Err(format!(
-            "downloaded {archive_name} (blake3 {digest}) does not match any attested subject"
-        ));
-    }
-    Ok(verified.keyid.clone())
-}
-
 // ------------------------------------------------------ extract + swap
 
 /// Pull `<stage_dir>/mkit` out of the tar.gz. Only that one entry is
@@ -1024,31 +894,6 @@ mod tests {
         assert!(validate_tag("v1.2").is_err());
     }
 
-    // ---- embedded keys ----
-
-    #[test]
-    fn embedded_keys_parse() {
-        let keys = parse_pubkeys(RELEASE_ATTEST_PUB).unwrap();
-        assert!(!keys.is_empty());
-    }
-
-    /// The crate-local copy (packaged for `cargo publish`) must stay
-    /// byte-identical to the canonical checked-in rotation set. Skips
-    /// when the docs copy isn't present (published-crate builds).
-    #[test]
-    fn embedded_keys_match_docs_copy() {
-        let docs =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/keys/release-attest.pub");
-        let Ok(canonical) = std::fs::read_to_string(&docs) else {
-            return;
-        };
-        assert_eq!(
-            canonical, RELEASE_ATTEST_PUB,
-            "rust/crates/mkit-cli/keys/release-attest.pub is out of sync with \
-             docs/keys/release-attest.pub — copy the docs file over the crate copy"
-        );
-    }
-
     // ---- receipts ----
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -1133,80 +978,6 @@ mod tests {
         let tgz = tgz_with(&[("mkit-0.4.0-x/README.md", b"readme")]);
         let e = extract_binary(&tgz, "mkit-0.4.0-x").unwrap_err();
         assert!(e.contains("no mkit-0.4.0-x/mkit member"), "{e}");
-    }
-
-    // ---- attestation verification (mirrors the release tool's tests
-    // from the CONSUMER side) ----
-
-    fn signed_dsse(seed_byte: u8, subjects: &[(&str, &[u8])], tag: &str) -> (Vec<u8>, [u8; 32]) {
-        use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer as _, jcs, statement};
-        use zeroize::Zeroizing;
-        let seed = Zeroizing::new([seed_byte; 32]);
-        let pk = mkit_core::sign::KeyPair::from_seed_zeroizing(&seed)
-            .public
-            .0;
-        let predicate = jcs::encode(&jcs::Value::Object(vec![jcs::Member::new(
-            "tag",
-            jcs::Value::String(tag.to_owned()),
-        )]))
-        .unwrap();
-        let stmt = statement::encode(&statement::Statement {
-            subjects: subjects
-                .iter()
-                .map(|(name, body)| statement::Subject {
-                    name: Some((*name).to_owned()),
-                    digest_blake3_hex: hash::to_hex(&hash::hash(body)),
-                    digest_sha256_hex: statement::sha256_hex(body),
-                })
-                .collect(),
-            predicate_type: PREDICATE_TYPE_RELEASE_V1.to_owned(),
-            predicate_jcs: predicate.as_bytes(),
-        })
-        .unwrap()
-        .into_bytes();
-        let mut signer = mkit_attest::signer_repo_key::RepoKeySigner::from_seed_zeroizing(&seed);
-        let pae = mkit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt);
-        let sig = signer.sign(&pae).unwrap();
-        let dsse = Envelope {
-            payload_type: PAYLOAD_TYPE_IN_TOTO.to_owned(),
-            payload: stmt,
-            signatures: vec![Sig {
-                keyid: signer.keyid_string(),
-                sig,
-            }],
-        }
-        .encode()
-        .unwrap()
-        .into_bytes();
-        (dsse, pk)
-    }
-
-    #[test]
-    fn attestation_subset_check_passes_for_one_archive() {
-        let a = b"archive-a".as_slice();
-        let b = b"archive-b".as_slice();
-        let (dsse, pk) = signed_dsse(7, &[("a.tar.gz", a), ("b.tar.gz", b)], "v0.4.0");
-        // Holding only archive b (the updater's situation) verifies.
-        verify_release_attestation(&dsse, &[pk], "v0.4.0", "b.tar.gz", b).unwrap();
-    }
-
-    #[test]
-    fn attestation_rejects_wrong_key_tag_and_digest() {
-        let a = b"archive-a".as_slice();
-        let (dsse, pk) = signed_dsse(7, &[("a.tar.gz", a)], "v0.4.0");
-        let other =
-            mkit_core::sign::KeyPair::from_seed_zeroizing(&zeroize::Zeroizing::new([9u8; 32]))
-                .public
-                .0;
-        let e = verify_release_attestation(&dsse, &[other], "v0.4.0", "a.tar.gz", a).unwrap_err();
-        assert!(e.contains("no signature verified"), "{e}");
-        let e = verify_release_attestation(&dsse, &[pk], "v0.4.1", "a.tar.gz", a).unwrap_err();
-        assert!(e.contains("different release"), "{e}");
-        let e = verify_release_attestation(&dsse, &[pk], "v0.4.0", "a.tar.gz", b"tampered")
-            .unwrap_err();
-        assert!(e.contains("does not match any attested subject"), "{e}");
-        let e = verify_release_attestation(&dsse, &[pk], "v0.4.0", "b.tar.gz", a).unwrap_err();
-        assert!(e.contains("does not match any attested subject"), "{e}");
     }
 
     // ---- staged-binary check + perms (unix) ----
