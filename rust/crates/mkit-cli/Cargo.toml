@@ -225,6 +225,14 @@ proptest = "1"
 connectrpc = { version = "0.8.1", default-features = false, features = ["server", "gzip", "zstd", "streaming", "json"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 futures = "0.3"
+# tests/ssh_e2e_real.rs's containerized real-sshd test: a genuine
+# OpenSSH daemon (lscr.io/linuxserver/openssh-server) via Docker, closing
+# the gap the module docs' host-level skeleton left open ("would flake
+# across runners" — the container sidesteps exactly that fragility, since
+# the daemon's provisioning lives in a pinned, pre-built image instead of
+# on the host). `blocking` feature: this suite's tests are plain `#[test]`,
+# not async.
+testcontainers = { version = "0.27", features = ["blocking"] }
 
 [features]
 default = []
