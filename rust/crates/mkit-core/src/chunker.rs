@@ -206,6 +206,79 @@ impl Iterator for ChunkIterator<'_> {
     }
 }
 
+/// Streaming variant of [`ChunkIterator`] that pulls from a [`Read`]
+/// instead of requiring the whole input as an in-memory slice.
+///
+/// [`FastCdc::cut`] only ever looks at most `max_size` bytes ahead of the
+/// current chunk's start (see its doc comment), so this reader keeps at
+/// most one `max_size`-sized window resident at a time — memory use is
+/// bounded by the chunker's `max_size` parameter, independent of the
+/// total input length. It produces byte-identical chunk boundaries and
+/// content to [`ChunkIterator`] run over the same bytes, since both call
+/// the same [`FastCdc::cut`] on the same window (pinned by the
+/// `streaming_matches_in_memory_*` tests below).
+/// Size of the scratch buffer used to pull bytes from the underlying
+/// reader in [`ChunkReader::fill`]. Heap-allocated once per
+/// `ChunkReader` rather than a stack array (`clippy::large_stack_arrays`)
+/// and reused across every `fill` call.
+const READ_SCRATCH_SIZE: usize = 64 * 1024;
+
+#[derive(Debug)]
+pub struct ChunkReader<R> {
+    cdc: FastCdc,
+    reader: R,
+    buf: Vec<u8>,
+    scratch: Vec<u8>,
+    eof: bool,
+}
+
+impl<R: std::io::Read> ChunkReader<R> {
+    #[must_use]
+    pub fn new(cdc: FastCdc, reader: R) -> Self {
+        Self {
+            cdc,
+            reader,
+            buf: Vec::new(),
+            scratch: vec![0u8; READ_SCRATCH_SIZE],
+            eof: false,
+        }
+    }
+
+    /// Top up `buf` to at least `max_size` bytes (or EOF), preserving
+    /// whatever's already buffered at the front. `read` can return short
+    /// of the requested length without signalling EOF, so this loops
+    /// until either the target is met or a `0`-byte read confirms EOF.
+    fn fill(&mut self) -> std::io::Result<()> {
+        let target = self.cdc.max_size();
+        while !self.eof && self.buf.len() < target {
+            let n = self.reader.read(&mut self.scratch)?;
+            if n == 0 {
+                self.eof = true;
+            } else {
+                self.buf.extend_from_slice(&self.scratch[..n]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Read and return the next chunk's owned bytes, or `None` at end of
+    /// input. Mirrors `Iterator` exhaustion semantics but is fallible
+    /// because filling the window can fail.
+    ///
+    /// # Errors
+    /// Propagates the underlying reader's I/O errors.
+    pub fn next_chunk(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        self.fill()?;
+        if self.buf.is_empty() {
+            return Ok(None);
+        }
+        let length = self.cdc.cut(&self.buf);
+        let rest = self.buf.split_off(length);
+        let chunk = std::mem::replace(&mut self.buf, rest);
+        Ok(Some(chunk))
+    }
+}
+
 /// Convenience: collect all chunk *end* offsets from `data` using the
 /// frozen v1 chunker. The returned vector starts with the length of the
 /// first chunk and ends with `data.len()`. An empty input yields an
@@ -405,6 +478,102 @@ mod tests {
         assert_eq!(from_helper, from_iter);
     }
 
+    #[test]
+    fn streaming_matches_in_memory_iterator() {
+        let mut data = vec![0u8; 500 * 1024];
+        Prng::new(0x5713_EA31).fill(&mut data);
+
+        let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| data[b.offset..b.offset + b.length].to_vec())
+            .collect();
+
+        let mut reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
+        let mut streamed = Vec::new();
+        while let Some(chunk) = reader.next_chunk().unwrap() {
+            streamed.push(chunk);
+        }
+
+        assert_eq!(in_memory, streamed);
+    }
+
+    #[test]
+    fn streaming_empty_input_yields_no_chunks() {
+        let mut reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&[] as &[u8]));
+        assert!(reader.next_chunk().unwrap().is_none());
+    }
+
+    #[test]
+    fn streaming_small_input_is_single_chunk() {
+        let small = b"hello, this is a tiny file";
+        let mut reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&small[..]));
+        let chunk = reader.next_chunk().unwrap().expect("one chunk");
+        assert_eq!(chunk, small);
+        assert!(reader.next_chunk().unwrap().is_none());
+    }
+
+    /// A reader that only ever yields a handful of bytes per `read` call,
+    /// to exercise `ChunkReader::fill`'s short-read loop (a real `File`
+    /// on a slow filesystem or a network stream behaves this way).
+    struct StingyReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+    impl std::io::Read for StingyReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (self.data.len() - self.pos).min(buf.len()).min(7);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn streaming_reader_buffer_stays_bounded_regardless_of_input_size() {
+        // The whole point of issue #828: ingest memory must not scale
+        // with file size. Run several MiB through the reader and assert
+        // its internal window never exceeds `max_size` (256 KiB) plus
+        // one read-scratch overshoot (64 KiB) — bounded by the chunker's
+        // own parameters, not by how much input remains.
+        let mut data = vec![0u8; 8 * 1024 * 1024];
+        Prng::new(0x8000_0008).fill(&mut data);
+        let mut reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
+        let mut chunk_count = 0usize;
+        while let Some(_chunk) = reader.next_chunk().unwrap() {
+            assert!(
+                reader.buf.len() <= MAX_SIZE + READ_SCRATCH_SIZE,
+                "internal buffer grew to {} bytes, expected <= {}",
+                reader.buf.len(),
+                MAX_SIZE + READ_SCRATCH_SIZE
+            );
+            chunk_count += 1;
+        }
+        assert!(chunk_count > 1, "expected multiple chunks from 8 MiB input");
+    }
+
+    #[test]
+    fn streaming_matches_in_memory_iterator_under_short_reads() {
+        let mut data = vec![0u8; 300 * 1024];
+        Prng::new(0x5713_EA32).fill(&mut data);
+
+        let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| data[b.offset..b.offset + b.length].to_vec())
+            .collect();
+
+        let mut reader = ChunkReader::new(
+            FastCdc::v1(),
+            StingyReader {
+                data: &data,
+                pos: 0,
+            },
+        );
+        let mut streamed = Vec::new();
+        while let Some(chunk) = reader.next_chunk().unwrap() {
+            streamed.push(chunk);
+        }
+
+        assert_eq!(in_memory, streamed);
+    }
+
     /// Pinned v1 gear-table digest, harvested once from the splitmix64
     /// derivation seeded with "MKITFCDC". Drift = a v2 break.
     const EXPECTED_GEAR_DIGEST_HEX: &str =
@@ -454,6 +623,28 @@ mod tests {
                 expected_offset += b.length;
             }
             proptest::prop_assert_eq!(expected_offset, data.len());
+        }
+
+        /// `ChunkReader` (streaming) produces byte-identical chunks to
+        /// `ChunkIterator` (in-memory) for arbitrary input — the
+        /// correctness contract issue #828's ingest streaming depends on:
+        /// content addressing must not change based on how a file was
+        /// read.
+        #[test]
+        fn proptest_streaming_matches_in_memory(
+            data in proptest::collection::vec(proptest::num::u8::ANY, 0..256 * 1024),
+        ) {
+            let cdc = FastCdc::v1();
+            let in_memory: Vec<Vec<u8>> = ChunkIterator::new(cdc, &data)
+                .map(|b| data[b.offset..b.offset + b.length].to_vec())
+                .collect();
+
+            let mut reader = ChunkReader::new(cdc, std::io::Cursor::new(&data));
+            let mut streamed = Vec::new();
+            while let Some(chunk) = reader.next_chunk().unwrap() {
+                streamed.push(chunk);
+            }
+            proptest::prop_assert_eq!(in_memory, streamed);
         }
     }
 }

@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::chunker::{ChunkIterator, FastCdc};
+use crate::chunker::{ChunkIterator, ChunkReader, FastCdc};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
@@ -599,13 +599,90 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
     Ok((meta, data))
 }
 
-fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
+/// Hash and store a regular file, returning its content-address and the
+/// [`fs::Metadata`] observed when it was opened (for stat-cache use by
+/// callers like `mkit add`).
+///
+/// Files at or below [`CHUNK_THRESHOLD`] are read fully into memory — a
+/// single [`Blob`](crate::object::Blob) needs its bytes contiguous
+/// anyway, and the threshold keeps this small (1 MiB). Files above the
+/// threshold are streamed chunk-by-chunk directly from the open file
+/// handle instead of first buffering the whole file (issue #828):
+/// ingest memory is bounded by one `FastCdc` window regardless of the
+/// file's total size.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
     sink: &S,
     path: &Path,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
-    let (meta, data) = read_regular_file_bounded(path)?;
-    let hash = store_file_object(sink, &data)?;
+    let mut file = open_regular_file(path)?;
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(WorktreeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not a regular file",
+        )));
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+    }
+
+    if meta.len() <= CHUNK_THRESHOLD {
+        let initial_capacity = usize::try_from(meta.len())
+            .map_err(|_| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+        let mut data = Vec::with_capacity(initial_capacity);
+        file.by_ref()
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut data)?;
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+            return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+        }
+        let hash = store_file_object(sink, &data)?;
+        return Ok((hash, meta));
+    }
+
+    let hash = store_large_file_streaming(sink, file.take(MAX_FILE_BYTES + 1), path)?;
     Ok((hash, meta))
+}
+
+/// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
+/// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
+/// instead of requiring the whole file resident in memory first (issue
+/// #828). Bounds ingest memory to one `FastCdc::v1` window
+/// (`chunker::MAX_SIZE`, 256 KiB) plus the growing chunk-hash list (32
+/// bytes/chunk), regardless of the file's total size.
+///
+/// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
+/// error if `reader` yields more than [`MAX_FILE_BYTES`].
+///
+/// # Errors
+/// See [`WorktreeError`].
+fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+) -> WorktreeResult<Hash> {
+    let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+    let mut chunks = Vec::new();
+    let mut total_size: u64 = 0;
+    while let Some(chunk) = chunker.next_chunk()? {
+        total_size = total_size
+            .checked_add(chunk.len() as u64)
+            .filter(|&t| t <= MAX_FILE_BYTES)
+            .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+        let prologue = serialize::blob_prologue(chunk.len())?;
+        chunks.push(sink.put_parts(&[&prologue, &chunk])?);
+    }
+
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size,
+        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
+        chunks,
+    });
+    let manifest_bytes = serialize::serialize(&manifest)?;
+    Ok(sink.put(&manifest_bytes)?)
 }
 
 /// Store a regular file's bytes as the canonical object and return its
@@ -1079,6 +1156,53 @@ mod tests {
             reassembled.extend_from_slice(&b.data);
         }
         assert_eq!(reassembled, big, "chunks must round-trip the source");
+    }
+
+    #[test]
+    fn hash_file_with_metadata_streaming_matches_store_file_object_in_memory() {
+        // The streaming disk path (issue #828) must be content-address
+        // equivalent to the original whole-buffer path for the same
+        // bytes — same test data/PRNG shape as `large_file_becomes_chunked_blob`.
+        let work = TempDir::new().unwrap();
+        let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 700 * 1024;
+        let mut big = Vec::with_capacity(n);
+        let mut state: u64 = 0xFACE_FEED;
+        for _ in 0..n {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            big.push((z & 0xFF) as u8);
+        }
+        let path = work.path().join("big.bin");
+        fs::write(&path, &big).unwrap();
+
+        let (_sd1, store1) = fresh_store();
+        let (streamed_hash, meta) = hash_file_with_metadata(&store1, &path).unwrap();
+        assert_eq!(meta.len(), n as u64);
+
+        let (_sd2, store2) = fresh_store();
+        let in_memory_hash = store_file_object(&store2, &big).unwrap();
+
+        assert_eq!(
+            streamed_hash, in_memory_hash,
+            "streaming a file from disk must produce the same content-address \
+             as chunking the fully-buffered bytes"
+        );
+
+        // And the objects it actually wrote must round-trip.
+        let Object::ChunkedBlob(manifest) = store1.read_object(&streamed_hash).unwrap() else {
+            panic!("expected chunked_blob");
+        };
+        let mut reassembled = Vec::with_capacity(n);
+        for h in &manifest.chunks {
+            let Object::Blob(b) = store1.read_object(h).unwrap() else {
+                panic!("chunk did not resolve to a Blob");
+            };
+            reassembled.extend_from_slice(&b.data);
+        }
+        assert_eq!(reassembled, big);
     }
 
     // ---- build_tree_from_index — the staging-area path -------------

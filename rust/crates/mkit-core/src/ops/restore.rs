@@ -491,16 +491,23 @@ fn restore_blob(
     match obj {
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
         Object::ChunkedBlob(cb) => {
-            let mut buf: Vec<u8> = Vec::with_capacity(usize::try_from(cb.total_size).unwrap_or(0));
+            // Stream each chunk straight to the open tmp file instead of
+            // concatenating the whole reassembled file into memory first
+            // (issue #828): peak memory is one chunk (≤256 KiB), not the
+            // file's total size.
+            let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
+            let mut written: u64 = 0;
             for ch in &cb.chunks {
                 let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
                     return Err(RestoreError::NotABlob);
                 };
-                buf.extend_from_slice(&b.data);
+                tmp.write_all(&b.data)?;
+                written += b.data.len() as u64;
             }
-            cb.check_reassembled_size(buf.len())?;
-            write_file_atomic(dir, name, &buf, executable)?;
+            cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            drop(tmp);
+            finish_atomic_write(&tmp_path, &final_path, executable)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
@@ -565,19 +572,37 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
 /// flushes (`F_FULLFSYNC` each on macOS) for no recoverable state; git
 /// likewise does not flush checked-out files.
 fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
+    let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
+    tmp.write_all(data)?;
+    drop(tmp);
+    finish_atomic_write(&tmp_path, &final_path, executable)
+}
+
+/// Open a fresh tmp file beside `name`, removing any stale tmp file a
+/// prior aborted attempt at the same name left behind. Returns the tmp
+/// path, final path, and the open handle so a caller can write
+/// incrementally (see [`restore_blob`]'s `ChunkedBlob` arm) instead of
+/// buffering the whole file first — pair with [`finish_atomic_write`]
+/// to apply the executable bit and atomically rename into place.
+fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf, fs::File)> {
     let tmp_name = make_tmp_sibling_name(name);
     let tmp_path = dir.join(&tmp_name);
     let final_path = dir.join(name);
-    {
-        let _ = fs::remove_file(&tmp_path);
-        let mut tmp = fs::File::create(&tmp_path)?;
-        tmp.write_all(data)?;
-        if executable {
-            apply_executable_bit(&tmp_path)?;
-        }
+    let _ = fs::remove_file(&tmp_path);
+    let tmp = fs::File::create(&tmp_path)?;
+    Ok((tmp_path, final_path, tmp))
+}
+
+/// Apply the executable bit (if requested) and atomically rename the
+/// tmp file from [`create_tmp_for_write`] into its final path. The tmp
+/// file's handle must already be closed/dropped before calling this
+/// (renaming an open handle is unreliable on some platforms).
+fn finish_atomic_write(tmp_path: &Path, final_path: &Path, executable: bool) -> io::Result<()> {
+    if executable {
+        apply_executable_bit(tmp_path)?;
     }
-    prepare_path_for_rename(&final_path)?;
-    fs::rename(&tmp_path, &final_path)?;
+    prepare_path_for_rename(final_path)?;
+    fs::rename(tmp_path, final_path)?;
     Ok(())
 }
 
