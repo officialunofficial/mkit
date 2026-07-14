@@ -17,6 +17,25 @@ traffic against a real room.
 See `PLAN.md` (repo root) for the full design: rate-floor math, the
 per-identity floor bookkeeping, and the file-by-file breakdown.
 
+## Content: static by default, optionally AI-refreshed
+
+`src/content.ts` ships fixed, deterministic phrase pools (no RNG). If Workers
+AI is available (the `AI` binding in `wrangler.jsonc`), the `Spammer` DO also
+runs a background refresh — at most once every ~20 minutes, via
+`ctx.waitUntil`, never on the hot 1s alarm tick — asking a cheap model
+(`@cf/mistral/mistral-7b-instruct-v0.1`) for a fresh batch of chat/commit/remix
+phrases (`src/ai-content.ts`). A successful refresh replaces the pool future
+ticks pick from; ANY failure (quota, timeout, malformed/empty JSON, an
+oversized entry) is caught and logged, and the Worker just keeps using
+whatever pool it already had — the static `content.ts` pool if no refresh has
+ever succeeded. Reactions are excluded from this entirely: their emoji stay
+pinned to the closed, server-verified `REACTION_EMOJI` allowlist.
+
+This is well inside the Workers AI free tier (10,000 neurons/day): one
+batched refresh call every ~20 minutes on the cheapest model is on the order
+of a few dozen to a couple hundred requests/day, not the ~259,000/day a
+per-event call would require at this Worker's ~3 events/s cadence.
+
 ## Inert by default
 
 This Worker never starts anything on its own:

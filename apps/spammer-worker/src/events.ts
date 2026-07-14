@@ -9,6 +9,7 @@
 // Nothing here talks to the network directly or reimplements any part of the
 // envelope/transport contract.
 
+import type { ContentPools } from "./ai-content";
 import { CHAT_PHRASES, COMMIT_MESSAGE_PHRASES, REACTION_EMOJI, REMIX_MESSAGE_PHRASES, pick } from "./content";
 import { makeSignFn, procedures } from "./envelope";
 import type { Identity } from "./identities";
@@ -19,6 +20,16 @@ export type EmitContext = {
   wasm: WasmApi;
   /** `REPO_BASE_URL` — e.g. `https://api.mkit.sh`, or the staging/test equivalent. */
   baseUrl: string;
+  /**
+   * AI-refreshed chat/commit/remix phrase pools (`ai-content.ts`), when
+   * `spammer.ts` has one in DO storage. `undefined` — no refresh has
+   * succeeded yet, or Workers AI is unavailable — falls back to `content.ts`'s
+   * static pools per-category (see each emit* function below). Reactions are
+   * NOT included here on purpose: their emoji must stay pinned to the closed,
+   * server-verified `REACTION_EMOJI` allowlist — AI has no business inventing
+   * new ones.
+   */
+  contentPools?: ContentPools;
 };
 
 /** CAS precondition carried on `UpdateRef` — mirrors `apps/web/src/lib/repo/backend.ts`'s `RefExpectation`. */
@@ -50,7 +61,7 @@ export async function emitChat(
   identity: Identity,
   counter: number,
 ): Promise<EmitChatResult> {
-  const text = pick(CHAT_PHRASES, counter);
+  const text = pick(ctx.contentPools?.chat ?? CHAT_PHRASES, counter);
   const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PostMessage);
   return ctx.wasm.repo.post_message(ctx.baseUrl, room, text, sign);
 }
@@ -117,7 +128,7 @@ export async function emitCommit(
   identity: Identity,
   counter: number,
 ): Promise<EmitCommitResult> {
-  const message = pick(COMMIT_MESSAGE_PHRASES, counter);
+  const message = pick(ctx.contentPools?.commit ?? COMMIT_MESSAGE_PHRASES, counter);
 
   const pushOnce = async (parentHead: string | null) => {
     const parentHex = parentHead ?? "";
@@ -257,7 +268,7 @@ export async function emitRemix(
   upstreamCommitHash: string,
   counter: number,
 ): Promise<EmitRemixResult> {
-  const message = pick(REMIX_MESSAGE_PHRASES, counter);
+  const message = pick(ctx.contentPools?.remix ?? REMIX_MESSAGE_PHRASES, counter);
   const ref = forkRefName(upstreamCommitHash, identity.pubkeyHex);
 
   const pushOnce = async (parentHead: string | null) => {

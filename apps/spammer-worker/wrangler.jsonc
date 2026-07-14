@@ -49,5 +49,15 @@
   "durable_objects": {
     "bindings": [{ "name": "SPAMMER", "class_name": "Spammer" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Spammer"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Spammer"] }],
+
+  // Workers AI, used ONLY for a periodic (every ~20 min, see
+  // ai-content.ts's CONTENT_REFRESH_EVERY_N_TICKS) background refresh of the
+  // chat/commit/remix phrase pools — never called synchronously on the hot
+  // 1s alarm tick. Free tier is 10,000 neurons/day; one refresh call on the
+  // cheapest text model (~50-200 neurons) every 20 min is ~72-288
+  // calls/day worst case, a small fraction of that budget. Any failure
+  // (quota, timeout, malformed output) falls back to content.ts's static
+  // pools — see ai-content.ts's doc comment.
+  "ai": { "binding": "AI" }
 }

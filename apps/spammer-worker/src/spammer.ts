@@ -24,6 +24,7 @@
 //     in-memory field — survives an isolate eviction between ticks.
 
 import { DurableObject } from "cloudflare:workers";
+import { refreshContentPools, type ContentPools } from "./ai-content";
 import { emitChat, emitCommit, emitReaction, emitRemix, MAIN_REF, type EmitContext } from "./events";
 import { getIdentityPool, POOL_SIZE, type Identity } from "./identities";
 import { planTick, type PlannedEvent, type SchedulerState } from "./scheduler";
@@ -50,6 +51,18 @@ const DEFAULT_SCHEDULER_META: SchedulerMeta = { chatCursor: 0, pushCursor: 0, re
 
 /** How long an alarm tick waits before rescheduling itself — PLAN.md's "Alarm interval: 1000 ms". */
 const ALARM_INTERVAL_MS = 1000;
+
+/**
+ * How often (in ticks) to kick off a background Workers-AI content refresh —
+ * every 1200 ticks ≈ 20 minutes at the real 1000ms alarm cadence. Deliberately
+ * tick-based (not wall-clock-based) for consistency with the rest of this
+ * DO's tick-driven design. See `ai-content.ts`'s doc comment for the
+ * free-tier budget math behind this cadence.
+ */
+const CONTENT_REFRESH_EVERY_N_TICKS = 1200;
+
+/** DO storage key for the last successfully AI-refreshed pool — absent until the first refresh ever succeeds. */
+const CONTENT_POOLS_STORAGE_KEY = "contentPools";
 
 type FloorRow = {
   identity_index: number;
@@ -221,8 +234,18 @@ export class Spammer extends DurableObject<Env> {
       this.persistFloors(events, now);
       await this.persistSchedulerMeta(nextState);
 
+      // Fire-and-forget: a background Workers AI content refresh, at most
+      // once every CONTENT_REFRESH_EVERY_N_TICKS ticks. `ctx.waitUntil` lets
+      // this keep running after `alarm()` returns without delaying this
+      // tick's own reschedule or emit — see ai-content.ts's doc comment for
+      // why this must never sit on the hot per-tick path.
+      if (nextState.tick % CONTENT_REFRESH_EVERY_N_TICKS === 0) {
+        this.ctx.waitUntil(this.refreshContentPoolsInBackground());
+      }
+
       if (events.length > 0) {
-        const ctx: EmitContext = { wasm, baseUrl: this.env.REPO_BASE_URL };
+        const contentPools = await this.ctx.storage.get<ContentPools>(CONTENT_POOLS_STORAGE_KEY);
+        const ctx: EmitContext = { wasm, baseUrl: this.env.REPO_BASE_URL, contentPools };
         await this.emitBatch(ctx, pool, events, nextState.tick);
       }
     } catch (err) {
@@ -233,6 +256,21 @@ export class Spammer extends DurableObject<Env> {
       if (await this.isEnabled()) {
         await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
       }
+    }
+  }
+
+  /**
+   * Runs entirely outside the hot per-tick path (invoked only via
+   * `ctx.waitUntil`, at most once every `CONTENT_REFRESH_EVERY_N_TICKS`
+   * ticks). On success, overwrites the stored pool for future ticks to read;
+   * on ANY failure (`refreshContentPools` never throws — see its own doc
+   * comment) leaves the existing stored pool untouched, so a bad refresh
+   * degrades to "keep using the last known-good pool", never to an error.
+   */
+  private async refreshContentPoolsInBackground(): Promise<void> {
+    const refreshed = await refreshContentPools(this.env.AI);
+    if (refreshed) {
+      await this.ctx.storage.put(CONTENT_POOLS_STORAGE_KEY, refreshed);
     }
   }
 
