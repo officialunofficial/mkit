@@ -1,0 +1,258 @@
+name: "Release: verify distribution channels"
+
+# Manually dispatched verification that mkit actually installs and works
+# from every distribution channel this project ships — crates.io, npm,
+# the curl-pipe install script, cargo binstall, Homebrew, and Scoop —
+# each in an isolated environment. This is the automated, multi-channel
+# completion of docs/RELEASE.md's "Smoke test" section (which
+# scripts/release-smoke.sh already mechanizes for the GitHub Release
+# archive itself); this workflow extends that same idea across every
+# OTHER channel. NOT a release gate: nothing here runs automatically on
+# push or pull_request. Dispatch it manually against an already-published
+# version — typically right after cutting a release, or periodically to
+# catch drift in a channel nobody happened to test by hand.
+#
+# CURRENT LIMITATION (as of 2026-07-14, ahead of #779's public-repo flip):
+# install.sh, cargo binstall's prebuilt-binary path, Homebrew, and Scoop
+# all resolve through GitHub Releases or a tap/bucket that mirrors them —
+# all of which need the repo to be PUBLIC for anonymous access. The
+# Homebrew tap and Scoop bucket also don't have a real formula/manifest
+# yet (see docs/RELEASE.md's pre-release checklist). Until the repo goes
+# public AND a real release has gone through Phase 5 distribution, expect
+# `install-script`, `homebrew`, and `scoop` below to fail, and
+# `cargo-binstall` to silently fall back to a from-source build instead of
+# fetching a prebuilt binary. `cargo-install` and `npm` are unaffected —
+# crates.io and the npm registry are already public today regardless of
+# this repo's visibility — so those two are meaningful right now.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify, no leading v (e.g. 0.3.0)"
+        required: true
+      npm_version:
+        description: "npm package version to verify (may lag the release version — e.g. npm is still on 0.2.1 while crates.io is on 0.3.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+
+jobs:
+  cargo-install:
+    name: cargo install mkit-cli (crates.io)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: cargo install mkit-cli
+        run: |
+          cargo install mkit-cli --version "${{ inputs.version }}" --locked --root "$RUNNER_TEMP/cargo-install"
+
+      - name: Basic flow smoke
+        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-install/bin/mkit" "${{ inputs.version }}"
+
+  cargo-binstall:
+    name: cargo binstall mkit-cli
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        with:
+          tool: cargo-binstall
+
+      # While the repo is private, binstall's pkg-url (GitHub Releases)
+      # 404s and it falls back to `cargo install` — see the limitation
+      # note at the top of this file. Same command either way; only the
+      # fetch path differs once the repo goes public.
+      - name: cargo binstall mkit-cli
+        run: |
+          cargo binstall mkit-cli --version "${{ inputs.version }}" --locked --no-confirm --root "$RUNNER_TEMP/cargo-binstall"
+
+      - name: Basic flow smoke
+        run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/mkit" "${{ inputs.version }}"
+
+  npm:
+    name: npm install @makechain/mkit-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve npm version
+        id: v
+        shell: bash
+        run: |
+          v="${{ inputs.npm_version }}"
+          if [ -z "$v" ]; then
+            v="$(npm view @makechain/mkit-wasm version)"
+            echo "npm_version input not set — using published latest: ${v}"
+          fi
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@ea7bbbef9633bce3609c6f5cf537f4cf9a76c4d3  # v5
+        with:
+          node-version: "22"
+
+      - name: npm view + install
+        run: |
+          npm view "@makechain/mkit-wasm@${{ steps.v.outputs.version }}"
+          mkdir "$RUNNER_TEMP/npm-smoke" && cd "$RUNNER_TEMP/npm-smoke"
+          npm init -y
+          npm install --save-exact "@makechain/mkit-wasm@${{ steps.v.outputs.version }}"
+
+      - name: npm audit signatures
+        working-directory: ${{ runner.temp }}/npm-smoke
+        run: npm audit signatures
+
+      # Functional smoke, not just "did it install": requires the module
+      # and calls a real exported function, proving the wasm actually
+      # loads and executes rather than merely being present on disk.
+      - name: Functional smoke (require + call blake3_hex)
+        working-directory: ${{ runner.temp }}/npm-smoke
+        run: |
+          node -e "
+            const wasm = require('@makechain/mkit-wasm');
+            const h = wasm.blake3_hex(new TextEncoder().encode('hello'));
+            console.log('blake3_hex(hello) =', h);
+            if (!/^[0-9a-f]{64}\$/.test(h)) { throw new Error('not a 64-hex-char hash: ' + h); }
+            console.log('OK');
+          "
+
+  install-script:
+    name: install.sh (${{ matrix.image }})
+    # See the limitation note at the top of this file — expected to fail
+    # until the repo is public. Not `continue-on-error` on purpose: a
+    # silently-green "expected failure" is worse than a red job someone
+    # has to notice is stale once the repo goes public.
+    # debian/ubuntu (apt, glibc) + fedora (dnf, glibc) — deliberately no
+    # Alpine leg: mkit's release archives are glibc-only
+    # (x86_64/aarch64-unknown-linux-gnu, see release.yml's build matrix),
+    # and neither install.sh nor docs/INSTALL.md claims musl/Alpine
+    # support. Testing it would need an undocumented `gcompat` shim just
+    # to run the downloaded (glibc) binary, which would test a
+    # compatibility path mkit doesn't actually support rather than a
+    # real distribution channel.
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:bookworm-slim", "ubuntu:24.04", "fedora:latest"]
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install curl/ca-certificates (Debian/Ubuntu)
+        if: startsWith(matrix.image, 'debian') || startsWith(matrix.image, 'ubuntu')
+        run: apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar
+
+      - name: Install curl/ca-certificates (Fedora)
+        if: startsWith(matrix.image, 'fedora')
+        run: dnf install -y curl ca-certificates tar
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      # Runs the install.sh AT THIS COMMIT (not curl-piped from the live
+      # mkit.sh domain) so this tests the script content actually under
+      # review/on this branch, matching the "test what's in this tree"
+      # principle used elsewhere in this repo's CI.
+      - name: Run install.sh
+        env:
+          MKIT_VERSION: "v${{ inputs.version }}"
+        run: bash install.sh
+
+      - name: Basic flow smoke
+        run: |
+          bin="$(command -v mkit || echo "$HOME/.local/bin/mkit")"
+          bash scripts/basic-flow-smoke.sh "$bin" "${{ inputs.version }}"
+
+  homebrew:
+    name: brew install (macOS)
+    # See the limitation note at the top of this file — expected to fail
+    # until officialunofficial/homebrew-tap has a real Formula/mkit.rb.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: brew tap + install
+        run: |
+          brew tap officialunofficial/tap https://github.com/officialunofficial/homebrew-tap
+          brew install officialunofficial/tap/mkit
+
+      # Homebrew's own `test do` block (contrib/homebrew/mkit.rb) is the
+      # formula-idiomatic smoke test; run it in addition to the shared
+      # basic-flow check so a formula-level regression surfaces even if
+      # someone edits the formula without touching this workflow.
+      - name: brew test
+        run: brew test officialunofficial/tap/mkit
+
+      - name: Basic flow smoke
+        run: bash scripts/basic-flow-smoke.sh "$(command -v mkit)" "${{ inputs.version }}"
+
+  scoop:
+    name: scoop install (Windows)
+    # See the limitation note at the top of this file — expected to fail
+    # until officialunofficial/scoop-bucket exists with a real mkit.json.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod get.scoop.sh | Invoke-Expression
+
+      - name: scoop bucket add + install
+        shell: pwsh
+        run: |
+          scoop bucket add officialunofficial https://github.com/officialunofficial/scoop-bucket
+          scoop install officialunofficial/mkit
+
+      - name: Basic flow smoke
+        shell: pwsh
+        run: |
+          $bin = (Get-Command mkit.exe).Source
+          $out = & $bin version
+          $expected = "mkit ${{ inputs.version }}"
+          if ($out -ne $expected) { throw "version contract violated: got [$out], expected [$expected]" }
+          Write-Host "version contract OK: $out"
+          $repo = Join-Path $env:RUNNER_TEMP "scoop-smoke-repo"
+          New-Item -ItemType Directory -Path $repo | Out-Null
+          Push-Location $repo
+          & $bin init
+          & $bin keygen
+          "hello" | Out-File -FilePath README.md -Encoding utf8
+          & $bin add README.md
+          & $bin commit -m "smoke test commit"
+          Pop-Location
+          Write-Host "basic init/keygen/add/commit flow OK"
+
+      # The Windows-only curl-pipe one-liner from a fresh PowerShell
+      # session — docs/RELEASE.md's smoke test calls this out explicitly
+      # as its own checklist item, separate from the Scoop path above.
+      - name: install.ps1 one-liner (fresh session)
+        shell: pwsh
+        env:
+          MKIT_VERSION: "v${{ inputs.version }}"
+        run: |
+          irm "https://raw.githubusercontent.com/officialunofficial/mkit/main/install.ps1" | iex
+          mkit version
