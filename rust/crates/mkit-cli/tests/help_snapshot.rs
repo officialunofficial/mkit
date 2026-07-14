@@ -173,18 +173,10 @@ fn dash_dash_help_goes_to_stdout() {
     assert!(output.stderr.is_empty(), "stderr should be empty on --help");
 }
 
-#[test]
-fn unknown_subcommand_exits_usage() {
-    let output = Command::new(mkit_bin())
-        .arg("definitely-nonsense")
-        .output()
-        .expect("spawn");
-    assert_eq!(
-        output.status.code(),
-        Some(64),
-        "unknown command must exit 64 (sysexits EX_USAGE)"
-    );
-}
+// Unknown-subcommand exit code + exact error text: see
+// tests/cmd/unknown-subcommand.trycmd (a strict superset of what a
+// `unknown_subcommand_exits_usage` test asserting only the exit code
+// used to check here).
 
 /// Snapshot of `mkit --help` output. Reviewable diffs via
 /// `cargo insta review`; raw assertions on a 30+ subcommand list

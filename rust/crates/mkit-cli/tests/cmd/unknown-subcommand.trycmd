@@ -1,0 +1,7 @@
+
+```
+$ mkit definitely-nonsense
+? 64
+error: unknown command 'definitely-nonsense' (run 'mkit --help' for a list of commands)
+
+```
