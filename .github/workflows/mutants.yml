@@ -1,0 +1,174 @@
+name: "CI: Mutation testing"
+
+# Mutation testing for the security-critical crates (mkit-core, mkit-attest,
+# mkit-keystore): cargo-mutants inserts small semantic mutations (flip a
+# comparison, swap a return value, etc.) and checks the test suite still
+# catches them. A surviving mutant means some code path has no test
+# actually pinning its behavior.
+#
+# Two lanes, matching the pattern mutants.rs itself documents ("Incremental
+# tests of pull requests") and the cadence rust-security.yml already uses
+# for its own scheduled sweep:
+#   - `mutants-diff` (every PR): `--in-diff` scopes the run to only the
+#     lines this PR actually changed, across all three crates. Bounded by
+#     construction (a typical PR touches a handful of lines, not thousands),
+#     regardless of how large the crates themselves are. No-ops (green, no
+#     mutants to test) if the PR doesn't touch any of them.
+#   - `mutants-full` (weekly, Tuesday — staggered a day after
+#     rust-security.yml's Monday advisory sweep): an UNSCOPED full sweep,
+#     but only of `mkit-attest` — NOT mkit-core or mkit-keystore. See the
+#     scoping note below for why. Not PR-blocking; surfaces on the Actions
+#     tab for the team to triage, same posture as fuzz.yml's nightly
+#     spot-check.
+#
+# Scoping note (full sweep, mkit-attest only): `cargo mutants --list`
+# reports 4527 mutants for mkit-core, 870 for mkit-keystore, and 407 for
+# mkit-attest — a combined 5804. Timed locally: mkit-attest's baseline
+# build alone (before a single mutant is even tested) took 10+ minutes,
+# and each mutant needs its own incremental rebuild-and-retest cycle on
+# top of that. Even generously assuming CI hardware halves that per-mutant
+# cost, mkit-core's 4527 mutants alone would still run many hours past any
+# GitHub Actions job's 360-minute ceiling. Rather than ship a "full sweep"
+# that silently never finishes (or silently only covers whatever fraction
+# happened to complete before timing out), this scopes the automated
+# full-sweep lane to mkit-attest alone — attestation/signing is the crate
+# this item's own name calls out most specifically, and it comfortably
+# fits the timeout below.
+#
+# mkit-core and mkit-keystore are NOT covered by any automated full sweep
+# today. Both remain covered by `mutants-diff` above (bounded to whatever
+# a given PR actually changes) and by CONTRIBUTING.md's existing "run
+# cargo-mutants locally, ad hoc" guidance. Properly covering them with a
+# scheduled sweep needs curated `--file` scoping to their most
+# security-relevant modules (e.g. mkit-core's signing/hashing primitives
+# rather than every pack/delta/tree code path already exercised heavily
+# by golden vectors, proptest, and fuzz) — that scoping work is a
+# follow-up, not something to guess at here without deeper module-by-module
+# review.
+
+on:
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 7 * * 2"  # Tuesdays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  # The crates the PR-diff lane runs against — security-critical
+  # (object/commit model, signing/attestation, keystore). Bounded by
+  # --in-diff regardless of each crate's total size (see the scoping note
+  # above for why the *full-sweep* lane below is mkit-attest only).
+  MUTANTS_PACKAGES: "-p mkit-core -p mkit-attest -p mkit-keystore"
+
+jobs:
+  mutants-diff:
+    name: cargo-mutants (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          # Full history: computing the merge-base diff below needs it.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: "rust-mutants-diff"
+          protoc: "false"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        with:
+          tool: cargo-nextest
+
+      # Diff against the merge-base (triple-dot), not the base tip
+      # directly — matches what the PR's own "Files changed" tab shows.
+      # Scoped to the three crates above; an empty diff means this PR
+      # doesn't touch any of them, so the next step no-ops.
+      - name: Compute diff against merge-base
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            -- crates/mkit-core crates/mkit-attest crates/mkit-keystore \
+            > /tmp/mutants.diff
+          lines=$(wc -l < /tmp/mutants.diff)
+          echo "diff lines touching scoped crates: ${lines}"
+          echo "has_diff=$([ "${lines}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        id: diff
+
+      - name: cargo mutants --in-diff
+        if: steps.diff.outputs.has_diff == 'true'
+        working-directory: rust
+        run: |
+          cargo mutants --in-diff /tmp/mutants.diff \
+            ${{ env.MUTANTS_PACKAGES }} \
+            --test-tool nextest \
+            --timeout-multiplier 3 \
+            -- --locked --all-features
+
+      - name: Upload mutants report on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: mutants-diff-report
+          path: rust/mutants.out/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutants-full:
+    name: cargo-mutants (full sweep, mkit-attest only, scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # mkit-attest only — see the scoping note at the top of this file for
+    # why mkit-core/mkit-keystore aren't included in the automated sweep.
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: "rust-mutants-full"
+          protoc: "false"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo mutants (full sweep, mkit-attest)
+        working-directory: rust
+        run: |
+          cargo mutants -p mkit-attest \
+            --test-tool nextest \
+            --timeout-multiplier 3 \
+            -- --locked --all-features
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: mutants-full-report
+          path: rust/mutants.out/**
+          if-no-files-found: ignore
+          retention-days: 30
