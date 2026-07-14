@@ -567,6 +567,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Multi-pack push splitting** (#831): a push whose plan exceeds a single
+  pack's payload cap (`pack::MAX_TOTAL_PAYLOAD`, 4 GiB in production) now
+  splits across multiple packs instead of failing with `PackfileTooLarge`.
+  `remote_dispatch::build_and_upload_packs` seals and uploads each pack as
+  soon as it would exceed the cap (peak memory: one pack buffer, not the
+  whole plan), and `advance_packmap` now chains an ordered set of pack keys
+  onto a single packmap node instead of exactly one &mdash; the fetch side
+  needed **no changes**, since `resolve_pack_chain` already `flat_map`s
+  every node's `packs`. A push whose plan fits in one pack (the overwhelming
+  common case) is unaffected. Also fixes a latent progress-reporting bug:
+  `PackUploaded` byte counts now accumulate across packs instead of being
+  overwritten by the last one. This closes the remaining format/planning
+  gap left by #704 (S3/R2 multipart) and #702/#647 (streaming pack
+  transfer), which had already removed the transport-side reasons for the
+  4 GiB cap without giving push planning a way to exceed it.
 - **Streaming chunked-blob ingest and checkout** (#828): `add`/`build_tree`
   no longer read a large file's entire contents into memory before
   `FastCdc`-chunking it &mdash; a new `chunker::ChunkReader` streams the

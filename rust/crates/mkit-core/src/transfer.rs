@@ -5,8 +5,10 @@
 //! and below the transport. The push path uses [`plan_pack`] to decide
 //! which objects of a ref's closure to send, and how — raw, or as a delta
 //! against a base the remote already holds. The plan is then serialised
-//! with [`crate::pack::PackWriter`] and uploaded as a single pack keyed by
-//! its own BLAKE3 digest.
+//! with [`crate::pack::PackWriter`] into one or more packs — split when
+//! the plan's payload exceeds a single pack's cap (issue #831; the CLI's
+//! `remote_dispatch::build_and_upload_packs` owns the splitting) — each
+//! keyed by its own BLAKE3 digest.
 //!
 //! Because a delta-encoded pack is keyed by the pack digest (not by the
 //! reconstructed object's hash), the fetch side can no longer find it by
@@ -460,13 +462,18 @@ pub struct PlannedDelta {
     pub stream: Vec<u8>,
 }
 
-/// A deterministic plan for the single pack a push uploads for one ref.
+/// A deterministic plan for the pack(s) a push uploads for one ref —
+/// serialised into a single pack when it fits under the payload cap, or
+/// split across several when it doesn't (issue #831).
 ///
 /// Entries are pre-ordered for [`crate::pack::PackWriter`]: all `raw`
 /// objects first (non-blobs before blobs, each group in BLAKE3 order),
 /// then `deltas`. Delta bases are external — they live in `old_tip`'s
 /// closure, which the remote already holds and earlier packs already
-/// delivered — so no in-pack base ordering is required (SPEC-PACKFILE §4).
+/// delivered, NEVER in an entry introduced earlier in this same plan —
+/// so no in-pack base ordering is required (SPEC-PACKFILE §4), and a
+/// left-to-right split of this sequence across multiple packs is always
+/// safe.
 #[derive(Debug, Clone, Default)]
 pub struct PackPlan {
     /// Objects to send verbatim, already ordered non-blobs-then-blobs.
