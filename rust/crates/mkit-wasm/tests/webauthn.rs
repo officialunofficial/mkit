@@ -6,8 +6,7 @@
 //! attestation signing lifecycle from the demo pages: derive the DSSE
 //! PAE, use it as the `WebAuthn` `challenge`, then verify the resulting
 //! assertion. Platform passkeys are P-256-only, and mkit's core commit
-//! signing is Ed25519-only, so the passkey path is attestations — see
-//! `docs/research/passkey-signing-demo.md`.
+//! signing is Ed25519-only, so the passkey path is attestations.
 //!
 //! We have no published (authenticatorData, clientDataJSON, signature)
 //! golden triple (authenticator secrets are per-device), so — exactly

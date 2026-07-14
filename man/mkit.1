@@ -1299,10 +1299,8 @@ as
 -able mbox patches, oldest first; merge commits are skipped.
 .It Cm self Cm update Oo Fl Fl version Ar tag Oc Oo Fl Fl check Oc Oo Fl Fl allow-downgrade Oc Oo Fl Fl format Ar human|json Oc
 Update this binary in place from a signed GitHub Release. The
-downloaded archive is verified against the mkit-native release
-attestation (a DSSE/in-toto envelope over the archives' BLAKE3
-digests) using release-attestation public keys embedded in the binary
-at build time \(em no
+downloaded archive is checked against its sha256 sidecar asset when
+the release publishes one; this runs entirely in-process \(em no
 .Cm cosign
 or GitHub attestation API required. Only installer-managed binaries
 (installed via

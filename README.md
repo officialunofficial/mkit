@@ -160,8 +160,7 @@ recognizes:
 The keystore vault abstracts these behind one interface so commit
 signing, attestation signing, and SSH push-auth share key references.
 The normative interface is in
-[`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md); end-user overview
-in [`docs/keystore.md`](docs/keystore.md). The backends a given
+[`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md). The backends a given
 binary supports depend on enabled build features &mdash; see
 [`docs/CLI.md`](docs/CLI.md) §"Config keys".
 
@@ -365,7 +364,6 @@ series.
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | End users &mdash; install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users &mdash; subcommands, env vars, exit codes |
-| [`docs/keystore.md`](docs/keystore.md) | End users &mdash; keystore overview, picking a backend |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users &mdash; migrate from git, track a git upstream, push work back |
 | [`docs/specs/`](docs/specs/README.md) | Implementers plus integrators &mdash; the wire-format and subsystem specifications, indexed with one-line summaries |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors &mdash; module layering and design notes |

@@ -323,11 +323,10 @@ mkit self update --check    # just report whether an update exists
 mkit self update --version v0.4.0   # pin a specific release
 ```
 
-`self update` downloads the release archive for your platform and
-verifies the **mkit-native release attestation** &mdash; a DSSE/in-toto
-envelope over the archives' BLAKE3 digests, signed by the release key
-whose public half is embedded in your binary &mdash; entirely in-process
-(no `cosign` needed, unlike the install script). It refuses silent
+`self update` downloads the release archive for your platform and, when
+the release publishes a sha256 sidecar for it, checks the archive
+against it before swapping the binary in &mdash; entirely in-process (no
+`cosign` needed, unlike the install script). It refuses silent
 downgrades, swaps the binary atomically, and rewrites the same
 receipts `install.sh` writes, so the two stay interchangeable.
 
@@ -340,6 +339,5 @@ channel instead:
 
 mkit never checks for updates in the background; `self update` acts
 only when you run it. Full details (receipts, downgrade policy,
-environment variables) are in [CLI.md](CLI.md); the attestation's
-trust model and the key-rotation runbook are in
-[RELEASE.md](RELEASE.md).
+environment variables) are in [CLI.md](CLI.md); the release signing
+and verification model is in [RELEASE.md](RELEASE.md).

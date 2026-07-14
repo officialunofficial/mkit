@@ -1,10 +1,10 @@
 //! End-to-end `mkit self update` flow against a mock release origin.
 //!
 //! Exercises the injectable core (`run_update` + `UpdateEnv`) with a
-//! mockito server standing in for the GitHub releases API, a tempdir
-//! standing in for the install dir, and a test-only trust root. The
-//! "binaries" are shell scripts that honor the `mkit version` output
-//! contract, which is all the pre-swap self-check needs.
+//! mockito server standing in for the GitHub releases API and a
+//! tempdir standing in for the install dir. The "binaries" are shell
+//! scripts that honor the `mkit version` output contract, which is
+//! all the pre-swap self-check needs.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -12,11 +12,8 @@ use std::path::{Path, PathBuf};
 
 use mkit_cli::commands::self_update::{Opts, Outcome, UpdateEnv, run_update};
 use mkit_core::hash;
-use zeroize::Zeroizing;
 
 const TEST_TARGET: &str = "x-test-triple";
-const PREDICATE_TYPE_RELEASE_V1: &str =
-    "https://github.com/officialunofficial/mkit/spec/predicate/release/v1";
 
 // ------------------------------------------------------------- fixtures
 
@@ -66,90 +63,39 @@ fn tgz_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
     builder.into_inner().unwrap().finish().unwrap()
 }
 
-/// Sign a release DSSE over `(name, bytes)` subjects with the test seed.
-fn signed_dsse(subjects: &[(&str, &[u8])], tag: &str) -> (Vec<u8>, [u8; 32]) {
-    use mkit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer as _, jcs, statement};
-    let seed = Zeroizing::new([42u8; 32]);
-    let pk = mkit_core::sign::KeyPair::from_seed_zeroizing(&seed)
-        .public
-        .0;
-    let predicate = jcs::encode(&jcs::Value::Object(vec![jcs::Member::new(
-        "tag",
-        jcs::Value::String(tag.to_owned()),
-    )]))
-    .unwrap();
-    let stmt = statement::encode(&statement::Statement {
-        subjects: subjects
-            .iter()
-            .map(|(name, body)| statement::Subject {
-                name: Some((*name).to_owned()),
-                digest_blake3_hex: hash::to_hex(&hash::hash(body)),
-                digest_sha256_hex: statement::sha256_hex(body),
-            })
-            .collect(),
-        predicate_type: PREDICATE_TYPE_RELEASE_V1.to_owned(),
-        predicate_jcs: predicate.as_bytes(),
-    })
-    .unwrap()
-    .into_bytes();
-    let mut signer = mkit_attest::signer_repo_key::RepoKeySigner::from_seed_zeroizing(&seed);
-    let pae = mkit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &stmt);
-    let sig = signer.sign(&pae).unwrap();
-    let dsse = Envelope {
-        payload_type: PAYLOAD_TYPE_IN_TOTO.to_owned(),
-        payload: stmt,
-        signatures: vec![Sig {
-            keyid: format!(
-                "{}{}",
-                mkit_attest::KEYID_PREFIX,
-                hash::to_hex(&hash::hash(&pk))
-            ),
-            sig,
-        }],
-    }
-    .encode()
-    .unwrap()
-    .into_bytes();
-    (dsse, pk)
-}
-
 /// Stand up a mock origin serving `latest` → `tag` plus the tag's
-/// release JSON and its three assets. Returns the guard (mocks live as
-/// long as it does) and the trust key.
+/// release JSON and its assets. Returns the guard (mocks live as long
+/// as it does).
 struct Origin {
     server: mockito::ServerGuard,
-    trust_key: [u8; 32],
 }
 
 fn origin_with_release(tag: &str, archive: &[u8]) -> Origin {
-    origin_with_release_and_dsse_body(tag, archive, None)
+    origin_with_release_and_sha256_body(tag, archive, None)
 }
 
-/// `dsse_override` lets the tamper test serve an attestation that does
+/// `sha256_override` lets the tamper test serve a sidecar that does
 /// not match the served archive.
-fn origin_with_release_and_dsse_body(
+fn origin_with_release_and_sha256_body(
     tag: &str,
     archive: &[u8],
-    dsse_override: Option<&[u8]>,
+    sha256_override: Option<&[u8]>,
 ) -> Origin {
     use sha2::Digest as _;
     let bare = tag.trim_start_matches('v');
     let archive_name = format!("mkit-{bare}-{TEST_TARGET}.tar.gz");
-    let dsse_name = format!("mkit-{bare}.release.dsse");
-    let (dsse, trust_key) = signed_dsse(&[(archive_name.as_str(), archive)], tag);
-    let dsse_body = dsse_override.map_or(dsse, <[u8]>::to_vec);
     let sha_body = format!(
         "{}  {archive_name}\n",
         hash::to_hex_bytes(&sha2::Sha256::digest(archive))
     );
+    let sha_body = sha256_override.map_or_else(|| sha_body.clone().into_bytes(), <[u8]>::to_vec);
 
     let mut server = mockito::Server::new();
     let url = server.url();
     let release_json = format!(
         r#"{{"tag_name":"{tag}","assets":[
             {{"name":"{archive_name}","url":"{url}/assets/archive"}},
-            {{"name":"{archive_name}.sha256","url":"{url}/assets/sha256"}},
-            {{"name":"{dsse_name}","url":"{url}/assets/dsse"}}
+            {{"name":"{archive_name}.sha256","url":"{url}/assets/sha256"}}
         ]}}"#
     );
     server
@@ -168,18 +114,13 @@ fn origin_with_release_and_dsse_body(
         .mock("GET", "/assets/sha256")
         .with_body(&sha_body)
         .create();
-    server
-        .mock("GET", "/assets/dsse")
-        .with_body(&dsse_body)
-        .create();
-    Origin { server, trust_key }
+    Origin { server }
 }
 
 fn env_for(origin: &Origin, install: &Install, current: &str) -> UpdateEnv {
     UpdateEnv {
         api_base: origin.server.url(),
         token: None,
-        trust_keys: vec![origin.trust_key],
         exe_path: install.exe.clone(),
         state_dir: install.state_dir.clone(),
         current_version: current.to_owned(),
@@ -313,28 +254,24 @@ fn pinned_downgrade_with_allow_flag_proceeds() {
 
 #[test]
 fn tampered_archive_rejected_before_swap() {
+    use sha2::Digest as _;
     let new_binary = script_binary("9.9.9");
     let archive = tgz_with(&[(
         &format!("mkit-9.9.9-{TEST_TARGET}/mkit"),
         new_binary.as_slice(),
     )]);
-    // Attestation signs DIFFERENT bytes than the served archive.
-    let (wrong_dsse, _) = signed_dsse(
-        &[(
-            format!("mkit-9.9.9-{TEST_TARGET}.tar.gz").as_str(),
-            b"not the served archive".as_slice(),
-        )],
-        "v9.9.9",
+    // sha256 sidecar covers DIFFERENT bytes than the served archive.
+    let wrong_sha = format!(
+        "{}  mkit-9.9.9-{TEST_TARGET}.tar.gz\n",
+        hash::to_hex_bytes(&sha2::Sha256::digest(b"not the served archive"))
     );
-    let origin = origin_with_release_and_dsse_body("v9.9.9", &archive, Some(&wrong_dsse));
+    let origin =
+        origin_with_release_and_sha256_body("v9.9.9", &archive, Some(wrong_sha.as_bytes()));
     let install = managed_install("v0.3.0");
     let before = std::fs::read(&install.exe).unwrap();
 
     let (msg, _) = run_update(&opts(), &env_for(&origin, &install, "0.3.0")).unwrap_err();
-    assert!(
-        msg.contains("attested subject") || msg.contains("sha256 mismatch"),
-        "{msg}"
-    );
+    assert!(msg.contains("sha256 mismatch"), "{msg}");
     assert_eq!(
         std::fs::read(&install.exe).unwrap(),
         before,
@@ -393,12 +330,16 @@ fn check_reports_without_touching_anything() {
 }
 
 #[test]
-fn release_without_attestation_refused() {
-    // A release whose assets lack the .release.dsse (pre-attestation
-    // releases) must be refused, not silently installed.
+fn release_without_sha256_sidecar_still_updates() {
+    // The sha256 sidecar is defense-in-depth, not required: a release
+    // whose assets lack it must still install successfully.
     let bare = "9.9.9";
     let archive_name = format!("mkit-{bare}-{TEST_TARGET}.tar.gz");
-    let archive = tgz_with(&[(&format!("mkit-{bare}-{TEST_TARGET}/mkit"), b"x".as_slice())]);
+    let new_binary = script_binary(bare);
+    let archive = tgz_with(&[(
+        &format!("mkit-{bare}-{TEST_TARGET}/mkit"),
+        new_binary.as_slice(),
+    )]);
     let mut server = mockito::Server::new();
     let url = server.url();
     let release_json = format!(
@@ -421,15 +362,12 @@ fn release_without_attestation_refused() {
     let env = UpdateEnv {
         api_base: server.url(),
         token: None,
-        trust_keys: vec![[1u8; 32]],
         exe_path: install.exe.clone(),
         state_dir: install.state_dir.clone(),
         current_version: "0.3.0".to_owned(),
         target: TEST_TARGET.to_owned(),
     };
-    let (msg, _) = run_update(&opts(), &env).unwrap_err();
-    assert!(
-        msg.contains("predates the mkit-native release attestation"),
-        "{msg}"
-    );
+    let outcome = run_update(&opts(), &env).unwrap();
+    assert!(matches!(outcome, Outcome::Updated { .. }));
+    assert_eq!(std::fs::read(&install.exe).unwrap(), new_binary);
 }

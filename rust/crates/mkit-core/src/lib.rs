@@ -4,8 +4,8 @@
 // `#[cfg(test)]` code (which legitimately prints), and `mkit-rpc` declares
 // its own `[lints.clippy]` table (dropping workspace inheritance), so it
 // would silently escape a workspace-level deny. Scope is libraries only:
-// `mkit-cli` and `release-attest` print as their job, and `mkit-test-util`
-// is dev-only test infrastructure whose diagnostic prints are the point.
+// `mkit-cli` prints as its job, and `mkit-test-util` is dev-only test
+// infrastructure whose diagnostic prints are the point.
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 //!

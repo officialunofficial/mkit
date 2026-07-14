@@ -34,8 +34,6 @@
 //! individual objects scattered arbitrarily across the BLAKE3 keyspace
 //! (unreachability has no relationship to insertion order), and neither
 //! `Freezer` nor `Archive` support that operation directly.
-//!
-//! See `docs/adr/0004-object-store-loose-files-vs-freezer-archive.md`.
 #![cfg(feature = "history-mmr")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 

@@ -1316,13 +1316,10 @@ Config / keys / version:
     case-insensitively and canonicalize to lowercase, like git.
 - `mkit self update [--version <tag>] [--check] [--allow-downgrade]
   [--format human|json]` &mdash; update this binary in place from a signed
-  GitHub Release. The downloaded archive is verified against the
-  **mkit-native release attestation** (`mkit-<ver>.release.dsse`, a
-  DSSE/in-toto envelope over the archives' BLAKE3 digests &mdash; see
-  `docs/RELEASE.md`) using release-attestation public keys embedded in
-  the binary at build time; no `cosign` and no GitHub attestation API
-  are involved. The sha256 sidecar is additionally checked as
-  defense-in-depth. Only **installer-managed** binaries are updated:
+  GitHub Release. The downloaded archive is checked against its sha256
+  sidecar asset when the release publishes one; this runs entirely
+  in-process, no `cosign` and no GitHub attestation API are involved.
+  Only **installer-managed** binaries are updated:
   the `.mkit-installed-tag` receipt written by `install.sh` must sit
   next to the (canonicalized) executable, and the global
   `$MKIT_STATE_DIR/installed-tag` (default `~/.local/state/mkit`) must

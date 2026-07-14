@@ -4,8 +4,7 @@
 //
 // A single shared mkit repository that anyone may push to anonymously, each
 // write signed with an Ed25519 key (the key is the whole identity; no
-// accounts, no allow-list). See
-// docs/research/passkey-multiplayer-architecture.md.
+// accounts, no allow-list).
 //
 // Storage model (framework-independent):
 //   - Immutable mkit objects (commits / trees / blobs) are content-addressed
