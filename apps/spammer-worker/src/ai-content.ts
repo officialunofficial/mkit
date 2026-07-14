@@ -25,13 +25,15 @@ const MAX_CHAT_CHARS = 100;
 const MAX_COMMIT_CHARS = 60;
 const MAX_REMIX_CHARS = 80;
 
-const PROMPT = `You generate short, upbeat sample text for a live developer-tools demo chat feed. Respond with ONLY a single JSON object, no prose, no markdown code fences, matching EXACTLY this shape:
+const PROMPT = `You generate short sample text for mkit, a live cryptographically-signed, content-addressed version-control demo (like git, but every commit/message/remix is Ed25519-signed and BLAKE3 content-addressed). Respond with ONLY a single JSON object, no prose, no markdown code fences, matching EXACTLY this shape:
 {"chat": ["...", ...], "commit": ["...", ...], "remix": ["...", ...]}
 
+CRITICAL CONSTRAINT: every commit in this demo has an EMPTY tree — there is NO real file, NO real diff, NO real code change behind any commit. Never invent a specific fake code change (e.g. never write things like "add prop X to component Y" or "fix bug in Z") — that describes work that doesn't exist and misleads anyone reading the feed. Instead, commit/remix messages should read as honest, self-aware signed placeholder messages — about the act of signing/pushing/forking itself, not about invented feature work.
+
 Rules:
-- "chat": 15 short chat-style lines (max ${MAX_CHAT_CHARS} characters each) about a live, cryptographically-signed, content-addressed collaborative coding demo called mkit. Casual and friendly, no hashtags, no emoji-only lines, no profanity.
-- "commit": 10 short git-commit-message-style lines (max ${MAX_COMMIT_CHARS} characters each) for trivial demo commits.
-- "remix": 6 short lines (max ${MAX_REMIX_CHARS} characters each) about remixing/forking someone else's commit.
+- "chat": 15 short chat-style lines (max ${MAX_CHAT_CHARS} characters each), casual and friendly, about THIS demo's real properties: Ed25519 signing, BLAKE3 content-addressing, the live feed, forking/remixing, no accounts needed. No hashtags, no emoji-only lines, no profanity, no invented person names or fictional conversations between characters.
+- "commit": 10 short lines (max ${MAX_COMMIT_CHARS} characters each) in the voice of a real git commit message, but honest about being a signed placeholder over an empty tree — e.g. referencing "signed", "content-addressed", "no files", "a verified vibe" — never a specific invented feature/bugfix.
+- "remix": 6 short lines (max ${MAX_REMIX_CHARS} characters each) about the act of remixing/forking another commit — attribution, branching, signed provenance — never an invented feature description.
 Output strictly valid JSON. No trailing commas. No commentary before or after the JSON.`;
 
 /** The three phrase pools `events.ts`'s emit* functions pick from — either AI-refreshed (this module) or `content.ts`'s static fallback. */
