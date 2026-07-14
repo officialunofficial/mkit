@@ -1,0 +1,39 @@
+{
+  "name": "mkit-spammer-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "../web/vendor/mkit-wasm",
+    "../web/vendor/mkit-repo-client",
+    "../web/vendor/mkit-repo-proto"
+  ],
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --project unit --coverage",
+    "wasm:build": "bun run wasm:build:core && bun run wasm:build:repo-client",
+    "wasm:build:core": "rm -rf ../web/vendor/mkit-wasm/pkg && cd ../../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../apps/web/vendor/mkit-wasm/pkg --release",
+    "wasm:build:repo-client": "rm -rf ../web/vendor/mkit-repo-client/pkg && cd ../../rust/crates/mkit-repo-client && wasm-pack build --target web --out-dir ../../../apps/web/vendor/mkit-repo-client/pkg --release"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2",
+    "mkit-repo-client": "workspace:*",
+    "mkit-repo-proto": "workspace:*",
+    "mkit-wasm": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/workers-types": "^5.20260712.1",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.8",
+    "wrangler": "^4.99.0"
+  }
+}

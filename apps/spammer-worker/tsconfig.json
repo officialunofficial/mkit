@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "types": ["@cloudflare/workers-types", "node"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test", "worker-configuration.d.ts"]
+}
