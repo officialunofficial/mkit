@@ -21,14 +21,20 @@
   // does NOT arm the worker, and setting it to "false" is not itself a kill
   // switch. The real kill switch is `POST /control?action=disable`.
   //
-  // ROOM/REPO_BASE_URL point at the target mkit-repo-worker room. Stage every
-  // change against a THROWAWAY room (e.g. "spammer-test") first — never
-  // exercise "lobby-v2" outside of a deliberate, reviewed go-live (see
-  // README's kill-switch runbook). Changing ROOM to "lobby-v2" is itself a
-  // reviewed diff, not a default.
+  // ROOM/REPO_BASE_URL point at the target mkit-repo-worker room.
+  //
+  // GO-LIVE (this diff): ROOM is now "lobby-v2", the real default room real
+  // visitors land on at mkit.sh — verified first against the throwaway
+  // "spammer-test" room per README's staged-rollout procedure (real signed
+  // commits/chat/remixes observed landing and fully stopping on disable
+  // against the deployed Worker, not just local wrangler dev). Still
+  // ENABLED="false" / DO-storage-disabled by default — deploying this diff
+  // does not itself start anything; a separate authenticated
+  // `/control?action=enable` call is still required. Kill switch
+  // (`/control?action=disable`) stays available at all times — see README.
   "vars": {
     "ENABLED": "false",
-    "ROOM": "spammer-test",
+    "ROOM": "lobby-v2",
     "REPO_BASE_URL": "https://api.mkit.sh"
   },
 
