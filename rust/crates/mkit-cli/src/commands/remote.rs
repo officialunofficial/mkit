@@ -3,8 +3,9 @@
 //! URL validation: only `mkit+<scheme>://` is accepted. Recognised
 //! schemes: `file`, `https`, `s3`, `ssh`, `memory`.
 
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mkit_core::layout::RepoLayout;
@@ -180,11 +181,15 @@ pub fn run(args: &[String]) -> u8 {
             } else if cfg.remotes.remove(&name).is_none() {
                 return emit_err(&format!("remote '{name}' not found"), exit::GENERAL_ERROR);
             }
+            // Configured remotes nested under `name` (#660): their ref
+            // and bridge-state subtrees must survive the removal even
+            // though they share `name`'s directory prefix.
+            let siblings = nested_sibling_names(&cfg.remotes, &name);
             match config::write(&layout, &cfg) {
                 Ok(()) => {
                     // Stale tracking refs would shadow a future remote
                     // reusing the name; objects stay (gc owns them).
-                    remove_tracking_refs(&layout, &name);
+                    remove_tracking_refs(&layout, &name, &siblings);
                     remove_applied_packs_record(&layout, &name);
                     warn_orphaned_bridge_state(&layout, &name);
                     exit::OK
@@ -210,6 +215,11 @@ pub fn run(args: &[String]) -> u8 {
                 cfg.remotes.insert(old, entry);
                 return emit_err(&format!("remote '{new}' already exists"), exit::CANTCREAT);
             }
+            // Configured remotes nested under `old` (#660): computed
+            // before `new` is inserted below, so `new` can never be
+            // mistaken for one of `old`'s own siblings even when `new`
+            // itself extends `old` (`rename a a/sub`).
+            let siblings = nested_sibling_names(&cfg.remotes, &old);
             cfg.remotes.insert(new.clone(), entry);
             // Repoint any branch upstreams that tracked the old name.
             for up in cfg.branch_upstreams.values_mut() {
@@ -219,8 +229,8 @@ pub fn run(args: &[String]) -> u8 {
             }
             match config::write(&layout, &cfg) {
                 Ok(()) => {
-                    move_tracking_refs(&layout, &old, &new);
-                    move_bridge_state(&layout, &old, &new);
+                    move_tracking_refs(&layout, &old, &new, &siblings);
+                    move_bridge_state(&layout, &old, &new, &siblings);
                     move_applied_packs_record(&layout, &old, &new);
                     exit::OK
                 }
@@ -282,8 +292,16 @@ pub fn run(args: &[String]) -> u8 {
 /// Best-effort move of `refs/remotes/<old>/` to `refs/remotes/<new>/`
 /// after a rename. Failure is reported but non-fatal: the config
 /// rename already happened, and a follow-up fetch repopulates.
-fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str) {
-    if let Err(e) = rename_state_dir(&layout.remotes_dir(), old, new) {
+///
+/// `siblings` lists the configured remote names nested under `old`
+/// (#660, `nested_sibling_names`); this joins them against the root it
+/// already owns (`layout.remotes_dir()`) to build the protected set that
+/// `move_state_dir` needs — empty in the overwhelmingly common case, in
+/// which `move_state_dir` takes its whole-directory fast path.
+fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str, siblings: &[String]) {
+    let root = layout.remotes_dir();
+    let protected: Vec<PathBuf> = siblings.iter().map(|s| root.join(s)).collect();
+    if let Err(e) = move_state_dir(&root, old, new, &protected) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -295,8 +313,15 @@ fn move_tracking_refs(layout: &RepoLayout, old: &str, new: &str) {
 
 /// Bridge state under `.mkit/git/<name>/` follows a rename so leases,
 /// maps, and the staging mirror stay bound to the same remote name.
-fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str) {
-    if let Err(e) = rename_state_dir(&layout.git_state_dir(), old, new) {
+///
+/// `siblings` lists the configured remote names nested under `old`
+/// (#660, `nested_sibling_names`); this joins them against the root it
+/// already owns (`layout.git_state_dir()`) to build the protected set —
+/// see `move_tracking_refs` for the shared `move_state_dir` call.
+fn move_bridge_state(layout: &RepoLayout, old: &str, new: &str, siblings: &[String]) {
+    let root = layout.git_state_dir();
+    let protected: Vec<PathBuf> = siblings.iter().map(|s| root.join(s)).collect();
+    if let Err(e) = move_state_dir(&root, old, new, &protected) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -340,90 +365,198 @@ fn move_applied_packs_record(layout: &RepoLayout, old: &str, new: &str) {
 /// Move the per-remote state directory for `old` to `new` under `root`,
 /// tolerating multi-segment remote names (which map to nested
 /// subdirectories) on both sides, *including* the case where one name is
-/// a path-prefix of the other (`a` <-> `a/b`). A direct `fs::rename(src,
-/// dst)` breaks for that case in both directions: renaming `a` to `a/b`
-/// asks the OS to move a directory into its own subtree (EINVAL), and
-/// renaming `a/b` to `a` lands on the non-empty old ancestor (ENOTEMPTY).
-/// git's per-ref transactions don't have this problem, so this was a
-/// real parity gap, not an exotic input.
+/// a path-prefix of the other (`a` <-> `a/b`), and *including* the case
+/// where a configured sibling remote nests inside `old`'s own directory
+/// prefix (`a/b` configured while `a` is renamed or removed, #660) and
+/// must not be dragged along or deleted with it. `protected` (built by
+/// the caller via `nested_sibling_names` + its own root) lists the
+/// absolute paths of those siblings' state directories; empty in the
+/// overwhelmingly common case.
 ///
-/// The fix is a two-step move through a dot-named temp directory
-/// directly under `root`: rename `src` to the temp sibling (always legal
-/// — never a move into one's own subtree), prune any now-empty parents
-/// left behind under `src`, create the destination's parents (`fs::rename`
-/// won't), then rename the temp directory into place. This is one
-/// uniform path with no prefix-nesting case analysis.
+/// A direct `fs::rename(src, dst)` breaks on the prefix case in both
+/// directions: renaming `a` to `a/b` asks the OS to move a directory into
+/// its own subtree (EINVAL), and renaming `a/b` to `a` lands on the
+/// non-empty old ancestor (ENOTEMPTY). git's per-ref transactions don't
+/// have this problem, so this was a real parity gap, not an exotic
+/// input.
 ///
-/// A missing source directory is a no-op (nothing to move). If the final
-/// rename fails (e.g. an orphaned state directory already occupies the
-/// destination), the state is restored to `src` on a best-effort basis
+/// # Mechanism: one two-phase move through a temp sibling
+///
+/// The fix is a move through a dot-named temp directory directly under
+/// `root`, `.rename.tmp.<pid>.0` — one path, no prefix-nesting or
+/// protected-sibling case analysis at the call site.
+///
+/// Phase 1 extracts `src`'s content into `tmp`:
+/// - `protected.is_empty()` (no sibling in the way): a single
+///   whole-directory `fs::rename(&src, &tmp)` — always legal, since
+///   renaming a directory to a fresh sibling of `root` is never a move
+///   into its own subtree. This is the pre-#660 fast path, still exactly
+///   two renames total for the common case.
+/// - otherwise: `tmp` is created empty and `walk_unprotected` extracts
+///   every unprotected entry under `src` into it one at a time (skipping
+///   protected roots whole, recursing through their ancestors), leaving
+///   each protected subtree exactly where it is — still under `src`, not
+///   dragged to the equivalent position under `dst`.
+///
+/// Either way `tmp` ends up holding exactly what should land at `dst`.
+/// Phase 2 (`prune_empty_parents`) tidies `src`'s now-empty ancestors —
+/// `src` itself may legitimately remain non-empty when protected content
+/// stayed behind, which is the point. Phase 3 creates `dst`'s parents
+/// (`fs::rename` won't). Phase 4 is the single `fs::rename(&tmp, &dst)`
+/// that completes the move.
+///
+/// A missing source directory is a no-op (nothing to move).
+///
+/// # Restore / "parked at" contract — covers every phase, not just the
+/// final rename
+///
+/// If anything from phase 1 through phase 4 fails after content has
+/// actually reached `tmp`, the move backs out on a best-effort basis
 /// before the error is returned, so a failed move is a clean no-op
-/// rather than stranding state in the temp directory — the caller's
-/// existing warning then fires as before. Parent creation/pruning are
-/// both best-effort: creation failures fall through to the following
-/// `rename`, which then fails and is handled by the same restore path;
-/// prune failures are silent since they're tidiness, not correctness.
-/// If the restore rename *also* fails, the returned error is annotated
-/// with the temp path so the caller's warning says where the state
-/// actually ended up, rather than only describing the final-rename
-/// failure that triggered the restore.
+/// rather than stranding state — the caller's existing warning then
+/// fires as before, and a follow-up fetch self-heals. If `tmp` never
+/// received any content (phase 1 itself failed outright — `create_dir`
+/// or the whole-dir rename never succeeded), there is nothing to restore
+/// and the original error is returned unadorned.
 ///
-/// Crash safety: a crash between the two renames leaves a
-/// `.rename.tmp.<pid>.<seq>` directory orphaned directly under `root`
-/// (the same temp-name convention as `atomic::write_atomic`). Unlike the
-/// pre-existing empty-dir warts on this warn-only path, this one is
+/// The restore is one helper for both shapes: try `fs::rename(&tmp,
+/// &src)` first — this succeeds outright when `src` vanished entirely
+/// (the fast-path case, where nothing remains at `src` to collide with).
+/// If that fails (the selective case, where `src` still exists holding
+/// retained protected content, so a whole-directory rename onto it is
+/// rejected), fall back to `merge_tree_into(&tmp, &src)`, which merges
+/// `tmp`'s entries back into `src` one at a time, recursing into any
+/// like-named retained ancestor directory instead of clobbering it.
+///
+/// When the restore succeeds — by either path — the original error is
+/// returned as-is. The `"; state parked at <tmp>"` annotation is added
+/// ONLY when the restore itself also fails, since that's the one case
+/// where the plain error text says nothing about where the content
+/// actually went. A `merge_tree_into` success followed by a failed
+/// best-effort `remove_dir(&tmp)` cleanup does NOT count as a restore
+/// failure and must NOT trigger the annotation (finding 5c, #789): the
+/// content is home, and a leftover (near-)empty `tmp` husk is inert
+/// debris, not stranded state.
+///
+/// Parent creation/pruning (phases 2 and 3) are themselves best-effort:
+/// a creation failure falls through to the following `rename`, which
+/// then fails and is handled by the same restore path; a prune failure
+/// is silent since it's tidiness, not correctness.
+///
+/// # Crash safety
+///
+/// A crash between phases leaves a `.rename.tmp.<pid>.0` directory
+/// orphaned directly under `root` (the same temp-name convention as
+/// `atomic::write_atomic`, `atomic.rs:44-46`, so crash debris is
+/// grep-able by one pattern across the codebase). Unlike the
+/// pre-existing empty-dir warts on this warn-only path, this one may be
 /// fully populated — but a dot-leading path component is invalid per
 /// `validate_ref_name` (`refs::validate_ref_name`, SPEC-REFS §3), so
 /// every listing enumerator (`show-ref`, `for-each-ref`,
 /// `list_remote_names`) and the git-bridge `state_names` scan treat it
-/// as inert rather than a phantom remote or ref namespace. The temp
-/// name can't collide with any live remote's state directory either,
-/// since remote names are validated dot-free (`validate_remote_name`).
-/// What nesting-boundary cleanup this does NOT attempt (a sibling `a/b`
-/// dragged along by a rename of `a`, or deleted by a `remove` of `a`) is
-/// tracked in #660.
-fn rename_state_dir(root: &Path, old: &str, new: &str) -> std::io::Result<()> {
+/// as inert rather than a phantom remote or ref namespace. The temp name
+/// can't collide with any live remote's state directory either, since
+/// remote names are validated dot-free (`validate_remote_name`). The
+/// "name" component is the fixed literal `rename` rather than
+/// `old`/`new`: those may be multi-segment remote names
+/// (`team/upstream`), and embedding a `/` into a single path component
+/// here would make `root.join(...)` build a *nested* path instead of a
+/// flat sibling, defeating the one-temp-dir-directly-under-`root`
+/// invariant this whole function relies on. The suffix is fixed at `.0`
+/// rather than reusing `atomic`'s process-wide counter (private to
+/// `mkit-core`, unreachable from this crate) because a single call
+/// creates and consumes at most one temp dir before returning, so
+/// nothing within one call can collide with it.
+///
+/// # Adopted edge case
+///
+/// A protected root that exists as a plain *file* (a branch-path /
+/// remote-name collision inherent to the directory-keyed layout, and
+/// predating #660) is adopted into the protection set by
+/// `walk_unprotected`'s exact-path check and left untouched — the safe
+/// direction for an input this function doesn't otherwise reason about.
+///
+/// # Destination-side nesting boundary (finding 3, #789 — not fixed here)
+///
+/// `protected` is always computed by the caller from `old`
+/// (`nested_sibling_names(remotes, old)`), never from `new`. When a
+/// configured sibling instead nests under the DESTINATION — `rename a/b
+/// a` while `a/x` is configured, or `rename a a/b` while `a/b/c` is
+/// configured — this function has no way to see that from `old` alone,
+/// so it takes the ordinary fast or selective path as if no sibling were
+/// involved, and the final `fs::rename(&tmp, &dst)` lands on `dst`'s
+/// already-occupied directory and fails closed: the restore contract
+/// above fires, the caller's standard warning is emitted, and the
+/// source state is intact rather than merged into the sibling's
+/// directory or dragging it along. This is a deliberate boundary, not a
+/// bug — see the #660/#789 PR discussion for why destination-side
+/// protection (computing and reasoning about siblings of `new` too) is
+/// out of scope here. `rename_round_trip_into_sibling_fails_closed`
+/// pins this exact shape.
+fn move_state_dir(root: &Path, old: &str, new: &str, protected: &[PathBuf]) -> std::io::Result<()> {
     let (src, dst) = (root.join(old), root.join(new));
     if !src.is_dir() {
         return Ok(());
     }
-    // `.{name}.tmp.{pid}.{seq}` mirrors `atomic::write_atomic`'s temp-file
-    // convention (`atomic.rs:44-46`) so crash debris is grep-able by one
-    // pattern across the codebase. The "name" component is the fixed
-    // literal `rename` rather than `old`/`new`: those may be multi-segment
-    // remote names (`team/upstream`), and embedding a `/` into a single
-    // path component here would make `root.join(...)` build a *nested*
-    // path instead of a flat sibling, defeating the one-temp-dir-directly-
-    // under-`root` invariant this whole function relies on. `seq` is
-    // fixed at `0` rather than reusing `atomic`'s process-wide counter:
-    // that counter is private to `mkit-core` (`atomic` is `pub(crate)`,
-    // `TEMP_SEQ` is a private static) and unreachable from this crate,
-    // and this function creates and consumes exactly one temp dir per
-    // call before returning, so a fixed suffix cannot collide with
-    // another temp dir from the same call.
     let tmp = root.join(format!(".rename.tmp.{}.0", std::process::id()));
-    std::fs::rename(&src, &tmp)?;
-    prune_empty_parents(&src, root);
-    if let Some(parent) = dst.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::rename(&tmp, &dst) {
-        if let Some(parent) = src.parent() {
+
+    let extracted = if protected.is_empty() {
+        std::fs::rename(&src, &tmp)
+    } else {
+        std::fs::create_dir(&tmp).and_then(|()| {
+            walk_unprotected(&src, protected, &mut |entry: &Path| {
+                // `entry` always came from `read_dir(src)` (directly, or
+                // via a recursive `walk_unprotected` call rooted at an
+                // ancestor under `src`), so it is always under `src` —
+                // never leave an entry behind on the strength of a
+                // silently-ignored mismatch here (finding 5a, #789).
+                let rel = entry
+                    .strip_prefix(&src)
+                    .expect("walk_unprotected only ever yields entries located under src");
+                let target = tmp.join(rel);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(entry, &target)
+            })
+        })
+    };
+
+    let result = extracted.and_then(|()| {
+        prune_empty_parents(&src, root);
+        if let Some(parent) = dst.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::rename(&tmp, &src).is_err() {
-            // The restore itself failed too: state is now parked at
-            // `tmp`, not `src`. Say so — the final-rename error alone
-            // doesn't tell the caller (and its warning) where the state
-            // actually went.
-            return Err(std::io::Error::new(
-                e.kind(),
-                format!("{e}; state parked at {}", tmp.display()),
-            ));
-        }
+        std::fs::rename(&tmp, &dst)
+    });
+
+    let Err(e) = result else {
+        return Ok(());
+    };
+    if !tmp.exists() {
+        // Phase 1 never got as far as creating/populating `tmp`: `src`
+        // is untouched, so there is nothing to restore.
         return Err(e);
     }
-    Ok(())
+    let _ = std::fs::create_dir_all(&src);
+    if std::fs::rename(&tmp, &src).is_ok() {
+        return Err(e);
+    }
+    if merge_tree_into(&tmp, &src).is_err() {
+        // The restore itself failed too: state is now parked at `tmp`,
+        // not `src`. Say so — the original error alone doesn't tell the
+        // caller (and its warning) where the state actually ended up.
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("{e}; state parked at {}", tmp.display()),
+        ));
+    }
+    // Merge succeeded: the state is home. `tmp` is now an inert
+    // (near-)empty husk; best-effort cleanup only — its failure is
+    // tidiness debris, not stranded state, so the annotation above must
+    // not fire for it (finding 5c, #789).
+    let _ = std::fs::remove_dir(&tmp);
+    Err(e)
 }
 
 /// Walk up from `dir`, removing empty directories, until `root` is
@@ -437,6 +570,108 @@ fn prune_empty_parents(dir: &Path, root: &Path) {
         }
         dir = d.parent();
     }
+}
+
+/// Configured remote names that are proper extensions of `name`
+/// (`name + "/"` prefix): the subtrees under `name`'s state directories
+/// that actually belong to OTHER configured remotes and must survive a
+/// rename/remove of `name` (#660). Empty in the overwhelmingly common
+/// case, in which callers take the pre-existing whole-directory fast
+/// path unchanged.
+fn nested_sibling_names(remotes: &BTreeMap<String, RemoteEntry>, name: &str) -> Vec<String> {
+    let prefix = format!("{name}/");
+    remotes
+        .keys()
+        .filter(|k| k.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
+/// Visit the entries of `dir` bottom-up, skipping any entry that IS a
+/// protected root (left untouched — not handed to `f`, not recursed
+/// into) and recursing into any entry that is an ANCESTOR of a
+/// protected root; every other entry is handed to `f` whole, since its
+/// subtree cannot contain a protected path. After visiting, `dir`
+/// itself is opportunistically removed via `remove_dir`: success means
+/// every unprotected entry left and no protected subtree remains
+/// beneath it; failure (non-empty) is the natural terminator, not an
+/// error, mirroring `prune_empty_parents`.
+///
+/// The entry list is snapshotted with one `read_dir` before any
+/// mutation happens, so a destination created inside `dir` by `f`
+/// itself (a rename into `dir`'s own subtree) is never iterated.
+///
+/// A missing `dir` is a no-op, matching the fast paths this is an
+/// alternative to. Like every other helper on these rename/remove
+/// paths, failure is best-effort: the first error from `f` (or from
+/// `read_dir`) aborts the walk immediately and propagates to the
+/// caller's existing warn-only handling — partial state is acceptable
+/// here and self-heals on the next fetch.
+fn walk_unprotected(
+    dir: &Path,
+    protected: &[PathBuf],
+    f: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    for entry in entries {
+        if protected.iter().any(|p| p == &entry) {
+            // `entry` IS a protected root: leave it, and everything
+            // beneath it, entirely alone.
+            continue;
+        }
+        if protected.iter().any(|p| p.starts_with(&entry)) {
+            // `entry` is an ancestor of some protected root: recurse so
+            // its unprotected children are still visited individually.
+            walk_unprotected(&entry, protected, f)?;
+        } else {
+            // No protected path can live under `entry` — hand it to `f`
+            // whole.
+            f(&entry)?;
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
+    Ok(())
+}
+
+/// Restore helper for `move_state_dir`'s occupied-destination /
+/// mid-extraction failure: moves every entry under `from` into `into`,
+/// recursing into any like-named directory that already exists at the
+/// destination (needed because `into` — `src` — may have retained
+/// ancestor directories of protected content that a moved entry's
+/// relative path nests under, finding 4 / #789) and renaming everything
+/// else directly. Not a general merge utility: used only to put
+/// `move_state_dir`'s temp contents back where they came from.
+fn merge_tree_into(from: &Path, into: &Path) -> std::io::Result<()> {
+    // Snapshot the entry list before any mutation, the same discipline
+    // as `walk_unprotected` (finding 5b, #789): recursing into a
+    // like-named destination directory below mutates `into`, and a
+    // naive un-snapshotted `read_dir(from)` iterator is only required to
+    // reflect entries present at some unspecified point during the
+    // scan, not to ignore ones renamed away out from under it mid-walk.
+    let entries: Vec<PathBuf> = std::fs::read_dir(from)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    for path in entries {
+        let name = path
+            .file_name()
+            .expect("read_dir entries always have a file name");
+        let target = into.join(name);
+        if path.is_dir() && target.is_dir() {
+            merge_tree_into(&path, &target)?;
+            std::fs::remove_dir(&path)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&path, &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Removing a remote leaves its bridge state in place (it holds the
@@ -455,11 +690,34 @@ fn warn_orphaned_bridge_state(layout: &RepoLayout, name: &str) {
 }
 
 /// Best-effort removal of `refs/remotes/<name>/` after a remove.
-fn remove_tracking_refs(layout: &RepoLayout, name: &str) {
-    let dir = layout.remotes_dir().join(name);
-    if dir.is_dir()
-        && let Err(e) = std::fs::remove_dir_all(&dir)
-    {
+///
+/// `siblings` lists the configured remote names nested under `name`
+/// (#660, `nested_sibling_names`); this joins them against the root it
+/// already owns (`layout.remotes_dir()`) to build the protected set. When
+/// empty (the overwhelmingly common case) this is the unchanged
+/// whole-directory `remove_dir_all` fast path; otherwise a selective walk
+/// deletes only the entries not on a protected sibling's path, so `a/b`'s
+/// refs survive `remove a`.
+fn remove_tracking_refs(layout: &RepoLayout, name: &str, siblings: &[String]) {
+    let root = layout.remotes_dir();
+    let dir = root.join(name);
+    let protected: Vec<PathBuf> = siblings.iter().map(|s| root.join(s)).collect();
+    let result = if protected.is_empty() {
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)
+        } else {
+            Ok(())
+        }
+    } else {
+        walk_unprotected(&dir, &protected, &mut |entry: &Path| {
+            if entry.is_dir() {
+                std::fs::remove_dir_all(entry)
+            } else {
+                std::fs::remove_file(entry)
+            }
+        })
+    };
+    if let Err(e) = result {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -583,3 +841,125 @@ fn show(cfg: &Config, json: bool, verbose: bool) -> u8 {
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod tests {
+    use super::{PathBuf, walk_unprotected};
+
+    fn touch(path: &std::path::Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn protected_root_is_left_untouched() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        touch(&root.join("keep/marker.txt"));
+        touch(&root.join("drop.txt"));
+        let protected = vec![root.join("keep")];
+        let mut visited = Vec::new();
+        walk_unprotected(root, &protected, &mut |p| {
+            visited.push(p.to_path_buf());
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            }
+        })
+        .unwrap();
+        assert!(
+            root.join("keep/marker.txt").exists(),
+            "protected subtree must survive whole"
+        );
+        assert!(
+            !root.join("drop.txt").exists(),
+            "unprotected entry must be visited and removed"
+        );
+        assert_eq!(visited, vec![root.join("drop.txt")]);
+    }
+
+    #[test]
+    fn ancestor_of_protected_root_is_recursed_not_removed_whole() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        touch(&root.join("a/b/c/marker.txt")); // protected root is a/b/c
+        touch(&root.join("a/other.txt")); // unprotected sibling under ancestor `a`
+        let protected = vec![root.join("a/b/c")];
+        let mut visited = Vec::new();
+        walk_unprotected(root, &protected, &mut |p| {
+            visited.push(p.to_path_buf());
+            if p.is_dir() {
+                std::fs::remove_dir_all(p)
+            } else {
+                std::fs::remove_file(p)
+            }
+        })
+        .unwrap();
+        assert!(
+            root.join("a/b/c/marker.txt").exists(),
+            "deeply nested protected root must survive"
+        );
+        assert!(
+            !root.join("a/other.txt").exists(),
+            "unprotected file under the ancestor must be removed"
+        );
+        assert_eq!(visited, vec![root.join("a/other.txt")]);
+        // `a` and `a/b` survive only because `a/b/c` remains beneath them
+        // — proof the ancestor dirs were recursed into, not deleted
+        // whole, and that they are NOT force-pruned once emptied of
+        // unprotected content.
+        assert!(root.join("a").is_dir());
+        assert!(root.join("a/b").is_dir());
+    }
+
+    #[test]
+    fn snapshot_is_taken_before_any_mutation() {
+        // Mirrors a rename into the walked directory's own subtree:
+        // `f` creates a NEW entry inside `dir` as a side effect. That
+        // entry must never be visited by this same walk, since the
+        // entry list was snapshotted up front.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        touch(&root.join("existing.txt"));
+        let protected: Vec<PathBuf> = Vec::new();
+        let mut visited = Vec::new();
+        walk_unprotected(root, &protected, &mut |p| {
+            visited.push(p.to_path_buf());
+            std::fs::write(root.join("created-during-walk.txt"), b"new").unwrap();
+            std::fs::remove_file(p)
+        })
+        .unwrap();
+        assert_eq!(visited, vec![root.join("existing.txt")]);
+        assert!(
+            root.join("created-during-walk.txt").exists(),
+            "entry created mid-walk must not be picked up by the same walk"
+        );
+    }
+
+    #[test]
+    fn dir_is_removed_bottom_up_after_its_entries_are_individually_processed() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let sub = root.join("a");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("one.txt"), b"1").unwrap();
+        std::fs::write(sub.join("two.txt"), b"2").unwrap();
+        let protected: Vec<PathBuf> = Vec::new();
+        walk_unprotected(&sub, &protected, &mut |p| {
+            assert!(
+                p.is_file(),
+                "each entry is handed to f individually, never the dir itself"
+            );
+            std::fs::remove_file(p)
+        })
+        .unwrap();
+        // `f` only ever saw the two files; `sub`'s own removal is the
+        // walker's bottom-up cleanup once it is empty, not something
+        // `f` did.
+        assert!(
+            !sub.exists(),
+            "now-empty dir must be removed by the walk itself"
+        );
+    }
+}

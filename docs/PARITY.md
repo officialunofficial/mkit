@@ -234,3 +234,19 @@ own change, and are listed here so the gap is explicit:
   `--ignore-rev` fall-through is git's exact positional guess, byte-for-byte
   &mdash; parity is the contract there; `--ignore-rev-precise` is a conscious,
   documented better-than-git mode, not a changed default.
+- **`mkit remote rename` and prefix-nested remote names (#660/#789)** —
+  with prefix-nested remote names configured (`a` and `a/b` both exist),
+  mkit's rename moves only the named remote's own tracking refs and
+  bridge state, leaving a nested sibling's exactly where they are; git's
+  own rename (verified on 2.50.1) silently drags the sibling's refs to
+  the new name while its config still points at the old one. `remote
+  remove` was already per-ref-filtered the same way in git, so mkit only
+  reaches parity there. This protection is keyed on the *source* name,
+  not the destination: a rename whose destination nests under an
+  unrelated configured sibling (`rename a/b a` while `a/x` is configured,
+  or `rename a a/b` while `a/b/c` is configured) is outside what the
+  source-side check can see, so it fails closed with the standard
+  warning rather than merging into the sibling or dragging it along —
+  nothing moves, nothing is lost, the sibling is untouched. Deliberate
+  boundary, not a bug; see `move_state_dir`'s doc in
+  `mkit-cli/src/commands/remote.rs`.

@@ -195,7 +195,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'remote',
         status: 'parity',
-        note: 'List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes.',
+        note: "List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes. With prefix-nested names (a and a/b both configured), rename preserves the sibling's tracking refs — git's own rename silently drags them to the new name.",
       },
       {
         cmd: 'push / pull / fetch / clone',
