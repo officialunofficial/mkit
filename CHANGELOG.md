@@ -358,6 +358,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Docs/dev-scratchpad cleanup for a production-mature public footprint.**
+  Removed `docs/adr/` (4 ADRs, superseded by
+  `docs/specs/SPEC-MERKLE-OBJECTS.md` and the code they annotate),
+  `docs/research/` (2 exploratory design notes), `docs/keystore.md` (a
+  redundant stub &mdash; see `docs/specs/SPEC-KEYSTORE.md`), and
+  `docs/INVARIANTS.md` (unreferenced anywhere in the repo, scoped to the
+  now-closed [#634](https://github.com/officialunofficial/mkit/issues/634)
+  perf epic).
+
+- **Removed the mkit-native release-attestation feature.** `mkit self
+  update` no longer requires, or is able to verify, the DSSE/in-toto
+  envelope previously signed over release tarballs by the
+  `release-attest` crate; verification is now sha256-sidecar-only, and a
+  release that omits the sidecar installs with no cryptographic check at
+  all beyond TLS. `cosign` signatures and the GitHub-native SLSA
+  build-provenance attestation on every release are unaffected and remain
+  the recommended verification path for `install.sh`. **Breaking (SemVer,
+  pre-1.0 minor bump):** removes the public
+  `mkit_cli::commands::self_update::verify_release_attestation` function
+  and the `UpdateEnv::trust_keys` field. Also removes
+  `rust/crates/release-attest`, `docs/keys/`, and the corresponding
+  `release.yml` sign/verify steps; the `MKIT_RELEASE_ATTEST_KEY` GitHub
+  secret is now unused and slated for decommission.
+
 - **Operational slim-down.** Removed governance/process ceremony whose
   maintenance overhead was disproportionate to the project's size:
   `GOVERNANCE.md`, `MAINTAINERS.md`, `TRADEMARKS.md`, `SUPPORT.md`, the GitHub
