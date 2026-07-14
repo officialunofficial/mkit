@@ -60,28 +60,46 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # workflow_dispatch always runs THIS workflow file (from the ref you
+      # dispatch from, normally main) against the checked-out TAG's tree —
+      # the two can disagree on layout. The MCP app lived at top-level `mcp/`
+      # before the apps/ reorg (PR #444/#504, merged 2026-06-23) and at
+      # `apps/mcp/` after. Detect which one the checked-out tree actually has
+      # instead of hardcoding a path that only matches post-reorg tags.
+      - name: Locate MCP app directory in checked-out tree
+        id: locate-mcp
+        run: |
+          if [ -d apps/mcp ]; then
+            echo "dir=apps/mcp" >> "$GITHUB_OUTPUT"
+          elif [ -d mcp ]; then
+            echo "dir=mcp" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not locate the MCP app directory (checked apps/mcp and mcp) in the checked-out tree for ${{ inputs.tag || github.ref }}"
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: '22'
 
       - name: Install MCP dependencies
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: npm ci
 
       - name: Typecheck + test (never seed from a tree whose indexer fails)
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: npm run ci
 
       - name: Build corpus index from the tag's tree
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: npm run index
 
       # Guard: the indexer derives the version from rust/Cargo.toml. If the tag
       # was pushed before the release-plz version-bump merged, the label would
       # lie about the content — fail loudly instead.
       - name: Guard — tag matches workspace version
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: |
           INDEXED="$(jq -r .version dist/manifest.json)"
           if [[ "$INDEXED" != "$RELEASE_TAG" ]]; then
@@ -92,7 +110,7 @@ jobs:
 
       - name: Check whether this version is already indexed
         id: indexed
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         shell: bash  # explicit: gets `-o pipefail`, so a wrangler failure fails the step
         env:
           FORCE: ${{ inputs.force }}
@@ -139,10 +157,10 @@ jobs:
 
       - name: Apply D1 migrations (idempotent)
         if: ${{ steps.indexed.outputs.seed == 'true' }}
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: npm run db:migrate
 
       - name: Seed corpus into remote D1
         if: ${{ steps.indexed.outputs.seed == 'true' }}
-        working-directory: apps/mcp
+        working-directory: ${{ steps.locate-mcp.outputs.dir }}
         run: npm run db:seed
