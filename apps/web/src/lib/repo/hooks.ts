@@ -11,7 +11,7 @@ import { recordActivity } from '../activity-log'
 import { playerName } from '../identity-name'
 import { useIdentityStore } from '../identity-store'
 import { usePresenceStore } from '../presence-store'
-import type { MkitApi } from '../mkit'
+import { type MkitApi, mkit } from '../mkit'
 import {
   BackendNotReadyError,
   type ChatMessageEntry,
@@ -21,6 +21,7 @@ import {
   type ReactionEntry,
   type ReactionUpdate,
   type RefExpectation,
+  type RefUpdate,
   type RemixSourceEntry,
   type RoomWatchHandlers,
   MockRepoBackend,
@@ -28,6 +29,7 @@ import {
   WasmRepoBackend,
   aggregateReactions,
   decodeLogObject,
+  isForkRef,
   mergeFeed,
   subscribeRoom,
 } from './backend'
@@ -40,6 +42,8 @@ export const repoKeys = {
   log: (room: string, ref: string) => ['repo', room, 'log', ref] as const,
   messages: (room: string) => ['repo', room, 'messages'] as const,
   reactions: (room: string) => ['repo', room, 'reactions'] as const,
+  /** Remix (fork) pushes observed live over the socket — see {@link useRemixes}. */
+  remixes: (room: string) => ['repo', room, 'remixes'] as const,
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +417,29 @@ export function applyReactionFrame(prev: ReactionEntry[] | undefined, r: Reactio
   return list.filter((x) => !matches(x))
 }
 
+/** Cap on {@link repoKeys.remixes}' cache — live-only (no historical backfill), so this just bounds memory growth. */
+const REMIX_FEED_LIMIT = 100
+
+/**
+ * Resolve a live fork-ref update into a decoded {@link CommitLogEntry} for the feed: fetches the remix object's raw
+ * bytes and decodes via {@link decodeLogObject} (shared with the commit-log walk, so `kind`/`sources` come out the same
+ * shape). Returns `null` if the object hasn't landed yet or fails to decode — the caller just drops the frame rather
+ * than showing a broken row.
+ */
+async function resolveRemixEntry(backend: RepoBackend, room: string, u: RefUpdate): Promise<CommitLogEntry | null> {
+  const bytes = await backend.getObject(room, u.objectIdHex)
+  if (!bytes) return null
+  const api = await mkit()
+  return decodeLogObject(api, bytes, u.objectIdHex, u.name)?.entry ?? null
+}
+
+/** Prepend a newly-resolved remix to the cached list, deduped by hash and capped to {@link REMIX_FEED_LIMIT}. */
+export function prependRemix(prev: CommitLogEntry[] | undefined, entry: CommitLogEntry): CommitLogEntry[] {
+  const list = prev ?? []
+  if (list.some((x) => x.hash === entry.hash)) return list
+  return [entry, ...list].slice(0, REMIX_FEED_LIMIT)
+}
+
 /**
  * Subscribe to the live room stream (ONE WebSocket) and update the cache. Chat and reaction frames carry their FULL
  * payload, so they're applied straight to the cache — O(1), no refetch round-trip per event. Ref/commit frames carry
@@ -438,6 +465,21 @@ export function useLobbyEvents(room: string): void {
       onReaction: (r) =>
         qc.setQueryData<ReactionEntry[]>(repoKeys.reactions(room), (prev) => applyReactionFrame(prev, r)),
       onRef: (u) => {
+        // A fork push lands on a `forks/<...>` ref, never `main` — the lobby's
+        // commit-log walk only follows `main`, so a fork ref would otherwise never
+        // surface anywhere but the refs/branches panel. Resolve it directly and
+        // patch it into the remix feed cache instead of invalidating the log.
+        if (isForkRef(u.name)) {
+          if (backend) {
+            void resolveRemixEntry(backend, room, u).then((entry) => {
+              if (!entry) return
+              qc.setQueryData(repoKeys.remixes(room), (prev: CommitLogEntry[] | undefined) => prependRemix(prev, entry))
+            })
+          }
+          void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
+          void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+          return
+        }
         void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
         // Prefix match covers both the uncapped log key and the lobby's capped one.
         void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
@@ -447,7 +489,7 @@ export function useLobbyEvents(room: string): void {
       // joins/leaves and show viewer-vs-participant state.
       onPresence: (p) => setPresence(room, p),
     }),
-    [qc, room, setPresence],
+    [qc, room, setPresence, backend],
   )
 
   // Worker mode: open the socket immediately off the static URL (no wasm dep).
@@ -554,6 +596,20 @@ export function useToggleReaction(room: string, myPubkeyHex?: string) {
  */
 const LOBBY_LOG_LIMIT = 30
 
+/**
+ * Remix (fork) pushes seen live over the socket, newest-first-prepended (see {@link prependRemix}). No historical
+ * backfill — this is a pure cache read populated entirely by {@link useLobbyEvents}'s `onRef` handler, since forks live
+ * on `forks/*` refs the commit-log walk never follows. Always enabled (no network fetch, no backend dependency).
+ */
+export function useRemixes(room: string) {
+  return useQuery({
+    queryKey: repoKeys.remixes(room),
+    queryFn: (): CommitLogEntry[] => [],
+    initialData: [] as CommitLogEntry[],
+    staleTime: Number.POSITIVE_INFINITY,
+  })
+}
+
 export function useLobbyFeed(
   room: string,
   ref = 'main',
@@ -561,7 +617,11 @@ export function useLobbyFeed(
 ): { items: FeedItem[]; isLoading: boolean; isError: boolean } {
   const log = useCommitLog(room, ref, limit)
   const messages = useLobbyMessages(room)
-  const items = useMemo(() => mergeFeed(log.data ?? [], messages.data ?? []), [log.data, messages.data])
+  const remixes = useRemixes(room)
+  const items = useMemo(
+    () => mergeFeed([...(log.data ?? []), ...remixes.data], messages.data ?? []),
+    [log.data, messages.data, remixes.data],
+  )
   // `isPending` (not `isLoading`) so the gap where the backend is still null —
   // queries are `enabled:false`, which reports isLoading=false in v5 — still
   // reads as loading, not as an empty room. Only consulted when the feed is

@@ -406,20 +406,20 @@ function Row({
 }
 
 /**
- * A commit/fork in the feed, styled like a chat SYSTEM message: centered, small text, a small avatar — visually
- * distinct from a person's chat message. The whole line is a button that opens the commit-detail drawer.
+ * A commit/fork in the feed — left-aligned and inline with the chat rows above/below it (not centered as a separate
+ * "system message" style), small text, a small avatar. The whole line is a button that opens the commit-detail drawer.
  */
 function CommitNotice({ item, onOpen }: { item: CommitItem; onOpen: () => void }) {
   const e = item.entry
   const time = fmtTime(item.ts)
   const fork = isForkRef(e.ref)
   return (
-    <div className='px-4 py-1.5'>
+    <div className='px-4 py-1'>
       <button
         type='button'
         onClick={onOpen}
         title='View commit details'
-        className='group/sys mx-auto flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-2 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+        className='group/sys flex w-full max-w-full flex-wrap items-center justify-start gap-x-1.5 gap-y-0.5 rounded-md px-1.5 py-1 text-left text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
       >
         <PlayerAvatar pubkey={e.authorPubkey} size={16} />
         <PlayerLabel pubkey={e.authorPubkey} className='font-medium text-fg' />
@@ -427,7 +427,7 @@ function CommitNotice({ item, onOpen }: { item: CommitItem; onOpen: () => void }
         <code className='font-mono text-fg'>{e.hash.slice(0, 10)}</code>
         <span>to</span>
         <code className='font-mono text-fg'>{e.ref}</code>
-        {e.message ? <span className='truncate'>— “{e.message}”</span> : null}
+        {e.message ? <span className='truncate text-fg'>: “{e.message}”</span> : null}
         <time className='tabular-nums opacity-70' title={time.title}>
           {time.clock}
         </time>
