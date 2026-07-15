@@ -174,7 +174,7 @@ export type ControlStatus = {
     knownForkRefs: number;
     /** Undrained response-queue intent count (`SchedulerState.responseQueue`). */
     queueDepth: number;
-    /** `false` until the first successful poll (or explicitly-fresh watermark) has recorded at least one ref — mirrors `refsTracked > 0`, exposed as its own boolean since "has this instance EVER observed the room" is the operationally interesting question, not the exact count. */
+    /** `watermark.initialized` (#849) — the observer's own explicit "has this instance completed its first-enable baseline poll" flag. NOT `refsTracked > 0`: a room with zero refs is still validly initialized once that first poll completes, and `refsTracked` alone can't distinguish that from "never polled yet". */
     watermarkInitialized: boolean;
     budget: {
       /** UTC day key (`YYYY-MM-DD`) the ledger's spend below is accounted against. */
@@ -184,6 +184,17 @@ export type ControlStatus = {
     };
   };
 };
+
+/**
+ * Deterministic per-(tick, slot) counter — enough variety that the two
+ * chat picks (or any two same-kind picks) in one tick never select the
+ * identical content-pool phrase; see content.ts's `pick`. Shared by
+ * `emitOne` and `resolveChatTexts` so both derive the same counter for the
+ * same (tick, slot) pair.
+ */
+function counterFor(tick: number, slot: number): number {
+  return tick * 97 + slot;
+}
 
 export class Spammer extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -312,7 +323,7 @@ export class Spammer extends DurableObject<Env> {
         refsTracked,
         knownForkRefs: watermark.knownForkRefs.length,
         queueDepth: meta.responseQueue?.length ?? 0,
-        watermarkInitialized: refsTracked > 0,
+        watermarkInitialized: watermark.initialized,
         budget: { dayKey: ledger.dayKey, usedNeurons: ledger.dayKey === utcDayKey(now) ? ledger.neuronsSpentToday : 0 },
       },
     };
@@ -478,10 +489,7 @@ export class Spammer extends DurableObject<Env> {
   ): Promise<unknown> {
     const identity = pool[event.identityIndex];
     if (!identity) throw new Error(`[spammer] no identity at pool index ${event.identityIndex}`);
-    // Deterministic per-(tick, slot) counter — enough variety that the two
-    // chat picks (or any two same-kind picks) in one tick never select the
-    // identical content-pool phrase; see content.ts's `pick`.
-    const counter = tick * 97 + slot;
+    const counter = counterFor(tick, slot);
 
     switch (event.kind) {
       case "chat": {
@@ -558,7 +566,7 @@ export class Spammer extends DurableObject<Env> {
       const event = events[slot]!;
       if (event.kind !== "chat" || !event.response) continue;
 
-      const counter = tick * 97 + slot;
+      const counter = counterFor(tick, slot);
       let personalized: string | null = null;
 
       if (this.env.AI_REPLY_PERSONALIZATION === "true") {

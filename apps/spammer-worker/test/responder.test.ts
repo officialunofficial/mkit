@@ -25,7 +25,7 @@ function commit(overrides: Partial<CommitMeta> & { hash: string }): CommitMeta {
 }
 
 function watermark(overrides: Partial<ObserverWatermark> = {}): ObserverWatermark {
-  return { refHeads: {}, knownForkRefs: [], respondedEventIds: [], ...overrides };
+  return { refHeads: {}, knownForkRefs: [], respondedEventIds: [], initialized: true, ...overrides };
 }
 
 // -----------------------------------------------------------------------------
@@ -33,12 +33,12 @@ function watermark(overrides: Partial<ObserverWatermark> = {}): ObserverWatermar
 // -----------------------------------------------------------------------------
 
 describe("responder.ts — refsNeedingFetch", () => {
-  it("returns [] outright for a fresh watermark (zero refHeads keys), even with refs present", () => {
+  it("returns [] outright for a fresh watermark (!watermark.initialized), even with refs present", () => {
     const refs: RefEntry[] = [
       { name: "main", headHex: "m1" },
       { name: "feature/x", headHex: "f1" },
     ];
-    expect(refsNeedingFetch(watermark(), refs)).toEqual([]);
+    expect(refsNeedingFetch(watermark({ initialized: false }), refs)).toEqual([]);
   });
 
   it("excludes a ref whose head is unchanged", () => {
@@ -152,11 +152,26 @@ describe("responder.ts — buildSnapshot", () => {
     expect(snap.newCommitsByRef.main).toEqual([commit({ hash: "m3" }), commit({ hash: "m2" })]);
   });
 
-  it("a ref with no watermark head yet (brand new) accepts the whole page up to the cap, with no stop condition", () => {
+  it("a ref with no watermark head yet (brand new) accepts ONLY the page's first entry (its head), not the ancestors behind it", () => {
     const refs: RefEntry[] = [{ name: "feature/new", headHex: "f3" }];
     const page = [commit({ hash: "f3" }), commit({ hash: "f2" }), commit({ hash: "f1" })];
     const snap = buildSnapshot(refs, { "feature/new": page }, watermark());
-    expect(snap.newCommitsByRef["feature/new"]).toEqual(page);
+    expect(snap.newCommitsByRef["feature/new"]).toEqual([commit({ hash: "f3" })]);
+  });
+
+  it("a brand-new ref whose page is longer than MAX_ACCEPTED_COMMITS_PER_REF still accepts only its head", () => {
+    const refs: RefEntry[] = [{ name: "feature/new", headHex: "fN" }];
+    const page = Array.from({ length: MAX_ACCEPTED_COMMITS_PER_REF + 5 }, (_, i) => commit({ hash: `f${i + 1}` }));
+    const snap = buildSnapshot(refs, { "feature/new": page }, watermark());
+    expect(snap.newCommitsByRef["feature/new"]).toEqual([page[0]]);
+  });
+
+  it("an EXISTING ref (has a watermark head) that moved is unaffected by the new-ref head-only rule — still accepts up to the watermark head, capped as before", () => {
+    const wm = watermark({ refHeads: { main: "m1" } });
+    const refs: RefEntry[] = [{ name: "main", headHex: "m3" }];
+    const page = [commit({ hash: "m3" }), commit({ hash: "m2" }), commit({ hash: "m1" }), commit({ hash: "m0" })];
+    const snap = buildSnapshot(refs, { main: page }, wm);
+    expect(snap.newCommitsByRef.main).toEqual([commit({ hash: "m3" }), commit({ hash: "m2" })]);
   });
 
   it("caps accepted commits at MAX_ACCEPTED_COMMITS_PER_REF even when the watermark head never appears in the page", () => {

@@ -28,17 +28,18 @@ import type { ForkUpstreamRef } from "./scheduler";
  * diffs commit-by-commit, and an unmoved ref contributes zero real events by
  * construction.
  *
- * Returns `[]` outright when `watermark.refHeads` has zero keys — the exact
- * same "fresh watermark" test `observe`'s own doc comment uses for its
- * first-enable short-circuit. That branch adopts the snapshot's ref heads as
- * the baseline WITHOUT ever inspecting commit data (see `observer.ts`), so
- * paging commits for every ref on a freshly-enabled (or freshly-redeployed)
- * instance would be pure waste — worse, it would be wasted I/O in the exact
- * moment #848's "restart/redeploy safety" story cares most about staying
- * cheap and inert.
+ * Returns `[]` outright when `!watermark.initialized` — the exact same
+ * "fresh watermark" test `observe`'s own doc comment uses for its
+ * first-enable short-circuit (#849's explicit `initialized` flag, not
+ * `refHeads` emptiness — a room can legitimately have zero refs and still be
+ * initialized). That branch adopts the snapshot's ref heads as the baseline
+ * WITHOUT ever inspecting commit data (see `observer.ts`), so paging commits
+ * for every ref on a freshly-enabled (or freshly-redeployed) instance would
+ * be pure waste — worse, it would be wasted I/O in the exact moment #848's
+ * "restart/redeploy safety" story cares most about staying cheap and inert.
  */
 export function refsNeedingFetch(watermark: ObserverWatermark, refs: readonly RefEntry[]): RefEntry[] {
-  if (Object.keys(watermark.refHeads).length === 0) {
+  if (!watermark.initialized) {
     return [];
   }
   return refs.filter((ref) => watermark.refHeads[ref.name] !== ref.headHex);
@@ -81,17 +82,21 @@ export function forkUpstreamsFromWatermark(watermark: ObserverWatermark): ForkUp
 
 /**
  * Cap on how many commits from one ref's `list_commits` page are accepted
- * into `ObserverSnapshot.newCommitsByRef` per poll. `list_commits` walks
- * newest-first from the ref's current head; a burst (many real commits
- * landing on one ref between two ~5s polls, or a ref this instance has never
- * watermarked before) could otherwise hand `observe` an unbounded run of
- * "new" commits, each of which can enqueue its own response bundle
+ * into `ObserverSnapshot.newCommitsByRef` per poll for a ref `observe` has
+ * already watermarked. `list_commits` walks newest-first from the ref's
+ * current head; a burst (many real commits landing on one ref between two
+ * ~5s polls) could otherwise hand `observe` an unbounded run of "new"
+ * commits, each of which can enqueue its own response bundle
  * (`enqueueResponseBundle` in `scheduler.ts`) — 10 is generous headroom over
  * any plausible per-poll burst at the polling cadence (#854's
  * `POLL_EVERY_N_TICKS`) while keeping a single pathological ref from
  * exploding the response queue. Truncation is log-worthy (the caller can
  * detect it by noticing a ref's accepted count hit this cap) but the cap
  * itself is just data — this module has no I/O to log through.
+ *
+ * A ref with NO watermark head yet (brand new since the last poll) does not
+ * use this cap at all — see {@link buildSnapshot}'s doc comment for why it
+ * instead accepts exactly one commit (the ref's head).
  */
 export const MAX_ACCEPTED_COMMITS_PER_REF = 10;
 
@@ -103,11 +108,16 @@ export const MAX_ACCEPTED_COMMITS_PER_REF = 10;
  * commits strictly NEWER than `watermark.refHeads[ref.name]`: it stops (and
  * does NOT include) at the first commit whose hash equals the watermark head
  * — that commit was already observed on a prior poll — and stops earlier
- * still if {@link MAX_ACCEPTED_COMMITS_PER_REF} is reached first. A ref with
- * no watermark head yet (brand new since the last poll) has no stop
- * condition beyond the cap, since there is nothing to stop at — this is
- * exactly the "brand-new `forks/…` ref" case `observe` collapses to a single
- * `"fork"` event regardless of how many commits came back for it.
+ * still if {@link MAX_ACCEPTED_COMMITS_PER_REF} is reached first.
+ *
+ * A ref with no watermark head yet (brand new since the last poll) accepts
+ * ONLY the page's first entry — the ref's current head — regardless of how
+ * many older commits came back on the same page. A real user pointing a
+ * brand-new branch at existing history (e.g. branching off an old commit)
+ * must not replay that history's ancestors as if they just landed; the new
+ * ref is acknowledged once, at its head, symmetric with how `observe`
+ * already collapses a brand-new `forks/…` ref to a single `"fork"` event
+ * regardless of the commits behind it.
  *
  * `refs` is carried straight through as `ObserverSnapshot.refs` (needed by
  * `observe` for ref-presence/deletion tracking even for refs that didn't
@@ -127,10 +137,15 @@ export function buildSnapshot(
 
     const watermarkHead = watermark.refHeads[ref.name];
     const accepted: CommitMeta[] = [];
-    for (const commitMeta of page) {
-      if (commitMeta.hash === watermarkHead) break;
-      if (accepted.length >= MAX_ACCEPTED_COMMITS_PER_REF) break;
-      accepted.push(commitMeta);
+    if (watermarkHead === undefined) {
+      // New ref: acknowledge only its head, never the ancestors behind it.
+      accepted.push(page[0]);
+    } else {
+      for (const commitMeta of page) {
+        if (commitMeta.hash === watermarkHead) break;
+        if (accepted.length >= MAX_ACCEPTED_COMMITS_PER_REF) break;
+        accepted.push(commitMeta);
+      }
     }
     if (accepted.length > 0) newCommitsByRef[ref.name] = accepted;
   }
