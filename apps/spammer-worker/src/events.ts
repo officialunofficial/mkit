@@ -89,7 +89,8 @@ async function postChat(ctx: EmitContext, room: string, identity: Identity, text
  * `text` is caller-validated: this function does no length or shape checking
  * of its own. Template rendering and slot-fill (short-hash/short-key/branch
  * substitution, length constraints, malformed-template rejection) are the
- * AI-content/template layer's job (#853, not yet landed) — by the time a
+ * AI-content/template layer's job (`ai-content.ts`'s reply templates,
+ * #853) — by the time a
  * string reaches here it is already a complete, ready-to-post message, and
  * this function's only responsibility is signing and posting it, exactly
  * like {@link emitChat} does for a pool pick (see {@link postChat}, the
