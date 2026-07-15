@@ -28,10 +28,20 @@ import { POOL_SIZE, getIdentityPool, makeRoundRobinCursor, seedForIndex } from "
 import { hexToBytes } from "../src/hex";
 import {
   CHAT_FLOOR_MS,
+  MAX_BUNDLES_IN_FLIGHT,
   PUSH_FLOOR_MS,
   REACTION_FLOOR_MS,
+  RESPONSE_AUTHOR_COOLDOWN_MS,
+  RESPONSE_BUNDLE_SPREAD_MS,
+  RESPONSE_CHAT_INCLUDE_PERCENT,
+  RESPONSE_REACTION_COUNT_MIN,
+  RESPONSE_REACTION_COUNT_RANGE,
+  RESPONSE_REMIX_INCLUDE_PERCENT,
   type EventKind,
+  type RealEventRef,
+  type ResponseIntent,
   type SchedulerState,
+  enqueueResponseBundle,
   initialSchedulerState,
   planTick,
 } from "../src/scheduler";
@@ -350,5 +360,435 @@ describe("scheduler.ts — tick planner", () => {
     expect(a.nextState).toEqual(b.nextState);
     // The input state itself must be untouched (no mutation).
     expect(state).toEqual(initialSchedulerState(8));
+  });
+
+  it("backward compat: a state with the new response fields entirely absent behaves identically to an explicit-undefined state", () => {
+    const withExplicitUndefined: SchedulerState = {
+      ...initialSchedulerState(8),
+      responseQueue: undefined,
+      lastBundleMsByAuthor: undefined,
+      reactionIdentitiesByBundle: undefined,
+    };
+    const legacyShape: SchedulerState = {
+      lastChatMs: new Array(8).fill(undefined),
+      lastPushMs: new Array(8).fill(undefined),
+      lastReactionMs: new Array(8).fill(undefined),
+      chatCursor: 0,
+      pushCursor: 0,
+      reactionCursor: 0,
+      tick: 0,
+      // No responseQueue / lastBundleMsByAuthor / reactionIdentitiesByBundle
+      // keys at all — mirrors `spammer.ts`'s `loadSchedulerState`, which
+      // this issue deliberately does not touch (see #854).
+    };
+    const a = planTick(withExplicitUndefined, 42_000);
+    const b = planTick(legacyShape, 42_000);
+    expect(a.events).toEqual(b.events);
+    expect(a.nextState).toEqual(b.nextState);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// scheduler.ts — issue #850 verification: response-queue draining
+// -----------------------------------------------------------------------------
+
+describe("enqueueResponseBundle — bundle composition", () => {
+  const realEvent = (targetIdHex: string, authorPubkeyHex = "real-author-1", ref = "refs/heads/main"): RealEventRef => ({
+    kind: "commit",
+    ref,
+    targetIdHex,
+    authorPubkeyHex,
+  });
+
+  it("composes RESPONSE_REACTION_COUNT_MIN..+RANGE-1 reactions from distinct, increasing notBeforeMs offsets spread within RESPONSE_BUNDLE_SPREAD_MS", () => {
+    for (const targetIdHex of ["target-a", "target-b", "target-c", "target-d", "target-e"]) {
+      const state = enqueueResponseBundle(initialSchedulerState(), realEvent(targetIdHex), 1_000_000);
+      const reactions = (state.responseQueue ?? []).filter((intent) => intent.kind === "reaction");
+
+      expect(reactions.length).toBeGreaterThanOrEqual(RESPONSE_REACTION_COUNT_MIN);
+      expect(reactions.length).toBeLessThanOrEqual(RESPONSE_REACTION_COUNT_MIN + RESPONSE_REACTION_COUNT_RANGE - 1);
+
+      const offsets = reactions.map((r) => r.notBeforeMs - 1_000_000).sort((x, y) => x - y);
+      expect(new Set(offsets).size).toBe(offsets.length); // distinct
+      for (const offset of offsets) {
+        expect(offset).toBeGreaterThanOrEqual(0);
+        expect(offset).toBeLessThan(RESPONSE_BUNDLE_SPREAD_MS);
+      }
+
+      // Every intent in the bundle shares one bundleId and carries the real event's ref/author through.
+      const bundleIds = new Set((state.responseQueue ?? []).map((i) => i.bundleId));
+      expect(bundleIds.size).toBe(1);
+      for (const intent of state.responseQueue ?? []) {
+        expect(intent.ref).toBe("refs/heads/main");
+        expect(intent.realAuthorPubkeyHex).toBe("real-author-1");
+        expect(intent.targetIdHex).toBe(targetIdHex);
+      }
+    }
+  });
+
+  it("includes at most one chat reply and a remix at a rate near RESPONSE_REMIX_INCLUDE_PERCENT, both deterministic per target hash", () => {
+    const targets = Array.from({ length: 500 }, (_, i) => `target-${i}`);
+    let chatCount = 0;
+    let remixCount = 0;
+
+    for (const targetIdHex of targets) {
+      const state = enqueueResponseBundle(initialSchedulerState(), realEvent(targetIdHex), 0);
+      const kinds = (state.responseQueue ?? []).map((intent) => intent.kind);
+      const chatKinds = kinds.filter((k) => k === "chat");
+      expect(chatKinds.length).toBeLessThanOrEqual(1);
+      if (chatKinds.length === 1) chatCount++;
+      if (kinds.includes("remix")) remixCount++;
+
+      // Determinism: re-deriving the SAME targetIdHex from a fresh state yields the identical bundle contents.
+      const again = enqueueResponseBundle(initialSchedulerState(), realEvent(targetIdHex), 0);
+      expect(again.responseQueue).toEqual(state.responseQueue);
+    }
+
+    const remixFraction = remixCount / targets.length;
+    expect(remixFraction).toBeGreaterThan(0.1);
+    expect(remixFraction).toBeLessThan(0.3); // ~20% target (RESPONSE_REMIX_INCLUDE_PERCENT), generous tolerance for hash variance
+
+    const chatFraction = chatCount / targets.length;
+    expect(chatFraction).toBeGreaterThan(0.65);
+    expect(chatFraction).toBeLessThan(0.95); // ~80% target (RESPONSE_CHAT_INCLUDE_PERCENT), generous tolerance
+  });
+});
+
+describe("enqueueResponseBundle — per-author cooldown and global bundle cap", () => {
+  const realEvent = (targetIdHex: string, authorPubkeyHex: string): RealEventRef => ({
+    kind: "commit",
+    ref: "refs/heads/main",
+    targetIdHex,
+    authorPubkeyHex,
+  });
+
+  /** Drain a state's responseQueue to empty by repeatedly calling planTick with a generously-spaced clock. */
+  function drainFully(state: SchedulerState): SchedulerState {
+    let s = state;
+    for (let i = 1; i <= 100 && (s.responseQueue?.length ?? 0) > 0; i++) {
+      s = planTick(s, i * (RESPONSE_BUNDLE_SPREAD_MS + PUSH_FLOOR_MS)).nextState;
+    }
+    return s;
+  }
+
+  it("an event whose author already got a bundle within RESPONSE_AUTHOR_COOLDOWN_MS enqueues nothing", () => {
+    const author = "cooldown-author";
+    const first = enqueueResponseBundle(initialSchedulerState(), realEvent("t1", author), 0);
+    expect(first.responseQueue!.length).toBeGreaterThan(0);
+    const drained = drainFully(first);
+    expect(drained.responseQueue ?? []).toEqual([]);
+
+    const stillCoolingDown = enqueueResponseBundle(drained, realEvent("t2", author), RESPONSE_AUTHOR_COOLDOWN_MS - 1);
+    expect(stillCoolingDown.responseQueue ?? []).toEqual([]);
+    expect(stillCoolingDown.lastBundleMsByAuthor).toEqual(drained.lastBundleMsByAuthor);
+  });
+
+  it("enqueues again once the cooldown has fully elapsed", () => {
+    const author = "cooldown-author-2";
+    const first = enqueueResponseBundle(initialSchedulerState(), realEvent("t1", author), 0);
+    const drained = drainFully(first);
+
+    const afterCooldown = enqueueResponseBundle(drained, realEvent("t2", author), RESPONSE_AUTHOR_COOLDOWN_MS);
+    expect(afterCooldown.responseQueue!.length).toBeGreaterThan(0);
+    expect(afterCooldown.lastBundleMsByAuthor?.[author]).toBe(RESPONSE_AUTHOR_COOLDOWN_MS);
+  });
+
+  it("drops an event from a DIFFERENT author that arrives while MAX_BUNDLES_IN_FLIGHT bundles already have pending intents — acknowledgment, not dogpile", () => {
+    const inFlight = enqueueResponseBundle(initialSchedulerState(), realEvent("in-flight", "author-1"), 0);
+    expect(inFlight.responseQueue!.length).toBeGreaterThan(0);
+
+    const dropped = enqueueResponseBundle(inFlight, realEvent("dropped", "author-2"), 1000);
+    expect(dropped.responseQueue).toEqual(inFlight.responseQueue);
+    expect(dropped.lastBundleMsByAuthor?.["author-2"]).toBeUndefined();
+  });
+
+  it("allows a new bundle once the in-flight bundle has fully drained", () => {
+    const first = enqueueResponseBundle(initialSchedulerState(), realEvent("first", "author-1"), 0);
+    const drained = drainFully(first);
+    expect(drained.responseQueue ?? []).toEqual([]);
+
+    const second = enqueueResponseBundle(drained, realEvent("second", "author-2"), 5_000_000);
+    expect(second.responseQueue!.length).toBeGreaterThan(0);
+  });
+});
+
+describe("planTick — response-queue draining", () => {
+  const POOL = 8;
+
+  function baseState(overrides: Partial<SchedulerState> = {}): SchedulerState {
+    return { ...initialSchedulerState(POOL), ...overrides };
+  }
+
+  const intent = (bundleId: string, kind: ResponseIntent["kind"], notBeforeMs: number): ResponseIntent => ({
+    kind,
+    targetIdHex: "real-target-hex",
+    ref: "refs/heads/feature",
+    realAuthorPubkeyHex: "real-author",
+    notBeforeMs,
+    bundleId,
+  });
+
+  it("drains a due reaction/chat/remix intent through its own floor, carrying the response payload on the PlannedEvent", () => {
+    const state = baseState({
+      responseQueue: [intent("b1", "reaction", 0), intent("b1", "chat", 0), intent("b1", "remix", 0)],
+    });
+    const { events, nextState } = planTick(state, 0);
+
+    const expectedPayload = { targetIdHex: "real-target-hex", ref: "refs/heads/feature", realAuthorPubkeyHex: "real-author" };
+    expect(events.find((e) => e.kind === "reaction" && e.response)?.response).toEqual(expectedPayload);
+    expect(events.find((e) => e.kind === "chat" && e.response)?.response).toEqual(expectedPayload);
+    expect(events.find((e) => e.kind === "remix" && e.response)?.response).toEqual(expectedPayload);
+
+    // Every queued intent was due and the pool (8) had room — the bundle fully drains this tick.
+    expect(nextState.responseQueue ?? []).toEqual([]);
+  });
+
+  it("leaves a not-yet-due intent queued and never emits it early", () => {
+    const state = baseState({ responseQueue: [intent("b1", "reaction", 5000)] });
+    const { events, nextState } = planTick(state, 1000);
+    expect(events.some((e) => e.response)).toBe(false);
+    expect(nextState.responseQueue).toEqual([intent("b1", "reaction", 5000)]);
+  });
+
+  it("requeues (never drops) a due intent when the entire pool is inside its floor this tick", () => {
+    const state = baseState({
+      lastReactionMs: new Array(POOL).fill(0),
+      responseQueue: [intent("b1", "reaction", 0)],
+    });
+    const { events, nextState } = planTick(state, 1); // 1ms later — nobody clears REACTION_FLOOR_MS (200ms)
+    expect(events.some((e) => e.kind === "reaction")).toBe(false);
+    expect(nextState.responseQueue).toEqual([intent("b1", "reaction", 0)]);
+  });
+
+  it("requeues (never drops) a due chat intent when the entire pool is inside CHAT_FLOOR_MS", () => {
+    const state = baseState({
+      lastChatMs: new Array(POOL).fill(0),
+      responseQueue: [intent("b1", "chat", 0)],
+    });
+    const { events, nextState } = planTick(state, 1); // 1ms later — nobody clears CHAT_FLOOR_MS (2500ms)
+    expect(events.some((e) => e.kind === "chat")).toBe(false);
+    expect(nextState.responseQueue).toEqual([intent("b1", "chat", 0)]);
+  });
+
+  it("requeues (never drops) a due remix intent when the entire pool is inside PUSH_FLOOR_MS", () => {
+    const state = baseState({
+      lastPushMs: new Array(POOL).fill(0),
+      responseQueue: [intent("b1", "remix", 0)],
+    });
+    const { events, nextState } = planTick(state, 1); // 1ms later — nobody clears PUSH_FLOOR_MS (30000ms)
+    expect(events.some((e) => e.response && e.kind === "remix")).toBe(false);
+    expect(nextState.responseQueue).toEqual([intent("b1", "remix", 0)]);
+  });
+
+  it("a response pick and an ambient pick never double-book an identity's floor in the same tick (pool size 1)", () => {
+    const state: SchedulerState = {
+      lastChatMs: [undefined],
+      lastPushMs: [undefined],
+      lastReactionMs: [undefined],
+      chatCursor: 0,
+      pushCursor: 0,
+      reactionCursor: 0,
+      tick: 0, // commit push-kind tick AND a REACTION_EVERY_N_TICKS boundary — both ambient categories are "live" this tick
+      responseQueue: [intent("b1", "reaction", 0), intent("b1", "chat", 0), intent("b1", "remix", 0)],
+    };
+
+    const { events } = planTick(state, 0);
+
+    // Exactly one event per category — the response pick claimed the pool's
+    // only identity, so the ambient picks that would otherwise ALSO fire
+    // this tick (2 chat, 1 push, 1 reaction) all found nobody eligible.
+    const reactionEvents = events.filter((e) => e.kind === "reaction");
+    const chatEvents = events.filter((e) => e.kind === "chat");
+    const pushEvents = events.filter((e) => e.kind === "commit" || e.kind === "remix");
+    expect(reactionEvents).toHaveLength(1);
+    expect(chatEvents).toHaveLength(1);
+    expect(pushEvents).toHaveLength(1);
+
+    // The single push event is the RESPONSE remix (not a separate ambient commit).
+    expect(pushEvents[0]!.kind).toBe("remix");
+    expect(pushEvents[0]!.response).toBeDefined();
+    expect(chatEvents[0]!.response).toBeDefined();
+    expect(reactionEvents[0]!.response).toBeDefined();
+  });
+
+  it("keeps reaction intents within one bundle on DISTINCT identities even when they drain across separate ticks", () => {
+    const poolSize = 2;
+    // tick fixed at 1 (not a REACTION_EVERY_N_TICKS boundary) across both
+    // calls so ambient reaction picks never interfere with this assertion.
+    const stateA: SchedulerState = {
+      lastChatMs: new Array(poolSize).fill(undefined),
+      lastPushMs: new Array(poolSize).fill(undefined),
+      lastReactionMs: new Array(poolSize).fill(undefined),
+      chatCursor: 0,
+      pushCursor: 0,
+      reactionCursor: 0,
+      tick: 1,
+      responseQueue: [intent("bundle-x", "reaction", 1000)],
+    };
+    const resultA = planTick(stateA, 1000);
+    const firstIdentity = resultA.events.find((e) => e.kind === "reaction")?.identityIndex;
+    expect(firstIdentity).toBeDefined();
+
+    // Exactly REACTION_FLOOR_MS (200ms) later: floor alone would allow the
+    // SAME identity to be picked again — only the bundle-exclusion tracking
+    // (`reactionIdentitiesByBundle`) forces a distinct one.
+    const stateB: SchedulerState = {
+      ...resultA.nextState,
+      tick: 1, // pin tick again so ambient reaction stays off for this call too
+      responseQueue: [intent("bundle-x", "reaction", 1000 + REACTION_FLOOR_MS)],
+    };
+    const resultB = planTick(stateB, 1000 + REACTION_FLOOR_MS);
+    const secondIdentity = resultB.events.find((e) => e.kind === "reaction")?.identityIndex;
+    expect(secondIdentity).toBeDefined();
+    expect(secondIdentity).not.toBe(firstIdentity);
+  });
+
+  it("ambient push-kind selection (commit vs remix) is untouched by response-queue contents", () => {
+    const withoutQueue = baseState({ tick: 0 }); // 0 % REMIX_EVERY_N_TICKS !== last-of-cycle -> commit tick
+    const withQueue = baseState({
+      tick: 0,
+      responseQueue: [intent("b1", "remix", 0), intent("b1", "chat", 0), intent("b1", "reaction", 0)],
+    });
+
+    const a = planTick(withoutQueue, 0);
+    const b = planTick(withQueue, 0);
+
+    const ambientPushA = a.events.filter((e) => (e.kind === "commit" || e.kind === "remix") && !e.response);
+    const ambientPushB = b.events.filter((e) => (e.kind === "commit" || e.kind === "remix") && !e.response);
+    expect(ambientPushA).toHaveLength(1);
+    expect(ambientPushB).toHaveLength(1);
+    expect(ambientPushA[0]!.kind).toBe("commit");
+    expect(ambientPushB[0]!.kind).toBe("commit"); // still a commit — the response remix is a SEPARATE event, not a substitution
+  });
+
+  it("is a pure function even with a non-empty response queue: identical (state, now) always yields identical output", () => {
+    const state = baseState({
+      responseQueue: [intent("b1", "reaction", 0), intent("b1", "chat", 5000), intent("b1", "remix", 20_000)],
+      lastBundleMsByAuthor: { "real-author": 0 },
+    });
+    const a = planTick(state, 10_000);
+    const b = planTick(state, 10_000);
+    expect(a.events).toEqual(b.events);
+    expect(a.nextState).toEqual(b.nextState);
+  });
+
+  it("spreads a real bundle's intents across multiple ticks rather than draining it all at once", () => {
+    const enqueuedAt = 0;
+    const withBundle = enqueueResponseBundle(initialSchedulerState(POOL_SIZE), {
+      kind: "commit",
+      ref: "refs/heads/main",
+      targetIdHex: "spread-target",
+      authorPubkeyHex: "spread-author",
+    }, enqueuedAt);
+    const totalIntents = withBundle.responseQueue!.length;
+    expect(totalIntents).toBeGreaterThan(0);
+
+    let state = withBundle;
+    let now = enqueuedAt;
+    let firstTickDrainedCount = -1;
+    let ticksUntilFullyDrained = 0;
+    while ((state.responseQueue?.length ?? 0) > 0 && ticksUntilFullyDrained < 60) {
+      const before = state.responseQueue?.length ?? 0;
+      const { events, nextState } = planTick(state, now);
+      const drainedThisTick = events.filter((e) => e.response).length;
+      if (firstTickDrainedCount === -1) firstTickDrainedCount = drainedThisTick;
+      state = nextState;
+      now += 1000;
+      ticksUntilFullyDrained++;
+      void before;
+    }
+
+    // Not everything fires on the very first tick...
+    expect(firstTickDrainedCount).toBeLessThan(totalIntents);
+    // ...but the whole bundle is fully drained well within RESPONSE_BUNDLE_SPREAD_MS plus a little slack.
+    expect(ticksUntilFullyDrained).toBeGreaterThan(1);
+    expect(ticksUntilFullyDrained * 1000).toBeLessThanOrEqual(RESPONSE_BUNDLE_SPREAD_MS + 5000);
+  });
+});
+
+describe("planTick + enqueueResponseBundle — simulated hour under combined ambient + response load", () => {
+  it("zero floor violations across a simulated hour with a steady stream of real events feeding the response queue", () => {
+    const AUTHORS = ["real-author-a", "real-author-b", "real-author-c", "real-author-d"];
+    let state = initialSchedulerState(POOL_SIZE);
+    let now = 0;
+    const lastChat = new Array<number | undefined>(POOL_SIZE).fill(undefined);
+    const lastPush = new Array<number | undefined>(POOL_SIZE).fill(undefined);
+    const lastReaction = new Array<number | undefined>(POOL_SIZE).fill(undefined);
+    const violations: string[] = [];
+
+    for (let t = 0; t < 3600; t++) {
+      now += 1000;
+
+      // A real event lands from a rotating author every 7 seconds.
+      if (t % 7 === 0) {
+        const author = AUTHORS[(t / 7) % AUTHORS.length]!;
+        state = enqueueResponseBundle(
+          state,
+          { kind: "commit", ref: "refs/heads/main", targetIdHex: `real-target-${t}`, authorPubkeyHex: author },
+          now,
+        );
+      }
+
+      const { events, nextState } = planTick(state, now);
+      state = nextState;
+
+      for (const ev of events) {
+        if (ev.kind === "chat") {
+          const last = lastChat[ev.identityIndex];
+          if (last !== undefined && now - last < CHAT_FLOOR_MS) violations.push(`chat identity ${ev.identityIndex} at ${now}`);
+          lastChat[ev.identityIndex] = now;
+        } else if (ev.kind === "commit" || ev.kind === "remix") {
+          const last = lastPush[ev.identityIndex];
+          if (last !== undefined && now - last < PUSH_FLOOR_MS) violations.push(`push identity ${ev.identityIndex} at ${now}`);
+          lastPush[ev.identityIndex] = now;
+        } else {
+          const last = lastReaction[ev.identityIndex];
+          if (last !== undefined && now - last < REACTION_FLOOR_MS) violations.push(`reaction identity ${ev.identityIndex} at ${now}`);
+          lastReaction[ev.identityIndex] = now;
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("holds the per-author cooldown and the global bundle cap over a simulated hour with a stream of real events", () => {
+    const AUTHORS = ["author-a", "author-b", "author-c"];
+    let state = initialSchedulerState(POOL_SIZE);
+    let now = 0;
+    const bundleEnqueueTimesByAuthor: Record<string, number[]> = {};
+
+    for (let t = 0; t < 3600; t++) {
+      now += 1000;
+
+      if (t % 10 === 0) {
+        const author = AUTHORS[(t / 10) % AUTHORS.length]!;
+        const before = state.responseQueue?.length ?? 0;
+        state = enqueueResponseBundle(
+          state,
+          { kind: "commit", ref: "refs/heads/main", targetIdHex: `t-${t}`, authorPubkeyHex: author },
+          now,
+        );
+        const after = state.responseQueue?.length ?? 0;
+        if (after > before) (bundleEnqueueTimesByAuthor[author] ??= []).push(now);
+      }
+
+      // Global cap: at most MAX_BUNDLES_IN_FLIGHT distinct bundles pending at any instant.
+      const distinctBundleIds = new Set((state.responseQueue ?? []).map((intent) => intent.bundleId));
+      expect(distinctBundleIds.size).toBeLessThanOrEqual(MAX_BUNDLES_IN_FLIGHT);
+
+      state = planTick(state, now).nextState;
+    }
+
+    let totalBundlesEnqueued = 0;
+    for (const author of AUTHORS) {
+      const times = bundleEnqueueTimesByAuthor[author] ?? [];
+      totalBundlesEnqueued += times.length;
+      for (let i = 1; i < times.length; i++) {
+        expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(RESPONSE_AUTHOR_COOLDOWN_MS);
+      }
+    }
+    // Sanity: the test isn't vacuously true — at least some bundles got through over the hour.
+    expect(totalBundlesEnqueued).toBeGreaterThan(0);
   });
 });
