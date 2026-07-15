@@ -276,6 +276,22 @@ function hashStringToUint32(s: string): number {
  * ({@link RESPONSE_CHAT_INCLUDE_PERCENT}% of bundles), and a remix
  * ({@link RESPONSE_REMIX_INCLUDE_PERCENT}% of bundles) — all decided by
  * {@link hashStringToUint32} of `event.targetIdHex`, never by `Math.random`.
+ *
+ * Also prunes `state.lastBundleMsByAuthor`: every entry whose cooldown has
+ * already fully elapsed (`now - ms >= RESPONSE_AUTHOR_COOLDOWN_MS`) is
+ * dropped before the new author entry is added, since an expired entry can
+ * never again change the cooldown check above — keeping it around is dead
+ * weight that would otherwise round-trip through DO storage forever on a
+ * long-lived room (see {@link SchedulerState.lastBundleMsByAuthor}'s doc
+ * comment). Pruning happens ONLY on this success path, not on either
+ * no-op/early-return gate above — that keeps this function's "a no-op
+ * enqueue returns `state` completely unchanged" contract literal (same
+ * object reference back), which is what the cooldown/cap tests rely on.
+ * This does not let the map grow unboundedly in the meantime: an entry can
+ * only be added by a successful enqueue, and every successful enqueue
+ * re-prunes the WHOLE map, so growth stays bounded by "how many bundles
+ * have successfully gone out since the oldest still-live entry" — never by
+ * "how many distinct authors this room has ever seen."
  */
 export function enqueueResponseBundle(state: SchedulerState, event: RealEventRef, now: number): SchedulerState {
   const lastBundleMs = state.lastBundleMsByAuthor?.[event.authorPubkeyHex];
@@ -287,6 +303,12 @@ export function enqueueResponseBundle(state: SchedulerState, event: RealEventRef
   if (bundleIdsInFlight >= MAX_BUNDLES_IN_FLIGHT) {
     return state;
   }
+
+  const prunedLastBundleMsByAuthor: Record<string, number> = {};
+  for (const [author, ms] of Object.entries(state.lastBundleMsByAuthor ?? {})) {
+    if (now - ms < RESPONSE_AUTHOR_COOLDOWN_MS) prunedLastBundleMsByAuthor[author] = ms;
+  }
+  prunedLastBundleMsByAuthor[event.authorPubkeyHex] = now;
 
   const bundleId = `${event.targetIdHex}:${now}`;
   const intents: ResponseIntent[] = [];
@@ -330,7 +352,7 @@ export function enqueueResponseBundle(state: SchedulerState, event: RealEventRef
   return {
     ...state,
     responseQueue: [...(state.responseQueue ?? []), ...intents],
-    lastBundleMsByAuthor: { ...(state.lastBundleMsByAuthor ?? {}), [event.authorPubkeyHex]: now },
+    lastBundleMsByAuthor: prunedLastBundleMsByAuthor,
   };
 }
 
@@ -370,6 +392,15 @@ export type SchedulerState = {
    * the cooldown clock {@link enqueueResponseBundle} reads. `undefined` means
    * "no bundle has ever been enqueued in this state's history" (same
    * optional/backward-compat contract as `responseQueue` above).
+   *
+   * Bounded: {@link enqueueResponseBundle} prunes every entry whose cooldown
+   * has fully elapsed on each successful enqueue (an expired entry can never
+   * again affect the cooldown check — see that function's doc comment), so
+   * an author's entry lives for at most one {@link RESPONSE_AUTHOR_COOLDOWN_MS}
+   * window past its last bundle, not forever. Without this bound this map —
+   * unlike the observer's capped responded-LRU — would gain one entry per
+   * distinct real author for the lifetime of a long-lived public room and
+   * round-trip through DO storage on every tick.
    */
   lastBundleMsByAuthor?: Readonly<Record<string, number>>;
   /**
