@@ -97,6 +97,22 @@ export type ObserverWatermark = {
    * are ~5s apart) while keeping the persisted watermark small.
    */
   respondedEventIds: string[];
+  /**
+   * Whether this watermark has ever been through `observe`'s fresh-baseline
+   * path. `false` only for exactly what {@link initialObserverWatermark}
+   * produces; `observe` sets it `true` on every watermark it returns
+   * thereafter, INCLUDING the very first fresh-path call even when the room
+   * had zero refs at that moment. Freshness is a stated fact carried on the
+   * watermark, not something inferred from `refHeads` being empty — a room
+   * can legitimately have zero refs at enable time (nothing has ever been
+   * pushed yet), and inferring "not yet initialized" from that emptiness
+   * would make `observe` keep re-adopting the room's later state as baseline
+   * on every poll, silently swallowing the room's first-ever real commit
+   * instead of detecting it. Enabling on an empty room IS being initialized:
+   * the room's current (empty) state is the baseline, and any ref that
+   * appears afterward is real activity.
+   */
+  initialized: boolean;
 };
 
 /** Cap on {@link ObserverWatermark.respondedEventIds}'s length — see that field's doc comment. */
@@ -112,9 +128,15 @@ export type RealEvent = {
   authorPubkeyHex: string;
 };
 
-/** A fresh watermark: no refs tracked, no fork refs known, empty LRU. The DO seeds a newly-enabled instance with exactly this — see `observe`'s "first enable" behavior below. */
+/**
+ * A fresh watermark: no refs tracked, no fork refs known, empty LRU,
+ * `initialized: false`. The DO seeds a newly-enabled instance with exactly
+ * this — see `observe`'s "first enable" behavior below. `initialized: false`
+ * is what makes `observe` take the fresh path on the very next call; every
+ * watermark `observe` returns from then on has `initialized: true`.
+ */
 export function initialObserverWatermark(): ObserverWatermark {
-  return { refHeads: {}, knownForkRefs: [], respondedEventIds: [] };
+  return { refHeads: {}, knownForkRefs: [], respondedEventIds: [], initialized: false };
 }
 
 /** Deterministic dedup id for a `"commit"` event — see `ObserverWatermark.respondedEventIds`. */
@@ -135,19 +157,27 @@ function forkEventId(ref: string): string {
  * the watermark to persist for next time. Pure: no I/O, no `Date.now`, no
  * randomness — same inputs always yield the same outputs.
  *
- * **First enable (fresh watermark).** `watermark.refHeads` having zero keys
- * is treated as "never observed before" (exactly what
+ * **First enable (fresh watermark).** `watermark.initialized === false` is
+ * treated as "never observed before" (exactly what
  * {@link initialObserverWatermark} produces): every ref's head and every
  * `forks/…` ref name in `snapshot` is recorded into `nextWatermark`
- * immediately, and `realEvents` is empty. This is the ONLY branch that skips
- * per-ref diffing — it exists so a freshly-enabled (or freshly-redeployed)
- * instance can never replay-respond to a room's entire backlog (#848 user
- * story: "restart/redeploy safety ... the first watermark is 'now' across
- * every ref, never empty history"). A watermark that already tracks at
- * least one ref (e.g. only `main`, because that is the only ref that has
- * ever existed) always goes through the normal per-ref diff below, even for
- * a ref it has never seen before — a brand-new branch appearing after
- * enable is real activity worth detecting, not backlog.
+ * immediately, `nextWatermark.initialized` is set `true`, and `realEvents`
+ * is empty. This is the ONLY branch that skips per-ref diffing — it exists
+ * so a freshly-enabled (or freshly-redeployed) instance can never
+ * replay-respond to a room's entire backlog (#848 user story:
+ * "restart/redeploy safety ... the first watermark is 'now' across every
+ * ref, never empty history"). Freshness is judged ONLY by the explicit
+ * `initialized` flag, never by `refHeads` being empty: a room can
+ * legitimately have zero refs at enable time, and that snapshot's emptiness
+ * IS the baseline — `nextWatermark.initialized` still flips to `true`, so
+ * the room's first-ever real commit (which creates the first ref) is
+ * diffed and detected on the next call instead of being silently adopted as
+ * baseline forever. A watermark that is already `initialized` (e.g. one
+ * tracking only `main`, because that is the only ref that has ever existed,
+ * or even one tracking zero refs because the room was empty at enable time)
+ * always goes through the normal per-ref diff below, even for a ref it has
+ * never seen before — a brand-new branch appearing after enable is real
+ * activity worth detecting, not backlog.
  *
  * **Per-ref diff (normal case).** For every ref in `snapshot.refs`:
  * - `nextWatermark.refHeads[ref.name]` is set to the snapshot's current
@@ -185,11 +215,10 @@ export function observe(
   snapshot: ObserverSnapshot,
   syntheticPubkeys: ReadonlySet<string>,
 ): { realEvents: RealEvent[]; nextWatermark: ObserverWatermark } {
-  if (Object.keys(watermark.refHeads).length === 0) {
+  if (!watermark.initialized) {
     return initializeFreshWatermark(snapshot, watermark);
   }
 
-  const priorForkRefs = new Set(watermark.knownForkRefs);
   const responded = new Set(watermark.respondedEventIds);
   const nextRefHeads: Record<string, string> = {};
   const forkRefOrder = watermark.knownForkRefs.slice();
@@ -252,16 +281,22 @@ export function observe(
       refHeads: nextRefHeads,
       knownForkRefs: forkRefOrder,
       respondedEventIds: boundedResponded,
+      initialized: true,
     },
   };
 }
 
 /**
  * First-enable path (see `observe`'s doc comment): adopt the snapshot's
- * current state as the baseline with zero events. `watermark.respondedEventIds`
- * is carried through unchanged (expected empty for a truly fresh watermark,
- * but not asserted — this function only needs `refHeads`/`knownForkRefs` to
- * be authoritatively rebuilt from the snapshot).
+ * current state as the baseline with zero events, and mark the returned
+ * watermark `initialized: true` — even when `snapshot.refs` is empty. A room
+ * with zero refs at enable time is still a valid baseline (there is simply
+ * nothing to diff against yet); what matters is that this call happened, so
+ * the NEXT call goes through the normal per-ref diff instead of re-adopting
+ * whatever the room looks like by then. `watermark.respondedEventIds` is
+ * carried through unchanged (expected empty for a truly fresh watermark, but
+ * not asserted — this function only needs `refHeads`/`knownForkRefs` to be
+ * authoritatively rebuilt from the snapshot).
  */
 function initializeFreshWatermark(
   snapshot: ObserverSnapshot,
@@ -275,6 +310,11 @@ function initializeFreshWatermark(
   }
   return {
     realEvents: [],
-    nextWatermark: { refHeads, knownForkRefs, respondedEventIds: watermark.respondedEventIds.slice() },
+    nextWatermark: {
+      refHeads,
+      knownForkRefs,
+      respondedEventIds: watermark.respondedEventIds.slice(),
+      initialized: true,
+    },
   };
 }

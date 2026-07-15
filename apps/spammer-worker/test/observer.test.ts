@@ -34,7 +34,7 @@ function snapshot(refs: ObserverSnapshot["refs"], newCommitsByRef: ObserverSnaps
 
 /** A watermark that already tracks `main` at `mainHead` (and nothing else) — the smallest possible "already enabled" watermark, used by most non-fresh-path tests. */
 function trackingWatermark(mainHead: string, extra: Partial<ObserverWatermark> = {}): ObserverWatermark {
-  return { refHeads: { main: mainHead }, knownForkRefs: [], respondedEventIds: [], ...extra };
+  return { refHeads: { main: mainHead }, knownForkRefs: [], respondedEventIds: [], initialized: true, ...extra };
 }
 
 describe("observer.ts — fresh watermark (first enable)", () => {
@@ -62,16 +62,61 @@ describe("observer.ts — fresh watermark (first enable)", () => {
     });
     expect(nextWatermark.knownForkRefs).toEqual([`${FORKS_PREFIX}m0-11111111111`]);
     expect(nextWatermark.respondedEventIds).toEqual([]);
+    expect(nextWatermark.initialized).toBe(true);
   });
 
-  it("treats a watermark with zero refHeads keys as fresh even if respondedEventIds is non-empty", () => {
-    const stale: ObserverWatermark = { refHeads: {}, knownForkRefs: [], respondedEventIds: ["commit:stale"] };
+  it("treats an uninitialized watermark as fresh regardless of what refHeads/respondedEventIds already hold", () => {
+    const stale: ObserverWatermark = {
+      refHeads: { main: "stale-head" },
+      knownForkRefs: [],
+      respondedEventIds: ["commit:stale"],
+      initialized: false,
+    };
     const snap = snapshot([{ name: "main", headHex: "m1" }], { main: [commit({ hash: "m1", authorPubkeyHex: REAL_ALICE })] });
     const { realEvents, nextWatermark } = observe(stale, snap, SYNTHETIC);
     expect(realEvents).toEqual([]);
     expect(nextWatermark.refHeads).toEqual({ main: "m1" });
+    expect(nextWatermark.initialized).toBe(true);
     // Carried through unchanged, not reset — see `initializeFreshWatermark`'s doc comment.
     expect(nextWatermark.respondedEventIds).toEqual(["commit:stale"]);
+  });
+
+  it("does NOT treat an initialized watermark as fresh just because refHeads is empty (the bug this fixes)", () => {
+    // An already-initialized watermark for a room that had zero refs at
+    // enable time. The OLD code inferred freshness from `refHeads` having
+    // zero keys, so it would have kept taking the fresh path forever here —
+    // silently re-adopting state instead of diffing. The explicit
+    // `initialized` flag means this now goes through the normal per-ref
+    // diff, exactly like any other already-enabled watermark.
+    const emptyRoomWatermark: ObserverWatermark = { refHeads: {}, knownForkRefs: [], respondedEventIds: [], initialized: true };
+    const snap = snapshot([{ name: "main", headHex: "m1" }], { main: [commit({ hash: "m1", parent: "", authorPubkeyHex: REAL_ALICE })] });
+
+    const { realEvents, nextWatermark } = observe(emptyRoomWatermark, snap, SYNTHETIC);
+
+    expect(realEvents).toEqual<RealEvent[]>([{ kind: "commit", ref: "main", targetIdHex: "m1", authorPubkeyHex: REAL_ALICE }]);
+    expect(nextWatermark.refHeads).toEqual({ main: "m1" });
+  });
+
+  it("initializing on a truly empty room, then observing its first-ever real commit, yields that commit event (not silent adoption)", () => {
+    // End-to-end version of the fix: enable on a room with zero refs at all
+    // (nothing has ever been pushed), then the room gets its first real
+    // commit on `main`. The old emptiness-as-freshness inference would have
+    // kept treating every poll as "first enable" until a ref finally
+    // appeared, silently adopting that first commit as baseline instead of
+    // reporting it.
+    const enableSnapshot = snapshot([], {});
+    const { realEvents: enableEvents, nextWatermark: afterEnable } = observe(initialObserverWatermark(), enableSnapshot, SYNTHETIC);
+    expect(enableEvents).toEqual([]);
+    expect(afterEnable.refHeads).toEqual({});
+    expect(afterEnable.initialized).toBe(true);
+
+    const firstCommitSnapshot = snapshot([{ name: "main", headHex: "m1" }], {
+      main: [commit({ hash: "m1", parent: "", authorPubkeyHex: REAL_ALICE })],
+    });
+    const { realEvents, nextWatermark } = observe(afterEnable, firstCommitSnapshot, SYNTHETIC);
+
+    expect(realEvents).toEqual<RealEvent[]>([{ kind: "commit", ref: "main", targetIdHex: "m1", authorPubkeyHex: REAL_ALICE }]);
+    expect(nextWatermark.refHeads).toEqual({ main: "m1" });
   });
 });
 
@@ -92,7 +137,7 @@ describe("observer.ts — commit detection on main", () => {
   });
 
   it("detects a new non-synthetic commit on a non-main, non-forks branch identically", () => {
-    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [] };
+    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [], initialized: true };
     const snap = snapshot(
       [
         { name: "main", headHex: "m0" },
@@ -109,7 +154,7 @@ describe("observer.ts — commit detection on main", () => {
   });
 
   it("filters synthetic-authored commits on any ref", () => {
-    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [] };
+    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [], initialized: true };
     const snap = snapshot(
       [
         { name: "main", headHex: "m1" },
@@ -206,7 +251,7 @@ describe("observer.ts — fork-ref detection", () => {
   });
 
   it("treats a follow-up push to an ALREADY-known fork ref as an ordinary commit event, not another fork event", () => {
-    const watermark: ObserverWatermark = { refHeads: { main: "m0", [forkRef]: "fk1" }, knownForkRefs: [forkRef], respondedEventIds: [`fork:${forkRef}`] };
+    const watermark: ObserverWatermark = { refHeads: { main: "m0", [forkRef]: "fk1" }, knownForkRefs: [forkRef], respondedEventIds: [`fork:${forkRef}`], initialized: true };
     const snap = snapshot([{ name: forkRef, headHex: "fk2" }], {
       [forkRef]: [commit({ hash: "fk2", parent: "fk1", authorPubkeyHex: REAL_ALICE, kind: "remix" })],
     });
@@ -234,7 +279,7 @@ describe("observer.ts — per-ref watermark advance / dedup", () => {
   });
 
   it("advances refHeads per-ref independently, so an untouched ref's watermark is unaffected by another ref's activity", () => {
-    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [] };
+    const watermark: ObserverWatermark = { refHeads: { main: "m0", "feature/x": "f0" }, knownForkRefs: [], respondedEventIds: [], initialized: true };
     const snap = snapshot(
       [
         { name: "main", headHex: "m1" },
@@ -254,6 +299,7 @@ describe("observer.ts — ref deletion pruning", () => {
       refHeads: { main: "m0", "feature/gone": "g0" },
       knownForkRefs: [],
       respondedEventIds: [],
+      initialized: true,
     };
     const snap = snapshot([{ name: "main", headHex: "m0" }], {});
 
@@ -265,7 +311,7 @@ describe("observer.ts — ref deletion pruning", () => {
 
   it("does NOT prune a known fork ref from knownForkRefs even if a later snapshot omits it", () => {
     const forkRef = `${FORKS_PREFIX}abcabcabcabc-222222222222`;
-    const watermark: ObserverWatermark = { refHeads: { main: "m0", [forkRef]: "fk1" }, knownForkRefs: [forkRef], respondedEventIds: [] };
+    const watermark: ObserverWatermark = { refHeads: { main: "m0", [forkRef]: "fk1" }, knownForkRefs: [forkRef], respondedEventIds: [], initialized: true };
     const snap = snapshot([{ name: "main", headHex: "m0" }], {});
 
     const { nextWatermark } = observe(watermark, snap, SYNTHETIC);
