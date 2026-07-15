@@ -10,7 +10,6 @@ import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
 import { RefsPanel, RepoLog } from './multiplayer/repo-browser'
-import { WhatJustHappened } from './multiplayer/what-just-happened'
 
 /**
  * Owns the repo backend as a VALUE and provides it to the tree. `useResolvedRepoBackend` returns the mock offline
@@ -29,11 +28,8 @@ export function MultiplayerDemo() {
   return (
     <RepoBackendProvider backend={backend}>
       <MultiplayerBody api={api} id={id} room={room} useMock={useMock} />
-      {/* Draggable dock (snaps to one of 8 anchors, persisted): collapsed both are
-          emoji circles in a ROW; expanding one collapses the other (mutual
-          exclusion). Each renders null when empty, so the row collapses cleanly. */}
+      {/* Draggable dock (snaps to one of 8 anchors, persisted). Renders null when empty. */}
       <FloatingDock>
-        <WhatJustHappened />
         <PresencePanel room={room} />
       </FloatingDock>
     </RepoBackendProvider>
@@ -59,7 +55,6 @@ function MultiplayerBody({
 
   // The passkey create/unlock ceremony — shared with the front-page lobby via
   // `useIdentityActions` so the ceremony + keys.mkit.sh registration live once.
-  // The "what just happened" narration is emitted from inside that hook.
   const { onCreate, onUnlock, busy, status, embeddedBrowserWarning } = useIdentityActions()
 
   // Repo-browser navigation state (no router change needed): which ref the

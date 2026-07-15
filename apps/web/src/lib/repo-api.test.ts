@@ -29,6 +29,7 @@ import {
   makeSignFn,
   procedures,
   postMessageMutationOptions,
+  prependRemix,
   pushCommitMutationOptions,
   repoKeys,
 } from './repo-api'
@@ -1328,6 +1329,39 @@ describe('mergeFeed merges commits + chat oldest-first by timestamp', () => {
     ]
     // Feed is oldest-first, so the parent must render above the head.
     expect(mergeFeed(sameSecond, []).map((f) => (f.kind === 'commit' ? f.entry.hash : ''))).toEqual(['parent', 'head'])
+  })
+})
+
+describe('prependRemix dedupes + caps the live remix feed cache', () => {
+  const remix = (hash: string, ts: number): CommitLogEntry => ({
+    hash,
+    message: 'forked it',
+    authorPubkey: 'a',
+    ref: `forks/${hash}`,
+    kind: 'remix',
+    createdAt: new Date(ts).toISOString(),
+  })
+
+  it('prepends a new remix onto an empty cache', () => {
+    expect(prependRemix(undefined, remix('r1', 1000))).toEqual([remix('r1', 1000)])
+  })
+
+  it('prepends newest-first (new entries lead the list)', () => {
+    const prev = [remix('r1', 1000)]
+    expect(prependRemix(prev, remix('r2', 2000)).map((e) => e.hash)).toEqual(['r2', 'r1'])
+  })
+
+  it('is idempotent — a repeated hash (replayed frame) is dropped, not duplicated', () => {
+    const prev = [remix('r1', 1000)]
+    expect(prependRemix(prev, remix('r1', 1000))).toBe(prev)
+  })
+
+  it('caps the list length so it cannot grow unbounded', () => {
+    const prev = Array.from({ length: 100 }, (_, i) => remix(`r${i}`, i))
+    const next = prependRemix(prev, remix('new', 999))
+    expect(next.length).toBe(100)
+    expect(next[0]!.hash).toBe('new')
+    expect(next.some((e) => e.hash === 'r99')).toBe(false) // oldest fell off the cap
   })
 })
 

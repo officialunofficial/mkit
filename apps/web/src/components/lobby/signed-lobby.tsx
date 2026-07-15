@@ -304,7 +304,7 @@ function Feed({
                   {item.kind === 'system' ? (
                     <SystemNotice notice={item} />
                   ) : item.kind === 'commit' ? (
-                    <CommitNotice item={item} onOpen={() => onOpenCommit(item)} />
+                    <CommitNotice room={room} item={item} onOpen={() => onOpenCommit(item)} />
                   ) : (
                     <Row
                       item={item}
@@ -406,31 +406,47 @@ function Row({
 }
 
 /**
- * A commit/fork in the feed, styled like a chat SYSTEM message: centered, small text, a small avatar — visually
- * distinct from a person's chat message. The whole line is a button that opens the commit-detail drawer.
+ * A commit/remix in the feed — centered and quiet like {@link SystemNotice}, but tight (small avatar, small text, no
+ * timestamp — the drawer has the exact time). The whole line is a button that opens the commit-detail drawer.
+ *
+ * A remix names BOTH sides of the fork: the source commit's own author (resolved via {@link useObject} +
+ * {@link decodeAuthorPubkey} — one extra object fetch, permanently cached since objects are content-addressed) gets its
+ * own avatar, and the new remix's short hash stands in for the (auto-generated, not human-meaningful) fork ref name. A
+ * plain commit push keeps showing `{hash} to {ref}` since `ref` (usually `main`) IS meaningful there.
  */
-function CommitNotice({ item, onOpen }: { item: CommitItem; onOpen: () => void }) {
+function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; onOpen: () => void }) {
+  const api = useMkit()
   const e = item.entry
-  const time = fmtTime(item.ts)
-  const fork = isForkRef(e.ref)
+  const isRemix = e.kind === 'remix'
+  const source = isRemix ? e.sources?.[0] : undefined
+  const sourceObj = useObject(room, source?.commitHashHex ?? null)
+  const sourceAuthor = useMemo(() => decodeAuthorPubkey(api, sourceObj.data ?? null), [api, sourceObj.data])
   return (
-    <div className='px-4 py-1.5'>
+    <div className='px-4 py-1'>
       <button
         type='button'
         onClick={onOpen}
         title='View commit details'
-        className='group/sys mx-auto flex max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-2 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+        className='group/sys mx-auto flex w-full max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-1.5 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
       >
         <PlayerAvatar pubkey={e.authorPubkey} size={16} />
         <PlayerLabel pubkey={e.authorPubkey} className='font-medium text-fg' />
-        <span>{fork ? 'forked' : 'pushed'}</span>
-        <code className='font-mono text-fg'>{e.hash.slice(0, 10)}</code>
-        <span>to</span>
-        <code className='font-mono text-fg'>{e.ref}</code>
-        {e.message ? <span className='truncate'>— “{e.message}”</span> : null}
-        <time className='tabular-nums opacity-70' title={time.title}>
-          {time.clock}
-        </time>
+        <span>{isRemix ? 'remixed' : 'pushed'}</span>
+        {isRemix && source ? (
+          <>
+            {sourceAuthor ? <PlayerAvatar pubkey={sourceAuthor} size={16} /> : null}
+            <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 6)}</code>
+            <span>to</span>
+            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
+          </>
+        ) : (
+          <>
+            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
+            <span>to</span>
+            <code className='font-mono text-fg'>{e.ref}</code>
+          </>
+        )}
+        {e.message ? <span className='truncate text-fg'>“{e.message}”</span> : null}
         <span aria-hidden className='opacity-0 transition-opacity group-hover/sys:opacity-70'>
           ›
         </span>
@@ -897,6 +913,22 @@ function DrawerAddReaction({ onToggle }: { onToggle: (emoji: string) => void }) 
       </Popover.Portal>
     </Popover.Root>
   )
+}
+
+/**
+ * Decode just the signer's pubkey from raw commit/remix object bytes (a remix's source is always one or the other);
+ * null on any error.
+ */
+function decodeAuthorPubkey(api: ReturnType<typeof useMkit>, bytes: Uint8Array | null): string | null {
+  if (!bytes) return null
+  try {
+    const kind = api.object_kind(bytes)
+    if (kind === 'remix') return api.remix_decode(bytes).signer_hex
+    if (kind === 'commit') return api.commit_decode(bytes).signer_hex
+    return null
+  } catch {
+    return null
+  }
 }
 
 /** Decode the rich commit/remix fields (parents, tree, signature, timestamp) from raw object bytes; null on any error. */

@@ -6,7 +6,6 @@
 
 import { useEffect, useState } from 'react'
 import { attestIdentityBinding, rpId } from '../../lib/passkey'
-import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
 import { Field, FieldList } from '../result-panel'
 import { useMkit } from '../use-mkit'
@@ -188,19 +187,7 @@ export function UnlockedHeader({
     ? "This is a temporary identity with no saved passkey, so there's nothing to link with."
     : "Linking needs your passkey's own public key, which is captured only when your identity is first created on this device. Identities recovered on another device (or created before this feature) can't be linked here."
 
-  // Narrate the lock so the "I can wipe my key and re-derive it" property is
-  // legible.
-  const onLock = () => {
-    recordActivity({
-      kind: 'lock',
-      title: 'Signing key wiped from memory',
-      lines: [
-        'Your Ed25519 seed is gone from memory. You can still read the repository, but you can’t sign a push until you unlock.',
-        'Your passkey and public key remain, so unlocking re-derives the same player. Nothing was ever written to disk.',
-      ],
-    })
-    id.lock()
-  }
+  const onLock = () => id.lock()
 
   return (
     <section className='space-y-3'>

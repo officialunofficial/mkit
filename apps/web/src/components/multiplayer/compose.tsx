@@ -6,7 +6,6 @@
 import * as Collapsible from '@radix-ui/react-collapsible'
 import { useQueryClient } from '@tanstack/react-query'
 import { useId, useMemo, useState } from 'react'
-import { recordActivity } from '../../lib/activity-log'
 import { useIdentityStore } from '../../lib/identity-store'
 import {
   CasConflictError,
@@ -96,27 +95,10 @@ export function Compose({
     } catch {
       return // a build failure is already surfaced via `built.error`
     }
-    // Time the whole sign → upload → CAS-advance round-trip for the speed badge.
-    const t0 = performance.now()
     try {
       await push.mutateAsync({ api, seedHex, room, ref: targetRef, commitBytes, commitHash, message, parentHash })
-      recordActivity({
-        kind: 'push',
-        title: `Signed in your browser → pushed to branch “${targetRef}”`,
-        durationMs: performance.now() - t0,
-        lines: [
-          'Signed the commit with your Ed25519 key, uploaded it by content hash, then advanced the branch under a compare-and-set.',
-          <span key='hashes'>
-            commit <code className='font-mono'>{commitHash.slice(0, 12)}…</code> · parent{' '}
-            {parentHash ? <code className='font-mono'>{parentHash.slice(0, 12)}…</code> : '∅ (first commit)'}
-          </span>,
-          'tree ∅ — no files in this demo, so this commit is really a signed message.',
-          'The server verified the signature, but anyone can write: it proves “same key”, not who you are.',
-        ],
-      })
     } catch {
-      // A rejected push (e.g. a CAS conflict) already surfaces via `push.error`
-      // below and the optimistic entry rolled back — nothing to narrate.
+      // A rejected push (e.g. a CAS conflict) already surfaces via `push.error` below and the optimistic entry rolled back.
     }
   }
 
@@ -239,12 +221,12 @@ export function Compose({
                 Parent
                 <InfoTip label='About the parent'>
                   <p>
-                    The current head of “{targetRef || 'main'}” — the commit this one builds on (∅ for the first commit
-                    on a branch).
+                    The current head of “{targetRef || 'main'}” — the commit this one builds on (none for the first
+                    commit on a branch).
                   </p>
                 </InfoTip>
               </dt>
-              <dd className='min-w-0 font-mono break-all'>{parentHash || '∅ (first commit on this branch)'}</dd>
+              <dd className='min-w-0 font-mono break-all'>{parentHash || 'none (first commit on this branch)'}</dd>
             </dl>
           </Collapsible.Content>
         </Collapsible.Root>

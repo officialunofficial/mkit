@@ -9,8 +9,8 @@
 // the signed-in player (a signed write to the registry).
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
-import { avatarMesh } from '../../lib/identity-avatar'
+import { type CSSProperties, useState } from 'react'
+import { avatarMesh, usernameColor } from '../../lib/identity-avatar'
 import { playerName } from '../../lib/identity-name'
 import { useIdentityStore } from '../../lib/identity-store'
 import { getName, keysEnabled, setName } from '../../lib/keys-client'
@@ -46,10 +46,26 @@ export function useDisplayName(pubkeyHex: string | null): string {
   return q.data ?? ownName ?? playerName(pubkeyHex)
 }
 
-/** A pubkey's handle as a span. Used wherever a player is shown in the UI. */
+/**
+ * A pubkey's handle as a span, colored Twitch-chat-style via {@link usernameColor} (deterministic from the key, no
+ * lookup) — every place a username renders (chat rows, commit/remix notices, presence notices, the detail drawer) gets
+ * the same color for the same player automatically, since they all go through this one component.
+ */
 export function PlayerLabel({ pubkey, className }: { pubkey: string; className?: string }) {
   const name = useDisplayName(pubkey)
-  return <span className={className}>{name}</span>
+  const color = usernameColor(pubkey)
+  return (
+    <span
+      className={`${className ?? ''}${color ? ' text-(--player-color-light) dark:text-(--player-color-dark)' : ''}`}
+      style={
+        color
+          ? ({ '--player-color-light': color.light, '--player-color-dark': color.dark } as CSSProperties)
+          : undefined
+      }
+    >
+      {name}
+    </span>
+  )
 }
 
 /**
