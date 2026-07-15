@@ -201,9 +201,13 @@ Workspace crates:
 | `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) &mdash; see [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) |
 | `mkit-rpc` | shared wire schemas plus length-prefixed framing for stdio subprocess protocols (external signers) |
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
+| `mkit-transport-connect` | the `mkit.transport.v1` Connect service: the native ConnectRPC client behind `mkit+https://` dispatch, plus the axum-hosted server behind `mkit serve --http` ([`docs/specs/SPEC-TRANSPORT-CONNECT.md`](docs/specs/SPEC-TRANSPORT-CONNECT.md)) |
 | `mkit-cli` | the `mkit` binary |
 | `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
+| `mkit-repo-client` | browser (WASM) ConnectRPC client for the anonymous-multiplayer repo service; unpublished |
 | `mkit-fuzz` (at `rust/fuzz/`, not `rust/crates/`) | bounded property tests (cargo-fuzz compatible) |
+| `mkit-benches` (at `rust/benches/`, not `rust/crates/`) | Criterion microbenchmarks plus the `render-charts` binary (see [Performance](#performance)) |
+| `mkit-test-util` | dev-only test helpers shared across the crates' test suites; unpublished |
 
 Each transport implements the same trait &mdash; `list_refs`, `read_ref`,
 `write_ref`, `pack_exists`, `download_pack`, `upload_pack` &mdash; described
