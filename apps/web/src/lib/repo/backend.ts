@@ -981,15 +981,18 @@ export class WasmRepoBackend implements RepoBackend {
   private walkCache = new Map<string, { head: string; entries: CommitLogEntry[] }>()
   /**
    * In-flight walks, keyed by `room::ref::cap`. Without this, a burst of rapid successive `WatchRefs`-driven
-   * invalidations (e.g. a sustained multi-commit/sec writer, where `head` has usually already moved again by the
-   * time the previous walk resolves) launches many overlapping {@link WasmRepoBackend.commitLogViaListCommits}
-   * calls for the SAME room/ref: their `onProgress` writes interleave unpredictably, and whichever call's
-   * `walkCache.set` lands LAST wins even if it started from an older `head` — the log can end up stuck showing
-   * stale/incomplete data indefinitely under sustained churn. Concurrent callers for the same key now share ONE
-   * walk; each still gets its own `onProgress` fanned out via {@link progressCallbacks}. Keyed by `cap` too so a
-   * capped caller (e.g. the lobby feed) never shares a truncated walk with an uncapped one.
+   * invalidations (e.g. a sustained multi-commit/sec writer, where `head` has usually already moved again by the time
+   * the previous walk resolves) launches many overlapping {@link WasmRepoBackend.commitLogViaListCommits} calls for the
+   * SAME room/ref: their `onProgress` writes interleave unpredictably, and whichever call's `walkCache.set` lands LAST
+   * wins even if it started from an older `head` — the log can end up stuck showing stale/incomplete data indefinitely
+   * under sustained churn. Concurrent callers for the same key now share ONE walk; each still gets its own `onProgress`
+   * fanned out via {@link progressCallbacks}. Keyed by `cap` too so a capped caller (e.g. the lobby feed) never shares a
+   * truncated walk with an uncapped one.
    */
-  private inflightWalks = new Map<string, { promise: Promise<CommitLogEntry[]>; progressCallbacks: Set<(p: CommitLogEntry[]) => void> }>()
+  private inflightWalks = new Map<
+    string,
+    { promise: Promise<CommitLogEntry[]>; progressCallbacks: Set<(p: CommitLogEntry[]) => void> }
+  >()
   /**
    * Hash-keyed object cache, keyed by `room::objectIdHex`. mkit objects are CONTENT-ADDRESSED — a given hash maps to
    * fixed bytes forever — so a cached entry can never go stale and is ALWAYS safe to serve without a network
