@@ -285,14 +285,34 @@ silently truncating.
 independently at decode time; it is not folded into `MAX_TOTAL_PAYLOAD`
 or `entry_count`.
 
-**S3 single-PUT limit:** AWS S3 and Cloudflare R2 enforce a 5 GiB single-
-object cap; the 4 GiB pack cap stays under it. Larger packs require
-multipart upload, which remains a future-version candidate (red-team
-R-14) &mdash; v2 was spent on compression (§3.3, §3.4), not multipart.
+**The per-pack cap is a format choice, not a transport ceiling.**
+Earlier versions of this section justified the 4 GiB figure by AWS
+S3/Cloudflare R2's 5 GiB single-`PUT` limit, and flagged multipart
+upload as a future-version candidate (red-team R-14). That framing is
+stale: S3/R2 multipart upload (issue #704) shipped without a `version`
+bump, because it turned out to be a purely transport-layer concern
+&mdash; `CreateMultipartUpload`/`UploadPart` against each backend's own
+single-`PUT` ceiling, resolved entirely inside the transport
+implementations, never touching this spec. The 4 GiB figure is simply
+the bound this version chose to keep pack construction and
+verification bounded in memory and time; it is not derived from, and
+no longer needs to track, any transport's own object-size limits.
 
-**Known future relaxations** (not part of v1 or v2): streaming packs,
-multipart upload, removal of the 10M entry count. Each requires a
-`version` bump.
+**A push whose payload exceeds one pack's cap is not blocked &mdash; it
+splits.** `remote_dispatch::build_and_upload_packs` (issue #831) seals
+and uploads a new pack the moment the next entry would exceed the cap,
+chaining every pack one push produced onto a single packlist node
+(`PackListNode.packs: Vec<Hash>`, in apply/build order &mdash; see the
+packlist/packmap chain documentation in `mkit_core::transfer`). The
+fetch side needs no pack-count-specific handling: it already resolves
+and unpacks every pack a node lists, in order, whether that's one pack
+or several. A push whose plan fits in one pack &mdash; the overwhelming
+common case &mdash; is completely unaffected.
+
+**Known future relaxations** (not part of v1 or v2): a streaming pack
+format that doesn't require `entry_count` or trailer position known in
+advance, and removal of the 10M entry count. Each requires a `version`
+bump.
 
 ---
 
