@@ -512,6 +512,111 @@ describe("enqueueResponseBundle — per-author cooldown and global bundle cap", 
   });
 });
 
+describe("enqueueResponseBundle — lastBundleMsByAuthor pruning (unbounded-growth fix)", () => {
+  const realEvent = (targetIdHex: string, authorPubkeyHex: string): RealEventRef => ({
+    kind: "commit",
+    ref: "refs/heads/main",
+    targetIdHex,
+    authorPubkeyHex,
+  });
+
+  /**
+   * Drain a state's responseQueue to empty by repeatedly calling planTick
+   * with a generously-spaced clock, starting `startNow` ms after the bundle
+   * being drained was enqueued (its intents' `notBeforeMs` are absolute, so
+   * this must track whatever `now` the enqueue used).
+   */
+  function drainFully(state: SchedulerState, startNow: number): SchedulerState {
+    let s = state;
+    for (let i = 1; i <= 100 && (s.responseQueue?.length ?? 0) > 0; i++) {
+      s = planTick(s, startNow + i * (RESPONSE_BUNDLE_SPREAD_MS + PUSH_FLOOR_MS)).nextState;
+    }
+    return s;
+  }
+
+  it("drops an author entry whose cooldown has fully elapsed on the next successful enqueue", () => {
+    const first = enqueueResponseBundle(initialSchedulerState(), realEvent("t1", "old-author"), 0);
+    const drained = drainFully(first, 0);
+    expect(drained.lastBundleMsByAuthor).toEqual({ "old-author": 0 });
+
+    // Exactly RESPONSE_AUTHOR_COOLDOWN_MS later, old-author's entry is fully
+    // expired (the cooldown check is a strict `<`, so `now - ms === COOLDOWN_MS`
+    // no longer counts as cooling down) — a DIFFERENT author's successful
+    // enqueue should prune it away.
+    const expiredAt = RESPONSE_AUTHOR_COOLDOWN_MS;
+    const next = enqueueResponseBundle(drained, realEvent("t2", "new-author"), expiredAt);
+
+    expect(next.lastBundleMsByAuthor).toEqual({ "new-author": expiredAt });
+    expect(next.lastBundleMsByAuthor?.["old-author"]).toBeUndefined();
+  });
+
+  it("keeps a within-cooldown author entry across a different author's successful enqueue", () => {
+    const first = enqueueResponseBundle(initialSchedulerState(), realEvent("t1", "old-author"), 0);
+    const drained = drainFully(first, 0);
+    expect(drained.lastBundleMsByAuthor).toEqual({ "old-author": 0 });
+
+    const stillWithinCooldown = RESPONSE_AUTHOR_COOLDOWN_MS - 1;
+    const next = enqueueResponseBundle(drained, realEvent("t2", "new-author"), stillWithinCooldown);
+
+    expect(next.lastBundleMsByAuthor).toEqual({ "old-author": 0, "new-author": stillWithinCooldown });
+  });
+
+  it("does NOT prune (or otherwise touch) lastBundleMsByAuthor on a no-op enqueue — cooldown-hit and cap-hit paths return state completely unchanged", () => {
+    // Cooldown-hit path: an author already inside their own cooldown.
+    const author = "cooldown-author";
+    const withOldAuthor = enqueueResponseBundle(initialSchedulerState(), realEvent("t0", "long-expired-author"), 0);
+    const drainedOld = drainFully(withOldAuthor, 0);
+    const withBoth = enqueueResponseBundle(
+      drainedOld,
+      realEvent("t1", author),
+      RESPONSE_AUTHOR_COOLDOWN_MS * 2, // long-expired-author's entry is now stale, but this call still succeeds
+    );
+    const drainedBoth = drainFully(withBoth, RESPONSE_AUTHOR_COOLDOWN_MS * 2);
+    // The successful enqueue above already pruned long-expired-author away.
+    expect(drainedBoth.lastBundleMsByAuthor).toEqual({ [author]: RESPONSE_AUTHOR_COOLDOWN_MS * 2 });
+
+    const stillCoolingDown = enqueueResponseBundle(
+      drainedBoth,
+      realEvent("t2", author),
+      RESPONSE_AUTHOR_COOLDOWN_MS * 2 + RESPONSE_AUTHOR_COOLDOWN_MS - 1,
+    );
+    // No-op (cooldown hit): the object comes back completely unchanged, not
+    // just deep-equal — pruning never runs on this path.
+    expect(stillCoolingDown).toBe(drainedBoth);
+
+    // Cap-hit path: a bundle is in flight, so a different author is dropped.
+    const inFlight = enqueueResponseBundle(initialSchedulerState(), realEvent("in-flight", "author-a"), 0);
+    const dropped = enqueueResponseBundle(inFlight, realEvent("dropped", "author-b"), RESPONSE_AUTHOR_COOLDOWN_MS * 5);
+    expect(dropped).toBe(inFlight);
+  });
+
+  it("keeps lastBundleMsByAuthor bounded over a long stream of many distinct authors, never approaching one entry per author ever seen", () => {
+    let state = initialSchedulerState();
+    let now = 0;
+    const AUTHOR_COUNT = 500;
+    // Space authors far enough apart that each new bundle both clears the
+    // global in-flight cap AND falls outside every earlier author's cooldown
+    // window by the time it lands — the worst case for "one entry per
+    // distinct author ever seen" growth, which is exactly what the fix rules out.
+    const SPACING_MS = RESPONSE_AUTHOR_COOLDOWN_MS * 2;
+
+    for (let i = 0; i < AUTHOR_COUNT; i++) {
+      now += SPACING_MS;
+      state = enqueueResponseBundle(state, realEvent(`target-${i}`, `author-${i}`), now);
+      state = drainFully(state, now);
+
+      // Bounded regardless of how many distinct authors have EVER been seen —
+      // only entries within one cooldown window of `now` can still be present,
+      // and at this spacing that's at most the just-added entry.
+      expect(Object.keys(state.lastBundleMsByAuthor ?? {}).length).toBeLessThanOrEqual(1);
+    }
+
+    // Sanity: this really did see AUTHOR_COUNT distinct authors, and the map
+    // never grew anywhere close to that size.
+    expect(Object.keys(state.lastBundleMsByAuthor ?? {}).length).toBeLessThan(AUTHOR_COUNT);
+  });
+});
+
 describe("planTick — response-queue draining", () => {
   const POOL = 8;
 
