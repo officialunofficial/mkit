@@ -285,6 +285,17 @@ mkit attest --algorithm ed25519 \
 mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
 ```
 
+`verify-attest` reports `UnknownKeyid` until each signer's key is
+registered as a trust root (`mkit trust add --trust-roots
+.mkit/attest-trust-roots.toml <keyid> <pubkey-hex> --kind
+<algorithm>`) &mdash; the p256 additional-signer's keyid is the
+`--print-pubkey` output above, but the ed25519 `repo-key` signer's
+attestation keyid is `blake3:` plus the BLAKE3 digest of its pubkey,
+not the raw pubkey itself; read it off a produced `.dsse` envelope's
+`keyid` field, or see
+[`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md)
+§6.5 for the full trust-roots walkthrough.
+
 ## Identity and push auth
 
 **.mkit/keys/default.key** is a raw Ed25519 seed. The same seed covers:
@@ -302,7 +313,7 @@ pubkey to an account, and `mkit serve` executes as that account. mkit
 core ships **no custom push-auth protocol** &mdash; SSH's KEX already does
 the nonce/signature exchange, and `AuthorizedKeysCommand` is the
 standard server-side hook for `pubkey → account`. A downstream
-service can wire its own identity model (for example, pubkey → on-chain
+service can wire its own identity model (for example, pubkey → onchain
 owner address) through that hook without changing the wire protocol.
 See [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) for the transport
 trust model.

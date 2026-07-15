@@ -445,7 +445,7 @@ takes no defensive posture against them.
   non-`root` user. On Linux, set
   `kernel.yama.ptrace_scope = 1` (or stricter) before relying on
   mkit's key-file protections.
-- Recovery from a compromised signing key. There is no on-chain or
+- Recovery from a compromised signing key. There is no onchain or
   in-band revocation; the user's recourse is to publish a new key
   and re-sign forward history.
 - A `.mkit/` directory served from a network filesystem (NFS, SMB/CIFS,
