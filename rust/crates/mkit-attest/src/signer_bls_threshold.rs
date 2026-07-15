@@ -211,7 +211,7 @@ pub fn verify(aggregate_pubkey: &[u8], message: &[u8], signature: &[u8]) -> Resu
 /// that swap. Exposed for tests and a future release-party dealer
 /// binary.
 #[must_use]
-pub fn trusted_dealer<R: rand_core::CryptoRngCore>(
+pub fn trusted_dealer<R: rand_core::CryptoRng>(
     rng: &mut R,
     n: core::num::NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
@@ -231,14 +231,14 @@ pub fn threshold_for(n: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{NZU32, test_rng_seeded};
+    use commonware_utils::{NZU32, TestRng};
 
     /// Helper: deal a 3-of-? cohort. The N3f1 fault model with n=3
     /// gives quorum = 3 (no faults tolerated at n=3), so we use n=4
     /// to get a 3-of-4 cohort for the threshold tests. With n=4,
     /// `max_faults` = 1, quorum = 3.
     fn deal_3_of_4() -> (Sharing<V>, Vec<Share>) {
-        let mut rng = test_rng_seeded(0x4242);
+        let mut rng = TestRng::new(0x4242);
         trusted_dealer(&mut rng, NZU32!(4))
     }
 

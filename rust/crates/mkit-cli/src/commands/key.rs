@@ -292,7 +292,10 @@ fn generate_bls_threshold(cfg: &Config, opts: &GenerateOpts) -> u8 {
 
     // Run the trusted dealer with the OS RNG. The cohort `Sharing`
     // gives us the aggregated public key + every holder's `Share`.
-    let mut rng = rand_core::OsRng;
+    // `SysRng`'s `TryRng::Error` is fallible (`getrandom::Error`);
+    // `UnwrapErr` gives the infallible `CryptoRng` the dealer expects,
+    // panicking only if the OS random source itself fails.
+    let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     let (sharing, shares) = mkit_attest::bls_threshold_trusted_dealer(&mut rng, total_nz);
     let agg_pubkey = sharing.public().encode().to_vec();
     let keyid = format!("{BLS_THRESHOLD_KEYID_PREFIX}{}", hex_lower(&agg_pubkey));

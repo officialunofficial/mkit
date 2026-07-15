@@ -29,18 +29,24 @@ ignore = [
     # crates (https://github.com/commonwarexyz/monorepo) — once
     # commonware migrates off paste this ignore goes. Re-justify by
     # 2026-08-21.
+    #
+    # Re-confirmed 2026-07-15 on the commonware 2026.7.0 train: `paste`
+    # v1.0.15 is still transitively present (`cargo deny check
+    # advisories` still fires this one; unlike RUSTSEC-2025-0055 below,
+    # it is not stale).
     { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-08-21." },
-    # `tracing-subscriber 0.2.25` ANSI-escape log-injection (fixed in
-    # >=0.3.20). Pulled transitively by the commonware 2026.5.x train:
-    # commonware-runtime -> ark-ed-on-bls12-381-bandersnatch ->
-    # ark-r1cs-std -> tracing-subscriber 0.2 (the evrf/"golden" DKG curve
-    # new in 2026.5.0). It is arkworks' internal tracing, not on mkit's
-    # user-facing logging path, and the impact is minimal (terminal ANSI
-    # manipulation in logs). No fix is reachable from mkit: ark-r1cs-std
-    # 0.5.0 pins tracing-subscriber 0.2. Drops automatically once the
-    # arkworks chain (or the commonware train) moves to >=0.3.20.
-    # Re-justify by 2026-08-21.
-    { id = "RUSTSEC-2025-0055", reason = "transitive via commonware-runtime 2026.5.x -> arkworks (ark-r1cs-std 0.5.0) -> tracing-subscriber 0.2; arkworks-internal logging, not on mkit's logging path, minimal impact, no reachable fix. Re-justify by 2026-08-21." },
+    # RUSTSEC-2025-0055 (tracing-subscriber 0.2.25 ANSI-escape log
+    # injection) REMOVED 2026-07-15: it came in via commonware-runtime
+    # 2026.5.x -> arkworks (ark-ed-on-bls12-381-bandersnatch ->
+    # ark-r1cs-std 0.5.0) -> tracing-subscriber 0.2, for the evrf/
+    # "golden" DKG curve. On the commonware 2026.7.0 train that whole
+    # arkworks/bandersnatch chain is gone from the dependency graph
+    # (`cargo update` dropped ark-bls12-381, ark-ec,
+    # ark-ed-on-bls12-381-bandersnatch, ark-ff, ark-poly, ark-r1cs-std,
+    # ark-relations, ark-serialize, ark-std; the sole remaining
+    # `tracing-subscriber` in the tree is v0.3.23, the fixed line).
+    # `cargo deny check advisories` confirms with an
+    # `advisory-not-detected` warning — this ignore is now dead weight.
 ]
 
 [licenses]

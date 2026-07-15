@@ -14,9 +14,9 @@
 //!    real mkit object bytes, byte-identical on read-back.
 //! 2. [`freezer_has_no_per_key_delete`] — a compile-time fact, documented
 //!    here rather than exercised at runtime: [`Freezer`]'s inherent `impl`
-//!    (`commonware-storage` v2026.5.0, `storage/src/freezer/storage.rs`)
-//!    exposes exactly `put`, `get`, `sync`, `close`, and `destroy`. `destroy`
-//!    consumes `self` and removes the *entire* structure (all three
+//!    (`commonware-storage` v2026.7.0, `storage/src/freezer/storage.rs`)
+//!    exposes exactly `init`, `put`, `get`, `has`, `sync`, `close`, and
+//!    `destroy`. `destroy` consumes `self` and removes the *entire* structure (all three
 //!    on-disk components: table blob, key-index journal, value journal) —
 //!    there is no method that removes a single key while leaving the
 //!    Freezer otherwise intact. If a per-key delete existed, this test
@@ -164,7 +164,8 @@ fn freezer_put_get_byte_identical() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = freezer_cfg(&context, "basic");
-        let mut freezer: Freezer<_, ObjKey, Bytes> = Freezer::init(context, cfg).await.unwrap();
+        let mut freezer: Freezer<_, ObjKey, Bytes> =
+            Freezer::init(context, cfg, None).await.unwrap();
 
         for (id, bytes) in &objects {
             freezer
@@ -203,7 +204,8 @@ fn freezer_has_no_per_key_delete() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = freezer_cfg(&context, "nodelete");
-        let mut freezer: Freezer<_, ObjKey, Bytes> = Freezer::init(context, cfg).await.unwrap();
+        let mut freezer: Freezer<_, ObjKey, Bytes> =
+            Freezer::init(context, cfg, None).await.unwrap();
 
         for (id, bytes) in &objects {
             freezer

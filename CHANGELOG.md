@@ -397,6 +397,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **commonware 2026.7.0** dependency train across the workspace (up from
+  2026.5.0), plus `apps/repo-worker` and the separate `contrib/signers`
+  workspace, both of which path-depend into `rust/crates/*` and needed
+  their own `Cargo.lock` regenerated too. No wire-format or object
+  change &mdash; investigated dropping `mkit-core/src/merkle.rs`'s vendored
+  BMT construction for a direct `commonware_storage::bmt` dependency now
+  that `bmt` is confirmed `no_std` (commonwarexyz/monorepo#4090), but
+  found it's not viable: `bmt::Builder<H: Hasher>` requires
+  `commonware_cryptography::Hasher`, and `commonware-cryptography`'s
+  `blst` (BLS12-381) dependency is unconditional, not feature-gated,
+  and fails to build for `wasm32-unknown-unknown` on toolchains without
+  a WASM-capable C compiler. The vendored construction stays (its
+  cross-check test against upstream still passes byte-for-byte).
+  `commonware-parallel`'s `Strategy` trait gained new required methods
+  (`manual`, `spawn`, `run`, `try_run`, `try_fold`, `sort_by`); mkit's
+  internal `CountingStrategy` test helper was updated to match.
+  `commonware_utils::test_rng_seeded(seed)` was renamed to
+  `TestRng::new(seed)` and `commonware_storage::freezer::Freezer::init`
+  gained a third `Option<Checkpoint>` parameter; both updated at their
+  mkit call sites.
+- **BREAKING (`mkit-attest`, `bls-threshold` feature):**
+  `trusted_dealer`/`bls_threshold_trusted_dealer`'s generic RNG bound
+  moved from rand_core 0.6's `CryptoRngCore` to rand_core 0.10's
+  `CryptoRng` &mdash; a from-scratch, source-incompatible trait (`TryRng`/
+  `TryCryptoRng`), not just a version bump. `commonware-cryptography`
+  2026.7.0 made the same move internally, so this crate's bound had to
+  follow. Callers supplying an RNG type must now implement rand_core
+  0.10's `CryptoRng` (for example `commonware_utils::TestRng`, or
+  `rand_core::UnwrapErr(getrandom::SysRng)` in place of the old
+  `rand_core::OsRng`); an RNG that only implements the 0.6-era
+  `CryptoRngCore` no longer satisfies the bound.
 - **BREAKING (`mkit-core`, `pack-shards` feature): pack-shard Reed-Solomon
   hasher cut over from `Sha256` to `Blake3`.** `pack_shard::RsScheme` now
   wraps `commonware_coding::ReedSolomon<Blake3>` instead of `Sha256`,
@@ -668,6 +699,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`RUSTSEC-2025-0055` ignore removed from `deny.toml`.** The advisory
+  (tracing-subscriber 0.2 ANSI-escape logging, flagged for
+  re-justification by 2026-08-21 per the `[0.2.0]` entry below) reached
+  the tree only transitively via `commonware-runtime 2026.5.x → arkworks
+  (ark-ed-on-bls12-381-bandersnatch → ark-r1cs-std) → tracing-subscriber
+  0.2`. The commonware 2026.7.0 bump drops that entire arkworks/
+  bandersnatch chain from the dependency tree; the only
+  `tracing-subscriber` left is v0.3.23, the fixed line. `RUSTSEC-2024-0436`
+  (`paste`, unmaintained) is still transitively present via commonware's
+  feature-gated deps and remains ignored.
 - **`clone`/`pull`/`fetch` now verify commit/remix/tag signatures and
   fail closed by default.** Previously the only signature check was the
   manual, single-revision `mkit verify <rev>` &mdash; a hostile remote

@@ -13,20 +13,31 @@
 //! `commonware_storage::bmt`. We do **not** depend on it for object identity:
 //! `merkle.rs` lives in `mkit-core` and `Object::id` calls it, so this module
 //! must compile to `wasm32` for `mkit-core` *itself* to — independent of any
-//! wasm caller. At the pinned `commonware =2026.5.0`, `bmt` is gated behind
-//! `commonware-storage/std`, which unconditionally pulls `zstd-sys` (a C
-//! library with no `wasm32-unknown-unknown` target). Instead this module
-//! vendors the *identical* BMT construction over the `blake3` crate (already a
-//! mkit dependency, wasm-clean). A native-only test
-//! (`tests::vendored_root_matches_commonware`) cross-verifies the vendored
-//! root byte-for-byte against `commonware_storage::bmt`, so the two never
-//! drift.
+//! wasm caller. Instead this module vendors the *identical* BMT construction
+//! over the `blake3` crate (already a mkit dependency, wasm-clean). A
+//! native-only test (`tests::vendored_root_matches_commonware`) cross-verifies
+//! the vendored root byte-for-byte against `commonware_storage::bmt`, so the
+//! two never drift.
 //!
-//! TODO(commonware#4089): the upstream PR commonwarexyz/monorepo#4090 makes
-//! `bmt` `no_std` (it has no real `std` dependency — only an incidental
-//! `commonware-runtime` re-export of `bytes::{Buf, BufMut}`). Once that
-//! releases, this vendored copy can be dropped for a direct
-//! `commonware-storage` dependency; the cross-check test already pins equality.
+//! RESOLVED (commonware#4089 / commonwarexyz/monorepo#4090, shipped in
+//! `commonware =2026.7.0`): `bmt` itself is now genuinely `no_std` — that
+//! part of the original TODO held. It is *not* enough to drop the vendored
+//! copy, though: `commonware_storage::bmt::Builder<H: Hasher>` is generic
+//! over `commonware_cryptography::Hasher`, so reaching a concrete hasher
+//! (e.g. `Blake3`) means depending on the `commonware-cryptography` crate —
+//! and that crate's `blst` dependency (BLS12-381) is **not** feature-gated;
+//! it compiles unconditionally for every consumer, wasm or not. Confirmed
+//! empirically: `blst`'s C sources fail to build for
+//! `wasm32-unknown-unknown` wherever the local `clang` has no WASM LLVM
+//! backend registered (e.g. stock Xcode clang on macOS — `clang
+//! --print-targets` lists no `wasm32` entry). Even on a toolchain where it
+//! *does* build, making `commonware-storage` (and therefore
+//! `commonware-cryptography`/`blst`) a mandatory dependency of `mkit-core`'s
+//! object-identity path would impose that C library's build/binary-size
+//! cost on every consumer, not just wasm callers — the same reason
+//! `mkit-attest` keeps `blst` behind an opt-in `bls-threshold` feature
+//! instead of pulling it in by default. So the vendored construction stays;
+//! the cross-check test is what keeps it honest against upstream.
 //!
 //! The construction (matching commonware):
 //! * leaf at index `i` is hashed with its position: `H(i_be32 ‖ leaf)`;

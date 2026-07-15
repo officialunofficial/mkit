@@ -36,15 +36,21 @@ commonware-codec = { workspace = true }
 # in on top of the in-process `from_session` constructor. It pulls a
 # real tokio runtime,
 # OS random, and a `governor`-compatible system clock so we can
-# construct the `BufferPooler + CryptoRngCore + Clock` context that
+# construct the `BufferPooler + CryptoRng + Clock` context that
 # `commonware_stream::encrypted::dial` expects without depending on
 # commonware's full tokio runtime entry point (which consumes the
 # runtime when its driver future returns — not compatible with a
 # long-lived `Transport`). Off by default; downstream callers (the
 # mkit-cli `enc-transport` feature) opt in.
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "macros", "io-util", "time", "sync"], optional = true }
-rand = { version = "0.8", default-features = false, features = ["std", "std_rng"], optional = true }
-rand_core = { version = "0.6", optional = true }
+# `sys_rng` provides `getrandom::SysRng`, the rand_core 0.10 `TryRng`
+# source `TokioContext` wraps in `UnwrapErr` for its `CryptoRng` impl.
+# 0.10 to match the rand_core edge commonware-cryptography /
+# commonware-stream 2026.7.0 depend on (their `CryptoRng` bound is a
+# different, incompatible trait pre-0.10) — no plain `rand` dep needed,
+# this crate never used more than `OsRng`.
+getrandom = { version = "0.4", features = ["sys_rng"], optional = true }
+rand_core = { version = "0.10", optional = true }
 governor = { version = "0.10", default-features = false, features = ["std"], optional = true }
 
 [features]
@@ -54,7 +60,7 @@ default = []
 # builds without tokio when the in-process path is all callers need
 # (transport-trait shape work, deterministic-runtime tests). Turn on
 # from `mkit-cli` via its `enc-transport` feature.
-tcp = ["dep:tokio", "dep:rand", "dep:rand_core", "dep:governor"]
+tcp = ["dep:tokio", "dep:getrandom", "dep:rand_core", "dep:governor"]
 
 [dev-dependencies]
 # Deterministic runner for the in-process round-trip test. The test
