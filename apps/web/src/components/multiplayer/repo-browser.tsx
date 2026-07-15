@@ -201,7 +201,7 @@ export function RefsPanel({
       ) : entries.length === 0 ? (
         <p className='text-sm text-muted'>No branches yet. Push a commit to create one.</p>
       ) : (
-        <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'>
+        <ul className='max-h-80 divide-y divide-dashed divide-hairline overflow-y-auto border-y border-dashed border-hairline'>
           {entries.map((r) => {
             const active = r.name === selectedRef
             return (
