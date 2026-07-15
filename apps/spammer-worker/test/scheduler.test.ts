@@ -28,9 +28,11 @@ import { POOL_SIZE, getIdentityPool, makeRoundRobinCursor, seedForIndex } from "
 import { hexToBytes } from "../src/hex";
 import {
   CHAT_FLOOR_MS,
+  FORK_OF_FORK_REMIX_PERCENT,
   MAX_BUNDLES_IN_FLIGHT,
   PUSH_FLOOR_MS,
   REACTION_FLOOR_MS,
+  REMIX_EVERY_N_TICKS,
   RESPONSE_AUTHOR_COOLDOWN_MS,
   RESPONSE_BUNDLE_SPREAD_MS,
   RESPONSE_CHAT_INCLUDE_PERCENT,
@@ -38,6 +40,7 @@ import {
   RESPONSE_REACTION_COUNT_RANGE,
   RESPONSE_REMIX_INCLUDE_PERCENT,
   type EventKind,
+  type ForkUpstreamRef,
   type RealEventRef,
   type ResponseIntent,
   type SchedulerState,
@@ -703,6 +706,183 @@ describe("planTick — response-queue draining", () => {
     // ...but the whole bundle is fully drained well within RESPONSE_BUNDLE_SPREAD_MS plus a little slack.
     expect(ticksUntilFullyDrained).toBeGreaterThan(1);
     expect(ticksUntilFullyDrained * 1000).toBeLessThanOrEqual(RESPONSE_BUNDLE_SPREAD_MS + 5000);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// scheduler.ts — issue #851 verification: fork-of-fork upstream selection
+// -----------------------------------------------------------------------------
+
+describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
+  const FORK_UPSTREAMS: ForkUpstreamRef[] = [
+    { ref: "forks/aaaaaaaaaaaa-111111111111", headHex: "fork-head-1" },
+    { ref: "forks/bbbbbbbbbbbb-222222222222", headHex: "fork-head-2" },
+    { ref: "forks/cccccccccccc-333333333333", headHex: "fork-head-3" },
+  ];
+
+  /** Advance `planTick` for `totalTicks` ticks with a push floor-safe cadence, recording every AMBIENT remix pick's `remixUpstream`. */
+  function simulateAmbientRemixes(
+    totalTicks: number,
+    forkUpstreams: readonly ForkUpstreamRef[] | undefined,
+  ): { remixTicks: number; forkOfForkFires: number; remixUpstreams: (ForkUpstreamRef | undefined)[] } {
+    let state = initialSchedulerState(POOL_SIZE);
+    let now = 0;
+    let remixTicks = 0;
+    let forkOfForkFires = 0;
+    const remixUpstreams: (ForkUpstreamRef | undefined)[] = [];
+
+    for (let t = 0; t < totalTicks; t++) {
+      now += PUSH_FLOOR_MS; // generous spacing so every push pick finds an eligible identity
+      const { events, nextState } = planTick(state, now, forkUpstreams);
+      state = nextState;
+      const ambientRemix = events.find((e) => e.kind === "remix" && !e.response);
+      if (ambientRemix) {
+        remixTicks++;
+        remixUpstreams.push(ambientRemix.remixUpstream);
+        if (ambientRemix.remixUpstream) forkOfForkFires++;
+      }
+    }
+
+    return { remixTicks, forkOfForkFires, remixUpstreams };
+  }
+
+  it("fires at approximately FORK_OF_FORK_REMIX_PERCENT of ambient remix ticks when fork refs are known", () => {
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, FORK_UPSTREAMS);
+
+    expect(remixTicks).toBeGreaterThan(0);
+    const fraction = forkOfForkFires / remixTicks;
+    // ~25% target (FORK_OF_FORK_REMIX_PERCENT); generous tolerance for hash variance, same style as the response-bundle-composition fraction tests above.
+    expect(FORK_OF_FORK_REMIX_PERCENT).toBe(25);
+    expect(fraction).toBeGreaterThan(0.15);
+    expect(fraction).toBeLessThan(0.35);
+    // Every fired candidate actually came from the supplied set.
+    expect(forkOfForkFires).toBeGreaterThan(0);
+  });
+
+  it("every selected upstream is one of the supplied forkUpstreams entries", () => {
+    const { remixUpstreams } = simulateAmbientRemixes(8000, FORK_UPSTREAMS);
+    for (const picked of remixUpstreams) {
+      if (picked === undefined) continue;
+      expect(FORK_UPSTREAMS).toContainEqual(picked);
+    }
+  });
+
+  it("never fires when forkUpstreams is omitted", () => {
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, undefined);
+    expect(remixTicks).toBeGreaterThan(0);
+    expect(forkOfForkFires).toBe(0);
+  });
+
+  it("never fires when forkUpstreams is an empty array", () => {
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, []);
+    expect(remixTicks).toBeGreaterThan(0);
+    expect(forkOfForkFires).toBe(0);
+  });
+
+  it("falls back to a plain (no-remixUpstream) ambient remix — identical to pre-#851 behavior — when forkUpstreams is absent", () => {
+    const state = initialSchedulerState(POOL_SIZE);
+    // tick 0 with REMIX_EVERY_N_TICKS - 1 ... find a remix tick directly by constructing state at the boundary.
+    const remixTickState: SchedulerState = { ...state, tick: REMIX_EVERY_N_TICKS - 1 };
+    const withoutArg = planTick(remixTickState, 0);
+    const withUndefined = planTick(remixTickState, 0, undefined);
+    const withEmpty = planTick(remixTickState, 0, []);
+
+    expect(withoutArg.events).toEqual(withUndefined.events);
+    expect(withoutArg.events).toEqual(withEmpty.events);
+    const remixEvent = withoutArg.events.find((e) => e.kind === "remix");
+    expect(remixEvent).toBeDefined();
+    expect(remixEvent!.remixUpstream).toBeUndefined();
+  });
+
+  it("is deterministic: the same (state, now, forkUpstreams) always yields the same output, including remixUpstream", () => {
+    const remixTickState: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_EVERY_N_TICKS - 1 };
+    const a = planTick(remixTickState, 0, FORK_UPSTREAMS);
+    const b = planTick(remixTickState, 0, FORK_UPSTREAMS);
+    expect(a.events).toEqual(b.events);
+    expect(a.nextState).toEqual(b.nextState);
+  });
+
+  it("picks the same candidate for the same tick across repeated ticks-worth-apart states (keyed on tick, not on identity)", () => {
+    // Two different pool sizes / identity assignments landing on the SAME
+    // tick value must make the SAME fire/no-fire and SAME candidate decision
+    // — the decision is keyed on `state.tick`, never on which identity got
+    // picked for the push.
+    const stateSmallPool: SchedulerState = { ...initialSchedulerState(4), tick: REMIX_EVERY_N_TICKS - 1 };
+    const stateBigPool: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_EVERY_N_TICKS - 1 };
+    const a = planTick(stateSmallPool, 0, FORK_UPSTREAMS);
+    const b = planTick(stateBigPool, 0, FORK_UPSTREAMS);
+    const remixA = a.events.find((e) => e.kind === "remix");
+    const remixB = b.events.find((e) => e.kind === "remix");
+    expect(remixA?.remixUpstream).toEqual(remixB?.remixUpstream);
+  });
+
+  it("ambient commit targeting is unaffected: a commit pick never carries remixUpstream regardless of forkUpstreams", () => {
+    // tick 0 is a commit tick (0 % REMIX_EVERY_N_TICKS !== REMIX_EVERY_N_TICKS - 1).
+    const commitTickState: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: 0 };
+    const { events } = planTick(commitTickState, 0, FORK_UPSTREAMS);
+    const commitEvent = events.find((e) => e.kind === "commit");
+    expect(commitEvent).toBeDefined();
+    expect((commitEvent as { remixUpstream?: unknown }).remixUpstream).toBeUndefined();
+
+    // Sweep every tick in one REMIX_EVERY_N_TICKS cycle and confirm only the
+    // remix-kind tick ever carries remixUpstream; every commit-kind tick
+    // never does, however many times fork-of-fork selection is consulted.
+    for (let tick = 0; tick < REMIX_EVERY_N_TICKS; tick++) {
+      const s: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick };
+      const { events: evs } = planTick(s, 0, FORK_UPSTREAMS);
+      const push = evs.find((e) => e.kind === "commit" || e.kind === "remix");
+      expect(push).toBeDefined();
+      if (push!.kind === "commit") {
+        expect(push!.remixUpstream).toBeUndefined();
+      }
+    }
+  });
+
+  it("response-queue draining is unaffected by forkUpstreams being present: a response remix intent never gets its target overridden by fork-of-fork selection", () => {
+    const POOL = 8;
+    const responseIntent: ResponseIntent = {
+      kind: "remix",
+      targetIdHex: "real-target-hex",
+      ref: "refs/heads/feature",
+      realAuthorPubkeyHex: "real-author",
+      notBeforeMs: 0,
+      bundleId: "b1",
+    };
+    // Pin tick to a remix-kind AMBIENT tick too, so both a response remix and
+    // an ambient remix could in principle be in play this tick — the
+    // response remix must still never carry remixUpstream, and its response
+    // payload's targetIdHex must be untouched by fork-of-fork selection.
+    const state: SchedulerState = {
+      ...initialSchedulerState(POOL),
+      tick: REMIX_EVERY_N_TICKS - 1,
+      responseQueue: [responseIntent],
+    };
+
+    const withoutForkUpstreams = planTick(state, 0);
+    const withForkUpstreams = planTick(state, 0, FORK_UPSTREAMS);
+
+    const responseRemixWithout = withoutForkUpstreams.events.find((e) => e.kind === "remix" && e.response);
+    const responseRemixWith = withForkUpstreams.events.find((e) => e.kind === "remix" && e.response);
+    expect(responseRemixWithout).toBeDefined();
+    expect(responseRemixWith).toBeDefined();
+
+    // The response payload (including its real target) is byte-for-byte
+    // identical whether or not forkUpstreams was supplied...
+    expect(responseRemixWith!.response).toEqual(responseRemixWithout!.response);
+    expect(responseRemixWith!.response!.targetIdHex).toBe("real-target-hex");
+    // ...and it NEVER gains a remixUpstream field, even though this tick is
+    // an ambient-remix-kind tick and forkUpstreams was supplied — fork-of-fork
+    // selection only ever touches phase 2's ambient pick, never phase 1's
+    // drained response intents.
+    expect(responseRemixWith!.remixUpstream).toBeUndefined();
+
+    // The rest of planTick's output (identities picked, nextState) is
+    // otherwise unaffected by forkUpstreams's mere presence — only the
+    // (possible) ambient remix's remixUpstream field can differ.
+    const stripRemixUpstream = (evs: typeof withoutForkUpstreams.events) =>
+      evs.map(({ remixUpstream: _remixUpstream, ...rest }) => rest);
+    expect(stripRemixUpstream(withForkUpstreams.events)).toEqual(stripRemixUpstream(withoutForkUpstreams.events));
+    expect(withForkUpstreams.nextState).toEqual(withoutForkUpstreams.nextState);
   });
 });
 
