@@ -980,6 +980,20 @@ export class WasmRepoBackend implements RepoBackend {
    */
   private walkCache = new Map<string, { head: string; entries: CommitLogEntry[] }>()
   /**
+   * In-flight walks, keyed by `room::ref::cap`. Without this, a burst of rapid successive `WatchRefs`-driven
+   * invalidations (e.g. a sustained multi-commit/sec writer, where `head` has usually already moved again by the time
+   * the previous walk resolves) launches many overlapping {@link WasmRepoBackend.commitLogViaListCommits} calls for the
+   * SAME room/ref: their `onProgress` writes interleave unpredictably, and whichever call's `walkCache.set` lands LAST
+   * wins even if it started from an older `head` — the log can end up stuck showing stale/incomplete data indefinitely
+   * under sustained churn. Concurrent callers for the same key now share ONE walk; each still gets its own `onProgress`
+   * fanned out via {@link progressCallbacks}. Keyed by `cap` too so a capped caller (e.g. the lobby feed) never shares a
+   * truncated walk with an uncapped one.
+   */
+  private inflightWalks = new Map<
+    string,
+    { promise: Promise<CommitLogEntry[]>; progressCallbacks: Set<(p: CommitLogEntry[]) => void> }
+  >()
+  /**
    * Hash-keyed object cache, keyed by `room::objectIdHex`. mkit objects are CONTENT-ADDRESSED — a given hash maps to
    * fixed bytes forever — so a cached entry can never go stale and is ALWAYS safe to serve without a network
    * round-trip. Populated on every successful {@link getObject} and consulted first; subsumes the per-walk re-download
@@ -1142,12 +1156,42 @@ export class WasmRepoBackend implements RepoBackend {
     const cached = this.walkCache.get(cacheKey)
     if (cached && cached.head === head) return cached.entries.slice(0, cap)
 
+    // Coalesce concurrent callers for the SAME room/ref/cap into ONE shared walk
+    // — see `inflightWalks`'s doc comment for why this matters under sustained
+    // rapid ref-churn. A late-joining caller just adds its `onProgress` to the
+    // fan-out set and awaits the SAME promise; it does not start a new walk.
+    const inflightKey = `${cacheKey}::${cap}`
+    const existing = this.inflightWalks.get(inflightKey)
+    if (existing) {
+      if (opts?.onProgress) existing.progressCallbacks.add(opts.onProgress)
+      return existing.promise
+    }
+
+    const progressCallbacks = new Set<(p: CommitLogEntry[]) => void>()
+    if (opts?.onProgress) progressCallbacks.add(opts.onProgress)
+    const fanOutProgress = (partial: CommitLogEntry[]) => {
+      for (const cb of progressCallbacks) cb(partial)
+    }
+
     // The worker owns the commit-log walk: ListCommits returns the whole page of
     // denormalized metadata in ONE round-trip (O(1) round-trips, no per-object
     // GetObject + decode). The client just renders what it's handed.
-    const entries = await this.commitLogViaListCommits(room, ref, cap, cached, opts)
-    this.walkCache.set(cacheKey, { head, entries })
-    return entries
+    const promise: Promise<CommitLogEntry[]> = this.commitLogViaListCommits(room, ref, cap, cached, {
+      ...opts,
+      onProgress: fanOutProgress,
+    })
+      .then((entries) => {
+        this.walkCache.set(cacheKey, { head, entries })
+        return entries
+      })
+      .finally(() => {
+        // Only clear if we're still the current in-flight walk for this key — a
+        // fresher walk (started after this one resolved/rejected) may already
+        // have replaced us in the map.
+        if (this.inflightWalks.get(inflightKey)?.promise === promise) this.inflightWalks.delete(inflightKey)
+      })
+    this.inflightWalks.set(inflightKey, { promise, progressCallbacks })
+    return promise
   }
 
   /**

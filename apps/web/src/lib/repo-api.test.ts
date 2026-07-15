@@ -464,6 +464,71 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
     expect(listCommitsCalls.length).toBe(2)
   })
 
+  it('coalesces concurrent calls for the same room/ref/cap into ONE walk', async () => {
+    // Regression test for the bug a sustained multi-commit/sec writer exposed on
+    // the live lobby-v2 room: rapid WatchRefs-driven invalidations launched many
+    // overlapping walks whose results/onProgress writes raced each other, and the
+    // commit feed never rendered anything. `Promise.all` here relies on JS's
+    // execution/microtask ordering: `commitLog('room')` #1 runs synchronously up
+    // to its `await getRef(...)`, THEN #2 does the same, THEN #1's `getRef`
+    // resolution is processed first (queued first) — so #1 reaches the
+    // inflightWalks check/set and starts its walk BEFORE #2 even checks, meaning
+    // #2 deterministically finds #1's in-flight entry and coalesces onto it,
+    // never issuing its own `listCommits` call.
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      c2: { message: 'second', signer: 's', parent: 'c1' },
+      c1: { message: 'first', signer: 's' },
+    }
+    const { backend, listCommitsCalls } = harness({ head: 'c2', graph, counters })
+
+    const [a, b] = await Promise.all([backend.commitLog('room'), backend.commitLog('room')])
+
+    expect(listCommitsCalls.length).toBe(1) // one shared walk, not two
+    expect(a.map((e) => e.hash)).toEqual(['c2', 'c1'])
+    expect(b).toEqual(a) // both callers got the SAME result
+  })
+
+  it('fans out onProgress to every coalesced caller', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      c2: { message: 'second', signer: 's', parent: 'c1' },
+      c1: { message: 'first', signer: 's' },
+    }
+    const { backend } = harness({ head: 'c2', graph, counters })
+
+    const progressA: CommitLogEntry[][] = []
+    const progressB: CommitLogEntry[][] = []
+    await Promise.all([
+      backend.commitLog('room', 'main', { onProgress: (p) => progressA.push(p) }),
+      backend.commitLog('room', 'main', { onProgress: (p) => progressB.push(p) }),
+    ])
+
+    expect(progressA.length).toBeGreaterThan(0)
+    expect(progressB.length).toBeGreaterThan(0)
+    expect(progressA.at(-1)?.map((e) => e.hash)).toEqual(['c2', 'c1'])
+    expect(progressB.at(-1)?.map((e) => e.hash)).toEqual(['c2', 'c1'])
+  })
+
+  it('does NOT coalesce callers with a different cap (each gets its own walk)', async () => {
+    const counters = { decode: 0, getObject: 0, getRef: 0 }
+    const graph = {
+      c3: { message: 'third', signer: 's', parent: 'c2' },
+      c2: { message: 'second', signer: 's', parent: 'c1' },
+      c1: { message: 'first', signer: 's' },
+    }
+    const { backend, listCommitsCalls } = harness({ head: 'c3', graph, counters })
+
+    const [capped, uncapped] = await Promise.all([
+      backend.commitLog('room', 'main', { limit: 1 }),
+      backend.commitLog('room', 'main'),
+    ])
+
+    expect(listCommitsCalls.length).toBe(2) // different cap ⇒ independent walks
+    expect(capped.map((e) => e.hash)).toEqual(['c3'])
+    expect(uncapped.map((e) => e.hash)).toEqual(['c3', 'c2', 'c1'])
+  })
+
   it('decodes a single commit by hash for the detail view (tree + signature)', async () => {
     // #505 PR 5/5 (Pattern 6): the previous version of this test only
     // round-tripped opaque bytes through the fake `harness` above and
