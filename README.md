@@ -201,9 +201,13 @@ Workspace crates:
 | `mkit-keystore` | platform-aware signing-key vault (software, OS keychains, systemd-creds, YubiKey, external signers) &mdash; see [`docs/specs/SPEC-KEYSTORE.md`](docs/specs/SPEC-KEYSTORE.md) |
 | `mkit-rpc` | shared wire schemas plus length-prefixed framing for stdio subprocess protocols (external signers) |
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
+| `mkit-transport-connect` | the `mkit.transport.v1` Connect service: the native ConnectRPC client behind `mkit+https://` dispatch, plus the axum-hosted server behind `mkit serve --http` ([`docs/specs/SPEC-TRANSPORT-CONNECT.md`](docs/specs/SPEC-TRANSPORT-CONNECT.md)) |
 | `mkit-cli` | the `mkit` binary |
 | `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
+| `mkit-repo-client` | browser (WASM) ConnectRPC client for the anonymous-multiplayer repo service; unpublished |
 | `mkit-fuzz` (at `rust/fuzz/`, not `rust/crates/`) | bounded property tests (cargo-fuzz compatible) |
+| `mkit-benches` (at `rust/benches/`, not `rust/crates/`) | Criterion microbenchmarks plus the `render-charts` binary (see [Performance](#performance)) |
+| `mkit-test-util` | dev-only test helpers shared across the crates' test suites; unpublished |
 
 Each transport implements the same trait &mdash; `list_refs`, `read_ref`,
 `write_ref`, `pack_exists`, `download_pack`, `upload_pack` &mdash; described
@@ -285,6 +289,17 @@ mkit attest --algorithm ed25519 \
 mkit verify-attest --trust-roots .mkit/attest-trust-roots.toml
 ```
 
+`verify-attest` reports `UnknownKeyid` until each signer's key is
+registered as a trust root (`mkit trust add --trust-roots
+.mkit/attest-trust-roots.toml <keyid> <pubkey-hex> --kind
+<algorithm>`) &mdash; the p256 additional-signer's keyid is the
+`--print-pubkey` output above, but the ed25519 `repo-key` signer's
+attestation keyid is `blake3:` plus the BLAKE3 digest of its pubkey,
+not the raw pubkey itself; read it off a produced `.dsse` envelope's
+`keyid` field, or see
+[`docs/specs/SPEC-ATTESTATIONS.md`](docs/specs/SPEC-ATTESTATIONS.md)
+§6.5 for the full trust-roots walkthrough.
+
 ## Identity and push auth
 
 **.mkit/keys/default.key** is a raw Ed25519 seed. The same seed covers:
@@ -302,7 +317,7 @@ pubkey to an account, and `mkit serve` executes as that account. mkit
 core ships **no custom push-auth protocol** &mdash; SSH's KEX already does
 the nonce/signature exchange, and `AuthorizedKeysCommand` is the
 standard server-side hook for `pubkey → account`. A downstream
-service can wire its own identity model (for example, pubkey → on-chain
+service can wire its own identity model (for example, pubkey → onchain
 owner address) through that hook without changing the wire protocol.
 See [`docs/SSH-SECURITY.md`](docs/SSH-SECURITY.md) for the transport
 trust model.
@@ -340,7 +355,14 @@ on everyday operations.
 Component microbenchmarks &mdash; signature throughput by algorithm, and
 object-commit/pack-create against `git2` and the `git` CLI &mdash; live in
 [`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
-hardware, kernel, filesystem, and cache warmth; reproduce locally with:
+hardware, kernel, filesystem, and cache warmth. Pack creation at 1 MiB
+file sizes, the case mkit's chunked and parallel design targets:
+
+![Pack creation wallclock at 10 files x 1 MiB: mkit finishes in 32 ms versus 174 ms for git2 and 499 ms for git pack-objects](benchmarks/charts/pack_create-10__1_mib.svg)
+
+![Pack creation wallclock at 100 files x 1 MiB: mkit finishes in 206 ms versus 3,025 ms for git pack-objects and 6,695 ms for git2](benchmarks/charts/pack_create-100__1_mib.svg)
+
+Reproduce locally with:
 
 ```sh
 # Name the bench targets explicitly. The `--workspace -- --quick`

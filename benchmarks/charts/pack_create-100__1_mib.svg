@@ -12,23 +12,23 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
   <line x1="200.0" y1="52.0" x2="200.0" y2="138.0" class="grid"/>
   <text x="200.0" y="152.0" text-anchor="middle" class="axis-label">0</text>
   <line x1="304.0" y1="52.0" x2="304.0" y2="138.0" class="grid"/>
-  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">5</text>
+  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">1</text>
   <line x1="408.0" y1="52.0" x2="408.0" y2="138.0" class="grid"/>
-  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">10</text>
+  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">2</text>
   <line x1="512.0" y1="52.0" x2="512.0" y2="138.0" class="grid"/>
-  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">15</text>
+  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">3</text>
   <line x1="616.0" y1="52.0" x2="616.0" y2="138.0" class="grid"/>
-  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">20</text>
+  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">4</text>
   <line x1="720.0" y1="52.0" x2="720.0" y2="138.0" class="grid"/>
-  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">25</text>
+  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">5</text>
   <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ops/s</text>
   <text x="190.0" y="77.2" text-anchor="end" class="label">mkit (BLAKE3)</text>
-  <rect x="200.0" y="60.0" width="464.0" height="18.2" rx="2" fill="#4C78A8"/>
-  <text x="672.0" y="77.2" class="value">22 ops/s (44.83 ms)</text>
-  <text x="190.0" y="103.2" text-anchor="end" class="label">git2 (libgit2)</text>
-  <rect x="200.0" y="86.0" width="142.3" height="18.2" rx="2" fill="#E45756"/>
-  <text x="350.3" y="103.2" class="value">6.8 ops/s (146 ms)</text>
-  <text x="190.0" y="129.2" text-anchor="end" class="label">git pack-objects</text>
-  <rect x="200.0" y="112.0" width="7.0" height="18.2" rx="2" fill="#9D7660"/>
-  <text x="215.0" y="129.2" class="value">0.34 ops/s (2971 ms)</text>
+  <rect x="200.0" y="60.0" width="505.4" height="18.2" rx="2" fill="#4C78A8"/>
+  <text x="713.4" y="77.2" class="value">5 (206 ms)</text>
+  <text x="190.0" y="103.2" text-anchor="end" class="label">git pack-objects</text>
+  <rect x="200.0" y="86.0" width="34.4" height="18.2" rx="2" fill="#9D7660"/>
+  <text x="242.4" y="103.2" class="value">0 (3024 ms)</text>
+  <text x="190.0" y="129.2" text-anchor="end" class="label">git2 (libgit2)</text>
+  <rect x="200.0" y="112.0" width="15.5" height="18.2" rx="2" fill="#E45756"/>
+  <text x="223.5" y="129.2" class="value">0 (6695 ms)</text>
 </svg>
