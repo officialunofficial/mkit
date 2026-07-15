@@ -8,9 +8,8 @@
 // global identity store, so unlocking in either surface unlocks the other.
 
 import { useState } from 'react'
-import { recordActivity } from '../lib/activity-log'
 import { embeddedBrowserWarning } from '../lib/embedded-browser'
-import { playerName, randomPetname } from '../lib/identity-name'
+import { randomPetname } from '../lib/identity-name'
 import { useIdentityStore } from '../lib/identity-store'
 import { keysEnabled } from '../lib/keys-client'
 import { PrfUnsupportedError, createIdentity, deriveEd25519Seed } from '../lib/passkey'
@@ -69,12 +68,7 @@ export function useIdentityActions(): IdentityActions {
         // passkey" button, it never blocks identity creation.
         id.setP256PubkeyHex(res.p256PubkeyHex)
       }
-      // Time ONLY the local key-derivation compute (seed → Ed25519 pubkey) — NOT
-      // the passkey ceremony, which is user/OS-gated and would misrepresent the
-      // "fast" story. This is the genuinely sub-ms part worth flexing.
-      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
-      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: res.via === 'ephemeral' })
       // Register the handle in keys.mkit.sh (signed write). Fire-and-forget and
       // only for a recoverable identity with a configured registry.
@@ -86,18 +80,6 @@ export function useIdentityActions(): IdentityActions {
           ? "Your device can't save this identity, so it'll only last until you close this tab."
           : 'Your identity is ready.',
       )
-      recordActivity({
-        kind: 'create',
-        title: `New player: ${petname}`,
-        durationMs: deriveMs,
-        lines: [
-          res.via === 'ephemeral'
-            ? 'No passkey PRF here, so this is a random in-memory key — it won’t persist or recover.'
-            : 'Your passkey derived a 32-byte Ed25519 seed in a single prompt — no key file, nothing stored to disk.',
-          `Signer pubkey ${pubkey.slice(0, 12)}… (renders as ${petname}).`,
-          'The seed stays in memory only, and the same passkey always re-derives it: same passkey, same player, any device.',
-        ],
-      })
     } catch (e) {
       setStatus(errMsg(e))
     } finally {
@@ -124,20 +106,9 @@ export function useIdentityActions(): IdentityActions {
       // button (see identity-panel `canAttest`) — the signing identity itself is
       // fully usable. There is no non-destructive way to re-capture it: minting a
       // new passkey would derive a DIFFERENT seed, i.e. a different player.
-      const t0 = performance.now()
       const pubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(res.seedHex)))
-      const deriveMs = performance.now() - t0
       id.unlock({ seedHex: res.seedHex, ed25519PubkeyHex: pubkey, ephemeral: false })
       setStatus('Your identity is unlocked.')
-      recordActivity({
-        kind: 'unlock',
-        title: `Recovered ${playerName(pubkey)} — same key, no key file`,
-        durationMs: deriveMs,
-        lines: [
-          'The same passkey re-derived the same seed, so you get the same Ed25519 key — no new passkey created.',
-          `Signer pubkey ${pubkey.slice(0, 12)}… — identical to before, because it’s derived, not stored.`,
-        ],
-      })
     } catch (e) {
       if (e instanceof PrfUnsupportedError) {
         setStatus("This passkey can't unlock your signing key. Create a new identity instead.")

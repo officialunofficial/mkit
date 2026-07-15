@@ -1,18 +1,16 @@
-// Which floating-dock panel is expanded — at most ONE at a time (mutual
-// exclusion). Temporary UI state, not persisted: both panels derive their
-// open/expanded state from this single value, so opening one collapses the
-// other for free.
+// Whether the floating-dock's presence panel is expanded. Temporary UI state,
+// not persisted.
 
 import { create } from 'zustand'
 
-export type DockExpanded = 'activity' | 'presence' | null
+export type DockExpanded = 'presence' | null
 
 type DockExpansion = {
   expanded: DockExpanded
-  open: (which: 'activity' | 'presence') => void
+  open: (which: 'presence') => void
   /** Release the slot only if `which` currently holds it (no-op otherwise). */
-  close: (which: 'activity' | 'presence') => void
-  toggle: (which: 'activity' | 'presence') => void
+  close: (which: 'presence') => void
+  toggle: (which: 'presence') => void
 }
 
 export const useDockExpansion = create<DockExpansion>((set) => ({

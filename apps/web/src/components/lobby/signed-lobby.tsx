@@ -435,13 +435,13 @@ function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; 
         {isRemix && source ? (
           <>
             {sourceAuthor ? <PlayerAvatar pubkey={sourceAuthor} size={16} /> : null}
-            <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 10)}</code>
+            <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 6)}</code>
             <span>to</span>
-            <code className='font-mono text-fg'>{e.hash.slice(0, 10)}</code>
+            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
           </>
         ) : (
           <>
-            <code className='font-mono text-fg'>{e.hash.slice(0, 10)}</code>
+            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
             <span>to</span>
             <code className='font-mono text-fg'>{e.ref}</code>
           </>

@@ -1,7 +1,7 @@
-// Persisted screen position for the floating dock (the what-just-happened +
-// presence circles). One of 8 snap anchors; remembered across reloads in
-// localStorage, degrading to in-memory state when storage is unavailable (SSR /
-// tests) so importing the store never throws.
+// Persisted screen position for the floating dock (the presence circle). One
+// of 8 snap anchors; remembered across reloads in localStorage, degrading to
+// in-memory state when storage is unavailable (SSR / tests) so importing the
+// store never throws.
 
 import { create } from 'zustand'
 import { type PersistStorage, createJSONStorage, persist } from 'zustand/middleware'

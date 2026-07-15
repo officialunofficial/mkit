@@ -1,8 +1,8 @@
 'use client'
 
-// The bottom-corner dock that holds the floating panels (what-just-happened +
-// presence). Snaps to one of 8 screen anchors; hovering reveals a move handle
-// you drag to re-snap. The chosen anchor persists in localStorage.
+// The bottom-corner dock that holds the floating presence panel. Snaps to one
+// of 8 screen anchors; hovering reveals a move handle you drag to re-snap.
+// The chosen anchor persists in localStorage.
 
 import { type ReactNode, useRef, useState } from 'react'
 import { useDockExpansion } from '../../lib/dock-expansion'

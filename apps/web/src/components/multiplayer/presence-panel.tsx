@@ -1,8 +1,8 @@
 'use client'
 
-// Floating "who's online" panel (bottom-right, below the what-just-happened
-// overlay). Reads the live roster the watch socket feeds into the presence
-// store. Collapsed → "● N others online"; expanded → the list of online keys,
+// Floating "who's online" panel (bottom-right dock). Reads the live roster
+// the watch socket feeds into the presence store. Collapsed → "● N others
+// online"; expanded → the list of online keys,
 // plus your own row and a viewer tally. Locking drops you from the keyed members
 // into the viewer count (and back on unlock) — so the panel makes lock/unlock
 // visible to everyone in the repository, not just you.

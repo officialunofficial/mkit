@@ -6,7 +6,6 @@
 
 import * as ScrollArea from '@radix-ui/react-scroll-area'
 import { useMemo, useState } from 'react'
-import { recordActivity } from '../../lib/activity-log'
 import {
   CasConflictError,
   type CommitLogEntry,
@@ -37,13 +36,35 @@ type DeriveActions = {
   pending: boolean
 }
 
-const pad = (n: number, w = 2) => String(n).padStart(w, '0')
-
-/** UTC `HH:MM:SS:mmm` for a commit's ISO `createdAt` (empty if unparseable). */
-function utcTime(iso: string): string {
+/**
+ * "Time ago" relative to now (a commit log is read for recency, not wall-clock) — "just now" / "5m ago" / "3h ago" /
+ * "2d ago", falling back to a short date past a week. Empty for an unparseable `iso`. Pair with {@link fullTime} on a
+ * `title` for the exact moment on hover.
+ */
+function timeAgo(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}:${pad(d.getUTCMilliseconds(), 3)}`
+  const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000))
+  if (sec < 5) return 'just now'
+  if (sec < 60) return `${sec}s ago`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  const day = Math.floor(hr / 24)
+  if (day < 7) return `${day}d ago`
+  const sameYear = d.getFullYear() === new Date().getFullYear()
+  return d.toLocaleDateString(
+    undefined,
+    sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' },
+  )
+}
+
+/** Full absolute date+time for a `title` hover — empty for an unparseable `iso`. */
+function fullTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })
 }
 
 /**
@@ -78,31 +99,12 @@ export function RepoLog({
   // then select the new branch so it lands visibly in the panel + log.
   const run = async (mode: 'remix' | 'branch', upstreamCommit: string) => {
     setStatus(null)
-    const t0 = performance.now()
     try {
       const ref = mode === 'remix' ? await remix(upstreamCommit) : await branch(upstreamCommit)
       if (!ref) return
       onSelectRef(ref)
       onSelectCommit(null)
       setStatus(mode === 'remix' ? `Remixed → ${ref}` : `Branched off → ${ref}`)
-      recordActivity({
-        kind: 'fork',
-        title:
-          mode === 'remix'
-            ? `Remixed ${upstreamCommit.slice(0, 10)}… → ${ref}`
-            : `Branched off ${upstreamCommit.slice(0, 10)}… → ${ref}`,
-        durationMs: performance.now() - t0,
-        lines:
-          mode === 'remix'
-            ? [
-                'Signed a remix object that RECORDS the upstream commit as its source — attribution is carried along.',
-                `remix branch ${ref}`,
-              ]
-            : [
-                'Created a new branch pointing AT the commit — no new object, no attribution, a fresh line of history (git branch).',
-                `branch ${ref}`,
-              ],
-      })
     } catch (e) {
       setStatus(
         e instanceof CasConflictError
@@ -227,7 +229,7 @@ export function RefsPanel({
                     </span>
                   ) : null}
                   {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
-                  <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 10)}…</code>
+                  <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 6)}</code>
                 </button>
               </li>
             )
@@ -272,9 +274,9 @@ function LiveLog({
           {entries.length > 0 ? <span className='ml-1.5 font-normal text-muted'>{entries.length}</span> : null}
         </h2>
         <span className='font-mono text-xs text-muted'>
-          {/* Show "head …" while the head is loading/refetching; only show ∅ once
+          {/* Show "head …" while the head is loading/refetching; only show "none" once
               the query has settled with no head. */}
-          head {head.isPending || head.isFetching ? '…' : head.data ? `${head.data.slice(0, 10)}…` : '∅'}
+          head {head.isPending || head.isFetching ? '…' : head.data ? head.data.slice(0, 6) : 'none'}
         </span>
       </div>
       {showSkeleton ? (
@@ -344,11 +346,11 @@ function LogRow({
           <div className='text-xs text-muted' title={entry.authorPubkey}>
             <PlayerLabel pubkey={entry.authorPubkey} className='font-medium text-fg' />{' '}
             <code className='font-mono break-all'>
-              {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 16)}…
+              {entry.authorPubkey.slice(0, 10)}… · {entry.hash.slice(0, 6)}
             </code>{' '}
             ·{' '}
-            <time className='font-mono' dateTime={entry.createdAt}>
-              {utcTime(entry.createdAt)} UTC
+            <time className='font-mono' dateTime={entry.createdAt} title={fullTime(entry.createdAt)}>
+              {timeAgo(entry.createdAt)}
             </time>
           </div>
         </div>
@@ -491,7 +493,7 @@ function CommitDetail({
           {isRemix ? (
             <Field label='Remix / fork of'>
               {decoded.sources.length === 0 ? (
-                <span className='text-sm text-muted'>∅ (no sources)</span>
+                <span className='text-sm text-muted'>No sources</span>
               ) : (
                 <ul className='space-y-1.5'>
                   {decoded.sources.map((s) => (
@@ -524,7 +526,7 @@ function CommitDetail({
           </Field>
           <Field label='Timestamp'>
             <span className='text-sm'>
-              {decoded.timestamp ? new Date(decoded.timestamp * 1000).toISOString() : '∅'}{' '}
+              {decoded.timestamp ? new Date(decoded.timestamp * 1000).toISOString() : 'unknown'}{' '}
               <span className='text-muted'>({decoded.timestamp} unix s)</span>
             </span>
           </Field>
@@ -533,7 +535,7 @@ function CommitDetail({
           </Field>
           <Field label='Parents'>
             {decoded.parents.length === 0 ? (
-              <span className='text-sm text-muted'>∅ ({isRemix ? 'root remix' : 'root commit'})</span>
+              <span className='text-sm text-muted'>None ({isRemix ? 'root remix' : 'root commit'})</span>
             ) : (
               <ul className='space-y-1.5'>
                 {decoded.parents.map((p, i) => (
