@@ -462,6 +462,24 @@ impl<'s> WriteBatch<'s> {
     }
 }
 
+/// Worker-pool cap for [`parallel_io`]. Deliberately NOT
+/// `std::thread::available_parallelism()`: a worker here spends nearly
+/// all its time blocked in the kernel on a barrier/fsync-class syscall,
+/// not consuming CPU, so CPU core count is the wrong resource to size
+/// against (the classic pool-sizing formula — thread count scaling with
+/// `1 + wait/compute`, not compute alone — puts this workload's ideal
+/// count far above core count; `tokio::task::spawn_blocking`'s default
+/// pool of 512 threads exists for the identical reason). 64 is chosen
+/// from a benchmark sweep (16/32/64/128 workers, batches of
+/// 10/100/1000 objects) on macOS/APFS (issue #864): 64 was the clear
+/// local optimum, ~16% faster than 16 at 1000 objects, with 128
+/// regressing slightly — fsync concurrency is ultimately gated by
+/// filesystem journal serialization, not raw device queue depth, so
+/// returns diminish (and can reverse) well before "as many threads as
+/// possible." Linux/ext4 numbers are not yet gathered; re-tune if they
+/// diverge meaningfully from the macOS data.
+const MAX_SYNC_WORKERS: usize = 64;
+
 /// Run `op(0..count)` across a small pool of scoped threads, joining
 /// them all before returning. Concurrency overlaps per-item device
 /// latency (~ms per flush primitive on Apple SSDs) that would otherwise
@@ -472,10 +490,7 @@ fn parallel_io(count: usize, op: impl Fn(usize) -> io::Result<()> + Sync) -> io:
     if count == 0 {
         return Ok(());
     }
-    let workers = std::thread::available_parallelism()
-        .map_or(4, std::num::NonZeroUsize::get)
-        .min(16)
-        .min(count);
+    let workers = MAX_SYNC_WORKERS.min(count);
     if workers == 1 {
         return (0..count).try_for_each(op);
     }

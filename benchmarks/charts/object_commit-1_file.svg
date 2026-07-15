@@ -12,23 +12,23 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
   <line x1="200.0" y1="52.0" x2="200.0" y2="138.0" class="grid"/>
   <text x="200.0" y="152.0" text-anchor="middle" class="axis-label">0</text>
   <line x1="304.0" y1="52.0" x2="304.0" y2="138.0" class="grid"/>
-  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">20</text>
+  <text x="304.0" y="152.0" text-anchor="middle" class="axis-label">200</text>
   <line x1="408.0" y1="52.0" x2="408.0" y2="138.0" class="grid"/>
-  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">40</text>
+  <text x="408.0" y="152.0" text-anchor="middle" class="axis-label">400</text>
   <line x1="512.0" y1="52.0" x2="512.0" y2="138.0" class="grid"/>
-  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">60</text>
+  <text x="512.0" y="152.0" text-anchor="middle" class="axis-label">600</text>
   <line x1="616.0" y1="52.0" x2="616.0" y2="138.0" class="grid"/>
-  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">80</text>
+  <text x="616.0" y="152.0" text-anchor="middle" class="axis-label">800</text>
   <line x1="720.0" y1="52.0" x2="720.0" y2="138.0" class="grid"/>
-  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">100</text>
+  <text x="720.0" y="152.0" text-anchor="middle" class="axis-label">1,000</text>
   <text x="460.0" y="168.0" text-anchor="middle" class="axis-label">ops/s</text>
   <text x="190.0" y="77.2" text-anchor="end" class="label">mkit</text>
-  <rect x="200.0" y="60.0" width="208.0" height="18.2" rx="2" fill="#4C78A8"/>
-  <text x="416.0" y="77.2" class="value">40 (25.00 ms)</text>
-  <text x="190.0" y="103.2" text-anchor="end" class="label">git CLI</text>
-  <rect x="200.0" y="86.0" width="453.9" height="18.2" rx="2" fill="#B279A2"/>
-  <text x="661.9" y="103.2" class="value">87 (11.46 ms)</text>
-  <text x="190.0" y="129.2" text-anchor="end" class="label">git2 (libgit2)</text>
-  <rect x="200.0" y="112.0" width="128.3" height="18.2" rx="2" fill="#E45756"/>
-  <text x="336.3" y="129.2" class="value">25 (40.52 ms)</text>
+  <rect x="200.0" y="60.0" width="46.2" height="18.2" rx="2" fill="#4C78A8"/>
+  <text x="254.2" y="77.2" class="value">89 (11.25 ms)</text>
+  <text x="190.0" y="103.2" text-anchor="end" class="label">git2 (libgit2)</text>
+  <rect x="200.0" y="86.0" width="480.3" height="18.2" rx="2" fill="#E45756"/>
+  <text x="688.3" y="103.2" class="value">924 (1.08 ms)</text>
+  <text x="190.0" y="129.2" text-anchor="end" class="label">git CLI</text>
+  <rect x="200.0" y="112.0" width="61.7" height="18.2" rx="2" fill="#B279A2"/>
+  <text x="269.7" y="129.2" class="value">119 (8.43 ms)</text>
 </svg>
