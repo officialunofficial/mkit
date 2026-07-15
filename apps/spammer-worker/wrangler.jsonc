@@ -43,6 +43,19 @@
   // wrangler.jsonc) gates the `/control` enable/disable/status endpoint. An
   // unset secret must fail every `/control` call closed, never open.
 
+  // Responder (#848/#854) — an independent opt-in layer on top of the
+  // ambient loop above, gated by its OWN "responderEnabled" DO-storage flag
+  // (`/control?action=responder-enable`/`responder-disable`), disabled by
+  // default. Two more optional vars govern it, same "deliberately not set
+  // here" posture as AI_CONTENT_AUTO_REFRESH below:
+  //   - AI_REPLY_PERSONALIZATION="true" opts into a small, hard-budgeted
+  //     (see reply-budget.ts) per-event AI-personalized reply on top of the
+  //     zero-marginal-cost reply-template fallback that's always active.
+  //   - RESPONDER_NONHUMAN_ALLOWLIST is a comma-separated list of additional
+  //     known-non-human pubkeys (e.g. legacy seeded demo authors, if any)
+  //     the responder should never treat as a real user to respond to —
+  //     empty/unset by default (see responder.ts's mergedSyntheticPubkeys).
+
   // Official Unofficial, Inc. — the account other apps/* Workers deploy to
   // (see apps/og/wrangler.toml). No `routes`/`custom_domain` here: this Worker
   // is workers.dev-only and must never intercept mkit.sh / api.mkit.sh

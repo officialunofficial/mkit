@@ -1,4 +1,5 @@
-// The `Spammer` Durable Object (PLAN.md build step 8).
+// The `Spammer` Durable Object (PLAN.md build step 8; extended by issue #854
+// — "DO wiring" — to poll the room's read side and drive response traffic).
 //
 // One singleton instance owns the whole synthetic-activity loop: a
 // self-rescheduling `alarm()` that, once every ~1000 ms, asks `scheduler.ts`
@@ -6,30 +7,71 @@
 // the resulting per-identity floors — plus the `/control` surface
 // (enable/disable/status) that is the ONLY way to turn any of this on.
 //
+// As of #854, the SAME alarm loop optionally (see "responderEnabled" below)
+// also polls the room's unauthenticated reads every `POLL_EVERY_N_TICKS`
+// ticks, diffs them via `observer.ts`'s pure `observe`, and enqueues response
+// bundles via `scheduler.ts`'s `enqueueResponseBundle` — ALL the decidable
+// logic for "what to fetch" / "what changed" / "what to say" lives in the
+// pure `responder.ts`/`observer.ts`/`scheduler.ts` modules; this file is only
+// I/O glue (wasm calls, `Date.now()`, DO storage) and orchestration, per this
+// codebase's standing "the DO stays thin" principle.
+//
 // DORMANT BY DEFAULT: a freshly-created instance has never had `enabled` set,
 // so `(await storage.get("enabled")) ?? false` is `false` and `alarm()`
 // no-ops without rescheduling itself even if one somehow fired. The DO never
 // arms its own first alarm — only an authenticated `POST /control` (action
-// "enable") does that (see `ensureAlarmScheduled`).
+// "enable") does that (see `ensureAlarmScheduled`). The responder has its
+// OWN independent `"responderEnabled"` flag (default `false`, same posture)
+// that gates ONLY the polling/response half of the tick — it never touches
+// the alarm itself, which the ambient loop alone owns (see the `/control`
+// section's "responder-enable"/"responder-disable" cases).
 //
 // Storage layout (DO SQLite, `new_sqlite_classes` migration in
 // wrangler.jsonc):
 //   - `identity_floors` SQL table — per-identity `last_chat_ms`/`last_push_ms`/
 //     `last_reaction_ms` (PLAN.md's floor bookkeeping the scheduler needs).
-//   - `ctx.storage` KV keys `"enabled"` (boolean) and `"schedulerMeta"` (the
-//     scheduler's round-robin cursors + tick counter) — small, non-relational
-//     bookkeeping that doesn't warrant its own table; the KV API is backed by
-//     the SAME SQLite storage the `new_sqlite_classes` migration provisions,
-//     so this is still "SQLite-backed" underneath, and — unlike a plain
-//     in-memory field — survives an isolate eviction between ticks.
+//   - `ctx.storage` KV keys:
+//     - `"enabled"` (boolean) — the ambient loop's kill switch (unchanged).
+//     - `"schedulerMeta"` (the scheduler's round-robin cursors + tick
+//       counter, PLUS — as of #850/#851/#854 — the optional
+//       `responseQueue`/`lastBundleMsByAuthor`/`reactionIdentitiesByBundle`
+//       fields `SchedulerState` gained; see `SchedulerMeta` below, which
+//       mirrors `SchedulerState` exactly minus the floor arrays that live in
+//       `identity_floors` instead).
+//     - `"responderEnabled"` (boolean, default `false`) — the responder's
+//       OWN independent kill switch (#854/#848: "independently killable from
+//       ambient traffic").
+//     - `"observerWatermark"` (`ObserverWatermark`, `observer.ts`) — the
+//       per-ref head map / known-fork-ref inventory / responded-event LRU
+//       `observe` round-trips every poll. Absent means "never polled yet";
+//       `loadObserverWatermark` defaults it to `initialObserverWatermark()`,
+//       NOT an empty-history replay risk — see that function's doc comment
+//       and #848's "restart/redeploy safety" story.
+//     - `"replyBudgetLedger"` (`LedgerState`, `reply-budget.ts`) — the
+//       per-UTC-day AI-personalization neuron spend + last-call timestamp.
+//       Absent means "no personalization call has ever been attempted";
+//       `loadReplyLedger` defaults it to `initialLedgerState(now)`.
+//   - This KV API is backed by the SAME SQLite storage the
+//     `new_sqlite_classes` migration provisions, so all of the above is
+//     still "SQLite-backed" underneath, and — unlike a plain in-memory field
+//     — survives an isolate eviction between ticks.
 
 import { DurableObject } from "cloudflare:workers";
-import { refreshContentPools, type ContentPools } from "./ai-content";
+import {
+  generatePersonalizedReply,
+  refreshContentPools,
+  REPLY_SHORT_HEX_LEN,
+  type ContentPools,
+  type PersonalizedReplyEvent,
+} from "./ai-content";
 import { isAuthorized, jsonResponse, resolveAction } from "./control-auth";
-import { emitChat, emitCommit, emitReaction, emitRemix, MAIN_REF, type EmitContext } from "./events";
+import { emitChat, emitChatText, emitCommit, emitReaction, emitRemix, MAIN_REF, type EmitContext } from "./events";
 import { getIdentityPool, POOL_SIZE, type Identity } from "./identities";
-import { planTick, type PlannedEvent, type SchedulerState } from "./scheduler";
-import { getWasm } from "./wasm";
+import { initialObserverWatermark, observe, type CommitMeta, type ObserverWatermark, type RefEntry } from "./observer";
+import { canPersonalize, initialLedgerState, recordCall, utcDayKey, type LedgerState } from "./reply-budget";
+import { buildSnapshot, chooseReplyText, forkUpstreamsFromWatermark, mergedSyntheticPubkeys, refsNeedingFetch } from "./responder";
+import { enqueueResponseBundle, planTick, type PlannedEvent, type ResponseIntent, type SchedulerState } from "./scheduler";
+import { getWasm, type WasmApi } from "./wasm";
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS identity_floors (
@@ -40,18 +82,59 @@ const SCHEMA = `
   )
 `;
 
-/** The scheduler's round-robin cursors + tick counter — everything `SchedulerState` needs beyond the per-identity floor arrays. */
+/**
+ * The scheduler's round-robin cursors + tick counter — everything
+ * `SchedulerState` needs beyond the per-identity floor arrays (those live in
+ * `identity_floors` instead — see this file's top storage-layout comment).
+ * As of #850/#851, `SchedulerState` also carries the OPTIONAL
+ * `responseQueue`/`lastBundleMsByAuthor`/`reactionIdentitiesByBundle` fields;
+ * they round-trip through this same DO-storage key so a response bundle
+ * queued on one tick survives an isolate eviction before it fully drains,
+ * exactly like the cursors/tick counter already did.
+ */
 type SchedulerMeta = {
   chatCursor: number;
   pushCursor: number;
   reactionCursor: number;
   tick: number;
+  responseQueue?: readonly ResponseIntent[];
+  lastBundleMsByAuthor?: Readonly<Record<string, number>>;
+  reactionIdentitiesByBundle?: Readonly<Record<string, readonly number[]>>;
 };
 
 const DEFAULT_SCHEDULER_META: SchedulerMeta = { chatCursor: 0, pushCursor: 0, reactionCursor: 0, tick: 0 };
 
 /** How long an alarm tick waits before rescheduling itself — PLAN.md's "Alarm interval: 1000 ms". */
 const ALARM_INTERVAL_MS = 1000;
+
+/**
+ * How often (in ticks) the responder polls `list_refs`/`list_commits` — every
+ * 5 ticks ≈ 5s at the real 1000ms alarm cadence, matching #848's "~5s
+ * cadence, tunable" (`Implementation Decisions → Read side`). Consulted ONLY
+ * when `"responderEnabled"` is true; the ambient loop's own per-tick cadence
+ * is completely unaffected by this constant either way.
+ */
+export const POLL_EVERY_N_TICKS = 5;
+
+/**
+ * `list_commits` page size per polled ref, per poll. Kept intentionally
+ * SMALL — one shallow page, not a deep walk — now that EVERY ref is polled
+ * each cycle (not just `main`), which multiplies the metadata volume fetched
+ * per poll relative to a `main`-only design. See #848's "Known transport
+ * risk": a stripped `Content-Encoding` header can leave a still-gzipped
+ * response body silently unparseable at volume; the vendored
+ * `mkit-repo-client` transport already sniffs the gzip magic number
+ * regardless of that header (fixed independent of page size — see
+ * `rust/crates/mkit-repo-client/src/transport.rs`), but a small page size
+ * keeps per-ref payloads modest on top of that fix, not instead of it.
+ */
+export const COMMIT_PAGE_SIZE = 20;
+
+/** Raw `list_refs` row shape crossing the wasm boundary — `RepoWasmApi.list_refs` is typed `Promise<any>` (wasm-bindgen can't express the JS object shape), so this is asserted, not inferred. Mirrors `mkit-repo-client::list_refs`'s doc comment (`{ name, objectIdHex }`). */
+type RawRefEntry = { name: string; objectIdHex: string };
+
+/** Raw `list_commits` response shape — see `RawRefEntry`'s doc comment for why this is asserted. Mirrors `mkit-repo-client::list_commits`'s doc comment (`{ commits: [...], nextCursorHex }`); `nextCursorHex` is unused here — one shallow page (`COMMIT_PAGE_SIZE`) per ref per poll is deliberate (see that const's doc comment), so this DO never walks a second page. */
+type RawCommitsPage = { commits: CommitMeta[]; nextCursorHex: string };
 
 /**
  * How often (in ticks) to kick off a background Workers-AI content refresh —
@@ -72,7 +155,35 @@ type FloorRow = {
   last_reaction_ms: number | null;
 };
 
-export type ControlStatus = { enabled: boolean; room: string; poolSize: number };
+/**
+ * `/control?action=status` payload — extended by #854 with a `responder`
+ * sub-object (#848: "the status endpoint to report responder state
+ * (enabled, watermark summary, queue depth, budget remaining)") on top of
+ * the pre-existing ambient-loop fields, which are UNCHANGED.
+ */
+export type ControlStatus = {
+  enabled: boolean;
+  room: string;
+  poolSize: number;
+  responder: {
+    /** The independent responder kill-switch flag (`"responderEnabled"` storage key) — NOT the same as `enabled` (the ambient loop's flag). */
+    enabled: boolean;
+    /** `Object.keys(watermark.refHeads).length` — how many refs the watermark currently tracks. */
+    refsTracked: number;
+    /** `watermark.knownForkRefs.length` — the fork-of-fork upstream candidate pool size. */
+    knownForkRefs: number;
+    /** Undrained response-queue intent count (`SchedulerState.responseQueue`). */
+    queueDepth: number;
+    /** `false` until the first successful poll (or explicitly-fresh watermark) has recorded at least one ref — mirrors `refsTracked > 0`, exposed as its own boolean since "has this instance EVER observed the room" is the operationally interesting question, not the exact count. */
+    watermarkInitialized: boolean;
+    budget: {
+      /** UTC day key (`YYYY-MM-DD`) the ledger's spend below is accounted against. */
+      dayKey: string;
+      /** Neurons spent on `dayKey` so far — `0` if `dayKey` isn't today (an unrolled-over ledger reads as "nothing spent today yet", mirrors `reply-budget.ts`'s own lazy-rollover semantics). */
+      usedNeurons: number;
+    };
+  };
+};
 
 export class Spammer extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -138,6 +249,22 @@ export class Spammer extends DurableObject<Env> {
         if (refreshed) await this.ctx.storage.put(CONTENT_POOLS_STORAGE_KEY, refreshed);
         return jsonResponse({ ...(await this.statusPayload()), contentRefreshed: refreshed !== null }, 200);
       }
+      case "responder-enable": {
+        // Same storage-flag pattern as "enable" above, but deliberately does
+        // NOT call `ensureAlarmScheduled` — the ambient loop (gated by
+        // `"enabled"`) is the ONLY thing that arms/owns the alarm; the
+        // responder piggybacks on whatever cadence is already running (or
+        // stays inert, still flagged on, if the ambient loop itself is off —
+        // #848: "independently killable from ambient traffic" cuts both
+        // ways, so it's also independently enable-able without implicitly
+        // starting the ambient loop).
+        await this.setResponderEnabled(true);
+        return jsonResponse(await this.statusPayload(), 200);
+      }
+      case "responder-disable": {
+        await this.setResponderEnabled(false);
+        return jsonResponse(await this.statusPayload(), 200);
+      }
       default:
         return jsonResponse({ error: `unknown action: ${action}` }, 400);
     }
@@ -151,6 +278,14 @@ export class Spammer extends DurableObject<Env> {
     return (await this.ctx.storage.get<boolean>("enabled")) ?? false;
   }
 
+  private async setResponderEnabled(value: boolean): Promise<void> {
+    await this.ctx.storage.put("responderEnabled", value);
+  }
+
+  private async isResponderEnabled(): Promise<boolean> {
+    return (await this.ctx.storage.get<boolean>("responderEnabled")) ?? false;
+  }
+
   /** Arms the first alarm only if none is already pending — never stomps an in-flight schedule. */
   private async ensureAlarmScheduled(): Promise<void> {
     const existing = await this.ctx.storage.getAlarm();
@@ -162,7 +297,25 @@ export class Spammer extends DurableObject<Env> {
   private async statusPayload(): Promise<ControlStatus> {
     // Read fresh (not cached) so a status call right after enable/disable
     // always reflects the value that call just wrote.
-    return { enabled: await this.isEnabled(), room: this.env.ROOM, poolSize: POOL_SIZE };
+    const now = Date.now();
+    const watermark = await this.loadObserverWatermark();
+    const meta = (await this.ctx.storage.get<SchedulerMeta>("schedulerMeta")) ?? DEFAULT_SCHEDULER_META;
+    const ledger = await this.loadReplyLedger(now);
+    const refsTracked = Object.keys(watermark.refHeads).length;
+
+    return {
+      enabled: await this.isEnabled(),
+      room: this.env.ROOM,
+      poolSize: POOL_SIZE,
+      responder: {
+        enabled: await this.isResponderEnabled(),
+        refsTracked,
+        knownForkRefs: watermark.knownForkRefs.length,
+        queueDepth: meta.responseQueue?.length ?? 0,
+        watermarkInitialized: refsTracked > 0,
+        budget: { dayKey: ledger.dayKey, usedNeurons: ledger.dayKey === utcDayKey(now) ? ledger.neuronsSpentToday : 0 },
+      },
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -181,9 +334,36 @@ export class Spammer extends DurableObject<Env> {
     try {
       const wasm = await getWasm();
       const pool = getIdentityPool(wasm.mkit);
-      const state = await this.loadSchedulerState();
+      let state = await this.loadSchedulerState();
       const now = Date.now();
-      const { events, nextState } = planTick(state, now);
+
+      // Responder polling (#854): piggybacks on this SAME alarm tick at a
+      // coarser cadence (`POLL_EVERY_N_TICKS`), and ONLY when
+      // `responderEnabled` — the ambient picks below run completely
+      // unconditionally regardless of this flag. `watermark` is loaded
+      // EVERY tick (cheap, a single storage.get) regardless of whether this
+      // tick polls, because `forkUpstreamsFromWatermark` below needs the
+      // freshest persisted watermark either way — see that function's doc
+      // comment for the deliberate #851/#854 coupling this creates.
+      let watermark = await this.loadObserverWatermark();
+      if (state.tick % POLL_EVERY_N_TICKS === 0 && (await this.isResponderEnabled())) {
+        try {
+          const polled = await this.pollAndEnqueueResponses(wasm, pool, watermark, state, now);
+          watermark = polled.watermark;
+          state = polled.state;
+          await this.ctx.storage.put("observerWatermark", watermark);
+        } catch (err) {
+          // A poll failure (network, malformed wasm response, transport
+          // hiccup, …) must never break the ambient tick it's piggybacking
+          // on — log and skip; the next poll (POLL_EVERY_N_TICKS ticks from
+          // now) simply tries again against the still-valid `watermark`
+          // this tick never advanced.
+          console.error("[spammer] responder poll failed — skipping this poll:", err);
+        }
+      }
+
+      const forkUpstreams = forkUpstreamsFromWatermark(watermark);
+      const { events, nextState } = planTick(state, now, forkUpstreams);
 
       // Persist floors + cursors/tick BEFORE emitting: if an emit throws (or
       // this whole alarm invocation throws and Cloudflare auto-retries it),
@@ -218,7 +398,7 @@ export class Spammer extends DurableObject<Env> {
       if (events.length > 0) {
         const contentPools = await this.ctx.storage.get<ContentPools>(CONTENT_POOLS_STORAGE_KEY);
         const ctx: EmitContext = { wasm, baseUrl: this.env.REPO_BASE_URL, contentPools };
-        await this.emitBatch(ctx, pool, events, nextState.tick);
+        await this.emitBatch(ctx, pool, events, nextState.tick, now);
       }
     } catch (err) {
       console.error("[spammer] alarm tick failed:", err);
@@ -246,16 +426,34 @@ export class Spammer extends DurableObject<Env> {
     }
   }
 
-  private async emitBatch(ctx: EmitContext, pool: Identity[], events: PlannedEvent[], tick: number): Promise<void> {
+  private async emitBatch(
+    ctx: EmitContext,
+    pool: Identity[],
+    events: PlannedEvent[],
+    tick: number,
+    now: number,
+  ): Promise<void> {
     const room = this.env.ROOM;
 
     // "remix" and "reaction" both need something real to point at; fetch the
-    // current `main` head at most once per tick, shared by both kinds.
-    const needsMainHead = events.some((e) => e.kind === "remix" || e.kind === "reaction");
+    // current `main` head at most once per tick, shared by both kinds — but
+    // ONLY for picks that actually fall back to it: a response pick already
+    // carries its own real target (`event.response.targetIdHex`, #850) and
+    // an ambient fork-of-fork remix pick already carries its own upstream
+    // (`event.remixUpstream.headHex`, #851), so neither needs `main`'s head
+    // at all.
+    const needsMainHead = events.some(
+      (e) => (e.kind === "remix" && !e.response && !e.remixUpstream) || (e.kind === "reaction" && !e.response),
+    );
     const mainHead = needsMainHead ? ((await ctx.wasm.repo.get_ref(ctx.baseUrl, room, MAIN_REF)) ?? null) : null;
 
+    // Response-chat text must be resolved BEFORE the concurrent emit step
+    // below — see `resolveChatTexts`'s own doc comment for why (shared,
+    // persisted AI-personalization budget ledger).
+    const chatTexts = await this.resolveChatTexts(ctx, events, tick, now);
+
     const results = await Promise.allSettled(
-      events.map((event, slot) => this.emitOne(ctx, room, pool, event, tick, slot, mainHead)),
+      events.map((event, slot) => this.emitOne(ctx, room, pool, event, tick, slot, mainHead, chatTexts)),
     );
     for (const [i, result] of results.entries()) {
       if (result.status === "rejected") {
@@ -276,6 +474,7 @@ export class Spammer extends DurableObject<Env> {
     tick: number,
     slot: number,
     mainHead: string | null,
+    chatTexts: ReadonlyMap<number, string>,
   ): Promise<unknown> {
     const identity = pool[event.identityIndex];
     if (!identity) throw new Error(`[spammer] no identity at pool index ${event.identityIndex}`);
@@ -285,23 +484,160 @@ export class Spammer extends DurableObject<Env> {
     const counter = tick * 97 + slot;
 
     switch (event.kind) {
-      case "chat":
-        return emitChat(ctx, room, identity, counter);
+      case "chat": {
+        // A response chat (#850) already has its text resolved (personalized
+        // AI reply, or `chooseReplyText`'s template fallback) — post it
+        // verbatim via `emitChatText`. An ambient chat pick has no entry in
+        // `chatTexts` at all and keeps using `emitChat`'s own pool pick,
+        // completely unchanged from before #854.
+        const text = chatTexts.get(slot);
+        return text !== undefined ? emitChatText(ctx, room, identity, text) : emitChat(ctx, room, identity, counter);
+      }
       case "commit":
         return emitCommit(ctx, room, identity, counter);
-      case "remix":
-        if (!mainHead) {
-          console.warn(`[spammer] tick ${tick}: no main head yet — skipping remix (identity #${identity.index})`);
+      case "remix": {
+        // Real-event target (#850) wins over a fork-of-fork upstream (#851),
+        // which wins over `main`'s tip (pre-#851 default) — the three are
+        // mutually exclusive on any one `PlannedEvent` per `scheduler.ts`'s
+        // own contract (`response` and `remixUpstream` are never both set).
+        const target = event.response?.targetIdHex ?? event.remixUpstream?.headHex ?? mainHead;
+        if (!target) {
+          console.warn(`[spammer] tick ${tick}: no remix target available — skipping remix (identity #${identity.index})`);
           return null;
         }
-        return emitRemix(ctx, room, identity, mainHead, counter);
-      case "reaction":
-        if (!mainHead) {
-          console.warn(`[spammer] tick ${tick}: no main head yet — skipping reaction (identity #${identity.index})`);
+        return emitRemix(ctx, room, identity, target, counter);
+      }
+      case "reaction": {
+        const target = event.response?.targetIdHex ?? mainHead;
+        if (!target) {
+          console.warn(`[spammer] tick ${tick}: no reaction target available — skipping reaction (identity #${identity.index})`);
           return null;
         }
-        return emitReaction(ctx, room, identity, mainHead, counter);
+        return emitReaction(ctx, room, identity, target, counter);
+      }
     }
+  }
+
+  /**
+   * Resolve the post TEXT for every response-chat event (`event.kind ===
+   * "chat" && event.response`, issue #850) in `events`, BEFORE `emitBatch`'s
+   * concurrent `Promise.allSettled` emit step. Deliberately sequential (not
+   * folded into `emitOne`'s per-event concurrency): personalization spends a
+   * SHARED, DO-storage-persisted budget ledger (`reply-budget.ts`), and two
+   * response chats resolving concurrently against the same in-memory
+   * `LedgerState` value could both pass `canPersonalize` and double-spend
+   * before either one's `recordCall` gets persisted. Resolving in order, one
+   * `ledger` variable threaded through the loop, makes "checked ⇒ spent"
+   * hold for the ledger the same way `scheduler.ts`'s floor arrays already
+   * make it hold for identities (see `alarm()`'s "persist BEFORE emitting"
+   * comment for the parallel).
+   *
+   * Personalization requires BOTH `env.AI_REPLY_PERSONALIZATION === "true"`
+   * (opt-in, default unset — mirrors `AI_CONTENT_AUTO_REFRESH`'s posture,
+   * and #855's rollout: zero budget granted until the template pipeline is
+   * proven) AND `canPersonalize(ledger, now)` (the hard daily budget/spacing
+   * gate). `recordCall` is applied ONLY when `generatePersonalizedReply`
+   * returns non-null — it never throws (see its own doc comment) but DOES
+   * legitimately return `null` on a quota/network/validation failure, which
+   * must fall back to `chooseReplyText` WITHOUT spending budget on a call
+   * that produced nothing usable. The ledger is read from (and, if touched,
+   * written back to) storage at most once per tick, and only if
+   * personalization was actually attempted — an unset flag or an
+   * already-exhausted budget never touches storage for this at all.
+   */
+  private async resolveChatTexts(
+    ctx: EmitContext,
+    events: PlannedEvent[],
+    tick: number,
+    now: number,
+  ): Promise<Map<number, string>> {
+    const texts = new Map<number, string>();
+    let ledger: LedgerState | null = null;
+
+    for (let slot = 0; slot < events.length; slot++) {
+      const event = events[slot]!;
+      if (event.kind !== "chat" || !event.response) continue;
+
+      const counter = tick * 97 + slot;
+      let personalized: string | null = null;
+
+      if (this.env.AI_REPLY_PERSONALIZATION === "true") {
+        ledger ??= await this.loadReplyLedger(now);
+        if (canPersonalize(ledger, now)) {
+          const request: PersonalizedReplyEvent = {
+            shortHash: event.response.targetIdHex.slice(0, REPLY_SHORT_HEX_LEN),
+            shortAuthor: event.response.realAuthorPubkeyHex.slice(0, REPLY_SHORT_HEX_LEN),
+            branch: event.response.ref === MAIN_REF ? undefined : event.response.ref,
+          };
+          personalized = await generatePersonalizedReply(this.env.AI, request);
+          if (personalized !== null) ledger = recordCall(ledger, now);
+        }
+      }
+
+      texts.set(slot, personalized ?? chooseReplyText(ctx.contentPools, event.response, counter));
+    }
+
+    if (ledger !== null) await this.ctx.storage.put("replyBudgetLedger", ledger);
+    return texts;
+  }
+
+  /**
+   * The poll-and-diff half of the responder (#854): list every ref, page
+   * `list_commits` only for the ones {@link refsNeedingFetch} says moved
+   * (or are new), hand the result to `observer.ts`'s pure `observe`, and
+   * enqueue a response bundle (`scheduler.ts`'s `enqueueResponseBundle`) for
+   * each real event it detected. ALL the decidable logic here — which refs
+   * to fetch, how to trim/cap each page, which authors are synthetic, the
+   * diff itself, bundle composition — lives in `responder.ts`/`observer.ts`/
+   * `scheduler.ts`; this method is pure I/O sequencing.
+   */
+  private async pollAndEnqueueResponses(
+    wasm: WasmApi,
+    pool: Identity[],
+    watermark: ObserverWatermark,
+    state: SchedulerState,
+    now: number,
+  ): Promise<{ watermark: ObserverWatermark; state: SchedulerState }> {
+    const room = this.env.ROOM;
+
+    const rawRefs = (await wasm.repo.list_refs(this.env.REPO_BASE_URL, room, "")) as RawRefEntry[];
+    const refs: RefEntry[] = rawRefs.map((r) => ({ name: r.name, headHex: r.objectIdHex }));
+
+    const fetchedCommitPagesByRef: Record<string, CommitMeta[]> = {};
+    for (const ref of refsNeedingFetch(watermark, refs)) {
+      const page = (await wasm.repo.list_commits(
+        this.env.REPO_BASE_URL,
+        room,
+        ref.name,
+        "",
+        COMMIT_PAGE_SIZE,
+      )) as RawCommitsPage;
+      fetchedCommitPagesByRef[ref.name] = page.commits;
+    }
+
+    const snapshot = buildSnapshot(refs, fetchedCommitPagesByRef, watermark);
+    const syntheticPubkeys = mergedSyntheticPubkeys(pool, this.env.RESPONDER_NONHUMAN_ALLOWLIST);
+    const { realEvents, nextWatermark } = observe(watermark, snapshot, syntheticPubkeys);
+
+    // `RealEvent` (observer.ts) and `RealEventRef` (scheduler.ts) are the
+    // SAME shape by design — #849 and #850 were built as independent,
+    // parallel-buildable modules (see scheduler.ts's `RealEventRef` doc
+    // comment) that #854 is what reconciles; passing one where the other is
+    // typed needs no adapter.
+    let nextState = state;
+    for (const event of realEvents) {
+      nextState = enqueueResponseBundle(nextState, event, now);
+    }
+
+    return { watermark: nextWatermark, state: nextState };
+  }
+
+  private async loadObserverWatermark(): Promise<ObserverWatermark> {
+    return (await this.ctx.storage.get<ObserverWatermark>("observerWatermark")) ?? initialObserverWatermark();
+  }
+
+  private async loadReplyLedger(now: number): Promise<LedgerState> {
+    return (await this.ctx.storage.get<LedgerState>("replyBudgetLedger")) ?? initialLedgerState(now);
   }
 
   // -------------------------------------------------------------------------
@@ -350,6 +686,12 @@ export class Spammer extends DurableObject<Env> {
       pushCursor: state.pushCursor,
       reactionCursor: state.reactionCursor,
       tick: state.tick,
+      // Round-trip #850/#851's optional response-scheduling fields the SAME
+      // way the cursors/tick counter already round-trip — see this class's
+      // top storage-layout comment and `SchedulerMeta`'s own doc comment.
+      responseQueue: state.responseQueue,
+      lastBundleMsByAuthor: state.lastBundleMsByAuthor,
+      reactionIdentitiesByBundle: state.reactionIdentitiesByBundle,
     };
     await this.ctx.storage.put("schedulerMeta", meta);
   }

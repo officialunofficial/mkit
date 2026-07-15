@@ -112,6 +112,49 @@ describe("spammer.ts — resolveAction", () => {
     });
     expect(await resolveAction(request, new URL(request.url))).toBe("status");
   });
+
+  // #854: the responder gets its own enable/disable actions on the SAME
+  // `/control` surface, resolved by the SAME `resolveAction` helper — no
+  // action-specific parsing anywhere, so these two just mirror the
+  // "enable"/"disable" coverage above with the new action names.
+  it("resolves the new responder-enable action via the ?action= query param", async () => {
+    const request = new Request("https://example.invalid/control?action=responder-enable", { method: "POST" });
+    expect(await resolveAction(request, new URL(request.url))).toBe("responder-enable");
+  });
+
+  it("resolves the new responder-disable action via a POST JSON body", async () => {
+    const request = new Request("https://example.invalid/control", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "responder-disable" }),
+    });
+    expect(await resolveAction(request, new URL(request.url))).toBe("responder-disable");
+  });
+});
+
+// #854: `isAuthorized` (tested above) never inspects WHICH action is being
+// requested — the token check happens before `resolveAction` is even called
+// on the real `/control` path (see spammer.ts's `fetch`), so "the new
+// control actions are rejected without/with-wrong token exactly like
+// existing actions" already follows from `isAuthorized`'s existing coverage
+// being action-agnostic. This block makes that explicit for the two new
+// action names specifically, rather than leaving it merely implied.
+describe("spammer.ts — responder-enable/responder-disable are token-gated like every other action", () => {
+  it("rejects a responder-enable request with no Authorization header", () => {
+    expect(isAuthorized(requestWithAuth(undefined), "secret-token")).toBe(false);
+  });
+
+  it("rejects a responder-enable/responder-disable request with the wrong token", () => {
+    expect(isAuthorized(requestWithAuth("Bearer wrong-token"), "secret-token")).toBe(false);
+  });
+
+  it("rejects EVERY responder action when CONTROL_TOKEN is unset, same as every existing action", () => {
+    expect(isAuthorized(requestWithAuth("Bearer anything-at-all"), undefined)).toBe(false);
+  });
+
+  it("accepts a well-formed Bearer header matching the expected token, same as every existing action", () => {
+    expect(isAuthorized(requestWithAuth("Bearer secret-token"), "secret-token")).toBe(true);
+  });
 });
 
 describe("spammer.ts — jsonResponse", () => {
