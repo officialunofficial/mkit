@@ -355,7 +355,14 @@ on everyday operations.
 Component microbenchmarks &mdash; signature throughput by algorithm, and
 object-commit/pack-create against `git2` and the `git` CLI &mdash; live in
 [`benchmarks/charts/`](benchmarks/charts/). Numbers vary by
-hardware, kernel, filesystem, and cache warmth; reproduce locally with:
+hardware, kernel, filesystem, and cache warmth. Pack creation at 1 MiB
+file sizes, the case mkit's chunked and parallel design targets:
+
+![Pack creation wallclock at 10 files x 1 MiB: mkit finishes in 32 ms versus 174 ms for git2 and 499 ms for git pack-objects](benchmarks/charts/pack_create-10__1_mib.svg)
+
+![Pack creation wallclock at 100 files x 1 MiB: mkit finishes in 206 ms versus 3,025 ms for git pack-objects and 6,695 ms for git2](benchmarks/charts/pack_create-100__1_mib.svg)
+
+Reproduce locally with:
 
 ```sh
 # Name the bench targets explicitly. The `--workspace -- --quick`
