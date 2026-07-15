@@ -73,6 +73,36 @@ export const REMIX_MESSAGE_PHRASES: readonly string[] = [
 ] as const;
 
 /**
+ * Reply-template phrases for {@link fillReplyTemplate} in `ai-content.ts` —
+ * the curated fallback for the new "reply" category (see that module's doc
+ * comment). Unlike the other pools, entries here carry substitution slots
+ * (`{hash}`, `{author}`, `{branch}` — see `ai-content.ts`'s `ALLOWED_REPLY_SLOTS`)
+ * filled in deterministically at emit time, so a real user's push is
+ * acknowledged by name without ever needing a per-event AI call.
+ *
+ * Same empty-tree honesty voice as the other pools: every line acknowledges
+ * the ACT of signing/pushing/forking, never invents a claim about content
+ * that doesn't exist, and never addresses anyone by an invented name — only
+ * the short hash/author-key/branch slots a real event actually supplies.
+ * Mixed deliberately: some entries use `{branch}` (only ever picked by a
+ * caller when the push landed on a non-`main` branch — see
+ * `fillReplyTemplate`'s doc comment), most don't (so `main` pushes, the
+ * common case, always have plenty of eligible templates).
+ */
+export const REPLY_TEMPLATES: readonly string[] = [
+  "gm {author} — saw that signed push, {hash} landed clean",
+  "{hash} verified and in the log, nice one {author}",
+  "another signed commit from {author} — {hash} checks out",
+  "welcome to the feed {author}, {hash} is officially content-addressed",
+  "{author} pushed to {branch} — {hash} is live over there",
+  "nice fork {author}, {branch} now has its own signed history",
+  "{hash} on {branch} — good to see activity off main too",
+  "spotted {hash} — signed, verified, no funny business {author}",
+  "{author}'s {hash} just joined the log, gm",
+  "solid push {author}, {hash} is a real signed object now",
+] as const;
+
+/**
  * The closed emoji allowlist a reaction may use — MUST match
  * `apps/repo-worker/src/chat.rs::REACTION_EMOJI` exactly (the server rejects
  * anything outside this set), which itself must match the web client's
