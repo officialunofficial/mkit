@@ -23,9 +23,52 @@ import type { ChatMessageEntry, ReactionEntry, RefEntry } from './backend'
 
 export type RepoConnectClient = ReturnType<typeof createClient<typeof RepoService>>
 
+/**
+ * True if `bytes` begins with the gzip magic number (`0x1f 0x8b`) — mirrors `mkit-repo-client`'s `is_gzip`
+ * (`rust/crates/mkit-repo-client/src/transport.rs`). Exported for tests.
+ */
+export function isGzip(bytes: Uint8Array): boolean {
+  return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b
+}
+
+/**
+ * A Cloudflare Workers quirk (already documented and worked around once, in `mkit-repo-client`'s wasm transport — see
+ * that crate's `transport.rs` doc comment): repo-worker's `connectrpc` gzip-compresses any response over 1 KiB and
+ * correctly sets `Content-Encoding: gzip` when it does (`connectrpc::service` — verified server-side), but somewhere
+ * between there and this client the header gets stripped while the body stays gzip-compressed — so a spec-compliant
+ * client (this one) never decompresses it and fails trying to parse gzip bytes as JSON.
+ *
+ * Unlike the Rust `connectrpc` crate (which has ITS OWN protocol-level gzip decompressor and only needed the header
+ * re-asserted to trigger it), `@connectrpc/connect-web`'s unary JSON transport has no such fallback — it relies
+ * entirely on the browser's transport-level auto-decompression, which only fires for a `Response` that came directly
+ * off the wire (not one reconstructed in JS). So this wrapper does the decompression itself, via the standard
+ * `DecompressionStream` API (supported in every modern browser and in Cloudflare Workers/workerd) — not just re-declare
+ * the header.
+ *
+ * Sniffs the gzip magic number rather than trusting any response header, exactly like the Rust workaround: correct
+ * regardless of whether the (already-broken) `Content-Encoding` header is present, absent, or lying.
+ */
+export async function gzipAwareFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init)
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  if (!isGzip(bytes)) {
+    // Not gzip — reconstruct a fresh Response over the SAME bytes (the
+    // original body was already consumed by `arrayBuffer()` above) rather
+    // than assuming the caller can re-read a consumed body.
+    return new Response(bytes, { status: res.status, statusText: res.statusText, headers: res.headers })
+  }
+  const decompressedStream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+  const decompressed = await new Response(decompressedStream).arrayBuffer()
+  const headers = new Headers(res.headers)
+  // The body is no longer encoded — drop the (already-unreliable) header
+  // rather than leave a stale claim that could confuse a LATER consumer.
+  headers.delete('content-encoding')
+  return new Response(decompressed, { status: res.status, statusText: res.statusText, headers })
+}
+
 /** Build a typed `RepoService` Connect client bound to `baseUrl` (JSON wire format, matching the server's default). */
 export function createRepoConnectClient(baseUrl: string): RepoConnectClient {
-  return createClient(RepoService, createConnectTransport({ baseUrl }))
+  return createClient(RepoService, createConnectTransport({ baseUrl, fetch: gzipAwareFetch }))
 }
 
 /** Hex-encode a proto `bytes` field, or `''` for an empty/absent one (mirrors the wasm client's convention). */
