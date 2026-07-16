@@ -6,10 +6,34 @@ import { sanitizeTitle } from "./title";
 
 const app = new Hono();
 
-// Title-only card (matching the Modal docs social image): the brand by default.
-// The description still travels in the page's og:description meta tag; it is not
-// drawn on the image.
+// Title-first card in the same family as polychrome's social image (white
+// card, black/greyscale type, brand-gradient rule at the foot). The
+// description still travels in the page's og:description meta tag and is NOT
+// drawn unless a caller explicitly passes ?description= — mkit.sh's <Seo>
+// sends title only, so its cards stay title-only like before.
 const DEFAULT_TITLE = "mkit";
+
+// Tagline drawn under the brand-only default card (og.mkit.sh hit with no
+// ?title= — no mkit.sh page produces that, every page passes its own title).
+// Kept under the {@link MAX_DESCRIPTION_WORDS} cap.
+const DEFAULT_DESCRIPTION = "Version control that signs every commit — Ed25519 signatures, BLAKE3 hashes, attestations built in.";
+
+/** Hard cap on the words drawn in the description line — one small sentence, never a paragraph. */
+const MAX_DESCRIPTION_WORDS = 15;
+
+/** First {@link MAX_DESCRIPTION_WORDS} words of `text` (whitespace-split), unchanged when already within the cap. */
+function capWords(text: string): string {
+  const words = text.split(/\s+/);
+  return words.length <= MAX_DESCRIPTION_WORDS ? text : words.slice(0, MAX_DESCRIPTION_WORDS).join(" ");
+}
+
+/**
+ * Sunset accent: the pink→yellow leg of the brand gradient, using the exact
+ * hex stops from mkit.sh's `--gradient-h` (apps/web/src/styles.css — keep in
+ * sync with that variable). Drawn as the card's footer rule, standing in for
+ * polychrome's red→magenta accent line.
+ */
+const ACCENT_GRADIENT = "linear-gradient(90deg, #fa7cfa 0%, #f5ca23 100%)";
 
 // The colourful BLAKE3-grid mark — mkit's brand mark, the single pop of colour
 // next to the mono wordmark.
@@ -25,17 +49,24 @@ const SCALE = 2;
 const CACHE_CONTROL = "public, max-age=31536000, immutable";
 
 app.get("/", async (c) => {
-  const title = sanitizeTitle(c.req.query("title"), DEFAULT_TITLE);
+  const rawTitle = c.req.query("title");
+  const title = sanitizeTitle(rawTitle, DEFAULT_TITLE);
+  // Subtitle line: an explicit ?description= wins; the brand-only default card
+  // (no title given) gets the built-in tagline; a titled card with no
+  // description stays title-only. Empty means the Text node is skipped.
+  const isBrandCard = sanitizeTitle(rawTitle, "") === "";
+  const description = capWords(sanitizeTitle(c.req.query("description"), isBrandCard ? DEFAULT_DESCRIPTION : ""));
 
   const s = SCALE;
-  // Flat-black, minimal layout (modal.com/docs social image): grid mark + "mkit"
-  // wordmark top-left, one large left-aligned title in the upper area, a hairline
-  // rule at the foot, lots of negative space between.
+  // White, minimal layout in polychrome's social-card family: grid mark +
+  // "mkit" wordmark top-left, one large left-aligned near-black title (plus an
+  // optional grey subtitle) in the upper area, the brand-gradient rule at the
+  // foot, lots of negative space between.
   const html = VStack(
     {
       width: 1200 * s,
       height: 630 * s,
-      backgroundColor: "#000000",
+      backgroundColor: "#ffffff",
       padding: 64 * s,
       fontFamily: "'Geist', sans-serif",
     },
@@ -47,7 +78,7 @@ app.get("/", async (c) => {
           marginLeft: 16 * s,
           fontSize: 32 * s,
           fontWeight: 700,
-          color: "#ffffff",
+          color: "#111111",
           letterSpacing: -1 * s,
         },
         "mkit",
@@ -58,17 +89,36 @@ app.get("/", async (c) => {
         marginTop: 44 * s,
         fontSize: 76 * s,
         fontWeight: 600,
-        color: "#ffffff",
+        color: "#111111",
         letterSpacing: -2.5 * s,
         lineHeight: 1.05,
       },
       title,
     ),
+    ...(description
+      ? [
+          // 60% of the title size, regular weight, 50%-black — one quiet
+          // informative sentence, never competing with the title.
+          Text(
+            {
+              marginTop: 26 * s,
+              maxWidth: (1200 - 128) * s,
+              fontSize: 46 * s,
+              fontWeight: 400,
+              color: "rgba(0, 0, 0, 0.5)",
+              letterSpacing: -0.5 * s,
+              lineHeight: 1.3,
+            },
+            description,
+          ),
+        ]
+      : []),
     Box({ flex: 1 }),
-    Box({ height: 1 * s, width: "100%", backgroundColor: "#333333" }),
+    Box({ height: 8 * s, width: "100%", backgroundImage: ACCENT_GRADIENT }),
   );
 
   const fonts = await loadGoogleFonts([
+    { family: "Geist", weight: 400 },
     { family: "Geist", weight: 600 },
     { family: "Geist", weight: 700 },
   ]);
