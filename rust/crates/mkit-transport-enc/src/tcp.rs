@@ -19,7 +19,7 @@
 //!
 //! 1. A `commonware_runtime::BufferPool` to feed
 //!    `commonware_stream::encrypted::Sender` / `Receiver`.
-//! 2. A `Clock + CryptoRngCore + BufferPooler` value to pass into
+//! 2. A `Clock + CryptoRng + BufferPooler` value to pass into
 //!    `encrypted::dial` / `listen`.
 //!
 //! `BufferPool` is reference-counted (Arc inside) — once we have a
@@ -51,8 +51,7 @@ use commonware_runtime::{BufferPool, BufferPooler, Clock, Runner as _};
 use commonware_stream::encrypted::{dial, listen};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use mkit_core::protocol::async_shim::Executor;
-use rand::rngs::OsRng;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{TryCryptoRng, TryRng, UnwrapErr};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::tokio_io::{TokioSink, TokioStream, split_tcp};
@@ -150,10 +149,10 @@ impl Executor for TokioExecutor {
 }
 
 // ---------------------------------------------------------------------------
-// TokioContext — minimal Clock + RngCore + BufferPooler stand-in
+// TokioContext — minimal Clock + CryptoRng + BufferPooler stand-in
 // ---------------------------------------------------------------------------
 
-/// Minimal `BufferPooler + CryptoRngCore + Clock` context, just
+/// Minimal `BufferPooler + CryptoRng + Clock` context, just
 /// barely enough to drive `commonware_stream::encrypted::{dial, listen}`.
 ///
 /// We don't try to be a drop-in replacement for
@@ -195,22 +194,27 @@ impl BufferPooler for TokioContext {
     }
 }
 
-impl RngCore for TokioContext {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+// `TryRng<Error = Infallible>` gives `Rng` for free; `TryCryptoRng`
+// (also infallible) gives `CryptoRng` for free — both via blanket
+// impls in `rand_core`, so neither is implemented directly here.
+// `UnwrapErr` bridges `getrandom::SysRng` (fallible: `getrandom::Error`)
+// to the infallible shape, panicking only if the OS random source
+// itself fails.
+impl TryRng for TokioContext {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        UnwrapErr(getrandom::SysRng).try_next_u32()
     }
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        UnwrapErr(getrandom::SysRng).try_next_u64()
     }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        UnwrapErr(getrandom::SysRng).try_fill_bytes(dest)
     }
 }
 
-impl CryptoRng for TokioContext {}
+impl TryCryptoRng for TokioContext {}
 
 impl GClock for TokioContext {
     type Instant = SystemTime;

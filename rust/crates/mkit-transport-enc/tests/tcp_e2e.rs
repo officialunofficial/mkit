@@ -209,7 +209,7 @@ fn bootstrap_buffer_pool() -> commonware_runtime::BufferPool {
     .expect("pool bootstrap thread")
 }
 
-/// Minimal `Clock` / `RngCore` / `BufferPooler` implementation for the
+/// Minimal `Clock` / `CryptoRng` / `BufferPooler` implementation for the
 /// listener side. Duplicates the lib's private `TokioContext`
 /// because the lib type is `pub(crate)` and this test lives outside
 /// the crate. That type may be promoted to `pub` if a third caller
@@ -231,21 +231,23 @@ impl commonware_runtime::BufferPooler for MiniContext {
         &self.pool
     }
 }
-impl rand_core::RngCore for MiniContext {
-    fn next_u32(&mut self) -> u32 {
-        rand::rngs::OsRng.next_u32()
+// `TryRng<Error = Infallible>` / `TryCryptoRng` give `Rng` / `CryptoRng`
+// for free via blanket impls (see `tcp.rs`'s `TokioContext` for the
+// same pattern this duplicates).
+impl rand_core::TryRng for MiniContext {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        rand_core::UnwrapErr(getrandom::SysRng).try_next_u32()
     }
-    fn next_u64(&mut self) -> u64 {
-        rand::rngs::OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        rand_core::UnwrapErr(getrandom::SysRng).try_next_u64()
     }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        rand::rngs::OsRng.fill_bytes(dest);
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        rand::rngs::OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        rand_core::UnwrapErr(getrandom::SysRng).try_fill_bytes(dest)
     }
 }
-impl rand_core::CryptoRng for MiniContext {}
+impl rand_core::TryCryptoRng for MiniContext {}
 impl governor::clock::Clock for MiniContext {
     type Instant = std::time::SystemTime;
     fn now(&self) -> Self::Instant {

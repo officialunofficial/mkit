@@ -51,7 +51,7 @@ thiserror = "2"
 # mkit-rpc (mkit-cli, mkit-attest, mkit-transport-enc,
 # mkit-transport-ssh) also depends on mkit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
-mkit-core = { version = "0.3", path = "../mkit-core", default-features = false }
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 
 [build-dependencies]
 buffa-build = "0.8.1"

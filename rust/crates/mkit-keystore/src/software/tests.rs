@@ -1044,7 +1044,7 @@ fn mode(path: &Path) -> u32 {
 fn bls_share_storage_round_trip_and_verify() {
     use commonware_codec::{DecodeExt, Encode as _};
     use commonware_cryptography::bls12381::primitives::group::Share;
-    use commonware_utils::{NZU32, test_rng_seeded};
+    use commonware_utils::{NZU32, TestRng};
     use mkit_attest::Signer as _;
     use tempfile::TempDir;
 
@@ -1055,7 +1055,7 @@ fn bls_share_storage_round_trip_and_verify() {
     );
 
     // 3-of-4 cohort via the in-tree trusted dealer.
-    let mut rng = test_rng_seeded(0xF00D);
+    let mut rng = TestRng::new(0xF00D);
     let (sharing, shares) = mkit_attest::bls_threshold_trusted_dealer(&mut rng, NZU32!(4));
     let agg_pubkey = sharing.public().encode().to_vec();
     let keyid = format!(
@@ -1125,7 +1125,7 @@ fn bls_share_storage_round_trip_and_verify() {
 #[test]
 fn bls_share_aad_binds_cohort_metadata() {
     use commonware_codec::Encode as _;
-    use commonware_utils::{NZU32, test_rng_seeded};
+    use commonware_utils::{NZU32, TestRng};
     use tempfile::TempDir;
 
     let dir = TempDir::new().expect("tempdir");
@@ -1134,7 +1134,7 @@ fn bls_share_aad_binds_cohort_metadata() {
         Arc::new(TestProtector) as Arc<dyn KeyProtector>,
     );
 
-    let mut rng = test_rng_seeded(0xC0DE);
+    let mut rng = TestRng::new(0xC0DE);
     let (sharing, shares) = mkit_attest::bls_threshold_trusted_dealer(&mut rng, NZU32!(4));
     let agg_pubkey = sharing.public().encode().to_vec();
     let label = KeyLabel::new("aad-bind").unwrap();

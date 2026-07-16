@@ -788,10 +788,10 @@ mod tests {
             KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
         };
         use commonware_codec::Encode as _;
-        use commonware_utils::{NZU32, test_rng_seeded};
+        use commonware_utils::{NZU32, TestRng};
 
         // 3-of-4 cohort.
-        let mut rng = test_rng_seeded(0xBEEF);
+        let mut rng = TestRng::new(0xBEEF);
         let (sharing, shares) = trusted_dealer(&mut rng, NZU32!(4));
         let agg_pubkey = sharing.public().encode().to_vec();
         let keyid = format!("{KEYID_PREFIX}{}", mkit_core::to_hex_bytes(&agg_pubkey));
@@ -851,9 +851,9 @@ mod tests {
             KEYID_PREFIX, ThresholdSigner, aggregate, trusted_dealer,
         };
         use commonware_codec::Encode as _;
-        use commonware_utils::{NZU32, test_rng_seeded};
+        use commonware_utils::{NZU32, TestRng};
 
-        let mut rng = test_rng_seeded(0xCAFE);
+        let mut rng = TestRng::new(0xCAFE);
         let (sharing, shares) = trusted_dealer(&mut rng, NZU32!(4));
         let agg_pubkey = sharing.public().encode().to_vec();
         let keyid = format!("{KEYID_PREFIX}{}", mkit_core::to_hex_bytes(&agg_pubkey));
