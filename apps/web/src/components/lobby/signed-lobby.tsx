@@ -414,6 +414,55 @@ function Row({
  * own avatar, and the new remix's short hash stands in for the (auto-generated, not human-meaningful) fork ref name. A
  * plain commit push keeps showing `{hash} to {ref}` since `ref` (usually `main`) IS meaningful there.
  */
+/**
+ * The little glyph that tells commit-activity rows apart at a glance: a commit
+ * dot for a plain push to `main`, a branch glyph for a push to any other
+ * (non-fork) ref, and a fork glyph for a remix. Same inline-SVG conventions as
+ * the rest of this file (stroke=currentColor, no icon library) so it inherits
+ * the row's muted/hover color for free.
+ */
+function CommitKindIcon({ kind }: { kind: 'commit' | 'branch' | 'remix' }) {
+  const label = kind === 'remix' ? 'remix' : kind === 'branch' ? 'branch push' : 'commit'
+  return (
+    <svg
+      width='13'
+      height='13'
+      viewBox='0 0 24 24'
+      fill='none'
+      stroke='currentColor'
+      strokeWidth='1.8'
+      role='img'
+      aria-label={label}
+      className='shrink-0'
+    >
+      <title>{label}</title>
+      {kind === 'remix' ? (
+        // git-fork: two upstream dots merging down into one
+        <>
+          <circle cx='6' cy='5.5' r='2.5' />
+          <circle cx='18' cy='5.5' r='2.5' />
+          <circle cx='12' cy='18.5' r='2.5' />
+          <path d='M6 8v1.5a4 4 0 0 0 4 4h4a4 4 0 0 0 4-4V8M12 13.5V16' strokeLinecap='round' />
+        </>
+      ) : kind === 'branch' ? (
+        // git-branch: a line with a branch splitting off to a second dot
+        <>
+          <circle cx='7' cy='6' r='2.5' />
+          <circle cx='7' cy='18' r='2.5' />
+          <circle cx='17' cy='8' r='2.5' />
+          <path d='M7 8.5v7M17 10.5a7 7 0 0 1-7 5' strokeLinecap='round' />
+        </>
+      ) : (
+        // git-commit: a dot on the line
+        <>
+          <circle cx='12' cy='12' r='3.5' />
+          <path d='M2.5 12h6M15.5 12h6' strokeLinecap='round' />
+        </>
+      )}
+    </svg>
+  )
+}
+
 function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; onOpen: () => void }) {
   const api = useMkit()
   const e = item.entry
@@ -421,6 +470,7 @@ function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; 
   const source = isRemix ? e.sources?.[0] : undefined
   const sourceObj = useObject(room, source?.commitHashHex ?? null)
   const sourceAuthor = useMemo(() => decodeAuthorPubkey(api, sourceObj.data ?? null), [api, sourceObj.data])
+  const iconKind = isRemix || isForkRef(e.ref) ? 'remix' : e.ref === 'main' ? 'commit' : 'branch'
   return (
     <div className='px-4 py-1'>
       <button
@@ -429,6 +479,7 @@ function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; 
         title='View commit details'
         className='group/sys mx-auto flex w-full max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-1.5 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
       >
+        <CommitKindIcon kind={iconKind} />
         <PlayerAvatar pubkey={e.authorPubkey} size={16} />
         <PlayerLabel pubkey={e.authorPubkey} className='font-medium text-fg' />
         <span>{isRemix ? 'remixed' : 'pushed'}</span>
