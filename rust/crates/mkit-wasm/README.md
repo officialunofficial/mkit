@@ -7,11 +7,11 @@ No filesystem or network access is performed inside the wasm module. It is a sta
 ## Install
 
 ```sh
-bun add @makechain/mkit-wasm
+bun add @officialunofficial/mkit-wasm
 # or
-npm i @makechain/mkit-wasm
+npm i @officialunofficial/mkit-wasm
 # or
-pnpm add @makechain/mkit-wasm
+pnpm add @officialunofficial/mkit-wasm
 ```
 
 The published package is built with `wasm-pack --target bundler`. It works out of the box with esbuild, Wrangler, Vite, webpack, and Rollup. For direct `<script type="module">` usage without a bundler, build the crate yourself with `--target web`.
@@ -28,7 +28,7 @@ import {
   commit_verify,
   attest_build,
   attest_verify,
-} from "@makechain/mkit-wasm";
+} from "@officialunofficial/mkit-wasm";
 
 const id = blake3_hex(new TextEncoder().encode("hello"));
 console.log(id); // 64-char lowercase hex
@@ -45,7 +45,7 @@ the package also exports `mkit_wasm_init(module)`: compile a
 `WebAssembly.Module` yourself and inject it once before the first call.
 
 ```ts
-import { mkit_wasm_init, blake3_hex } from "@makechain/mkit-wasm";
+import { mkit_wasm_init, blake3_hex } from "@officialunofficial/mkit-wasm";
 // `wasmModule` is a WebAssembly.Module you compiled/imported for your runtime.
 mkit_wasm_init(wasmModule);
 
@@ -89,7 +89,7 @@ TypeScript declarations shipped in the package for full signatures.
 
 This package is generated from the `mkit-wasm` crate inside the mkit Rust
 workspace (`rust/crates/mkit-wasm`). Each npm release is built from a tagged
-commit, so `@makechain/mkit-wasm@0.3.0` on npm corresponds to tag `v0.3.0`.
+commit, so `@officialunofficial/mkit-wasm@X.Y.Z` on npm corresponds to tag `vX.Y.Z`.
 
 The wasm bundle wraps the same Rust crates the native `mkit` CLI uses,
 so on-disk objects produced here are byte-identical to those produced

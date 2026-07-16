@@ -176,18 +176,18 @@ if [ "$skip_npm" -eq 1 ]; then
 elif ! command -v npm >/dev/null 2>&1; then
   warn "npm not installed — skipping npm checks"
 else
-  note "checking @makechain/mkit-wasm@${version} on npm"
-  if ! npm view "@makechain/mkit-wasm@${version}" >/dev/null; then
-    error "npm view @makechain/mkit-wasm@${version} failed"
+  note "checking @officialunofficial/mkit-wasm@${version} on npm"
+  if ! npm view "@officialunofficial/mkit-wasm@${version}" >/dev/null; then
+    error "npm view @officialunofficial/mkit-wasm@${version} failed"
   fi
   npm_dir="$(mktemp -d)"
   trap 'rm -rf "$work_dir" "$repo_dir" "$npm_dir"' EXIT
   (
     cd "$npm_dir"
     npm init -y >/dev/null
-    npm install --save-exact "@makechain/mkit-wasm@${version}" >/dev/null
+    npm install --save-exact "@officialunofficial/mkit-wasm@${version}" >/dev/null
     npm audit signatures
-  ) || error "npm audit signatures failed for @makechain/mkit-wasm@${version}"
+  ) || error "npm audit signatures failed for @officialunofficial/mkit-wasm@${version}"
 fi
 
 if [ "$fail" -ne 0 ]; then

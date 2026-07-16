@@ -709,7 +709,7 @@ jobs:
             ### npm package
 
             The WASM bindings are also published to npm as
-            [`@makechain/mkit-wasm`](https://www.npmjs.com/package/@makechain/mkit-wasm) at the
+            [`@officialunofficial/mkit-wasm`](https://www.npmjs.com/package/@officialunofficial/mkit-wasm) at the
             same version, with Sigstore-backed provenance attached to this
             workflow run.
 
@@ -773,6 +773,12 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      # Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22's bundled npm
+      # on GitHub-hosted runners drifts with each LTS patch, so pin
+      # explicitly rather than trust whatever ships that day.
+      - name: Ensure npm >= 11.5.1 (Trusted Publishing requirement)
+        run: npm install -g npm@^11.5.1
+
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked --version 0.13.1
 
@@ -799,23 +805,13 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           # Override the npm package name to the scoped form. The Rust
-          # crate stays unscoped (`mkit-wasm`); the npm distribution
-          # name is `@makechain/mkit-wasm` because the release token
-          # is a Granular Access Token scoped to that npm org.
-          # See docs/RELEASE.md for rationale + rotation steps.
-          npm pkg set name=@makechain/mkit-wasm
+          # crate stays unscoped (`mkit-wasm`); the npm distribution name
+          # is `@officialunofficial/mkit-wasm`, matching the GitHub org
+          # this repo lives under. See docs/RELEASE.md for rationale.
+          npm pkg set name=@officialunofficial/mkit-wasm
           # Force-align the package.json version to the git tag.
           npm version --no-git-tag-version --allow-same-version "$VERSION"
           jq '{name, version, license, repository}' package.json
-
-      - name: Ensure NPM_TOKEN present
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN}" ]; then
-            echo "::error::MKIT_NPM_TOKEN secret is not configured. Set it in repo or org secrets before tagging a release." >&2
-            exit 1
-          fi
 
       - name: Require public repository for npm provenance
         env:
@@ -826,11 +822,18 @@ jobs:
             exit 1
           fi
 
+      # Trusted Publishing (OIDC): npm CLI auto-detects this job's GitHub
+      # Actions OIDC token (id-token: write, above) and authenticates
+      # without any stored npm token, PROVIDED the @officialunofficial/
+      # mkit-wasm package's Trusted Publisher is configured on npmjs.com to
+      # trust org=officialunofficial, repo=mkit, workflow=release.yml — see
+      # docs/RELEASE.md. No NODE_AUTH_TOKEN: if OIDC isn't wired up yet on
+      # the npm side, this fails closed instead of silently falling back to
+      # a stale/absent token. Provenance is automatic under Trusted
+      # Publishing — the explicit --provenance flag is kept for older-CLI
+      # defense in depth.
       - name: Publish to npm
         working-directory: rust/crates/mkit-wasm/pkg
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MKIT_NPM_TOKEN }}
-        # provenance: requires public repo, GitHub OIDC, and this job's id-token: write permission.
         run: npm publish --access public --provenance
 
       - name: Stage WASM bundle for GitHub Release

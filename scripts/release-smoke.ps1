@@ -158,18 +158,18 @@ try {
     } elseif (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
         Write-Warn 'npm not installed — skipping npm checks'
     } else {
-        Write-Log "checking @makechain/mkit-wasm@$Version on npm"
-        & npm view "@makechain/mkit-wasm@$Version" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Write-Err "npm view @makechain/mkit-wasm@$Version failed" }
+        Write-Log "checking @officialunofficial/mkit-wasm@$Version on npm"
+        & npm view "@officialunofficial/mkit-wasm@$Version" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Err "npm view @officialunofficial/mkit-wasm@$Version failed" }
 
         $NpmDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mkit-smoke-npm-" + [System.Guid]::NewGuid())
         New-Item -ItemType Directory -Path $NpmDir | Out-Null
         try {
             Push-Location $NpmDir
             & npm init -y | Out-Null
-            & npm install --save-exact "@makechain/mkit-wasm@$Version" | Out-Null
+            & npm install --save-exact "@officialunofficial/mkit-wasm@$Version" | Out-Null
             & npm audit signatures
-            if ($LASTEXITCODE -ne 0) { throw "npm audit signatures failed for @makechain/mkit-wasm@$Version" }
+            if ($LASTEXITCODE -ne 0) { throw "npm audit signatures failed for @officialunofficial/mkit-wasm@$Version" }
         } catch {
             Write-Err $_
         } finally {

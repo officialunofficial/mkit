@@ -111,12 +111,10 @@ Verification steps &mdash; cosign bundle, `SHA256SUMS`, SBOM &mdash; are in
 ### WASM (npm)
 
 ```sh
-bun add @makechain/mkit-wasm     # or: npm i @makechain/mkit-wasm
+bun add @officialunofficial/mkit-wasm     # or: npm i @officialunofficial/mkit-wasm
 ```
 
-The `@makechain` scope is intentional (Makechain is an internal team
-at Official Unofficial, Inc., not a separate entity). TypeScript and
-Cloudflare Workers examples in
+TypeScript and Cloudflare Workers examples in
 [`docs/INSTALL.md`](docs/INSTALL.md#wasm--npm).
 
 ### Hardware signers (optional)
@@ -203,7 +201,7 @@ Workspace crates:
 | `mkit-transport-{memory,file,http,s3,ssh,enc}` | Transport trait implementations (`enc` = the `mkit+enc://` no-OpenSSH encrypted transport) |
 | `mkit-transport-connect` | the `mkit.transport.v1` Connect service: the native ConnectRPC client behind `mkit+https://` dispatch, plus the axum-hosted server behind `mkit serve --http` ([`docs/specs/SPEC-TRANSPORT-CONNECT.md`](docs/specs/SPEC-TRANSPORT-CONNECT.md)) |
 | `mkit-cli` | the `mkit` binary |
-| `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@makechain/mkit-wasm` |
+| `mkit-wasm` | wasm-bindgen surface for browsers / Cloudflare Workers, published to npm as `@officialunofficial/mkit-wasm` |
 | `mkit-repo-client` | browser (WASM) ConnectRPC client for the anonymous-multiplayer repo service; unpublished |
 | `mkit-fuzz` (at `rust/fuzz/`, not `rust/crates/`) | bounded property tests (cargo-fuzz compatible) |
 | `mkit-benches` (at `rust/benches/`, not `rust/crates/`) | Criterion microbenchmarks plus the `render-charts` binary (see [Performance](#performance)) |
