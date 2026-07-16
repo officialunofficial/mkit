@@ -696,9 +696,22 @@ token-based release behind it (0.1.0&ndash;0.3.0, published as
    cd rust
    wasm-pack build crates/mkit-wasm --release --target bundler --out-dir pkg
    cd crates/mkit-wasm/pkg
+   npm pkg set name=@officialunofficial/mkit-wasm
    npm version --no-git-tag-version --allow-same-version 0.0.0-init
-   npm publish --access public
+   npm publish --access public --tag init
    ```
+   `wasm-pack`'s raw output is named unscoped `mkit-wasm`, hence the `npm pkg
+   set` step. `--tag init` keeps the placeholder off the `latest` dist-tag
+   once a real version publishes (it briefly holds `latest` too, being the
+   only version, until the first real tag push supersedes it).
+
+   The npm registry's CDN edge cache can serve a stale 404 for a
+   brand-new scope/package for a few minutes after a successful publish,
+   even though `npm dist-tag ls`, `npm access list packages`, and
+   `npm install` (corgi-format endpoint) already see it — don't diagnose a
+   fresh publish as failed from a bare `npm view`/`curl` 404, and don't
+   re-query the same URL repeatedly (it just refreshes the negative-cache
+   TTL). Wait a few minutes and recheck.
 2. On the package's `npmjs.com` page &rarr; **Settings** &rarr; **Trusted
    Publisher**, add a GitHub Actions publisher:
    - Organization or user: `officialunofficial`
