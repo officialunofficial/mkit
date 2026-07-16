@@ -1084,7 +1084,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1565,7 +1565,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mkit-attest"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64",
  "blake3",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "buffa",
  "buffa-build",
@@ -2282,7 +2282,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2572,7 +2572,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
