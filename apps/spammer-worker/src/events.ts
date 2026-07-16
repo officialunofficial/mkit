@@ -62,8 +62,47 @@ export async function emitChat(
   counter: number,
 ): Promise<EmitChatResult> {
   const text = pick(ctx.contentPools?.chat ?? CHAT_PHRASES, counter);
+  return postChat(ctx, room, identity, text);
+}
+
+/**
+ * Sign-and-post core shared by {@link emitChat} (phrase-pool pick) and
+ * {@link emitChatText} (explicit text) — the two variants differ only in
+ * where `text` comes from; the envelope/post mechanics are identical and
+ * belong in exactly one place, mirroring how {@link buildSignedCommit} is
+ * factored out below `emitCommit`.
+ */
+async function postChat(ctx: EmitContext, room: string, identity: Identity, text: string): Promise<EmitChatResult> {
   const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PostMessage);
   return ctx.wasm.repo.post_message(ctx.baseUrl, room, text, sign);
+}
+
+/**
+ * Post one signed chat message as `identity` into `room` with the EXACT
+ * `text` given — no phrase-pool pick. This is issue #848's real-user
+ * responder's reply path: a reply has to say something specific ("nice push,
+ * <short-hash> by <short-key>" / "<short-key> forked <branch>", etc.) that a
+ * `pick(pool, counter)` selection over {@link CHAT_PHRASES} can never
+ * produce, since it needs to reference the real commit hash, author key, and
+ * (when not `main`) branch name it's acknowledging.
+ *
+ * `text` is caller-validated: this function does no length or shape checking
+ * of its own. Template rendering and slot-fill (short-hash/short-key/branch
+ * substitution, length constraints, malformed-template rejection) are the
+ * AI-content/template layer's job (`ai-content.ts`'s reply templates,
+ * #853) — by the time a
+ * string reaches here it is already a complete, ready-to-post message, and
+ * this function's only responsibility is signing and posting it, exactly
+ * like {@link emitChat} does for a pool pick (see {@link postChat}, the
+ * shared core both variants call).
+ */
+export async function emitChatText(
+  ctx: EmitContext,
+  room: string,
+  identity: Identity,
+  text: string,
+): Promise<EmitChatResult> {
+  return postChat(ctx, room, identity, text);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,8 @@
 // deterministic.
 
 import { describe, expect, it, vi } from "vitest";
-import { emitCommit, emitRemix, forkRefName, MAIN_REF, type EmitContext } from "../src/events";
+import { pick, REACTION_EMOJI } from "../src/content";
+import { emitChatText, emitCommit, emitReaction, emitRemix, forkRefName, MAIN_REF, type EmitContext } from "../src/events";
 import type { Identity } from "../src/identities";
 import { makeFakeWasm } from "./helpers/fake-wasm";
 
@@ -140,5 +141,99 @@ describe("events.ts — emitRemix", () => {
       expect(first.ref).toBe(second.ref);
       expect(second.parentHash).toBe(first.remixHash);
     }
+  });
+
+  // #852: `emitRemix` already accepts an arbitrary `upstreamCommitHash` — this
+  // is verification, not new machinery. The fork-ref naming scheme
+  // (`forkRefName`) only ever consumes the upstream hash + forker pubkey, and
+  // never looks at which ref that hash currently lives on, so a commit that
+  // lives on some OTHER real ref (a feature branch, never `main`'s or any
+  // fork ref's own head in this fake) must remix identically to any other
+  // upstream hash.
+  it("remixes an arbitrary real commit hash that lives on a non-main, non-fork feature branch — lands on the correctly-named fork ref and chains via CAS on repeat", async () => {
+    const fake = makeFakeWasm();
+    const ctx: EmitContext = { wasm: fake.wasm, baseUrl: BASE_URL };
+    const room = "test-room";
+    const forker = identity(6);
+
+    // Simulate a real user's commit sitting on their own feature branch —
+    // NOT `main`'s head, NOT any fork ref's head — to prove the fork-ref
+    // scheme cares only about the commit hash, not its origin ref.
+    const featureBranchRef = "alice/feature-branch";
+    const upstreamCommitHash = "real-user-feature-commit-hash";
+    fake.forceRef(room, featureBranchRef, upstreamCommitHash);
+
+    const first = await emitRemix(ctx, room, forker, upstreamCommitHash, 0);
+    expect(first.committed).toBe(true);
+    if (first.committed) {
+      const expectedRef = forkRefName(upstreamCommitHash, forker.pubkeyHex);
+      expect(first.ref).toBe(expectedRef);
+      expect(first.parentHash).toBeNull();
+      expect(fake.getRef(room, expectedRef)).toBe(first.remixHash);
+    }
+    // The feature branch itself is untouched — remixing never writes back to
+    // the upstream's own ref.
+    expect(fake.getRef(room, featureBranchRef)).toBe(upstreamCommitHash);
+    expect(fake.getRef(room, MAIN_REF)).toBeUndefined();
+
+    // A repeat remix of the SAME upstream by the SAME identity chains onto
+    // its own prior head via CAS MATCH, exactly like the same-ref case above.
+    const second = await emitRemix(ctx, room, forker, upstreamCommitHash, 1);
+    expect(second.committed).toBe(true);
+    if (first.committed && second.committed) {
+      expect(second.ref).toBe(first.ref);
+      expect(second.parentHash).toBe(first.remixHash);
+      expect(fake.getRef(room, first.ref)).toBe(second.remixHash);
+    }
+  });
+});
+
+describe("events.ts — emitChatText", () => {
+  it("posts exactly the given text, not a phrase-pool pick", async () => {
+    const fake = makeFakeWasm();
+    const ctx: EmitContext = { wasm: fake.wasm, baseUrl: BASE_URL };
+    const room = "test-room";
+    const replier = identity(7);
+    const text = "nice push, real1234abcd by key5678efgh on alice/feature-branch";
+
+    const result = await emitChatText(ctx, room, replier, text);
+
+    expect(result.accepted).toBe(true);
+    expect(fake.chats).toEqual([{ room, text }]);
+  });
+
+  it("shares the signing path with emitChat: both funnel through post_message with the caller's exact text", async () => {
+    const fake = makeFakeWasm();
+    const ctx: EmitContext = { wasm: fake.wasm, baseUrl: BASE_URL };
+    const room = "test-room";
+    const replier = identity(8);
+
+    await emitChatText(ctx, room, replier, "reply one");
+    await emitChatText(ctx, room, replier, "reply two");
+
+    expect(fake.chats).toEqual([
+      { room, text: "reply one" },
+      { room, text: "reply two" },
+    ]);
+  });
+});
+
+describe("events.ts — emitReaction", () => {
+  it("reacts to an arbitrary real commit hash regardless of its origin ref", async () => {
+    const fake = makeFakeWasm();
+    const ctx: EmitContext = { wasm: fake.wasm, baseUrl: BASE_URL };
+    const room = "test-room";
+    const reactor = identity(9);
+
+    // Again: a commit on a feature branch that is neither `main` nor a fork
+    // ref — `emitReaction` must not care.
+    fake.forceRef(room, "bob/experiment", "another-real-user-commit-hash");
+    const targetIdHex = "another-real-user-commit-hash";
+
+    const counter = 2;
+    const result = await emitReaction(ctx, room, reactor, targetIdHex, counter);
+
+    expect(result.active).toBe(true);
+    expect(fake.reactions).toEqual([{ room, targetIdHex, emoji: pick(REACTION_EMOJI, counter) }]);
   });
 });
