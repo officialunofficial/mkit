@@ -21,9 +21,17 @@ type SeoProps = {
   card?: string
 }
 
+/**
+ * Card-design generation, folded into the og:image URL purely as a cache
+ * buster: the OG worker ignores it, but social platforms (Slack, X, Discord)
+ * cache unfurl images by exact URL with no re-scrape control, so shipping a
+ * visual redesign of the card requires minting new URLs. Bump on redesign.
+ */
+const OG_CARD_VERSION = '2'
+
 export function Seo({ title, description, path, card }: SeoProps) {
   const url = `${SITE_URL}${path}`
-  const image = `${OG_URL}/?${new URLSearchParams({ title: card ?? title }).toString()}`
+  const image = `${OG_URL}/?${new URLSearchParams({ title: card ?? title, v: OG_CARD_VERSION }).toString()}`
 
   return (
     <>
