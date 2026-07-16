@@ -15,14 +15,15 @@ import type { MkitApi } from "./wasm";
 /**
  * Number of synthetic identities in the pool — see PLAN.md's rate-math section.
  *
- * 64, not 32: with one push (commit or remix) planned per alarm tick and
- * round-robin selection, natural per-identity push spacing is `POOL_SIZE`
- * seconds. At 64s spacing, worst-case ops/hr/author — assuming EVERY push
- * needs one CAS-conflict retry (4 ops: put+update, then a second put+update)
- * — is (3600/64)*4 = 225, a genuine 25% margin under the real 300-op/hr cap
- * (`write_quota.rs:31`). At 32 this worst case hits 450 ops/hr, well over
- * the cap. The no-retry (typical) case is (3600/64)*2 ≈ 112.5 ops/hr, ~63%
- * margin under the cap.
+ * 64, not 32, was derived for the ORIGINAL one-push-per-alarm-tick cadence:
+ * at 64s natural per-identity spacing, worst-case ops/hr/author — assuming
+ * EVERY push needs one CAS-conflict retry (4 ops: put+update, then a second
+ * put+update) — was (3600/64)*4 = 225, a genuine 25% margin under the real
+ * 300-op/hr cap (`write_quota.rs:31`), where 32 would have blown it (450).
+ * Under the current gated cadence (one push per `PUSH_EVERY_N_TICKS` ticks —
+ * see `scheduler.ts`'s "Ambient cadence" doc section), natural spacing is
+ * `POOL_SIZE × PUSH_EVERY_N_TICKS` seconds (~16 min), so quota headroom is
+ * enormous and the pool size persists for identity variety, not rate math.
  */
 export const POOL_SIZE = 64;
 

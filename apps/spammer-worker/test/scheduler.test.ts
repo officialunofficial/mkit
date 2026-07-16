@@ -27,12 +27,14 @@ import { buildSignedEnvelope, canonicalString, procedures } from "../src/envelop
 import { POOL_SIZE, getIdentityPool, makeRoundRobinCursor, seedForIndex } from "../src/identities";
 import { hexToBytes } from "../src/hex";
 import {
+  CHAT_EVERY_N_TICKS,
   CHAT_FLOOR_MS,
   FORK_OF_FORK_REMIX_PERCENT,
   MAX_BUNDLES_IN_FLIGHT,
+  PUSH_EVERY_N_TICKS,
   PUSH_FLOOR_MS,
   REACTION_FLOOR_MS,
-  REMIX_EVERY_N_TICKS,
+  REMIX_EVERY_N_PUSHES,
   RESPONSE_AUTHOR_COOLDOWN_MS,
   RESPONSE_BUNDLE_SPREAD_MS,
   RESPONSE_CHAT_INCLUDE_PERCENT,
@@ -249,20 +251,24 @@ function runSimulation(
 }
 
 describe("scheduler.ts — tick planner", () => {
-  it("simulates a full hour at the real 1000ms alarm cadence: zero floor violations, aggregate rate ~3/s", () => {
+  it("simulates a full hour at the real 1000ms alarm cadence: zero floor violations, calm gated rates per category", () => {
     const SECONDS_PER_HOUR = 3600;
     const { violations, totalEvents, elapsedMs, kindCounts } = runSimulation(SECONDS_PER_HOUR, 1000);
 
     expect(violations).toEqual([]);
     expect(elapsedMs).toBe(SECONDS_PER_HOUR * 1000);
 
-    // PLAN.md targets "~3 events/s aggregate" (base 2 chat + 1 push), "inside
-    // the 2-4/s target", plus an occasional additive reaction.
+    // Gated cadence (see scheduler.ts's "Ambient cadence" doc section): one
+    // chat per CHAT_EVERY_N_TICKS, one push per PUSH_EVERY_N_TICKS, one
+    // reaction per REACTION_EVERY_N_TICKS ⇒ exact per-category counts over a
+    // floor-unconstrained hour (the pool never saturates at these rates).
+    expect(kindCounts.chat).toBe(SECONDS_PER_HOUR / CHAT_EVERY_N_TICKS);
+    expect(kindCounts.commit + kindCounts.remix).toBe(SECONDS_PER_HOUR / PUSH_EVERY_N_TICKS);
     const eventsPerSecond = totalEvents / (elapsedMs / 1000);
-    expect(eventsPerSecond).toBeGreaterThan(2.5);
-    expect(eventsPerSecond).toBeLessThan(4);
+    expect(eventsPerSecond).toBeGreaterThan(0.3);
+    expect(eventsPerSecond).toBeLessThan(0.5);
 
-    // Push kind mix: remix on ~every 8th push tick, commit otherwise.
+    // Push kind mix: remix on ~every REMIX_EVERY_N_PUSHES-th push, commit otherwise.
     expect(kindCounts.commit).toBeGreaterThan(0);
     expect(kindCounts.remix).toBeGreaterThan(0);
     const pushTotal = kindCounts.commit + kindCounts.remix;
@@ -302,7 +308,7 @@ describe("scheduler.ts — tick planner", () => {
       chatCursor: 0,
       pushCursor: 0,
       reactionCursor: 0,
-      tick: 1,
+      tick: CHAT_EVERY_N_TICKS, // a chat-gate tick (and, at 5, neither a push- nor reaction-gate tick)
     };
 
     const tooSoon = planTick(state, lastChatAt + CHAT_FLOOR_MS - 1);
@@ -696,7 +702,7 @@ describe("planTick — response-queue draining", () => {
       chatCursor: 0,
       pushCursor: 0,
       reactionCursor: 0,
-      tick: 0, // commit push-kind tick AND a REACTION_EVERY_N_TICKS boundary — both ambient categories are "live" this tick
+      tick: 0, // a chat-, push- (commit-kind), AND reaction-gate tick — every ambient category is "live" this tick
       responseQueue: [intent("b1", "reaction", 0), intent("b1", "chat", 0), intent("b1", "remix", 0)],
     };
 
@@ -704,7 +710,7 @@ describe("planTick — response-queue draining", () => {
 
     // Exactly one event per category — the response pick claimed the pool's
     // only identity, so the ambient picks that would otherwise ALSO fire
-    // this tick (2 chat, 1 push, 1 reaction) all found nobody eligible.
+    // this tick (1 chat, 1 push, 1 reaction) all found nobody eligible.
     const reactionEvents = events.filter((e) => e.kind === "reaction");
     const chatEvents = events.filter((e) => e.kind === "chat");
     const pushEvents = events.filter((e) => e.kind === "commit" || e.kind === "remix");
@@ -752,7 +758,7 @@ describe("planTick — response-queue draining", () => {
   });
 
   it("ambient push-kind selection (commit vs remix) is untouched by response-queue contents", () => {
-    const withoutQueue = baseState({ tick: 0 }); // 0 % REMIX_EVERY_N_TICKS !== last-of-cycle -> commit tick
+    const withoutQueue = baseState({ tick: 0 }); // push ordinal 0 -> commit-kind push-gate tick
     const withQueue = baseState({
       tick: 0,
       responseQueue: [intent("b1", "remix", 0), intent("b1", "chat", 0), intent("b1", "reaction", 0)],
@@ -825,6 +831,9 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
     { ref: "forks/cccccccccccc-333333333333", headHex: "fork-head-3" },
   ];
 
+  /** The first tick whose push pick is remix-kind under the gated cadence: push ordinal REMIX_EVERY_N_PUSHES - 1, i.e. tick (REMIX_EVERY_N_PUSHES - 1) × PUSH_EVERY_N_TICKS. */
+  const REMIX_TICK = (REMIX_EVERY_N_PUSHES - 1) * PUSH_EVERY_N_TICKS;
+
   /** Advance `planTick` for `totalTicks` ticks with a push floor-safe cadence, recording every AMBIENT remix pick's `remixUpstream`. */
   function simulateAmbientRemixes(
     totalTicks: number,
@@ -852,7 +861,7 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
   }
 
   it("fires at approximately FORK_OF_FORK_REMIX_PERCENT of ambient remix ticks when fork refs are known", () => {
-    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, FORK_UPSTREAMS);
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(48_000, FORK_UPSTREAMS);
 
     expect(remixTicks).toBeGreaterThan(0);
     const fraction = forkOfForkFires / remixTicks;
@@ -865,7 +874,7 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
   });
 
   it("every selected upstream is one of the supplied forkUpstreams entries", () => {
-    const { remixUpstreams } = simulateAmbientRemixes(8000, FORK_UPSTREAMS);
+    const { remixUpstreams } = simulateAmbientRemixes(48_000, FORK_UPSTREAMS);
     for (const picked of remixUpstreams) {
       if (picked === undefined) continue;
       expect(FORK_UPSTREAMS).toContainEqual(picked);
@@ -873,21 +882,21 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
   });
 
   it("never fires when forkUpstreams is omitted", () => {
-    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, undefined);
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(48_000, undefined);
     expect(remixTicks).toBeGreaterThan(0);
     expect(forkOfForkFires).toBe(0);
   });
 
   it("never fires when forkUpstreams is an empty array", () => {
-    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(8000, []);
+    const { remixTicks, forkOfForkFires } = simulateAmbientRemixes(48_000, []);
     expect(remixTicks).toBeGreaterThan(0);
     expect(forkOfForkFires).toBe(0);
   });
 
   it("falls back to a plain (no-remixUpstream) ambient remix — identical to pre-#851 behavior — when forkUpstreams is absent", () => {
     const state = initialSchedulerState(POOL_SIZE);
-    // tick 0 with REMIX_EVERY_N_TICKS - 1 ... find a remix tick directly by constructing state at the boundary.
-    const remixTickState: SchedulerState = { ...state, tick: REMIX_EVERY_N_TICKS - 1 };
+    // Construct state directly at a remix-kind push-gate tick (see REMIX_TICK above).
+    const remixTickState: SchedulerState = { ...state, tick: REMIX_TICK };
     const withoutArg = planTick(remixTickState, 0);
     const withUndefined = planTick(remixTickState, 0, undefined);
     const withEmpty = planTick(remixTickState, 0, []);
@@ -900,7 +909,7 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
   });
 
   it("is deterministic: the same (state, now, forkUpstreams) always yields the same output, including remixUpstream", () => {
-    const remixTickState: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_EVERY_N_TICKS - 1 };
+    const remixTickState: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_TICK };
     const a = planTick(remixTickState, 0, FORK_UPSTREAMS);
     const b = planTick(remixTickState, 0, FORK_UPSTREAMS);
     expect(a.events).toEqual(b.events);
@@ -912,8 +921,8 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
     // tick value must make the SAME fire/no-fire and SAME candidate decision
     // — the decision is keyed on `state.tick`, never on which identity got
     // picked for the push.
-    const stateSmallPool: SchedulerState = { ...initialSchedulerState(4), tick: REMIX_EVERY_N_TICKS - 1 };
-    const stateBigPool: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_EVERY_N_TICKS - 1 };
+    const stateSmallPool: SchedulerState = { ...initialSchedulerState(4), tick: REMIX_TICK };
+    const stateBigPool: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: REMIX_TICK };
     const a = planTick(stateSmallPool, 0, FORK_UPSTREAMS);
     const b = planTick(stateBigPool, 0, FORK_UPSTREAMS);
     const remixA = a.events.find((e) => e.kind === "remix");
@@ -922,18 +931,19 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
   });
 
   it("ambient commit targeting is unaffected: a commit pick never carries remixUpstream regardless of forkUpstreams", () => {
-    // tick 0 is a commit tick (0 % REMIX_EVERY_N_TICKS !== REMIX_EVERY_N_TICKS - 1).
+    // tick 0 is a commit-kind push-gate tick (push ordinal 0).
     const commitTickState: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: 0 };
     const { events } = planTick(commitTickState, 0, FORK_UPSTREAMS);
     const commitEvent = events.find((e) => e.kind === "commit");
     expect(commitEvent).toBeDefined();
     expect((commitEvent as { remixUpstream?: unknown }).remixUpstream).toBeUndefined();
 
-    // Sweep every tick in one REMIX_EVERY_N_TICKS cycle and confirm only the
-    // remix-kind tick ever carries remixUpstream; every commit-kind tick
-    // never does, however many times fork-of-fork selection is consulted.
-    for (let tick = 0; tick < REMIX_EVERY_N_TICKS; tick++) {
-      const s: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick };
+    // Sweep every push-gate tick in one REMIX_EVERY_N_PUSHES cycle and
+    // confirm only the remix-kind push ever carries remixUpstream; every
+    // commit-kind push never does, however many times fork-of-fork selection
+    // is consulted.
+    for (let pushOrdinal = 0; pushOrdinal < REMIX_EVERY_N_PUSHES; pushOrdinal++) {
+      const s: SchedulerState = { ...initialSchedulerState(POOL_SIZE), tick: pushOrdinal * PUSH_EVERY_N_TICKS };
       const { events: evs } = planTick(s, 0, FORK_UPSTREAMS);
       const push = evs.find((e) => e.kind === "commit" || e.kind === "remix");
       expect(push).toBeDefined();
@@ -959,7 +969,7 @@ describe("planTick — fork-of-fork upstream selection (issue #851)", () => {
     // payload's targetIdHex must be untouched by fork-of-fork selection.
     const state: SchedulerState = {
       ...initialSchedulerState(POOL),
-      tick: REMIX_EVERY_N_TICKS - 1,
+      tick: REMIX_TICK,
       responseQueue: [responseIntent],
     };
 

@@ -37,6 +37,15 @@ export const CHAT_PHRASES: readonly string[] = [
   "forks show up over on the refs/branches panel",
   "no accounts, no passwords — just an Ed25519 key",
   "this message is a first-class signed object too",
+  "every hash in this feed is checkable, go verify one",
+  "the refs panel is the fun part, click around",
+  "pushed from a browser, verified by the server, no trust required",
+  "same protocol the CLI speaks, just in a lobby",
+  "each of these commits is an empty tree — the signature is the point",
+  "try the fork button on any commit, attribution comes along for free",
+  "one shared repo, everyone signs their own writes",
+  "the log only ever grows — that's the whole idea",
+  "passkey in, signed commits out",
 ] as const;
 
 /**

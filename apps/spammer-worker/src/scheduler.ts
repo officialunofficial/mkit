@@ -70,22 +70,31 @@
 // corrected for a real ops-per-push accounting error caught in review — do
 // not re-derive these numbers casually, they were verified against the real
 // repo-worker floors):
-//   - Pool: `POOL_SIZE` (64) identities, round-robin per event category. 64,
-//     not the originally-planned 32: a commit/remix push is 2 ops
-//     (put_object + update_ref), not 1, against the real 300-ops/hr/author
-//     cap (`write_quota.rs:31`). At pool=32 (32s natural push spacing per
-//     identity), steady-state is already 225 ops/hr/author (75% of the cap)
-//     with NO safety margin left for CAS-conflict retries (each retry adds
-//     another put+update = +2 ops). At pool=64 (64s natural spacing),
-//     steady-state is ~112.5 ops/hr/author, and even the worst case of every
-//     single push needing one retry (4 ops/push) stays at 225 ops/hr — a
-//     real 25% margin under the cap. See `identities.ts`'s `POOL_SIZE` doc
-//     comment for the full math.
-//   - Per tick (1000 ms alarm cadence): 2 chat + 1 push ⇒ ~3 events/s
-//     aggregate, plus an occasional reaction on top (additive, not part of
-//     the 3 — reactions are cheap, floor 150 ms).
-//   - Push kind: `commit` on most ticks, `remix` on every `REMIX_EVERY_N_TICKS`th
-//     tick.
+//   - Pool: `POOL_SIZE` (64) identities, round-robin per event category. 64
+//     was sized for the ORIGINAL one-push-per-tick cadence, where a
+//     commit/remix push being 2 ops (put_object + update_ref) against the
+//     real 300-ops/hr/author cap (`write_quota.rs:31`) left only a 25%
+//     worst-case margin (see `identities.ts`'s `POOL_SIZE` doc comment for
+//     that original derivation). Under the current gated cadence (one push
+//     per `PUSH_EVERY_N_TICKS` ticks), natural per-identity push spacing is
+//     POOL_SIZE × PUSH_EVERY_N_TICKS seconds (~16 min), i.e. ~7.5 ops/hr/
+//     author — the pool size is now pure headroom rather than the operative
+//     constraint, and is kept at 64 for identity-variety, not quota math.
+//   - Ambient cadence (1000 ms alarm ticks, per-category gates): one chat
+//     every CHAT_EVERY_N_TICKS ticks (~12/min), one push every
+//     PUSH_EVERY_N_TICKS ticks (~4/min), one reaction every
+//     REACTION_EVERY_N_TICKS ticks (~6/min) ⇒ ~0.4 events/s aggregate.
+//     Originally this was 2 chat + 1 push EVERY tick (~3 events/s); that
+//     volume starved real users out of the CAS race on `main` (a human's
+//     `update_ref` almost always lost to a synthetic push landing the same
+//     second) and cycled the chat phrase pool so fast every entry repeated
+//     several times per minute. The gates fix both while keeping the room
+//     visibly alive. The response-queue drain (phase 1) is NOT gated — it
+//     still runs every tick, so real-user acknowledgment latency is
+//     unchanged.
+//   - Push kind: `commit` on most push ticks, `remix` on every
+//     `REMIX_EVERY_N_PUSHES`th push (counted in pushes, not ticks, so the
+//     ~1-in-8 remix share survives the push gating).
 //   - Safety floors (wider than the REAL server floors on purpose — see
 //     PLAN.md "Floor headroom"): refuse to pick an identity for chat within
 //     `CHAT_FLOOR_MS` (2500 ms, over the real 2000 ms `chat.rs` floor) of its
@@ -98,8 +107,24 @@
 /** Number of synthetic identities the scheduler round-robins over by default — mirrors `identities.ts`'s `POOL_SIZE`. */
 export const POOL_SIZE = 64;
 
-/** Chat events planned per tick (PLAN.md default mix: "2 chat + 1 push"). */
-export const CHAT_EVENTS_PER_TICK = 2;
+/**
+ * One ambient chat pick every this-many-th tick (0-indexed `state.tick`) —
+ * ~12 chats/min at the 1000ms alarm cadence. Replaces the original
+ * "2 chat per tick" mix (~120/min), which buried real users' messages and
+ * cycled the phrase pool so fast every entry repeated several times a
+ * minute — see the "Ambient cadence" section of this file's top doc comment.
+ */
+export const CHAT_EVERY_N_TICKS = 5;
+
+/**
+ * One ambient push pick (commit or remix) every this-many-th tick — ~4
+ * pushes/min at the 1000ms alarm cadence. Replaces the original one-push-
+ * per-tick mix (~60/min), under which a real user's CAS `update_ref` on
+ * `main` almost always lost the race to a synthetic push ("Someone pushed
+ * first — try again" on every attempt): at ~15s between synthetic pushes, a
+ * human's push-plus-one-retry virtually always lands.
+ */
+export const PUSH_EVERY_N_TICKS = 15;
 
 /** Safety floor for chat: refuse an identity whose last chat was less than this many ms ago. 250 ms margin over the real 2000 ms `MIN_POST_INTERVAL_MS` (`chat.rs:26`). */
 export const CHAT_FLOOR_MS = 2500;
@@ -110,11 +135,11 @@ export const PUSH_FLOOR_MS = 30_000;
 /** Safety floor for a reaction. Margin over the real 150 ms `REACT_MIN_INTERVAL_MS` (`chat.rs:90-96`). */
 export const REACTION_FLOOR_MS = 200;
 
-/** A push is a `remix` every this-many-th tick (0-indexed `state.tick`); every other push tick is a `commit`. PLAN.md: "every ~8th tick". */
-export const REMIX_EVERY_N_TICKS = 8;
+/** A push is a `remix` every this-many-th PUSH (not tick — pushes now fire only every {@link PUSH_EVERY_N_TICKS} ticks); every other push is a `commit`. Preserves PLAN.md's ~1-in-8 remix share of pushes at the calmer cadence. */
+export const REMIX_EVERY_N_PUSHES = 8;
 
-/** A reaction is attempted every this-many-th tick — PLAN.md's "occasional reaction ... on a fraction of ticks", additive to the 3-event base mix. */
-export const REACTION_EVERY_N_TICKS = 5;
+/** A reaction is attempted every this-many-th tick (~6/min at the 1000ms alarm cadence) — PLAN.md's "occasional reaction", additive to the chat/push mix above. */
+export const REACTION_EVERY_N_TICKS = 10;
 
 export type EventKind = "chat" | "commit" | "remix" | "reaction";
 
@@ -553,14 +578,15 @@ function selectForkUpstream(
  *    for a REACTION in the same bundle (`reactionIdentitiesByBundle`), so
  *    "distinct identities within a bundle" holds even when a bundle's
  *    reactions drain across separate ticks.
- * 2. **Ambient picks** (original PLAN.md build-step-7 behavior, mostly
- *    UNCHANGED — see the fork-of-fork addendum below): `CHAT_EVENTS_PER_TICK`
- *    chat picks (each immediately marks its identity's `lastChatMs` as `now`
- *    in the WORKING copy, so the two chat picks in one tick can never land on
- *    the same identity), then one push pick (kind decided by
- *    `REMIX_EVERY_N_TICKS` off `state.tick` — NEVER influenced by the
+ * 2. **Ambient picks** (PLAN.md build-step-7 behavior, cadence-gated per
+ *    category — see this file's top doc comment's "Ambient cadence" section
+ *    and the fork-of-fork addendum below): one chat pick on
+ *    `CHAT_EVERY_N_TICKS` tick boundaries (immediately marking its
+ *    identity's `lastChatMs` as `now` in the WORKING copy), one push pick on
+ *    `PUSH_EVERY_N_TICKS` boundaries (kind decided by
+ *    `REMIX_EVERY_N_PUSHES` off the push ordinal — NEVER influenced by the
  *    response queue, so ambient commit/remix selection is byte-for-byte
- *    identical whether or not a response bundle is in flight), then an
+ *    identical whether or not a response bundle is in flight), and an
  *    occasional reaction pick gated by `REACTION_EVERY_N_TICKS`. An ambient
  *    `commit`/`remix` `PlannedEvent` never carries a `response` payload and
  *    (unlike a response `PlannedEvent`) carries no ref/target at all, so
@@ -661,8 +687,14 @@ export function planTick(
     if (!bundleIdsStillQueued.has(bundleId)) delete reactionIdentitiesByBundle[bundleId];
   }
 
-  // --- Phase 2: ambient picks (unchanged) -----------------------------------
-  for (let i = 0; i < CHAT_EVENTS_PER_TICK; i++) {
+  // --- Phase 2: ambient picks (cadence-gated) --------------------------------
+  // Each category fires only on its own tick boundary (`CHAT_EVERY_N_TICKS` /
+  // `PUSH_EVERY_N_TICKS` / `REACTION_EVERY_N_TICKS`) instead of every tick —
+  // see each constant's doc comment for the rate it produces and the
+  // real-user problem (CAS starvation on `main`, feed/phrase-pool churn) the
+  // original every-tick mix caused. Within a firing tick the pick mechanics
+  // (selectEligible, floors, cursors) are unchanged.
+  if (state.tick % CHAT_EVERY_N_TICKS === 0) {
     const picked = selectEligible(chatCursor, poolSize, lastChatMs, CHAT_FLOOR_MS, now);
     chatCursor = picked.nextCursor;
     if (picked.index !== null) {
@@ -671,17 +703,23 @@ export function planTick(
     }
   }
 
-  const pushKind: EventKind = state.tick % REMIX_EVERY_N_TICKS === REMIX_EVERY_N_TICKS - 1 ? "remix" : "commit";
-  const pushPick = selectEligible(pushCursor, poolSize, lastPushMs, PUSH_FLOOR_MS, now);
-  pushCursor = pushPick.nextCursor;
-  if (pushPick.index !== null) {
-    // Fork-of-fork (#851): only ever consulted for a `remix` pick — a
-    // `commit` pick's `PlannedEvent` never gains a `remixUpstream` field, so
-    // ambient commit targeting stays `main`-only regardless of
-    // `forkUpstreams`'s contents.
-    const remixUpstream = pushKind === "remix" ? selectForkUpstream(state.tick, forkUpstreams) : undefined;
-    events.push({ identityIndex: pushPick.index, kind: pushKind, ...(remixUpstream ? { remixUpstream } : {}) });
-    lastPushMs[pushPick.index] = now;
+  if (state.tick % PUSH_EVERY_N_TICKS === 0) {
+    // The remix cadence is counted in PUSHES (this tick's ordinal among push
+    // ticks), not raw ticks, so the ~1-in-8 remix share survives the
+    // push-gating: push #7, #15, #23, … are remixes, the rest commits.
+    const pushIndex = Math.floor(state.tick / PUSH_EVERY_N_TICKS);
+    const pushKind: EventKind = pushIndex % REMIX_EVERY_N_PUSHES === REMIX_EVERY_N_PUSHES - 1 ? "remix" : "commit";
+    const pushPick = selectEligible(pushCursor, poolSize, lastPushMs, PUSH_FLOOR_MS, now);
+    pushCursor = pushPick.nextCursor;
+    if (pushPick.index !== null) {
+      // Fork-of-fork (#851): only ever consulted for a `remix` pick — a
+      // `commit` pick's `PlannedEvent` never gains a `remixUpstream` field, so
+      // ambient commit targeting stays `main`-only regardless of
+      // `forkUpstreams`'s contents.
+      const remixUpstream = pushKind === "remix" ? selectForkUpstream(state.tick, forkUpstreams) : undefined;
+      events.push({ identityIndex: pushPick.index, kind: pushKind, ...(remixUpstream ? { remixUpstream } : {}) });
+      lastPushMs[pushPick.index] = now;
+    }
   }
 
   if (state.tick % REACTION_EVERY_N_TICKS === 0) {
