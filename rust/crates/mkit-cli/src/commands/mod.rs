@@ -630,13 +630,16 @@ pub(crate) fn history_executor() -> std::sync::Arc<mkit_core::history::TokioExec
 ///
 /// - **Default build (no `history-mmr`)** — exactly equivalent to
 ///   `refs::update_ref(mkit_dir, branch, condition, new_hash)`.
-/// - **`--features history-mmr`** — opens a journaled
-///   `CommitHistory` for `branch` under `<mkit_dir>/history/`, takes
-///   the `refs-history.lock` repo lock, performs the CAS ref-write,
-///   appends `new_hash` to the MMR, and `sync()`s the journal before
+/// - **`--features history-mmr`** — takes the `refs-history.lock`
+///   repo lock, THEN opens a journaled `CommitHistory` for `branch`
+///   under `<mkit_dir>/history/` (lock-then-open, not the reverse —
+///   see `mkit_core::refs::open_and_update_ref_with_history_and_backfill`'s
+///   doc comment for why), performs the CAS ref-write, appends
+///   `new_hash` to the MMR, and `sync()`s the journal before
 ///   returning. The journal survives `SIGKILL` immediately after the
-///   call returns. See `mkit-core::refs::update_ref_with_history` and
-///   SPEC-HISTORY-PROOF §4 for the contract.
+///   call returns. See
+///   `mkit-core::refs::open_and_update_ref_with_history_and_backfill`
+///   and SPEC-HISTORY-PROOF §4 for the contract.
 ///
 /// If the journal is empty but `branch` already has a ref value on
 /// disk (a v0.1.x-era repo enabling `history-mmr` for the first time,
@@ -666,23 +669,30 @@ pub fn write_ref_recording_history(
     #[cfg(feature = "history-mmr")]
     {
         let exec = history_executor();
-        let mut history = mkit_core::history::CommitHistory::open_at(exec, layout, branch)
-            .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
 
         // Opening the object store is read-only and touches none of the
         // history-journal state that's actually racy here, so it's fine
-        // to do before the lock — only the empty-check + backfill (run
-        // by `update_ref_with_history_and_backfill`, via this
-        // `parent_of` walker) needs to be inside it.
+        // to do before the lock.
         let store = ObjectStore::open(layout)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
 
-        refs::update_ref_with_history_and_backfill(
+        // `open_and_update_ref_with_history_and_backfill` (not the
+        // open-then-call shape this used to have) acquires the
+        // per-branch lock BEFORE opening the journal, closing a race
+        // two concurrent first-writers on a never-before-journaled
+        // branch could hit: `CommitHistory::open_at` reads the on-disk
+        // metadata blob, and reading it while the OTHER thread is mid
+        // -`sync` (writing that same blob under its own lock hold) can
+        // observe a torn/zeroed blob and fail as "corrupt" even though
+        // nothing is actually wrong once the write finishes. See
+        // `mkit_core::refs::update_ref_with_history_critical_section`'s
+        // doc comment for the full mechanism.
+        refs::open_and_update_ref_with_history_and_backfill(
             layout,
             branch,
             condition,
             new_hash,
-            &mut history,
+            exec,
             |h| match store.read_object(h) {
                 Ok(Object::Commit(c)) => Ok(c.parents.first().copied()),
                 Ok(Object::Remix(r)) => Ok(r.parents.first().copied()),

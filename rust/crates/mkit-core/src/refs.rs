@@ -628,7 +628,7 @@ fn update_ref_with_history_locked<X, G>(
     condition: RefWriteCondition,
     hash: &Hash,
     history: &mut crate::history::CommitHistory<X>,
-    mut on_empty_journal: G,
+    on_empty_journal: G,
 ) -> RefResult<()>
 where
     X: crate::protocol::async_shim::Executor + 'static,
@@ -673,11 +673,58 @@ where
         },
     )?;
 
+    update_ref_with_history_critical_section(
+        layout,
+        branch,
+        condition,
+        hash,
+        history,
+        on_empty_journal,
+    )
+}
+
+/// The lock-HELD body of [`update_ref_with_history_locked`] — reopen,
+/// the empty-journal/one-ahead-gap check, the CAS-write, and the final
+/// append. Callers MUST already hold `history_lock_name(branch)`
+/// before calling this; it does not acquire any lock itself.
+///
+/// Split out so [`open_and_update_ref_with_history_and_backfill`] can
+/// acquire the lock, THEN open `history` (via `CommitHistory::open_at`)
+/// while already holding it, then run this same critical section —
+/// closing the race [`update_ref_with_history_locked`]'s callers are
+/// still exposed to when they open `history` before locking:
+/// `CommitHistory::open_at` performs real disk reads of the on-disk
+/// metadata blob, and if that
+/// read races a concurrent holder's in-progress `sync()` write to the
+/// same blob (commonware's `Metadata` double-buffer scheme has no
+/// locking of its own — mkit's lock is the only synchronization), the
+/// reader can observe a torn/zeroed blob and fail with
+/// `HistoryError::Corrupted`, even though nothing is actually corrupt
+/// on disk once the writer finishes. `reopen()`'s staleness handling
+/// does not cover this: it protects against reading old-but-valid
+/// state, not against reading torn state produced by a write in
+/// progress.
+#[cfg(feature = "history-mmr")]
+fn update_ref_with_history_critical_section<X, G>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    history: &mut crate::history::CommitHistory<X>,
+    mut on_empty_journal: G,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    G: FnMut(&mut crate::history::CommitHistory<X>, Hash) -> Result<(), String>,
+{
     // `history` may have been opened (its `CommitHistory::open_at`
     // bootstrap read the on-disk journal) before this call took the
     // lock above. Re-derive it from the current on-disk state now that
     // we hold the lock, so a concurrent writer's append in that window
-    // can't be appended over (SPEC-HISTORY-PROOF §4.3).
+    // can't be appended over (SPEC-HISTORY-PROOF §4.3). A no-op re-read
+    // when `history` was opened after the lock was already held (see
+    // [`open_and_update_ref_with_history_and_backfill`]), which is
+    // harmless — this call is cheap once the journal is open.
     history
         .reopen()
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history reopen: {e}")))?;
@@ -711,6 +758,67 @@ where
         .append(hash)
         .map_err(|e| RefError::InvalidRef(format!("{branch}: history append: {e}")))?;
     Ok(())
+}
+
+/// [`update_ref_with_history_and_backfill`], but closes a race that
+/// shape leaves open when two concurrent writers have never touched
+/// `branch`'s journal before: `CommitHistory::open_at` runs AFTER the
+/// per-branch lock is acquired here, not before, so a concurrent
+/// writer already holding the lock can never be mid-`sync` (writing
+/// the on-disk metadata blob) while this call's own `open_at` reads it
+/// — see [`update_ref_with_history_critical_section`]'s doc comment.
+/// `mkit-cli`'s `write_ref_recording_history` is the production
+/// caller.
+///
+/// Prefer this over opening a `CommitHistory` yourself and passing it
+/// to [`update_ref_with_history_and_backfill`] whenever the branch may
+/// never have been journaled before and multiple writers can race —
+/// exactly [`update_ref_with_history_and_backfill`]'s own
+/// never-journaled-branch backfill scenario, just one step earlier (at
+/// the open, not just the backfill).
+///
+/// # Errors
+///
+/// Same as [`update_ref_with_history_and_backfill`], plus
+/// [`RefError::InvalidRef`] if `CommitHistory::open_at` fails (lock
+/// acquisition, corrupt journal, or filesystem error).
+#[cfg(feature = "history-mmr")]
+pub fn open_and_update_ref_with_history_and_backfill<X, F, E>(
+    layout: &RepoLayout,
+    branch: &str,
+    condition: RefWriteCondition,
+    hash: &Hash,
+    executor: std::sync::Arc<X>,
+    mut parent_of: F,
+) -> RefResult<()>
+where
+    X: crate::protocol::async_shim::Executor + 'static,
+    F: FnMut(&Hash) -> Result<Option<Hash>, E>,
+    E: core::fmt::Display,
+{
+    let lock_name = history_lock_name(branch);
+    let _lock = crate::repo_lock::acquire_default(layout.common_dir(), &lock_name).map_err(
+        |e| match e {
+            crate::repo_lock::LockError::Io(io) => RefError::Io(io),
+            other => RefError::InvalidRef(format!("{branch}: lock acquisition: {other}")),
+        },
+    )?;
+
+    let mut history = crate::history::CommitHistory::open_at(executor, layout, branch)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: open history journal: {e}")))?;
+
+    update_ref_with_history_critical_section(
+        layout,
+        branch,
+        condition,
+        hash,
+        &mut history,
+        |history, current| {
+            crate::history::rebuild_from_chain(history, current, &mut parent_of)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 /// Heal a journal that is missing its last append relative to
