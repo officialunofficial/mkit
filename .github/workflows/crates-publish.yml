@@ -141,35 +141,9 @@ jobs:
       # so the existing signed `v{version}` tag causes no conflict. Idempotent
       # only for a clean release: cargo errors on an already-published version,
       # so re-runs after a partial publish need `--exclude` for what landed.
-      # TEMPORARY for the v0.4.1 tag only: dispatching release-plz-pr for the
-      # 0.4.1 version bump (instead of a hand-authored release-prep PR) let
-      # its own release-plz-release job publish all 13 crates below to
-      # crates.io directly on that PR's merge — release_always = false only
-      # gates WHEN release-plz publishes (on release-PR merge, not every
-      # push), not WHETHER it does; it is not actually inert once its
-      # release-pr job runs. Same failure mode this file's header comment
-      # already documents for 0.3.0. `cargo publish` errors outright on an
-      # already-published version with no skip-if-exists option, so these
-      # excludes are required for this tag's run to succeed at all — REVERT
-      # this step in the same follow-up PR that restores CHANGELOG.md's
-      # `[Unreleased]` heading (see docs/RELEASE.md "Cutting a release").
       - name: Publish workspace to crates.io
         working-directory: rust
-        run: |
-          cargo publish --workspace --locked \
-            --exclude mkit-core \
-            --exclude mkit-attest \
-            --exclude mkit-rpc \
-            --exclude mkit-git-bridge \
-            --exclude mkit-keystore \
-            --exclude mkit-transport-memory \
-            --exclude mkit-transport-file \
-            --exclude mkit-transport-http \
-            --exclude mkit-transport-s3 \
-            --exclude mkit-transport-ssh \
-            --exclude mkit-transport-enc \
-            --exclude mkit-transport-connect \
-            --exclude mkit-cli
+        run: cargo publish --workspace --locked
 
   # Publish the mkit-rpc and mkit-repo proto modules — the two modules in the
   # repo-root buf.yaml v2 workspace that carry a `name:` (issue #719) — to
