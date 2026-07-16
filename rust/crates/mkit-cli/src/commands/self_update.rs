@@ -32,8 +32,8 @@
 //! downgrade refused (mirrors `mkit-transport-http`, #223).
 //!
 //! Environment:
-//! * `GH_TOKEN` / `GITHUB_TOKEN` — bearer for the GitHub API. Optional
-//!   for public repos; required while the repo is private.
+//! * `GH_TOKEN` / `GITHUB_TOKEN` — bearer for the GitHub API. Optional;
+//!   raises the unauthenticated GitHub API rate limit.
 //! * `MKIT_STATE_DIR` — receipt state dir override (installer parity).
 //! * `MKIT_SELF_UPDATE_API_BASE` — override the API base URL
 //!   (`https://api.github.com/repos/officialunofficial/mkit`). For

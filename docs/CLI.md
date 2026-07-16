@@ -1339,8 +1339,8 @@ Config / keys / version:
     emit exactly `mkit <X.Y.Z>`); the swap is a same-directory atomic
     rename. Group-/world-writable install dirs are refused (installer
     parity).
-  - Environment: `GH_TOKEN`/`GITHUB_TOKEN` (API bearer; needed while
-    the repo is private), `MKIT_STATE_DIR`,
+  - Environment: `GH_TOKEN`/`GITHUB_TOKEN` (API bearer; optional,
+    raises the unauthenticated GitHub API rate limit), `MKIT_STATE_DIR`,
     `MKIT_SELF_UPDATE_API_BASE` (test/mirror override).
   - There is **no background update check** &mdash; the command only ever
     acts when invoked. Not yet supported on Windows.
