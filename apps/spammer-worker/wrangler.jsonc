@@ -56,11 +56,12 @@
   //     the responder should never treat as a real user to respond to —
   //     empty/unset by default (see responder.ts's mergedSyntheticPubkeys).
 
-  // Official Unofficial, Inc. — the account other apps/* Workers deploy to
-  // (see apps/og/wrangler.toml). No `routes`/`custom_domain` here: this Worker
-  // is workers.dev-only and must never intercept mkit.sh / api.mkit.sh
-  // traffic — it is purely an outbound client.
-  "account_id": "0bc82bff4439c556f9dc1b054d2de6d7",
+  // No account_id here — deploys to the same Official Unofficial, Inc.
+  // account other apps/* Workers use, resolved via the CLOUDFLARE_ACCOUNT_ID
+  // env var at deploy time like apps/repo-worker, apps/keys-worker, apps/mcp
+  // (see apps/og/wrangler.toml). No `routes`/`custom_domain` here: this
+  // Worker is workers.dev-only and must never intercept mkit.sh /
+  // api.mkit.sh traffic — it is purely an outbound client.
 
   // The `Spammer` Durable Object: one singleton instance owns the
   // self-rescheduling alarm loop + per-identity rate-floor bookkeeping in its

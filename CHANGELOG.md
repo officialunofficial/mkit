@@ -7,6 +7,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/officialunofficial/mkit/compare/v0.3.0...v0.4.0) - 2026-07-16
+
+### Bug Fixes
+
+- *(cli)* move remote state through a temp sibling so prefix-nested renames work ([#657](https://github.com/officialunofficial/mkit/pull/657)) ([#659](https://github.com/officialunofficial/mkit/pull/659))
+- *(core,cli)* close branch -m vs commit ref-loss race left open by #637 ([#672](https://github.com/officialunofficial/mkit/pull/672))
+- *(core,cli)* wire MMR crash recovery and lock ordering ([#555](https://github.com/officialunofficial/mkit/pull/555)) ([#580](https://github.com/officialunofficial/mkit/pull/580))
+- *(core)* index reader rejects nonzero object_hash on Removed entries ([#557](https://github.com/officialunofficial/mkit/pull/557)) ([#576](https://github.com/officialunofficial/mkit/pull/576))
+- *(core)* enforce total_size on ChunkedBlob reassembly ([#550](https://github.com/officialunofficial/mkit/pull/550)) ([#567](https://github.com/officialunofficial/mkit/pull/567))
+- *(blame)* close -C merge residual — interior first-parent carve-out + boundary all-parents search ([#507](https://github.com/officialunofficial/mkit/pull/507))
+- *(blame)* trace -C copies across every merge parent (review #503)
+- *(blame)* address review — reverse range hardening + O(1) liveness exit
+- *(blame)* address review — Arc-share ignore_revs, ignore-rev wins over -M/-C
+- *(blame)* address review — diff_trees reuse, no tree-walk recursion, fewer clones
+- *(blame)* keep -w and implied -M when blaming a copy source
+- *(blame)* position-stable line matching; fast-fail -w size guard
+- *(cli)* address review round 10 — mv dir-batch, D/F continue, abort ancestor guard, stash disambiguation, +docs
+- *(cli)* address review round 9 — D/F conflict atomicity, empty-merge index, mv symlink guards, stash fail-closed, +docs
+- *(cli)* address review round 8 — skip/abort edge cases, mv dir-child integrity, stash unborn untracked, +docs
+- *(cli)* address review round 7 — abort edit-preservation, mv case/source/dest guards, stash unborn dirs, +docs
+- *(cli)* address review round 6 — continue/abort data loss, mv symlink/ancestor, stash unborn, +docs
+- *(stash)* preserve staged deletions in --index via a serialized index snapshot
+- *(cli)* address review round 3 — cherry-pick -n conflicts, branch --contains default, merge parent, stash index errors
+- *(cli)* address review round 2 — stash --index atomicity + config subsection case
+- *(cli)* address peer review — cherry-pick -m is mainline, config files case-insensitive
+- *(rpc,attest)* enforce SPEC-RPC §3.3/§4 receiver strictness ([#558](https://github.com/officialunofficial/mkit/pull/558)) ([#581](https://github.com/officialunofficial/mkit/pull/581))
+- *(serve,transport)* surface CAS conflicts as RefConflict per SPEC-TRANSPORT §4.2.1 ([#551](https://github.com/officialunofficial/mkit/pull/551)) ([#568](https://github.com/officialunofficial/mkit/pull/568))
+- *(keystore)* drop orphaned systemd_creds re-export (linux test build)
+- *(keystore)* qualify static_label in linux/windows backends
+- *(transport-http)* bound + validate advance_refs (PR #422 review)
+- *(transport-s3)* reject non-canonical ref bodies per SPEC-REFS §1 ([#552](https://github.com/officialunofficial/mkit/pull/552)) ([#565](https://github.com/officialunofficial/mkit/pull/565))
+- *(s3)* use Self:: in intra-doc link; scrub stray finding ref in test
+- reformat two import lines to satisfy the CI-pinned rustfmt ([#781](https://github.com/officialunofficial/mkit/pull/781))
+- *(cli)* thread ssh.* trust-pinning config into spawned ssh ([#389](https://github.com/officialunofficial/mkit/pull/389)) ([#435](https://github.com/officialunofficial/mkit/pull/435))
+- *(cli)* preserve a nested sibling remote's refs and bridge state across prefix rename/remove ([#660](https://github.com/officialunofficial/mkit/pull/660)) ([#789](https://github.com/officialunofficial/mkit/pull/789))
+- converge buffa/connectrpc across all 4 lockfiles on latest published versions ([#805](https://github.com/officialunofficial/mkit/pull/805))
+- *(cli)* create destination parents when remote rename moves tracking refs and bridge state ([#596](https://github.com/officialunofficial/mkit/pull/596)) ([#605](https://github.com/officialunofficial/mkit/pull/605))
+- *(sparse)* wire the bitmap-cache read path into checkout/clone ([#556](https://github.com/officialunofficial/mkit/pull/556)) ([#579](https://github.com/officialunofficial/mkit/pull/579))
+- *(serve,enc)* cumulative per-connection frame/byte budgets on the enc listener ([#559](https://github.com/officialunofficial/mkit/pull/559)) ([#578](https://github.com/officialunofficial/mkit/pull/578))
+- *(cli)* address review round 2 — checkout -b atomicity + color/tag fixes
+- *(cli)* address peer review of PR #402 — tag peeling, -c reach, --color
+- *(cli)* address PR review — fill parity gaps, document deferrals
+- *(cli)* address christopherwxyz review — merge no-op commit, abort atomicity, mv/config cleanups
+- *(cli)* address review round 11 — mv dir-dest symlink guard, atomic abort pre-flight, completion fixes
+- *(cli)* self-review follow-up — round-9 fixes must not introduce data loss
+- *(cli)* complete review round 5 — merge --abort after --no-commit ([#4](https://github.com/officialunofficial/mkit/pull/4)), cherry-pick/revert -n deletions ([#5](https://github.com/officialunofficial/mkit/pull/5))
+- *(cli)* address review round 5 — mv hardening, rebase merge regression, +more
+- *(cli)* address review round 4 — mv data-loss/overlap, cherry-pick -n conflict, empty merge commit
+- *(transport-connect)* wire ConnectTransport into the shared retry/backoff driver ([#801](https://github.com/officialunofficial/mkit/pull/801))
+
+### Documentation
+
+- resolve corpus-wide style-guide drift ([#787](https://github.com/officialunofficial/mkit/pull/787)) ([#812](https://github.com/officialunofficial/mkit/pull/812))
+- promote SPEC-REFS to stable, document flock-over-NFS caveat, tier sigstore as roadmap ([#741](https://github.com/officialunofficial/mkit/pull/741))
+- spec remediation WIP (index v1 drop, attest sha256 digests, ref-prefix boundary fix) ([#669](https://github.com/officialunofficial/mkit/pull/669))
+- *(core)* explain why the stdio deny is per-crate, not a workspace lint (#441 follow-up) ([#601](https://github.com/officialunofficial/mkit/pull/601))
+- release readiness — SPEC Invariants, docs/specs/ move, runbook accuracy ([#548](https://github.com/officialunofficial/mkit/pull/548))
+- *(rpc)* correct stale proto comments and fastcdc fixture metadata ([#391](https://github.com/officialunofficial/mkit/pull/391)) ([#433](https://github.com/officialunofficial/mkit/pull/433))
+- *(specs,parity)* SPEC-WORKTREE + worktree parity docs (#493 Phase 4) ([#591](https://github.com/officialunofficial/mkit/pull/591))
+- *(cli)* unlink private items from push_branch's public rustdoc ([#569](https://github.com/officialunofficial/mkit/pull/569))
+- *(cli)* reconcile help/docs/completions for the parity push; clippy clean
+- reflect --contains/--no-contains default-HEAD in all surfaces
+
+### Features
+
+- *(cli)* add log --author/--grep/--since/--until/--no-merges/--first-parent and diff -w/-b/-U<n> ([#746](https://github.com/officialunofficial/mkit/pull/746))
+- *(core,transport)* centralize retry/backoff, close SSH/enc retry gap ([#764](https://github.com/officialunofficial/mkit/pull/764))
+- *(core,transport)* additive Transport streaming API with PackChunk client/server streams ([#760](https://github.com/officialunofficial/mkit/pull/760))
+- *(core)* pack payload compression via zstd (SPEC-PACKFILE v2) ([#674](https://github.com/officialunofficial/mkit/pull/674))
+- *(core)* pair changed small blobs against their same-path prior version (#646a) ([#673](https://github.com/officialunofficial/mkit/pull/673))
+- *(core)* [**breaking**] cut pack-shard Reed-Solomon hasher over from Sha256 to Blake3 ([#671](https://github.com/officialunofficial/mkit/pull/671))
+- *(core,cli)* cross-worktree gc roots + tree-spanning gc lock (#493 Phase 3) ([#590](https://github.com/officialunofficial/mkit/pull/590))
+- *(cli,core)* mkit worktree add/list/remove/prune (#493 Phase 2) ([#589](https://github.com/officialunofficial/mkit/pull/589))
+- *(core,cli)* linked-worktree on-disk model + discovery (#493 Phase 1) ([#592](https://github.com/officialunofficial/mkit/pull/592))
+- *(blame)* content-addressed --ignore-rev-precise fall-through ([#496](https://github.com/officialunofficial/mkit/pull/496)) ([#523](https://github.com/officialunofficial/mkit/pull/523))
+- *(transport)* bound pack-chain depth via periodic re-baseline ([#406](https://github.com/officialunofficial/mkit/pull/406)) ([#521](https://github.com/officialunofficial/mkit/pull/521))
+- *(transport)* skip already-applied packs on incremental fetch via local applied-pack record ([#409](https://github.com/officialunofficial/mkit/pull/409)) ([#520](https://github.com/officialunofficial/mkit/pull/520))
+- *(blame)* make -M/-C and --ignore-rev merge-aware
+- *(blame)* merge-aware walk by default; --first-parent restores linear ([#458](https://github.com/officialunofficial/mkit/pull/458))
+- *(blame)* --reverse <start>..<end> — forward (reverse) blame ([#459](https://github.com/officialunofficial/mkit/pull/459))
+- *(blame)* --ignore-rev / --ignore-revs-file — skip noise commits ([#457](https://github.com/officialunofficial/mkit/pull/457))
+- *(blame)* -M / -C move & copy detection
+- *(blame)* -w / --ignore-whitespace (ignore whitespace when matching)
+- *(cli)* exact rename detection in status and diff ([#439](https://github.com/officialunofficial/mkit/pull/439))
+- *(transport)* atomic branch+packmap advance seam (#408, client)
+- *(core)* [**breaking**] merkelize ChunkedBlob & Tree identity (BMT roots) [stacked on #401] ([#414](https://github.com/officialunofficial/mkit/pull/414))
+- *(transport)* wire delta encoding into the push/fetch path ([#401](https://github.com/officialunofficial/mkit/pull/401))
+- *(cli)* stash pop/apply --index (restore staged state)
+- *(rpc,repo-worker)* publish mkit-rpc and mkit-repo proto modules to the BSR ([#753](https://github.com/officialunofficial/mkit/pull/753))
+- *(cli)* verify commit/remix/tag signatures on clone/pull/fetch, fail closed by default ([#743](https://github.com/officialunofficial/mkit/pull/743))
+- *(attest)* implement external-signer PinPrompt/PinResponse round-trip; deprecate --pin on argv ([#745](https://github.com/officialunofficial/mkit/pull/745))
+- *(transport-http)* atomic advance_refs override → vcs /refs/advance ([#408](https://github.com/officialunofficial/mkit/pull/408))
+- *(transport-s3)* implement S3/R2 multipart upload for packs above the single-PUT cap ([#758](https://github.com/officialunofficial/mkit/pull/758))
+- *(vcs-worker)* reference mkit.transport.v1 Cloudflare Worker server ([#754](https://github.com/officialunofficial/mkit/pull/754))
+- *(transport)* native ConnectRPC client for mkit+https:// (mkit.transport.v1) ([#762](https://github.com/officialunofficial/mkit/pull/762))
+- *(cli)* honest transfer-progress reporting for clone/push/pull/fetch ([#744](https://github.com/officialunofficial/mkit/pull/744))
+- *(cli)* unify --format=json across mutating commands ([#747](https://github.com/officialunofficial/mkit/pull/747))
+- *(cli)* fetch/pull --all, clone -b/-o, config --unset and scope selectors ([#740](https://github.com/officialunofficial/mkit/pull/740))
+- *(cli)* mkit serve --http — self-hosted mkit.transport.v1 Connect remote ([#761](https://github.com/officialunofficial/mkit/pull/761))
+- *(cli)* mkit trust command family + verify --trusted signer binding ([#739](https://github.com/officialunofficial/mkit/pull/739))
+- *(transport)* clean up applied-packs record on remote remove/rename ([#545](https://github.com/officialunofficial/mkit/pull/545)) ([#597](https://github.com/officialunofficial/mkit/pull/597))
+- *(cli)* mkit self update — in-place updates verified by the release attestation ([#509](https://github.com/officialunofficial/mkit/pull/509))
+- *(blame)* support -L line ranges and a [<rev>] argument ([#460](https://github.com/officialunofficial/mkit/pull/460))
+- *(cli)* diff color output (--color/--no-color)
+- *(cli)* switch/merge-base/rev-list + high-value parity flags
+- *(cli)* global -C <path> and -c <key>=<val> flags (git parity)
+- *(cli)* git-shaped local-mutation summaries + status long format
+- *(cli)* git-shaped sync output (push/pull/fetch/clone/remote)
+- *(cli)* mv supports directory moves
+- *(cli)* branch --list <pattern> glob filtering
+- *(cli)* close git CLI/UX parity gaps + reconcile all docs
+- *(transport,repo-worker,vcs-worker)* add grpc.health.v1.Health check RPC ([#808](https://github.com/officialunofficial/mkit/pull/808))
+- *(mkit-transport-connect)* split client timeout into per-verb-class defaults ([#802](https://github.com/officialunofficial/mkit/pull/802))
+
+### Performance
+
+- *(core)* tune parallel_io's worker-pool cap for fsync-bound batch commits ([#867](https://github.com/officialunofficial/mkit/pull/867))
+- *(transport)* split an oversized push plan across multiple packs ([#835](https://github.com/officialunofficial/mkit/pull/835))
+- *(core)* stream chunked-blob ingest and checkout instead of whole-file buffering ([#834](https://github.com/officialunofficial/mkit/pull/834))
+- *(core,cli)* fix quadratic staging in mkit add via path->position index ([#749](https://github.com/officialunofficial/mkit/pull/749))
+- *(core)* skip BLAKE3 re-verification on display-only reads ([#625](https://github.com/officialunofficial/mkit/pull/625)) ([#654](https://github.com/officialunofficial/mkit/pull/654))
+- *(cli)* load each diffstat side once — LoadedBlob replaces per-view store reads ([#624](https://github.com/officialunofficial/mkit/pull/624)) ([#628](https://github.com/officialunofficial/mkit/pull/628))
+- *(cli)* render diffstat from blob metadata — stop reassembling chunked blobs ([#606](https://github.com/officialunofficial/mkit/pull/606)) ([#613](https://github.com/officialunofficial/mkit/pull/613))
+- *(blame)* address review — skip blob load on fast path, borrow parent lines
+- *(transport)* load/persist applied-packs record once per fetch ([#546](https://github.com/officialunofficial/mkit/pull/546)) ([#598](https://github.com/officialunofficial/mkit/pull/598))
+
+### Refactor
+
+- *(cli,core)* decompose diff.rs, worktree.rs, and store.rs hot clusters into focused modules ([#633](https://github.com/officialunofficial/mkit/pull/633)) ([#656](https://github.com/officialunofficial/mkit/pull/656))
+- *(core,cli)* introduce RepoLayout path-resolution seam (#493 Phase 0) ([#587](https://github.com/officialunofficial/mkit/pull/587))
+- *(blame)* dedup parent-lines load, bundle merge-pass args
+- *(blame)* address review — Rc-shared memo, extract walk module
+- *(blame)* index-backed detection, work-stack, no perf/recursion cliffs
+- *(blame)* sub-block move/copy detection; extract detector; typed opts
+- *(blame)* collapse to one checked matcher; strip vertical tab
+- *(blame)* extract match_lines_with_options; blame completions
+- *(transport-http)* extract ref endpoints/DTOs into ref_ops module ([#423](https://github.com/officialunofficial/mkit/pull/423)) ([#536](https://github.com/officialunofficial/mkit/pull/536))
+
+### Bisect
+
+- add bisect run <cmd> ([#528](https://github.com/officialunofficial/mkit/pull/528)) ([#540](https://github.com/officialunofficial/mkit/pull/540))
+
+### Blame
+
+- --porcelain / --line-porcelain output ([#524](https://github.com/officialunofficial/mkit/pull/524)) ([#541](https://github.com/officialunofficial/mkit/pull/541))
+- implement -C -C -C whole-history copy search ([#526](https://github.com/officialunofficial/mkit/pull/526)) ([#539](https://github.com/officialunofficial/mkit/pull/539))
+- break -C copy ties by git line-identity (ancestor source) ([#527](https://github.com/officialunofficial/mkit/pull/527)) ([#538](https://github.com/officialunofficial/mkit/pull/538))
+- expose inline -M<num> / -C<num> similarity thresholds ([#525](https://github.com/officialunofficial/mkit/pull/525)) ([#537](https://github.com/officialunofficial/mkit/pull/537))
+
+### Deps
+
+- bump commonware-* to 2026.7.0, fix downstream breakage ([#856](https://github.com/officialunofficial/mkit/pull/856))
+- *(rust)* migrate to buffa 0.8.0 (regen mkit-rpc; repo-client/worker stay 0.7) ([#491](https://github.com/officialunofficial/mkit/pull/491))
+- *(rust)* bump regex ([#544](https://github.com/officialunofficial/mkit/pull/544))
+- *(rust)* bump chacha20poly1305 from 0.10.1 to 0.11.0 in /rust ([#483](https://github.com/officialunofficial/mkit/pull/483))
+
+### Proto
+
+- *(rpc,repo-worker)* extract shared RefExpectation/RefEntry to mkit/common/v1/refs.proto ([#734](https://github.com/officialunofficial/mkit/pull/734))
+
 ### Added
 
 - **BSR-published proto modules for external integrators.** The `mkit-rpc`
@@ -397,6 +557,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **commonware 2026.7.0** dependency train across the workspace (up from
+  2026.5.0), plus `apps/repo-worker` and the separate `contrib/signers`
+  workspace, both of which path-depend into `rust/crates/*` and needed
+  their own `Cargo.lock` regenerated too. No wire-format or object
+  change &mdash; investigated dropping `mkit-core/src/merkle.rs`'s vendored
+  BMT construction for a direct `commonware_storage::bmt` dependency now
+  that `bmt` is confirmed `no_std` (commonwarexyz/monorepo#4090), but
+  found it's not viable: `bmt::Builder<H: Hasher>` requires
+  `commonware_cryptography::Hasher`, and `commonware-cryptography`'s
+  `blst` (BLS12-381) dependency is unconditional, not feature-gated,
+  and fails to build for `wasm32-unknown-unknown` on toolchains without
+  a WASM-capable C compiler. The vendored construction stays (its
+  cross-check test against upstream still passes byte-for-byte).
+  `commonware-parallel`'s `Strategy` trait gained new required methods
+  (`manual`, `spawn`, `run`, `try_run`, `try_fold`, `sort_by`); mkit's
+  internal `CountingStrategy` test helper was updated to match.
+  `commonware_utils::test_rng_seeded(seed)` was renamed to
+  `TestRng::new(seed)` and `commonware_storage::freezer::Freezer::init`
+  gained a third `Option<Checkpoint>` parameter; both updated at their
+  mkit call sites.
+- **BREAKING (`mkit-attest`, `bls-threshold` feature):**
+  `trusted_dealer`/`bls_threshold_trusted_dealer`'s generic RNG bound
+  moved from rand_core 0.6's `CryptoRngCore` to rand_core 0.10's
+  `CryptoRng` &mdash; a from-scratch, source-incompatible trait (`TryRng`/
+  `TryCryptoRng`), not just a version bump. `commonware-cryptography`
+  2026.7.0 made the same move internally, so this crate's bound had to
+  follow. Callers supplying an RNG type must now implement rand_core
+  0.10's `CryptoRng` (for example `commonware_utils::TestRng`, or
+  `rand_core::UnwrapErr(getrandom::SysRng)` in place of the old
+  `rand_core::OsRng`); an RNG that only implements the 0.6-era
+  `CryptoRngCore` no longer satisfies the bound.
 - **BREAKING (`mkit-core`, `pack-shards` feature): pack-shard Reed-Solomon
   hasher cut over from `Sha256` to `Blake3`.** `pack_shard::RsScheme` now
   wraps `commonware_coding::ReedSolomon<Blake3>` instead of `Sha256`,
@@ -567,6 +758,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **`WriteBatch::commit`'s barrier-issuing thread pool is now sized for
+  I/O concurrency, not CPU cores** (#864). The pool that issues one
+  fsync-class barrier per staged object was capped at
+  `available_parallelism().min(16)` — CPU core count, the wrong resource
+  for a workload that spends nearly all its time blocked on the storage
+  device rather than computing (mirroring why `tokio::task::spawn_blocking`
+  defaults to 512 threads for the same class of work). Replaced with a
+  benchmarked `MAX_SYNC_WORKERS = 64` constant. Real effect on a 1000-file
+  `add`/`commit`: mkit goes from ~1.6x slower than `git2` (libgit2) to
+  roughly matching it, while its lead over the actual `git` CLI widens to
+  ~21.5x. No change to `WriteBatch`'s durability contract or public API.
 - **Multi-pack push splitting** (#831): a push whose plan exceeds a single
   pack's payload cap (`pack::MAX_TOTAL_PAYLOAD`, 4 GiB in production) now
   splits across multiple packs instead of failing with `PackfileTooLarge`.
@@ -668,6 +870,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`RUSTSEC-2025-0055` ignore removed from `deny.toml`.** The advisory
+  (tracing-subscriber 0.2 ANSI-escape logging, flagged for
+  re-justification by 2026-08-21 per the `[0.2.0]` entry below) reached
+  the tree only transitively via `commonware-runtime 2026.5.x → arkworks
+  (ark-ed-on-bls12-381-bandersnatch → ark-r1cs-std) → tracing-subscriber
+  0.2`. The commonware 2026.7.0 bump drops that entire arkworks/
+  bandersnatch chain from the dependency tree; the only
+  `tracing-subscriber` left is v0.3.23, the fixed line. `RUSTSEC-2024-0436`
+  (`paste`, unmaintained) is still transitively present via commonware's
+  feature-gated deps and remains ignored.
 - **`clone`/`pull`/`fetch` now verify commit/remix/tag signatures and
   fail closed by default.** Previously the only signature check was the
   manual, single-revision `mkit verify <rev>` &mdash; a hostile remote

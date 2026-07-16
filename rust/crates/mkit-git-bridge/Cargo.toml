@@ -15,7 +15,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-core = { version = "0.4", path = "../mkit-core" }
 # git object ids are SHA-1 over "type len\0" + body. This is git's
 # object-naming function, not a security boundary (SPEC-GIT-BRIDGE §2);
 # integrity rides on the carried BLAKE3 + Ed25519 material.

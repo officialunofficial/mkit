@@ -1,7 +1,8 @@
 name = "mkit-og"
-# Official Unofficial, Inc. — the account that owns the mkit.sh zone (same one
-# mkit-mcp deploys to), so the og.mkit.sh custom domain provisions.
-account_id = "0bc82bff4439c556f9dc1b054d2de6d7"
+# No account_id here — deploys to the same Official Unofficial, Inc. account
+# (owner of the mkit.sh zone) that mkit-mcp deploys to, resolved via the
+# CLOUDFLARE_ACCOUNT_ID env var at deploy time like apps/repo-worker,
+# apps/keys-worker, apps/mcp.
 main = "src/index.ts"
 compatibility_date = "2026-02-25"
 

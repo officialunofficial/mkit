@@ -35,12 +35,19 @@ fn bench_object_commit(c: &mut Criterion) {
             .collect();
 
         // --- mkit-core: hash + atomic-write each payload as a blob ------
-        // Uses ObjectStore::write so the comparison is apples-to-apples
-        // with git2's odb.write and `git hash-object -w` below — all
-        // three perform a real on-disk write, not just a hash. Every
-        // measured iteration gets a fresh tempdir + store (like
-        // store_write.rs's iter_with_setup) so writes never dedup
-        // against a payload already staged by a prior iteration.
+        // Uses ObjectStore::batch(), the write path every multi-object
+        // command (add, commit, pack unpack) actually takes — content is
+        // still fsynced per object before it becomes visible, but the
+        // directory-durability fsync is deferred and amortized to one
+        // flush at `commit()`, not paid per object like the raw
+        // `ObjectStore::write()` this bench used before. That distinction
+        // is the whole story at N>1: the per-object-fsync path is ~8-25x
+        // slower here for no correctness benefit, since nothing in this
+        // benchmark's multi-file commit needs each object durable before
+        // the *next* object is written — only before the batch as a whole
+        // is visible. Every measured iteration gets a fresh tempdir +
+        // store (like store_write.rs's iter_with_setup) so writes never
+        // dedup against a payload already staged by a prior iteration.
         {
             c.bench_function(&format!("commit/{axis}/mkit"), |b| {
                 b.iter_with_setup(
@@ -158,12 +165,17 @@ fn init_git_repo(dir: &Path) {
 }
 
 fn commit_via_mkit(store: &ObjectStore, payloads: &[Vec<u8>]) {
-    // ObjectStore::write hashes the payload (BLAKE3), atomically
-    // writes the bytes to <objects>/<2-hex-shard>/<62-hex-suffix> via
-    // tmpfile + fsync + rename, and is idempotent on duplicate writes.
+    // ObjectStore::batch() hashes each payload (BLAKE3) and atomically
+    // writes it to <objects>/<2-hex-shard>/<62-hex-suffix> via
+    // tmpfile + fsync + rename, same as ObjectStore::write; the
+    // difference is `commit()` amortizes the shard-directory fsyncs
+    // (rename durability) to once for the whole batch instead of once
+    // per object. Idempotent on duplicate writes, same as `write`.
+    let batch = store.batch();
     for p in payloads {
-        let _h = store.write(p).unwrap();
+        let _h = batch.write(p).unwrap();
     }
+    batch.commit().unwrap();
 }
 
 fn commit_via_git2(repo: &git2::Repository, payloads: &[Vec<u8>]) {

@@ -45,7 +45,6 @@ connectrpc = { version = "0.8.1", default-features = false, features = ["gzip", 
 # Protobuf runtime for the generated message types. connectrpc 0.8 requires
 # buffa >= 0.8.1 (view→owned overflow accounting).
 buffa = "0.8.1"
-buffa-types = "0.8.1"
 
 # Hashing — pure-Rust BLAKE3 over the raw request body (wasm-safe). Must match
 # the server's BLAKE3 of the serialized protobuf request body.
@@ -53,7 +52,6 @@ blake3 = "1"
 
 # HTTP types shared with the transport.
 http = "1"
-http-body = "1"
 http-body-util = "0.1"
 bytes = "1.6"
 
@@ -62,7 +60,6 @@ futures = "0.3"
 
 # Serialization (generated message derives).
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 # Wasm / browser bindings.
 wasm-bindgen = "0.2"
