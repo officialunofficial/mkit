@@ -1011,7 +1011,6 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "http",
- "http-body",
  "http-body-util",
  "mkit-attest",
  "mkit-core",

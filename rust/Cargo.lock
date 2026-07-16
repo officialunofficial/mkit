@@ -785,19 +785,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "buffa-types"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cb54bcbf6946c58e550eeaf6209047146363dbc7cbdc87e49e67089ed2ff5f"
-dependencies = [
- "buffa",
- "bytes",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3499,7 +3486,6 @@ dependencies = [
  "security-framework",
  "sha2 0.10.9",
  "tempfile",
- "thiserror 2.0.18",
  "windows-native-keyring-store",
  "yubikey",
  "zbus-secret-service-keyring-store",
@@ -3512,18 +3498,15 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "buffa",
- "buffa-types",
  "bytes",
  "connectrpc",
  "connectrpc-build",
  "futures",
  "http",
- "http-body",
  "http-body-util",
  "js-sys",
  "send_wrapper",
  "serde",
- "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -3552,7 +3535,6 @@ version = "0.3.0"
 dependencies = [
  "axum",
  "buffa",
- "buffa-types",
  "bytes",
  "connectrpc",
  "connectrpc-build",
@@ -3562,16 +3544,13 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "http",
- "http-body",
  "http-body-util",
  "mkit-core",
  "mkit-transport-file",
  "mkit-transport-memory",
  "rustls",
  "serde",
- "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "url",
  "webpki-roots",
@@ -3615,7 +3594,6 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "url",
 ]
 
@@ -3640,7 +3618,6 @@ dependencies = [
  "sha2 0.11.0",
  "testcontainers",
  "testcontainers-modules",
- "thiserror 2.0.18",
 ]
 
 [[package]]
