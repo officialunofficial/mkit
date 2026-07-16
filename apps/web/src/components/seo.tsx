@@ -22,10 +22,9 @@ type SeoProps = {
 }
 
 /**
- * Card-design generation, folded into the og:image URL purely as a cache
- * buster: the OG worker ignores it, but social platforms (Slack, X, Discord)
- * cache unfurl images by exact URL with no re-scrape control, so shipping a
- * visual redesign of the card requires minting new URLs. Bump on redesign.
+ * Card-design generation, folded into the og:image URL purely as a cache buster: the OG worker ignores it, but social
+ * platforms (Slack, X, Discord) cache unfurl images by exact URL with no re-scrape control, so shipping a visual
+ * redesign of the card requires minting new URLs. Bump on redesign.
  */
 const OG_CARD_VERSION = '2'
 
