@@ -304,7 +304,20 @@ function Feed({
                   {item.kind === 'system' ? (
                     <SystemNotice notice={item} />
                   ) : item.kind === 'commit' ? (
-                    <CommitNotice room={room} item={item} onOpen={() => onOpenCommit(item)} />
+                    <CommitNotice
+                      room={room}
+                      item={item}
+                      onOpen={() => onOpenCommit(item)}
+                      // Reactions key on the commit hash — the same id the
+                      // detail drawer (and the spammer's responder) targets,
+                      // so bot reaction bundles on a real push show up right
+                      // on the activity row.
+                      reactions={reactionsFor(item.entry.hash)}
+                      canReact={unlocked}
+                      onToggle={(emoji) =>
+                        unlocked ? toggle.mutate({ targetId: item.entry.hash, emoji }) : onNeedIdentity()
+                      }
+                    />
                   ) : (
                     <Row
                       item={item}
@@ -463,7 +476,21 @@ function CommitKindIcon({ kind }: { kind: 'commit' | 'branch' | 'remix' }) {
   )
 }
 
-function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; onOpen: () => void }) {
+function CommitNotice({
+  room,
+  item,
+  onOpen,
+  reactions,
+  canReact,
+  onToggle,
+}: {
+  room: string
+  item: CommitItem
+  onOpen: () => void
+  reactions: ReactionAgg[]
+  canReact: boolean
+  onToggle: (emoji: string) => void
+}) {
   const api = useMkit()
   const e = item.entry
   const isRemix = e.kind === 'remix'
@@ -472,36 +499,68 @@ function CommitNotice({ room, item, onOpen }: { room: string; item: CommitItem; 
   const sourceAuthor = useMemo(() => decodeAuthorPubkey(api, sourceObj.data ?? null), [api, sourceObj.data])
   const iconKind = isRemix || isForkRef(e.ref) ? 'remix' : e.ref === 'main' ? 'commit' : 'branch'
   return (
+    // Mirrors the chat Row's `gap-2.5 px-4` + 26px-gutter skeleton EXACTLY, so
+    // the commit's avatar starts at the same x as chat message text (16px pad
+    // + 26px gutter + 10px gap), with the kind icon living in the gutter the
+    // way chat avatars do. The reactions line below indents through the same
+    // gutter, so commit reactions align with chat reactions too.
     <div className='px-4 py-1'>
       <button
         type='button'
         onClick={onOpen}
         title='View commit details'
-        className='group/sys mx-auto flex w-full max-w-full flex-wrap items-center justify-center gap-x-1.5 gap-y-0.5 rounded-md px-1.5 py-1 text-center text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+        className='group/sys flex w-full min-w-0 items-center gap-2.5 rounded-md py-1 text-left text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
       >
-        <CommitKindIcon kind={iconKind} />
+        <span className='flex w-[26px] shrink-0 items-center justify-end'>
+          <CommitKindIcon kind={iconKind} />
+        </span>
+        {/* One line, left-aligned, never wraps: every fact (author, hash, ref)
+            keeps its natural width — the author label is explicitly nowrap'd
+            so a passkey handle can't break across lines — and only the commit
+            MESSAGE truncates (it's the one min-w-0 flex child; hover it for
+            the full text via its own title). */}
+        <span className='flex min-w-0 flex-1 items-center justify-start gap-x-1.5'>
         <PlayerAvatar pubkey={e.authorPubkey} size={16} />
-        <PlayerLabel pubkey={e.authorPubkey} className='font-medium text-fg' />
-        <span>{isRemix ? 'remixed' : 'pushed'}</span>
+        <PlayerLabel pubkey={e.authorPubkey} className='shrink-0 whitespace-nowrap font-medium text-fg' />
+        <span className='shrink-0'>{isRemix ? 'remixed' : 'pushed'}</span>
         {isRemix && source ? (
           <>
             {sourceAuthor ? <PlayerAvatar pubkey={sourceAuthor} size={16} /> : null}
             <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 6)}</code>
-            <span>to</span>
+            <span className='shrink-0'>to</span>
             <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
           </>
         ) : (
           <>
             <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
-            <span>to</span>
+            <span className='shrink-0'>to</span>
             <code className='font-mono text-fg'>{e.ref}</code>
           </>
         )}
-        {e.message ? <span className='truncate text-fg'>“{e.message}”</span> : null}
-        <span aria-hidden className='opacity-0 transition-opacity group-hover/sys:opacity-70'>
+        {e.message ? (
+          <span title={e.message} className='min-w-0 truncate text-fg'>
+            “{e.message}”
+          </span>
+        ) : null}
+        <span aria-hidden className='shrink-0 opacity-0 transition-opacity group-hover/sys:opacity-70'>
           ›
         </span>
+        </span>
       </button>
+      {/* Signed reactions targeting this commit's hash (bot response bundles
+          land here too) — the SAME size and component as chat-row reactions,
+          on their own line under the notice, indented through the same
+          26px-gutter skeleton so they align with chat reactions. Toggling
+          behaves identically (and the drawer stays the place to add a first
+          one). Nothing renders when nothing has reacted. */}
+      {reactions.length > 0 ? (
+        <div className='flex gap-2.5 pb-0.5'>
+          <span className='w-[26px] shrink-0' aria-hidden />
+          <div className='min-w-0 flex-1'>
+            <ReactionPills reactions={reactions} canReact={canReact} onToggle={onToggle} />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -542,7 +601,7 @@ function ReactionPills({
           title={
             canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Sign in with your passkey to react'
           }
-          className={`inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
+          className={`reaction-pop-in inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
               ? 'border-blue-500/60 bg-blue-500/10 text-fg'
               : `border-hairline bg-muted/5 text-muted ${HOVER_BORDER} hover:text-fg`

@@ -293,6 +293,29 @@
     }
   }
 
+  /* Reaction-pill entrance: a pill mounts when its emoji's FIRST reaction on
+     that target arrives (live over the socket), so a short scale+fade keeps
+     it from popping in — same rationale (and reduced-motion posture) as
+     .dock-pop-in above, tuned smaller/springier for a 24px pill. */
+  @keyframes reaction-pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  .reaction-pop-in {
+    animation: reaction-pop-in 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reaction-pop-in {
+      animation: none;
+    }
+  }
+
   /* Utility for applying the brand gradient as text fill. Used on the
      landing hero only — kept off secondary headings so the colour still
      reads as an accent rather than a default. */
