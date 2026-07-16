@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/officialunofficial/mkit/compare/v0.4.0...v0.4.1) - 2026-07-16
+
+### Bug Fixes
+
+- *(core,cli)* close a torn-read race between concurrent history-journal opens and writes ([#873](https://github.com/officialunofficial/mkit/pull/873))
+
 ## [0.4.0](https://github.com/officialunofficial/mkit/compare/v0.3.0...v0.4.0) - 2026-07-16
 
 ### Bug Fixes
