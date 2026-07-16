@@ -41,7 +41,7 @@ all = { level = "warn", priority = -1 }
 [dependencies]
 # Inter-workspace deps need explicit version + path so `cargo publish`
 # accepts them.
-mkit-core = { version = "0.3", path = "../mkit-core" }
+mkit-core = { version = "0.4", path = "../mkit-core" }
 
 # ConnectRPC native client: hyper/hyper-util transport + rustls TLS. This is
 # the crate's mandatory baseline; `server`/`axum` are added by the `server`
@@ -122,7 +122,7 @@ connectrpc-build = "0.8.0"
 [dev-dependencies]
 tempfile = "3"
 mkit-transport-file = { path = "../mkit-transport-file" }
-mkit-transport-memory = { version = "0.3", path = "../mkit-transport-memory" }
+mkit-transport-memory = { version = "0.4", path = "../mkit-transport-memory" }
 # Test-only: `envelope::tests::parity` independently re-verifies the write
 # envelope headers `EnvelopeTransport` produces against a from-scratch
 # reimplementation of `apps/vcs-worker`'s server-side `verify_envelope` /

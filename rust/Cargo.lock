@@ -3327,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-attest"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "blake3",
@@ -3353,7 +3353,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-benches"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake2",
  "blake3",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-git-bridge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "mkit-core",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-keystore"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "card-backend-pcsc",
  "chacha20poly1305 0.11.0",
@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arbitrary",
  "buffa",
@@ -3544,11 +3544,11 @@ dependencies = [
 
 [[package]]
 name = "mkit-test-util"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "mkit-transport-connect"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "buffa",
@@ -3579,7 +3579,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-enc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "buffa",
  "commonware-codec",
@@ -3599,7 +3599,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-file"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mkit-core",
  "tempfile",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "mkit-core",
@@ -3621,14 +3621,14 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-memory"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "mkit-core",
 ]
 
 [[package]]
 name = "mkit-transport-s3"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hex",
  "hmac 0.13.0",
@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-transport-ssh"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "buffa",
  "hex",
@@ -3656,7 +3656,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-wasm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bao",
  "base64",
