@@ -1649,12 +1649,10 @@ dependencies = [
 name = "mkit-sign-tpm"
 version = "0.1.0"
 dependencies = [
- "base64",
  "buffa",
  "mkit-rpc",
  "p256 0.13.2",
  "sha2 0.11.0",
- "thiserror",
  "tss-esapi",
 ]
 
