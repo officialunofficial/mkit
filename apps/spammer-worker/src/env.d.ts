@@ -25,4 +25,25 @@ interface Env {
    * `alarm()` doc comment for why this defaults off.
    */
   AI_CONTENT_AUTO_REFRESH?: string;
+  /**
+   * Opt-in gate for per-event AI-personalized replies (#853's ledger,
+   * #854's `emitOne` wiring) — must be exactly "true" to ever call
+   * `generatePersonalizedReply`; unset (the default, deliberately not
+   * declared in wrangler.jsonc's `vars`) means every response chat reply
+   * uses `responder.ts`'s `chooseReplyText` template fallback only, with the
+   * personalization budget ledger never spent. Mirrors
+   * `AI_CONTENT_AUTO_REFRESH`'s opt-in posture and #855's rollout plan
+   * (templates only until the pipeline is proven, THEN grant budget).
+   */
+  AI_REPLY_PERSONALIZATION?: string;
+  /**
+   * Comma-separated allowlist of additional pubkeys (hex) `responder.ts`'s
+   * `mergedSyntheticPubkeys` treats as non-human on top of the 64 synthetic
+   * pool identities — e.g. legacy seeded demo authors, if any exist (#848:
+   * "a small config allowlist of additional 'known non-human' pubkeys ...
+   * empty by default"). Unset/empty means the pool alone is the synthetic
+   * set. Trimmed and lowercased entry-by-entry, not case- or
+   * whitespace-sensitive.
+   */
+  RESPONDER_NONHUMAN_ALLOWLIST?: string;
 }
