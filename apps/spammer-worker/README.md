@@ -4,11 +4,14 @@ A Cloudflare Worker that drives realistic, validly-signed synthetic activity
 into a live [mkit](https://mkit.sh) room served by `mkit-repo-worker`
 (`https://api.mkit.sh`).
 
-A single Durable Object (`Spammer`) owns a self-rescheduling `alarm()` loop.
-Once every ~1000 ms it emits a small batch of real events — signed chat
-messages, signed commits on `main`, occasional remix objects on `forks/…`
-refs, and the odd reaction — from a deterministic pool of 64 synthetic
-Ed25519 identities. Every event is built with the same vendored wasm
+A single Durable Object (`Spammer`) owns a self-rescheduling `alarm()` loop
+ticking every ~1000 ms. Each event category fires on its own tick cadence
+(see `scheduler.ts`'s "Ambient cadence" doc section): ~12 signed chat
+messages/min, ~4 signed pushes/min to `main` (roughly 1 in 8 a remix on a
+`forks/…` ref), and ~6 reactions/min — from a deterministic pool of 64
+synthetic Ed25519 identities. The rates are deliberately calm: fast enough
+that the room reads as alive, slow enough that a real visitor's push wins
+the CAS race on `main` and their chat isn't buried. Every event is built with the same vendored wasm
 (`mkit-wasm` + `mkit-repo-client`) the web app uses, so each write carries a
 genuine `mkit-write:v1` envelope and passes repo-worker's real signature and
 content-address verification. Nothing is mocked or bypassed — this is real
@@ -33,8 +36,8 @@ pinned to the closed, server-verified `REACTION_EMOJI` allowlist.
 
 This is well inside the Workers AI free tier (10,000 neurons/day): one
 batched refresh call every ~20 minutes on the cheapest model is on the order
-of a few dozen to a couple hundred requests/day, not the ~259,000/day a
-per-event call would require at this Worker's ~3 events/s cadence.
+of a few dozen to a couple hundred requests/day, not the tens of thousands
+a per-event call would require at this Worker's ambient cadence.
 
 ## Inert by default
 
