@@ -428,11 +428,9 @@ function Row({
  * plain commit push keeps showing `{hash} to {ref}` since `ref` (usually `main`) IS meaningful there.
  */
 /**
- * The little glyph that tells commit-activity rows apart at a glance: a commit
- * dot for a plain push to `main`, a branch glyph for a push to any other
- * (non-fork) ref, and a fork glyph for a remix. Same inline-SVG conventions as
- * the rest of this file (stroke=currentColor, no icon library) so it inherits
- * the row's muted/hover color for free.
+ * The little glyph that tells commit-activity rows apart at a glance: a commit dot for a plain push to `main`, a branch
+ * glyph for a push to any other (non-fork) ref, and a fork glyph for a remix. Same inline-SVG conventions as the rest
+ * of this file (stroke=currentColor, no icon library) so it inherits the row's muted/hover color for free.
  */
 function CommitKindIcon({ kind }: { kind: 'commit' | 'branch' | 'remix' }) {
   const label = kind === 'remix' ? 'remix' : kind === 'branch' ? 'branch push' : 'commit'
@@ -520,31 +518,31 @@ function CommitNotice({
             MESSAGE truncates (it's the one min-w-0 flex child; hover it for
             the full text via its own title). */}
         <span className='flex min-w-0 flex-1 items-center justify-start gap-x-1.5'>
-        <PlayerAvatar pubkey={e.authorPubkey} size={16} />
-        <PlayerLabel pubkey={e.authorPubkey} className='shrink-0 whitespace-nowrap font-medium text-fg' />
-        <span className='shrink-0'>{isRemix ? 'remixed' : 'pushed'}</span>
-        {isRemix && source ? (
-          <>
-            {sourceAuthor ? <PlayerAvatar pubkey={sourceAuthor} size={16} /> : null}
-            <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 6)}</code>
-            <span className='shrink-0'>to</span>
-            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
-          </>
-        ) : (
-          <>
-            <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
-            <span className='shrink-0'>to</span>
-            <code className='font-mono text-fg'>{e.ref}</code>
-          </>
-        )}
-        {e.message ? (
-          <span title={e.message} className='min-w-0 truncate text-fg'>
-            “{e.message}”
+          <PlayerAvatar pubkey={e.authorPubkey} size={16} />
+          <PlayerLabel pubkey={e.authorPubkey} className='shrink-0 whitespace-nowrap font-medium text-fg' />
+          <span className='shrink-0'>{isRemix ? 'remixed' : 'pushed'}</span>
+          {isRemix && source ? (
+            <>
+              {sourceAuthor ? <PlayerAvatar pubkey={sourceAuthor} size={16} /> : null}
+              <code className='font-mono text-fg'>{source.commitHashHex.slice(0, 6)}</code>
+              <span className='shrink-0'>to</span>
+              <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
+            </>
+          ) : (
+            <>
+              <code className='font-mono text-fg'>{e.hash.slice(0, 6)}</code>
+              <span className='shrink-0'>to</span>
+              <code className='font-mono text-fg'>{e.ref}</code>
+            </>
+          )}
+          {e.message ? (
+            <span title={e.message} className='min-w-0 truncate text-fg'>
+              “{e.message}”
+            </span>
+          ) : null}
+          <span aria-hidden className='shrink-0 opacity-0 transition-opacity group-hover/sys:opacity-70'>
+            ›
           </span>
-        ) : null}
-        <span aria-hidden className='shrink-0 opacity-0 transition-opacity group-hover/sys:opacity-70'>
-          ›
-        </span>
         </span>
       </button>
       {/* Signed reactions targeting this commit's hash (bot response bundles
