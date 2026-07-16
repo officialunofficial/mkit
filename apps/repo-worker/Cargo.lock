@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-attest"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "blake3",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "buffa",
  "buffa-build",
