@@ -58,7 +58,7 @@ allowlisted release fingerprint, and points at a commit reachable from
    attestation (`actions/attest-build-provenance`), verifiable with `gh
    attestation verify` or `slsa-verifier` in addition to cosign.
 
-2. **npm package** `@makechain/mkit-wasm@X.Y.Z`. Built with
+2. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
    public`. The pkg tarball is also attached to the GitHub Release as
    `mkit-wasm-X.Y.Z-npm.tar.gz` for offline mirroring. npm provenance is
@@ -167,7 +167,7 @@ against a fresh PowerShell session: cosign signature, the `SHA256SUMS`
 entry, `mkit version`/`mkit.exe version` against the tag, the bundled man
 page and completions, a basic `mkit init` → `mkit keygen` → add a file →
 `mkit commit` flow, and (unless `--skip-npm`/`-SkipNpm`) `npm view
-@makechain/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the same
+@officialunofficial/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the same
 script used for a pre-flight dry run against a locally packaged archive
 before tagging (missing sidecars like the cosign bundle are skipped with a
 warning, not a failure, in that case) &mdash; this checklist is the spec of
@@ -185,7 +185,7 @@ record the script implements, so if the two ever disagree, fix the script:
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
 - [ ] Windows only: `irm https://mkit.sh/install.ps1 | iex` installs
       `mkit.exe` and `mkit version` runs from a fresh PowerShell session.
-- [ ] `npm view @makechain/mkit-wasm@X.Y.Z` and `npm audit signatures`.
+- [ ] `npm view @officialunofficial/mkit-wasm@X.Y.Z` and `npm audit signatures`.
 
 ### Distribution and announce
 
@@ -628,12 +628,11 @@ less reliable than the macOS case until that's verified.
 | Secret | Purpose | Required for |
 | --- | --- | --- |
 | `CRATES_PACKAGE_KEY` (org-level) | crates.io publish token (publish-new plus publish-update) | `crates-publish.yml` |
-| `MKIT_NPM_TOKEN` | npm publish auth (Automation token, 2FA-bypass) | `publish-wasm` |
 | `CODECOV_TOKEN` | Codecov upload auth &mdash; **vestigial**: no GitHub workflow reads it. Coverage runs on Cloud Build (`cloudbuild/coverage.yaml`); the live token is the GCP Secret Manager copy | &mdash; (see [`CODECOV_TOKEN`](#codecov_token)) |
 | `BUF_TOKEN` | Buf Schema Registry API token (write access) &mdash; pushes the `mkit-rpc`/`mkit-repo` proto modules | `crates-publish.yml`'s `buf-push` job (see [`BUF_TOKEN`](#buf_token)) |
 
-cosign keyless and npm provenance both run on the GitHub OIDC token; no extra
-secrets are needed for those.
+cosign keyless and npm Trusted Publishing (auth plus provenance) both run on
+the GitHub OIDC token; no extra secrets are needed for those.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
@@ -674,21 +673,25 @@ GitHub Actions secret of the same name is vestigial and safe to delete.
    repos via GitHub OIDC &mdash; but that applies to GitHub Actions uploads, not
    Cloud Build, so the Secret Manager token stays.
 
-### `MKIT_NPM_TOKEN`
+### npm Trusted Publishing (OIDC) — `@officialunofficial/mkit-wasm`
 
-`@makechain/mkit-wasm` is the npm package published by the release workflow.
+`@officialunofficial/mkit-wasm` is the npm package published by the release
+workflow, under the `officialunofficial` npm org (matching the GitHub org —
+renamed from the earlier `@makechain/mkit-wasm` once the repo went public).
+`publish-wasm` authenticates via the GitHub Actions OIDC token directly (npm
+[Trusted Publishers](https://docs.npmjs.com/trusted-publishers)) &mdash; there is
+**no `MKIT_NPM_TOKEN`-equivalent secret to provision, rotate, leak, or
+revoke** for the automated path. This replaced the original
+Automation-token setup once the package had at least one successful
+token-based release behind it (0.1.0&ndash;0.3.0, published as
+`@makechain/mkit-wasm`).
 
-1. **Create an npm org / user.** The package publishes under the account that
-   owns `MKIT_NPM_TOKEN`. Recommended: a machine account or a maintainer account
-   with the package in a 2FA-protected org.
-2. **Generate an Automation token** (`npmjs.com → Access Tokens`). Required
-   scope: `read+write` on `@makechain/mkit-wasm`. Automation tokens bypass the
-   2FA OTP prompt that would otherwise block CI.
-3. **Add to GitHub repo secrets:** name `MKIT_NPM_TOKEN`, value the token.
-4. **Claim the package name (one-time).** Until the first successful
-   `npm publish`, `@makechain/mkit-wasm` is unclaimed. Either cut a real tag (the
-   workflow publishes), or publish a placeholder once from a maintainer
-   workstation:
+**One-time setup (npmjs.com, by an owner of the `officialunofficial` org):**
+
+1. If `@officialunofficial/mkit-wasm` has never been published, either cut a
+   real tag (the workflow's first successful OIDC-authenticated publish
+   claims the name) or publish a placeholder once from a maintainer
+   workstation with a personal token:
    ```sh
    cd rust
    wasm-pack build crates/mkit-wasm --release --target bundler --out-dir pkg
@@ -696,16 +699,21 @@ GitHub Actions secret of the same name is vestigial and safe to delete.
    npm version --no-git-tag-version --allow-same-version 0.0.0-init
    npm publish --access public
    ```
-5. Verify with `npm view @makechain/mkit-wasm` after the first publish.
+2. On the package's `npmjs.com` page &rarr; **Settings** &rarr; **Trusted
+   Publisher**, add a GitHub Actions publisher:
+   - Organization or user: `officialunofficial`
+   - Repository: `mkit`
+   - Workflow filename: `release.yml` (filename only, not the full
+     `.github/workflows/` path)
+   - Environment: leave blank (the job doesn't use a GitHub environment)
+   - Allowed actions: `npm publish`
+3. Verify with `npm view @officialunofficial/mkit-wasm` after the first
+   OIDC-authenticated publish; confirm provenance with `npm audit
+   signatures`.
 
-**Future work: migrate to npm
-[Trusted Publishers (OIDC)](https://docs.npmjs.com/trusted-publishers)** so the
-`publish-wasm` job authenticates via the GitHub Actions OIDC token directly &mdash; no
-`MKIT_NPM_TOKEN` to rotate, leak, or revoke. Configure the repo plus `release.yml`
-workflow under the package's Publishing access settings, drop the
-`NODE_AUTH_TOKEN` env on the publish step, delete the secret, and cut a patch
-release to validate. Defer until after at least one successful token-based
-release.
+Requires npm CLI &ge;11.5.1 (the workflow pins this explicitly) and
+GitHub-hosted runners (self-hosted runners aren't supported for Trusted
+Publishing as of this writing).
 
 ### `BUF_TOKEN`
 
@@ -747,8 +755,10 @@ deliberate decision, not a default.
 ### Package name decision
 
 The Rust crate remains `mkit-wasm`, but the release workflow publishes the npm
-package as `@makechain/mkit-wasm` so ownership and token scope live under the
-Makechain npm organization. If the scope ever changes, update
+package as `@officialunofficial/mkit-wasm`, matching the GitHub org this repo
+lives under (renamed from `@makechain/mkit-wasm` once the repo went public —
+see [npm Trusted Publishing](#npm-trusted-publishing-oidc-officialunofficialmkit-wasm)
+above). If the scope ever changes again, update
 `rust/crates/mkit-wasm/README.md`'s install snippet, the `publish-wasm` workflow
-`npm pkg set name=...` line, and the `npm view` smoke-test references in this
-doc.
+`npm pkg set name=...` line, the npm Trusted Publisher config on npmjs.com, and
+the `npm view` smoke-test references in this doc.

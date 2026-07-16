@@ -1,7 +1,7 @@
 //! Integration tests for the raw Ed25519 wasm exports (`ed25519_sign`,
 //! `ed25519_verify`, `ed25519_pubkey_from_seed`).
 //!
-//! These exports let `@makechain/mkit-wasm` consumers drop a separate
+//! These exports let `@officialunofficial/mkit-wasm` consumers drop a separate
 //! `@noble/ed25519` dependency: the same `ed25519_dalek::verify_strict`
 //! path mkit-attest uses internally is now reachable from JS. Tests run
 //! on native — the wasm-bindgen wrappers delegate straight to the same

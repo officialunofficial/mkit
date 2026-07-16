@@ -21,8 +21,8 @@
  *
  * Consumer pattern (Bun / Cloudflare Workers):
  *
- *     import wasmModule from "../node_modules/@makechain/mkit-wasm/mkit_wasm_bg.wasm";
- *     import { mkit_wasm_init, blake3_hex } from "@makechain/mkit-wasm";
+ *     import wasmModule from "../node_modules/@officialunofficial/mkit-wasm/mkit_wasm_bg.wasm";
+ *     import { mkit_wasm_init, blake3_hex } from "@officialunofficial/mkit-wasm";
  *     mkit_wasm_init(wasmModule);
  *     blake3_hex(new Uint8Array([1,2,3]));   // works
  *

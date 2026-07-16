@@ -22,7 +22,7 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CLI on a dev machine (Windows)        | Release archive (PowerShell installer) | `irm https://mkit.sh/install.ps1 \| iex` |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
-| Browser / Cloudflare Worker           | npm                                  | `bun add @makechain/mkit-wasm`                                                                                  |
+| Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
 Pick the leftmost channel that satisfies your constraints &mdash; release
@@ -166,16 +166,16 @@ Full reproducibility, signing, and supply-chain notes live under
 
 The `mkit-wasm` crate ([`rust/crates/mkit-wasm`](../rust/crates/mkit-wasm))
 is built with `wasm-pack` and published to npm as
-`@makechain/mkit-wasm`.
+`@officialunofficial/mkit-wasm`.
 
 **Install:**
 
 ```sh
-bun add @makechain/mkit-wasm
+bun add @officialunofficial/mkit-wasm
 # or
-npm i @makechain/mkit-wasm
+npm i @officialunofficial/mkit-wasm
 # or
-pnpm add @makechain/mkit-wasm
+pnpm add @officialunofficial/mkit-wasm
 ```
 
 **Why `wasm-pack` with `--target bundler`.** mkit-wasm targets the
@@ -188,7 +188,7 @@ wrangler's bundler will inline the `.wasm` import.
 **TypeScript usage:**
 
 ```ts
-import init, { hash, parse_envelope } from "@makechain/mkit-wasm";
+import init, { hash, parse_envelope } from "@officialunofficial/mkit-wasm";
 
 await init();
 const id = hash(new TextEncoder().encode("hello"));
@@ -198,8 +198,8 @@ console.log(id);
 **Cloudflare Workers (ESM modules format):**
 
 ```ts
-import init, { hash } from "@makechain/mkit-wasm";
-import wasmModule from "@makechain/mkit-wasm/mkit_wasm_bg.wasm";
+import init, { hash } from "@officialunofficial/mkit-wasm";
+import wasmModule from "@officialunofficial/mkit-wasm/mkit_wasm_bg.wasm";
 
 export default {
   async fetch(req: Request): Promise<Response> {
@@ -214,7 +214,7 @@ export default {
 
 ```html
 <script type="module">
-  import init, { hash } from "https://esm.sh/@makechain/mkit-wasm";
+  import init, { hash } from "https://esm.sh/@officialunofficial/mkit-wasm";
   await init();
   console.log(hash(new TextEncoder().encode("hi")));
 </script>

@@ -92,7 +92,7 @@ jobs:
         run: bash scripts/basic-flow-smoke.sh "$RUNNER_TEMP/cargo-binstall/bin/mkit" "${{ inputs.version }}"
 
   npm:
-    name: npm install @makechain/mkit-wasm
+    name: npm install @officialunofficial/mkit-wasm
     runs-on: ubuntu-latest
     steps:
       - name: Resolve npm version
@@ -101,7 +101,7 @@ jobs:
         run: |
           v="${{ inputs.npm_version }}"
           if [ -z "$v" ]; then
-            v="$(npm view @makechain/mkit-wasm version)"
+            v="$(npm view @officialunofficial/mkit-wasm version)"
             echo "npm_version input not set — using published latest: ${v}"
           fi
           echo "version=${v}" >> "$GITHUB_OUTPUT"
@@ -113,10 +113,10 @@ jobs:
 
       - name: npm view + install
         run: |
-          npm view "@makechain/mkit-wasm@${{ steps.v.outputs.version }}"
+          npm view "@officialunofficial/mkit-wasm@${{ steps.v.outputs.version }}"
           mkdir "$RUNNER_TEMP/npm-smoke" && cd "$RUNNER_TEMP/npm-smoke"
           npm init -y
-          npm install --save-exact "@makechain/mkit-wasm@${{ steps.v.outputs.version }}"
+          npm install --save-exact "@officialunofficial/mkit-wasm@${{ steps.v.outputs.version }}"
 
       - name: npm audit signatures
         working-directory: ${{ runner.temp }}/npm-smoke
@@ -129,7 +129,7 @@ jobs:
         working-directory: ${{ runner.temp }}/npm-smoke
         run: |
           node -e "
-            const wasm = require('@makechain/mkit-wasm');
+            const wasm = require('@officialunofficial/mkit-wasm');
             const h = wasm.blake3_hex(new TextEncoder().encode('hello'));
             console.log('blake3_hex(hello) =', h);
             if (!/^[0-9a-f]{64}\$/.test(h)) { throw new Error('not a 64-hex-char hash: ' + h); }

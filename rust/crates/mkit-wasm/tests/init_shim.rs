@@ -84,7 +84,7 @@ export function mkit_wasm_init(module) {{
 /// Test 6 (auto-init shim) part A: the patched glue exports
 /// `mkit_wasm_init` as a top-level function and keeps the import-time
 /// auto-init call intact. Consumer pattern from the README:
-/// `import { mkit_wasm_init, blake3_hex } from "@makechain/mkit-wasm";
+/// `import { mkit_wasm_init, blake3_hex } from "@officialunofficial/mkit-wasm";
 ///  mkit_wasm_init(wasmModule); blake3_hex(...);`
 #[test]
 fn shim_exports_mkit_wasm_init() {
