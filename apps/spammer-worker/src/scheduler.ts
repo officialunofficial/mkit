@@ -1,14 +1,17 @@
 // Pure tick planner (PLAN.md build step 7; extended for issue #850 — see
-// "Response-queue draining" below).
+// "Response-queue draining" below — and issue #851 — see "Fork-of-fork
+// upstream selection" below).
 //
 // `planTick` is the ONLY thing that decides what the `Spammer` DO's `alarm()`
 // emits on a given tick — it does no I/O, holds no wasm handle, and touches
-// no clock other than the `now` (ms epoch) its caller passes in. That makes
-// it directly host-testable (this file's tests simulate a full hour of ticks
-// in a tight loop) and, later, trivially wired into `spammer.ts`: the DO
-// reads its `SchedulerState` back from SQLite, calls `planTick(state, Date.now())`,
-// emits the returned `events`, then persists `nextState` — no other floor
-// bookkeeping lives anywhere else.
+// no clock other than the `now` (ms epoch) its caller passes in, plus (as of
+// #851) an optional per-tick `forkUpstreams` snapshot, equally caller-owned.
+// That makes it directly host-testable (this file's tests simulate a full
+// hour of ticks in a tight loop) and, later, trivially wired into
+// `spammer.ts`: the DO reads its `SchedulerState` back from SQLite, calls
+// `planTick(state, Date.now(), forkUpstreams)`, emits the returned `events`,
+// then persists `nextState` (never `forkUpstreams` itself — see below) — no
+// other floor bookkeeping lives anywhere else.
 //
 // Response-queue draining (issue #850, parent #848 "Response planning"):
 // `planTick` gained a second job on top of ambient picking — draining
@@ -37,6 +40,31 @@
 // `POOL_SIZE` doc comment for why draining through the existing per-identity
 // floor is what carries that margin, independent of WHICH source (ambient or
 // response) is doing the draining.
+//
+// Fork-of-fork upstream selection (issue #851, parent #848 "Fork-of-fork: IN
+// scope"): every ambient remix pick used to fork whatever `main`'s head
+// currently was — `events.ts`'s `buildSignedRemix` doc comment used to note
+// "this build step never remixes another remix" as a simple statement of
+// fact, which flattened the refs panel's fork topology to one hop. `planTick`
+// now takes an OPTIONAL third argument, `forkUpstreams`, a per-tick snapshot
+// of known fork refs and their current heads supplied by the caller — plain
+// caller-provided data like `now`, NOT part of `SchedulerState`, because it
+// is a live read of room state (the DO's observer watermark, #854), not
+// scheduler-internal bookkeeping that needs to round-trip through storage.
+// On `FORK_OF_FORK_REMIX_PERCENT`% of ambient remix ticks (deterministically,
+// via the same tick-keyed `hashStringToUint32` pattern
+// `enqueueResponseBundle` already uses below — no `Math.random`), the planner
+// picks one of `forkUpstreams` as the remix's upstream instead of `main`'s
+// tip, carried on the `PlannedEvent` as `remixUpstream`. Absence or an empty
+// `forkUpstreams` array makes this entirely inert — ambient remix picks fall
+// back to `main`-tip remix exactly as before this issue, which is how every
+// existing call site (and this file's pre-#851 tests) keeps working
+// unmodified. This is a SELECTION-layer change only: `events.ts`'s
+// `emitRemix` already accepts any upstream commit hash and needs no change
+// (see this file's `PlannedEvent.remixUpstream` doc comment). It touches ONLY
+// phase 2's ambient remix pick — response-queue remix intents (phase 1)
+// already carry their own real target via `ResponsePayload.targetIdHex` and
+// are never candidates for `remixUpstream` substitution.
 //
 // Rate-math design (mirrors PLAN.md's "Synthetic-identity / rate-math design",
 // corrected for a real ops-per-push accounting error caught in review — do
@@ -103,6 +131,19 @@ export type PlannedEvent = {
    * picks never carry a response payload.
    */
   response?: ResponsePayload;
+  /**
+   * Present only on an ambient `remix` pick (issue #851) that the fork-of-fork
+   * selection in `planTick`'s phase 2 chose to fork an existing fork ref's
+   * head instead of `main`'s tip — tells the emitter (`spammer.ts`, calling
+   * `events.ts`'s `emitRemix`) which head to pass as `upstreamCommitHash`.
+   * `undefined` means "fork `main`'s current tip", the pre-#851 default
+   * behavior, which is what every ambient remix pick still does when
+   * `planTick`'s `forkUpstreams` argument is absent/empty. Never set together
+   * with `response` — a response remix intent already carries its own real
+   * target via `ResponsePayload.targetIdHex` and is never a candidate for
+   * fork-of-fork substitution (see this file's top doc comment).
+   */
+  remixUpstream?: ForkUpstreamRef;
 };
 
 /** The response-specific fields carried by a `PlannedEvent` drained from the queue — see {@link PlannedEvent.response}. */
@@ -110,6 +151,20 @@ export type ResponsePayload = {
   targetIdHex: string;
   ref: string;
   realAuthorPubkeyHex: string;
+};
+
+/**
+ * One known fork ref and its current head, as the caller (eventually the
+ * DO's observer watermark, #854) supplies to `planTick`'s `forkUpstreams`
+ * parameter — see {@link PlannedEvent.remixUpstream} and this file's top doc
+ * comment's "Fork-of-fork upstream selection" section. `ref` is the fork
+ * ref's full name (`events.ts`'s `FORKS_PREFIX`-prefixed `forkRefName`
+ * output); `headHex` is that ref's current head commit hash — exactly what
+ * `emitRemix` needs as `upstreamCommitHash` to fork it again.
+ */
+export type ForkUpstreamRef = {
+  ref: string;
+  headHex: string;
 };
 
 // -----------------------------------------------------------------------------
@@ -420,13 +475,64 @@ function selectEligible(
   return { index: null, nextCursor: start };
 }
 
+// -----------------------------------------------------------------------------
+// Fork-of-fork upstream selection (issue #851)
+// -----------------------------------------------------------------------------
+
+/**
+ * Percent (0-100) of ambient remix ticks that fork a KNOWN fork ref's head
+ * instead of `main`'s current tip — #848's "Fork-of-fork: IN scope" proposed
+ * rate ("~25%"). Consulted only by {@link selectForkUpstream}, itself called
+ * only from `planTick`'s phase 2 ambient remix pick — see this file's top doc
+ * comment's "Fork-of-fork upstream selection" section for why this is a
+ * selection-layer-only change.
+ */
+export const FORK_OF_FORK_REMIX_PERCENT = 25;
+
+/**
+ * Deterministically decide whether the ambient remix pick on tick `tick`
+ * should fork a known fork ref's head instead of `main`'s tip, and if so,
+ * which candidate from `forkUpstreams`. Returns `undefined` — "fork `main`'s
+ * tip, as before this issue" — when `forkUpstreams` is absent/empty (the
+ * feature is entirely inert with no known fork refs, per #851's acceptance
+ * criteria: "never fires when no fork refs are known yet") or when the tick's
+ * hash misses the {@link FORK_OF_FORK_REMIX_PERCENT} fraction.
+ *
+ * Both "does it fire this tick" and "which candidate index" are derived from
+ * {@link hashStringToUint32} keyed on `tick` (domain-separated suffixes, the
+ * same no-`Math.random` pattern `enqueueResponseBundle`'s bundle-composition
+ * decisions use above) — NOT on `now`, so the same `(tick, forkUpstreams)`
+ * pair always yields the same fire/no-fire decision and the same array index,
+ * which is what makes `planTick` pure in its full `(state, now,
+ * forkUpstreams)` input set — see `planTick`'s own doc comment.
+ */
+function selectForkUpstream(
+  tick: number,
+  forkUpstreams: readonly ForkUpstreamRef[] | undefined,
+): ForkUpstreamRef | undefined {
+  if (!forkUpstreams || forkUpstreams.length === 0) return undefined;
+  if (hashStringToUint32(`fork-of-fork:fires:${tick}`) % 100 >= FORK_OF_FORK_REMIX_PERCENT) return undefined;
+  const idx = hashStringToUint32(`fork-of-fork:pick:${tick}`) % forkUpstreams.length;
+  return forkUpstreams[idx];
+}
+
 /**
  * Plan one alarm tick: decide which identities emit which event kinds,
  * honoring every per-category floor with `now` as the sole clock reference
  * (so drift/bursty tick timing is handled correctly — a tick that fires
  * early just finds fewer/no eligible identities rather than violating a
- * floor). Pure: same `(state, now)` always yields the same `(events,
- * nextState)`.
+ * floor). Pure: same `(state, now, forkUpstreams)` always yields the same
+ * `(events, nextState)`.
+ *
+ * `forkUpstreams` (issue #851) is a per-tick snapshot of known fork refs and
+ * their current heads, OPTIONAL and supplied by the caller exactly like
+ * `now` — NOT persisted in `SchedulerState` and NOT round-tripped into
+ * `nextState`, because it is a live read of room state (the DO's observer
+ * watermark, wired in #854) the caller re-supplies fresh every tick, not
+ * scheduler-owned bookkeeping. Absent or empty, it makes phase 2's
+ * fork-of-fork selection (below) a no-op — every ambient remix pick forks
+ * `main`'s tip exactly as it did before this issue, so every pre-#851 call
+ * site keeps working unmodified with zero behavior change.
  *
  * Two phases, in order:
  *
@@ -447,20 +553,31 @@ function selectEligible(
  *    for a REACTION in the same bundle (`reactionIdentitiesByBundle`), so
  *    "distinct identities within a bundle" holds even when a bundle's
  *    reactions drain across separate ticks.
- * 2. **Ambient picks** (original PLAN.md build-step-7 behavior, UNCHANGED):
- *    `CHAT_EVENTS_PER_TICK` chat picks (each immediately marks its
- *    identity's `lastChatMs` as `now` in the WORKING copy, so the two chat
- *    picks in one tick can never land on the same identity), then one push
- *    pick (kind decided by `REMIX_EVERY_N_TICKS` off `state.tick` — NEVER
- *    influenced by the response queue, so ambient commit/remix selection is
- *    byte-for-byte identical whether or not a response bundle is in flight),
- *    then an occasional reaction pick gated by `REACTION_EVERY_N_TICKS`. An
- *    ambient `commit`/`remix` `PlannedEvent` never carries a `response`
- *    payload and (unlike a response `PlannedEvent`) carries no ref/target at
- *    all, so `spammer.ts`'s emit path always resolves it against `main` —
- *    the "ambient commit selection must still only ever target `main`, even
- *    when the response queue is non-empty" guardrail (#850) holds by
- *    construction, not by any check in this function.
+ * 2. **Ambient picks** (original PLAN.md build-step-7 behavior, mostly
+ *    UNCHANGED — see the fork-of-fork addendum below): `CHAT_EVENTS_PER_TICK`
+ *    chat picks (each immediately marks its identity's `lastChatMs` as `now`
+ *    in the WORKING copy, so the two chat picks in one tick can never land on
+ *    the same identity), then one push pick (kind decided by
+ *    `REMIX_EVERY_N_TICKS` off `state.tick` — NEVER influenced by the
+ *    response queue, so ambient commit/remix selection is byte-for-byte
+ *    identical whether or not a response bundle is in flight), then an
+ *    occasional reaction pick gated by `REACTION_EVERY_N_TICKS`. An ambient
+ *    `commit`/`remix` `PlannedEvent` never carries a `response` payload and
+ *    (unlike a response `PlannedEvent`) carries no ref/target at all, so
+ *    `spammer.ts`'s emit path always resolves it against `main` — the
+ *    "ambient commit selection must still only ever target `main`, even when
+ *    the response queue is non-empty" guardrail (#850) holds by construction,
+ *    not by any check in this function. This is true of `commit` picks
+ *    UNCONDITIONALLY: fork-of-fork selection (#851, immediately below) only
+ *    ever touches a `remix` pick, never a `commit` one.
+ *
+ *    **Fork-of-fork addendum (issue #851):** when the push pick's kind is
+ *    `remix`, {@link selectForkUpstream} is consulted (keyed on `state.tick`,
+ *    never on which identity was picked) to decide whether this remix forks
+ *    a known fork ref's head instead of `main`'s tip; if it does, the head it
+ *    picked is attached as `PlannedEvent.remixUpstream`. This is the ONLY
+ *    place `forkUpstreams` is read — it cannot affect phase 1 (response
+ *    intents already carry their own real target) or a `commit` pick.
  *
  * Because phase 1 runs first against the SAME working-copy arrays phase 2
  * reads, any identity a response intent consumed is already ineligible (for
@@ -470,7 +587,11 @@ function selectEligible(
  * absent, phase 1 is a no-op and phase 2 runs exactly as it did before this
  * issue — see this module's test file's backward-compat coverage.
  */
-export function planTick(state: SchedulerState, now: number): { events: PlannedEvent[]; nextState: SchedulerState } {
+export function planTick(
+  state: SchedulerState,
+  now: number,
+  forkUpstreams?: readonly ForkUpstreamRef[],
+): { events: PlannedEvent[]; nextState: SchedulerState } {
   const poolSize = state.lastChatMs.length;
   const lastChatMs = state.lastChatMs.slice();
   const lastPushMs = state.lastPushMs.slice();
@@ -554,7 +675,12 @@ export function planTick(state: SchedulerState, now: number): { events: PlannedE
   const pushPick = selectEligible(pushCursor, poolSize, lastPushMs, PUSH_FLOOR_MS, now);
   pushCursor = pushPick.nextCursor;
   if (pushPick.index !== null) {
-    events.push({ identityIndex: pushPick.index, kind: pushKind });
+    // Fork-of-fork (#851): only ever consulted for a `remix` pick — a
+    // `commit` pick's `PlannedEvent` never gains a `remixUpstream` field, so
+    // ambient commit targeting stays `main`-only regardless of
+    // `forkUpstreams`'s contents.
+    const remixUpstream = pushKind === "remix" ? selectForkUpstream(state.tick, forkUpstreams) : undefined;
+    events.push({ identityIndex: pushPick.index, kind: pushKind, ...(remixUpstream ? { remixUpstream } : {}) });
     lastPushMs[pushPick.index] = now;
   }
 
