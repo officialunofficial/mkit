@@ -598,6 +598,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **`WriteBatch::commit`'s barrier-issuing thread pool is now sized for
+  I/O concurrency, not CPU cores** (#864). The pool that issues one
+  fsync-class barrier per staged object was capped at
+  `available_parallelism().min(16)` — CPU core count, the wrong resource
+  for a workload that spends nearly all its time blocked on the storage
+  device rather than computing (mirroring why `tokio::task::spawn_blocking`
+  defaults to 512 threads for the same class of work). Replaced with a
+  benchmarked `MAX_SYNC_WORKERS = 64` constant. Real effect on a 1000-file
+  `add`/`commit`: mkit goes from ~1.6x slower than `git2` (libgit2) to
+  roughly matching it, while its lead over the actual `git` CLI widens to
+  ~21.5x. No change to `WriteBatch`'s durability contract or public API.
 - **Multi-pack push splitting** (#831): a push whose plan exceeds a single
   pack's payload cap (`pack::MAX_TOTAL_PAYLOAD`, 4 GiB in production) now
   splits across multiple packs instead of failing with `PackfileTooLarge`.

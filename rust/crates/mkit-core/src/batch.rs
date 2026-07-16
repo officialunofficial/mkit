@@ -462,20 +462,46 @@ impl<'s> WriteBatch<'s> {
     }
 }
 
-/// Run `op(0..count)` across a small pool of scoped threads, joining
-/// them all before returning. Concurrency overlaps per-item device
-/// latency (~ms per flush primitive on Apple SSDs) that would otherwise
-/// serialise a batch; correctness only needs *all* items complete
-/// before the caller proceeds, which the join guarantees. Returns the
-/// first error observed, if any.
+/// Worker-pool cap for [`parallel_io`]. Deliberately NOT
+/// `std::thread::available_parallelism()`: a worker here spends nearly
+/// all its time blocked in the kernel on a barrier/fsync-class syscall,
+/// not consuming CPU, so CPU core count is the wrong resource to size
+/// against (the classic pool-sizing formula — thread count scaling with
+/// `1 + wait/compute`, not compute alone — puts this workload's ideal
+/// count far above core count; `tokio::task::spawn_blocking`'s default
+/// pool of 512 threads exists for the identical reason).
+///
+/// 64 is chosen from a benchmark sweep (16/32/64/128 workers, 1000-object
+/// batches) on macOS/APFS (issue #864), repeated with 25-sample mean/
+/// stddev tracking after an initial small-sample pass overstated its
+/// confidence in the 128 result. The 16-vs-64 comparison is robust and
+/// reproduced across three independent runs: 64 is consistently ~20-30%
+/// faster than 16 with visibly tighter variance (stddev in the 10-30ms
+/// range vs 16's 25-40ms, non-overlapping in every run). 32 and 128,
+/// by contrast, showed high run-to-run variance (stddev over 100ms) and
+/// no reliably-ordered result against 64 — plausibly 128 threads hitting
+/// real scheduling contention on a 16-core machine, but not confidently
+/// distinguishable from noise at the sample sizes tested here. Treat
+/// "64" as validated; treat any specific claim about 32 or 128 as
+/// unresolved, not as "128 regresses." fsync concurrency is ultimately
+/// gated by filesystem journal serialization, not raw device queue
+/// depth, so diminishing (and possibly reversing) returns somewhere
+/// past 64 is expected in principle even if this data can't yet pin
+/// down exactly where. Linux/ext4 numbers are not gathered at all; re-tune
+/// if they diverge meaningfully from the macOS data.
+const MAX_SYNC_WORKERS: usize = 64;
+
+/// Run `op(0..count)` across a pool of up to [`MAX_SYNC_WORKERS`] scoped
+/// threads, joining them all before returning. Concurrency overlaps
+/// per-item device latency (~ms per flush primitive on Apple SSDs) that
+/// would otherwise serialise a batch; correctness only needs *all*
+/// items complete before the caller proceeds, which the join
+/// guarantees. Returns the first error observed, if any.
 fn parallel_io(count: usize, op: impl Fn(usize) -> io::Result<()> + Sync) -> io::Result<()> {
     if count == 0 {
         return Ok(());
     }
-    let workers = std::thread::available_parallelism()
-        .map_or(4, std::num::NonZeroUsize::get)
-        .min(16)
-        .min(count);
+    let workers = MAX_SYNC_WORKERS.min(count);
     if workers == 1 {
         return (0..count).try_for_each(op);
     }
