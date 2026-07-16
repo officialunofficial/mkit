@@ -766,9 +766,9 @@ where
 /// per-branch lock is acquired here, not before, so a concurrent
 /// writer already holding the lock can never be mid-`sync` (writing
 /// the on-disk metadata blob) while this call's own `open_at` reads it
-/// — see [`update_ref_with_history_critical_section`]'s doc comment.
-/// `mkit-cli`'s `write_ref_recording_history` is the production
-/// caller.
+/// — see this module's private `update_ref_with_history_critical_section`
+/// helper's doc comment for the full mechanism. `mkit-cli`'s
+/// `write_ref_recording_history` is the production caller.
 ///
 /// Prefer this over opening a `CommitHistory` yourself and passing it
 /// to [`update_ref_with_history_and_backfill`] whenever the branch may
