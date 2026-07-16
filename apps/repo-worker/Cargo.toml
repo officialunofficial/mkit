@@ -68,9 +68,6 @@ ed25519-dalek = { version = "2", default-features = false }
 
 # http / body plumbing for the worker::Request <-> connectrpc adapter.
 http = "1"
-# The generated client stub references `::http_body::Body` in its transport
-# bound, so it must be a direct dep even though this worker is server-only.
-http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
 tower = { version = "0.5", features = ["util"] }

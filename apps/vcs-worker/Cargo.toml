@@ -42,7 +42,6 @@ ed25519-dalek = { version = "2", default-features = false }
 
 # http / body plumbing for the worker::Request <-> connectrpc adapter.
 http = "1"
-http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
 tower = { version = "0.5", features = ["util"] }
