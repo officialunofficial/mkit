@@ -3,23 +3,24 @@ import { redirectMiddleware, resolveRedirect } from './redirects'
 
 describe('resolveRedirect', () => {
   it.each([
-    ['/hash', '/demos#hash'],
-    ['/tree', '/demos#tree'],
-    ['/sign', '/demos#sign'],
-    ['/streaming', '/demos#streaming'],
-    ['/push', '/demos#push'],
-    ['/attest', '/demos#attest'],
+    ['/hash', '/concepts#hash'],
+    ['/tree', '/concepts#tree'],
+    ['/sign', '/concepts#sign'],
+    ['/streaming', '/concepts#streaming'],
+    ['/push', '/concepts#push'],
+    ['/attest', '/concepts#attest'],
+    ['/demos', '/concepts'],
   ])('maps deleted route %s to %s', (from, to) => {
     expect(resolveRedirect(from)).toBe(to)
   })
 
   it('tolerates a single trailing slash', () => {
-    expect(resolveRedirect('/sign/')).toBe('/demos#sign')
+    expect(resolveRedirect('/sign/')).toBe('/concepts#sign')
   })
 
   it('leaves live and unknown routes alone', () => {
     expect(resolveRedirect('/')).toBeNull()
-    expect(resolveRedirect('/demos')).toBeNull()
+    expect(resolveRedirect('/concepts')).toBeNull()
     expect(resolveRedirect('/multiplayer')).toBeNull()
     expect(resolveRedirect('/hash/extra')).toBeNull()
   })
@@ -41,11 +42,19 @@ describe('redirectMiddleware', () => {
     expect(nextCalled).toBe(false)
     expect(res).toBeInstanceOf(Response)
     expect((res as Response).status).toBe(301)
-    expect((res as Response).headers.get('Location')).toBe('/demos#streaming')
+    expect((res as Response).headers.get('Location')).toBe('/concepts#streaming')
+  })
+
+  it('301s the renamed /demos page to /concepts without calling next', async () => {
+    const { res, nextCalled } = await run('/demos')
+    expect(nextCalled).toBe(false)
+    expect(res).toBeInstanceOf(Response)
+    expect((res as Response).status).toBe(301)
+    expect((res as Response).headers.get('Location')).toBe('/concepts')
   })
 
   it('delegates to next for a live route', async () => {
-    const { res, nextCalled } = await run('/demos')
+    const { res, nextCalled } = await run('/concepts')
     expect(nextCalled).toBe(true)
     expect(res).toBeUndefined()
   })

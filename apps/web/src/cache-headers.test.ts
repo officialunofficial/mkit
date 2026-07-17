@@ -48,7 +48,7 @@ describe('cacheHeadersMiddleware', () => {
     const mw = cacheHeadersMiddleware()
     const c = ctx('GET', new Response('placeholder'))
     const next = async () => {
-      c.res = new Response(null, { status: 301, headers: { Location: '/demos#hash' } })
+      c.res = new Response(null, { status: 301, headers: { Location: '/concepts#hash' } })
     }
 
     await mw(c, next)

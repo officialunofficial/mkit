@@ -177,7 +177,7 @@ export function DemosTabs() {
           the active tab (wrapping around). Switches tabs in place rather than
           navigating away. */}
       <section className='space-y-4 pt-8'>
-        <h2 className='text-xl font-semibold tracking-tight'>More demos to explore</h2>
+        <h2 className='text-xl font-semibold tracking-tight'>More concepts to explore</h2>
         <ul className='grid gap-4 sm:grid-cols-3'>
           {upNext.map((t) => (
             <li key={t.id}>

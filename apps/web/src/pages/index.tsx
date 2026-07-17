@@ -91,8 +91,8 @@ export default function HomePage() {
 
       <ul className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4'>
         <Demo
-          to='/demos'
-          title='demos'
+          to='/concepts'
+          title='concepts'
           body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
         />
         <Demo
@@ -131,12 +131,12 @@ function InstallCommand({ command }: { command: string }) {
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
 // `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/demos' | '/performance' | '/parity' | '/multiplayer'
+type DemoRoute = '/concepts' | '/performance' | '/parity' | '/multiplayer'
 
 // Soft per-tile mesh gradients: layered low-alpha radial blooms over the
 // white card so text stays legible while each tile reads distinct.
 const MESH: Record<DemoRoute, string> = {
-  '/demos':
+  '/concepts':
     'radial-gradient(at 18% 22%, rgba(99,102,241,0.10), transparent 55%), radial-gradient(at 82% 12%, rgba(56,189,248,0.08), transparent 55%)',
   '/performance':
     'radial-gradient(at 18% 18%, rgba(251,146,60,0.09), transparent 55%), radial-gradient(at 82% 80%, rgba(248,113,113,0.08), transparent 55%)',
@@ -148,7 +148,7 @@ const MESH: Record<DemoRoute, string> = {
 
 // Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
 const SHAPE_COLOR: Record<DemoRoute, string> = {
-  '/demos': 'rgb(99,102,241)',
+  '/concepts': 'rgb(99,102,241)',
   '/performance': 'rgb(249,115,22)',
   '/parity': 'rgb(139,92,246)',
   '/multiplayer': 'rgb(236,72,153)',
@@ -166,7 +166,7 @@ function TileShape({ to }: { to: DemoRoute }) {
   } as const
   const shape = (() => {
     switch (to) {
-      case '/demos':
+      case '/concepts':
         return (
           <>
             <rect x='3' y='3' width='4' height='4' rx='1' />

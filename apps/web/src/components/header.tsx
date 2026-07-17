@@ -2,12 +2,12 @@ import { Link } from 'waku'
 import { GridLogo } from './grid-logo'
 import { ThemeToggle } from './theme-toggle'
 
-// Top-nav order: the combined demos playground first (it now folds in the
+// Top-nav order: the combined concepts playground first (it now folds in the
 // tree and push walkthroughs as tabs), then the doc-style pages
 // (performance, parity, specs), then the live multiplayer room. Reordering
 // the site nav is editing this list — nothing else.
 const NAV_LINKS = [
-  { to: '/demos', label: 'demos' },
+  { to: '/concepts', label: 'concepts' },
   { to: '/performance', label: 'performance' },
   { to: '/parity', label: 'parity' },
   { to: '/specs', label: 'specs' },
