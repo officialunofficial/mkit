@@ -11,7 +11,7 @@ const DEFAULT_NAME = 'grid.ppm'
 // byte-range change (~12 bytes per cell at 2px×2px×3bytes) instead of zlib-cascading the change across the entire
 // compressed stream — which is the whole point of demonstrating content-defined chunking. PPM picked over BMP for
 // the smaller, format-agnostic header (`P6 width height 255` in ASCII) and natural RGB byte order.
-type CellOverride = { x: number; y: number; hue: number }
+export type CellOverride = { x: number; y: number; hue: number }
 
 // 512×512 raster (256 cells × 2 px) keeps ~12 FastCDC chunks (above the 4-chunk min that makes the strip readable)
 // while cutting wasm bandwidth-bound work — chunker, ChunkedBlob, delta, Bao — by 2.25× vs the prior 768-pixel grid.

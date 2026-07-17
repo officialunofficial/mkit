@@ -1,7 +1,14 @@
 'use client'
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { type FileAsset, decodePpmHeader, driftDefaultPpm, generateDefaultPpm, mutateRandomBytes } from '../lib/ppm'
+import {
+  type CellOverride,
+  type FileAsset,
+  decodePpmHeader,
+  driftDefaultPpm,
+  generateDefaultPpm,
+  mutateRandomBytes,
+} from '../lib/ppm'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { ObjectRow } from './result-panel'
 import { formatBytes, useMkit } from './use-mkit'
@@ -39,7 +46,7 @@ export function StreamingDemo() {
   const generatedRef = useRef<FileAsset | null>(null)
   // Accumulated cell-hue overrides for the default PPM so each auto-edit tick adds one drifted square on top of the
   // running mutation history, instead of replacing the whole image. Reset whenever the file is replaced.
-  const overridesRef = useRef<Parameters<typeof generateDefaultPpm>[1]>([])
+  const overridesRef = useRef<CellOverride[]>([])
   // Mirror of `currentFile` so the auto-edit interval can read the latest bytes without re-binding on every render.
   const currentFileRef = useRef<FileAsset | null>(null)
   currentFileRef.current = currentFile
