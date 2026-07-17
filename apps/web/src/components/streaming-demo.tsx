@@ -402,12 +402,16 @@ function Section({
 // `role='switch'` + `aria-checked` gives it the right semantics; the pill track and sliding thumb are plain divs.
 function CorruptSwitch({ checked, onToggle }: { checked: boolean; onToggle: () => void }) {
   return (
-    <div className='flex items-center gap-2'>
-      <button
-        type='button'
-        role='switch'
-        aria-checked={checked}
-        onClick={onToggle}
+    // Track, thumb, and label all live inside the switch button: the visible text is the accessible name, and
+    // clicking the label toggles — a bare unnamed pill fails both.
+    <button
+      type='button'
+      role='switch'
+      aria-checked={checked}
+      onClick={onToggle}
+      className='group flex items-center gap-2'
+    >
+      <span
         className={`inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${
           checked ? 'bg-red-600' : 'bg-hairline'
         }`}
@@ -416,9 +420,9 @@ function CorruptSwitch({ checked, onToggle }: { checked: boolean; onToggle: () =
           aria-hidden
           className={`size-4 rounded-full bg-white transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`}
         />
-      </button>
-      <span className='text-sm'>Corrupt the connection</span>
-    </div>
+      </span>
+      <span className='text-sm transition-opacity group-hover:opacity-80'>Corrupt the connection</span>
+    </button>
   )
 }
 
