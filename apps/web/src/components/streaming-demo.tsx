@@ -252,6 +252,9 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
       const canvas = ref.current
       const ctx = canvas?.getContext('2d')
       if (!canvas || !ctx) continue
+      // clearRect first: the placeholder fill is translucent, and on a restart it would otherwise just tint the
+      // previous run's image instead of erasing it.
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.fillStyle = 'rgba(0,0,0,0.04)'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
     }
@@ -329,11 +332,11 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
             if (raw) {
               const payload = snapshot.bytes.slice(chunk.offset, chunk.offset + chunk.len)
               if (corruptRef.current) {
+                // Zero a ~40% span to black: a dead stripe reads as damage against any content — XOR noise would be
+                // indistinguishable from the noise-grid default file.
                 const spanLen = Math.max(1, Math.floor(payload.length * 0.4))
                 const spanStart = Math.floor(payload.length * 0.3)
-                for (let i = spanStart; i < Math.min(payload.length, spanStart + spanLen); i++) {
-                  payload[i] = (payload[i]! ^ (0xa5 + i)) & 0xff
-                }
+                payload.fill(0, spanStart, Math.min(payload.length, spanStart + spanLen))
               }
               raw.set(payload, chunk.offset)
               rawPrefixRef.current = chunk.offset + chunk.len
@@ -446,7 +449,8 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
       ) : null}
       {snapshot?.ppm ? (
         <div className='flex flex-wrap gap-4'>
-          <div className='space-y-1'>
+          {/* w-40 pins each pane to its canvas width so the captions wrap instead of forcing the panes to stack. */}
+          <div className='w-40 space-y-1'>
             <canvas
               ref={rawCanvasRef}
               width={snapshot.ppm.width}
@@ -458,7 +462,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
             />
             <p className='text-xs text-muted'>Without verification — corrupted chunks land in the image and stay.</p>
           </div>
-          <div className='space-y-1'>
+          <div className='w-40 space-y-1'>
             <canvas
               ref={canvasRef}
               width={snapshot.ppm.width}
