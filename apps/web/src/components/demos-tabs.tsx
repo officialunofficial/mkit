@@ -73,8 +73,8 @@ const TABS: Tab[] = [
     body: (
       <>
         mkit cuts big files into content-defined chunks (FastCDC), ships only the chunks that changed, and verifies each
-        one as it arrives. git re-stores the whole binary on every edit. Watch the auto-editor run, or drop in your own
-        large file.
+        one as it arrives. git re-stores the whole binary on every edit. Watch the auto-editor run, start a verified
+        download, or drop in your own large file.
       </>
     ),
     Demo: StreamingDemo,
