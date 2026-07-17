@@ -1,7 +1,6 @@
 import { mulberry32 } from './grid-svg'
 
-// `source` records how the bytes were produced — the default grid render, or a user upload.
-export type FileAsset = { name: string; bytes: Uint8Array; source: 'default' | 'upload' }
+export type FileAsset = { name: string; bytes: Uint8Array }
 
 const DEFAULT_NAME = 'grid.ppm'
 
@@ -35,7 +34,7 @@ export function generateDefaultPpm(seed: number): FileAsset {
   }
   const data = ctx.getImageData(0, 0, GRID_SIZE, GRID_SIZE).data
   const bytes = encodePpm(data, GRID_SIZE, GRID_SIZE)
-  return { name: DEFAULT_NAME, bytes, source: 'default' }
+  return { name: DEFAULT_NAME, bytes }
 }
 
 // Walk the three ASCII whitespace-separated tokens after the `P6` magic, returning width/height and the byte offset
