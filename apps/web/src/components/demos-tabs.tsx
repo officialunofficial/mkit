@@ -72,9 +72,9 @@ const TABS: Tab[] = [
     blurb: 'Content-defined chunking ships and verifies only the parts of a file that changed.',
     body: (
       <>
-        mkit cuts big files into content-defined chunks (FastCDC), ships only the chunks that changed, and verifies each
-        one as it arrives. git re-stores the whole binary on every edit. Watch the auto-editor run, start a verified
-        download, or drop in your own large file.
+        mkit cuts big files into content-defined chunks (FastCDC) and verifies each one against a Bao root as it arrives
+        — corruption is caught mid-stream and re-fetched, not discovered after the download. Watch the file stream in
+        verified, corrupt the connection, or drop in your own large file.
       </>
     ),
     Demo: StreamingDemo,

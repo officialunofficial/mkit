@@ -1,16 +1,8 @@
 'use client'
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  type CellOverride,
-  type FileAsset,
-  decodePpmHeader,
-  driftDefaultPpm,
-  generateDefaultPpm,
-  mutateRandomBytes,
-} from '../lib/ppm'
+import { useEffect, useRef, useState } from 'react'
+import { type FileAsset, decodePpmHeader, generateDefaultPpm } from '../lib/ppm'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
-import { ObjectRow } from './result-panel'
 import { formatBytes, useMkit } from './use-mkit'
 
 // The wasm results expose their chunk lists via an index getter; materialise once into the shape ChunkStrip renders.
@@ -31,32 +23,20 @@ const DEFAULT_SEED = 0xc0de_cafe
 // state, Bao outboard) and start freezing the tab while building tens of thousands of DOM nodes. Real mkit has no
 // such limit; the cap only applies to this interactive page.
 const MAX_FILE_BYTES = 128 * 1024 * 1024
-// Auto-edit cadence. 500 ms is the visible target — the user perceives a continuously changing chunker. The
-// `tickRunning` guard naturally throttles to whatever rate the wasm pass actually completes at on the host machine,
-// so a slow device falls back to "as fast as possible" instead of stacking ticks.
-const AUTO_EDIT_INTERVAL_MS = 500
 
 export function StreamingDemo() {
   const [currentFile, setCurrentFile] = useState<FileAsset | null>(null)
-  const [previousFile, setPreviousFile] = useState<FileAsset | null>(null)
   const [tooLarge, setTooLarge] = useState<{ name: string; size: number } | null>(null)
-  const [autoEdit, setAutoEdit] = useState(true)
   // React strict-mode mounts twice; cache the generated default bytes so we don't burn the canvas pipeline twice on
   // first paint. Ref survives the remount.
   const generatedRef = useRef<FileAsset | null>(null)
-  // Accumulated cell-hue overrides for the default PPM so each auto-edit tick adds one drifted square on top of the
-  // running mutation history, instead of replacing the whole image. Reset whenever the file is replaced.
-  const overridesRef = useRef<CellOverride[]>([])
-  // Mirror of `currentFile` so the auto-edit interval can read the latest bytes without re-binding on every render.
-  const currentFileRef = useRef<FileAsset | null>(null)
-  currentFileRef.current = currentFile
 
   useEffect(() => {
     if (generatedRef.current) {
       setCurrentFile(generatedRef.current)
       return
     }
-    const asset = generateDefaultPpm(DEFAULT_SEED, [])
+    const asset = generateDefaultPpm(DEFAULT_SEED)
     generatedRef.current = asset
     setCurrentFile(asset)
   }, [])
@@ -71,49 +51,9 @@ export function StreamingDemo() {
     }
     const buf = await file.arrayBuffer()
     setTooLarge(null)
-    setAutoEdit(false)
-    overridesRef.current = []
     const next: FileAsset = { name, bytes: new Uint8Array(buf), source: 'upload' }
-    setPreviousFile(currentFile)
     setCurrentFile(next)
   }
-
-  // Auto-edit loop: snapshot the current file as the delta baseline once when toggled on, then mutate `currentFile`
-  // every tick. Default file → grow `overridesRef` and re-render the PPM (localised byte-range change). Uploaded file
-  // → flip 1–3 random bytes outside any image header. The interval reads the latest file via the functional updater
-  // so we don't restart it on every state change.
-  useEffect(() => {
-    if (!autoEdit) return
-    setPreviousFile(currentFile)
-    let cancelled = false
-    let tickRunning = false
-    const id = window.setInterval(() => {
-      if (cancelled || tickRunning) return
-      tickRunning = true
-      try {
-        const captured = currentFileRef.current
-        if (!captured || cancelled) {
-          tickRunning = false
-          return
-        }
-        const next: FileAsset =
-          captured.source === 'default'
-            ? driftDefaultPpm(DEFAULT_SEED, overridesRef.current)
-            : mutateRandomBytes(captured)
-        if (cancelled) return
-        setCurrentFile(next)
-      } finally {
-        tickRunning = false
-      }
-    }, AUTO_EDIT_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-    // We deliberately depend only on autoEdit. The interval reads currentFile via the setter callback so it stays
-    // current without restarting on every tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoEdit])
 
   if (!currentFile) {
     return <p className='text-sm text-muted'>Generating default file…</p>
@@ -121,22 +61,12 @@ export function StreamingDemo() {
 
   return (
     // Mobile-first ordering: live sections above the file sidebar so a phone landing on the streaming demo sees the
-    // chunker changing immediately, then scrolls down to the file controls. See `hash-demo.tsx` for the same pattern.
+    // download running immediately, then scrolls down to the file controls. See `hash-demo.tsx` for the same pattern.
     <div className='flex flex-col-reverse gap-10 lg:grid lg:grid-cols-[minmax(0,20rem)_1fr] lg:gap-12'>
       <div className='space-y-6 lg:sticky lg:top-24 lg:self-start'>
-        <FileSidebar
-          current={currentFile}
-          previous={previousFile}
-          onReplace={tryReplaceFile}
-          rejected={tooLarge}
-          autoEdit={autoEdit}
-          onToggleAutoEdit={() => setAutoEdit((v) => !v)}
-        />
+        <FileSidebar current={currentFile} onReplace={tryReplaceFile} rejected={tooLarge} />
       </div>
       <div className='space-y-12'>
-        <StreamingChunker file={currentFile} />
-        <StreamingChunkedBlob file={currentFile} />
-        <StreamingDelta current={currentFile} previous={previousFile} />
         <StreamingVerifiedDownload file={currentFile} />
       </div>
     </div>
@@ -147,18 +77,12 @@ export function StreamingDemo() {
 
 function FileSidebar({
   current,
-  previous,
   onReplace,
   rejected,
-  autoEdit,
-  onToggleAutoEdit,
 }: {
   current: FileAsset
-  previous: FileAsset | null
   onReplace: (file: File) => void | Promise<void>
   rejected: { name: string; size: number } | null
-  autoEdit: boolean
-  onToggleAutoEdit: () => void
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -171,11 +95,6 @@ function FileSidebar({
           <span className='block text-sm text-muted'>Current file</span>
           <p className='mt-1 text-sm font-medium break-all'>{current.name}</p>
           <p className='text-xs text-muted'>{formatBytes(current.bytes.byteLength)}</p>
-          {previous ? (
-            <p className='mt-1 text-xs text-muted'>
-              (prev: {previous.name}, {formatBytes(previous.bytes.byteLength)})
-            </p>
-          ) : null}
         </div>
       </div>
       {rejected ? (
@@ -225,222 +144,18 @@ function FileSidebar({
         }}
       />
       <p className='text-xs text-muted'>
-        Replace the file and the delta section fills in; the prior version is captured automatically. Demo cap:{' '}
-        {formatBytes(MAX_FILE_BYTES)}.
+        Drop in your own file and stream it back verified. Demo cap: {formatBytes(MAX_FILE_BYTES)}.
       </p>
-
-      <div className='space-y-2 border-t border-hairline pt-4'>
-        <button
-          type='button'
-          onClick={onToggleAutoEdit}
-          aria-pressed={autoEdit}
-          className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
-            autoEdit ? 'border-fg bg-fg text-bg' : 'border-hairline hover:border-blue-500/50'
-          }`}
-        >
-          <span aria-hidden className={`size-1.5 rounded-full ${autoEdit ? 'animate-pulse bg-bg' : 'bg-muted'}`} />
-          {autoEdit ? 'Auto-editing' : 'Auto-edit'}
-        </button>
-        <p className='text-xs text-muted'>
-          {current.source === 'default'
-            ? 'Drifts one grid cell per tick. FastCDC keeps most chunks stable while the edited region’s chunk re-hashes.'
-            : 'Flips 1–3 random bytes per tick, skipping any image header, so you can watch the chunker react to small edits.'}
-        </p>
-      </div>
     </div>
   )
 }
 
-// --- section 1: chunker ------------------------------------------------------
-
-function StreamingChunker({ file }: { file: FileAsset }) {
-  const api = useMkit()
-  const result = useMemo(() => {
-    const r = api.chunk_boundaries(file.bytes)
-    const chunks = stripChunks(r)
-    return { chunks, avg: r.avg, min: r.min, max: r.max, count: r.chunk_count }
-  }, [api, file])
-
-  const [tamperByte, setTamperByte] = useState(Math.floor(file.bytes.byteLength / 2))
-  // Clamp (don't re-center) when the file shrinks: auto-edit replaces the FileAsset object every tick without
-  // changing its length, and re-anchoring on identity snapped the slider back to the midpoint mid-drag.
-  useEffect(() => {
-    setTamperByte((b) => Math.min(b, file.bytes.byteLength - 1))
-  }, [file.bytes.byteLength])
-
-  const deferredByte = useDeferredValue(tamperByte)
-  const highlightIndex = useMemo(() => {
-    return findChunkAtOffset(result.chunks, deferredByte)
-  }, [result.chunks, deferredByte])
-
-  return (
-    <Section
-      id='chunker'
-      title='Chunker (FastCDC)'
-      description='Content-defined boundaries — chunks shift, but only locally, when bytes change.'
-    >
-      <p className='text-sm text-muted'>
-        {result.count} chunks · avg {formatBytes(result.avg)} ({formatBytes(result.min)}–{formatBytes(result.max)})
-      </p>
-      <ChunkStrip
-        chunks={result.chunks}
-        totalLen={file.bytes.byteLength}
-        ariaLabel='FastCDC chunks'
-        highlightIndex={highlightIndex ?? undefined}
-        markerByte={deferredByte}
-      />
-      <div className='space-y-2'>
-        <label className='block text-xs text-muted'>
-          Tamper byte: {tamperByte.toLocaleString()} of {(file.bytes.byteLength - 1).toLocaleString()}
-        </label>
-        <input
-          type='range'
-          min={0}
-          max={Math.max(0, file.bytes.byteLength - 1)}
-          step={1}
-          value={tamperByte}
-          onChange={(e) => setTamperByte(Number(e.target.value))}
-          className='w-full'
-          aria-label='Tamper byte offset'
-        />
-        <p className='text-xs text-muted'>
-          Edit byte {tamperByte.toLocaleString()} — only chunk {highlightIndex !== null ? highlightIndex : '–'} would
-          change. FastCDC's rolling hash keeps the rest stable.
-        </p>
-      </div>
-    </Section>
-  )
-}
-
-// --- section 2: chunked blob -------------------------------------------------
-
-function StreamingChunkedBlob({ file }: { file: FileAsset }) {
-  const api = useMkit()
-  const blob = useMemo(() => {
-    const r = api.chunked_blob_encode(file.bytes)
-    const chunks = stripChunks(r)
-    return { rootHash: r.root_hash_hex, bytesLen: r.bytes_len, count: r.chunk_count, chunks }
-  }, [api, file])
-
-  return (
-    <Section
-      id='chunked-blob'
-      title='ChunkedBlob'
-      description='Manifest object: the root hash commits to the list of chunk hashes.'
-    >
-      <div className='divide-y divide-hairline border-y border-hairline'>
-        <ObjectRow hash={blob.rootHash} label='ChunkedBlob root' meta={formatBytes(blob.bytesLen)} />
-        {blob.chunks.map((c, i) => (
-          <ObjectRow
-            key={`${c.offset}-${c.hash_hex}`}
-            hash={c.hash_hex}
-            label={`chunk ${i.toString().padStart(2, '0')}`}
-            meta={`offset ${c.offset.toLocaleString()} · ${formatBytes(c.len)}`}
-          />
-        ))}
-      </div>
-    </Section>
-  )
-}
-
-// --- section 3: delta --------------------------------------------------------
-
-function StreamingDelta({ current, previous }: { current: FileAsset; previous: FileAsset | null }) {
-  const api = useMkit()
-
-  const data = useMemo(() => {
-    if (!previous) return null
-    const prev = api.chunk_boundaries(previous.bytes)
-    const curr = api.chunk_boundaries(current.bytes)
-    const prevChunks = stripChunks(prev)
-    const currChunks = stripChunks(curr)
-    const prevHashes = new Set(prevChunks.map((c) => c.hash_hex))
-    const currHashes = new Set(currChunks.map((c) => c.hash_hex))
-    const prevDim = new Set<number>()
-    prevChunks.forEach((c, i) => {
-      if (currHashes.has(c.hash_hex)) prevDim.add(i)
-    })
-    const currDim = new Set<number>()
-    currChunks.forEach((c, i) => {
-      if (prevHashes.has(c.hash_hex)) currDim.add(i)
-    })
-    const summary = api.delta_encode(previous.bytes, current.bytes)
-    return {
-      prevChunks,
-      currChunks,
-      prevDim,
-      currDim,
-      bytesOnWire: summary.bytes_on_wire,
-      fullSize: summary.full_size,
-    }
-  }, [api, previous, current])
-
-  return (
-    <Section
-      id='delta'
-      title='Delta'
-      description='Wire format that ships only the new + changed chunks against a known base.'
-    >
-      {!data ? (
-        <p className='text-sm text-muted'>Replace the file to see the delta.</p>
-      ) : (
-        <>
-          <div className='space-y-1'>
-            <p className='text-xs text-muted'>Previous</p>
-            <ChunkStrip
-              chunks={data.prevChunks}
-              totalLen={previous!.bytes.byteLength}
-              ariaLabel='Previous file chunks'
-              dimSet={data.prevDim}
-            />
-          </div>
-          <div className='space-y-1'>
-            <p className='text-xs text-muted'>Current</p>
-            <ChunkStrip
-              chunks={data.currChunks}
-              totalLen={current.bytes.byteLength}
-              ariaLabel='Current file chunks'
-              dimSet={data.currDim}
-            />
-          </div>
-          <DeltaStat bytesOnWire={data.bytesOnWire} fullSize={data.fullSize} />
-        </>
-      )}
-    </Section>
-  )
-}
-
-function DeltaStat({ bytesOnWire, fullSize }: { bytesOnWire: number; fullSize: number }) {
-  const savings = fullSize > 0 ? (1 - bytesOnWire / fullSize) * 100 : 0
-  const positive = savings > 0
-  return (
-    <div className='rounded-lg border border-hairline bg-hairline/40 p-4 text-center'>
-      {positive ? (
-        <>
-          <div className='text-3xl font-semibold tabular-nums'>{Math.round(savings)}% saved</div>
-          <div className='text-sm text-muted'>
-            {formatBytes(bytesOnWire)} sent · {formatBytes(fullSize)} for a full re-upload
-          </div>
-        </>
-      ) : (
-        <>
-          <div className='text-base font-medium'>No shared chunks — full upload wins</div>
-          <div className='mt-1 text-sm text-muted'>
-            Delta is {formatBytes(bytesOnWire)} vs {formatBytes(fullSize)} full. Two files with no overlapping content
-            (e.g. unrelated images) ship the whole payload either way. Edit the same file to see savings.
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-// --- section 4: verified download ---------------------------------------------
+// --- verified download ---------------------------------------------
 
 // Everything the stream needs, captured once when the user presses Start. Streaming a snapshot (not the live file)
-// is what lets the auto-edit loop keep running underneath without resetting playback — the bug class the old
-// section suffered from. `ppm` is non-null only for the default grid file (or a user-supplied raw PPM), and gates
-// the progressive canvas paint; compressed uploads can't be painted from a byte prefix.
+// keeps playback stable regardless of later file replacement. `ppm` is non-null only for the default grid file (or a
+// user-supplied raw PPM), and gates the progressive canvas paint; compressed uploads can't be painted from a byte
+// prefix.
 type DownloadSnapshot = {
   bytes: Uint8Array
   chunks: StripChunk[]
@@ -493,6 +208,9 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   // Rows already blitted to the canvas, so a tick only draws the newly-completed span instead of repainting from
   // scratch.
   const paintedRowsRef = useRef(0)
+  // React strict-mode mounts twice; without this guard the auto-start effect would fire `start()` twice on first
+  // load, discarding the first snapshot. Ref survives the remount, so only the first real mount starts the stream.
+  const autoStartedRef = useRef(false)
 
   // Clear the canvas to the same placeholder fill `FilePreview` uses for undecodable bytes, once per fresh snapshot.
   // Keyed on `snapshot` (a new object every Start), never on `file` — see the tick effect below for why that split
@@ -509,7 +227,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   // No effect keyed on `file`. The live file drifting under a running stream is by design — the stream downloads a
   // snapshot taken at Start, and the copy below says so.
   const start = () => {
-    const bytes = file.bytes // FileAsset bytes are replaced, never mutated, per tick — holding the reference is safe
+    const bytes = file.bytes
     const r = api.chunk_boundaries(bytes)
     const chunks = stripChunks(r)
     const enc = api.bao_encode(bytes)
@@ -519,6 +237,14 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     setSnapshot({ bytes, chunks, rootHex: enc.hash_hex, outboard: enc.outboard, ppm })
     setDl({ ...freshDownloadState(), phase: 'streaming' })
   }
+
+  // Auto-start on mount so the page demos itself on load, without waiting for a click.
+  useEffect(() => {
+    if (autoStartedRef.current) return
+    autoStartedRef.current = true
+    start()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const reset = () => {
     setDl(freshDownloadState())
@@ -618,12 +344,17 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     <Section
       id='bao'
       title='Verified download (Bao)'
-      description='Download the file chunk by chunk — each chunk verifies against the root as it lands, so corruption is caught mid-stream, not after.'
+      description='Download the file chunk by chunk, content-defined chunks (FastCDC) verified against a Bao root as they land — corruption is caught mid-stream, not after.'
     >
       {snapshot ? (
         <p className='text-xs text-muted font-mono break-all'>
           Bao root: {snapshot.rootHex.slice(0, 16)}… · outboard {formatBytes(snapshot.outboard.length)} (~6% of the
           file) · streams the file as it was at Start
+        </p>
+      ) : null}
+      {snapshot ? (
+        <p className='text-xs text-muted'>
+          {snapshot.chunks.length} content-defined chunks (FastCDC) · avg {formatBytes(total / snapshot.chunks.length)}
         </p>
       ) : null}
       {snapshot?.ppm ? (
@@ -720,18 +451,9 @@ function Section({
   )
 }
 
-function findChunkAtOffset(chunks: StripChunk[], offset: number): number | null {
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i]!
-    if (offset >= c.offset && offset < c.offset + c.len) return i
-  }
-  return chunks.length > 0 ? chunks.length - 1 : null
-}
-
 // 96 px square preview of the current file. PPM is parsed and blitted directly via putImageData on an offscreen
 // canvas, then downscaled with `drawImage`; everything else is rendered through a Blob URL `<img>` decode. Both paths
-// fall back to a hairline placeholder if decoding fails (e.g. non-image upload). Small enough to redraw on every
-// auto-edit tick without breaking the budget.
+// fall back to a hairline placeholder if decoding fails (e.g. non-image upload).
 function FilePreview({ asset }: { asset: FileAsset }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
