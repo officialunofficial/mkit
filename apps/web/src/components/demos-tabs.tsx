@@ -74,7 +74,7 @@ const TABS: Tab[] = [
       <>
         mkit cuts big files into content-defined chunks (FastCDC) and verifies each one against a Bao root as it arrives
         — corruption is caught mid-stream and re-fetched, not discovered after the download. Watch the file stream in
-        verified, corrupt the connection, or drop in your own large file.
+        verified, or corrupt the connection and see the verifier catch it.
       </>
     ),
     Demo: StreamingDemo,
