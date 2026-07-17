@@ -16,6 +16,29 @@ function stripChunks(r: {
   })
 }
 
+// Blit rows [from, to) of `src` (bytes assembled at their file offsets) onto `ctx` at row `from`, converting the PPM's
+// packed RGB triples into RGBA. Shared by both the verified and unverified panes so there's exactly one RGB→RGBA loop.
+function paintRows(
+  ctx: CanvasRenderingContext2D,
+  src: Uint8Array,
+  ppm: { width: number; pixelStart: number },
+  from: number,
+  to: number,
+) {
+  const { width, pixelStart } = ppm
+  const bytesPerRow = width * 3
+  const rowSpan = to - from
+  const rgba = new Uint8ClampedArray(width * rowSpan * 4)
+  let p = pixelStart + from * bytesPerRow
+  for (let i = 0; i < width * rowSpan; i++) {
+    rgba[i * 4] = src[p++]!
+    rgba[i * 4 + 1] = src[p++]!
+    rgba[i * 4 + 2] = src[p++]!
+    rgba[i * 4 + 3] = 255
+  }
+  ctx.putImageData(new ImageData(rgba, width, rowSpan), 0, from)
+}
+
 const DEFAULT_SEED = 0xc0de_cafe
 // Demo-only hard cap. At 64 KiB avg FastCDC chunks, 128 MiB → ~2,048 chunks — the strip stays readable (each chip is
 // still visible at typical viewport widths) and the wasm passes finish in a few seconds on a modest laptop. Above this
@@ -208,6 +231,14 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   // Rows already blitted to the canvas, so a tick only draws the newly-completed span instead of repainting from
   // scratch.
   const paintedRowsRef = useRef(0)
+  // Unverified pane: bytes as they arrive on the wire, first attempt wins — no rejection, no retry, no stall. This is
+  // the counterfactual the verified pane exists to prevent.
+  const rawAssembledRef = useRef<Uint8Array | null>(null)
+  const rawCanvasRef = useRef<HTMLCanvasElement>(null)
+  const rawPaintedRowsRef = useRef(0)
+  // Contiguous prefix the unverified receiver has accepted, in bytes. Unlike `dl.cursor` this never rewinds on a
+  // rejection — the raw pane took its copy the moment a fresh chunk landed and moved on.
+  const rawPrefixRef = useRef(0)
   // React strict-mode mounts twice; without this guard the auto-start effect would fire `start()` twice on first
   // load, discarding the first snapshot. Ref survives the remount, so only the first real mount starts the stream.
   const autoStartedRef = useRef(false)
@@ -217,11 +248,13 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   // matters.
   useEffect(() => {
     if (!snapshot?.ppm) return
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!canvas || !ctx) return
-    ctx.fillStyle = 'rgba(0,0,0,0.04)'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    for (const ref of [canvasRef, rawCanvasRef]) {
+      const canvas = ref.current
+      const ctx = canvas?.getContext('2d')
+      if (!canvas || !ctx) continue
+      ctx.fillStyle = 'rgba(0,0,0,0.04)'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+    }
   }, [snapshot])
 
   // No effect keyed on `file`. The live file drifting under a running stream is by design — the stream downloads a
@@ -234,6 +267,9 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     const ppm = decodePpmHeader(bytes)
     assembledRef.current = ppm ? new Uint8Array(bytes.byteLength) : null
     paintedRowsRef.current = 0
+    rawAssembledRef.current = ppm ? new Uint8Array(bytes.byteLength) : null
+    rawPaintedRowsRef.current = 0
+    rawPrefixRef.current = 0
     setSnapshot({ bytes, chunks, rootHex: enc.hash_hex, outboard: enc.outboard, ppm })
     setDl({ ...freshDownloadState(), phase: 'streaming' })
   }
@@ -251,6 +287,9 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     setSnapshot(null)
     assembledRef.current = null
     paintedRowsRef.current = 0
+    rawAssembledRef.current = null
+    rawPaintedRowsRef.current = 0
+    rawPrefixRef.current = 0
   }
 
   // The tick: fetch `perTick` chunks as bao slices and verify each against the root as it lands. Sequential and
@@ -279,6 +318,28 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
           const buf = new Uint8Array(slice)
           // Corrupt fresh fetches only; a retry after a rejection arrives clean, as if from a different mirror.
           if (!isRetry && corruptRef.current) buf[buf.length - 1] = (buf[buf.length - 1] ?? 0) ^ 0x01
+
+          // Unverified receiver: takes the first copy of every fresh chunk unconditionally, verified or not — it has
+          // no hash check, so corruption (when armed) lands in the image and stays. A single flipped byte (the
+          // verifier's tamper above) is invisible at pixel scale, so the display corruption is synthesized separately
+          // as a visible stripe; the verifier still only ever sees — and rejects on — a genuinely tampered slice, and
+          // the copy under the pane is honest that even one bad bit would trip it.
+          if (!isRetry) {
+            const raw = rawAssembledRef.current
+            if (raw) {
+              const payload = snapshot.bytes.slice(chunk.offset, chunk.offset + chunk.len)
+              if (corruptRef.current) {
+                const spanLen = Math.max(1, Math.floor(payload.length * 0.4))
+                const spanStart = Math.floor(payload.length * 0.3)
+                for (let i = spanStart; i < Math.min(payload.length, spanStart + spanLen); i++) {
+                  payload[i] = (payload[i]! ^ (0xa5 + i)) & 0xff
+                }
+              }
+              raw.set(payload, chunk.offset)
+              rawPrefixRef.current = chunk.offset + chunk.len
+            }
+          }
+
           const v = api.bao_verify_slice(snapshot.rootHex, buf, chunk.offset, chunk.len)
           if (v.ok) {
             if (assembledRef.current && v.bytes) assembledRef.current.set(v.bytes, chunk.offset)
@@ -304,29 +365,46 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
 
       // Verified bytes form a contiguous prefix (the stream is sequential), so paint only the newly-completed rows.
       if (snapshot.ppm && verifiedAny) {
-        const canvas = canvasRef.current
-        const ctx = canvas?.getContext('2d')
+        const ctx = canvasRef.current?.getContext('2d')
         const assembled = assembledRef.current
         if (ctx && assembled) {
           const { width, pixelStart } = snapshot.ppm
           const prefixBytes =
             next.cursor < snapshot.chunks.length ? snapshot.chunks[next.cursor]!.offset : snapshot.bytes.byteLength
-          const bytesPerRow = width * 3
-          const rowsDone = Math.floor(Math.max(0, prefixBytes - pixelStart) / bytesPerRow)
+          const rowsDone = Math.floor(Math.max(0, prefixBytes - pixelStart) / (width * 3))
           const painted = paintedRowsRef.current
           if (rowsDone > painted) {
-            const rowSpan = rowsDone - painted
-            const rgba = new Uint8ClampedArray(width * rowSpan * 4)
-            let p = pixelStart + painted * bytesPerRow
-            for (let i = 0; i < width * rowSpan; i++) {
-              rgba[i * 4] = assembled[p++]!
-              rgba[i * 4 + 1] = assembled[p++]!
-              rgba[i * 4 + 2] = assembled[p++]!
-              rgba[i * 4 + 3] = 255
-            }
-            ctx.putImageData(new ImageData(rgba, width, rowSpan), 0, painted)
+            paintRows(ctx, assembled, snapshot.ppm, painted, rowsDone)
             paintedRowsRef.current = rowsDone
           }
+        }
+      }
+
+      // Unverified pane: paint whatever the raw receiver has accepted so far, rejection or not — its prefix only
+      // ever advances (see the fresh-fetch block above), so it never needs the retry-aware prefix math the verified
+      // pane uses.
+      if (snapshot.ppm) {
+        const ctx = rawCanvasRef.current?.getContext('2d')
+        const raw = rawAssembledRef.current
+        if (ctx && raw) {
+          const { width, pixelStart } = snapshot.ppm
+          const rowsDone = Math.floor(Math.max(0, rawPrefixRef.current - pixelStart) / (width * 3))
+          const painted = rawPaintedRowsRef.current
+          if (rowsDone > painted) {
+            paintRows(ctx, raw, snapshot.ppm, painted, rowsDone)
+            rawPaintedRowsRef.current = rowsDone
+          }
+        }
+      }
+
+      // Stall band on the verified canvas: marks the row where the rejected chunk would have painted. The next
+      // tick's clean retry paints starting at `paintedRowsRef.current` (unchanged since this tick, because the
+      // rejection broke the loop before advancing it) via the block above, overwriting this band.
+      if (snapshot.ppm && next.retryPending) {
+        const ctx = canvasRef.current?.getContext('2d')
+        if (ctx) {
+          ctx.fillStyle = 'rgba(220,38,38,0.85)'
+          ctx.fillRect(0, paintedRowsRef.current, snapshot.ppm.width, 2)
         }
       }
 
@@ -339,6 +417,15 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   const proofBytes = dl.wireBytes - dl.wastedBytes - dl.verifiedBytes
   const startLabel =
     dl.phase === 'streaming' ? 'Downloading…' : dl.phase === 'done' ? 'Download again' : 'Start download'
+
+  // Arming the toggle while idle would otherwise be invisible until the next Start — restart so the effect is
+  // immediate. corruptRef is written by the render this setCorrupt triggers, and the first tick fires no sooner than
+  // `delayMs` (>=100ms) later, so start()'s fresh snapshot is in place well before corruptRef is read.
+  const toggleCorrupt = () => {
+    const next = !corrupt
+    setCorrupt(next)
+    if (next && dl.phase !== 'streaming') start()
+  }
 
   return (
     <Section
@@ -358,15 +445,34 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
         </p>
       ) : null}
       {snapshot?.ppm ? (
-        <canvas
-          ref={canvasRef}
-          width={snapshot.ppm.width}
-          height={snapshot.ppm.height}
-          role='img'
-          aria-label='Verified download preview — the image fills in as chunks verify'
-          className='size-40 rounded-sm bg-white'
-          style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
-        />
+        <div className='flex flex-wrap gap-4'>
+          <div className='space-y-1'>
+            <canvas
+              ref={rawCanvasRef}
+              width={snapshot.ppm.width}
+              height={snapshot.ppm.height}
+              role='img'
+              aria-label='Unverified download preview — corrupted chunks land here and stay'
+              className='size-40 rounded-sm bg-white'
+              style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
+            />
+            <p className='text-xs text-muted'>Without verification — corrupted chunks land in the image and stay.</p>
+          </div>
+          <div className='space-y-1'>
+            <canvas
+              ref={canvasRef}
+              width={snapshot.ppm.width}
+              height={snapshot.ppm.height}
+              role='img'
+              aria-label='Verified download preview — the image fills in as chunks verify'
+              className='size-40 rounded-sm bg-white'
+              style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
+            />
+            <p className='text-xs text-muted'>
+              Verified — every chunk checked against the Bao root; corruption never gets in.
+            </p>
+          </div>
+        </div>
       ) : null}
       {snapshot ? (
         <ChunkStrip
@@ -377,6 +483,11 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
           pendingSet={dl.phase === 'streaming' && !dl.retryPending ? new Set([dl.cursor]) : undefined}
           failedSet={dl.retryPending ? new Set([dl.cursor]) : undefined}
         />
+      ) : null}
+      {dl.retryPending ? (
+        <p role='status' className='text-xs text-red-700 dark:text-red-400'>
+          Chunk {dl.cursor} arrived corrupted — rejected by the verifier (hash mismatch). Re-fetching…
+        </p>
       ) : null}
       <div className='flex flex-wrap items-center gap-3'>
         <button
@@ -396,7 +507,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
         </button>
         <button
           type='button'
-          onClick={() => setCorrupt((v) => !v)}
+          onClick={toggleCorrupt}
           aria-pressed={corrupt}
           className={`inline-flex h-10 items-center justify-center rounded-lg border px-3 text-sm font-medium transition-all duration-200 active:scale-[0.96] sm:h-9 ${
             corrupt ? 'border-red-600 bg-red-600 text-white' : 'border-hairline hover:border-red-500/50'
@@ -407,7 +518,8 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
       </div>
       {corrupt ? (
         <p className='text-xs text-muted'>
-          Every fresh chunk arrives tampered; the verifier rejects it and the re-fetch comes in clean.
+          Every fresh chunk arrives tampered. Watch the left image take damage while the verifier keeps the right one
+          clean.
         </p>
       ) : null}
       {snapshot ? (
