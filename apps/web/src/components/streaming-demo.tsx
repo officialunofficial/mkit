@@ -265,10 +265,11 @@ function StreamingChunker({ file }: { file: FileAsset }) {
   }, [api, file])
 
   const [tamperByte, setTamperByte] = useState(Math.floor(file.bytes.byteLength / 2))
-  // Re-anchor when file changes so the slider stays in range.
+  // Clamp (don't re-center) when the file shrinks: auto-edit replaces the FileAsset object every tick without
+  // changing its length, and re-anchoring on identity snapped the slider back to the midpoint mid-drag.
   useEffect(() => {
-    setTamperByte(Math.floor(file.bytes.byteLength / 2))
-  }, [file])
+    setTamperByte((b) => Math.min(b, file.bytes.byteLength - 1))
+  }, [file.bytes.byteLength])
 
   const deferredByte = useDeferredValue(tamperByte)
   const highlightIndex = useMemo(() => {
