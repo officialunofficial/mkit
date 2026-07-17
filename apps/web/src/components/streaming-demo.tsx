@@ -107,12 +107,12 @@ type DownloadSnapshot = {
 type DownloadState = {
   phase: 'idle' | 'streaming' | 'done'
   cursor: number // next chunk index to fetch
-  retryPending: boolean // chunk at `cursor` failed verification last tick; next fetch is the clean retry
+  failing: boolean // the last attempt at `cursor` was rejected; stays true as long as the connection stays corrupted
   verified: Set<number>
   verifiedBytes: number // payload bytes that passed verification
   wireBytes: number // everything sent: payloads + proofs, including rejected slices
   wastedBytes: number // slices that failed verification and were thrown away
-  rejected: number // count of rejected slices
+  rejected: number // count of rejected attempts
 }
 
 // Factory, not a shared constant: DownloadState holds a Set, and a module-level instance would alias the same Set
@@ -121,7 +121,7 @@ function freshDownloadState(): DownloadState {
   return {
     phase: 'idle',
     cursor: 0,
-    retryPending: false,
+    failing: false,
     verified: new Set(),
     verifiedBytes: 0,
     wireBytes: 0,
@@ -130,10 +130,9 @@ function freshDownloadState(): DownloadState {
   }
 }
 
-// Nominal stream length regardless of chunk count: delay between ticks is clamp(6000 / chunkCount, 100, 600) ms and
-// chunks fetched per tick is max(1, ceil(chunkCount / 60)). The floor keeps a much larger file from taking minutes;
-// the ceiling keeps the 9-chunk default slow enough to actually watch chunks light up one at a time.
-const STREAM_TARGET_MS = 6000
+// One chunk per tick. The only file here is the generated grid (~9 chunks), so 600 ms × 9 ≈ 5.4 s — slow enough to
+// watch chunks verify one at a time.
+const TICK_MS = 600
 
 function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
   const api = useMkit()
@@ -167,8 +166,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     ctx.fillRect(0, 0, canvas.width, canvas.height)
   }, [snapshot])
 
-  // No effect keyed on `file`. The live file drifting under a running stream is by design — the stream downloads a
-  // snapshot taken at Start, and the copy below says so.
+  // Capture everything the stream needs up front — the tick works only off the snapshot.
   const start = () => {
     const bytes = file.bytes
     const r = api.chunk_boundaries(bytes)
@@ -196,85 +194,68 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
     paintedRowsRef.current = 0
   }
 
-  // The tick: fetch `perTick` chunks as bao slices and verify each against the root as it lands. Sequential and
-  // single-flight by construction — the timeout only re-arms once `setDl` has landed a new `dl`, so there's no
-  // stacking even if a tick runs long. Corruption (when armed) hits only the first attempt at a chunk; the retry
-  // that follows a rejection always arrives clean, as if from a different mirror.
+  // The tick: fetch the next chunk as a bao slice and verify it against the root. Sequential and single-flight by
+  // construction — the timeout only re-arms once `setDl` has landed a new state. While the connection is corrupted,
+  // EVERY attempt arrives tampered and is rejected: the stream stalls at the current chunk, waste piles up, and
+  // nothing unverified ever reaches the image. Fixing the connection lets the next attempt through and the stream
+  // resumes where it stalled.
   useEffect(() => {
     if (dl.phase !== 'streaming' || !snapshot) return
-    const delayMs = Math.max(100, Math.min(600, Math.round(STREAM_TARGET_MS / snapshot.chunks.length)))
-    const perTick = Math.max(1, Math.ceil(snapshot.chunks.length / 60))
     const t = setTimeout(() => {
       const next: DownloadState = { ...dl, verified: new Set(dl.verified) }
-      let verifiedAny = false
-      for (let slot = 0; slot < perTick; slot++) {
-        if (next.cursor >= snapshot.chunks.length) {
-          next.phase = 'done'
-          break
+      const chunk = snapshot.chunks[next.cursor]!
+      let ok = false
+      try {
+        const slice = api.bao_slice(snapshot.outboard, snapshot.bytes, chunk.offset, chunk.len)
+        next.wireBytes += slice.length
+        const buf = new Uint8Array(slice)
+        if (corruptRef.current) buf[buf.length - 1] = (buf[buf.length - 1] ?? 0) ^ 0x01
+        const v = api.bao_verify_slice(snapshot.rootHex, buf, chunk.offset, chunk.len)
+        if (v.ok) {
+          if (assembledRef.current && v.bytes) assembledRef.current.set(v.bytes, chunk.offset)
+          ok = true
+        } else {
+          next.wastedBytes += slice.length
         }
-        const idx = next.cursor
-        const chunk = snapshot.chunks[idx]!
-        try {
-          const slice = api.bao_slice(snapshot.outboard, snapshot.bytes, chunk.offset, chunk.len)
-          next.wireBytes += slice.length
-          const isRetry = next.retryPending
-          const buf = new Uint8Array(slice)
-          // Corrupt fresh fetches only; a retry after a rejection arrives clean, as if from a different mirror.
-          if (!isRetry && corruptRef.current) buf[buf.length - 1] = (buf[buf.length - 1] ?? 0) ^ 0x01
-
-          const v = api.bao_verify_slice(snapshot.rootHex, buf, chunk.offset, chunk.len)
-          if (v.ok) {
-            if (assembledRef.current && v.bytes) assembledRef.current.set(v.bytes, chunk.offset)
-            next.verified.add(idx)
-            next.verifiedBytes += chunk.len
-            next.cursor += 1
-            next.retryPending = false
-            verifiedAny = true
-          } else {
-            next.wastedBytes += slice.length
-            next.rejected += 1
-            next.retryPending = true
-            break // the rejection consumes the rest of this tick — a visible stall at the corrupted chunk
-          }
-        } catch {
-          // Slice extraction can only throw on internal errors; treat it like a failed verification rather than
-          // letting it kill the stream.
-          next.rejected += 1
-          next.retryPending = true
-          break
-        }
+      } catch {
+        // Slice extraction can only throw on internal errors; treat it like a rejected attempt.
+      }
+      if (ok) {
+        next.verified.add(next.cursor)
+        next.verifiedBytes += chunk.len
+        next.cursor += 1
+        next.failing = false
+        if (next.cursor >= snapshot.chunks.length) next.phase = 'done'
+      } else {
+        next.rejected += 1
+        next.failing = true
       }
 
-      // Verified bytes form a contiguous prefix (the stream is sequential), so paint only the newly-completed rows.
-      if (snapshot.ppm && verifiedAny) {
+      if (snapshot.ppm) {
         const ctx = canvasRef.current?.getContext('2d')
         const assembled = assembledRef.current
         if (ctx && assembled) {
-          const { width, pixelStart } = snapshot.ppm
-          const prefixBytes =
-            next.cursor < snapshot.chunks.length ? snapshot.chunks[next.cursor]!.offset : snapshot.bytes.byteLength
-          const rowsDone = Math.floor(Math.max(0, prefixBytes - pixelStart) / (width * 3))
-          const painted = paintedRowsRef.current
-          if (rowsDone > painted) {
-            paintRows(ctx, assembled, snapshot.ppm, painted, rowsDone)
-            paintedRowsRef.current = rowsDone
+          if (ok) {
+            // Verified bytes form a contiguous prefix (the stream is sequential), so paint only the newly-completed
+            // rows.
+            const { width, pixelStart } = snapshot.ppm
+            const prefixBytes =
+              next.cursor < snapshot.chunks.length ? snapshot.chunks[next.cursor]!.offset : snapshot.bytes.byteLength
+            const rowsDone = Math.floor(Math.max(0, prefixBytes - pixelStart) / (width * 3))
+            if (rowsDone > paintedRowsRef.current) {
+              paintRows(ctx, assembled, snapshot.ppm, paintedRowsRef.current, rowsDone)
+              paintedRowsRef.current = rowsDone
+            }
+          } else {
+            // Stall marker at the first unpainted row; the resumed stream's paint overwrites it.
+            ctx.fillStyle = 'rgba(220,38,38,0.85)'
+            ctx.fillRect(0, paintedRowsRef.current, snapshot.ppm.width, 2)
           }
-        }
-      }
-
-      // Stall band on the verified canvas: marks the row where the rejected chunk would have painted. The next
-      // tick's clean retry paints starting at `paintedRowsRef.current` (unchanged since this tick, because the
-      // rejection broke the loop before advancing it) via the block above, overwriting this band.
-      if (snapshot.ppm && next.retryPending) {
-        const ctx = canvasRef.current?.getContext('2d')
-        if (ctx) {
-          ctx.fillStyle = 'rgba(220,38,38,0.85)'
-          ctx.fillRect(0, paintedRowsRef.current, snapshot.ppm.width, 2)
         }
       }
 
       setDl(next)
-    }, delayMs)
+    }, TICK_MS)
     return () => clearTimeout(t)
   }, [dl, snapshot, api])
 
@@ -285,7 +266,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
 
   // Arming the toggle while idle would otherwise be invisible until the next Start — restart so the effect is
   // immediate. corruptRef is written by the render this setCorrupt triggers, and the first tick fires no sooner than
-  // `delayMs` (>=100ms) later, so start()'s fresh snapshot is in place well before corruptRef is read.
+  // `TICK_MS` later, so start()'s fresh snapshot is in place well before corruptRef is read.
   const toggleCorrupt = () => {
     const next = !corrupt
     setCorrupt(next)
@@ -297,7 +278,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
       {snapshot ? (
         <p className='text-xs text-muted font-mono break-all'>
           Bao root: {snapshot.rootHex.slice(0, 16)}… · outboard {formatBytes(snapshot.outboard.length)} (~6% of the
-          file) · streams the file as it was at Start
+          file)
         </p>
       ) : null}
       {snapshot ? (
@@ -322,13 +303,14 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
           totalLen={snapshot.bytes.byteLength}
           ariaLabel='Verified download chunks'
           verifiedSet={dl.verified}
-          pendingSet={dl.phase === 'streaming' && !dl.retryPending ? new Set([dl.cursor]) : undefined}
-          failedSet={dl.retryPending ? new Set([dl.cursor]) : undefined}
+          pendingSet={dl.phase === 'streaming' && !dl.failing ? new Set([dl.cursor]) : undefined}
+          failedSet={dl.failing ? new Set([dl.cursor]) : undefined}
         />
       ) : null}
-      {dl.retryPending ? (
+      {dl.failing ? (
         <p role='status' className='text-xs text-red-700 dark:text-red-400'>
-          Chunk {dl.cursor} arrived corrupted — rejected by the verifier (hash mismatch). Re-fetching…
+          Chunk {dl.cursor} keeps arriving corrupted — rejected every attempt (hash mismatch). The stream is stalled;
+          nothing unverified reaches the image. Fix the connection to resume.
         </p>
       ) : null}
       {snapshot ? (
