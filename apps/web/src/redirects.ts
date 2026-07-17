@@ -1,21 +1,26 @@
 // Legacy-route redirects.
 //
 // The hash/sign/tree/streaming/push/attest demos used to each have their own
-// page; they are now tabs on `/demos` (see components/demos-tabs.tsx, which
+// page; they are now tabs on `/concepts` (see components/demos-tabs.tsx, which
 // keys off `#hash | #tree | #sign | #streaming | #push | #attest`). The old
 // pages were deleted, so those paths no longer prerender to a static asset —
 // which means Cloudflare hands the request to the Worker's Hono app, where this
 // middleware can 301 it to the new anchor instead of letting the RSC router
 // 404. Permanent (301) because the old URLs are gone for good: search engines
 // and any existing inbound links should learn the new location.
+//
+// `/demos` itself was renamed to `/concepts`; it 301s the same way. Fragments
+// aren't visible server-side, but browsers carry them over automatically on a
+// same-path-shape redirect, so a plain path 301 is enough.
 
 const REDIRECTS: Record<string, string> = {
-  '/hash': '/demos#hash',
-  '/tree': '/demos#tree',
-  '/sign': '/demos#sign',
-  '/streaming': '/demos#streaming',
-  '/push': '/demos#push',
-  '/attest': '/demos#attest',
+  '/hash': '/concepts#hash',
+  '/tree': '/concepts#tree',
+  '/sign': '/concepts#sign',
+  '/streaming': '/concepts#streaming',
+  '/push': '/concepts#push',
+  '/attest': '/concepts#attest',
+  '/demos': '/concepts',
 }
 
 /**
@@ -33,7 +38,8 @@ export function resolveRedirect(pathname: string): string | null {
 type RedirectContext = { req: { raw: Request } }
 
 /**
- * Cloudflare-adapter middleware factory that 301s the deleted demo routes to their `/demos#…` anchors.
+ * Cloudflare-adapter middleware factory that 301s the deleted demo routes to their `/concepts#…` anchors (and the
+ * renamed `/demos` page to `/concepts`).
  *
  * Like the installer sniff, this must be wired via the adapter's `middlewareFns` option (see waku.server.tsx): it runs
  * inside the deployed Worker's Hono app, before the RSC page router, so it intercepts a path that no longer has a

@@ -72,9 +72,9 @@ const TABS: Tab[] = [
     blurb: 'Content-defined chunking ships and verifies only the parts of a file that changed.',
     body: (
       <>
-        mkit cuts big files into content-defined chunks (FastCDC), ships only the chunks that changed, and verifies each
-        one as it arrives. git re-stores the whole binary on every edit. Watch the auto-editor run, or drop in your own
-        large file.
+        mkit cuts big files into content-defined chunks (FastCDC) and verifies each one against a Bao root as it arrives
+        — corruption is caught mid-stream and re-fetched, not discovered after the download. Watch the file stream in
+        verified, or corrupt the connection and see the verifier catch it.
       </>
     ),
     Demo: StreamingDemo,
@@ -177,7 +177,7 @@ export function DemosTabs() {
           the active tab (wrapping around). Switches tabs in place rather than
           navigating away. */}
       <section className='space-y-4 pt-8'>
-        <h2 className='text-xl font-semibold tracking-tight'>More demos to explore</h2>
+        <h2 className='text-xl font-semibold tracking-tight'>More concepts to explore</h2>
         <ul className='grid gap-4 sm:grid-cols-3'>
           {upNext.map((t) => (
             <li key={t.id}>
