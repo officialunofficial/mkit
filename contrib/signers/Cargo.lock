@@ -1625,7 +1625,7 @@ dependencies = [
  "dirs",
  "mkit-attest",
  "mkit-rpc",
- "p256 0.13.2",
+ "p256 0.14.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1651,7 +1651,7 @@ version = "0.1.0"
 dependencies = [
  "buffa",
  "mkit-rpc",
- "p256 0.13.2",
+ "p256 0.14.0",
  "sha2 0.11.0",
  "tss-esapi",
 ]
