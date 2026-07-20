@@ -1126,7 +1126,7 @@ dependencies = [
  "num-rational",
  "num-traits",
  "once_cell",
- "p256 0.14.0",
+ "p256",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
@@ -3328,7 +3328,7 @@ dependencies = [
  "k256",
  "mkit-core",
  "mkit-rpc",
- "p256 0.13.2",
+ "p256",
  "rand_core 0.10.1",
  "serde",
  "serde_json",
@@ -3350,7 +3350,7 @@ dependencies = [
  "k256",
  "mkit-cli",
  "mkit-core",
- "p256 0.13.2",
+ "p256",
  "serde",
  "serde_json",
  "sha1",
@@ -3392,7 +3392,7 @@ dependencies = [
  "mkit-transport-s3",
  "mkit-transport-ssh",
  "mockito",
- "p256 0.13.2",
+ "p256",
  "predicates",
  "proptest",
  "rand_core 0.10.1",
@@ -3481,7 +3481,7 @@ dependencies = [
  "mkit-attest",
  "mkit-core",
  "openpgp-card",
- "p256 0.13.2",
+ "p256",
  "regex",
  "security-framework",
  "sha2 0.10.9",
@@ -3970,18 +3970,6 @@ dependencies = [
 
 [[package]]
 name = "p256"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
-dependencies = [
- "ecdsa 0.16.9",
- "elliptic-curve 0.13.8",
- "primeorder 0.13.6",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "p256"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
@@ -3989,7 +3977,7 @@ dependencies = [
  "ecdsa 0.17.0",
  "elliptic-curve 0.14.1",
  "primefield",
- "primeorder 0.14.0",
+ "primeorder",
  "sha2 0.11.0",
 ]
 
@@ -4003,7 +3991,7 @@ dependencies = [
  "elliptic-curve 0.14.1",
  "fiat-crypto 0.3.0",
  "primefield",
- "primeorder 0.14.0",
+ "primeorder",
  "sha2 0.11.0",
 ]
 
@@ -4339,15 +4327,6 @@ dependencies = [
  "rand_core 0.10.1",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "primeorder"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
-dependencies = [
- "elliptic-curve 0.13.8",
 ]
 
 [[package]]
@@ -6772,7 +6751,7 @@ dependencies = [
  "elliptic-curve 0.14.1",
  "log",
  "nom 8.0.0",
- "p256 0.14.0",
+ "p256",
  "p384",
  "pbkdf2",
  "pcsc",

@@ -87,7 +87,7 @@ k256 = { version = "0.13", optional = true, default-features = false, features =
 # P-256 / secp256r1 / prime256v1 (COSE -7) — WebAuthn, Apple Secure
 # Enclave, Android Keystore, iOS CryptoKit, browser WebCrypto. Gated
 # behind `algo-p256`. Same `0.13` RustCrypto major as k256.
-p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 # Unconditional (not feature-gated): ES256K/ES256 sign SHA256(pae) when
 # those signer features are on, and every in-toto Statement subject
 # emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so
