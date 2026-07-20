@@ -82,7 +82,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9  # v0.5.131
         with:
           command: release
           manifest_path: rust/Cargo.toml
@@ -125,7 +125,7 @@ jobs:
       # release-plz runs cargo-semver-checks (semver_check = true) to diff the
       # public API against the previous tag and propose the right version bump.
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b  # v2
         with:
           tool: cargo-semver-checks
 
@@ -137,7 +137,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
 
       - name: Run release-plz release-pr
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7  # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9  # v0.5.131
         with:
           command: release-pr
           manifest_path: rust/Cargo.toml
