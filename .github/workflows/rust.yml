@@ -81,7 +81,7 @@ jobs:
     steps:
       - name: Checkout
         if: env.SHOULD_RUN == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # workflow_dispatch has no github.event.pull_request, so this
           # always falls through to github.sha — the tip of whatever ref the
@@ -111,7 +111,7 @@ jobs:
       # cosign-signed prebuilt binary from the cargo-nextest release.
       - name: Install cargo-nextest
         if: env.SHOULD_RUN == 'true'
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf  # v2
         with:
           tool: cargo-nextest
 
@@ -238,7 +238,7 @@ jobs:
     steps:
       - name: Checkout
         if: env.SHOULD_RUN == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -304,7 +304,7 @@ jobs:
     steps:
       - name: Checkout
         if: env.SHOULD_RUN == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # workflow_dispatch has no github.event.pull_request, so this
           # always falls through to github.sha — the tip of whatever ref the
