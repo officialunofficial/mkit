@@ -62,7 +62,7 @@ jobs:
           fi
 
       # Publish the TAG's tree, not a branch — what's released matches the tag.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -114,7 +114,7 @@ jobs:
       # publish has no baseline). Excludes mkit-cli (unstable CLI-internal lib
       # surface, intentionally unguarded) and mkit-wasm (npm-only, publish=false).
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853  # v2
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad  # v2
         with:
           tool: cargo-semver-checks
 
@@ -179,7 +179,7 @@ jobs:
           fi
 
       # Publish the TAG's tree, same as the crates.io publish job above.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
 
