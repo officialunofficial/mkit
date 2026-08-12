@@ -94,6 +94,25 @@ pub fn list_refs_lower_bound(
     Ok((start_after.to_string(), true))
 }
 
+/// Resolves a `ListRefs` wire `page_size` into either `None` — the
+/// pre-pagination "legacy" unbounded scan (`page_size == 0`: no LIMIT,
+/// `next_cursor` always empty) — or `Some(cap)`, the effective page cap
+/// clamped to `[1, 1000]` (`refstore::list_refs` then queries `cap + 1` rows
+/// to detect a following page without a second round-trip).
+///
+/// Pure so it's directly unit-testable: `worker_impl::refstore` is
+/// `#[cfg(target_arch = "wasm32")]`-gated wholesale (like the rest of this
+/// module's callers — see the doc comment above) and so can't run its own
+/// `#[cfg(test)]`s under plain `cargo test`.
+#[must_use]
+pub fn resolve_page_cap(page_size: u32) -> Option<u32> {
+    if page_size == 0 {
+        None
+    } else {
+        Some(page_size.clamp(1, 1000))
+    }
+}
+
 /// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
 /// Wire numbers are load-bearing (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,5 +394,53 @@ mod tests {
         assert!(list_refs_lower_bound("refs/heads/", "other").is_err());
         // Shorter than the prefix, so it can't start with it either.
         assert!(list_refs_lower_bound("refs/heads/", "refs/").is_err());
+    }
+
+    // An empty prefix (list every ref in the room, no filter) still produces a
+    // correct half-open range: no upper bound (`prefix_successor("")` is
+    // `None`) and an inclusive lower bound of the empty string, which every
+    // ref name is `>=` (SQLite TEXT ordering).
+    #[test]
+    fn empty_prefix_has_no_upper_bound_and_an_inclusive_empty_lower_bound() {
+        assert_eq!(prefix_successor(""), None);
+        assert_eq!(list_refs_lower_bound("", ""), Ok((String::new(), false)));
+    }
+
+    // A cursor round-trip: `start_after` set to the LAST name returned by the
+    // previous page must exclude that row from the next page (strict `>`), not
+    // re-include it — otherwise a client walking pages sees the boundary ref
+    // twice.
+    #[test]
+    fn start_after_equal_to_previous_pages_last_row_excludes_it() {
+        let last_row_of_page_one = "refs/heads/m";
+        assert_eq!(
+            list_refs_lower_bound("refs/heads/", last_row_of_page_one),
+            Ok((last_row_of_page_one.to_string(), true))
+        );
+        // Same, with no prefix filter (the unfiltered "all refs" listing).
+        assert_eq!(
+            list_refs_lower_bound("", last_row_of_page_one),
+            Ok((last_row_of_page_one.to_string(), true))
+        );
+    }
+
+    // --- resolve_page_cap vectors (ListRefs page_size resolution) ----------
+
+    #[test]
+    fn page_size_zero_is_the_legacy_unbounded_scan() {
+        assert_eq!(resolve_page_cap(0), None);
+    }
+
+    #[test]
+    fn page_size_within_range_passes_through_unclamped() {
+        assert_eq!(resolve_page_cap(1), Some(1));
+        assert_eq!(resolve_page_cap(200), Some(200));
+        assert_eq!(resolve_page_cap(1000), Some(1000));
+    }
+
+    #[test]
+    fn page_size_above_the_cap_is_clamped_to_1000() {
+        assert_eq!(resolve_page_cap(1001), Some(1000));
+        assert_eq!(resolve_page_cap(u32::MAX), Some(1000));
     }
 }

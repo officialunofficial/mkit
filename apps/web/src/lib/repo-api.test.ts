@@ -1,5 +1,12 @@
-import { QueryClient, QueryObserver, MutationObserver, keepPreviousData } from '@tanstack/react-query'
-import { describe, expect, it, vi } from 'vitest'
+import {
+  InfiniteQueryObserver,
+  type InfiniteData,
+  QueryClient,
+  QueryObserver,
+  MutationObserver,
+  keepPreviousData,
+} from '@tanstack/react-query'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bytesToHex } from '../components/use-mkit'
 import type { MkitApi } from './mkit'
 import { mkit } from './mkit'
@@ -11,10 +18,15 @@ import {
   MockRepoBackend,
   type FeedItem,
   type ReactionEntry,
+  type RefEntry,
+  type RefsPage,
+  type RefUpdate,
   type RepoConnectClient,
+  TrailingDebouncer,
   aggregateReactions,
   mergeFeed,
   parseActivityFrame,
+  patchRefsPages,
   type PushArgs,
   type RepoBackend,
   type RepoWasmClient,
@@ -79,7 +91,7 @@ function hexToBytes(hex: string): Uint8Array {
  */
 type GetRefReq = { room: string; name: string }
 type GetObjectReq = { room: string; objectId: Uint8Array }
-type ListRefsReq = { room: string; prefix: string }
+type ListRefsReq = { room: string; prefix: string; startAfter: string; pageSize: number }
 type ListMessagesReq = { room: string; limit: number }
 type ListReactionsReq = { room: string }
 type ListCommitsReq = { room: string; ref: string; startId: Uint8Array; pageSize: number }
@@ -87,7 +99,11 @@ type ListCommitsReq = { room: string; ref: string; startId: Uint8Array; pageSize
 function fakeClient(methods: {
   getRef?: (req: GetRefReq) => { exists: boolean; objectId: Uint8Array }
   getObject?: (req: GetObjectReq) => { found: boolean; bytes: Uint8Array }
-  listRefs?: (req: ListRefsReq) => { refs: Array<{ name: string; objectId: Uint8Array }> }
+  listRefs?: (req: ListRefsReq) => {
+    refs: Array<{ name: string; objectId: Uint8Array }>
+    nextCursor?: string
+    total?: number
+  }
   listMessages?: (req: ListMessagesReq) => {
     messages: Array<{ messageId: Uint8Array; authorPubkey: Uint8Array; text: string; createdAt: bigint; seq: bigint }>
   }
@@ -110,7 +126,7 @@ function fakeClient(methods: {
   return {
     getRef: async (req: GetRefReq) => methods.getRef?.(req) ?? { exists: false, objectId: new Uint8Array(0) },
     getObject: async (req: GetObjectReq) => methods.getObject?.(req) ?? { found: false, bytes: new Uint8Array(0) },
-    listRefs: async (req: ListRefsReq) => methods.listRefs?.(req) ?? { refs: [] },
+    listRefs: async (req: ListRefsReq) => methods.listRefs?.(req) ?? { refs: [], nextCursor: '', total: 0 },
     listMessages: async (req: ListMessagesReq) => methods.listMessages?.(req) ?? { messages: [] },
     listReactions: async (req: ListReactionsReq) => methods.listReactions?.(req) ?? { reactions: [] },
     listCommits: async (req: ListCommitsReq) => methods.listCommits?.(req) ?? { commits: [], nextCursor: '' },
@@ -263,6 +279,8 @@ describe('mock backend / RefExpectation CAS semantics', () => {
     await backend.updateRef('r', 'tags/v1', 'h2', 'ANY')
     const heads = await backend.listRefs('r', 'tags/')
     expect(heads.refs).toEqual([{ name: 'tags/v1', objectIdHex: 'h2' }])
+    expect(heads.total).toBe(1)
+    expect(heads.nextCursor).toBe('')
   })
 
   it('WatchRefs streams ref updates to subscribers, honouring prefix + unsubscribe', async () => {
@@ -567,18 +585,22 @@ describe('WasmRepoBackend.commitLog walks the shared `main` ref', () => {
 describe('listRefs exposes all branches in the room', () => {
   it('WasmRepoBackend.listRefs returns main + branches', async () => {
     const client = fakeClient({
-      listRefs: ({ prefix }) => ({
-        refs: [
+      listRefs: ({ prefix }) => {
+        const all = [
           { name: 'main', objectId: hexToBytes('a1') },
           { name: 'feature', objectId: hexToBytes('f1') },
-        ].filter((r) => r.name.startsWith(prefix)),
-      }),
+        ].filter((r) => r.name.startsWith(prefix))
+        return { refs: all, nextCursor: '', total: all.length }
+      },
     })
     const backend = new WasmRepoBackend(NO_WRITES, {} as unknown as MkitApi, () => null, 'http://x', client)
     const refs = await backend.listRefs('room')
     expect(refs.refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+    expect(refs.total).toBe(2)
+    expect(refs.nextCursor).toBe('')
     const filtered = await backend.listRefs('room', 'feat')
     expect(filtered.refs.map((r) => r.name)).toEqual(['feature'])
+    expect(filtered.total).toBe(1)
   })
 
   it('MockRepoBackend.commitLog filters by ref so each branch shows its own chain', async () => {
@@ -602,6 +624,67 @@ describe('listRefs exposes all branches in the room', () => {
     expect((await backend.commitLog('room', 'feature')).map((e) => e.hash)).toEqual(['h-feat'])
     // Both refs are listed in the panel.
     expect((await backend.listRefs('room')).refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+  })
+})
+
+describe('MockRepoBackend.listRefs pagination (keyset cursor)', () => {
+  async function seededBackend(names: string[]): Promise<MockRepoBackend> {
+    const api = await mkit()
+    const backend = new MockRepoBackend(api)
+    for (const name of names) await backend.updateRef('room', name, `h-${name}`, 'ANY')
+    return backend
+  }
+
+  it('walks every ref across multiple pages via the returned cursor (multi-page round-trip)', async () => {
+    const names = Array.from({ length: 9 }, (_, i) => `refs/heads/b${String(i).padStart(2, '0')}`)
+    const backend = await seededBackend(names)
+
+    const pageSize = 4
+    const seen: string[] = []
+    let cursor = ''
+    let pages = 0
+    for (;;) {
+      const page = await backend.listRefs('room', '', { startAfter: cursor, pageSize })
+      pages++
+      expect(pages).toBeLessThan(10) // guards against an infinite loop on a regression
+      seen.push(...page.refs.map((r) => r.name))
+      expect(page.total).toBe(names.length) // stable across every page
+      if (!page.nextCursor) break
+      cursor = page.nextCursor
+    }
+    expect(pages).toBe(3) // 9 refs / pageSize 4 -> pages of 4, 4, 1
+    expect(seen).toEqual(names.toSorted())
+    // No duplicates and no gaps across the walk.
+    expect(new Set(seen).size).toBe(names.length)
+  })
+
+  it('cap+1 boundary: exactly `pageSize` refs has no next page; one more than `pageSize` does', async () => {
+    const exact = await seededBackend(['a', 'b', 'c'])
+    const exactPage = await exact.listRefs('room', '', { startAfter: '', pageSize: 3 })
+    expect(exactPage.refs.map((r) => r.name)).toEqual(['a', 'b', 'c'])
+    expect(exactPage.nextCursor).toBe('')
+    expect(exactPage.total).toBe(3)
+
+    const over = await seededBackend(['a', 'b', 'c', 'd'])
+    const overPage = await over.listRefs('room', '', { startAfter: '', pageSize: 3 })
+    expect(overPage.refs.map((r) => r.name)).toEqual(['a', 'b', 'c'])
+    expect(overPage.nextCursor).toBe('c') // the last name of the returned page
+    expect(overPage.total).toBe(4)
+
+    const nextPage = await over.listRefs('room', '', { startAfter: overPage.nextCursor, pageSize: 3 })
+    expect(nextPage.refs.map((r) => r.name)).toEqual(['d'])
+    expect(nextPage.nextCursor).toBe('')
+  })
+
+  it('pageSize=0 (or omitted) is the legacy unpaginated scan: everything after the cursor, no next page', async () => {
+    const backend = await seededBackend(['a', 'b', 'c'])
+    const all = await backend.listRefs('room', '', { startAfter: '', pageSize: 0 })
+    expect(all.refs.map((r) => r.name)).toEqual(['a', 'b', 'c'])
+    expect(all.nextCursor).toBe('')
+
+    const noOpts = await backend.listRefs('room')
+    expect(noOpts.refs.map((r) => r.name)).toEqual(['a', 'b', 'c'])
+    expect(noOpts.nextCursor).toBe('')
   })
 })
 
@@ -1135,6 +1218,155 @@ describe('keepPreviousData smooths ref switching (useCommitLog / useRefs)', () =
     await vi.waitFor(() => expect(observer.getCurrentResult().isPlaceholderData).toBe(false))
 
     unsub()
+  })
+
+  it("keepPreviousData keeps the prior prefix's pages visible while a new prefix loads (useRefs' infinite-query shape)", async () => {
+    const qc = new QueryClient()
+    const keyAll = repoKeys.refs('room', '')
+    const keyFeat = repoKeys.refs('room', 'feature/')
+
+    const allPage: RefsPage = { refs: [{ name: 'main', objectIdHex: 'h1' }], nextCursor: '', total: 1 }
+    qc.setQueryData<InfiniteData<RefsPage, string>>(keyAll, { pages: [allPage], pageParams: [''] })
+
+    let resolveFeat: (v: RefsPage) => void = () => {}
+    const featPage = new Promise<RefsPage>((r) => {
+      resolveFeat = r
+    })
+
+    const observer = new InfiniteQueryObserver<
+      RefsPage,
+      Error,
+      InfiniteData<RefsPage, string>,
+      readonly unknown[],
+      string
+    >(qc, {
+      queryKey: keyAll,
+      queryFn: async () => qc.getQueryData<InfiniteData<RefsPage, string>>(keyAll)?.pages[0] ?? allPage,
+      initialPageParam: '',
+      getNextPageParam: (last: RefsPage) => last.nextCursor || undefined,
+      placeholderData: keepPreviousData,
+      enabled: true,
+    })
+    const unsub = observer.subscribe(() => {})
+    await vi.waitFor(() => expect(observer.getCurrentResult().data?.pages[0]?.refs[0]?.name).toBe('main'))
+
+    // Switch to the "feature/" prefix — its fetch is in flight (pending) but
+    // keepPreviousData keeps the "" prefix's page visible rather than flashing
+    // an empty branches panel.
+    observer.setOptions({
+      queryKey: keyFeat,
+      queryFn: () => featPage,
+      initialPageParam: '',
+      getNextPageParam: (last: RefsPage) => last.nextCursor || undefined,
+      placeholderData: keepPreviousData,
+      enabled: true,
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    const during = observer.getCurrentResult()
+    expect(during.data?.pages[0]?.refs[0]?.name).toBe('main') // prior prefix's page retained
+    expect(during.isPlaceholderData).toBe(true)
+
+    // Once the new prefix resolves, its page replaces the placeholder.
+    resolveFeat({ refs: [{ name: 'feature/x', objectIdHex: 'h2' }], nextCursor: '', total: 1 })
+    await vi.waitFor(() => expect(observer.getCurrentResult().data?.pages[0]?.refs[0]?.name).toBe('feature/x'))
+    await vi.waitFor(() => expect(observer.getCurrentResult().isPlaceholderData).toBe(false))
+
+    unsub()
+  })
+})
+
+describe('patchRefsPages patches a live ref advance into cached useRefs pages', () => {
+  function mkPage(refs: RefEntry[], nextCursor = '', total = refs.length): RefsPage {
+    return { refs, nextCursor, total }
+  }
+
+  it('patches the ref in place: the touched page gets a NEW array reference, untouched pages keep the SAME reference', () => {
+    const pageA = mkPage([
+      { name: 'a', objectIdHex: 'h-a' },
+      { name: 'b', objectIdHex: 'h-b' },
+    ])
+    const pageB = mkPage([{ name: 'c', objectIdHex: 'h-c' }])
+    const prev: InfiniteData<RefsPage, string> = { pages: [pageA, pageB], pageParams: ['', 'b'] }
+
+    const update: RefUpdate = { name: 'c', objectIdHex: 'h-c-2', authorPubkeyHex: 'someone' }
+    const next = patchRefsPages(prev, update)
+
+    expect(next).not.toBe(prev) // a match was found -> a new outer object
+    expect(next?.pages[0]).toBe(pageA) // untouched page -> SAME reference
+    expect(next?.pages[1]).not.toBe(pageB) // patched page -> NEW reference
+    expect(next?.pages[1]?.refs).toEqual([{ name: 'c', objectIdHex: 'h-c-2' }])
+    // The untouched page's own refs array is also left completely alone.
+    expect(next?.pages[0]?.refs).toBe(pageA.refs)
+  })
+
+  it('returns the SAME `prev` reference when the ref name is not found in any loaded page (signals "not found")', () => {
+    const pageA = mkPage([{ name: 'a', objectIdHex: 'h-a' }])
+    const prev: InfiniteData<RefsPage, string> = { pages: [pageA], pageParams: [''] }
+
+    const next = patchRefsPages(prev, { name: 'brand-new-branch', objectIdHex: 'h-x', authorPubkeyHex: '' })
+
+    // Referential equality is the "miss" signal `useRepoEvents`/`useLobbyEvents`
+    // rely on to fall back to a debounced full-list invalidation.
+    expect(next).toBe(prev)
+  })
+
+  it('passes through `undefined` (no cached data yet) unchanged', () => {
+    expect(patchRefsPages(undefined, { name: 'a', objectIdHex: 'h', authorPubkeyHex: '' })).toBeUndefined()
+  })
+})
+
+describe('TrailingDebouncer coalesces bursts and still flushes under a continuous stream', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('coalesces repeated calls within the window into ONE trailing invocation, timed from the LAST call', () => {
+    const debouncer = new TrailingDebouncer()
+    let calls = 0
+    debouncer.schedule('room-1', () => calls++, 1_000, 5_000)
+    vi.advanceTimersByTime(400)
+    debouncer.schedule('room-1', () => calls++, 1_000, 5_000) // resets the trailing timer
+    vi.advanceTimersByTime(400)
+    debouncer.schedule('room-1', () => calls++, 1_000, 5_000) // resets it again
+    expect(calls).toBe(0) // still inside the (repeatedly-reset) window — nothing fired yet
+
+    vi.advanceTimersByTime(999)
+    expect(calls).toBe(0) // one tick short of 1000ms since the LAST schedule() call
+    vi.advanceTimersByTime(1)
+    expect(calls).toBe(1) // exactly one flush for the whole burst
+  })
+
+  it('still flushes on the max-wait ceiling under a continuous stream that keeps resetting the trailing timer', () => {
+    const debouncer = new TrailingDebouncer()
+    let calls = 0
+    // A call every 800ms forever resets the 1000ms trailing timer — alone that
+    // would NEVER fire — but the 3000ms max-wait (armed once, at the first
+    // call of the burst) caps how long invalidation can be postponed.
+    for (let i = 0; i < 10; i++) {
+      debouncer.schedule('room-1', () => calls++, 1_000, 3_000)
+      vi.advanceTimersByTime(800)
+    }
+    expect(calls).toBeGreaterThanOrEqual(1) // the stream never let the trailing timer alone fire
+  })
+
+  it("keys are independent — a burst on one room does not reset or flush another room's timer", () => {
+    const debouncer = new TrailingDebouncer()
+    const calls = { a: 0, b: 0 }
+    debouncer.schedule('a', () => calls.a++, 1_000, 5_000)
+    vi.advanceTimersByTime(500)
+    debouncer.schedule('b', () => calls.b++, 1_000, 5_000)
+    vi.advanceTimersByTime(500) // 1000ms since room "a" was scheduled -> "a" fires
+    expect(calls).toEqual({ a: 1, b: 0 })
+    vi.advanceTimersByTime(500) // 1000ms since room "b" was scheduled -> "b" fires
+    expect(calls).toEqual({ a: 1, b: 1 })
+  })
+
+  it('cancel() drops a pending invocation without firing it', () => {
+    const debouncer = new TrailingDebouncer()
+    let calls = 0
+    debouncer.schedule('room-1', () => calls++, 1_000, 5_000)
+    debouncer.cancel('room-1')
+    vi.advanceTimersByTime(10_000)
+    expect(calls).toBe(0)
   })
 })
 

@@ -12,7 +12,7 @@
 // workaround in `rust/crates/mkit-repo-client/src/transport.rs`'s `is_gzip`.
 
 import { describe, expect, it, vi } from 'vitest'
-import { gzipAwareFetch, isGzip } from './connect-client'
+import { gzipAwareFetch, isGzip, listRefs, type RepoConnectClient } from './connect-client'
 
 // `Uint8Array` return types below are annotated `<ArrayBuffer>` (not the
 // default `<ArrayBufferLike>`) purely to satisfy `BlobPart`/`BodyInit`'s DOM
@@ -116,5 +116,54 @@ describe('connect-client.ts — gzipAwareFetch', () => {
     const res = await gzipAwareFetch('https://api.mkit.sh/x')
     expect(JSON.parse(await res.text())).toEqual(original)
     vi.unstubAllGlobals()
+  })
+})
+
+// `listRefs`'s request/response mapping mirrors `listCommits`'s (see the doc
+// comment on `listRefs` in connect-client.ts): the wire request carries
+// `room`/`prefix`/`startAfter`/`pageSize` straight through, and the wire
+// response's `objectId` bytes + `nextCursor`/`total` fields are mapped to the
+// app's hex-string shape (`objectIdHex`/`nextCursorName`/`total`).
+describe('connect-client.ts — listRefs wire mapping', () => {
+  it('passes room/prefix/startAfter/pageSize onto the wire request and maps the response to hex + nextCursorName', async () => {
+    let capturedReq: unknown
+    const client = {
+      listRefs: async (req: unknown) => {
+        capturedReq = req
+        return {
+          refs: [
+            { name: 'refs/heads/main', objectId: new Uint8Array([0xaa, 0xbb]) },
+            { name: 'refs/heads/feature', objectId: new Uint8Array(0) }, // absent id -> ''
+          ],
+          nextCursor: 'refs/heads/feature',
+          total: 5,
+        }
+      },
+    } as unknown as RepoConnectClient
+
+    const res = await listRefs(client, 'room-1', 'refs/heads/', 'refs/heads/a', 25)
+
+    expect(capturedReq).toEqual({ room: 'room-1', prefix: 'refs/heads/', startAfter: 'refs/heads/a', pageSize: 25 })
+    expect(res.refs).toEqual([
+      { name: 'refs/heads/main', objectIdHex: 'aabb' },
+      { name: 'refs/heads/feature', objectIdHex: '' },
+    ])
+    expect(res.nextCursorName).toBe('refs/heads/feature')
+    expect(res.total).toBe(5)
+  })
+
+  it("defaults prefix/startAfter/pageSize to ''/''/0 when omitted (the legacy unpaginated request)", async () => {
+    let capturedReq: unknown
+    const client = {
+      listRefs: async (req: unknown) => {
+        capturedReq = req
+        return { refs: [], nextCursor: '', total: 0 }
+      },
+    } as unknown as RepoConnectClient
+
+    const res = await listRefs(client, 'room-1')
+
+    expect(capturedReq).toEqual({ room: 'room-1', prefix: '', startAfter: '', pageSize: 0 })
+    expect(res).toEqual({ refs: [], nextCursorName: '', total: 0 })
   })
 })

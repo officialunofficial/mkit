@@ -39,7 +39,7 @@ use crate::chat::{REACT_MIN_INTERVAL_MS, is_rate_limited};
 use crate::envelope::FRESHNESS_WINDOW_MS;
 use crate::refs::{
     CasDecision, ConflictReason, RefExpectation, evaluate_cas, list_refs_lower_bound,
-    prefix_successor,
+    prefix_successor, resolve_page_cap,
 };
 use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
@@ -645,7 +645,10 @@ impl RefStore {
         // every actual VALUE still flows through a bound `?` parameter.
         let cmp = if strict { ">" } else { ">=" };
 
-        if page_size == 0 {
+        // `page_size == 0` -> `None`: the legacy unbounded scan (no LIMIT,
+        // `next_cursor` always empty). Otherwise the clamped `[1, 1000]` page
+        // cap — see `resolve_page_cap`'s doc comment.
+        let Some(cap) = resolve_page_cap(page_size) else {
             let rows: Vec<Row> = match hi.as_deref() {
                 Some(hi) => sql.exec(
                     &format!(
@@ -668,9 +671,8 @@ impl RefStore {
                 })
                 .collect();
             return Ok((refs, String::new(), total));
-        }
+        };
 
-        let cap = page_size.clamp(1, 1000);
         let limit = i64::from(cap) + 1; // one extra row: detects whether a next page follows
         let mut rows: Vec<Row> = match hi.as_deref() {
             Some(hi) => sql.exec(
