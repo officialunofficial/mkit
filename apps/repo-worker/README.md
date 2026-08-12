@@ -156,7 +156,7 @@ ConnectRPC unary, `POST /mkit.repo.v1.RepoService/<Method>`:
 | `GetObject` | read  | R2 get → `{found, bytes}`. |
 | `GetRef`    | read  | DO read → `{exists, object_id}`. |
 | `UpdateRef` | write | CAS (`ANY`/`MISSING`/`MATCH`) inside the DO's serial execution → `{committed, conflict, current_id}`. |
-| `ListRefs`  | read  | DO list under an optional prefix → `{refs}`. |
+| `ListRefs`  | read  | DO list under an optional prefix, cursor-paginated via `start_after`/`page_size` (`page_size=0` returns all, for back-compat) → `{refs, next_cursor, total}`. |
 | `WatchRefs` | read  | Connect server-streaming, bridged from the DO's `/watch` WebSocket, streaming a `RoomEvent` (commit/chat/reaction/presence) per broadcast &mdash; see below. |
 | `PurgeRoom` | admin | Deletes the room's R2 objects and chat bodies and its DO-resident refs/messages/reactions/commit-index rows. Irreversible. See "Retention and backup/restore" below. |
 

@@ -220,11 +220,15 @@ message UpdateRefResponse {
 
 message ListRefsRequest {
   string room = 1;
-  string prefix = 2;            // empty = all refs
+  string prefix = 2;        // empty = all refs
+  string start_after = 3;   // keyset cursor: return refs with name > start_after; empty = from the start
+  uint32 page_size = 4;     // max refs to return; 0 = ALL (legacy unpaginated behavior); server caps at 1000
 }
 
 message ListRefsResponse {
   repeated mkit.common.v1.RefEntry refs = 1;
+  string next_cursor = 2;   // pass as start_after for the next page; empty when the listing ended
+  uint32 total = 3;         // total refs matching the prefix (COUNT(*) on the PK)
 }
 
 // ----------------------------------------------------------------------------
