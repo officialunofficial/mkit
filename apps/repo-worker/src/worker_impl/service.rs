@@ -537,6 +537,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         let msg = request.to_owned_message();
         let room = msg.room.unwrap_or_default();
         let prefix = msg.prefix.unwrap_or_default();
+        let start_after = msg.start_after.unwrap_or_default();
+        let page_size = msg.page_size.unwrap_or(0);
 
         check_room(&room)?;
         if !is_valid_ref_prefix(&prefix) {
@@ -545,7 +547,17 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: ListResp = do_call(&env, &room, "/list", &ListReq { prefix }).await?;
+            let resp: ListResp = do_call(
+                &env,
+                &room,
+                "/list",
+                &ListReq {
+                    prefix,
+                    start_after,
+                    page_size,
+                },
+            )
+            .await?;
             let refs = resp
                 .refs
                 .into_iter()
@@ -557,6 +569,8 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 .collect();
             Ok(Response::new(ListRefsResponse {
                 refs,
+                next_cursor: Some(resp.next_cursor),
+                total: Some(resp.total),
                 ..Default::default()
             }))
         })

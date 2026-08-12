@@ -3261,6 +3261,10 @@ pub struct ListRefsRequestView<'a> {
     pub room: ::core::option::Option<&'a str>,
     /// Field 2: `prefix`
     pub prefix: ::core::option::Option<&'a str>,
+    /// Field 3: `start_after`
+    pub start_after: ::core::option::Option<&'a str>,
+    /// Field 4: `page_size`
+    pub page_size: ::core::option::Option<u32>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsRequestView<'a> {
@@ -3304,6 +3308,20 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsRequestView<'a> {
                 )?;
                 view.prefix = Some(::buffa::types::borrow_str(&mut cur)?);
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.start_after = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.page_size = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -3328,6 +3346,8 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsRequestView<'a> {
         ::core::result::Result::Ok(super::super::ListRefsRequest {
             room: self.room.map(|s| s.to_string()),
             prefix: self.prefix.map(|s| s.to_string()),
+            start_after: self.start_after.map(|s| s.to_string()),
+            page_size: self.page_size,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -3345,6 +3365,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsRequestView<'a> {
         if let Some(ref v) = self.prefix {
             size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
         }
+        if let Some(ref v) = self.start_after {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.page_size {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -3361,6 +3387,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsRequestView<'a> {
         }
         if let Some(ref v) = self.prefix {
             ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.start_after {
+            ::buffa::types::put_string_field(3u32, v, buf);
+        }
+        if let Some(v) = self.page_size {
+            ::buffa::types::put_uint32_field(4u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3388,6 +3420,12 @@ impl<'__a> ::serde::Serialize for ListRefsRequestView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.prefix {
             __map.serialize_entry("prefix", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.start_after {
+            __map.serialize_entry("startAfter", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.page_size {
+            __map.serialize_entry("pageSize", &::buffa::json_helpers::ProtoJson(&__v))?;
         }
         __map.end()
     }
@@ -3490,6 +3528,16 @@ impl ListRefsRequestOwnedView {
     pub fn prefix(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().prefix
     }
+    /// Field 3: `start_after`
+    #[must_use]
+    pub fn start_after(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().start_after
+    }
+    /// Field 4: `page_size`
+    #[must_use]
+    pub fn page_size(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().page_size
+    }
 }
 impl ::core::convert::From<::buffa::OwnedView<ListRefsRequestView<'static>>>
 for ListRefsRequestOwnedView {
@@ -3528,6 +3576,10 @@ pub struct ListRefsResponseView<'a> {
         'a,
         super::super::super::super::common::v1::__buffa::view::RefEntryView<'a>,
     >,
+    /// Field 2: `next_cursor`
+    pub next_cursor: ::core::option::Option<&'a str>,
+    /// Field 3: `total`
+    pub total: ::core::option::Option<u32>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
@@ -3557,6 +3609,20 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
         let view = self;
         let mut cur = cur;
         match tag.field_number() {
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.next_cursor = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.total = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
             1u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -3599,6 +3665,8 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
                 .iter()
                 .map(|v| v.to_owned_from_source(__buffa_src))
                 .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+            next_cursor: self.next_cursor.map(|s| s.to_string()),
+            total: self.total,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -3618,6 +3686,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
                 += 1u32 + ::buffa::encoding::varint_len(inner_size as u64) as u32
                     + inner_size;
         }
+        if let Some(ref v) = self.next_cursor {
+            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+        }
+        if let Some(v) = self.total {
+            size += 1u32 + ::buffa::types::uint32_encoded_len(v) as u32;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u32;
         size
     }
@@ -3632,6 +3706,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
         for v in &self.refs {
             ::buffa::types::put_len_delimited_header(1u32, __cache.consume_next(), buf);
             v.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.next_cursor {
+            ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(v) = self.total {
+            ::buffa::types::put_uint32_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3656,6 +3736,12 @@ impl<'__a> ::serde::Serialize for ListRefsResponseView<'__a> {
         let mut __map = __s.serialize_map(::core::option::Option::None)?;
         if !self.refs.is_empty() {
             __map.serialize_entry("refs", &*self.refs)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.next_cursor {
+            __map.serialize_entry("nextCursor", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.total {
+            __map.serialize_entry("total", &::buffa::json_helpers::ProtoJson(&__v))?;
         }
         __map.end()
     }
@@ -3757,6 +3843,16 @@ impl ListRefsResponseOwnedView {
         super::super::super::super::common::v1::__buffa::view::RefEntryView<'_>,
     > {
         &self.0.reborrow().refs
+    }
+    /// Field 2: `next_cursor`
+    #[must_use]
+    pub fn next_cursor(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().next_cursor
+    }
+    /// Field 3: `total`
+    #[must_use]
+    pub fn total(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().total
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<ListRefsResponseView<'static>>>

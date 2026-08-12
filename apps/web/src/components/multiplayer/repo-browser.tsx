@@ -5,7 +5,8 @@
 // under Compose), plus log rows and the loading skeleton.
 
 import * as ScrollArea from '@radix-ui/react-scroll-area'
-import { useMemo, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useEffect, useMemo, useRef as useReactRef, useState } from 'react'
 import {
   CasConflictError,
   type CommitLogEntry,
@@ -169,7 +170,61 @@ function SkeletonRows({ rows = 5 }: { rows?: number }) {
   )
 }
 
-/** All branches in the repo (left column). Each row selects the branch the log/detail view follows. */
+/**
+ * Estimated row height (px) for the virtualized branch list — measured off the rendered row (py-2.5 padding + a
+ * text-sm/icon-14 line), rounded up a touch so `useVirtualizer` never undershoots real layout.
+ */
+const REF_ROW_HEIGHT = 44
+
+/**
+ * How close (in loaded rows) the last virtual row must get to the end of `entries` before {@link RefsPanel} fetches the
+ * next page — small enough to stay ahead of a fast scroll without over-fetching.
+ */
+const REFS_FETCH_THRESHOLD = 5
+
+/**
+ * One branch row's contents — shared between the pinned `main` row and every virtualized row so the two never drift
+ * apart visually. `main` never fork-matches (`isForkRef` is always false for it), so the caller doesn't need to guard.
+ */
+function RefRow({ r, active, onSelect }: { r: RefEntryLike; active: boolean; onSelect: () => void }) {
+  return (
+    <button
+      type='button'
+      onClick={onSelect}
+      aria-pressed={active}
+      className={`flex h-full w-full items-center gap-3 py-2.5 text-left transition-colors ${
+        active ? 'text-fg' : 'text-muted hover:text-fg'
+      }`}
+    >
+      <HashChip hash={r.objectIdHex} size={14} />
+      <span className={`truncate font-mono text-sm ${active ? 'font-semibold' : 'font-medium'}`}>{r.name}</span>
+      {isForkRef(r.name) ? (
+        <span
+          className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'
+          title='A remix branch — its head records the commit it derived from (attribution).'
+        >
+          remix
+        </span>
+      ) : null}
+      {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
+      <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 6)}</code>
+    </button>
+  )
+}
+
+type RefEntryLike = { name: string; objectIdHex: string }
+
+/**
+ * All branches in the repo (left column). Each row selects the branch the log/detail view follows.
+ *
+ * `main` is pinned in its own row ABOVE the virtualized/paged list (sourced from {@link useRef}, the same
+ * head-of-`main` query `LiveLog` already runs) and filtered out of the paged rows below it — alphabetically `main`
+ * would otherwise sort after every `b/*`/`forks/*` prefix and sit unreachably far down a 30k-row list. Everything else
+ * renders through `@tanstack/react-virtual` inside the Radix `ScrollArea` (same idiom as {@link LiveLog}'s commit list)
+ * so the DOM only ever holds the rows actually on screen, not all of them — the fix for the mobile Safari freeze a full
+ * `30,342`-node `<ul>` caused in production. Server keyset order is preserved (no client re-sort) so paging in more
+ * rows never reshuffles what's already rendered.
+ */
 export function RefsPanel({
   room,
   useMock,
@@ -181,60 +236,109 @@ export function RefsPanel({
   selectedRef: string
   onSelectRef: (r: string) => void
 }) {
-  const refs = useRefs(room)
-  // Sort `main` first, then alphabetically — a stable, predictable panel.
-  const entries = (refs.data ?? []).toSorted((a, b) =>
-    a.name === 'main' ? -1 : b.name === 'main' ? 1 : a.name.localeCompare(b.name),
-  )
-  // Show the skeleton while loading (gated-pending OR no backend yet) OR while
-  // refetching with nothing to show yet — so a populated room never flashes its
-  // empty state before the walk resolves. Only render the empty copy once the
-  // query has settled with genuinely zero refs.
-  const showSkeleton = refs.isPending || (refs.isFetching && (refs.data?.length ?? 0) === 0)
+  const refsQuery = useRefs(room)
+  const mainHead = useRef(room, 'main')
+  const scrollRef = useReactRef<HTMLDivElement>(null)
+
+  // Server keyset order, `main` filtered out (it's rendered pinned, above).
+  const entries = useMemo(() => refsQuery.refs.filter((r) => r.name !== 'main'), [refsQuery.refs])
+
+  const virtualizer = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => REF_ROW_HEIGHT,
+    overscan: 8,
+    getItemKey: (index) => entries[index]?.name ?? index,
+  })
+  const virtualItems = virtualizer.getVirtualItems()
+
+  // Fetch the next page once the last virtualized row gets within
+  // `REFS_FETCH_THRESHOLD` of the loaded list — keeps scrolling ahead of the
+  // fetch instead of hitting a dead stop at the end of each page.
+  const lastIndex = virtualItems.at(-1)?.index ?? -1
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = refsQuery
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && lastIndex >= entries.length - REFS_FETCH_THRESHOLD) {
+      fetchNextPage()
+    }
+  }, [lastIndex, entries.length, hasNextPage, isFetchingNextPage, fetchNextPage])
+
+  // Show the skeleton while the first page is loading (gated-pending OR no
+  // backend yet) — so a populated room never flashes its empty state before
+  // the first page resolves. Only render the empty copy once the query has
+  // settled with genuinely zero refs (main included).
+  const showSkeleton = refsQuery.isLoading || mainHead.isLoading
+  const hasMain = !!mainHead.data
+  const total = refsQuery.total > 0 ? refsQuery.total : entries.length + (hasMain ? 1 : 0)
 
   return (
     <section className='space-y-2'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-sm font-semibold'>Branches</h2>
+        <h2 className='text-sm font-semibold'>
+          Branches
+          {!showSkeleton ? <span className='ml-1.5 font-normal text-muted'>· {total.toLocaleString()}</span> : null}
+        </h2>
         <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
       </div>
       {showSkeleton ? (
         <SkeletonRows rows={1} />
-      ) : entries.length === 0 ? (
+      ) : !hasMain && entries.length === 0 ? (
         <p className='text-sm text-muted'>No branches yet. Push a commit to create one.</p>
       ) : (
-        <ul className='max-h-80 divide-y divide-dashed divide-hairline overflow-y-auto border-y border-dashed border-hairline'>
-          {entries.map((r) => {
-            const active = r.name === selectedRef
-            return (
-              <li key={r.name}>
-                <button
-                  type='button'
-                  onClick={() => onSelectRef(r.name)}
-                  aria-pressed={active}
-                  className={`flex w-full items-center gap-3 py-2.5 text-left transition-colors ${
-                    active ? 'text-fg' : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  <HashChip hash={r.objectIdHex} size={14} />
-                  <span className={`truncate font-mono text-sm ${active ? 'font-semibold' : 'font-medium'}`}>
-                    {r.name}
-                  </span>
-                  {isForkRef(r.name) ? (
-                    <span
-                      className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'
-                      title='A remix branch — its head records the commit it derived from (attribution).'
-                    >
-                      remix
-                    </span>
-                  ) : null}
-                  {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
-                  <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 6)}</code>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+        <ScrollArea.Root type='auto' className='relative max-h-80 overflow-hidden'>
+          <ScrollArea.Viewport
+            ref={scrollRef}
+            className='h-full max-h-80 w-full border-y border-dashed border-hairline'
+          >
+            {/* `main` is pinned OUTSIDE the virtualized region — it's a single
+                stable row, not worth virtualizing, and needs to stay visible
+                without scrolling. */}
+            {hasMain ? (
+              <ul className={entries.length > 0 ? 'border-b border-dashed border-hairline' : ''}>
+                <li>
+                  <RefRow
+                    r={{ name: 'main', objectIdHex: mainHead.data ?? '' }}
+                    active={selectedRef === 'main'}
+                    onSelect={() => onSelectRef('main')}
+                  />
+                </li>
+              </ul>
+            ) : null}
+            <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+              {virtualItems.map((vrow) => {
+                const r = entries[vrow.index]
+                if (!r) return null
+                const active = r.name === selectedRef
+                const isLast = vrow.index === entries.length - 1
+                return (
+                  <div
+                    key={vrow.key}
+                    data-index={vrow.index}
+                    ref={virtualizer.measureElement}
+                    className={isLast ? '' : 'border-b border-dashed border-hairline'}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: vrow.size,
+                      transform: `translateY(${vrow.start}px)`,
+                    }}
+                  >
+                    <RefRow r={r} active={active} onSelect={() => onSelectRef(r.name)} />
+                  </div>
+                )
+              })}
+            </div>
+            {isFetchingNextPage ? <p className='py-2 text-center text-xs text-muted'>loading more…</p> : null}
+          </ScrollArea.Viewport>
+          <ScrollArea.Scrollbar
+            orientation='vertical'
+            className='flex w-1.5 touch-none select-none p-px transition-opacity data-[state=hidden]:opacity-0'
+          >
+            <ScrollArea.Thumb className='flex-1 rounded-full bg-muted/40 hover:bg-muted/60' />
+          </ScrollArea.Scrollbar>
+        </ScrollArea.Root>
       )}
     </section>
   )

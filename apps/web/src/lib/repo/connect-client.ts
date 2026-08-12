@@ -96,10 +96,24 @@ export async function getObject(client: RepoConnectClient, room: string, objectI
   return res.found ? res.bytes : null
 }
 
-/** ListRefs — refs in the room, optionally filtered by name prefix. */
-export async function listRefs(client: RepoConnectClient, room: string, prefix = ''): Promise<RefEntry[]> {
-  const res = await client.listRefs({ room, prefix })
-  return res.refs.map((r) => ({ name: r.name, objectIdHex: hex(r.objectId) }))
+/**
+ * ListRefs — one page of refs in the room, optionally filtered by name prefix. `startAfter` is the keyset cursor (empty
+ * = from the start); `pageSize` bounds the page (0 = server's legacy unpaginated ALL). Mirrors `listCommits`'s
+ * request/response mapping below.
+ */
+export async function listRefs(
+  client: RepoConnectClient,
+  room: string,
+  prefix = '',
+  startAfter = '',
+  pageSize = 0,
+): Promise<{ refs: RefEntry[]; nextCursorName: string; total: number }> {
+  const res = await client.listRefs({ room, prefix, startAfter, pageSize })
+  return {
+    refs: res.refs.map((r) => ({ name: r.name, objectIdHex: hex(r.objectId) })),
+    nextCursorName: res.nextCursor,
+    total: res.total,
+  }
 }
 
 /** ListMessages — recent room messages, oldest-first, capped by `limit`. */

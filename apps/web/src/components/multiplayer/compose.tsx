@@ -45,9 +45,9 @@ export function Compose({
   // before the room has any refs, so there's always a sensible default target.
   const refsQuery = useRefs(room)
   const refOptions = useMemo(() => {
-    const names = (refsQuery.data ?? []).map((r) => r.name)
+    const names = refsQuery.refs.map((r) => r.name)
     return [...new Set(['main', ...names])]
-  }, [refsQuery.data])
+  }, [refsQuery.refs])
   // The select sits on `__new__` whenever the target isn't an existing ref —
   // which is exactly the case while typing a brand-new branch name, so the
   // free-text input stays visible without any extra mode state.

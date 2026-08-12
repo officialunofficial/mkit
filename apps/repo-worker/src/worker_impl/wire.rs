@@ -75,6 +75,16 @@ pub struct UpdateResp {
 #[derive(Serialize, Deserialize)]
 pub struct ListReq {
     pub prefix: String,
+    /// Keyset cursor: return refs with `path > start_after`. Empty = from the
+    /// start of the prefix range. Must be empty or start with `prefix` (the
+    /// DO validates this).
+    #[serde(default)]
+    pub start_after: String,
+    /// Max refs to return; 0 = ALL (legacy unpaginated behavior — a request
+    /// from an older worker/client, or an explicit unbounded listing). A
+    /// non-zero value is clamped to `[1, 1000]` by the DO.
+    #[serde(default)]
+    pub page_size: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +96,16 @@ pub struct ListEntry {
 #[derive(Serialize, Deserialize)]
 pub struct ListResp {
     pub refs: Vec<ListEntry>,
+    /// Pass as `start_after` for the next page; empty when the listing ended
+    /// (fewer than `page_size` rows remained) or `page_size` was 0 (legacy
+    /// unbounded scan).
+    #[serde(default)]
+    pub next_cursor: String,
+    /// Total refs matching `prefix` (COUNT(*) on the PK). Computed only on
+    /// the first page (`start_after` empty); 0 on later pages — the caller
+    /// already has the total from page 1.
+    #[serde(default)]
+    pub total: u32,
 }
 
 // --- Chat (worker -> DO) ----------------------------------------------------

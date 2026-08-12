@@ -14,7 +14,8 @@
 //   POST /get    { "name": "<ref>" }                       -> { "exists", "value"? }
 //   POST /update { "name", "new", "expectation", "expected"?, "author"?, "idem" }
 //                                                          -> { "committed", "conflict", "current"? }
-//   POST /list   { "prefix": "<prefix>" }                  -> { "refs": [ { "name", "value" } ] }
+//   POST /list   { "prefix", "start_after", "page_size" }  -> { "refs": [ { "name", "value" } ],
+//                                                              "next_cursor", "total" }
 //   POST /quota  { "author", "bytes" }                      -> { "allowed", "reason"? }
 //   POST /purge  (no body)                                 -> { "refs_deleted", "messages_deleted", "reactions_deleted" }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
@@ -36,7 +37,10 @@ use worker::{
 
 use crate::chat::{REACT_MIN_INTERVAL_MS, is_rate_limited};
 use crate::envelope::FRESHNESS_WINDOW_MS;
-use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
+use crate::refs::{
+    CasDecision, ConflictReason, RefExpectation, evaluate_cas, list_refs_lower_bound,
+    prefix_successor, resolve_page_cap,
+};
 use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
 // DO wire types are declared once in `super::wire` and shared with service.rs,
 // so a field rename can't desync the worker (client) and the DO (server).
@@ -69,25 +73,13 @@ const MESSAGES_RETAINED: i64 = 1_000;
 /// grow it without limit; `list_reactions` reads at most this many.
 const REACTIONS_RETAINED: i64 = 5_000;
 
-/// The smallest string strictly greater than every string having `prefix` as a
-/// prefix — used as the exclusive upper bound of a prefix range scan. Clone the
-/// bytes, drop trailing `0xFF`, and increment the last remaining byte. Returns
-/// `None` when the prefix is empty or all-`0xFF` (no finite successor), or when
-/// the increment would break UTF-8 — callers then fall back to a lower-bound-only
-/// scan (still correct, just not upper-bounded).
-fn prefix_successor(prefix: &str) -> Option<String> {
-    let mut bytes = prefix.as_bytes().to_vec();
-    while let Some(&last) = bytes.last() {
-        if last == 0xFF {
-            bytes.pop();
-        } else {
-            let n = bytes.len();
-            bytes[n - 1] = last + 1;
-            return String::from_utf8(bytes).ok();
-        }
-    }
-    None
-}
+// `prefix_successor` and `list_refs_lower_bound` are pure string logic with
+// no `worker`/DO dependency, so — like `room_event.rs` — they live in
+// `crate::refs` (host-testable, no wasm32 target needed) rather than here in
+// `worker_impl`, which is `#[cfg(target_arch = "wasm32")]`-gated wholesale
+// and so can never run its own `#[cfg(test)]`s under plain `cargo test`.
+// Imported below via the `use super::wire::...` block's sibling `use
+// crate::refs::...`.
 
 /// Per-socket presence, stored as the hibernatable WebSocket attachment so the
 /// roster survives DO hibernation (it's rebuilt from `get_websockets()` on
@@ -236,8 +228,14 @@ impl DurableObject for RefStore {
             }
             "/list" => {
                 let body: ListReq = req.json().await?;
-                let refs = self.list_refs(&body.prefix);
-                Response::from_json(&ListResp { refs })
+                match self.list_refs(&body.prefix, &body.start_after, body.page_size) {
+                    Ok((refs, next_cursor, total)) => Response::from_json(&ListResp {
+                        refs,
+                        next_cursor,
+                        total,
+                    }),
+                    Err(msg) => Response::error(msg, 400),
+                }
             }
             "/post" => {
                 let body: PostReq = req.json().await?;
@@ -598,41 +596,143 @@ impl RefStore {
         );
     }
 
-    /// List refs whose path starts with `prefix` (empty = all).
-    fn list_refs(&self, prefix: &str) -> Vec<ListEntry> {
+    /// List refs whose path starts with `prefix` (empty = all), optionally
+    /// paged by a keyset cursor (`start_after`) and capped by `page_size`.
+    ///
+    /// Returns `(refs, next_cursor, total)`, or `Err(msg)` when `start_after`
+    /// doesn't extend `prefix` — the `/list` dispatcher (above) maps that to
+    /// a 400, which `do_call` in service.rs turns into `invalid_argument`.
+    ///
+    /// `page_size == 0` is the pre-pagination unbounded scan (legacy
+    /// callers): no LIMIT, `next_cursor` always empty — unchanged behavior
+    /// for anyone not yet passing the new fields. A non-zero `page_size` is
+    /// clamped to `[1, 1000]`; the query fetches one extra row past the cap
+    /// so a next page can be detected without a second query.
+    fn list_refs(
+        &self,
+        prefix: &str,
+        start_after: &str,
+        page_size: u32,
+    ) -> std::result::Result<(Vec<ListEntry>, String, u32), &'static str> {
         #[derive(Deserialize)]
         struct Row {
             path: String,
             value: String,
         }
+
+        let (lo, strict) = list_refs_lower_bound(prefix, start_after)?;
         // Prefix match as a HALF-OPEN RANGE over the `path` PRIMARY KEY so SQLite
         // seeks the index and scans only matching rows. A `LIKE 'p%' ESCAPE` can
         // NOT use the BINARY-collated PK index (the ESCAPE clause and the
         // case-insensitive default both disable the LIKE-prefix optimization), so
         // it full-scans every ref. `hi` is the prefix successor; an empty prefix
         // (or an all-0xFF one with no finite successor) drops the upper bound.
+        let hi = prefix_successor(prefix);
         let sql = self.state.storage().sql();
-        let rows: Vec<Row> = if prefix.is_empty() {
-            sql.exec("SELECT path, value FROM refs ORDER BY path;", None)
-        } else if let Some(hi) = prefix_successor(prefix) {
-            sql.exec(
-                "SELECT path, value FROM refs WHERE path >= ? AND path < ? ORDER BY path;",
-                vec![prefix.into(), hi.into()],
-            )
+
+        // `total`: COUNT(*) over the same prefix range, computed only on the
+        // first page (`start_after` empty) — a later page reuses the total the
+        // caller already has from page 1, so paging costs one query per page.
+        let total = if start_after.is_empty() {
+            Self::count_refs(&sql, prefix, hi.as_deref())
         } else {
-            sql.exec(
-                "SELECT path, value FROM refs WHERE path >= ? ORDER BY path;",
-                vec![prefix.into()],
-            )
+            0
+        };
+
+        // `cmp` selects `>` for a cursor page vs `>=` for the first page. It's
+        // always one of these two hardcoded literals — never derived from
+        // request data — so interpolating it into the query text is safe;
+        // every actual VALUE still flows through a bound `?` parameter.
+        let cmp = if strict { ">" } else { ">=" };
+
+        // `page_size == 0` -> `None`: the legacy unbounded scan (no LIMIT,
+        // `next_cursor` always empty). Otherwise the clamped `[1, 1000]` page
+        // cap — see `resolve_page_cap`'s doc comment.
+        let Some(cap) = resolve_page_cap(page_size) else {
+            let rows: Vec<Row> = match hi.as_deref() {
+                Some(hi) => sql.exec(
+                    &format!(
+                        "SELECT path, value FROM refs WHERE path {cmp} ? AND path < ? ORDER BY path;"
+                    ),
+                    vec![lo.clone().into(), hi.into()],
+                ),
+                None => sql.exec(
+                    &format!("SELECT path, value FROM refs WHERE path {cmp} ? ORDER BY path;"),
+                    vec![lo.clone().into()],
+                ),
+            }
+            .map(|r| r.to_array().unwrap_or_default())
+            .unwrap_or_default();
+            let refs = rows
+                .into_iter()
+                .map(|r| ListEntry {
+                    name: r.path,
+                    value: r.value,
+                })
+                .collect();
+            return Ok((refs, String::new(), total));
+        };
+
+        let limit = i64::from(cap) + 1; // one extra row: detects whether a next page follows
+        let mut rows: Vec<Row> = match hi.as_deref() {
+            Some(hi) => sql.exec(
+                &format!(
+                    "SELECT path, value FROM refs WHERE path {cmp} ? AND path < ? ORDER BY path LIMIT ?;"
+                ),
+                vec![lo.clone().into(), hi.into(), limit.into()],
+            ),
+            None => sql.exec(
+                &format!(
+                    "SELECT path, value FROM refs WHERE path {cmp} ? ORDER BY path LIMIT ?;"
+                ),
+                vec![lo.clone().into(), limit.into()],
+            ),
         }
         .map(|r| r.to_array().unwrap_or_default())
         .unwrap_or_default();
-        rows.into_iter()
+
+        let next_cursor = if rows.len() as u32 > cap {
+            rows.truncate(cap as usize);
+            rows.last().map(|r| r.path.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let refs = rows
+            .into_iter()
             .map(|r| ListEntry {
                 name: r.path,
                 value: r.value,
             })
-            .collect()
+            .collect();
+        Ok((refs, next_cursor, total))
+    }
+
+    /// `SELECT COUNT(*)` over the same (prefix, prefix_successor) half-open
+    /// range `list_refs` scans — the `total` field on a first-page response.
+    /// `hi` is `prefix_successor(prefix)`, precomputed by the caller so this
+    /// doesn't redo that (possibly `None`) computation.
+    fn count_refs(sql: &worker::SqlStorage, prefix: &str, hi: Option<&str>) -> u32 {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        let result = match hi {
+            Some(hi) => sql.exec(
+                "SELECT COUNT(*) AS n FROM refs WHERE path >= ? AND path < ?;",
+                vec![prefix.into(), hi.into()],
+            ),
+            None if prefix.is_empty() => sql.exec("SELECT COUNT(*) AS n FROM refs;", None),
+            None => sql.exec(
+                "SELECT COUNT(*) AS n FROM refs WHERE path >= ?;",
+                vec![prefix.into()],
+            ),
+        };
+        result
+            .and_then(|r| r.to_array::<Count>())
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|c| c.n.max(0) as u32)
+            .unwrap_or(0)
     }
 
     /// Idempotently create the `write_quota` table — the per-author
