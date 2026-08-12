@@ -50,7 +50,7 @@ function stubBackend(overrides: Partial<RepoBackend> = {}): RepoBackend {
     getObject: async () => null,
     getRef: async () => null,
     updateRef: async () => {},
-    listRefs: async () => [],
+    listRefs: async () => ({ refs: [], nextCursor: '', total: 0 }),
     watchRefs: () => () => {},
     watchRoom: () => () => {},
     commitLog: async () => [],
@@ -262,7 +262,7 @@ describe('mock backend / RefExpectation CAS semantics', () => {
     await backend.updateRef('r', 'main', 'h1', 'ANY')
     await backend.updateRef('r', 'tags/v1', 'h2', 'ANY')
     const heads = await backend.listRefs('r', 'tags/')
-    expect(heads).toEqual([{ name: 'tags/v1', objectIdHex: 'h2' }])
+    expect(heads.refs).toEqual([{ name: 'tags/v1', objectIdHex: 'h2' }])
   })
 
   it('WatchRefs streams ref updates to subscribers, honouring prefix + unsubscribe', async () => {
@@ -576,9 +576,9 @@ describe('listRefs exposes all branches in the room', () => {
     })
     const backend = new WasmRepoBackend(NO_WRITES, {} as unknown as MkitApi, () => null, 'http://x', client)
     const refs = await backend.listRefs('room')
-    expect(refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+    expect(refs.refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
     const filtered = await backend.listRefs('room', 'feat')
-    expect(filtered.map((r) => r.name)).toEqual(['feature'])
+    expect(filtered.refs.map((r) => r.name)).toEqual(['feature'])
   })
 
   it('MockRepoBackend.commitLog filters by ref so each branch shows its own chain', async () => {
@@ -601,7 +601,7 @@ describe('listRefs exposes all branches in the room', () => {
     expect((await backend.commitLog('room', 'main')).map((e) => e.hash)).toEqual(['h-main'])
     expect((await backend.commitLog('room', 'feature')).map((e) => e.hash)).toEqual(['h-feat'])
     // Both refs are listed in the panel.
-    expect((await backend.listRefs('room')).map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
+    expect((await backend.listRefs('room')).refs.map((r) => r.name).toSorted()).toEqual(['feature', 'main'])
   })
 })
 
@@ -613,7 +613,7 @@ describe('MockRepoBackend.seedDemo populates the offline demo state', () => {
 
     // Refs: two foreign commits on main + one on feature + one forks/ ref.
     const refs = await backend.listRefs('room')
-    const names = refs.map((r) => r.name)
+    const names = refs.refs.map((r) => r.name)
     expect(names).toContain('main')
     expect(names).toContain('feature')
     expect(names.some((n) => isForkRef(n))).toBe(true)

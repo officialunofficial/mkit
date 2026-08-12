@@ -4,7 +4,15 @@
 // Moved verbatim out of the former monolithic `repo-api.ts`; re-exported by the
 // `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  type InfiniteData,
+  type QueryClient,
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo } from 'react'
 import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import { useIdentityStore } from '../identity-store'
@@ -18,6 +26,7 @@ import {
   type ReactionAgg,
   type ReactionEntry,
   type ReactionUpdate,
+  type RefEntry,
   type RefExpectation,
   type RefUpdate,
   type RemixSourceEntry,
@@ -99,15 +108,129 @@ export function useCommitLog(room: string, ref = 'main', limit?: number) {
   })
 }
 
-/** All refs in the room (optionally prefix-filtered) — drives the branches panel. */
+/**
+ * One `listRefs` page, as cached by {@link useRefs}'s `useInfiniteQuery` — the pageParam is the keyset cursor (a ref
+ * name), typed `string`.
+ */
+export type RefsPage = { refs: RefEntry[]; nextCursor: string; total: number }
+
+/** How many refs {@link useRefs} fetches per page — matches the panel's virtualized-scroll page granularity. */
+const REFS_PAGE_SIZE = 200
+
+/**
+ * All refs in the room (optionally prefix-filtered), keyset-paginated via `useInfiniteQuery` — drives the branches
+ * panel's virtualized infinite scroll.
+ *
+ * Returned shape (chosen for a virtualized-infinite-scroll consumer, e.g. `@tanstack/react-virtual`): - `refs`: every
+ * ref loaded so far, flattened across pages in keyset order — hand straight to the virtualizer as its item list; grows
+ * as `fetchNextPage` resolves more pages. - `total`: total refs matching `prefix`, from the first page (stable across
+ * later pages — the count doesn't change mid-listing) — use it to size the virtualizer / show "N of total loaded"
+ * without waiting for every page. - `fetchNextPage`/`hasNextPage`/`isFetchingNextPage`: passed straight through from
+ * the underlying infinite query, so a virtualizer's "load more" trigger (e.g. the last rendered row becoming visible)
+ * can drive pagination directly without re-deriving infinite-query state. - `isLoading`/`isError`: pass through for the
+ * initial-load gate (mirrors a plain `useQuery`'s flags).
+ */
 export function useRefs(room: string, prefix = '') {
   const backend = useRepoBackend()
-  return useQuery({
+  const query = useInfiniteQuery({
     queryKey: repoKeys.refs(room, prefix),
-    queryFn: () => backend!.listRefs(room, prefix),
+    queryFn: ({ pageParam }) => backend!.listRefs(room, prefix, { startAfter: pageParam, pageSize: REFS_PAGE_SIZE }),
+    initialPageParam: '',
+    getNextPageParam: (last) => last.nextCursor || undefined,
     enabled: !!backend,
-    // Keep the prior prefix's refs visible while a new prefix loads.
+    // Keep the prior prefix's pages visible while a new prefix loads.
     placeholderData: keepPreviousData,
+  })
+  const refs = useMemo(() => query.data?.pages.flatMap((p) => p.refs) ?? [], [query.data])
+  return {
+    refs,
+    total: query.data?.pages[0]?.total ?? 0,
+    fetchNextPage: query.fetchNextPage,
+    hasNextPage: query.hasNextPage,
+    isFetchingNextPage: query.isFetchingNextPage,
+    isLoading: query.isLoading,
+    isError: query.isError,
+  }
+}
+
+/**
+ * Patch a single ref's `objectIdHex` into the cached {@link useRefs} pages (all of them — a ref name only ever appears
+ * in one page, but every page is checked since the caller doesn't know which). Pure and unit-testable, in the same
+ * convention as {@link applyChatFrame}/{@link applyReactionFrame}: `prev` in, next state out, no side effects.
+ *
+ * Returns the SAME `prev` reference (not a copy) when `u.name` isn't found in any loaded page — callers use that
+ * referential equality to detect a "miss" (a ref not yet loaded, e.g. a brand-new branch) and fall back to a refetch
+ * instead of silently doing nothing. Returns `prev` unchanged (still undefined) when there's no cached data yet.
+ */
+export function patchRefsPages(
+  prev: InfiniteData<RefsPage, string> | undefined,
+  u: RefUpdate,
+): InfiniteData<RefsPage, string> | undefined {
+  if (!prev) return prev
+  let found = false
+  const pages = prev.pages.map((page) => {
+    const idx = page.refs.findIndex((r) => r.name === u.name)
+    if (idx === -1) return page
+    found = true
+    const refs = page.refs.slice()
+    refs[idx] = { name: u.name, objectIdHex: u.objectIdHex }
+    return { ...page, refs }
+  })
+  return found ? { ...prev, pages } : prev
+}
+
+/**
+ * Coalesces repeated calls for the same key into one trailing invocation ~`waitMs` after the LAST call — but caps the
+ * delay at `maxWaitMs` after the FIRST call in a burst, so a continuous stream of calls (e.g. a bot pushing every
+ * 15-30s, each resetting the trailing timer before it fires) still flushes periodically instead of postponing forever.
+ * A plain class (not a closure) so a test can hold its own instance and drive it with fake timers.
+ *
+ * Used to coalesce the `['repo', room, 'refs']` full-list invalidation that a live ref-advance falls back to when
+ * {@link patchRefsPages} can't find the ref in cache — see `useRepoEvents`/`useLobbyEvents`'s `onRef` handlers below.
+ * Keyed per room so unrelated rooms never coalesce into each other.
+ */
+export class TrailingDebouncer {
+  private pending = new Map<
+    string,
+    { trailing: ReturnType<typeof setTimeout>; maxWait: ReturnType<typeof setTimeout> }
+  >()
+
+  schedule(key: string, fn: () => void, waitMs = 10_000, maxWaitMs = 10_000): void {
+    const existing = this.pending.get(key)
+    if (existing) clearTimeout(existing.trailing)
+    const fire = () => {
+      const entry = this.pending.get(key)
+      if (entry) {
+        clearTimeout(entry.trailing)
+        clearTimeout(entry.maxWait)
+      }
+      this.pending.delete(key)
+      fn()
+    }
+    const trailing = setTimeout(fire, waitMs)
+    // Only armed once per burst — NOT reset on every call — so it fires
+    // `maxWaitMs` after the first call regardless of how many more arrive.
+    const maxWait = existing?.maxWait ?? setTimeout(fire, maxWaitMs)
+    this.pending.set(key, { trailing, maxWait })
+  }
+
+  /** Drop any pending invocation for `key` without firing it (e.g. on unmount). */
+  cancel(key: string): void {
+    const existing = this.pending.get(key)
+    if (!existing) return
+    clearTimeout(existing.trailing)
+    clearTimeout(existing.maxWait)
+    this.pending.delete(key)
+  }
+}
+
+/** Shared instance behind the debounced refs-list invalidation in both live-event hooks below. */
+const refsInvalidateDebouncer = new TrailingDebouncer()
+
+/** Debounced fallback for a `['repo', room, 'refs']` invalidation — see {@link TrailingDebouncer}. */
+function scheduleRefsInvalidate(qc: QueryClient, room: string): void {
+  refsInvalidateDebouncer.schedule(room, () => {
+    void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
   })
 }
 
@@ -270,8 +393,19 @@ export function useRepoEvents(room: string, prefix = ''): void {
         onRef: (u) => {
           void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
           void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
-          // The advanced ref may be new (a peer created a branch) → refresh the panel.
-          void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+          // Patch the advanced ref straight into the cached refs list when it's
+          // already loaded (the common case) — O(1), no refetch. Only an
+          // unrecognized ref (e.g. a peer created a brand-new branch) falls back
+          // to a full list refetch, and even that is debounced so a steady
+          // stream of advances on refs we DO have cached doesn't force a
+          // continuous unbounded refetch (see `TrailingDebouncer`).
+          let found = false
+          qc.setQueryData<InfiniteData<RefsPage, string>>(repoKeys.refs(room, prefix), (prev) => {
+            const next = patchRefsPages(prev, u)
+            found = next !== prev
+            return next
+          })
+          if (!found) scheduleRefsInvalidate(qc, room)
         },
         // Live "who's online" roster → the presence store the panel reads.
         onPresence: (p) => setPresence(room, p),
@@ -463,7 +597,15 @@ export function useLobbyEvents(room: string): void {
         void qc.invalidateQueries({ queryKey: repoKeys.ref(room, u.name) })
         // Prefix match covers both the uncapped log key and the lobby's capped one.
         void qc.invalidateQueries({ queryKey: repoKeys.log(room, u.name) })
-        void qc.invalidateQueries({ queryKey: ['repo', room, 'refs'] })
+        // Same patch-first, debounced-fallback approach as `useRepoEvents` above
+        // — the lobby always watches the unfiltered ('') prefix.
+        let found = false
+        qc.setQueryData<InfiniteData<RefsPage, string>>(repoKeys.refs(room, ''), (prev) => {
+          const next = patchRefsPages(prev, u)
+          found = next !== prev
+          return next
+        })
+        if (!found) scheduleRefsInvalidate(qc, room)
       },
       // Live "who's online" roster → the presence store, so the lobby can narrate
       // joins/leaves and show viewer-vs-participant state.

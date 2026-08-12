@@ -324,8 +324,17 @@ export interface RepoBackend {
     expectation: RefExpectation,
     expectedIdHex?: string,
   ): Promise<void>
-  /** ListRefs — refs in the room, optionally filtered by name prefix. */
-  listRefs(room: string, prefix?: string): Promise<RefEntry[]>
+  /**
+   * ListRefs — one page of refs in the room, optionally filtered by name prefix. `opts.startAfter` is the keyset cursor
+   * (name of the last ref seen; empty = from the start); `opts.pageSize` bounds the page (0/omitted = all, matching the
+   * server's legacy unpaginated behavior). `nextCursor` is empty when the listing ended; `total` is the count of refs
+   * matching `prefix` regardless of paging.
+   */
+  listRefs(
+    room: string,
+    prefix?: string,
+    opts?: { startAfter?: string; pageSize?: number },
+  ): Promise<{ refs: RefEntry[]; nextCursor: string; total: number }>
   /** WatchRefs (server-streaming) — fires on each ref advance. Returns an unsubscribe fn. */
   watchRefs(room: string, prefix: string, onUpdate: (u: RefUpdate) => void): () => void
   /**
@@ -584,15 +593,43 @@ export class MockRepoBackend implements RepoBackend {
     this.broadcast(room, name, { name, objectIdHex: newIdHex, authorPubkeyHex: '' })
   }
 
-  async listRefs(room: string, prefix?: string): Promise<RefEntry[]> {
-    const out: RefEntry[] = []
+  async listRefs(
+    room: string,
+    prefix?: string,
+    opts?: { startAfter?: string; pageSize?: number },
+  ): Promise<{ refs: RefEntry[]; nextCursor: string; total: number }> {
+    const matching: RefEntry[] = []
     for (const [k, objectIdHex] of this.refs) {
       if (!k.startsWith(`${room}::`)) continue
       const name = k.slice(room.length + 2)
       if (prefix && !name.startsWith(prefix)) continue
-      out.push({ name, objectIdHex })
+      matching.push({ name, objectIdHex })
     }
-    return out
+    // Sort by name — the Map's insertion order isn't a meaningful ordering,
+    // and keyset pagination below requires a stable, comparable order (same
+    // as the server's PK-ordered scan).
+    matching.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+
+    const total = matching.length
+    const startAfter = opts?.startAfter ?? ''
+    const pageSize = opts?.pageSize ?? 0
+
+    const startIdx = startAfter ? matching.findIndex((r) => r.name > startAfter) : 0
+    const afterCursor = startIdx === -1 ? [] : matching.slice(startIdx)
+
+    if (pageSize <= 0) {
+      // 0 = legacy unpaginated behavior — return everything after the cursor.
+      return { refs: afterCursor, nextCursor: '', total }
+    }
+
+    // Fetch cap+1 so a `pageSize`-th item's presence tells us whether a next
+    // page exists, without a second round-trip — same "fetch cap+1, slice,
+    // derive next_cursor" shape as the server plan.
+    const page = afterCursor.slice(0, pageSize + 1)
+    const hasMore = page.length > pageSize
+    const refs = hasMore ? page.slice(0, pageSize) : page
+    const nextCursor = hasMore ? refs[refs.length - 1]!.name : ''
+    return { refs, nextCursor, total }
   }
 
   watchRefs(room: string, prefix: string, onUpdate: (u: RefUpdate) => void): () => void {
@@ -1063,8 +1100,13 @@ export class WasmRepoBackend implements RepoBackend {
     if (res.conflict) throw new CasConflictError(res.currentIdHex)
   }
 
-  async listRefs(room: string, prefix?: string): Promise<RefEntry[]> {
-    return repoClient.listRefs(this.client, room, prefix ?? '')
+  async listRefs(
+    room: string,
+    prefix?: string,
+    opts?: { startAfter?: string; pageSize?: number },
+  ): Promise<{ refs: RefEntry[]; nextCursor: string; total: number }> {
+    const res = await repoClient.listRefs(this.client, room, prefix ?? '', opts?.startAfter ?? '', opts?.pageSize ?? 0)
+    return { refs: res.refs, nextCursor: res.nextCursorName, total: res.total }
   }
 
   async postMessage(
