@@ -66,6 +66,8 @@ async fn probe(env: &Env) -> ServingStatus {
             "/list",
             &ListReq {
                 prefix: String::new(),
+                start_after: String::new(),
+                page_size: 0,
             },
         )
         .await

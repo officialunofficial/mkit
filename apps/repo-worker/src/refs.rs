@@ -45,6 +45,55 @@ pub fn is_valid_expected_id_len(expected_id: &[u8]) -> bool {
     expected_id.is_empty() || expected_id.len() == 32
 }
 
+/// The smallest string strictly greater than every string having `prefix` as
+/// a prefix — the exclusive upper bound of a `ListRefs` prefix range scan
+/// (`refstore::list_refs`). Clone the bytes, drop trailing `0xFF`, and
+/// increment the last remaining byte. Returns `None` when `prefix` is empty
+/// or all-`0xFF` (no finite successor), or when the increment would break
+/// UTF-8 — callers then fall back to a lower-bound-only scan (still correct,
+/// just not upper-bounded).
+///
+/// Pure string logic with no `worker`/DO dependency, so — like the rest of
+/// this module — it lives here rather than in `worker_impl::refstore` (which
+/// is `#[cfg(target_arch = "wasm32")]`-gated wholesale and so can't run its
+/// own `#[cfg(test)]`s under plain `cargo test`).
+#[must_use]
+pub fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    while let Some(&last) = bytes.last() {
+        if last == 0xFF {
+            bytes.pop();
+        } else {
+            let n = bytes.len();
+            bytes[n - 1] = last + 1;
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
+}
+
+/// The lower bound of a `ListRefs` prefix range scan, given an optional
+/// keyset cursor. Returns `(bound, strict)`:
+///   - `start_after` empty (first page) -> `(prefix, false)`, i.e. `path >= prefix`.
+///   - `start_after` non-empty (a later page) -> `(start_after, true)`, i.e.
+///     `path > start_after` — strict, so the cursor row itself isn't repeated.
+///
+/// Rejects a `start_after` that doesn't extend `prefix`: a cross-prefix
+/// cursor would let a caller page outside the range its `prefix` claims to
+/// scope, silently returning refs the caller didn't ask to see.
+pub fn list_refs_lower_bound(
+    prefix: &str,
+    start_after: &str,
+) -> Result<(String, bool), &'static str> {
+    if start_after.is_empty() {
+        return Ok((prefix.to_string(), false));
+    }
+    if !start_after.starts_with(prefix) {
+        return Err("start_after must start with prefix");
+    }
+    Ok((start_after.to_string(), true))
+}
+
 /// CAS expectation, proto-aligned with `mkit.repo.v1.RefExpectation`.
 /// Wire numbers are load-bearing (ANY=1, MISSING=2, MATCH=3; UNSPECIFIED=0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,5 +322,58 @@ mod tests {
             evaluate_cas(Some(ID_A), RefExpectation::Match, Some(malformed_expected)),
             CasDecision::Conflict(ConflictReason::Mismatch)
         );
+    }
+
+    // --- prefix_successor vectors (ListRefs pagination upper bound) --------
+
+    #[test]
+    fn prefix_successor_increments_last_byte() {
+        assert_eq!(
+            prefix_successor("refs/heads/").as_deref(),
+            Some("refs/heads0")
+        );
+        assert_eq!(prefix_successor("a").as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn prefix_successor_has_no_finite_bound_for_empty_prefix() {
+        assert_eq!(prefix_successor(""), None);
+    }
+
+    // --- list_refs_lower_bound conformance vectors (ListRefs pagination) ---
+
+    #[test]
+    fn empty_start_after_uses_prefix_inclusive() {
+        assert_eq!(
+            list_refs_lower_bound("refs/heads/", ""),
+            Ok(("refs/heads/".to_string(), false))
+        );
+        assert_eq!(list_refs_lower_bound("", ""), Ok((String::new(), false)));
+    }
+
+    #[test]
+    fn start_after_extending_prefix_is_strict() {
+        assert_eq!(
+            list_refs_lower_bound("refs/heads/", "refs/heads/main"),
+            Ok(("refs/heads/main".to_string(), true))
+        );
+        // An empty prefix is extended by anything.
+        assert_eq!(
+            list_refs_lower_bound("", "refs/heads/main"),
+            Ok(("refs/heads/main".to_string(), true))
+        );
+        // Equal to the prefix itself still counts as "extending" it.
+        assert_eq!(
+            list_refs_lower_bound("refs/heads/", "refs/heads/"),
+            Ok(("refs/heads/".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn start_after_outside_prefix_is_rejected() {
+        assert!(list_refs_lower_bound("refs/heads/", "refs/tags/v1").is_err());
+        assert!(list_refs_lower_bound("refs/heads/", "other").is_err());
+        // Shorter than the prefix, so it can't start with it either.
+        assert!(list_refs_lower_bound("refs/heads/", "refs/").is_err());
     }
 }
