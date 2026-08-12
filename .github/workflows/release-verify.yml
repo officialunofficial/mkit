@@ -107,7 +107,7 @@ jobs:
           echo "version=${v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
-        uses: actions/setup-node@ea7bbbef9633bce3609c6f5cf537f4cf9a76c4d3  # v5
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v5
         with:
           node-version: "22"
 
