@@ -21,13 +21,13 @@
     "ci": "npm run build && npm run test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "agents": "^0.17.3",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "agents": "^0.20.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.4",
-    "@cloudflare/workers-types": "^5.20260713.1",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@cloudflare/workers-types": "^5.20260814.1",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
