@@ -43,7 +43,7 @@ fn public_key_and_trust_kind(algorithm: &str, secret: &[u8; 32]) -> (Vec<u8>, &'
             (
                 signing_key
                     .verifying_key()
-                    .to_encoded_point(true)
+                    .to_sec1_point(true)
                     .as_bytes()
                     .to_vec(),
                 "secp256k1",
@@ -54,7 +54,7 @@ fn public_key_and_trust_kind(algorithm: &str, secret: &[u8; 32]) -> (Vec<u8>, &'
             (
                 signing_key
                     .verifying_key()
-                    .to_encoded_point(true)
+                    .to_sec1_point(true)
                     .as_bytes()
                     .to_vec(),
                 "p256-sec1",

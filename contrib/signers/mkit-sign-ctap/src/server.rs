@@ -475,7 +475,7 @@ mod tests {
 
         let sk = SigningKey::from_bytes(&[42u8; 32].into()).unwrap();
         let sig: P256Sig = sk.sign(&signed);
-        let sig = sig.normalize_s().unwrap_or(sig);
+        let sig = sig.normalize_s();
 
         SignedAssertion {
             auth_data,

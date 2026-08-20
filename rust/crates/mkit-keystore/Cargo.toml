@@ -47,9 +47,9 @@ der = { version = "0.8.0", optional = true }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 getrandom = "0.4.2"
 keyring-core = { version = "1.0.0", optional = true }
-k256 = { version = "0.13.4", default-features = false, features = ["ecdsa", "std"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 openpgp-card = { version = "0.6.1", optional = true }
-p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
 sha2 = { version = "0.10.9", default-features = false }
 zeroize = "1.8.2"
 yubikey = { version = "0.9.0-pre.0", optional = true }

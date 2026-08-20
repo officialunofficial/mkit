@@ -218,7 +218,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[9u8; 32].into()).unwrap();
         let msg = b"cross-check message";
         let sig: P256Sig = sk.sign(msg);
-        let sig = sig.normalize_s().unwrap_or(sig);
+        let sig = sig.normalize_s();
 
         let compact_expected = sig.to_bytes();
         let der = sig.to_der();

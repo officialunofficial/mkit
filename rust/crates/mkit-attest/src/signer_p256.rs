@@ -98,7 +98,7 @@ impl P256Signer {
     pub fn public_key_sec1(&self) -> Vec<u8> {
         self.sk
             .verifying_key()
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()
     }
@@ -110,7 +110,7 @@ impl P256Signer {
     pub fn public_key_sec1_uncompressed(&self) -> Vec<u8> {
         self.sk
             .verifying_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec()
     }
@@ -149,7 +149,7 @@ impl P256Signer {
         let sig: Signature = self.sk.sign(pae);
         // Defence-in-depth: re-normalise. If the crate ever relaxes the
         // low-S default we still emit a canonical signature.
-        let sig = sig.normalize_s().unwrap_or(sig);
+        let sig = sig.normalize_s();
         Ok(sig.to_bytes().to_vec())
     }
 }
@@ -193,10 +193,10 @@ pub fn verify_p256(pubkey_sec1: &[u8], msg: &[u8], sig_compact: &[u8]) -> Result
     arr.copy_from_slice(sig_compact);
     let sig = Signature::from_bytes(&arr.into()).map_err(|_| Error::P256SignatureInvalid)?;
 
-    // Low-S enforcement: normalize_s returns Some(canonical) iff the
-    // input was high-S. If it was, reject — the wire signature was not
-    // canonical, regardless of whether the raw math would verify.
-    if sig.normalize_s().is_some() {
+    // Low-S enforcement: normalize_s is a no-op iff the input was
+    // already low-S. If it changed anything the wire signature was not
+    // canonical, so reject regardless of whether the raw math verifies.
+    if sig.normalize_s() != sig {
         return Err(Error::P256SignatureInvalid);
     }
 

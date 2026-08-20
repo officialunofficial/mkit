@@ -43,13 +43,13 @@ pub(super) fn public_key(algorithm: Algorithm, secret: &[u8; 32]) -> Result<Vec<
         Algorithm::Secp256k1 => Ok(K256SigningKey::from_bytes(secret.into())
             .map_err(|_| invalid_key_material(algorithm, "invalid secp256k1 scalar"))?
             .verifying_key()
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()),
         Algorithm::P256 => Ok(P256SigningKey::from_bytes(secret.into())
             .map_err(|_| invalid_key_material(algorithm, "invalid P-256 scalar"))?
             .verifying_key()
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()),
         // BLS shares carry their own group-public-key recovery; the
@@ -66,15 +66,19 @@ pub(super) fn sign_message(algorithm: Algorithm, secret: &[u8; 32], msg: &[u8]) 
             .to_bytes()
             .to_vec()),
         Algorithm::Secp256k1 => {
-            use k256::ecdsa::signature::DigestSigner as _;
+            // `signature` v3's `DigestSigner` is generic over a `digest`
+            // v0.11 type, while this crate hashes with sha2 0.10. Prehash
+            // signing takes the finished digest bytes instead, which is the
+            // same computation without pulling in a second sha2 major.
+            use k256::ecdsa::signature::hazmat::PrehashSigner as _;
             let key = K256SigningKey::from_bytes(secret.into())
                 .map_err(|_| invalid_key_material(algorithm, "invalid secp256k1 scalar"))?;
             let mut hash = Sha256::new();
             hash.update(msg);
             let sig: K256Signature = key
-                .try_sign_digest(hash)
+                .sign_prehash(&hash.finalize())
                 .map_err(|_| Error::Internal("secp256k1 signing failed".into()))?;
-            let sig = sig.normalize_s().unwrap_or(sig);
+            let sig = sig.normalize_s();
             Ok(sig.to_bytes().to_vec())
         }
         Algorithm::P256 => {
@@ -82,7 +86,7 @@ pub(super) fn sign_message(algorithm: Algorithm, secret: &[u8; 32], msg: &[u8]) 
             let key = P256SigningKey::from_bytes(secret.into())
                 .map_err(|_| invalid_key_material(algorithm, "invalid P-256 scalar"))?;
             let sig: P256Signature = key.sign(msg);
-            let sig = sig.normalize_s().unwrap_or(sig);
+            let sig = sig.normalize_s();
             Ok(sig.to_bytes().to_vec())
         }
         // BLS shares use `mkit_attest::signer_bls_threshold::ThresholdSigner`

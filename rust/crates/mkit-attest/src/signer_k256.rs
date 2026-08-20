@@ -23,7 +23,7 @@ use crate::{Algorithm, Error};
 #[cfg(feature = "algo-secp256k1")]
 use k256::ecdsa::{
     Signature as K256Sig, SigningKey, VerifyingKey,
-    signature::{DigestSigner, hazmat::PrehashVerifier},
+    signature::hazmat::{PrehashSigner, PrehashVerifier},
 };
 #[cfg(feature = "algo-secp256k1")]
 use sha2::{Digest, Sha256};
@@ -98,7 +98,7 @@ impl Secp256k1Signer {
     pub fn public_key_sec1(&self) -> Vec<u8> {
         self.sk
             .verifying_key()
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()
     }
@@ -124,16 +124,18 @@ impl Secp256k1Signer {
     /// [`Error::Secp256k1SignatureInvalid`] if the underlying k256 sign
     /// call fails (should not happen for well-formed inputs).
     pub fn sign_dsse(&self, pae: &[u8]) -> Result<Vec<u8>, Error> {
-        // DigestSigner consumes the hasher state and produces an ECDSA
-        // signature over the 32-byte digest. k256's ecdsa impl applies
-        // low-S normalization automatically on encode (confirmed at
-        // https://docs.rs/k256/0.13/k256/ecdsa/index.html#usage) so the
+        // PrehashSigner takes the finished 32-byte digest and produces an
+        // ECDSA signature over it. (`DigestSigner` would do the same, but
+        // it is generic over a `digest` v0.11 hasher while this crate
+        // hashes with sha2 0.10.) k256's ecdsa impl applies low-S
+        // normalization automatically on encode (confirmed at
+        // https://docs.rs/k256/0.14/k256/ecdsa/index.html#usage) so the
         // resulting (r, s) pair has s < n/2.
         let mut h = Sha256::new();
         h.update(pae);
         let sig: K256Sig = self
             .sk
-            .try_sign_digest(h)
+            .sign_prehash(&h.finalize())
             .map_err(|_| Error::Secp256k1SignatureInvalid)?;
         // `to_bytes` yields the 64-byte compact form (r || s, big-endian).
         Ok(sig.to_bytes().to_vec())
@@ -176,16 +178,15 @@ pub fn verify_secp256k1(pubkey_sec1: &[u8], msg: &[u8], sig_compact: &[u8]) -> R
         return Err(Error::Secp256k1SignatureInvalid);
     }
     let sig = K256Sig::from_slice(sig_compact).map_err(|_| Error::Secp256k1SignatureInvalid)?;
-    // Enforce low-S: reject malleable high-S form. `normalize_s` returns
-    // Some(normalized) iff the input was high-s; we refuse those outright
-    // so the verifier contract matches what the signer emits.
-    if sig.normalize_s().is_some() {
+    // Enforce low-S: reject malleable high-S form. `normalize_s` is a
+    // no-op iff the input was already low-S, so an inequality here means
+    // the wire signature was high-S; we refuse those outright so the
+    // verifier contract matches what the signer emits.
+    if sig.normalize_s() != sig {
         return Err(Error::Secp256k1VerifyFailed);
     }
     let mut h = Sha256::new();
     h.update(msg);
-    // DigestVerifier consumes the hasher state; equivalent to
-    // `verify_prehash(&hash.finalize(), &sig)` but avoids an extra alloc.
     let digest = h.finalize();
     vk.verify_prehash(&digest, &sig)
         .map_err(|_| Error::Secp256k1VerifyFailed)?;
@@ -296,15 +297,16 @@ mod tests {
     #[test]
     fn low_s_enforced_on_output() {
         // The signer's output s-value MUST already be in the lower half
-        // of the curve order. Re-parse, try to normalize, and assert no
-        // normalization was needed.
+        // of the curve order. Re-parse, normalize, and assert the
+        // normalization was a no-op.
         let sig_bytes = Secp256k1Signer::new(fixed_secret())
             .unwrap()
             .sign_dsse(FIXED_PAE)
             .unwrap();
         let sig = K256Sig::from_slice(&sig_bytes).unwrap();
-        assert!(
-            sig.normalize_s().is_none(),
+        assert_eq!(
+            sig.normalize_s(),
+            sig,
             "signer emitted a high-S signature; low-S normalization regressed"
         );
     }

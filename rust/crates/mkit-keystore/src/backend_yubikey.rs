@@ -8,7 +8,7 @@ use openpgp_card::ocard::{KeyType, StatusBytes};
 use openpgp_card::state::Open;
 use openpgp_card::{Card, Error as OpenPgpError};
 use p256::ecdsa::Signature as P256Signature;
-use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
 use p256::pkcs8::DecodePublicKey as _;
 use sha2::{Digest as _, Sha256};
 use yubikey::piv::{AlgorithmId as PivAlgorithmId, SlotAlgorithmId, SlotId};
@@ -281,7 +281,7 @@ impl KeySigner for YubiKeyPivSigner {
         .map_err(map_yubikey_error)?;
         let signature = P256Signature::from_der(&der)
             .map_err(|error| Error::Encoding(format!("PIV P-256 signature DER: {error}")))?;
-        let signature = signature.normalize_s().unwrap_or(signature);
+        let signature = signature.normalize_s();
         Ok(signature.to_bytes().to_vec())
     }
 }
@@ -563,7 +563,7 @@ fn p256_public_key_from_certificate(certificate: &yubikey::Certificate) -> Resul
         .map_err(|error| Error::Encoding(format!("PIV certificate SPKI DER: {error}")))?;
     let public = p256::PublicKey::from_public_key_der(&der)
         .map_err(|error| Error::Encoding(format!("PIV P-256 public key: {error}")))?;
-    Ok(public.to_encoded_point(true).as_bytes().to_vec())
+    Ok(public.to_sec1_point(true).as_bytes().to_vec())
 }
 
 fn piv_public_key_for_slot(yubikey: &mut yubikey::YubiKey, slot: SlotId) -> Result<Vec<u8>> {

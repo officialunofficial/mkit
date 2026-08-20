@@ -54,4 +54,4 @@ tss-esapi = { version = "7.7", optional = true }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
 buffa = "0.8.1"
 # In-process P-256 signer for protocol-shape unit tests.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
