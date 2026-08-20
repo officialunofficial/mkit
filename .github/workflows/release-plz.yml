@@ -125,7 +125,7 @@ jobs:
       # release-plz runs cargo-semver-checks (semver_check = true) to diff the
       # public API against the previous tag and propose the right version bump.
       - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad  # v2
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2
         with:
           tool: cargo-semver-checks
 
