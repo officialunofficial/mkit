@@ -366,9 +366,10 @@ mod tests {
 
     #[test]
     fn pkcs8_round_trip() {
-        // Build a PKCS#8 DER blob via the underlying SecretKey path —
-        // the p256 0.13 ecdsa::SigningKey does not itself impl
-        // EncodePrivateKey, but p256::SecretKey does.
+        // Build a PKCS#8 DER blob via the underlying SecretKey path.
+        // (As of p256 0.14 `ecdsa::SigningKey` also impls
+        // EncodePrivateKey — by delegating to SecretKey — so this
+        // stays the direct way to produce the same bytes.)
         use p256::SecretKey;
         use p256::pkcs8::EncodePrivateKey;
 
