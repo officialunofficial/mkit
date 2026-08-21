@@ -1,32 +1,34 @@
+import { CheckCircleIcon, MinusCircleIcon, WarningCircleIcon } from '@phosphor-icons/react/ssr'
 import { categories, inherentDivergences, legend, safetyDivergences } from '../lib/parity-data'
 import type { ParityCategory, ParityStatus } from '../lib/parity-data'
 
 /**
- * Status glyph: filled green circle (parity — exact git match), amber outline circle (divergent — works but differs),
- * slate dash (non-goal — deliberately off the git track). Drawn as inline SVG with explicit colors so they read the
- * same in light and dark, independent of the theme tokens.
+ * Status glyph per §3.10: an outline icon carrying the hue while the label carries the meaning. Parity is a success,
+ * divergent a warning, non-goal a neutral state — deliberately off the git track, not a failure.
  */
 function StatusIcon({ status }: { status: ParityStatus }) {
   switch (status) {
     case 'parity':
       return (
-        <svg width='10' height='10' viewBox='0 0 10 10' aria-hidden className='shrink-0'>
-          <circle cx='5' cy='5' r='4' fill='#16a34a' />
-        </svg>
+        <CheckCircleIcon size={12} aria-hidden className='shrink-0' style={{ color: 'var(--status-success-fg)' }} />
       )
     case 'divergent':
       return (
-        <svg width='10' height='10' viewBox='0 0 10 10' aria-hidden className='shrink-0'>
-          <circle cx='5' cy='5' r='3.6' fill='none' stroke='#f59e0b' strokeWidth='1.5' />
-        </svg>
+        <WarningCircleIcon size={12} aria-hidden className='shrink-0' style={{ color: 'var(--status-warning-fg)' }} />
       )
     case 'non-goal':
       return (
-        <svg width='10' height='10' viewBox='0 0 10 10' aria-hidden className='shrink-0'>
-          <line x1='1.5' y1='5' x2='8.5' y2='5' stroke='#64748b' strokeWidth='1.6' strokeLinecap='round' />
-        </svg>
+        <MinusCircleIcon size={12} aria-hidden className='shrink-0' style={{ color: 'var(--status-neutral-fg)' }} />
       )
   }
+}
+
+/**
+ * §3.2 rule 10: an identifier named in prose renders as inline code. Notes arrive as prose with backtick spans; render
+ * them as mono instead of shipping the backticks.
+ */
+function renderInlineCode(text: string) {
+  return text.split('`').map((part, i) => (i % 2 === 1 ? <code key={i}>{part}</code> : part))
 }
 
 function statusLabel(s: ParityStatus): string {
@@ -40,16 +42,16 @@ function statusLabel(s: ParityStatus): string {
   }
 }
 
-/** One dense row: glyph at the left, command and note flowing together as a single line that wraps cleanly. */
+/** One dense row: status glyph at the left, command and note flowing together as a single line that wraps cleanly. */
 function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: string }) {
   return (
-    <div className='flex items-start gap-2 py-1.5'>
-      <span className='flex h-4 shrink-0 items-center'>
+    <div className='flex items-start gap-1 px-2 py-1.5'>
+      <span className='flex h-4 shrink-0 items-center' title={statusLabel(status)}>
         <StatusIcon status={status} />
       </span>
       <span className='sr-only'>{statusLabel(status)}: </span>
-      <p className='text-[11px] leading-snug'>
-        <code className='font-mono text-fg'>{cmd}</code> <span className='text-[11px] text-muted'>{note}</span>
+      <p className='text-xs leading-4'>
+        <code>{cmd}</code> <span className='text-secondary'>{renderInlineCode(note)}</span>
       </p>
     </div>
   )
@@ -57,10 +59,12 @@ function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: s
 
 function Category({ cat }: { cat: ParityCategory }) {
   return (
-    <section className='mb-6 break-inside-avoid space-y-1'>
-      <h2 className='text-sm font-semibold'>{cat.name}</h2>
-      {cat.blurb ? <p className='max-w-prose text-xs text-subtle'>{cat.blurb}</p> : null}
-      <div className='divide-y divide-hairline border-y border-hairline'>
+    <section className='mb-6 break-inside-avoid'>
+      <div className='rule-square pb-2'>
+        <h2 className='ds-h2'>{cat.name}</h2>
+        {cat.blurb ? <p className='ds-note mt-1'>{cat.blurb}</p> : null}
+      </div>
+      <div className='data-frame mt-2'>
         {cat.items.map((item) => (
           <Row key={item.cmd} cmd={item.cmd} status={item.status} note={item.note} />
         ))}
@@ -71,55 +75,73 @@ function Category({ cat }: { cat: ParityCategory }) {
 
 function NoteBlock({ label, body }: { label: string; body: string }) {
   return (
-    <div className='py-1.5 text-xs'>
-      <span className='font-medium text-fg'>{label}.</span> <span className='text-subtle'>{body}</span>
+    <div className='px-2 py-1.5 text-xs leading-4'>
+      <span className='font-medium'>{label}.</span> <span>{body}</span>
     </div>
   )
 }
 
 /**
- * Static mkit-vs-git parity matrix: a legend, command categories, the two permanent (BLAKE3-inherent) divergences, and
- * the deliberate safety divergences. Categories flow into two columns on wide screens to keep the page scannable rather
- * than a long single-column scroll.
+ * The status legend as a vertical stack — rendered beside the page intro (copy 4 of the 6 root columns, legend the
+ * other 2).
+ */
+export function ParityLegend() {
+  return (
+    <div className='space-y-1.5 text-xs leading-4'>
+      {legend.map((l) => (
+        <span key={l.status} className='flex items-start gap-1'>
+          <span className='flex h-4 shrink-0 items-center'>
+            <StatusIcon status={l.status} />
+          </span>
+          <span>
+            <span className='font-medium'>{l.label}</span> <span className='text-secondary'>{l.meaning}</span>
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Static mkit-vs-git parity matrix: command categories, the two permanent (BLAKE3-inherent) divergences, and the
+ * deliberate safety divergences. Categories flow into two columns on wide screens; the legend renders separately in the
+ * page header (ParityLegend).
  */
 export function ParityMatrix() {
   return (
-    <div className='space-y-12'>
-      <div className='flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted'>
-        {legend.map((l) => (
-          <span key={l.status} className='inline-flex items-center gap-1.5'>
-            <StatusIcon status={l.status} />
-            <span className='font-medium text-fg'>{l.label}</span>
-            <span>{l.meaning}</span>
-          </span>
-        ))}
-      </div>
-
+    <div className='space-y-8'>
       <div className='gap-x-10 lg:columns-2'>
         {categories.map((cat) => (
           <Category key={cat.name} cat={cat} />
         ))}
       </div>
 
-      <div className='grid gap-x-10 gap-y-6 border-t border-hairline border-dashed pt-12 lg:grid-cols-2'>
-        <section className='space-y-1'>
-          <h2 className='font-semibold'>Different, and permanent</h2>
-          <p className='max-w-prose text-xs text-subtle'>
-            These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
-          </p>
-          <div className='divide-y divide-hairline border-y border-hairline'>
+      <div
+        className='grid grid-cols-1 gap-x-10 gap-y-6 border-t pt-8 lg:grid-cols-2'
+        style={{ borderColor: 'var(--border-color-default)' }}
+      >
+        <section>
+          <div className='rule-square pb-2'>
+            <h2 className='ds-h2'>Different and Permanent</h2>
+            <p className='ds-note mt-1'>
+              These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
+            </p>
+          </div>
+          <div className='data-frame mt-2'>
             {inherentDivergences.map((n) => (
               <NoteBlock key={n.label} label={n.label} body={n.body} />
             ))}
           </div>
         </section>
 
-        <section className='space-y-1'>
-          <h2 className='font-semibold'>Safer than git</h2>
-          <p className='max-w-prose text-xs text-subtle'>
-            Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.
-          </p>
-          <div className='divide-y divide-hairline border-y border-hairline'>
+        <section>
+          <div className='rule-square pb-2'>
+            <h2 className='ds-h2'>Safer Than Git</h2>
+            <p className='ds-note mt-1'>
+              Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.
+            </p>
+          </div>
+          <div className='data-frame mt-2'>
             {safetyDivergences.map((n) => (
               <NoteBlock key={n.label} label={n.label} body={n.body} />
             ))}

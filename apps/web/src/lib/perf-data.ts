@@ -48,7 +48,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'append-1m',
     theme: 'large-files',
-    name: 'commit a 1 MiB change to the 100 MiB file',
+    name: 'Commit a 1 MiB Change to the 100 MiB File',
     description: 'Append 1 MiB to the already-committed 100 MiB file, then add + commit the new version.',
     mkit: { mean: 0.4085, stddev: 0.0421 },
     git: { mean: 2.0376, stddev: 0.0138 },
@@ -59,7 +59,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'big-1g',
     theme: 'large-files',
-    name: 'add + commit one 1 GiB file',
+    name: 'Add + Commit One 1 GiB File',
     description: 'Same shape at 1 GiB, 3 runs each.',
     mkit: { mean: 5.1225, stddev: 0.1476 },
     git: { mean: 18.5051, stddev: 0.1423 },
@@ -68,7 +68,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'big-100m',
     theme: 'large-files',
-    name: 'add + commit one 100 MiB file',
+    name: 'Add + Commit One 100 MiB File',
     description: 'A single 100 MiB file of incompressible bytes (a stand-in for video or other compressed media).',
     mkit: { mean: 0.7687, stddev: 0.0291 },
     git: { mean: 2.1463, stddev: 0.0237 },
@@ -80,7 +80,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'small-files',
     theme: 'everyday',
-    name: 'add + commit 100 small files',
+    name: 'Add + Commit 100 Small Files',
     description: '100 files of 10 KiB random bytes each, staged and committed in one shot.',
     mkit: { mean: 0.1657, stddev: 0.0038 },
     git: { mean: 0.2955, stddev: 0.0127 },
@@ -92,7 +92,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'rehash-unchanged',
     theme: 'everyday',
-    name: 're-add an unchanged 100 MiB file',
+    name: 'Re-add an Unchanged 100 MiB File',
     description: 'touch the committed file (mtime changes, bytes don’t) and run add again — a pure re-hash.',
     mkit: { mean: 0.1473, stddev: 0.0286 },
     git: { mean: 0.1738, stddev: 0.0023 },
@@ -103,7 +103,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'init',
     theme: 'everyday',
-    name: 'init an empty repository',
+    name: 'Init an Empty Repository',
     description: 'mkit init vs git init in a fresh directory.',
     mkit: { mean: 0.013, stddev: 0.0009 },
     git: { mean: 0.0135, stddev: 0.0009 },
@@ -111,7 +111,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
   {
     id: 'status-unchanged',
     theme: 'everyday',
-    name: 'status with an unchanged 100 MiB file',
+    name: 'Status With an Unchanged 100 MiB File',
     description: 'mkit status / git status in a clean repo holding the committed 100 MiB file, stat cache warm.',
     mkit: { mean: 0.0151, stddev: 0.0017 },
     git: { mean: 0.0146, stddev: 0.0012 },
@@ -125,7 +125,7 @@ export const sizeBenchmarks: SizeBenchmark[] = [
   {
     id: 'size-big-v1',
     theme: 'large-files',
-    name: 'one 100 MiB file, one commit',
+    name: 'One 100 MiB File, One Commit',
     description: 'Repository size after the first commit of the 100 MiB file.',
     mkitKiB: 104988,
     gitKiB: 115228,
@@ -136,7 +136,7 @@ export const sizeBenchmarks: SizeBenchmark[] = [
   {
     id: 'size-big-v2',
     theme: 'large-files',
-    name: 'growth after a 1 MiB change',
+    name: 'Growth After a 1 MiB Change',
     description:
       'Additional repository bytes after appending 1 MiB to the 100 MiB file and committing the second version.',
     mkitKiB: 1156,
@@ -149,7 +149,7 @@ export const sizeBenchmarks: SizeBenchmark[] = [
   {
     id: 'size-small',
     theme: 'everyday',
-    name: '100 small files, one commit',
+    name: '100 Small Files, One Commit',
     description: 'Repository size after committing 100 × 10 KiB of random bytes (1,000 KiB of content).',
     mkitKiB: 1236,
     gitKiB: 1312,
@@ -180,7 +180,7 @@ export const transferBenchmarks: TransferBenchmark[] = [
   {
     id: 'push-small-edit',
     theme: 'large-files',
-    name: 'push a 16-byte edit to a 2 MiB file',
+    name: 'Push a 16-Byte Edit to a 2 MiB File',
     description:
       'Edit 16 bytes in the middle of a 2 MiB FastCDC-chunked file the remote already holds, then push the new commit. Bytes counted on the wire.',
     wholeChunkBytes: 72704, // ~71 KiB: the whole re-cut FastCDC chunk

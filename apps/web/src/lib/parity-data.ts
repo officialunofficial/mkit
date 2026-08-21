@@ -74,7 +74,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Branches, tags, and merging',
+    name: 'Branches, Tags, and Merging',
     blurb: 'Create branches and tags, then merge history back together.',
     items: [
       {
@@ -96,7 +96,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'History and inspection',
+    name: 'History and Inspection',
     blurb: 'Read what happened, and find when it changed.',
     items: [
       {
@@ -148,7 +148,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Cleanup and maintenance',
+    name: 'Cleanup and Maintenance',
     blurb: 'Clear out untracked junk and reclaim object storage.',
     items: [
       { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
@@ -189,7 +189,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Remotes and git interop',
+    name: 'Remotes and Git Interop',
     blurb: "Sync over mkit's own transports, with one-way bridges to and from git.",
     items: [
       {
@@ -220,7 +220,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Config and conventions',
+    name: 'Config and Conventions',
     blurb: 'Git-shaped settings and ignore rules that never set your signed identity.',
     items: [
       {

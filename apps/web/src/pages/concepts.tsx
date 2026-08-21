@@ -1,4 +1,3 @@
-import { Link } from 'waku'
 import { DemosTabs } from '../components/demos-tabs'
 import { Seo } from '../components/seo'
 
@@ -12,12 +11,6 @@ export default function DemosPage() {
         card='See it work'
       />
       <DemosTabs />
-      <Link
-        to='/'
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-      >
-        ← back
-      </Link>
     </div>
   )
 }

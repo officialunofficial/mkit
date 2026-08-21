@@ -1,4 +1,3 @@
-import { Link } from 'waku'
 import { PerfSection } from '../components/perf-section'
 import { Seo } from '../components/seo'
 import { WithToc } from '../components/with-toc'
@@ -13,20 +12,14 @@ export default function PerformancePage() {
           path='/performance'
           card='Measured against git'
         />
-        <header className='space-y-3'>
-          <h1 className='text-4xl font-semibold tracking-tight'>Measured against git</h1>
-          <p className='max-w-prose text-base text-fg'>
-            The numbers below are real <code className='font-mono text-sm'>hyperfine</code> runs of both CLIs on one
-            machine.
+        <header>
+          <h1 className='ds-h1'>Measured Against Git</h1>
+          <p className='ds-note mt-1'>
+            Real <code>hyperfine</code> runs of both CLIs on one machine — git&rsquo;s wins shown as plainly as
+            mkit&rsquo;s.
           </p>
         </header>
         <PerfSection />
-        <Link
-          to='/'
-          className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-        >
-          ← back
-        </Link>
       </div>
     </WithToc>
   )

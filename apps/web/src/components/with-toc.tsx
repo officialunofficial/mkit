@@ -1,20 +1,21 @@
 import type { ReactNode } from 'react'
 import { OnThisPage } from './on-this-page'
 
-// Two-column documentation layout: page content on the left, a sticky
-// "On this page" table of contents on the right. The TOC column only
-// appears at lg and up; narrower screens render a single column. Demo
-// pages don't use this wrapper — only the doc-style pages (performance,
-// parity) that have section headers worth navigating.
+// Doc-page wrapper: the "On This Page" rail (§4.40) hangs fixed in the RIGHT
+// page margin — the trailing edge of the content column, mirroring the
+// primary nav's rail on the left — and disappears below the rail breakpoint
+// rather than collapsing to a trigger (§4.40 rule 6). The content column
+// keeps its measure either way.
 export function WithToc({ children }: { children: ReactNode }) {
   return (
-    <div className='lg:grid lg:grid-cols-[minmax(0,1fr)_11rem] lg:gap-12'>
+    <>
       <div className='min-w-0'>{children}</div>
-      <aside className='hidden lg:block'>
-        <div className='sticky top-20'>
-          <OnThisPage />
-        </div>
+      <aside
+        className='fixed top-24 hidden w-40 min-[1440px]:block'
+        style={{ left: 'calc(50% + (var(--page-column) / 2) + 2rem)' }}
+      >
+        <OnThisPage />
       </aside>
-    </div>
+    </>
   )
 }

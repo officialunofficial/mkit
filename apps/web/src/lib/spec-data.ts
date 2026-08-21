@@ -35,7 +35,7 @@ export function specUrl(name: string): string {
 
 export const categories: SpecCategory[] = [
   {
-    name: 'Objects and hashing',
+    name: 'Objects and Hashing',
     blurb: 'How bytes become content-addressed objects: layouts, Merkle identity, chunking, and deltas.',
     items: [
       {
@@ -65,7 +65,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Repository state',
+    name: 'Repository State',
     blurb: 'What lives inside .mkit/: refs, the staging index, linked worktrees, lock order, and garbage collection.',
     items: [
       {
@@ -101,7 +101,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Packs and transport',
+    name: 'Packs and Transport',
     blurb:
       'How objects move between repositories: the packfile container, erasure-coded delivery, and the transport protocols.',
     items: [
@@ -144,7 +144,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Security and signing',
+    name: 'Security and Signing',
     blurb:
       'The signature and attestation machinery: signing bytes, key storage, config trust boundaries, and verifiable history.',
     items: [
@@ -187,7 +187,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Interop and subprocess protocols',
+    name: 'Interop and Subprocess Protocols',
     blurb:
       'The wire contracts mkit speaks with other systems: git bridges in both directions, external signers, and the shared RPC framing.',
     items: [
@@ -218,7 +218,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Spec conventions',
+    name: 'Spec Conventions',
     blurb: 'How the corpus itself is written and read.',
     items: [
       {

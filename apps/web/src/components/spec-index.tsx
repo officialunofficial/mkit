@@ -1,32 +1,42 @@
+import { ArrowUpRightIcon } from '@phosphor-icons/react/ssr'
 import { categories, specUrl } from '../lib/spec-data'
 import type { SpecCategory, SpecItem } from '../lib/spec-data'
 
-/** One spec row: the document name linked to GitHub, its verbatim status token, and a one-line description. */
+/**
+ * One spec row: the document name linked to GitHub, its verbatim status token in mono (§3.2 rule 10), and a one-line
+ * description.
+ */
 function Row({ item }: { item: SpecItem }) {
   return (
-    <div className='space-y-0.5 py-2.5'>
-      <p className='text-sm leading-snug'>
+    <div className='px-2 py-1.5'>
+      <p className='text-xs leading-4'>
         <a
           href={specUrl(item.name)}
           target='_blank'
           rel='noreferrer'
-          className='font-mono text-fg underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+          className='ds-link font-mono inline-flex items-center gap-0.5'
         >
           {item.name}
+          <ArrowUpRightIcon size={12} aria-hidden className='text-secondary' />
+          <span className='sr-only'>(opens in a new tab)</span>
         </a>{' '}
-        <span className='font-mono text-[11px] text-muted'>{item.status}</span>
+        <span className='font-mono'>{item.status}</span>
       </p>
-      <p className='max-w-prose text-xs leading-relaxed text-subtle'>{item.description}</p>
+      <p className='mt-0.5 max-w-prose text-xs leading-4 text-secondary'>{item.description}</p>
     </div>
   )
 }
 
 function Category({ cat }: { cat: SpecCategory }) {
   return (
-    <section className='space-y-1'>
-      <h2 className='font-semibold'>{cat.name}</h2>
-      <p className='max-w-prose text-xs text-subtle'>{cat.blurb}</p>
-      <div className='divide-y divide-hairline border-y border-hairline'>
+    <section className='mb-6 break-inside-avoid'>
+      <div className='rule-square pb-2'>
+        <h2 className='ds-h2'>{cat.name}</h2>
+        <p className='ds-note mt-1'>{cat.blurb}</p>
+      </div>
+      {/* §4.9: a list shares the table's border grammar — heavy left border,
+          light frame, square-dot row separators. */}
+      <div className='data-frame mt-2'>
         {cat.items.map((item) => (
           <Row key={item.name} item={item} />
         ))}
@@ -37,22 +47,23 @@ function Category({ cat }: { cat: SpecCategory }) {
 
 /**
  * Static index of the SPEC-*.md corpus: a status-vocabulary note, then one section per category. Single column on
- * purpose — each row carries a full sentence of description, unlike the parity matrix's terse command notes, so two
- * columns would wrap badly. Data lives in `lib/spec-data.ts`.
+ * purpose — each row carries a full sentence of description. Data lives in `lib/spec-data.ts`.
  */
 export function SpecIndex() {
   return (
-    <div className='space-y-10'>
-      <p className='max-w-prose text-xs text-muted'>
+    <div className='space-y-8'>
+      <p className='max-w-prose'>
         Each status token comes verbatim from the document&rsquo;s front matter and combines two axes (defined in
-        SPEC-CONVENTIONS): maturity &mdash; <span className='font-mono text-fg'>draft</span> behavior is still changing
-        or has a called-out gap, <span className='font-mono text-fg'>stable</span> behavior changes only with a version
-        bump &mdash; and bindingness &mdash; <span className='font-mono text-fg'>normative</span> means interop depends
-        on conforming, <span className='font-mono text-fg'>advisory</span> means local-only guidance.
+        SPEC-CONVENTIONS): maturity &mdash; <code className='text-primary'>draft</code> behavior is still changing or
+        has a called-out gap, <code className='text-primary'>stable</code> behavior changes only with a version bump
+        &mdash; and bindingness &mdash; <code className='text-primary'>normative</code> means interop depends on
+        conforming, <code className='text-primary'>advisory</code> means local-only guidance.
       </p>
-      {categories.map((cat) => (
-        <Category key={cat.name} cat={cat} />
-      ))}
+      <div className='gap-x-10 lg:columns-2'>
+        {categories.map((cat) => (
+          <Category key={cat.name} cat={cat} />
+        ))}
+      </div>
     </div>
   )
 }

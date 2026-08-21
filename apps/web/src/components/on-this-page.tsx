@@ -44,7 +44,9 @@ export function OnThisPage() {
         found.push({ id: h.id, text })
       }
       setItems(found)
-      setActiveId('')
+      // §4.40 rule 4: exactly one item is current — before any scroll, that is
+      // the first section.
+      setActiveId(found[0]?.id ?? '')
 
       io?.disconnect()
       io = null
@@ -88,9 +90,9 @@ export function OnThisPage() {
   if (items.length < 2) return null
 
   return (
-    <nav aria-label='On this page' className='text-sm'>
-      <p className='mb-3 font-medium text-fg'>On this page</p>
-      <ul className='border-l border-hairline'>
+    <nav aria-label='On this page' className='text-xs leading-4'>
+      <p className='mb-2 font-medium text-primary'>On This Page</p>
+      <ul className='border-l' style={{ borderColor: 'var(--border-color-subtle)' }}>
         {items.map((item) => {
           const active = activeId === item.id
           return (
@@ -98,8 +100,10 @@ export function OnThisPage() {
               <a
                 href={`#${item.id}`}
                 aria-current={active ? 'location' : undefined}
-                className={`-ml-px block border-l py-1.5 pl-3 leading-snug transition-colors ${
-                  active ? 'border-fg text-fg' : 'border-transparent text-muted hover:border-hairline hover:text-fg'
+                className={`-ml-px block border-l py-1.5 pl-3 transition-colors duration-(--duration-fast) ease-standard ${
+                  active
+                    ? 'border-(--border-color-selected) font-medium text-primary'
+                    : 'border-transparent text-secondary hover:text-primary'
                 }`}
               >
                 {item.text}

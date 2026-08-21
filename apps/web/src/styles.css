@@ -1,105 +1,434 @@
 @import 'tailwindcss';
 
-/* Self-hosted Geist + Geist Mono (latin subset only, matching the weights the
-   site actually uses). Previously loaded from fonts.googleapis.com with
-   `display=swap`, which meant a visible font swap after the stylesheet
-   round-tripped to Google's CDN on every cold load. Self-hosting serves the
-   woff2 files from the same origin (bundled + cached like any other static
-   asset), so the swap window collapses to effectively nothing. */
-@import '@fontsource/geist-sans/latin-400.css';
-@import '@fontsource/geist-sans/latin-500.css';
-@import '@fontsource/geist-sans/latin-600.css';
-@import '@fontsource/geist-sans/latin-700.css';
-@import '@fontsource/geist-mono/latin-400.css';
-@import '@fontsource/geist-mono/latin-500.css';
+/* Pigment (DESIGN.md §2.1A): DM Sans variable for all text, DM Mono for
+   hashes, IDs, raw numeric values, and code. Self-hosted for the same
+   reason the Geist files were — no cross-origin font round-trip. */
+@import '@fontsource-variable/dm-sans/index.css';
+@import '@fontsource/dm-mono/latin-400.css';
 
 /* Manual override drives dark mode: the no-flash script in _root.tsx resolves
    `system`/`light`/`dark` to an explicit `data-theme` attribute, so `dark:`
-   utilities key off that attribute (no prefers-color-scheme needed in CSS —
-   the script already folded the system preference into the attribute). */
+   utilities key off that attribute. */
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
-/* Dark token overrides: invert the neutral lightness ramp. Re-tune muted /
-   subtle / hairline so they keep the same perceptual separation against the
-   dark background that they had against white. Brand gradient is unchanged —
-   it reads on both surfaces. */
-[data-theme='dark'] {
-  --color-bg: oklch(0.16 0 0);
-  /* A zero-alpha version of THIS theme's bg. See the light `@theme` for why we
-     never fade to the `transparent` keyword. */
-  --color-bg-0: oklch(0.16 0 0 / 0);
-  --color-fg: oklch(0.96 0 0);
-  --color-muted: oklch(0.62 0 0);
-  --color-subtle: oklch(0.48 0 0);
-  /* Lifted well above the 0.16 background so card/input borders read clearly
-     in dark mode without vanishing into the ground. */
-  --color-hairline: oklch(0.35 0 0);
+/* ---------------------------------------------------------------------
+   Pigment foundation tokens — DESIGN.md §2, values verbatim from
+   @officialunofficial/pigment styles/tokens.css. This block is the only
+   place a raw hex or pixel value may appear; everything downstream names
+   a token.
+
+   Theme resolution (§2.3): light is the base; dark applies under a dark
+   system preference; an explicit data-theme choice on <html> outranks
+   both. The no-flash script folds the system preference into the
+   attribute, and the prefers-color-scheme block keeps no-JS visitors on
+   the same contract.
+   --------------------------------------------------------------------- */
+:root {
+  /* §2.1B size and leading */
+  --t-lg: 20px;
+  --t-lg-leading: 26px;
+  --t-md: 16px;
+  --t-md-leading: 22px;
+  --t-base: 14px;
+  --t-base-leading: 20px;
+  --t-sm: 12px;
+  --t-sm-leading: 16px;
+  --t-xs: 11px;
+  --t-xs-leading: 15px;
+
+  /* §2.1C weight */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* §2.1D rules 1–2 */
+  --header-tracking: -0.02em;
+  --link-underline-offset: 3px;
+  --link-underline-thickness: 1.5px;
+
+  /* §2.2A border weights */
+  --border-width-heavy: 3px;
+  --border-width-medium: 2px;
+  --border-width-light: 1px;
+
+  /* §2.2B line styles, carried as dash/gap pairs — CSS `border-style`
+     cannot state a dash length, so non-solid edges are drawn with
+     repeating gradients (see .rule-square / .edge-dashed below). */
+  --square-dash: 1px;
+  --square-gap: 3px;
+  --square-period: calc(var(--square-dash) + var(--square-gap));
+  --dashed-dash: 3px;
+  --dashed-gap: 3px;
+  --dashed-period: calc(var(--dashed-dash) + var(--dashed-gap));
+
+  /* §2.3A surface */
+  --surface-page: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f5f5f5;
+  --surface-overlay: #ffffff;
+  --surface-hover: #f5f5f5;
+  --surface-active: #ebebeb;
+  --surface-selected: #f0f0f0;
+  --surface-sticky: #fafafa;
+  --surface-filtered: #f5f5f5;
+  --surface-code: #fafafa;
+  --surface-disabled: #f5f5f5;
+  --surface-scrim: rgb(0 0 0 / 40%);
+  --surface-skeleton: #ededed;
+  --shadow-color: rgb(0 0 0 / 8%);
+  --shadow-color-strong: rgb(0 0 0 / 13%);
+
+  /* §2.3B text */
+  --text-primary: #0a0a0a;
+  --text-secondary: #8a8a8a;
+  --text-muted: #a3a3a3;
+  --text-placeholder: #b8b8b8;
+  --text-disabled: #9e9e9e;
+  --text-inverse: #ffffff;
+  --text-link: #0a0a0a;
+
+  /* §2.3C border */
+  --border-color-subtle: #e5e5e5;
+  --border-color-default: #d4d4d4;
+  --border-color-strong: #171717;
+  --border-color-selected: #0a0a0a;
+  --border-color-focus: #0a0a0a;
+  --border-color-disabled: #ebebeb;
+
+  /* §2.3D action */
+  --action-primary-bg: #171717;
+  --action-primary-bg-hover: #3d3d3d;
+  --action-primary-bg-active: #000000;
+  --action-primary-fg: #ffffff;
+  --action-secondary-bg: #ffffff;
+  --action-secondary-bg-hover: #ebebeb;
+  --action-secondary-bg-active: #dedede;
+  --action-secondary-fg: #171717;
+  --action-secondary-border: #d4d4d4;
+  --action-ghost-bg: transparent;
+  --action-ghost-bg-hover: #ebebeb;
+  --action-ghost-bg-active: #dedede;
+  --action-ghost-fg: #171717;
+
+  /* §2.3E status */
+  --status-success-fg: #1a7f4b;
+  --status-success-bg: #ecf6f0;
+  --status-success-border: #b8dec8;
+  --status-warning-fg: #9a6700;
+  --status-warning-bg: #fdf6e7;
+  --status-warning-border: #e8d5a3;
+  --status-error-fg: #b42318;
+  --status-error-bg: #fdf0ef;
+  --status-error-border: #efc5c1;
+  --status-neutral-fg: #8a8a8a;
+  --status-neutral-bg: #f5f5f5;
+  --status-neutral-border: #e5e5e5;
+
+  /* §2.3F delta */
+  --delta-increase-fg: #1a7f4b;
+  --delta-increase-bg: #ecf6f0;
+  --delta-decrease-fg: #b42318;
+  --delta-decrease-bg: #fdf0ef;
+  --delta-unchanged-fg: #8a8a8a;
+
+  /* §2.3H focus and selection */
+  --focus-ring: #0a0a0a;
+  --focus-ring-offset: #ffffff;
+  --selection-bg: #e5e5e5;
+  --selection-fg: #0a0a0a;
+
+  /* §2.3I value */
+  --value-padding: #c7c7c7;
+
+  /* §2.4 spacing — base unit 4px */
+  --space-2xs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+
+  /* §2.5 radii */
+  --rounded-xs: 2px;
+  --rounded-sm: 4px;
+  --rounded-md: 6px;
+
+  /* §2.6 elevation. The derived pairs carry the dark-theme construction
+     (hairline instead of shadow) so no downstream rule writes a theme
+     selector of its own. */
+  --shd-diffuse: 0 1px 3px var(--shadow-color);
+  --shd-overlay: 0 4px 14px var(--shadow-color-strong);
+  --elevation-shadow: var(--shd-diffuse);
+  --elevation-hairline: transparent;
+  --overlay-shadow: var(--shd-overlay);
+  --overlay-hairline: var(--border-color-default);
+
+  /* §2.7 layout. The chrome, content, and footer all span this one central
+     column — polychrome's PageChrome construction at its exact default
+     column width (960px). The nav and TOC rails hang fixed in the page
+     margins outside it, 2rem off the column edge, matching PageChrome's
+     sidebar geometry. */
+  --page-column: 60rem;
+  --grid-gutter: var(--space-md);
+  --touch-target-min: 44px;
+  --row-height-text: 24px;
+  --row-height-control: 30px;
+
+  /* §2.8 icons */
+  --icon-default: 16px;
+  --icon-small: 12px;
+
+  /* §2.9 motion */
+  --duration-fast: 200ms;
+  --duration-base: 180ms;
+  --duration-spin: 900ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* §2.11 focus */
+  --focus-ring-width: 2px;
+  --focus-ring-gap: 2px;
 }
 
-/* Design tokens lifted verbatim from searchartwith.art (OKLCH triplet of
-   1 / 0.145 / 0.922 for bg / fg / hairline). Geist Variable is the
-   sans; we skip the site's DaVinci serif deliberately. */
-@theme {
-  --color-bg: oklch(1 0 0);
-  /* A zero-alpha version of `--color-bg`, per theme. Gradients that fade a
-     solid edge into nothing MUST fade to this — NOT the CSS `transparent`
-     keyword, which resolves to transparent-BLACK (rgba(0,0,0,0)). Safari/iOS
-     interpolate a gradient in premultiplied sRGB, so white→transparent passes
-     through greys and paints a dark "shadow" band (the fade strip under the
-     header rule looked broken on iOS). Fading to the bg colour at alpha 0
-     keeps the whole ramp on-hue and truly invisible at the far end. */
-  --color-bg-0: oklch(1 0 0 / 0);
-  --color-fg: oklch(0.145 0 0);
-  --color-muted: oklch(0.556 0 0);
-  /* `subtle` sits between `muted` and `hairline` — used for descriptive
-     copy that should read as secondary without fully fading out. */
-  --color-subtle: oklch(0.68 0 0);
-  --color-hairline: oklch(0.945 0 0);
-  --font-sans: 'Geist Sans', 'Geist', 'Geist Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+/* Dark under a dark system preference, unless light is explicitly chosen —
+   covers the instant before the no-flash script runs and no-JS visitors. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --surface-page: #0a0a0a;
+    --surface-raised: #0a0a0a;
+    --surface-sunken: #141414;
+    --surface-overlay: #0a0a0a;
+    --surface-hover: #1a1a1a;
+    --surface-active: #242424;
+    --surface-selected: #1f1f1f;
+    --surface-sticky: #121212;
+    --surface-filtered: #141414;
+    --surface-code: #101010;
+    --surface-disabled: #141414;
+    --surface-scrim: rgb(0 0 0 / 60%);
+    --surface-skeleton: #1c1c1c;
+    --shadow-color: rgb(0 0 0 / 40%);
+    --shadow-color-strong: rgb(0 0 0 / 48%);
+    --text-primary: #ededed;
+    --text-secondary: #676767;
+    --text-muted: #525252;
+    --text-placeholder: #464646;
+    --text-disabled: #565656;
+    --text-inverse: #0a0a0a;
+    --text-link: #ededed;
+    --border-color-subtle: #1f1f1f;
+    --border-color-default: #333333;
+    --border-color-strong: #ededed;
+    --border-color-selected: #f5f5f5;
+    --border-color-focus: #f5f5f5;
+    --border-color-disabled: #242424;
+    --action-primary-bg: #ededed;
+    --action-primary-bg-hover: #d4d4d4;
+    --action-primary-bg-active: #ffffff;
+    --action-primary-fg: #0a0a0a;
+    --action-secondary-bg: #0a0a0a;
+    --action-secondary-bg-hover: #242424;
+    --action-secondary-bg-active: #333333;
+    --action-secondary-fg: #ededed;
+    --action-secondary-border: #333333;
+    --action-ghost-bg-hover: #242424;
+    --action-ghost-bg-active: #333333;
+    --action-ghost-fg: #ededed;
+    --status-success-fg: #4fa97a;
+    --status-success-bg: #0e1a14;
+    --status-success-border: #1f3a2c;
+    --status-warning-fg: #d6a93b;
+    --status-warning-bg: #1c1608;
+    --status-warning-border: #3d3418;
+    --status-error-fg: #e5675c;
+    --status-error-bg: #1e100f;
+    --status-error-border: #4a2320;
+    --status-neutral-fg: #676767;
+    --status-neutral-bg: #141414;
+    --status-neutral-border: #1f1f1f;
+    --delta-increase-fg: #4fa97a;
+    --delta-increase-bg: #0e1a14;
+    --delta-decrease-fg: #e5675c;
+    --delta-decrease-bg: #1e100f;
+    --delta-unchanged-fg: #676767;
+    --focus-ring: #f5f5f5;
+    --focus-ring-offset: #0a0a0a;
+    --selection-bg: #333333;
+    --selection-fg: #ededed;
+    --value-padding: #3a3a3a;
+    --elevation-shadow: none;
+    --elevation-hairline: var(--border-color-subtle);
+  }
+}
 
-  /* Brand gradient lifted from the official-unofficial logo. Stops
-     are carried verbatim so the chroma matches across surfaces. Two
-     directional tokens: `-h` for horizontal rules, `-v` for text
-     clipping (which stays vertical like the logo itself). */
-  --gradient-h: linear-gradient(to right, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
-  --gradient-v: linear-gradient(to bottom, #fa7cfa 0%, #f5ca23 30%, #00d2a8 66%, #7a3bf7 97%);
+/* An explicit dark choice outranks the system preference (§2.3). */
+:root[data-theme='dark'] {
+  --surface-page: #0a0a0a;
+  --surface-raised: #0a0a0a;
+  --surface-sunken: #141414;
+  --surface-overlay: #0a0a0a;
+  --surface-hover: #1a1a1a;
+  --surface-active: #242424;
+  --surface-selected: #1f1f1f;
+  --surface-sticky: #121212;
+  --surface-filtered: #141414;
+  --surface-code: #101010;
+  --surface-disabled: #141414;
+  --surface-scrim: rgb(0 0 0 / 60%);
+  --surface-skeleton: #1c1c1c;
+  --shadow-color: rgb(0 0 0 / 40%);
+  --shadow-color-strong: rgb(0 0 0 / 48%);
+  --text-primary: #ededed;
+  --text-secondary: #676767;
+  --text-muted: #525252;
+  --text-placeholder: #464646;
+  --text-disabled: #565656;
+  --text-inverse: #0a0a0a;
+  --text-link: #ededed;
+  --border-color-subtle: #1f1f1f;
+  --border-color-default: #333333;
+  --border-color-strong: #ededed;
+  --border-color-selected: #f5f5f5;
+  --border-color-focus: #f5f5f5;
+  --border-color-disabled: #242424;
+  --action-primary-bg: #ededed;
+  --action-primary-bg-hover: #d4d4d4;
+  --action-primary-bg-active: #ffffff;
+  --action-primary-fg: #0a0a0a;
+  --action-secondary-bg: #0a0a0a;
+  --action-secondary-bg-hover: #242424;
+  --action-secondary-bg-active: #333333;
+  --action-secondary-fg: #ededed;
+  --action-secondary-border: #333333;
+  --action-ghost-bg-hover: #242424;
+  --action-ghost-bg-active: #333333;
+  --action-ghost-fg: #ededed;
+  --status-success-fg: #4fa97a;
+  --status-success-bg: #0e1a14;
+  --status-success-border: #1f3a2c;
+  --status-warning-fg: #d6a93b;
+  --status-warning-bg: #1c1608;
+  --status-warning-border: #3d3418;
+  --status-error-fg: #e5675c;
+  --status-error-bg: #1e100f;
+  --status-error-border: #4a2320;
+  --status-neutral-fg: #676767;
+  --status-neutral-bg: #141414;
+  --status-neutral-border: #1f1f1f;
+  --delta-increase-fg: #4fa97a;
+  --delta-increase-bg: #0e1a14;
+  --delta-decrease-fg: #e5675c;
+  --delta-decrease-bg: #1e100f;
+  --delta-unchanged-fg: #676767;
+  --focus-ring: #f5f5f5;
+  --focus-ring-offset: #0a0a0a;
+  --selection-bg: #333333;
+  --selection-fg: #ededed;
+  --value-padding: #3a3a3a;
+  --elevation-shadow: none;
+  --elevation-hairline: var(--border-color-subtle);
+}
+
+/* Tailwind color/font mapping. `inline` keeps utilities pointing at the
+   var() chain so the data-theme switch repaints them at runtime.
+
+   The first group keeps the site's pre-pigment names alive — the demo
+   components (untouched in this pass) use bg-bg / text-fg / text-muted /
+   text-subtle / border-hairline, and the aliases route them to the nearest
+   pigment token so the whole page stays one palette. */
+@theme inline {
+  --color-bg: var(--surface-page);
+  --color-bg-0: transparent;
+  --color-fg: var(--text-primary);
+  --color-muted: var(--text-secondary);
+  --color-subtle: var(--text-muted);
+  --color-hairline: var(--border-color-subtle);
+
+  /* Pigment names for rebuilt chrome. */
+  --color-page: var(--surface-page);
+  --color-sunken: var(--surface-sunken);
+  --color-hover-surface: var(--surface-hover);
+  --color-selected-surface: var(--surface-selected);
+  --color-code-surface: var(--surface-code);
+  --color-overlay: var(--surface-overlay);
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-placeholder: var(--text-placeholder);
+  --color-edge: var(--border-color-default);
+  --color-edge-subtle: var(--border-color-subtle);
+  --color-edge-strong: var(--border-color-strong);
+  --color-edge-selected: var(--border-color-selected);
+  --color-success: var(--status-success-fg);
+  --color-warning: var(--status-warning-fg);
+  --color-error: var(--status-error-fg);
+  --color-neutral-status: var(--status-neutral-fg);
+
+  --font-sans: 'DM Sans Variable', 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* §2.1B ties into the Tailwind scale where the two coincide: Tailwind's
+     text-sm (14/20) is pigment's text-base and text-xs (12/16) is pigment's
+     text-sm. text-2xs adds the 11px floor step. */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 15px;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
 @layer base {
   html {
-    /* Crisper type on macOS; no-op elsewhere. */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    /* Body copy avoids widow/orphan lines; headings get `balance`. */
     text-wrap: pretty;
-    /* Dynamic numbers (counters, hex columns) stay layout-stable. */
-    font-variant-numeric: tabular-nums;
     /* Reserve the scrollbar gutter so pages that don't scroll
-       horizontally-align with pages that do. Without this, content
-       jumps a few px when navigating from a short page to a tall one. */
+       horizontally-align with pages that do. */
     scrollbar-gutter: stable;
     font-family: var(--font-sans);
-    color: var(--color-fg);
-    background: var(--color-bg);
+    /* §2.1A: DM Sans's alternate figures (ss07) are on everywhere. */
+    font-feature-settings: 'ss07' 1;
+    color: var(--text-primary);
+    background: var(--surface-page);
   }
 
+  /* §2.1B: body default is text-base, 14/20. Set on body (not html) so rem
+     units keep their 16px root. */
+  body {
+    font-size: var(--t-base);
+    line-height: var(--t-base-leading);
+  }
+
+  /* §2.1D rule 2: all headers are semibold with -2% tracking. Sizes come
+     from the .ds-h* classes; the element rule carries what every header
+     shares, so demo headings inherit the voice too. */
   h1,
   h2,
-  h3 {
+  h3,
+  h4 {
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--header-tracking);
     text-wrap: balance;
-    /* Geist looks better a notch tighter than its 1.5 body default at
-       heading sizes. */
-    line-height: 1.15;
-    letter-spacing: -0.01em;
-    /* Offset in-page anchor jumps so the sticky header doesn't cover the
-       target heading (the "On this page" TOC links to these). */
-    scroll-margin-top: 5rem;
+    /* Breathing room on in-page anchor jumps; the masthead scrolls with the
+       page, so no chrome height to clear. */
+    scroll-margin-top: 1.5rem;
   }
 
-  /* Tailwind v4 Preflight no longer gives buttons a pointer cursor. Restore it
-     site-wide so every <button> (copy chips, tabs, Merkle nodes, demo controls)
-     reads as clickable; disabled ones fall back to not-allowed. */
+  /* §2.3H: selection is a token, not the UA default. */
+  ::selection {
+    background: var(--selection-bg);
+    color: var(--selection-fg);
+  }
+
+  /* §2.11 rules 1–3: 2px ring, 2px gap filled with focus-ring-offset,
+     keyboard focus only. Two stacked shadows rather than an outline offset,
+     so the gap is filled instead of showing the page through. */
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 var(--focus-ring-gap) var(--focus-ring-offset),
+      0 0 0 calc(var(--focus-ring-gap) + var(--focus-ring-width)) var(--focus-ring);
+  }
+
+  /* Tailwind v4 Preflight no longer gives buttons a pointer cursor. */
   button:not(:disabled),
   [role='button']:not([aria-disabled='true']) {
     cursor: pointer;
@@ -112,26 +441,19 @@
   pre,
   .font-mono {
     font-family: var(--font-mono);
+    /* §3.2 rule 4: DM Mono renders at weight-normal, always. */
+    font-weight: var(--weight-normal);
   }
 
-  /* Minimal scrollbar applied to every scrollable surface. Standard
-     `scrollbar-*` properties cover Firefox 64+, Chromium 121+, and
-     Safari 18.2+; the `::-webkit-scrollbar-*` block beneath is kept
-     for older WebKit (iOS < 18.2 etc.) and no-ops on Firefox. */
+  /* Minimal scrollbar applied to every scrollable surface. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-hairline) transparent;
+    scrollbar-color: var(--border-color-default) transparent;
   }
 
-  /* WebKit ignores `::-webkit-scrollbar-*` on native form controls
-     unless their appearance is reset — without this, `<textarea>`
-     falls back to the OS-native chrome scrollbar. Safari, iOS WebView,
-     and Chrome all require the override. Range inputs are deliberately
-     excluded: stripping their appearance hides the track + thumb
-     entirely (browsers need explicit ::-webkit-slider-* rules to
-     re-draw them), so we keep their native chrome. Checkboxes and
-     radios are excluded for the same reason — appearance:none leaves
-     them invisible without bespoke replacement styling. */
+  /* WebKit ignores `::-webkit-scrollbar-*` on native form controls unless
+     their appearance is reset. Range/checkbox/radio keep native chrome —
+     appearance:none leaves them invisible without bespoke styling. */
   textarea,
   select,
   input:not([type='range']):not([type='checkbox']):not([type='radio']) {
@@ -139,18 +461,15 @@
     appearance: none;
   }
 
-  /* The rule above strips the native <select> caret (appearance:none is needed
-     for the custom scrollbars). Draw our own chevron on the right of every
-     select so dropdowns always read as dropdowns. Selects leave room for it with
-     right padding (e.g. pr-7 / pr-9). */
+  /* Redraw the <select> caret that appearance:none strips. */
   select {
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23888888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%238a8a8a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
     background-size: 0.85rem;
   }
   [data-theme='dark'] select {
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23a3a3a3' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23676767' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
   }
 
   *::-webkit-scrollbar {
@@ -161,32 +480,41 @@
     background: transparent;
   }
   *::-webkit-scrollbar-thumb {
-    background-color: var(--color-hairline);
+    background-color: var(--border-color-default);
     border-radius: 999px;
   }
   *::-webkit-scrollbar-thumb:hover {
-    background-color: var(--color-muted);
+    background-color: var(--text-secondary);
   }
   *::-webkit-scrollbar-corner {
     background: transparent;
   }
 
-  /* `scrollbar-gutter: stable` reserves classic-scrollbar width
-     (~15px) even when `scrollbar-width: thin` is set, so leaving it on
-     textareas would waste horizontal space inside each input. Scope
-     the gutter reservation to the page only (html, above). */
+  /* Scope the page-level gutter reservation away from inner scrollers. */
   textarea,
   pre,
   [class*='overflow-'] {
     scrollbar-gutter: auto;
   }
 
-  /* Top-down Merkle tree using the classic ::before/::after CSS-tree
-     pattern. Each node carries a half-elbow on each side; first/last
-     children clip the outer half; the parent's own ::before draws the
-     stub up from the node into the row of elbows above. Hairline
-     `--color-hairline` keeps the connectors subtle so the coloured
-     squares remain the dominant signal. */
+  /* §2.9 rule 5: under a reduced-motion preference transitions are removed,
+     not shortened. Loops that say "the wait is live" (spinner, skeleton)
+     opt out with data-motion="essential" (§2.9 rule 6). */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition: none !important;
+    }
+    *:not([data-motion='essential']),
+    *:not([data-motion='essential'])::before,
+    *:not([data-motion='essential'])::after {
+      animation: none !important;
+    }
+  }
+
+  /* Top-down Merkle tree connectors (tree demo — untouched by the pigment
+     pass beyond routing its line colour through a token). */
   .merkle,
   .merkle ul {
     position: relative;
@@ -199,17 +527,13 @@
   .merkle ul {
     padding-top: 18px;
   }
-  /* Vertical stub from parent's node DOWN to the children's elbow row.
-     Sits inside the children-ul's padding-top, centred horizontally —
-     `display: flex; justify-content: center` puts the ul's centre on
-     the parent's centre, so this 1px line connects them cleanly. */
   .merkle ul::before {
     content: '';
     position: absolute;
     top: 0;
     left: 50%;
     height: 18px;
-    border-left: 1px solid var(--color-subtle);
+    border-left: 1px solid var(--border-color-default);
   }
   .merkle li {
     list-style: none;
@@ -224,7 +548,7 @@
     top: 0;
     height: 18px;
     width: 50%;
-    border-top: 1px solid var(--color-subtle);
+    border-top: 1px solid var(--border-color-default);
   }
   .merkle li::before {
     right: 50%;
@@ -243,20 +567,13 @@
   .merkle li:last-child::after {
     border: 0 none;
   }
-  /* Vertical stub from the elbow row down to each child square. The
-     button is `position: static` so this pseudo's containing block is
-     the LI — `top: 0` puts it at the elbow row, `height: 18px` ends
-     it exactly at the LI's padding-top edge, where the button (and
-     the square inside it) starts. Because the line is anchored to the
-     LI and not the button, the button's hover/active transforms can
-     scale the inner content without dragging the connector with it. */
   .merkle li > .merkle__node::before {
     content: '';
     position: absolute;
     top: 0;
     left: 50%;
     height: 18px;
-    border-left: 1px solid var(--color-subtle);
+    border-left: 1px solid var(--border-color-default);
   }
   .merkle > li {
     padding-top: 0;
@@ -269,11 +586,7 @@
     display: none;
   }
 
-  /* Floating-dock pop: panels in the bottom dock swap between a collapsed
-     circle and an expanded card by mounting/unmounting. A short scale+fade
-     entrance keeps that swap from being an instant jump — it plays in BOTH
-     directions because each side (card and circle) is a fresh mount. Honour
-     reduced-motion by skipping it. */
+  /* Floating-dock / reaction entrances (lobby demo — untouched). */
   @keyframes dock-pop-in {
     from {
       opacity: 0;
@@ -287,16 +600,6 @@
   .dock-pop-in {
     animation: dock-pop-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
   }
-  @media (prefers-reduced-motion: reduce) {
-    .dock-pop-in {
-      animation: none;
-    }
-  }
-
-  /* Reaction-pill entrance: a pill mounts when its emoji's FIRST reaction on
-     that target arrives (live over the socket), so a short scale+fade keeps
-     it from popping in — same rationale (and reduced-motion posture) as
-     .dock-pop-in above, tuned smaller/springier for a 24px pill. */
   @keyframes reaction-pop-in {
     from {
       opacity: 0;
@@ -310,21 +613,155 @@
   .reaction-pop-in {
     animation: reaction-pop-in 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
   }
-  @media (prefers-reduced-motion: reduce) {
-    .reaction-pop-in {
-      animation: none;
-    }
+}
+
+@layer components {
+  /* §2.1B type scale. */
+  .ds-h1 {
+    font-size: var(--t-lg);
+    line-height: var(--t-lg-leading);
+  }
+  .ds-h2 {
+    font-size: var(--t-md);
+    line-height: var(--t-md-leading);
+  }
+  .ds-h3 {
+    font-size: var(--t-base);
+    line-height: var(--t-base-leading);
   }
 
-  /* Utility for applying the brand gradient as text fill. Used on the
-     landing hero only — kept off secondary headings so the colour still
-     reads as an accent rather than a default. */
-  .text-gradient {
-    background-image: var(--gradient-v);
-    background-clip: text;
-    -webkit-background-clip: text;
-    color: transparent;
-    /* Preserve legibility for assistive tech and out-of-context views. */
-    -webkit-text-fill-color: transparent;
+  /* §3.5 rules 7–8: supplemental copy under a heading — one treatment
+     everywhere. The space-xs bind to its heading is the caller's. */
+  .ds-note {
+    font-size: var(--t-sm);
+    line-height: var(--t-sm-leading);
+    color: var(--text-secondary);
+    max-width: 68ch;
+  }
+
+  /* §2.1D rule 1: dotted underline at 3px offset / 1.5px thickness; solid on
+     hover; hue never moves. */
+  .ds-link {
+    color: var(--text-link);
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: var(--link-underline-offset);
+    text-decoration-thickness: var(--link-underline-thickness);
+  }
+  .ds-link:hover {
+    text-decoration-style: solid;
+  }
+
+  /* §2.2B: square dots — the separator under section headers and between
+     list rows. Drawn as a repeating gradient because border-style cannot
+     state a dash length. */
+  .rule-square {
+    background-image: linear-gradient(
+      to right,
+      var(--border-color-default) 0 var(--square-dash),
+      transparent var(--square-dash) var(--square-period)
+    );
+    background-repeat: repeat-x;
+    background-position: bottom left;
+    background-size: var(--square-period) var(--border-width-light);
+  }
+
+  /* §4.8 rules 1–3 shared by tables and lists (§4.9 rule 1): heavy solid
+     left border marking the start of the structure, light solid on the other
+     three sides, and §2.6 rule 1 elevation — shd-diffuse in light, a subtle
+     hairline in dark (outermost so it wraps the frame). */
+  .data-frame {
+    border-left: var(--border-width-heavy) solid var(--border-color-default);
+    border-top: var(--border-width-light) solid var(--border-color-default);
+    border-right: var(--border-width-light) solid var(--border-color-default);
+    border-bottom: var(--border-width-light) solid var(--border-color-default);
+    box-shadow:
+      var(--elevation-shadow),
+      0 0 0 var(--border-width-light) var(--elevation-hairline);
+    background: var(--surface-raised);
+  }
+  .data-frame > :not(:last-child) {
+    background-image: linear-gradient(
+      to right,
+      var(--border-color-default) 0 var(--square-dash),
+      transparent var(--square-dash) var(--square-period)
+    );
+    background-repeat: repeat-x;
+    background-position: bottom left;
+    background-size: var(--square-period) var(--border-width-light);
+  }
+
+  /* §4.24: outlined card — rounded-md, border-color-default hairline,
+     space-md padding. */
+  .card {
+    border-radius: var(--rounded-md);
+    border: var(--border-width-light) solid var(--border-color-default);
+    background: var(--surface-page);
+    padding: var(--space-md);
+  }
+
+  /* §4.29 code block: surface-code fill, solid light border, square corners,
+     mono at text-sm, space-sm padding. */
+  .code-region {
+    background: var(--surface-code);
+    border: var(--border-width-light) solid var(--border-color-default);
+    font-family: var(--font-mono);
+    font-size: var(--t-sm);
+    line-height: var(--t-sm-leading);
+    padding: var(--space-sm);
+  }
+
+  /* §4.1 buttons. Sizes per the table: default = text-base label, space-sm
+     horizontal, space-xs vertical; small = text-sm label, space-2xs
+     vertical. Radius rounded-sm at both sizes. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    border-radius: var(--rounded-sm);
+    font-size: var(--t-base);
+    line-height: var(--t-base-leading);
+    padding: var(--space-xs) var(--space-sm);
+    border: var(--border-width-light) solid transparent;
+    transition:
+      background-color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
+  }
+  .btn--small {
+    font-size: var(--t-sm);
+    line-height: var(--t-sm-leading);
+    padding: var(--space-2xs) var(--space-sm);
+  }
+  .btn--solid {
+    background: var(--action-primary-bg);
+    color: var(--action-primary-fg);
+  }
+  .btn--solid:hover {
+    background: var(--action-primary-bg-hover);
+  }
+  .btn--solid:active {
+    background: var(--action-primary-bg-active);
+  }
+  .btn--outlined {
+    background: var(--action-secondary-bg);
+    color: var(--action-secondary-fg);
+    border-color: var(--action-secondary-border);
+  }
+  .btn--outlined:hover {
+    background: var(--action-secondary-bg-hover);
+  }
+  .btn--outlined:active {
+    background: var(--action-secondary-bg-active);
+  }
+  .btn--ghost {
+    background: var(--action-ghost-bg);
+    color: var(--action-ghost-fg);
+  }
+  .btn--ghost:hover {
+    background: var(--action-ghost-bg-hover);
+  }
+  .btn--ghost:active {
+    background: var(--action-ghost-bg-active);
   }
 }

@@ -3,6 +3,7 @@
 import * as Tabs from '@radix-ui/react-tabs'
 import type { ComponentType, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
+import { NavCardButton } from './nav-card'
 import { AttestDemo } from './attest-demo'
 import { DemoBoundary } from './demo-boundary'
 import { HashDemo } from './hash-demo'
@@ -27,8 +28,8 @@ type Tab = {
 const TABS: Tab[] = [
   {
     id: 'hash',
-    label: 'hash',
-    title: 'What’s in a hash?',
+    label: 'Hash',
+    title: 'What’s in a Hash?',
     blurb: 'A hash is the name of some bytes — change one byte and the name changes completely.',
     body: (
       <>
@@ -40,8 +41,8 @@ const TABS: Tab[] = [
   },
   {
     id: 'tree',
-    label: 'tree',
-    title: 'Folders, all the way down',
+    label: 'Tree',
+    title: 'Folders, All the Way Down',
     blurb: 'Folders of hashes fold up into one Merkle root: file → folder → commit.',
     body: (
       <>
@@ -53,8 +54,8 @@ const TABS: Tab[] = [
   },
   {
     id: 'sign',
-    label: 'sign',
-    title: 'Who signed this?',
+    label: 'Sign',
+    title: 'Who Signed This?',
     blurb: 'Sign a message with an Ed25519 key; change a byte or the key and verification fails.',
     body: (
       <>
@@ -67,8 +68,8 @@ const TABS: Tab[] = [
   },
   {
     id: 'streaming',
-    label: 'streaming',
-    title: 'Verify gigabytes, one chunk at a time',
+    label: 'Streaming',
+    title: 'Verify Gigabytes, One Chunk at a Time',
     blurb: 'Content-defined chunking ships and verifies only the parts of a file that changed.',
     body: (
       <>
@@ -81,16 +82,16 @@ const TABS: Tab[] = [
   },
   {
     id: 'push',
-    label: 'push',
-    title: 'Push a file, any file',
+    label: 'Push',
+    title: 'Push a File, Any File',
     blurb: 'Split a file into hash-named chunks on push and send only the ones that changed.',
     body: <>When you push a file, mkit sends only what changed — not the whole file.</>,
     Demo: PushDemo,
   },
   {
     id: 'attest',
-    label: 'attest',
-    title: 'Statements, signed',
+    label: 'Attest',
+    title: 'Statements, Signed',
     blurb: 'A signed, first-class statement about a commit — reviewed, tested, deployed.',
     body: (
       <>
@@ -131,23 +132,27 @@ export function DemosTabs() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  // The three demos that follow the active one in tab order, wrapping around so
-  // the strip always offers three — "up next" rather than a static list.
+  // Every other concept, starting from the one after the active tab and
+  // wrapping — a complete list, so no concept reads as omitted by accident.
   const activeIndex = Math.max(
     0,
     TABS.findIndex((t) => t.id === active),
   )
-  const upNext = Array.from({ length: 3 }, (_, i) => TABS[(activeIndex + 1 + i) % TABS.length]!)
+  const upNext = Array.from({ length: TABS.length - 1 }, (_, i) => TABS[(activeIndex + 1 + i) % TABS.length]!)
 
   return (
     <div className='space-y-8'>
       <Tabs.Root value={active} onValueChange={onValueChange} className='space-y-8'>
-        <Tabs.List aria-label='Demos' className='flex flex-wrap gap-1 border-b border-hairline'>
+        <Tabs.List
+          aria-label='Demos'
+          className='flex flex-nowrap gap-0.5 overflow-x-auto border-b max-sm:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]'
+          style={{ borderColor: 'var(--border-color-subtle)' }}
+        >
           {TABS.map((t) => (
             <Tabs.Trigger
               key={t.id}
               value={t.id}
-              className='-mb-px border-b-2 border-transparent px-3 py-2 text-sm text-muted transition-colors hover:text-fg data-[state=active]:border-fg data-[state=active]:font-medium data-[state=active]:text-fg'
+              className='-mb-px shrink-0 border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary data-[state=active]:border-(--border-color-selected) data-[state=active]:font-medium data-[state=active]:text-primary'
             >
               {t.label}
             </Tabs.Trigger>
@@ -160,9 +165,9 @@ export function DemosTabs() {
           const Demo = t.Demo
           return (
             <Tabs.Content key={t.id} value={t.id} className='space-y-8 focus-visible:outline-none'>
-              <header className='space-y-3'>
-                <h1 className='text-4xl font-semibold tracking-tight'>{t.title}</h1>
-                <p className='max-w-prose text-base text-fg'>{t.body}</p>
+              <header>
+                <h1 className='ds-h1'>{t.title}</h1>
+                <p className='mt-2 max-w-prose'>{t.body}</p>
               </header>
               <DemoBoundary>
                 <Demo />
@@ -176,28 +181,11 @@ export function DemosTabs() {
       {/* "Up next" — the other demos on this page, starting from the one after
           the active tab (wrapping around). Switches tabs in place rather than
           navigating away. */}
-      <section className='space-y-4 pt-8'>
-        <h2 className='text-xl font-semibold tracking-tight'>More concepts to explore</h2>
-        <ul className='grid gap-4 sm:grid-cols-3'>
+      <section>
+        <h2 className='ds-h2 rule-square pb-2'>More Concepts to Explore</h2>
+        <ul className='mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3'>
           {upNext.map((t) => (
-            <li key={t.id}>
-              <button
-                type='button'
-                onClick={() => goToTab(t.id)}
-                className='group flex h-full w-full flex-col gap-1 rounded-md border border-hairline p-4 text-left transition-colors duration-300 hover:border-blue-500/50'
-              >
-                <span className='flex items-center justify-between text-base font-medium'>
-                  {t.label}
-                  <span
-                    aria-hidden
-                    className='text-sm transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:translate-x-0.5'
-                  >
-                    →
-                  </span>
-                </span>
-                <span className='text-sm text-muted'>{t.blurb}</span>
-              </button>
-            </li>
+            <NavCardButton key={t.id} onClick={() => goToTab(t.id)} title={t.label} body={t.blurb} />
           ))}
         </ul>
       </section>

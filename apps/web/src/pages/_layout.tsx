@@ -5,8 +5,8 @@ import { AgentationToolbar } from '../components/agentation-toolbar'
 import { Footer } from '../components/footer'
 import { Header } from '../components/header'
 import { MkitPreloader } from '../components/mkit-preloader'
-import { PointerTracker } from '../components/pointer-tracker'
 import { QueryProvider } from '../components/query-provider'
+import { SiteRail } from '../components/site-nav'
 
 type RootLayoutProps = { children: ReactNode }
 
@@ -14,27 +14,24 @@ export default async function RootLayout({ children }: RootLayoutProps) {
   const data = await getData()
 
   return (
-    <div>
+    <div className='flex min-h-dvh flex-col'>
       {/* Per-page <title>, description, and Open Graph / Twitter tags are set by
           <Seo> in each page (components/seo.tsx). */}
-      {/* The static/SSR favicon is the deterministic mkit grid mark (same seed
-          as the header GridLogo's SSR fallback); GridLogo then randomizes it
-          per load on the client. Previously this was the Waku ⛩️ default. */}
       <link rel='icon' type='image/svg+xml' href={data.icon} />
-      {/* Header and footer span edge-to-edge; the middle column lives
-          inside `<main>` so every page shares the same width. Pages
-          don't re-apply `max-w-*` themselves. */}
-      <PointerTracker />
       <MkitPreloader />
       <AgentationToolbar />
       <Header />
-      {/* Slightly wider container than editorial default (48rem →
-          64rem) so pages that benefit from a two-column layout have
-          room, while prose-heavy sections re-constrain themselves
-          via `max-w-prose` at the page level. */}
-      <main className='mx-auto w-full max-w-5xl px-6 pt-8 pb-24'>
-        <QueryProvider>{children}</QueryProvider>
-      </main>
+      {/* Polychrome's PageChrome shape: one central content column
+          (`--page-column`), with the primary nav hanging as a fixed rail in
+          the left page margin at wide viewports — outside the content measure
+          (§2.7, §4.27 rule 1) — and collapsing into the masthead trigger
+          below the rail breakpoint. */}
+      <SiteRail />
+      <div className='mx-auto w-full max-w-(--page-column) flex-1 px-6'>
+        <main className='min-w-0 pt-8 pb-24'>
+          <QueryProvider>{children}</QueryProvider>
+        </main>
+      </div>
       <Footer />
     </div>
   )
