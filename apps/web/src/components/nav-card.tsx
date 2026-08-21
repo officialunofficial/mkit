@@ -6,9 +6,10 @@ import { Link } from 'waku'
 
 /**
  * The one link-card construction (§4.24 rules 5–6): a title band — text-sm semibold, a step below the body copy, over a
- * solid light rule — and the body beneath it in text-primary. The title carries the dotted link mark, since the
- * underline is the system's only link signal (§2.1D rule 1, §4.3 rule 5); a trailing in-app arrow appears only when the
- * click changes location (§4.1 rules 7–8) — a card that swaps content in place carries none.
+ * solid light rule — and the body beneath it in text-primary. A card's title NEVER takes the link underline: the whole
+ * card is the control, and an underlined title reads as a second, smaller target inside it. The affordance is the
+ * trailing in-app arrow, which appears only when the click changes location (§4.1 rules 7–8) — a card that swaps
+ * content in place carries none.
  */
 function CardShell({
   title,
@@ -30,7 +31,7 @@ function CardShell({
         style={{ borderColor: 'var(--border-color-default)' }}
       >
         {icon}
-        <span className='ds-link'>{title}</span>
+        <span>{title}</span>
         {withArrow ? <ArrowRightIcon size={12} aria-hidden className='ml-auto text-secondary' /> : null}
       </span>
       <span className='block px-3 py-2 text-left'>{body}</span>
