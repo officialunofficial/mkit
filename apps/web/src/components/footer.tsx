@@ -18,7 +18,7 @@ function FooterLink({ href, children }: { href: string; children: ReactNode }) {
 export const Footer = () => {
   return (
     <footer>
-      <div className='mx-auto w-full max-w-6xl px-6'>
+      <div className='mx-auto w-full max-w-(--page-column) px-6'>
         {/* §4.25 rule 1: a separator between peer sections is solid light in
             border-color-default. */}
         <div className='border-t' style={{ borderColor: 'var(--border-color-default)' }} aria-hidden />

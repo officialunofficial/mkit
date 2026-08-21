@@ -65,12 +65,18 @@ export function NavList({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 /**
- * The wide-tier navigation rail: the offset left column of §2.7, outside the content measure. Below `wide` the nav
- * collapses to the masthead's trigger (§4.27 rule 7) and this rail is not rendered at all.
+ * The wide-tier navigation rail, built like polychrome's PageChrome sidebar: a fixed rail hanging in the page margin to
+ * the LEFT of the content column — outside the content measure (§2.7), so the column keeps its width whether the rail
+ * is there or not (§4.27 rule 10). Below the rail breakpoint the nav collapses to the masthead's trigger and this rail
+ * is not rendered at all.
  */
 export function SiteRail() {
   return (
-    <nav aria-label='Primary' className='sticky top-[57px] hidden self-start pt-8 text-[length:var(--t-base)] lg:block'>
+    <nav
+      aria-label='Primary'
+      className='fixed top-24 hidden w-40 min-[1440px]:block'
+      style={{ right: 'calc(50% + (var(--page-column) / 2) + 1rem)' }}
+    >
       <NavList />
     </nav>
   )

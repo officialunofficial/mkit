@@ -21,12 +21,13 @@ export default async function RootLayout({ children }: RootLayoutProps) {
       <MkitPreloader />
       <AgentationToolbar />
       <Header />
-      {/* §2.7 / §4.27: a central content column with an offset left column for
-          navigation at `wide` (≥1024px). The rail sits outside the content
-          measure; below `wide` it collapses to the masthead trigger and the
-          content takes the full width. */}
-      <div className='mx-auto grid w-full max-w-6xl flex-1 grid-cols-1 content-start px-6 lg:grid-cols-[10rem_minmax(0,1fr)] lg:gap-x-10'>
-        <SiteRail />
+      {/* Polychrome's PageChrome shape: one central content column
+          (`--page-column`), with the primary nav hanging as a fixed rail in
+          the left page margin at wide viewports — outside the content measure
+          (§2.7, §4.27 rule 1) — and collapsing into the masthead trigger
+          below the rail breakpoint. */}
+      <SiteRail />
+      <div className='mx-auto w-full max-w-(--page-column) flex-1 px-6'>
         <main className='min-w-0 pt-8 pb-24'>
           <QueryProvider>{children}</QueryProvider>
         </main>

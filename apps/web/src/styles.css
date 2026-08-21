@@ -164,7 +164,10 @@
   --overlay-shadow: var(--shd-overlay);
   --overlay-hairline: var(--border-color-default);
 
-  /* §2.7 layout */
+  /* §2.7 layout. The chrome, content, and footer all span this one central
+     column (polychrome's PageChrome construction); the nav and TOC rails
+     hang fixed in the page margins outside it. */
+  --page-column: 64rem;
   --grid-gutter: var(--space-md);
   --touch-target-min: 44px;
   --row-height-text: 24px;
@@ -402,9 +405,9 @@
     font-weight: var(--weight-semibold);
     letter-spacing: var(--header-tracking);
     text-wrap: balance;
-    /* Offset in-page anchor jumps so the sticky masthead doesn't cover the
-       target heading. */
-    scroll-margin-top: 5rem;
+    /* Breathing room on in-page anchor jumps; the masthead scrolls with the
+       page, so no chrome height to clear. */
+    scroll-margin-top: 1.5rem;
   }
 
   /* §2.3H: selection is a token, not the UA default. */
