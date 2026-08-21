@@ -44,7 +44,9 @@ export function OnThisPage() {
         found.push({ id: h.id, text })
       }
       setItems(found)
-      setActiveId('')
+      // §4.40 rule 4: exactly one item is current — before any scroll, that is
+      // the first section.
+      setActiveId(found[0]?.id ?? '')
 
       io?.disconnect()
       io = null

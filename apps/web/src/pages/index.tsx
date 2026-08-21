@@ -1,7 +1,7 @@
-import { ArrowRightIcon, FlaskIcon, GaugeIcon, GitDiffIcon, UsersThreeIcon } from '@phosphor-icons/react/ssr'
-import type { ComponentType } from 'react'
+import { ArrowUpRightIcon, FlaskIcon, GaugeIcon, GitDiffIcon, UsersThreeIcon } from '@phosphor-icons/react/ssr'
 import { Link } from 'waku'
 import { CopyButton } from '../components/copy-button'
+import { NavCardLink } from '../components/nav-card'
 import { DemoBoundary } from '../components/demo-boundary'
 import { SignedLobby } from '../components/lobby/signed-lobby'
 import { Seo } from '../components/seo'
@@ -34,7 +34,7 @@ export default function HomePage() {
           </p>
 
           <h2 className='ds-h2 rule-square mt-8 pb-2'>Get Started</h2>
-          <div className='mt-2 space-y-4'>
+          <div className='mt-2 space-y-6'>
             <div>
               <h3 className='ds-h3'>Install the CLI</h3>
               {/* Bare `mkit.sh` sniffs the curl User-Agent and serves the signed
@@ -52,8 +52,15 @@ export default function HomePage() {
             </div>
             <p className='ds-note'>
               Open source (alpha):{' '}
-              <a href='https://github.com/officialunofficial/mkit' target='_blank' rel='noreferrer' className='ds-link'>
+              <a
+                href='https://github.com/officialunofficial/mkit'
+                target='_blank'
+                rel='noreferrer'
+                className='ds-link inline-flex items-center gap-0.5'
+              >
                 officialunofficial/mkit
+                <ArrowUpRightIcon size={12} aria-hidden />
+                <span className='sr-only'>(opens in a new tab)</span>
               </a>{' '}
               on GitHub.
             </p>
@@ -74,28 +81,28 @@ export default function HomePage() {
       <section>
         <h2 className='ds-h2 rule-square pb-2'>Explore</h2>
         <ul className='mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2'>
-          <ExploreCard
+          <NavCardLink
             to='/concepts'
             title='Concepts'
-            Icon={FlaskIcon}
+            icon={<FlaskIcon size={12} aria-hidden />}
             body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
           />
-          <ExploreCard
+          <NavCardLink
             to='/performance'
             title='Performance'
-            Icon={GaugeIcon}
+            icon={<GaugeIcon size={12} aria-hidden />}
             body='Hashing, committing, packing — mkit measured against git on real operations.'
           />
-          <ExploreCard
+          <NavCardLink
             to='/parity'
             title='Parity'
-            Icon={GitDiffIcon}
+            icon={<GitDiffIcon size={12} aria-hidden />}
             body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
           />
-          <ExploreCard
+          <NavCardLink
             to='/multiplayer'
             title='Multiplayer'
-            Icon={UsersThreeIcon}
+            icon={<UsersThreeIcon size={12} aria-hidden />}
             body='Set up a passkey, sign a commit in your browser, and push to a shared repo — then watch everyone else’s commits arrive live.'
           />
         </ul>
@@ -106,57 +113,24 @@ export default function HomePage() {
 
 /**
  * A copyable shell command, rendered per §4.29: surface-code fill, solid light border, square corners, mono at text-sm.
- * The copy affordance sits after the value on the same line (§4.11 rule 7) and names what it copies.
+ * The copy control is the head band's trailing control (§4.29 rules 7–8) — a block with a copy control and no label
+ * still draws the band, so the control has somewhere to sit.
  */
 function InstallCommand({ command, label }: { command: string; label: string }) {
   return (
-    <div className='code-region mt-2 flex max-w-full items-center gap-3'>
-      <code className='overflow-x-auto whitespace-nowrap'>
+    <div className='code-region mt-2 max-w-full p-0'>
+      <div
+        className='flex items-center justify-between border-b px-2 py-1'
+        style={{ borderColor: 'var(--border-color-default)' }}
+      >
+        <span className='font-sans text-xs leading-4 font-semibold tracking-(--header-tracking)'>sh</span>
+        <CopyButton text={command} label={label} />
+      </div>
+      <code className='block overflow-x-auto px-2 py-1.5 whitespace-nowrap'>
         <span className='select-none text-secondary'>$ </span>
         {command}
       </code>
-      <span className='ml-auto inline-flex'>
-        <CopyButton text={command} label={label} />
-      </span>
     </div>
-  )
-}
-
-// `to` is narrowed to the concrete route literals Waku emits — a plain
-// `string` is too wide for Waku's typed Link.
-type ExploreRoute = '/concepts' | '/performance' | '/parity' | '/multiplayer'
-
-type IconComponent = ComponentType<{ size?: number; 'aria-hidden'?: boolean }>
-
-/**
- * An outlined card (§4.24) that navigates: icon and title on one line, the description under it, a trailing in-app
- * arrow (§4.1 rule 8) at the foot. Hover is a surface change at duration-fast — never a transform.
- */
-function ExploreCard({
-  to,
-  title,
-  body,
-  Icon,
-}: {
-  to: ExploreRoute
-  title: string
-  body: string
-  Icon: IconComponent
-}) {
-  return (
-    <li className='flex'>
-      <Link
-        to={to}
-        className='card flex w-full flex-col gap-1 transition-colors duration-(--duration-fast) ease-standard hover:bg-(--surface-hover)'
-      >
-        <span className='flex items-center gap-1 font-semibold tracking-(--header-tracking)'>
-          <Icon size={16} aria-hidden />
-          {title}
-        </span>
-        <span className='text-xs leading-4 text-secondary'>{body}</span>
-        <ArrowRightIcon size={16} aria-hidden className='mt-auto self-end text-secondary' />
-      </Link>
-    </li>
   )
 }
 

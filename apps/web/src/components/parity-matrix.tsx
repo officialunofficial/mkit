@@ -42,8 +42,8 @@ function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: s
         <StatusIcon status={status} />
       </span>
       <span className='sr-only'>{statusLabel(status)}: </span>
-      <p className='text-2xs'>
-        <code className='text-primary'>{cmd}</code> <span className='text-secondary'>{note}</span>
+      <p className='text-xs leading-4'>
+        <code>{cmd}</code> <span>{note}</span>
       </p>
     </div>
   )
@@ -51,9 +51,9 @@ function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: s
 
 function Category({ cat }: { cat: ParityCategory }) {
   return (
-    <section className='mb-6 break-inside-avoid'>
-      <h2 className='ds-h3'>{cat.name}</h2>
-      {cat.blurb ? <p className='ds-note mt-1 text-xs leading-4'>{cat.blurb}</p> : null}
+    <section>
+      <h2 className='ds-h2 rule-square pb-2'>{cat.name}</h2>
+      {cat.blurb ? <p className='ds-note mt-1'>{cat.blurb}</p> : null}
       <div className='data-frame mt-2'>
         {cat.items.map((item) => (
           <Row key={item.cmd} cmd={item.cmd} status={item.status} note={item.note} />
@@ -66,7 +66,7 @@ function Category({ cat }: { cat: ParityCategory }) {
 function NoteBlock({ label, body }: { label: string; body: string }) {
   return (
     <div className='px-2 py-1.5 text-xs leading-4'>
-      <span className='font-medium text-primary'>{label}.</span> <span className='text-secondary'>{body}</span>
+      <span className='font-medium'>{label}.</span> <span>{body}</span>
     </div>
   )
 }
@@ -78,26 +78,26 @@ function NoteBlock({ label, body }: { label: string; body: string }) {
 export function ParityMatrix() {
   return (
     <div className='space-y-8'>
-      <div className='flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs leading-4 text-secondary'>
+      <div className='grid grid-cols-1 gap-1.5 text-xs leading-4 sm:grid-cols-3 sm:gap-3'>
         {legend.map((l) => (
-          <span key={l.status} className='inline-flex items-center gap-1'>
-            <StatusIcon status={l.status} />
-            <span className='font-medium text-primary'>{l.label}</span>
-            <span>{l.meaning}</span>
+          <span key={l.status} className='inline-flex items-start gap-1'>
+            <span className='flex h-4 shrink-0 items-center'>
+              <StatusIcon status={l.status} />
+            </span>
+            <span>
+              <span className='font-medium'>{l.label}</span> <span className='text-secondary'>{l.meaning}</span>
+            </span>
           </span>
         ))}
       </div>
 
-      <div className='gap-x-10 lg:columns-2'>
+      <div className='space-y-8'>
         {categories.map((cat) => (
           <Category key={cat.name} cat={cat} />
         ))}
       </div>
 
-      <div
-        className='grid grid-cols-1 gap-x-10 gap-y-6 border-t pt-8 lg:grid-cols-2'
-        style={{ borderColor: 'var(--border-color-default)' }}
-      >
+      <div className='space-y-8 border-t pt-8' style={{ borderColor: 'var(--border-color-default)' }}>
         <section>
           <h2 className='ds-h2 rule-square pb-2'>Different, and Permanent</h2>
           <p className='ds-note mt-1'>

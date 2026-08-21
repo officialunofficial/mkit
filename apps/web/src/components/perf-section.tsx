@@ -5,11 +5,11 @@ import { labelColor } from '../lib/hash-color'
 import { methodology, sizeBenchmarks, timingBenchmarks, transferBenchmarks } from '../lib/perf-data'
 import type { SizeBenchmark, Theme, TimingBenchmark, TransferBenchmark } from '../lib/perf-data'
 
-/** `13.4628 → "13.5 s"`, `0.3108 → "311 ms"`, `0.0134 → "13.4 ms"`. Sub-second values read better in ms. */
+/** `13.4628 → "13.5s"`, `0.3108 → "311ms"`, `0.0134 → "13.4ms"`. Sub-second values read better in ms. */
 function fmtSeconds(s: number): string {
-  if (s >= 10) return `${s.toFixed(1)} s`
-  if (s >= 1) return `${s.toFixed(2)} s`
-  return `${(s * 1000).toFixed(s >= 0.1 ? 0 : 1)} ms`
+  if (s >= 10) return `${s.toFixed(1)}s`
+  if (s >= 1) return `${s.toFixed(2)}s`
+  return `${(s * 1000).toFixed(s >= 0.1 ? 0 : 1)}ms`
 }
 
 /** `105036 → "102.6 MiB"`, `1148 → "1.1 MiB"`, `92 → "92 KiB"`. Sizes come from `du -k` so the base unit is KiB. */
@@ -72,14 +72,14 @@ function TimingBlock({ b }: { b: TimingBenchmark }) {
     <div className='space-y-3 px-3 py-4'>
       <div className='flex items-baseline justify-between gap-4'>
         <h4 className='text-sm font-semibold'>{b.name}</h4>
-        <span className='shrink-0 text-xs text-muted'>{speedupLabel(b.mkit.mean, b.git.mean)}</span>
+        <span className='shrink-0 text-xs font-medium'>{speedupLabel(b.mkit.mean, b.git.mean)}</span>
       </div>
-      <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
+      <p className='max-w-prose text-sm'>{b.description}</p>
       <div className='space-y-1.5'>
         <Bar label='mkit' value={b.mkit.mean} max={max} display={fmtSeconds(b.mkit.mean)} color={labelColor(b.id)} />
         <Bar label='git' value={b.git.mean} max={max} display={fmtSeconds(b.git.mean)} />
       </div>
-      {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
+      {b.note ? <p className='max-w-prose text-xs leading-4'>{b.note}</p> : null}
     </div>
   )
 }
@@ -89,12 +89,12 @@ function SizeBlock({ b }: { b: SizeBenchmark }) {
   return (
     <div className='space-y-3 px-3 py-4'>
       <h4 className='text-sm font-semibold'>{b.name}</h4>
-      <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
+      <p className='max-w-prose text-sm'>{b.description}</p>
       <div className='space-y-1.5'>
         <Bar label='mkit' value={b.mkitKiB} max={max} display={fmtKiB(b.mkitKiB)} color={labelColor(b.id)} />
         <Bar label='git' value={b.gitKiB} max={max} display={fmtKiB(b.gitKiB)} />
       </div>
-      {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
+      {b.note ? <p className='max-w-prose text-xs leading-4'>{b.note}</p> : null}
     </div>
   )
 }
@@ -106,14 +106,14 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
     <div className='space-y-3 px-3 py-4'>
       <div className='flex items-baseline justify-between gap-4'>
         <h4 className='text-sm font-semibold'>{b.name}</h4>
-        <span className='shrink-0 text-xs text-muted'>{ratio.toFixed(0)}× smaller push</span>
+        <span className='shrink-0 text-xs font-medium'>{ratio.toFixed(0)}× smaller push</span>
       </div>
-      <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
+      <p className='max-w-prose text-sm'>{b.description}</p>
       <div className='space-y-1.5'>
         <Bar label='whole' value={b.wholeChunkBytes} max={max} display={fmtBytes(b.wholeChunkBytes)} />
         <Bar label='delta' value={b.deltaBytes} max={max} display={fmtBytes(b.deltaBytes)} color={labelColor(b.id)} />
       </div>
-      {b.note ? <p className='max-w-prose text-xs text-muted'>{b.note}</p> : null}
+      {b.note ? <p className='max-w-prose text-xs leading-4'>{b.note}</p> : null}
     </div>
   )
 }
@@ -124,9 +124,9 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
  */
 function MeasureGroup({ heading, hint, children }: { heading: string; hint: ReactNode; children: ReactNode }) {
   return (
-    <div className='space-y-1'>
-      <h3 className='text-xs leading-4 font-medium text-secondary'>{heading}</h3>
-      <p className='max-w-prose text-sm text-subtle'>{hint}</p>
+    <div>
+      <h3 className='ds-h3'>{heading}</h3>
+      <p className='ds-note mt-1'>{hint}</p>
       <div className='data-frame mt-2'>{children}</div>
     </div>
   )
@@ -152,6 +152,18 @@ const THEMES: Record<Theme, { title: string; blurb: string }> = {
   },
 }
 
+/** One §4.9 key–value row: key column at a shared width, value wrapping beside it. */
+function MethodologyRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className='grid grid-cols-[6rem_minmax(0,1fr)] px-2 py-1.5'>
+      <dt className='border-r pr-2 font-medium text-secondary' style={{ borderColor: 'var(--border-color-subtle)' }}>
+        {label}
+      </dt>
+      <dd className='min-w-0 pl-2'>{children}</dd>
+    </div>
+  )
+}
+
 /**
  * Static benchmark comparison: every number was measured once on a real machine (see `perf-data.ts` for the exact
  * commands) and baked in at build time. Bars are plain divs — lower is better everywhere, and git's wins are shown as
@@ -173,7 +185,7 @@ export function PerfSection() {
             </div>
             {timings.length > 0 ? (
               <MeasureGroup
-                heading='Time, end to end'
+                heading='Time, End to End'
                 hint='Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.'
               >
                 {timings.map((b) => (
@@ -183,7 +195,7 @@ export function PerfSection() {
             ) : null}
             {sizes.length > 0 ? (
               <MeasureGroup
-                heading='Bytes on disk'
+                heading='Bytes on Disk'
                 hint={
                   <>
                     Repository directory size (<code className='font-mono text-xs'>du -k .mkit</code> vs{' '}
@@ -198,7 +210,7 @@ export function PerfSection() {
             ) : null}
             {transfers.length > 0 ? (
               <MeasureGroup
-                heading='Bytes on the wire'
+                heading='Bytes on the Wire'
                 hint={
                   <>
                     What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the
@@ -217,18 +229,22 @@ export function PerfSection() {
       })}
 
       <section className='space-y-3'>
-        <h2 className='ds-h2 rule-square pb-2'>Methodology &amp; Caveats</h2>
-        <dl className='space-y-1 font-mono text-xs text-muted'>
-          <div>date: {methodology.date}</div>
-          <div>commit: {methodology.commit.slice(0, 8)}</div>
-          <div>machine: {methodology.machine}</div>
-          <div>versions: {methodology.versions}</div>
-          <div>harness: {methodology.harness}</div>
-          <div>workload: {methodology.workload}</div>
+        <h2 className='ds-h2 rule-square pb-2'>Methodology and Caveats</h2>
+        <dl className='data-frame text-xs leading-4'>
+          <MethodologyRow label='Date'>{methodology.date}</MethodologyRow>
+          <MethodologyRow label='Commit'>
+            <code>{methodology.commit.slice(0, 8)}</code>
+          </MethodologyRow>
+          <MethodologyRow label='Machine'>{methodology.machine}</MethodologyRow>
+          <MethodologyRow label='Versions'>{methodology.versions}</MethodologyRow>
+          <MethodologyRow label='Harness'>{methodology.harness}</MethodologyRow>
+          <MethodologyRow label='Workload'>{methodology.workload}</MethodologyRow>
         </dl>
-        <ul className='max-w-prose list-disc space-y-1.5 pl-4 text-xs text-muted'>
+        <ul className='data-frame text-xs leading-4'>
           {methodology.caveats.map((c) => (
-            <li key={c}>{c}</li>
+            <li key={c} className='max-w-prose px-2 py-1.5'>
+              {c}
+            </li>
           ))}
         </ul>
         <Collapsible.Root className='text-xs leading-4 text-secondary'>

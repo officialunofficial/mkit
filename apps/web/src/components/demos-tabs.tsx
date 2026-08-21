@@ -3,6 +3,7 @@
 import * as Tabs from '@radix-ui/react-tabs'
 import type { ComponentType, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
+import { NavCardButton } from './nav-card'
 import { AttestDemo } from './attest-demo'
 import { DemoBoundary } from './demo-boundary'
 import { HashDemo } from './hash-demo'
@@ -144,7 +145,7 @@ export function DemosTabs() {
       <Tabs.Root value={active} onValueChange={onValueChange} className='space-y-8'>
         <Tabs.List
           aria-label='Demos'
-          className='flex flex-nowrap gap-0.5 overflow-x-auto border-b'
+          className='flex flex-nowrap gap-0.5 overflow-x-auto border-b max-sm:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]'
           style={{ borderColor: 'var(--border-color-subtle)' }}
         >
           {TABS.map((t) => (
@@ -180,20 +181,11 @@ export function DemosTabs() {
       {/* "Up next" — the other demos on this page, starting from the one after
           the active tab (wrapping around). Switches tabs in place rather than
           navigating away. */}
-      <section className='pt-8'>
+      <section>
         <h2 className='ds-h2 rule-square pb-2'>More Concepts to Explore</h2>
         <ul className='mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3'>
           {upNext.map((t) => (
-            <li key={t.id} className='flex'>
-              <button
-                type='button'
-                onClick={() => goToTab(t.id)}
-                className='card flex w-full flex-col gap-1 text-left transition-colors duration-(--duration-fast) ease-standard hover:bg-(--surface-hover)'
-              >
-                <span className='font-semibold tracking-(--header-tracking)'>{t.label}</span>
-                <span className='text-xs leading-4 text-secondary'>{t.blurb}</span>
-              </button>
-            </li>
+            <NavCardButton key={t.id} onClick={() => goToTab(t.id)} title={t.label} body={t.blurb} />
           ))}
         </ul>
       </section>

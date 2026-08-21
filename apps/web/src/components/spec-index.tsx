@@ -1,3 +1,4 @@
+import { ArrowUpRightIcon } from '@phosphor-icons/react/ssr'
 import { categories, specUrl } from '../lib/spec-data'
 import type { SpecCategory, SpecItem } from '../lib/spec-data'
 
@@ -9,12 +10,19 @@ function Row({ item }: { item: SpecItem }) {
   return (
     <div className='px-2 py-1.5'>
       <p className='text-xs leading-4'>
-        <a href={specUrl(item.name)} target='_blank' rel='noreferrer' className='ds-link font-mono'>
+        <a
+          href={specUrl(item.name)}
+          target='_blank'
+          rel='noreferrer'
+          className='ds-link font-mono inline-flex items-center gap-0.5'
+        >
           {item.name}
+          <ArrowUpRightIcon size={12} aria-hidden className='text-secondary' />
+          <span className='sr-only'>(opens in a new tab)</span>
         </a>{' '}
-        <span className='font-mono text-2xs text-secondary'>{item.status}</span>
+        <span className='font-mono'>{item.status}</span>
       </p>
-      <p className='mt-0.5 max-w-prose text-xs leading-4 text-secondary'>{item.description}</p>
+      <p className='mt-0.5 max-w-prose text-xs leading-4'>{item.description}</p>
     </div>
   )
 }
@@ -42,7 +50,7 @@ function Category({ cat }: { cat: SpecCategory }) {
 export function SpecIndex() {
   return (
     <div className='space-y-8'>
-      <p className='max-w-prose text-xs leading-4 text-secondary'>
+      <p className='max-w-prose text-xs leading-4'>
         Each status token comes verbatim from the document&rsquo;s front matter and combines two axes (defined in
         SPEC-CONVENTIONS): maturity &mdash; <code className='text-primary'>draft</code> behavior is still changing or
         has a called-out gap, <code className='text-primary'>stable</code> behavior changes only with a version bump
