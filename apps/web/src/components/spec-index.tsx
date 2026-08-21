@@ -50,7 +50,7 @@ function Category({ cat }: { cat: SpecCategory }) {
 export function SpecIndex() {
   return (
     <div className='space-y-8'>
-      <p className='max-w-prose text-xs leading-4'>
+      <p className='max-w-prose'>
         Each status token comes verbatim from the document&rsquo;s front matter and combines two axes (defined in
         SPEC-CONVENTIONS): maturity &mdash; <code className='text-primary'>draft</code> behavior is still changing or
         has a called-out gap, <code className='text-primary'>stable</code> behavior changes only with a version bump

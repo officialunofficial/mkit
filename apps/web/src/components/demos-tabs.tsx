@@ -132,13 +132,13 @@ export function DemosTabs() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  // The three demos that follow the active one in tab order, wrapping around so
-  // the strip always offers three — "up next" rather than a static list.
+  // Every other concept, starting from the one after the active tab and
+  // wrapping — a complete list, so no concept reads as omitted by accident.
   const activeIndex = Math.max(
     0,
     TABS.findIndex((t) => t.id === active),
   )
-  const upNext = Array.from({ length: 3 }, (_, i) => TABS[(activeIndex + 1 + i) % TABS.length]!)
+  const upNext = Array.from({ length: TABS.length - 1 }, (_, i) => TABS[(activeIndex + 1 + i) % TABS.length]!)
 
   return (
     <div className='space-y-8'>

@@ -139,7 +139,7 @@ function MeasureGroup({ heading, hint, children }: { heading: string; hint: Reac
  */
 const THEMES: Record<Theme, { title: string; blurb: string }> = {
   'large-files': {
-    title: 'Large Files & Media',
+    title: 'Large Files and Media',
     blurb:
       'The workload mkit is built for: big, incompressible files and small edits to them. Content-defined chunking ' +
       'means a small edit costs the changed chunk, not the whole file — on disk, on the wire, and in wall-clock time.',
@@ -150,6 +150,13 @@ const THEMES: Record<Theme, { title: string; blurb: string }> = {
       'The routine git operations on ordinary trees, where the honest verdict is roughly even. mkit keeps pace while ' +
       'signing every commit and flushing every object to disk, neither of which git does by default.',
   },
+}
+
+/** `"2026-07-08" → "Jul 8, 2026"` — §3.1 rules 1 and 3: timestamps render human-friendly and carry the year. */
+function fmtDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${months[(m ?? 1) - 1]} ${d}, ${y}`
 }
 
 /** One §4.9 key–value row: key column at a shared width, value wrapping beside it. */
@@ -231,7 +238,7 @@ export function PerfSection() {
       <section className='space-y-3'>
         <h2 className='ds-h2 rule-square pb-2'>Methodology and Caveats</h2>
         <dl className='data-frame text-xs leading-4'>
-          <MethodologyRow label='Date'>{methodology.date}</MethodologyRow>
+          <MethodologyRow label='Date'>{fmtDate(methodology.date)}</MethodologyRow>
           <MethodologyRow label='Commit'>
             <code>{methodology.commit.slice(0, 8)}</code>
           </MethodologyRow>

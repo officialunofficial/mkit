@@ -23,6 +23,14 @@ function StatusIcon({ status }: { status: ParityStatus }) {
   }
 }
 
+/**
+ * §3.2 rule 10: an identifier named in prose renders as inline code. Notes arrive as prose with backtick spans; render
+ * them as mono instead of shipping the backticks.
+ */
+function renderInlineCode(text: string) {
+  return text.split('`').map((part, i) => (i % 2 === 1 ? <code key={i}>{part}</code> : part))
+}
+
 function statusLabel(s: ParityStatus): string {
   switch (s) {
     case 'parity':
@@ -38,12 +46,12 @@ function statusLabel(s: ParityStatus): string {
 function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: string }) {
   return (
     <div className='flex items-start gap-1 px-2 py-1.5'>
-      <span className='flex h-4 shrink-0 items-center'>
+      <span className='flex h-4 shrink-0 items-center' title={statusLabel(status)}>
         <StatusIcon status={status} />
       </span>
       <span className='sr-only'>{statusLabel(status)}: </span>
       <p className='text-xs leading-4'>
-        <code>{cmd}</code> <span>{note}</span>
+        <code>{cmd}</code> <span>{renderInlineCode(note)}</span>
       </p>
     </div>
   )
@@ -99,7 +107,7 @@ export function ParityMatrix() {
 
       <div className='space-y-8 border-t pt-8' style={{ borderColor: 'var(--border-color-default)' }}>
         <section>
-          <h2 className='ds-h2 rule-square pb-2'>Different, and Permanent</h2>
+          <h2 className='ds-h2 rule-square pb-2'>Different and Permanent</h2>
           <p className='ds-note mt-1'>
             These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
           </p>

@@ -40,7 +40,7 @@ export default function HomePage() {
               {/* Bare `mkit.sh` sniffs the curl User-Agent and serves the signed
                   installer (see src/install-route.ts). */}
               <InstallCommand command='curl mkit.sh | sh' label='Copy CLI install command' />
-              <p className='ds-note mt-2'>
+              <p className='mt-2 max-w-prose text-xs leading-4'>
                 Detects your platform, verifies the cosign signature, and drops <code>mkit</code> into{' '}
                 <code>~/.local/bin</code>.
               </p>
@@ -48,7 +48,9 @@ export default function HomePage() {
             <div>
               <h3 className='ds-h3'>Add the Agent Skill</h3>
               <InstallCommand command='npx skills add officialunofficial/mkit' label='Copy skill install command' />
-              <p className='ds-note mt-2'>Teaches Claude Code, Cursor, and other coding agents to drive mkit.</p>
+              <p className='mt-2 max-w-prose text-xs leading-4'>
+                Teaches Claude Code, Cursor, and other coding agents to drive mkit.
+              </p>
             </div>
             <p className='ds-note'>
               Open source (alpha):{' '}
