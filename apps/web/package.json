@@ -51,7 +51,6 @@
     "mkit-repo-client": "workspace:*",
     "mkit-repo-proto": "workspace:*",
     "mkit-wasm": "workspace:*",
-    "ox": "^1.0.3",
     "react": "~19.2.7",
     "react-dom": "~19.2.7",
     "react-server-dom-webpack": "~19.2.7",
