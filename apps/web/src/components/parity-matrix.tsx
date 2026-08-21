@@ -82,25 +82,34 @@ function NoteBlock({ label, body }: { label: string; body: string }) {
 }
 
 /**
- * Static mkit-vs-git parity matrix: a legend, command categories, the two permanent (BLAKE3-inherent) divergences, and
- * the deliberate safety divergences. Categories flow into two columns on wide screens.
+ * The status legend as a vertical stack — rendered beside the page intro (copy 4 of the 6 root columns, legend the
+ * other 2).
+ */
+export function ParityLegend() {
+  return (
+    <div className='space-y-1.5 text-xs leading-4'>
+      {legend.map((l) => (
+        <span key={l.status} className='flex items-start gap-1'>
+          <span className='flex h-4 shrink-0 items-center'>
+            <StatusIcon status={l.status} />
+          </span>
+          <span>
+            <span className='font-medium'>{l.label}</span> <span className='text-secondary'>{l.meaning}</span>
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Static mkit-vs-git parity matrix: command categories, the two permanent (BLAKE3-inherent) divergences, and the
+ * deliberate safety divergences. Categories flow into two columns on wide screens; the legend renders separately in the
+ * page header (ParityLegend).
  */
 export function ParityMatrix() {
   return (
     <div className='space-y-8'>
-      <div className='grid grid-cols-1 gap-1.5 text-xs leading-4 sm:grid-cols-3 sm:gap-3'>
-        {legend.map((l) => (
-          <span key={l.status} className='inline-flex items-start gap-1'>
-            <span className='flex h-4 shrink-0 items-center'>
-              <StatusIcon status={l.status} />
-            </span>
-            <span>
-              <span className='font-medium'>{l.label}</span> <span className='text-secondary'>{l.meaning}</span>
-            </span>
-          </span>
-        ))}
-      </div>
-
       <div className='gap-x-10 lg:columns-2'>
         {categories.map((cat) => (
           <Category key={cat.name} cat={cat} />

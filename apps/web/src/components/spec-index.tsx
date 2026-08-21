@@ -22,14 +22,14 @@ function Row({ item }: { item: SpecItem }) {
         </a>{' '}
         <span className='font-mono'>{item.status}</span>
       </p>
-      <p className='mt-0.5 max-w-prose text-xs leading-4'>{item.description}</p>
+      <p className='mt-0.5 max-w-prose text-xs leading-4 text-secondary'>{item.description}</p>
     </div>
   )
 }
 
 function Category({ cat }: { cat: SpecCategory }) {
   return (
-    <section>
+    <section className='mb-6 break-inside-avoid'>
       <div className='rule-square pb-2'>
         <h2 className='ds-h2'>{cat.name}</h2>
         <p className='ds-note mt-1'>{cat.blurb}</p>
@@ -59,9 +59,11 @@ export function SpecIndex() {
         &mdash; and bindingness &mdash; <code className='text-primary'>normative</code> means interop depends on
         conforming, <code className='text-primary'>advisory</code> means local-only guidance.
       </p>
-      {categories.map((cat) => (
-        <Category key={cat.name} cat={cat} />
-      ))}
+      <div className='gap-x-10 lg:columns-2'>
+        {categories.map((cat) => (
+          <Category key={cat.name} cat={cat} />
+        ))}
+      </div>
     </div>
   )
 }
