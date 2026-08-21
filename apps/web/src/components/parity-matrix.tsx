@@ -51,7 +51,7 @@ function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: s
       </span>
       <span className='sr-only'>{statusLabel(status)}: </span>
       <p className='text-xs leading-4'>
-        <code>{cmd}</code> <span>{renderInlineCode(note)}</span>
+        <code>{cmd}</code> <span className='text-secondary'>{renderInlineCode(note)}</span>
       </p>
     </div>
   )
@@ -59,9 +59,11 @@ function Row({ cmd, status, note }: { cmd: string; status: ParityStatus; note: s
 
 function Category({ cat }: { cat: ParityCategory }) {
   return (
-    <section>
-      <h2 className='ds-h2 rule-square pb-2'>{cat.name}</h2>
-      {cat.blurb ? <p className='ds-note mt-1'>{cat.blurb}</p> : null}
+    <section className='mb-6 break-inside-avoid'>
+      <div className='rule-square pb-2'>
+        <h2 className='ds-h2'>{cat.name}</h2>
+        {cat.blurb ? <p className='ds-note mt-1'>{cat.blurb}</p> : null}
+      </div>
       <div className='data-frame mt-2'>
         {cat.items.map((item) => (
           <Row key={item.cmd} cmd={item.cmd} status={item.status} note={item.note} />
@@ -99,18 +101,23 @@ export function ParityMatrix() {
         ))}
       </div>
 
-      <div className='space-y-8'>
+      <div className='gap-x-10 lg:columns-2'>
         {categories.map((cat) => (
           <Category key={cat.name} cat={cat} />
         ))}
       </div>
 
-      <div className='space-y-8 border-t pt-8' style={{ borderColor: 'var(--border-color-default)' }}>
+      <div
+        className='grid grid-cols-1 gap-x-10 gap-y-6 border-t pt-8 lg:grid-cols-2'
+        style={{ borderColor: 'var(--border-color-default)' }}
+      >
         <section>
-          <h2 className='ds-h2 rule-square pb-2'>Different and Permanent</h2>
-          <p className='ds-note mt-1'>
-            These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
-          </p>
+          <div className='rule-square pb-2'>
+            <h2 className='ds-h2'>Different and Permanent</h2>
+            <p className='ds-note mt-1'>
+              These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
+            </p>
+          </div>
           <div className='data-frame mt-2'>
             {inherentDivergences.map((n) => (
               <NoteBlock key={n.label} label={n.label} body={n.body} />
@@ -119,8 +126,12 @@ export function ParityMatrix() {
         </section>
 
         <section>
-          <h2 className='ds-h2 rule-square pb-2'>Safer Than Git</h2>
-          <p className='ds-note mt-1'>Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.</p>
+          <div className='rule-square pb-2'>
+            <h2 className='ds-h2'>Safer Than Git</h2>
+            <p className='ds-note mt-1'>
+              Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.
+            </p>
+          </div>
           <div className='data-frame mt-2'>
             {safetyDivergences.map((n) => (
               <NoteBlock key={n.label} label={n.label} body={n.body} />

@@ -30,8 +30,10 @@ function Row({ item }: { item: SpecItem }) {
 function Category({ cat }: { cat: SpecCategory }) {
   return (
     <section>
-      <h2 className='ds-h2 rule-square pb-2'>{cat.name}</h2>
-      <p className='ds-note mt-1'>{cat.blurb}</p>
+      <div className='rule-square pb-2'>
+        <h2 className='ds-h2'>{cat.name}</h2>
+        <p className='ds-note mt-1'>{cat.blurb}</p>
+      </div>
       {/* §4.9: a list shares the table's border grammar — heavy left border,
           light frame, square-dot row separators. */}
       <div className='data-frame mt-2'>

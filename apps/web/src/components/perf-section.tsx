@@ -186,8 +186,8 @@ export function PerfSection() {
         const transfers = transferBenchmarks.filter((b) => b.theme === key)
         return (
           <section key={key} className='space-y-4'>
-            <div>
-              <h2 className='ds-h2 rule-square pb-2'>{title}</h2>
+            <div className='rule-square pb-2'>
+              <h2 className='ds-h2'>{title}</h2>
               <p className='ds-note mt-1'>{blurb}</p>
             </div>
             {timings.length > 0 ? (
