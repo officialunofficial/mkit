@@ -12,7 +12,7 @@ export function WithToc({ children }: { children: ReactNode }) {
       <div className='min-w-0'>{children}</div>
       <aside
         className='fixed top-24 hidden w-40 min-[1440px]:block'
-        style={{ left: 'calc(50% + (var(--page-column) / 2) + 1rem)' }}
+        style={{ left: 'calc(50% + (var(--page-column) / 2) + 2rem)' }}
       >
         <OnThisPage />
       </aside>

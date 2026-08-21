@@ -24,12 +24,13 @@ const NAV_LINKS: ReadonlyArray<{ to: NavRoute; label: string; Icon: IconComponen
  * weight-medium, text-primary, a filled icon, and a medium left border in border-color-selected — never a fill — and
  * per rule 5 it is not a link.
  */
-export function NavList({ onNavigate }: { onNavigate?: () => void }) {
+export function NavList({ onNavigate, dense = false }: { onNavigate?: () => void; dense?: boolean }) {
   const router = useRouter()
   const current = router.path
+  const rowClass = dense ? 'py-0.5' : 'min-h-11'
 
   return (
-    <ul>
+    <ul className='space-y-0.5'>
       {NAV_LINKS.map(({ to, label, Icon }) => {
         const active = current === to
         const inner = (
@@ -43,7 +44,7 @@ export function NavList({ onNavigate }: { onNavigate?: () => void }) {
             {active ? (
               <span
                 aria-current='page'
-                className='flex items-center gap-1 border-l-2 py-1.5 pl-2.5 font-medium text-primary'
+                className={`flex items-center gap-1 border-l-2 pl-2 font-medium text-primary ${rowClass}`}
                 style={{ borderColor: 'var(--border-color-selected)' }}
               >
                 {inner}
@@ -52,7 +53,7 @@ export function NavList({ onNavigate }: { onNavigate?: () => void }) {
               <Link
                 to={to}
                 onClick={onNavigate}
-                className='flex items-center gap-1 border-l-2 border-transparent py-1.5 pl-2.5 text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary'
+                className={`flex items-center gap-1 border-l-2 border-transparent pl-2 text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary ${rowClass}`}
               >
                 {inner}
               </Link>
@@ -75,9 +76,9 @@ export function SiteRail() {
     <nav
       aria-label='Primary'
       className='fixed top-24 hidden w-40 min-[1440px]:block'
-      style={{ right: 'calc(50% + (var(--page-column) / 2) + 1rem)' }}
+      style={{ right: 'calc(50% + (var(--page-column) / 2) + 2rem)' }}
     >
-      <NavList />
+      <NavList dense />
     </nav>
   )
 }
