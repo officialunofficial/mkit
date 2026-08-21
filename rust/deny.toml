@@ -9,7 +9,7 @@ ignore = [
     # Transitive through yubikey 0.9.0-pre.0 for certificate parsing; mkit does
     # not expose RSA private-key decryption, and no fixed yubikey release exists.
     #
-    # TODO(2026-08-21): re-justify this ignore or drop it. cargo-deny v0.19's
+    # TODO(2026-11-19): re-justify this ignore or drop it. cargo-deny v0.19's
     # advisories schema does not yet support a native `expires` field on
     # ignore entries (unexpected-keys error on `expires`), so we encode the
     # 90-day expiry in this TODO comment plus a reminder block in
@@ -19,7 +19,15 @@ ignore = [
     # The regression test in rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs
     # asserts the yubikey RSA decrypt entrypoint stays unreferenced workspace-
     # wide; if that test is removed, this ignore MUST go too.
-    { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-08-21." },
+    #
+    # Re-confirmed 2026-08-21: still live, and still the only option.
+    # `cargo tree -i rsa` puts rsa v0.10.0-rc.18 in the graph through exactly
+    # one edge — yubikey 0.9.0-pre.0 -> mkit-keystore — and 0.9.0-pre.0 is
+    # still the newest yubikey on crates.io, so there is no fixed release to
+    # move to. Dropping the ignore would fail the gate on a vulnerability we
+    # cannot patch; the containment is the no_rsa_decrypt.rs guard, which
+    # still scans for `piv::decrypt_data` workspace-wide and still passes.
+    { id = "RUSTSEC-2023-0071", reason = "transitive via yubikey 0.9.0-pre.0 cert parsing; mkit never calls the affected RSA decrypt path (see mkit-keystore/tests/no_rsa_decrypt.rs). Re-justify by 2026-11-19." },
     # `paste` (macro crate) marked unmaintained 2024-10-07. Pulled
     # transitively by commonware-* (via blst/aws-lc-sys macro
     # expansion) when the optional `history-mmr` / `sparse-checkout`
@@ -28,13 +36,18 @@ ignore = [
     # binary code we own. The dependency comes in via the commonware
     # crates (https://github.com/commonwarexyz/monorepo) — once
     # commonware migrates off paste this ignore goes. Re-justify by
-    # 2026-08-21.
+    # 2026-11-19.
     #
     # Re-confirmed 2026-07-15 on the commonware 2026.7.0 train: `paste`
     # v1.0.15 is still transitively present (`cargo deny check
     # advisories` still fires this one; unlike RUSTSEC-2025-0055 below,
     # it is not stale).
-    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-08-21." },
+    #
+    # Re-confirmed again 2026-08-21: unchanged on the same train.
+    # `cargo tree -i paste` shows v1.0.15 entering as a proc-macro via
+    # commonware-codec -> commonware-coding -> mkit-core, so it still
+    # expands at compile time and contributes no runtime code.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-11-19." },
     # RUSTSEC-2025-0055 (tracing-subscriber 0.2.25 ANSI-escape log
     # injection) REMOVED 2026-07-15: it came in via commonware-runtime
     # 2026.5.x -> arkworks (ark-ed-on-bls12-381-bandersnatch ->

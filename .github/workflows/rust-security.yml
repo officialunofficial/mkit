@@ -1,7 +1,7 @@
 name: "Security: Rust (scheduled advisory sweep)"
 
 # REMINDER: rust/deny.toml ignores RUSTSEC-2023-0071 (yubikey transitive RSA
-# decrypt timing leak), re-justification deadline 2026-08-21. See also
+# decrypt timing leak), re-justification deadline 2026-11-19. See also
 # rust/crates/mkit-keystore/tests/no_rsa_decrypt.rs.
 #
 # Scope: this workflow keeps ONLY the time-based advisory sweep. The per-PR /
