@@ -4,10 +4,9 @@ import * as RadixTooltip from '@radix-ui/react-tooltip'
 import type { ReactNode } from 'react'
 
 /**
- * Hover/focus tooltip on an interactive element. Self-contained (carries its own provider) so it can be dropped
- * anywhere without an app-level wrapper, and portaled + collision-aware via Radix. Use for buttons/links where a short
- * hint helps; for revealing a full value (e.g. a complete hash) on a non-interactive text node, a native `title` is the
- * right tool instead.
+ * Hover/focus tooltip on an interactive element (§4.20). The panel sits on surface-overlay with a border-color-default
+ * hairline and shd-overlay — the shadow is how it says it has left the plane (§2.6 rule 2) — at rounded-md (§2.5 rule
+ * 2). Content is text-sm, never smaller: a tooltip's content is a value the reader came for (§4.20 rule 2).
  */
 export function Tooltip({
   content,
@@ -27,7 +26,14 @@ export function Tooltip({
             side={side}
             sideOffset={6}
             collisionPadding={8}
-            className='z-50 max-w-xs rounded-md border border-hairline bg-bg px-2 py-1 text-xs text-fg shadow-md'
+            className='max-w-xs rounded-(--rounded-md) border px-2 py-1 text-xs text-primary'
+            style={{
+              background: 'var(--surface-overlay)',
+              borderColor: 'var(--overlay-hairline)',
+              boxShadow: 'var(--overlay-shadow)',
+              fontSize: 'var(--t-sm)',
+              lineHeight: 'var(--t-sm-leading)',
+            }}
           >
             {content}
           </RadixTooltip.Content>

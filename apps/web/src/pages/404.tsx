@@ -13,18 +13,15 @@ export default function NotFoundPage() {
         path='/404'
         card='Not found'
       />
-      <header className='space-y-3'>
-        <h1 className='text-4xl font-semibold tracking-tight'>Not found</h1>
-        <p className='max-w-prose text-base text-fg'>
-          The page you&rsquo;re looking for doesn&rsquo;t exist — it may have moved, or the link may be wrong.
-        </p>
+      <header>
+        <h1 className='ds-h1'>Not Found</h1>
+        <p className='ds-note mt-1'>This page doesn&rsquo;t exist — it may have moved, or the link may be wrong.</p>
       </header>
-      <Link
-        to='/'
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-      >
-        ← back home
-      </Link>
+      <p>
+        <Link to='/' className='ds-link'>
+          Back to the overview
+        </Link>
+      </p>
     </div>
   )
 }

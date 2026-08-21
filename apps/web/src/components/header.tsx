@@ -1,89 +1,71 @@
-import { Link } from 'waku'
+'use client'
+
+import { ListIcon, XIcon } from '@phosphor-icons/react/ssr'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useRouter } from 'waku'
 import { GridLogo } from './grid-logo'
+import { NavList } from './site-nav'
 import { ThemeToggle } from './theme-toggle'
 
-// Top-nav order: the combined concepts playground first (it now folds in the
-// tree and push walkthroughs as tabs), then the doc-style pages
-// (performance, parity, specs), then the live multiplayer room. Reordering
-// the site nav is editing this list — nothing else.
-const NAV_LINKS = [
-  { to: '/concepts', label: 'concepts' },
-  { to: '/performance', label: 'performance' },
-  { to: '/parity', label: 'parity' },
-  { to: '/specs', label: 'specs' },
-  { to: '/multiplayer', label: 'multiplayer' },
-] as const
-
+/**
+ * Page chrome masthead (DESIGN.md §4.27): brand on the left, trailing controls on the right, separated from the content
+ * by a solid light rule — peers, not a structure and its start (§2.2A rule 1). Below `wide` the primary nav collapses
+ * to the trigger here; the expanded panel pushes the page down rather than covering it (§4.27 rule 8) and closes on
+ * selection, returning focus to the trigger (rule 9). Sticky occlusion is handled by an opaque surface-page ground
+ * alone — a sticky page header casts no shadow (§2.6 rule 4).
+ */
 export const Header = () => {
+  const [navOpen, setNavOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const router = useRouter()
+
+  // Route changes close the expanded nav (§4.27 rule 9).
+  useEffect(() => {
+    setNavOpen(false)
+  }, [router.path])
+
+  const closeNav = () => {
+    setNavOpen(false)
+    triggerRef.current?.focus()
+  }
+
   return (
-    // Sticky header with a translucent white ground + backdrop blur.
-    // At rest it reads as solid; when content scrolls under it the
-    // blur softens whatever's behind without obscuring it, so the
-    // transition between page body and chrome stays visible. The
-    // explicit `var(--color-bg)` call is required — Tailwind v4 won't
-    // auto-wrap a bare custom prop reference in every position, and an
-    // unset background was why the header was invisible.
     <header
-      className='sticky top-0 z-50 backdrop-blur-md backdrop-saturate-150'
-      style={{ backgroundColor: 'color-mix(in srgb, var(--color-bg) 80%, transparent)' }}
+      className='sticky top-0 z-2 border-b'
+      style={{ background: 'var(--surface-page)', borderColor: 'var(--border-color-default)' }}
     >
-      <div className='mx-auto w-full max-w-5xl px-6'>
-        <div className='flex items-center gap-6 py-4'>
-          {/* Negative margin + padding grows the tap target to 44px (WCAG 2.5.8 / platform guidance)
-              without shifting the 20px logo's visual position. */}
-          <Link to='/' className='-m-3 flex items-center p-3' aria-label='mkit home'>
-            <GridLogo className='size-5 rounded-[3px]' />
-          </Link>
-          {/* min-w-0 + flex-1 lets the nav shrink and scroll horizontally on
-              narrow screens instead of overflowing the row; scrollbar hidden
-              since the row is short and the links wrap off-edge cleanly. */}
-          <nav className='flex min-w-0 flex-1 items-center gap-4 overflow-x-auto text-sm [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'>
-            {NAV_LINKS.map(({ to, label }) => (
-              <Link
-                key={to}
-                to={to}
-                className='-mx-1 shrink-0 px-1 py-2 underline-offset-4 transition-opacity duration-300 hover:underline'
-              >
-                {label}
-              </Link>
-            ))}
-          </nav>
-          <div className='ml-auto'>
-            <ThemeToggle />
-          </div>
+      <div className='mx-auto flex w-full max-w-6xl items-center gap-2 px-6 py-3'>
+        <Link to='/' className='-m-2 flex items-center gap-2 p-2' aria-label='mkit home'>
+          <GridLogo className='size-5 rounded-[3px]' />
+          <span className='font-semibold tracking-(--header-tracking) text-primary'>mkit</span>
+        </Link>
+        <div className='ml-auto flex items-center gap-2'>
+          <ThemeToggle />
+          <button
+            ref={triggerRef}
+            type='button'
+            aria-expanded={navOpen}
+            aria-controls='site-nav-panel'
+            aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
+            onClick={() => setNavOpen((v) => !v)}
+            className='inline-flex size-8 items-center justify-center rounded-(--rounded-sm) text-primary transition-colors duration-(--duration-fast) ease-standard hover:bg-(--action-ghost-bg-hover) active:bg-(--action-ghost-bg-active) lg:hidden'
+          >
+            {navOpen ? <XIcon size={16} aria-hidden /> : <ListIcon size={16} aria-hidden />}
+          </button>
         </div>
-        {/* Top separator: 2px band carrying the brand gradient, wider
-            than the element so it can slide. `background-position-x`
-            reads `--mouse-x` (0..1, written by <PointerTracker/>), so
-            moving the cursor horizontally drags the colour stops
-            across the rule. The gradient is oversized (300%) so only
-            a slice of the palette is visible at any moment — mouse
-            movement reveals the rest. */}
-        <div
-          className='h-0.5 w-full'
-          style={{
-            backgroundImage: 'var(--gradient-h)',
-            backgroundSize: '300% 100%',
-            backgroundPositionX: 'calc(var(--mouse-x, 0.5) * 100%)',
-            transition: 'background-position-x 200ms cubic-bezier(0.2, 0, 0, 1)',
-          }}
-          aria-hidden
-        />
       </div>
-      {/* Fade strip directly below the 2px rule: content scrolling
-          upward softens into the opaque nav area instead of cutting
-          at a hard edge. `pointer-events-none` keeps it from stealing
-          clicks from anything that happens to land under it. Fades to
-          `--color-bg-0` (the bg colour at alpha 0), NOT the `transparent`
-          keyword — on Safari/iOS `transparent` interpolates as transparent
-          BLACK, painting a grey "shadow" band across this strip. */}
-      <div
-        className='pointer-events-none absolute inset-x-0 top-full h-6'
-        style={{
-          backgroundImage: 'linear-gradient(to bottom, var(--color-bg), var(--color-bg-0))',
-        }}
-        aria-hidden
-      />
+      {navOpen ? (
+        <nav
+          id='site-nav-panel'
+          aria-label='Primary'
+          className='border-t lg:hidden'
+          style={{ borderColor: 'var(--border-color-subtle)' }}
+        >
+          <div className='mx-auto w-full max-w-6xl px-6 py-2'>
+            <NavList onNavigate={closeNav} />
+          </div>
+        </nav>
+      ) : null}
     </header>
   )
 }

@@ -1,3 +1,5 @@
+import { ArrowRightIcon, FlaskIcon, GaugeIcon, GitDiffIcon, UsersThreeIcon } from '@phosphor-icons/react/ssr'
+import type { ComponentType } from 'react'
 import { Link } from 'waku'
 import { CopyButton } from '../components/copy-button'
 import { DemoBoundary } from '../components/demo-boundary'
@@ -6,7 +8,7 @@ import { Seo } from '../components/seo'
 
 export default function HomePage() {
   return (
-    <div className='space-y-10'>
+    <div className='space-y-8'>
       <Seo
         title='mkit — version control that signs every commit'
         description='Version control that signs every commit. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations are first-class objects. Written in Rust.'
@@ -14,213 +16,145 @@ export default function HomePage() {
         card='Version control that signs every commit.'
       />
 
-      {/* Above-the-fold: the live lobby beside the hero. Two columns on lg+
-          (lobby left, hero right); stacks to one column below that with the
-          LOBBY on top, then the hero. `items-start` so each column sizes to its
-          own content instead of stretching to match the taller one. */}
-      <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
-        {/* Signed lobby — a live, public feed merging chat, /multiplayer commits,
-            and emoji reactions, all Ed25519-signed by the same passkey identity.
-            Reading is open; posting/reacting unlock that identity. DemoBoundary
-            lets the static prerender emit a fallback and hydrate the wasm-backed
-            client. */}
+      {/* Above the fold: the claim beside the live lobby. Two columns at lg
+          (claim left, lobby right); stacks below with the claim on top so a
+          reader meets the thesis before the demo. */}
+      <div className='grid grid-cols-1 gap-x-3 gap-y-8 lg:grid-cols-2 lg:items-start'>
         <section>
-          <DemoBoundary>
-            <SignedLobby />
-          </DemoBoundary>
-        </section>
-
-        <section className='space-y-5'>
-          <h1 className='text-5xl font-semibold tracking-tight'>Sign every commit. Know every contributor.</h1>
-          <p className='max-w-prose text-lg text-fg'>
+          <h1 className='ds-h1'>Sign Every Commit. Know Every Contributor.</h1>
+          <p className='ds-note mt-1'>A content-addressed version control toolkit, written in Rust.</p>
+          <p className='mt-2 max-w-prose'>
             Every commit is cryptographically signed, so anyone can contribute and everyone can verify who did what.
-          </p>
-          <p className='max-w-prose text-sm text-muted'>
             mkit is git-like{' '}
-            <Link
-              to='/parity'
-              className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-            >
+            <Link to='/parity' className='ds-link'>
               where it can be
             </Link>
             , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
             first-class objects.
           </p>
+
+          <h2 className='ds-h2 rule-square mt-8 pb-2'>Get Started</h2>
+          <div className='mt-2 space-y-4'>
+            <div>
+              <h3 className='ds-h3'>Install the CLI</h3>
+              {/* Bare `mkit.sh` sniffs the curl User-Agent and serves the signed
+                  installer (see src/install-route.ts). */}
+              <InstallCommand command='curl mkit.sh | sh' label='Copy CLI install command' />
+              <p className='ds-note mt-2'>
+                Detects your platform, verifies the cosign signature, and drops <code>mkit</code> into{' '}
+                <code>~/.local/bin</code>.
+              </p>
+            </div>
+            <div>
+              <h3 className='ds-h3'>Add the Agent Skill</h3>
+              <InstallCommand command='npx skills add officialunofficial/mkit' label='Copy skill install command' />
+              <p className='ds-note mt-2'>Teaches Claude Code, Cursor, and other coding agents to drive mkit.</p>
+            </div>
+            <p className='ds-note'>
+              Open source (alpha):{' '}
+              <a href='https://github.com/officialunofficial/mkit' target='_blank' rel='noreferrer' className='ds-link'>
+                officialunofficial/mkit
+              </a>{' '}
+              on GitHub.
+            </p>
+          </div>
+        </section>
+
+        {/* Signed lobby — a live, public feed merging chat, /multiplayer
+            commits, and emoji reactions, all Ed25519-signed by the same
+            passkey identity. DemoBoundary lets the static prerender emit a
+            fallback and hydrate the wasm-backed client. */}
+        <section>
+          <DemoBoundary>
+            <SignedLobby />
+          </DemoBoundary>
         </section>
       </div>
 
-      {/* Full-width "get started" band beneath the split hero: the two install
-          paths side by side, with the open-source note. Pulled out of the hero's
-          right column so the install commands aren't cramped against the lobby. */}
-      <section className='space-y-5'>
-        <h2 className='text-2xl font-semibold tracking-tight'>Get started with mkit</h2>
-        <div className='grid gap-4 sm:grid-cols-2'>
-          <div className='space-y-2'>
-            <p className='text-sm font-medium'>Install the CLI</p>
-            {/* Primary install: the hosted one-liner. Bare `mkit.sh` sniffs the
-              curl User-Agent and serves the signed installer (see
-              src/install-route.ts); it detects your platform, verifies the
-              cosign signature, and drops `mkit` into ~/.local/bin. */}
-            <InstallCommand command='curl mkit.sh | sh' />
-            <p className='text-sm text-muted'>
-              Detects your platform, verifies the cosign signature, and drops <code className='font-mono'>mkit</code>{' '}
-              into <code className='font-mono'>~/.local/bin</code>.
-            </p>
-          </div>
-          <div className='space-y-2'>
-            <p className='text-sm font-medium'>Add the agent skill</p>
-            {/* Install the mkit agent skill (repo-root SKILL.md) into Claude Code
-              / Cursor / etc. via the vercel-labs `skills` CLI. */}
-            <InstallCommand command='npx skills add officialunofficial/mkit' />
-            <p className='text-sm text-muted'>Teaches Claude Code, Cursor, and other coding agents to drive mkit.</p>
-          </div>
-        </div>
-        <p className='text-sm text-muted'>
-          open source (alpha):{' '}
-          <a
-            href='https://github.com/officialunofficial/mkit'
-            target='_blank'
-            rel='noreferrer'
-            className='underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-          >
-            officialunofficial/mkit
-          </a>{' '}
-          on GitHub.
-        </p>
+      <section>
+        <h2 className='ds-h2 rule-square pb-2'>Explore</h2>
+        <ul className='mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2'>
+          <ExploreCard
+            to='/concepts'
+            title='Concepts'
+            Icon={FlaskIcon}
+            body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
+          />
+          <ExploreCard
+            to='/performance'
+            title='Performance'
+            Icon={GaugeIcon}
+            body='Hashing, committing, packing — mkit measured against git on real operations.'
+          />
+          <ExploreCard
+            to='/parity'
+            title='Parity'
+            Icon={GitDiffIcon}
+            body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
+          />
+          <ExploreCard
+            to='/multiplayer'
+            title='Multiplayer'
+            Icon={UsersThreeIcon}
+            body='Set up a passkey, sign a commit in your browser, and push to a shared repo — then watch everyone else’s commits arrive live.'
+          />
+        </ul>
       </section>
-
-      <ul className='grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4'>
-        <Demo
-          to='/concepts'
-          title='concepts'
-          body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
-        />
-        <Demo
-          to='/performance'
-          title='performance'
-          body='Hashing, committing, packing — mkit measured against git on real operations.'
-        />
-        <Demo
-          to='/parity'
-          title='parity'
-          body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
-        />
-        <Demo
-          to='/multiplayer'
-          title='multiplayer'
-          body='Set up a passkey, sign a commit in your browser, and push to a shared repo — then watch everyone else’s commits arrive live.'
-        />
-      </ul>
     </div>
   )
 }
 
-// A copyable shell command, rendered as a `$`-prefixed code chip. Long commands
-// scroll horizontally rather than wrapping.
-function InstallCommand({ command }: { command: string }) {
+/**
+ * A copyable shell command, rendered per §4.29: surface-code fill, solid light border, square corners, mono at text-sm.
+ * The copy affordance sits after the value on the same line (§4.11 rule 7) and names what it copies.
+ */
+function InstallCommand({ command, label }: { command: string; label: string }) {
   return (
-    <div className='inline-flex max-w-full items-center gap-3 overflow-x-auto rounded-md border border-hairline bg-muted/5 px-3 py-2'>
-      <code className='whitespace-nowrap font-mono text-sm'>
-        <span className='select-none text-muted'>$ </span>
+    <div className='code-region mt-2 flex max-w-full items-center gap-3'>
+      <code className='overflow-x-auto whitespace-nowrap'>
+        <span className='select-none text-secondary'>$ </span>
         {command}
       </code>
-      <CopyButton text={command} />
+      <span className='ml-auto inline-flex'>
+        <CopyButton text={command} label={label} />
+      </span>
     </div>
   )
 }
 
 // `to` is narrowed to the concrete route literals Waku emits — a plain
-// `string` is too wide for Waku 1.0.0-alpha.8's typed Link.
-type DemoRoute = '/concepts' | '/performance' | '/parity' | '/multiplayer'
+// `string` is too wide for Waku's typed Link.
+type ExploreRoute = '/concepts' | '/performance' | '/parity' | '/multiplayer'
 
-// Soft per-tile mesh gradients: layered low-alpha radial blooms over the
-// white card so text stays legible while each tile reads distinct.
-const MESH: Record<DemoRoute, string> = {
-  '/concepts':
-    'radial-gradient(at 18% 22%, rgba(99,102,241,0.10), transparent 55%), radial-gradient(at 82% 12%, rgba(56,189,248,0.08), transparent 55%)',
-  '/performance':
-    'radial-gradient(at 18% 18%, rgba(251,146,60,0.09), transparent 55%), radial-gradient(at 82% 80%, rgba(248,113,113,0.08), transparent 55%)',
-  '/parity':
-    'radial-gradient(at 16% 20%, rgba(167,139,250,0.09), transparent 55%), radial-gradient(at 84% 80%, rgba(96,165,250,0.08), transparent 55%)',
-  '/multiplayer':
-    'radial-gradient(at 20% 20%, rgba(236,72,153,0.10), transparent 55%), radial-gradient(at 80% 78%, rgba(99,102,241,0.08), transparent 55%)',
-}
+type IconComponent = ComponentType<{ size?: number; 'aria-hidden'?: boolean }>
 
-// Per-tile accent colour (solid hue echoing each tile's mesh) for the header shape.
-const SHAPE_COLOR: Record<DemoRoute, string> = {
-  '/concepts': 'rgb(99,102,241)',
-  '/performance': 'rgb(249,115,22)',
-  '/parity': 'rgb(139,92,246)',
-  '/multiplayer': 'rgb(236,72,153)',
-}
-
-// A small distinct geometric mark per tile, drawn in the tile's accent colour.
-function TileShape({ to }: { to: DemoRoute }) {
-  const common = {
-    width: 16,
-    height: 16,
-    viewBox: '0 0 16 16',
-    fill: 'none',
-    stroke: 'currentColor',
-    strokeWidth: 1.5,
-  } as const
-  const shape = (() => {
-    switch (to) {
-      case '/concepts':
-        return (
-          <>
-            <rect x='3' y='3' width='4' height='4' rx='1' />
-            <rect x='9' y='3' width='4' height='4' rx='1' />
-            <rect x='3' y='9' width='4' height='4' rx='1' />
-            <rect x='9' y='9' width='4' height='4' rx='1' />
-          </>
-        )
-      case '/performance':
-        return <path d='M3 13 V9 M8 13 V4 M13 13 V7' strokeLinecap='round' />
-      case '/parity':
-        return (
-          <>
-            <circle cx='6' cy='8' r='4' />
-            <circle cx='10' cy='8' r='4' />
-          </>
-        )
-      case '/multiplayer':
-        return (
-          <>
-            <circle cx='6' cy='6.5' r='2.5' />
-            <circle cx='11' cy='10' r='2.5' />
-          </>
-        )
-    }
-  })()
+/**
+ * An outlined card (§4.24) that navigates: icon and title on one line, the description under it, a trailing in-app
+ * arrow (§4.1 rule 8) at the foot. Hover is a surface change at duration-fast — never a transform.
+ */
+function ExploreCard({
+  to,
+  title,
+  body,
+  Icon,
+}: {
+  to: ExploreRoute
+  title: string
+  body: string
+  Icon: IconComponent
+}) {
   return (
-    <svg {...common} aria-hidden style={{ color: SHAPE_COLOR[to] }} className='shrink-0'>
-      {shape}
-    </svg>
-  )
-}
-
-function Demo({ to, title, body }: { to: DemoRoute; title: string; body: string }) {
-  return (
-    <li>
+    <li className='flex'>
       <Link
         to={to}
-        style={{ backgroundImage: MESH[to] }}
-        className='group flex aspect-square flex-col justify-between gap-4 overflow-hidden rounded-md border border-hairline p-5 transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] hover:scale-95'
+        className='card flex w-full flex-col gap-1 transition-colors duration-(--duration-fast) ease-standard hover:bg-(--surface-hover)'
       >
-        <div className='space-y-1'>
-          <div className='flex items-center gap-2 text-base font-medium'>
-            <TileShape to={to} />
-            {title}
-          </div>
-          <p className='text-sm text-muted'>{body}</p>
-        </div>
-        <span
-          aria-hidden
-          className='shrink-0 self-end text-base transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] group-hover:-translate-y-1 group-hover:translate-x-1'
-        >
-          ↗
+        <span className='flex items-center gap-1 font-semibold tracking-(--header-tracking)'>
+          <Icon size={16} aria-hidden />
+          {title}
         </span>
+        <span className='text-xs leading-4 text-secondary'>{body}</span>
+        <ArrowRightIcon size={16} aria-hidden className='mt-auto self-end text-secondary' />
       </Link>
     </li>
   )

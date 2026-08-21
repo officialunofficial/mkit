@@ -1,3 +1,4 @@
+import { CaretRightIcon } from '@phosphor-icons/react/ssr'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import type { ReactNode } from 'react'
 import { labelColor } from '../lib/hash-color'
@@ -68,7 +69,7 @@ function Bar({
 function TimingBlock({ b }: { b: TimingBenchmark }) {
   const max = Math.max(b.mkit.mean, b.git.mean)
   return (
-    <div className='space-y-3 py-6'>
+    <div className='space-y-3 px-3 py-4'>
       <div className='flex items-baseline justify-between gap-4'>
         <h4 className='text-sm font-semibold'>{b.name}</h4>
         <span className='shrink-0 text-xs text-muted'>{speedupLabel(b.mkit.mean, b.git.mean)}</span>
@@ -86,7 +87,7 @@ function TimingBlock({ b }: { b: TimingBenchmark }) {
 function SizeBlock({ b }: { b: SizeBenchmark }) {
   const max = Math.max(b.mkitKiB, b.gitKiB)
   return (
-    <div className='space-y-3 py-6'>
+    <div className='space-y-3 px-3 py-4'>
       <h4 className='text-sm font-semibold'>{b.name}</h4>
       <p className='max-w-prose text-sm text-subtle'>{b.description}</p>
       <div className='space-y-1.5'>
@@ -102,7 +103,7 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
   const max = Math.max(b.wholeChunkBytes, b.deltaBytes)
   const ratio = b.wholeChunkBytes / b.deltaBytes
   return (
-    <div className='space-y-3 py-6'>
+    <div className='space-y-3 px-3 py-4'>
       <div className='flex items-baseline justify-between gap-4'>
         <h4 className='text-sm font-semibold'>{b.name}</h4>
         <span className='shrink-0 text-xs text-muted'>{ratio.toFixed(0)}× smaller push</span>
@@ -124,9 +125,9 @@ function TransferBlock({ b }: { b: TransferBenchmark }) {
 function MeasureGroup({ heading, hint, children }: { heading: string; hint: ReactNode; children: ReactNode }) {
   return (
     <div className='space-y-1'>
-      <h3 className='text-xs font-semibold uppercase tracking-wide text-muted'>{heading}</h3>
+      <h3 className='text-xs leading-4 font-medium text-secondary'>{heading}</h3>
       <p className='max-w-prose text-sm text-subtle'>{hint}</p>
-      <div className='divide-y divide-hairline border-y border-hairline'>{children}</div>
+      <div className='data-frame mt-2'>{children}</div>
     </div>
   )
 }
@@ -138,13 +139,13 @@ function MeasureGroup({ heading, hint, children }: { heading: string; hint: Reac
  */
 const THEMES: Record<Theme, { title: string; blurb: string }> = {
   'large-files': {
-    title: 'Large files & media',
+    title: 'Large Files & Media',
     blurb:
       'The workload mkit is built for: big, incompressible files and small edits to them. Content-defined chunking ' +
       'means a small edit costs the changed chunk, not the whole file — on disk, on the wire, and in wall-clock time.',
   },
   everyday: {
-    title: 'Everyday operations',
+    title: 'Everyday Operations',
     blurb:
       'The routine git operations on ordinary trees, where the honest verdict is roughly even. mkit keeps pace while ' +
       'signing every commit and flushing every object to disk, neither of which git does by default.',
@@ -166,9 +167,9 @@ export function PerfSection() {
         const transfers = transferBenchmarks.filter((b) => b.theme === key)
         return (
           <section key={key} className='space-y-4'>
-            <div className='space-y-1'>
-              <h2 className='text-base font-semibold'>{title}</h2>
-              <p className='max-w-prose text-sm text-subtle'>{blurb}</p>
+            <div>
+              <h2 className='ds-h2 rule-square pb-2'>{title}</h2>
+              <p className='ds-note mt-1'>{blurb}</p>
             </div>
             {timings.length > 0 ? (
               <MeasureGroup
@@ -216,7 +217,7 @@ export function PerfSection() {
       })}
 
       <section className='space-y-3'>
-        <h2 className='text-sm font-semibold'>Methodology &amp; caveats</h2>
+        <h2 className='ds-h2 rule-square pb-2'>Methodology &amp; Caveats</h2>
         <dl className='space-y-1 font-mono text-xs text-muted'>
           <div>date: {methodology.date}</div>
           <div>commit: {methodology.commit.slice(0, 8)}</div>
@@ -230,12 +231,17 @@ export function PerfSection() {
             <li key={c}>{c}</li>
           ))}
         </ul>
-        <Collapsible.Root className='text-xs text-muted'>
-          <Collapsible.Trigger className='select-none transition-colors hover:text-fg'>
+        <Collapsible.Root className='text-xs leading-4 text-secondary'>
+          <Collapsible.Trigger className='group inline-flex select-none items-center gap-1 transition-colors duration-(--duration-fast) ease-standard hover:text-primary'>
+            <CaretRightIcon
+              size={12}
+              aria-hidden
+              className='transition-transform duration-(--duration-fast) ease-standard group-data-[state=open]:rotate-90'
+            />
             Exact commands
           </Collapsible.Trigger>
           <Collapsible.Content>
-            <pre className='mt-2 overflow-x-auto rounded-md border border-hairline p-3 font-mono text-[11px] leading-relaxed'>
+            <pre className='code-region mt-2 overflow-x-auto text-2xs leading-relaxed'>
               {methodology.commands.join('\n')}
             </pre>
           </Collapsible.Content>

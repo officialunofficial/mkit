@@ -5,8 +5,8 @@ import { AgentationToolbar } from '../components/agentation-toolbar'
 import { Footer } from '../components/footer'
 import { Header } from '../components/header'
 import { MkitPreloader } from '../components/mkit-preloader'
-import { PointerTracker } from '../components/pointer-tracker'
 import { QueryProvider } from '../components/query-provider'
+import { SiteRail } from '../components/site-nav'
 
 type RootLayoutProps = { children: ReactNode }
 
@@ -17,24 +17,20 @@ export default async function RootLayout({ children }: RootLayoutProps) {
     <div>
       {/* Per-page <title>, description, and Open Graph / Twitter tags are set by
           <Seo> in each page (components/seo.tsx). */}
-      {/* The static/SSR favicon is the deterministic mkit grid mark (same seed
-          as the header GridLogo's SSR fallback); GridLogo then randomizes it
-          per load on the client. Previously this was the Waku ⛩️ default. */}
       <link rel='icon' type='image/svg+xml' href={data.icon} />
-      {/* Header and footer span edge-to-edge; the middle column lives
-          inside `<main>` so every page shares the same width. Pages
-          don't re-apply `max-w-*` themselves. */}
-      <PointerTracker />
       <MkitPreloader />
       <AgentationToolbar />
       <Header />
-      {/* Slightly wider container than editorial default (48rem →
-          64rem) so pages that benefit from a two-column layout have
-          room, while prose-heavy sections re-constrain themselves
-          via `max-w-prose` at the page level. */}
-      <main className='mx-auto w-full max-w-5xl px-6 pt-8 pb-24'>
-        <QueryProvider>{children}</QueryProvider>
-      </main>
+      {/* §2.7 / §4.27: a central content column with an offset left column for
+          navigation at `wide` (≥1024px). The rail sits outside the content
+          measure; below `wide` it collapses to the masthead trigger and the
+          content takes the full width. */}
+      <div className='mx-auto grid w-full max-w-6xl grid-cols-1 px-6 lg:grid-cols-[10rem_minmax(0,1fr)] lg:gap-x-10'>
+        <SiteRail />
+        <main className='min-w-0 pt-8 pb-24'>
+          <QueryProvider>{children}</QueryProvider>
+        </main>
+      </div>
       <Footer />
     </div>
   )

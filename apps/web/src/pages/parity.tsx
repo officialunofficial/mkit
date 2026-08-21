@@ -1,4 +1,3 @@
-import { Link } from 'waku'
 import { ParityMatrix } from '../components/parity-matrix'
 import { Seo } from '../components/seo'
 import { WithToc } from '../components/with-toc'
@@ -13,21 +12,16 @@ export default function ParityPage() {
           path='/parity'
           card='How much of git is here?'
         />
-        <header className='space-y-3'>
-          <h1 className='text-4xl font-semibold tracking-tight'>How much of git is here?</h1>
-          <p className='max-w-prose text-base text-fg'>
+        <header>
+          <h1 className='ds-h1'>How Much of Git Is Here?</h1>
+          <p className='ds-note mt-1'>Parity of behavior, not wire interop — mkit never shares bytes with .git.</p>
+          <p className='mt-2 max-w-prose'>
             mkit matches the git commands and flags you already know. It also adds BLAKE3 addressing, a signature on
-            every commit, and guards against silent data loss. It never shares bytes with a{' '}
-            <code className='font-mono text-sm'>.git</code> repo, so this is parity of behavior, not wire interop.
+            every commit, and guards against silent data loss. It never shares bytes with a <code>.git</code> repo, so
+            this is parity of behavior, not wire interop.
           </p>
         </header>
         <ParityMatrix />
-        <Link
-          to='/'
-          className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
-        >
-          ← back
-        </Link>
       </div>
     </WithToc>
   )

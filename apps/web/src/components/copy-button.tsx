@@ -1,64 +1,42 @@
 'use client'
 
+import { CheckIcon, CopyIcon, XIcon } from '@phosphor-icons/react/ssr'
 import { useState } from 'react'
 
-function CopyIcon() {
-  return (
-    <svg
-      width='14'
-      height='14'
-      viewBox='0 0 24 24'
-      fill='none'
-      stroke='currentColor'
-      strokeWidth='2'
-      strokeLinecap='round'
-      strokeLinejoin='round'
-      aria-hidden
-    >
-      <rect x='9' y='9' width='13' height='13' rx='2' />
-      <path d='M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' />
-    </svg>
-  )
-}
+type CopyState = 'idle' | 'copied' | 'failed'
 
-function CheckIcon() {
-  return (
-    <svg
-      width='14'
-      height='14'
-      viewBox='0 0 24 24'
-      fill='none'
-      stroke='currentColor'
-      strokeWidth='2.5'
-      strokeLinecap='round'
-      strokeLinejoin='round'
-      aria-hidden
-    >
-      <path d='M20 6 9 17l-5-5' />
-    </svg>
-  )
-}
-
-/** Copy-to-clipboard button. Swaps to a green check for ~1.5s after a successful copy. */
-export function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
+/**
+ * Copy affordance (§4.11): feedback replaces the icon in place without changing the control's width, returns to idle on
+ * its own, and failure shows a mark distinct from both idle and success. The glyph is icon-small beside text-sm content
+ * (§2.8 rule 3); the invisible padding extends the hit area without growing the mark (§4.1 rule 4).
+ */
+export function CopyButton({ text, label = 'Copy command' }: { text: string; label?: string }) {
+  const [state, setState] = useState<CopyState>('idle')
 
   const copy = () => {
-    void navigator.clipboard?.writeText(text).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
+    void navigator.clipboard
+      ?.writeText(text)
+      .then(() => setState('copied'))
+      .catch(() => setState('failed'))
+      .finally(() => {
+        setTimeout(() => setState('idle'), 1500)
+      })
   }
 
   return (
     <button
       type='button'
       onClick={copy}
-      aria-label={copied ? 'Copied' : 'Copy command'}
-      className='-m-1 shrink-0 p-1 text-muted transition-opacity duration-300 hover:opacity-70'
-      style={copied ? { color: '#16a34a' } : undefined}
+      aria-label={state === 'copied' ? 'Copied' : label}
+      className='-m-2 shrink-0 p-2 text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary'
     >
-      {copied ? <CheckIcon /> : <CopyIcon />}
+      {state === 'copied' ? (
+        <CheckIcon size={12} aria-hidden style={{ color: 'var(--status-success-fg)' }} />
+      ) : state === 'failed' ? (
+        <XIcon size={12} aria-hidden style={{ color: 'var(--status-error-fg)' }} />
+      ) : (
+        <CopyIcon size={12} aria-hidden />
+      )}
     </button>
   )
 }
