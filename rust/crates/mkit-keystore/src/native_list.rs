@@ -389,7 +389,7 @@ fn verify_ecdsa_signature(
 ) -> Result<()> {
     match algorithm {
         Algorithm::Secp256k1 => {
-            use k256::ecdsa::signature::DigestVerifier as _;
+            use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
             use sha2::Digest as _;
 
             let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
@@ -399,7 +399,7 @@ fn verify_ecdsa_signature(
             let mut digest = sha2::Sha256::new();
             digest.update(message);
             verifying_key
-                .verify_digest(digest, &signature)
+                .verify_prehash(&digest.finalize(), &signature)
                 .map_err(|error| Error::Internal(format!("secp256k1 signature verify: {error}")))
         }
         Algorithm::P256 => {

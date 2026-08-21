@@ -130,7 +130,7 @@ sha1 = "0.11"
 sha2 = "0.10"
 blake2 = "0.10"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
-k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 tempfile = "3"
 git2 = "0.21"

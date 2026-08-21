@@ -952,7 +952,7 @@ fn validate_webauthn_response(
             webauthn_policy,
         )?;
 
-        let compressed = vk.to_encoded_point(true);
+        let compressed = vk.to_sec1_point(true);
         let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
         require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
     }
@@ -1016,7 +1016,7 @@ fn validate_secp256k1_response(
             )
         })?;
 
-        let compressed = vk.to_encoded_point(true);
+        let compressed = vk.to_sec1_point(true);
         let canonical = format!("secp256k1:{}", hex_lower(compressed.as_bytes()));
         require_matching_canonical_keyid(key_id, &[("secp256k1", &canonical)])
     }
@@ -1049,7 +1049,7 @@ fn validate_p256_response(
             )
         })?;
 
-        let compressed = vk.to_encoded_point(true);
+        let compressed = vk.to_sec1_point(true);
         let canonical = format!("p256:{}", hex_lower(compressed.as_bytes()));
         require_matching_canonical_keyid(key_id, &[("p256", &canonical)])
     }

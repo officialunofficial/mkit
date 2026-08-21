@@ -240,9 +240,9 @@ mod tests {
             let sk = SigningKey::from_bytes(&self.secret.into())
                 .map_err(|e| SignerError::Tpm(format!("init: {e}")))?;
             let vk = sk.verifying_key();
-            let pub_compressed = vk.to_encoded_point(true).as_bytes().to_vec();
+            let pub_compressed = vk.to_sec1_point(true).as_bytes().to_vec();
             let sig: P256Sig = sk.sign(pae);
-            let sig = sig.normalize_s().unwrap_or(sig);
+            let sig = sig.normalize_s();
             Ok((pub_compressed, sig.to_bytes().to_vec()))
         }
     }

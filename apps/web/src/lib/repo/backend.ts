@@ -451,19 +451,18 @@ export function mergeFeed(commits: CommitLogEntry[], messages: ChatMessageEntry[
     // oldest-first so two commits sharing a timestamp (unix-second precision)
     // render oldest-first under the stable sort, consistent with the rest of the
     // feed — not newest-first like the raw walk.
-    ...[...commits]
-      .reverse()
-      .map(
-        (entry): FeedItem => ({ kind: 'commit', ts: Date.parse(entry.createdAt) || 0, key: `c:${entry.hash}`, entry }),
-      ),
-    ...messages.map(
-      (message): FeedItem => ({
-        kind: 'chat',
-        ts: message.createdAt || 0,
-        key: `m:${message.messageIdHex}:${message.seq}`,
-        message,
-      }),
-    ),
+    ...[...commits].reverse().map((entry): FeedItem => ({
+      kind: 'commit',
+      ts: Date.parse(entry.createdAt) || 0,
+      key: `c:${entry.hash}`,
+      entry,
+    })),
+    ...messages.map((message): FeedItem => ({
+      kind: 'chat',
+      ts: message.createdAt || 0,
+      key: `m:${message.messageIdHex}:${message.seq}`,
+      message,
+    })),
   ]
   items.sort((a, b) => a.ts - b.ts || (a.kind === b.kind ? 0 : a.kind === 'commit' ? -1 : 1))
   return items

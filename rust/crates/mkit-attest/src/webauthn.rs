@@ -455,7 +455,7 @@ mod tests {
 
         let sk = SigningKey::from_bytes(&secret.into()).unwrap();
         let sig: P256Sig = sk.sign(&to_sign);
-        let sig = sig.normalize_s().unwrap_or(sig);
+        let sig = sig.normalize_s();
         (
             WebAuthnWrapping {
                 authenticator_data: auth_data,
@@ -529,7 +529,7 @@ mod tests {
 
         let sk = SigningKey::from_bytes(&TEST_SECRET.into()).unwrap();
         let sig: P256Sig = sk.sign(&to_sign);
-        let sig = sig.normalize_s().unwrap_or(sig).to_bytes().to_vec();
+        let sig = sig.normalize_s().to_bytes().to_vec();
 
         let wrap = WebAuthnWrapping {
             authenticator_data: auth_data,
@@ -624,7 +624,7 @@ mod tests {
         to_sign.extend_from_slice(&Sha256::digest(&cdj));
         let sk = SigningKey::from_bytes(&secret.into()).unwrap();
         let sig: P256Sig = sk.sign(&to_sign);
-        let sig = sig.normalize_s().unwrap_or(sig);
+        let sig = sig.normalize_s();
         (
             WebAuthnWrapping {
                 authenticator_data: auth_data,

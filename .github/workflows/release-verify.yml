@@ -76,7 +76,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-binstall
-        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad  # v2
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1  # v2
         with:
           tool: cargo-binstall
 
@@ -107,7 +107,7 @@ jobs:
           echo "version=${v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v5
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: "22"
 

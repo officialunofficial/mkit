@@ -81,13 +81,13 @@ tempfile = "3"
 # Ed25519 verifier dispatch compile out cleanly.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
 # secp256k1 / ES256K (COSE -47) signer + verifier — gated behind
-# `algo-secp256k1`. Pinned to the `0.13` line shared across the
+# `algo-secp256k1`. Pinned to the `0.14` line shared across the
 # RustCrypto `ecdsa` ecosystem.
-k256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+k256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 # P-256 / secp256r1 / prime256v1 (COSE -7) — WebAuthn, Apple Secure
 # Enclave, Android Keystore, iOS CryptoKit, browser WebCrypto. Gated
-# behind `algo-p256`. Same `0.13` RustCrypto major as k256.
-p256 = { version = "0.13", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+# behind `algo-p256`. Same `0.14` RustCrypto major as k256.
+p256 = { version = "0.14", optional = true, default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 # Unconditional (not feature-gated): ES256K/ES256 sign SHA256(pae) when
 # those signer features are on, and every in-toto Statement subject
 # emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so

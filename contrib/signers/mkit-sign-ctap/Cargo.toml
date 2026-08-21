@@ -40,7 +40,7 @@ mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
 buffa = "0.8.1"
 # CTAP-HID driver, optional behind the `ctap-hw` feature.
-ctap-hid-fido2 = { version = "=3.5.11", optional = true }
+ctap-hid-fido2 = { version = "=3.5.13", optional = true }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -57,7 +57,7 @@ buffa = "0.8.1"
 # For the crypto cross-check in tests/protocol_shape.rs — generate a
 # P-256 signature in-process so we don't need hardware just to lock
 # down the wire shape.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }
 sha2 = { version = "0.11", default-features = false }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

@@ -426,10 +426,7 @@ fn attest_and_verify_secp256k1_roundtrip() {
     secret[31] = 42;
     let pk = {
         let sk = SigningKey::from_bytes((&secret).into()).unwrap();
-        sk.verifying_key()
-            .to_encoded_point(true)
-            .as_bytes()
-            .to_vec()
+        sk.verifying_key().to_sec1_point(true).as_bytes().to_vec()
     };
     let keyid = format!("secp256k1:{}", hex_lower(&pk));
 
@@ -500,10 +497,7 @@ fn attest_and_verify_p256_roundtrip() {
     secret[31] = 7;
     let pk = {
         let sk = SigningKey::from_bytes(&secret.into()).unwrap();
-        sk.verifying_key()
-            .to_encoded_point(true)
-            .as_bytes()
-            .to_vec()
+        sk.verifying_key().to_sec1_point(true).as_bytes().to_vec()
     };
     let keyid = format!("p256:{}", hex_lower(&pk));
 
