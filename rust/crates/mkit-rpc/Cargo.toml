@@ -33,7 +33,7 @@ arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
 
 [dependencies]
 arbitrary = { version = "1", optional = true }
-buffa = "0.8.1"
+buffa = "0.9.1"
 thiserror = "2"
 # mkit-rpc now also re-exports a small set of shared transport-side
 # frame helpers (cond_to_wire, rpc_error_to_transport, ref_entry_to_ref,
@@ -54,7 +54,7 @@ thiserror = "2"
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 
 [build-dependencies]
-buffa-build = "0.8.1"
+buffa-build = "0.9.1"
 
 [dev-dependencies]
 hex = "0.4"

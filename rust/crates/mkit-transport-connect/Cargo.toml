@@ -46,20 +46,20 @@ mkit-core = { version = "0.4", path = "../mkit-core" }
 # ConnectRPC native client: hyper/hyper-util transport + rustls TLS. This is
 # the crate's mandatory baseline; `server`/`axum` are added by the `server`
 # feature below (see `[features]`).
-# `streaming` is tokio-based async-compression for `UploadPack`/
-# `DownloadPack`'s client-streaming/server-streaming RPCs (fine natively,
-# unlike on wasm — re-enabled explicitly since `default-features = false`
-# drops it). `json` keeps the buffa-generated message types' serde derives
-# (matches every other connectrpc consumer in this workspace).
-connectrpc = { version = "0.8.1", default-features = false, features = [
+# `UploadPack`/`DownloadPack`'s client-streaming/server-streaming RPCs work
+# natively without a separate opt-in — connectrpc 0.9 dropped the
+# `streaming` cargo feature (and `StreamingCompressionProvider`) entirely;
+# streaming RPCs themselves are unaffected. `json` keeps the
+# buffa-generated message types' serde derives (matches every other
+# connectrpc consumer in this workspace).
+connectrpc = { version = "0.9.0", default-features = false, features = [
     "client",
     "client-tls",
-    "streaming",
     "gzip",
     "zstd",
     "json",
 ] }
-buffa = "0.8.1"
+buffa = "0.9.1"
 
 # Only pulled in by the `server` feature — see `[features]`.
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
@@ -70,7 +70,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 # (see its own Cargo.toml), which is exactly what this crate's `server`
 # feature already turns on, so there is no additional dependency-graph
 # cost beyond the crate itself.
-connectrpc-health = { version = "0.8", optional = true }
+connectrpc-health = { version = "0.9.0", optional = true }
 
 # Async runtime driving the ConnectRPC client (and, under `server`, the axum
 # server too). The `Transport` trait (mkit_core::protocol::Transport) is
@@ -113,7 +113,7 @@ webpki-roots = "1"
 rustls = { version = "0.23", features = ["ring"] }
 
 [build-dependencies]
-connectrpc-build = "0.8.0"
+connectrpc-build = "0.9.0"
 
 [dev-dependencies]
 tempfile = "3"
@@ -130,13 +130,12 @@ hex = "0.4"
 # directly against `connectrpc::server`/`Router` (the client-side regression
 # gate — SPEC-TRANSPORT-CONNECT's testing decision) independent of this
 # crate's own `server` feature, so `server` is listed unconditionally here.
-connectrpc = { version = "0.8.1", default-features = false, features = [
+connectrpc = { version = "0.9.0", default-features = false, features = [
     "client",
     "client-tls",
     "server",
     "gzip",
     "zstd",
-    "streaming",
     "json",
 ] }
 
