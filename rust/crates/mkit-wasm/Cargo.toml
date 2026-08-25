@@ -88,7 +88,7 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # Versions match the copies mkit-attest already pulls in.
 [dev-dependencies]
 sha2 = { version = "0.10", default-features = false }
-base64 = "0.22"
+base64 = "0.23"
 
 [features]
 default = []
