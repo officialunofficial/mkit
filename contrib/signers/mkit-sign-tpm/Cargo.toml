@@ -38,7 +38,7 @@ tpm2 = ["dep:tss-esapi"]
 [dependencies]
 # mkit-rpc owns the wire schemas + length-prefixed framing.
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.8.1"
+buffa = "0.9.1"
 sha2 = "0.11"
 
 # `tss-esapi-sys` hard-rejects non-Linux/Windows targets in its build
@@ -52,6 +52,6 @@ tss-esapi = { version = "7.7", optional = true }
 
 [dev-dependencies]
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
-buffa = "0.8.1"
+buffa = "0.9.1"
 # In-process P-256 signer for protocol-shape unit tests.
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pkcs8"] }

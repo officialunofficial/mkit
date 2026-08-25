@@ -23,22 +23,30 @@ for ::buffa::view::OwnedView<__buffa::view::HealthCheckResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 /// Full service name for this service.
 pub const HEALTH_SERVICE_NAME: &str = "grpc.health.v1.Health";
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `Check` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `Check` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const HEALTH_CHECK_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/grpc.health.v1.Health/Check",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `Watch` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `Watch` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const HEALTH_WATCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/grpc.health.v1.Health/Watch",
         ::connectrpc::StreamType::ServerStream,
@@ -72,7 +80,7 @@ pub const HEALTH_WATCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 ///
 /// Request types resolved through `extern_path` (e.g. well-known types
 /// from another crate) use the same wrappers; the crate that owns the
-/// type must be generated with buffa ≥ 0.8.0 and views enabled so the
+/// type must be generated with buffa ≥ 0.9.0 and views enabled so the
 /// backing `HasMessageView` impl exists.
 ///
 /// The `impl Encodable<Out>` return bound accepts the owned `Out`, the
@@ -95,7 +103,8 @@ pub const HEALTH_WATCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait Health: Send + Sync + 'static {
-    /// Handle the Check RPC.
+    /// Check returns the serving status of the requested service. If the
+    /// service name is empty, the response covers the whole server.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -113,7 +122,21 @@ pub trait Health: Send + Sync + 'static {
             impl ::connectrpc::Encodable<HealthCheckResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the Watch RPC.
+    /// Watch performs a watch for the serving status of the requested service.
+    /// The server will immediately send back a message indicating the current
+    /// serving status. It will then subsequently send a new message whenever
+    /// the service's serving status changes.
+    ///
+    /// If the requested service is unknown when the call is received, the
+    /// server will send a message setting the serving status to SERVICE_UNKNOWN
+    /// but will *not* terminate the call. If at some future point, the serving
+    /// status of the service becomes known, the server will send a new message
+    /// with the service's serving status.
+    ///
+    /// If the call terminates with status UNIMPLEMENTED, then the client should
+    /// assume this method is not supported and should not retry the call. If
+    /// the call terminates with any other status (including OK), then the
+    /// client should retry the call with appropriate exponential backoff.
     ///
     /// `request` is borrowed from the request body and is valid for the
     /// duration of the call (until the response stream is returned);
@@ -303,6 +326,7 @@ impl<T: Health> ::connectrpc::Dispatcher for HealthServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::HealthCheckRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         HealthCheckRequest,
@@ -333,6 +357,7 @@ impl<T: Health> ::connectrpc::Dispatcher for HealthServer<T> {
                     >(request, format)?;
                     let req: __buffa::view::HealthCheckRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         HealthCheckRequest,
@@ -488,8 +513,7 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                HEALTH_SERVICE_NAME,
-                "Check",
+                HEALTH_CHECK_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -524,8 +548,7 @@ where
         ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
-                HEALTH_SERVICE_NAME,
-                "Watch",
+                HEALTH_WATCH_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )

@@ -35,11 +35,10 @@ worker = { version = "0.8", features = ["http"] }
 # re-enable it explicitly so the buffa-generated message types keep their
 # serde derives and JSON error / end-of-stream frames keep working
 # (serde_json is wasm-safe). The Router runs without a tokio runtime — its
-# wasm32 internal spawn is wasm_bindgen_futures::spawn_local. connectrpc 0.8
-# requires buffa >= 0.8.1 (view→owned overflow accounting), matching the
-# main workspace's pin.
-connectrpc = { version = "0.8.1", default-features = false, features = ["gzip", "json"] }
-buffa = "0.8.1"
+# wasm32 internal spawn is wasm_bindgen_futures::spawn_local. connectrpc 0.9
+# requires buffa ^0.9.1 (matched codegen), matching the main workspace's pin.
+connectrpc = { version = "0.9.0", default-features = false, features = ["gzip", "json"] }
+buffa = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -91,7 +90,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [build-dependencies]
-connectrpc-build = "0.8.0"
+connectrpc-build = "0.9.0"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }

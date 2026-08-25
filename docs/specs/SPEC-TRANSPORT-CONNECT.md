@@ -562,7 +562,7 @@ The acceptance gate for this document itself is static, not behavioral:
 
 - `buf lint` (`STANDARD` category) against `proto/mkit/transport/v1/transport.proto` &mdash; zero errors, zero lint exceptions.
 - `buf breaking` initialized (`breaking.use: [FILE]` in `buf.yaml`, §1) as the baseline for every future change to this module.
-- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.8.1`/`connectrpc 0.8`/`connectrpc-build 0.8`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
+- The proto compiles cleanly through the real `buffa`/`connectrpc-build` codegen path (not just `protoc`) &mdash; verified by generating and compiling the full client and server stub set (`TransportService`, `TransportServiceClient`, every request/response/`oneof` message) against `buffa 0.9.1`/`connectrpc 0.9`/`connectrpc-build 0.9`, mirroring the exact `include_generated!()` pattern `mkit-repo-client`/`apps/repo-worker` use.
 - Explicit maintainer sign-off on the RPC shapes in this document, per the originating issue's Testing Decisions.
 
 mkit#699/#700/#701 each own their own runtime test anchors (integration

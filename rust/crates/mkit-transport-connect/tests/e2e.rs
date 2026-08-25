@@ -109,7 +109,10 @@ async fn push_then_pull_round_trip() {
             ..Default::default()
         },
     ];
-    client.upload_pack(requests).await.expect("upload_pack");
+    client
+        .upload_pack(connectrpc::stream_iter(requests))
+        .await
+        .expect("upload_pack");
 
     // pack_exists now true.
     let exists = client

@@ -484,7 +484,7 @@ impl Transport for ConnectTransport {
             self.executor.block_on(async {
                 let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
                 self.client
-                    .upload_pack_with_options(requests.clone(), options)
+                    .upload_pack_with_options(connectrpc::stream_iter(requests.clone()), options)
                     .await
                     .map(|_| ())
                     .map_err(|e| map_connect_error(e, ErrorContext::Upload))

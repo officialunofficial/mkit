@@ -71,6 +71,20 @@ for ::buffa::view::OwnedView<__buffa::view::ListRefsResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<ReadRefResponse>
 for __buffa::view::ReadRefResponseView<'_> {
@@ -88,6 +102,20 @@ for ::buffa::view::OwnedView<__buffa::view::ReadRefResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<UpdateRefResponse>
@@ -107,6 +135,20 @@ for ::buffa::view::OwnedView<__buffa::view::UpdateRefResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<AdvanceRefsResponse>
 for __buffa::view::AdvanceRefsResponseView<'_> {
@@ -124,6 +166,20 @@ for ::buffa::view::OwnedView<__buffa::view::AdvanceRefsResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<PackExistsResponse>
@@ -143,6 +199,20 @@ for ::buffa::view::OwnedView<__buffa::view::PackExistsResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<UploadPackResponse>
 for __buffa::view::UploadPackResponseView<'_> {
@@ -160,6 +230,20 @@ for ::buffa::view::OwnedView<__buffa::view::UploadPackResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<DownloadPackResponse>
@@ -179,67 +263,60 @@ for ::buffa::view::OwnedView<__buffa::view::DownloadPackResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 /// Full service name for this service.
 pub const TRANSPORT_SERVICE_SERVICE_NAME: &str = "mkit.transport.v1.TransportService";
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListRefs` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ListRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_LIST_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/ListRefs",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ReadRef` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ReadRef` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_READ_REF_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/ReadRef",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `UpdateRef` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `UpdateRef` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_UPDATE_REF_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/UpdateRef",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `AdvanceRefs` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `AdvanceRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_ADVANCE_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/AdvanceRefs",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `PackExists` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `PackExists` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_PACK_EXISTS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/PackExists",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `UploadPack` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `UploadPack` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_UPLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/UploadPack",
         ::connectrpc::StreamType::ClientStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `DownloadPack` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `DownloadPack` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/DownloadPack",
         ::connectrpc::StreamType::ServerStream,
@@ -273,7 +350,7 @@ pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrp
 ///
 /// Request types resolved through `extern_path` (e.g. well-known types
 /// from another crate) use the same wrappers; the crate that owns the
-/// type must be generated with buffa ≥ 0.8.0 and views enabled so the
+/// type must be generated with buffa ≥ 0.9.0 and views enabled so the
 /// backing `HasMessageView` impl exists.
 ///
 /// The `impl Encodable<Out>` return bound accepts the owned `Out`, the
@@ -296,7 +373,8 @@ pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrp
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait TransportService: Send + Sync + 'static {
-    /// Handle the ListRefs RPC.
+    /// List refs whose full name starts with `prefix`. Returned names have
+    /// `prefix` stripped, per SPEC-REFS §4. An empty prefix lists every ref.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -314,7 +392,7 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ListRefsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the ReadRef RPC.
+    /// Read a ref's current value. `exists = false` if absent.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -332,7 +410,12 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ReadRefResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the UpdateRef RPC.
+    /// CAS ref write. Connect code `failed_precondition` on a CAS mismatch
+    /// (`MISSING` on an existing ref, or `MATCH` on a different current
+    /// value); `invalid_argument` on `REF_EXPECTATION_UNSPECIFIED`. See
+    /// SPEC-TRANSPORT-CONNECT §3 — the response never carries the current
+    /// ref value; a client that needs to disambiguate MUST follow up with
+    /// ReadRef.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -350,7 +433,8 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<UpdateRefResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the AdvanceRefs RPC.
+    /// Atomically advance a branch's head ref and packmap ref together,
+    /// each under its own CAS precondition. See SPEC-TRANSPORT-CONNECT §4.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -368,7 +452,7 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<AdvanceRefsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the PackExists RPC.
+    /// HEAD-check a pack by digest.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -386,7 +470,13 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<PackExistsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the UploadPack RPC.
+    /// Client-streaming pack upload. The first message on the stream MUST be
+    /// `header`; every subsequent message MUST be `chunk`, in ascending
+    /// contiguous `offset` order, ending with a `chunk.last = true` message.
+    /// The server MUST reject a stream whose received byte count does not
+    /// equal `header.total_bytes` or whose BLAKE3 does not equal
+    /// `header.pack_id`, and MUST NOT store partial bytes on rejection. See
+    /// SPEC-TRANSPORT-CONNECT §6.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -403,7 +493,11 @@ pub trait TransportService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<UploadPackResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the DownloadPack RPC.
+    /// Server-streaming pack download. The first message on the stream MUST
+    /// be `header`; every subsequent message MUST be `chunk`, ending with a
+    /// `chunk.last = true` message. Connect code `not_found` (raised before
+    /// any message is sent) if the digest is absent. See
+    /// SPEC-TRANSPORT-CONNECT §6.
     ///
     /// `request` is borrowed from the request body and is valid for the
     /// duration of the call (until the response stream is returned);
@@ -742,6 +836,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ListRefsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ListRefsRequest,
@@ -757,6 +852,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ReadRefRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ReadRefRequest,
@@ -772,6 +868,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::UpdateRefRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         UpdateRefRequest,
@@ -787,6 +884,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::AdvanceRefsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         AdvanceRefsRequest,
@@ -804,6 +902,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::PackExistsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         PackExistsRequest,
@@ -834,6 +933,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     >(request, format)?;
                     let req: __buffa::view::DownloadPackRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         DownloadPackRequest,
@@ -869,7 +969,7 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                 Box::pin(async move {
                     let req_stream = ::connectrpc::dispatcher::codegen::decode_message_request_stream::<
                         UploadPackRequest,
-                    >(requests, format);
+                    >(requests, format, ctx.decode_options().clone());
                     svc.upload_pack(ctx, req_stream)
                         .await?
                         .encode::<UploadPackResponse>(format)
@@ -1003,8 +1103,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "ListRefs",
+                TRANSPORT_SERVICE_LIST_REFS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1037,8 +1137,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "ReadRef",
+                TRANSPORT_SERVICE_READ_REF_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1074,8 +1174,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "UpdateRef",
+                TRANSPORT_SERVICE_UPDATE_REF_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1111,8 +1211,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "AdvanceRefs",
+                TRANSPORT_SERVICE_ADVANCE_REFS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1148,17 +1248,30 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "PackExists",
+                TRANSPORT_SERVICE_PACK_EXISTS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
             .await
     }
     /// Call the UploadPack RPC. Sends a request to /mkit.transport.v1.TransportService/UploadPack.
+    ///
+    /// `requests` is any `Stream<Item = ...> + Send + 'static` of
+    /// request messages (the `ClientRequestStream` bound); messages
+    /// are sent as the stream yields them. It backs the request
+    /// body, so yield owned messages or feed the call from a
+    /// channel-backed stream. For a collection that is already in
+    /// hand, wrap it with `::connectrpc::stream_iter(...)`.
+    ///
+    /// Dropping the returned future cancels the call: the request
+    /// body is dropped along with it, so messages the stream had
+    /// not yet yielded are never delivered. A caller that needs the
+    /// request delivered must drive the call to completion rather
+    /// than, say, wrapping it in a `timeout`.
     pub async fn upload_pack(
         &self,
-        requests: impl IntoIterator<Item = UploadPackRequest>,
+        requests: impl ::connectrpc::client::ClientRequestStream<UploadPackRequest>,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
             ::buffa::view::OwnedView<__buffa::view::UploadPackResponseView<'static>>,
@@ -1172,9 +1285,22 @@ where
             .await
     }
     /// Call the UploadPack RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    ///
+    /// `requests` is any `Stream<Item = ...> + Send + 'static` of
+    /// request messages (the `ClientRequestStream` bound); messages
+    /// are sent as the stream yields them. It backs the request
+    /// body, so yield owned messages or feed the call from a
+    /// channel-backed stream. For a collection that is already in
+    /// hand, wrap it with `::connectrpc::stream_iter(...)`.
+    ///
+    /// Dropping the returned future cancels the call: the request
+    /// body is dropped along with it, so messages the stream had
+    /// not yet yielded are never delivered. A caller that needs the
+    /// request delivered must drive the call to completion rather
+    /// than, say, wrapping it in a `timeout`.
     pub async fn upload_pack_with_options(
         &self,
-        requests: impl IntoIterator<Item = UploadPackRequest>,
+        requests: impl ::connectrpc::client::ClientRequestStream<UploadPackRequest>,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
         ::connectrpc::client::UnaryResponse<
@@ -1185,8 +1311,8 @@ where
         ::connectrpc::client::call_client_stream(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "UploadPack",
+                TRANSPORT_SERVICE_UPLOAD_PACK_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 requests,
                 options,
             )
@@ -1224,8 +1350,8 @@ where
         ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
-                TRANSPORT_SERVICE_SERVICE_NAME,
-                "DownloadPack",
+                TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
