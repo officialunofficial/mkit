@@ -96,7 +96,7 @@ mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional
 # drive `axum::serve` itself. Feature set mirrors `mkit-transport-connect`'s
 # own server-side (server + axum), version-pinned to the same "0.8" the
 # rest of the workspace's connectrpc consumers use.
-connectrpc = { version = "0.8.1", default-features = false, features = [
+connectrpc = { version = "0.9.0", default-features = false, features = [
     "server",
     "axum",
     "gzip",
@@ -128,7 +128,7 @@ mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 # remote_dispatch can build a key from raw bytes without touching
 # `mkit-transport-enc`'s internals.
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-buffa = "0.8.1"
+buffa = "0.9.1"
 
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
@@ -226,7 +226,7 @@ proptest = "1"
 # generated Connect codebase end-to-end. `server` is additive on top of
 # `mkit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
-connectrpc = { version = "0.8.1", default-features = false, features = ["server", "gzip", "zstd", "streaming", "json"] }
+connectrpc = { version = "0.9.0", default-features = false, features = ["server", "gzip", "zstd", "json"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 futures = "0.3"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for

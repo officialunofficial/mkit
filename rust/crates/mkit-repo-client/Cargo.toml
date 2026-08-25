@@ -40,11 +40,12 @@ wasm-opt = false
 # default-on FEATURE that default-features = false would drop; re-enabled
 # explicitly so the generated message types keep their serde derives
 # (serde_json is wasm-safe).
-connectrpc = { version = "0.8.1", default-features = false, features = ["gzip", "json"] }
+connectrpc = { version = "0.9.0", default-features = false, features = ["gzip", "json"] }
 
-# Protobuf runtime for the generated message types. connectrpc 0.8 requires
-# buffa >= 0.8.1 (view→owned overflow accounting).
-buffa = "0.8.1"
+# Protobuf runtime for the generated message types. connectrpc 0.9 requires
+# buffa ^0.9.1 (matched codegen; 0.9.1 also fixes a 0.9.0 descriptor-set
+# element-memory-bound regression).
+buffa = "0.9.1"
 
 # Hashing — pure-Rust BLAKE3 over the raw request body (wasm-safe). Must match
 # the server's BLAKE3 of the serialized protobuf request body.
@@ -80,4 +81,4 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 wasm-bindgen-test = "0.3"
 
 [build-dependencies]
-connectrpc-build = "0.8.0"
+connectrpc-build = "0.9.0"

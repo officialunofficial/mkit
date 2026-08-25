@@ -489,30 +489,32 @@ impl ::buffa::MessageName for Error {
 impl ::buffa::Message for Error {
     /// Returns the total encoded size in bytes.
     ///
-    /// The result is a `u32`; the protobuf specification requires all
-    /// messages to fit within 2 GiB (2,147,483,647 bytes), so a
-    /// compliant message will never overflow this type.
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
     #[allow(clippy::let_and_return)]
     fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        let mut size = 0u32;
+        let mut size = 0u64;
         if let Some(ref v) = self.code {
-            size += 1u32 + ::buffa::types::int32_encoded_len(v.to_i32()) as u32;
+            size += 1u64 + ::buffa::types::int32_encoded_len(v.to_i32()) as u64;
         }
         if let Some(ref v) = self.message {
-            size += 1u32 + ::buffa::types::string_encoded_len(v) as u32;
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
         if let Some(ref v) = self.details {
-            size += 1u32 + ::buffa::types::bytes_encoded_len(v) as u32;
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
-        size += self.__buffa_unknown_fields.encoded_len() as u32;
-        size
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
     }
     fn write_to(
         &self,
         _cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::bytes::BufMut,
+        buf: &mut impl ::buffa::EncodeSink,
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
@@ -523,7 +525,7 @@ impl ::buffa::Message for Error {
             ::buffa::types::put_string_field(2u32, v, buf);
         }
         if let Some(ref v) = self.details {
-            ::buffa::types::put_bytes_field(3u32, v, buf);
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }

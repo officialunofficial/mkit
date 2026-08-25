@@ -111,6 +111,20 @@ for ::buffa::view::OwnedView<__buffa::view::PutObjectResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<GetObjectResponse>
 for __buffa::view::GetObjectResponseView<'_> {
@@ -129,6 +143,20 @@ for ::buffa::view::OwnedView<__buffa::view::GetObjectResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<GetRefResponse> for __buffa::view::GetRefResponseView<'_> {
     fn encode(
@@ -145,6 +173,20 @@ for ::buffa::view::OwnedView<__buffa::view::GetRefResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<UpdateRefResponse>
@@ -164,6 +206,20 @@ for ::buffa::view::OwnedView<__buffa::view::UpdateRefResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<ListRefsResponse>
 for __buffa::view::ListRefsResponseView<'_> {
@@ -182,6 +238,20 @@ for ::buffa::view::OwnedView<__buffa::view::ListRefsResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<RoomEvent> for __buffa::view::RoomEventView<'_> {
     fn encode(
@@ -198,6 +268,20 @@ for ::buffa::view::OwnedView<__buffa::view::RoomEventView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<PostMessageResponse>
@@ -217,6 +301,20 @@ for ::buffa::view::OwnedView<__buffa::view::PostMessageResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<ListMessagesResponse>
 for __buffa::view::ListMessagesResponseView<'_> {
@@ -235,6 +333,20 @@ for ::buffa::view::OwnedView<__buffa::view::ListMessagesResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<ReactResponse> for __buffa::view::ReactResponseView<'_> {
     fn encode(
@@ -251,6 +363,20 @@ for ::buffa::view::OwnedView<__buffa::view::ReactResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<ListReactionsResponse>
@@ -270,6 +396,20 @@ for ::buffa::view::OwnedView<__buffa::view::ListReactionsResponseView<'static>> 
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 impl ::connectrpc::Encodable<ListCommitsResponse>
 for __buffa::view::ListCommitsResponseView<'_> {
@@ -287,6 +427,20 @@ for ::buffa::view::OwnedView<__buffa::view::ListCommitsResponseView<'static>> {
         codec: ::connectrpc::CodecFormat,
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
     }
 }
 impl ::connectrpc::Encodable<PurgeRoomResponse>
@@ -306,112 +460,90 @@ for ::buffa::view::OwnedView<__buffa::view::PurgeRoomResponseView<'static>> {
     ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
         ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
     }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
 }
 /// Full service name for this service.
 pub const REPO_SERVICE_SERVICE_NAME: &str = "mkit.repo.v1.RepoService";
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `PutObject` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `PutObject` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_PUT_OBJECT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/PutObject",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `GetObject` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `GetObject` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_GET_OBJECT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/GetObject",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `GetRef` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `GetRef` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_GET_REF_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/GetRef",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `UpdateRef` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `UpdateRef` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_UPDATE_REF_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/UpdateRef",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListRefs` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ListRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_LIST_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListRefs",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `WatchRefs` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `WatchRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_WATCH_REFS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/WatchRefs",
         ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `PostMessage` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `PostMessage` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_POST_MESSAGE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/PostMessage",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListMessages` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ListMessages` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_LIST_MESSAGES_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListMessages",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `React` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `React` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_REACT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/React",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListReactions` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ListReactions` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_LIST_REACTIONS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListReactions",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `ListCommits` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `ListCommits` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_LIST_COMMITS_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/ListCommits",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
-/// Static [`Spec`](::connectrpc::Spec) for the server-side `PurgeRoom` RPC.
-///
-/// The dispatcher surfaces this on
-/// [`RequestContext::spec`](::connectrpc::RequestContext::spec).
+/// Static [`Spec`](::connectrpc::Spec) for the `PurgeRoom` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const REPO_SERVICE_PURGE_ROOM_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.repo.v1.RepoService/PurgeRoom",
         ::connectrpc::StreamType::Unary,
@@ -445,7 +577,7 @@ pub const REPO_SERVICE_PURGE_ROOM_SPEC: ::connectrpc::Spec = ::connectrpc::Spec:
 ///
 /// Request types resolved through `extern_path` (e.g. well-known types
 /// from another crate) use the same wrappers; the crate that owns the
-/// type must be generated with buffa ≥ 0.8.0 and views enabled so the
+/// type must be generated with buffa ≥ 0.9.0 and views enabled so the
 /// backing `HasMessageView` impl exists.
 ///
 /// The `impl Encodable<Out>` return bound accepts the owned `Out`, the
@@ -468,7 +600,8 @@ pub const REPO_SERVICE_PURGE_ROOM_SPEC: ::connectrpc::Spec = ::connectrpc::Spec:
 /// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait RepoService: Send + Sync + 'static {
-    /// Handle the PutObject RPC.
+    /// Store a loose mkit object. The server MUST verify BLAKE3(bytes)==object_id
+    /// and store idempotently (a re-PUT of the same id is a no-op).
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -486,7 +619,7 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<PutObjectResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the GetObject RPC.
+    /// Fetch a loose object by id. `found=false` if absent.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -504,7 +637,7 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<GetObjectResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the GetRef RPC.
+    /// Read a ref's current value. `exists=false` if absent.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -522,7 +655,9 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<GetRefResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the UpdateRef RPC.
+    /// Advance a ref under a CAS condition. `committed` on success, `conflict`
+    /// on a precondition failure (the existing value is returned in
+    /// `current_id` so the client can rebase/retry).
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -540,7 +675,7 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<UpdateRefResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the ListRefs RPC.
+    /// List refs under an optional prefix.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -558,7 +693,11 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ListRefsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the WatchRefs RPC.
+    /// Server-streaming live room activity — one RoomEvent per successful
+    /// UpdateRef/PostMessage/React, plus presence roster changes, to every
+    /// subscriber. RoomEvent is a oneof of the four kinds (commit/chat/
+    /// reaction/presence) so the stream is one schema-validated feed instead of
+    /// requiring a second, hand-parsed channel for chat/reactions/presence.
     ///
     /// `request` is borrowed from the request body and is valid for the
     /// duration of the call (until the response stream is returned);
@@ -576,7 +715,14 @@ pub trait RepoService: Send + Sync + 'static {
             >,
         >,
     > + Send;
-    /// Handle the PostMessage RPC.
+    /// Post a signed chat message to the room. The write envelope (request
+    /// metadata) authenticates the author exactly like UpdateRef — the verified
+    /// Ed25519 pubkey IS the author, no accounts. The server content-addresses
+    /// the canonical message bytes by BLAKE3 (stored once in the object store,
+    /// like a commit), assigns a monotonic per-room sequence, and broadcasts a
+    /// chat frame to every `/watch/<room>` subscriber. Rate-limited + length-
+    /// capped server-side; `rate_limited=true` (with `accepted=false`) when the
+    /// author posted too recently.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -594,7 +740,8 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<PostMessageResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the ListMessages RPC.
+    /// Recent messages for the room, oldest-first (chat reading order), capped by
+    /// `limit`. Unauthenticated — reading the lobby is open to everyone.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -612,7 +759,10 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ListMessagesResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the React RPC.
+    /// Toggle a signed emoji reaction on a feed item (a chat message or a commit),
+    /// keyed by its hex id. Signed like PostMessage — the verified Ed25519 pubkey
+    /// is the reactor. Idempotent per (author, target, emoji): a second call from
+    /// the same author removes it. Broadcasts a reaction frame to subscribers.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -630,7 +780,8 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ReactResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the ListReactions RPC.
+    /// All reactions in the room (target_id → emoji → reactors); the client
+    /// aggregates counts + "did I react". Unauthenticated read.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -648,7 +799,12 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ListReactionsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the ListCommits RPC.
+    /// Walk the commit chain server-side from a ref head (or a `start_id` cursor)
+    /// by first-parent, returning a bounded page of RAW commit/remix objects in ONE
+    /// round-trip — instead of the client issuing O(depth) sequential GetObject
+    /// calls that can't be pipelined (each parent id is only known after decoding
+    /// the previous object). The client decodes the bytes with its existing
+    /// decoder, so the server needs no field-by-field parity. Unauthenticated read.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -666,7 +822,18 @@ pub trait RepoService: Send + Sync + 'static {
             impl ::connectrpc::Encodable<ListCommitsResponse> + Send + use<'a, Self>,
         >,
     > + Send;
-    /// Handle the PurgeRoom RPC.
+    /// Permanently delete a room's R2 objects (both the `objects/` and
+    /// `messages/` key prefixes) and its Durable-Object-resident mutable state
+    /// (refs, chat rows, reactions, and the denormalized commit index) — the
+    /// ONLY way to reclaim storage the anonymous-multiplayer write path
+    /// otherwise retains forever (immutable objects are never deleted by any
+    /// other RPC). Admin-gated (see the ADMIN AUTH note above): the request
+    /// MUST carry a valid `X-Admin-Token` header, or the server rejects with
+    /// `unauthenticated` before this handler runs. There is no signed-write
+    /// envelope requirement (a purge is an operator action, not a
+    /// room-participant write) and no undo — the purge is immediate and
+    /// irreversible. See the README "Retention & backup/restore" runbook
+    /// before invoking against a production room.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -1164,6 +1331,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::PutObjectRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         PutObjectRequest,
@@ -1179,6 +1347,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::GetObjectRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         GetObjectRequest,
@@ -1194,6 +1363,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::GetRefRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         GetRefRequest,
@@ -1209,6 +1379,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::UpdateRefRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         UpdateRefRequest,
@@ -1224,6 +1395,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ListRefsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ListRefsRequest,
@@ -1239,6 +1411,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::PostMessageRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         PostMessageRequest,
@@ -1256,6 +1429,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ListMessagesRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ListMessagesRequest,
@@ -1273,6 +1447,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ReactRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ReactRequest,
@@ -1288,6 +1463,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ListReactionsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ListReactionsRequest,
@@ -1305,6 +1481,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::ListCommitsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         ListCommitsRequest,
@@ -1322,6 +1499,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request.encoded()?, format)?;
                     let req: __buffa::view::PurgeRoomRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         PurgeRoomRequest,
@@ -1352,6 +1530,7 @@ impl<T: RepoService> ::connectrpc::Dispatcher for RepoServiceServer<T> {
                     >(request, format)?;
                     let req: __buffa::view::WatchRefsRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
                         &body,
+                        ctx.decode_options(),
                     )?;
                     let req = ::connectrpc::ServiceRequest::<
                         WatchRefsRequest,
@@ -1510,8 +1689,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "PutObject",
+                REPO_SERVICE_PUT_OBJECT_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1547,8 +1726,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "GetObject",
+                REPO_SERVICE_GET_OBJECT_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1581,8 +1760,7 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "GetRef",
+                REPO_SERVICE_GET_REF_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1618,8 +1796,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "UpdateRef",
+                REPO_SERVICE_UPDATE_REF_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1655,8 +1833,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "ListRefs",
+                REPO_SERVICE_LIST_REFS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1694,8 +1872,8 @@ where
         ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "WatchRefs",
+                REPO_SERVICE_WATCH_REFS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1731,8 +1909,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "PostMessage",
+                REPO_SERVICE_POST_MESSAGE_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1768,8 +1946,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "ListMessages",
+                REPO_SERVICE_LIST_MESSAGES_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1802,8 +1980,7 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "React",
+                REPO_SERVICE_REACT_SPEC.with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1839,8 +2016,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "ListReactions",
+                REPO_SERVICE_LIST_REACTIONS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1876,8 +2053,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "ListCommits",
+                REPO_SERVICE_LIST_COMMITS_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
@@ -1913,8 +2090,8 @@ where
         ::connectrpc::client::call_unary(
                 &self.transport,
                 &self.config,
-                REPO_SERVICE_SERVICE_NAME,
-                "PurgeRoom",
+                REPO_SERVICE_PURGE_ROOM_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,
             )
