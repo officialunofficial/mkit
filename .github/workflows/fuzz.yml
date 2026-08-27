@@ -41,7 +41,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3  # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
         with:
           # cargo-fuzz builds inside rust/fuzz with its own target dir,
           # but pulls workspace deps from rust/. Cache both.
