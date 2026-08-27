@@ -10,6 +10,7 @@ import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
 import { RefsPanel, RepoLog } from './multiplayer/repo-browser'
+import { WebMcpTools } from './multiplayer/webmcp-tools'
 
 /**
  * Owns the repo backend as a VALUE and provides it to the tree. `useResolvedRepoBackend` returns the mock offline
@@ -64,6 +65,18 @@ function MultiplayerBody({
 
   return (
     <div className='space-y-8'>
+      {/* WebMCP (https://github.com/webmachinelearning/webmcp) tool registration — renders nothing; lets an in-page
+          agent read branches/commits and push/remix/branch through the same signing path as the UI below. */}
+      <WebMcpTools
+        room={room}
+        selectedRef={selectedRef}
+        onSelectRef={(r) => {
+          setSelectedRef(r)
+          setSelectedCommit(null)
+        }}
+        onSelectCommit={setSelectedCommit}
+      />
+
       {/* Identity — its own bordered section spanning both columns. The locked
           create/unlock actions and the unlocked player header share this banner
           so "who am I" reads as one distinct concern above the repo workspace. */}
