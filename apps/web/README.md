@@ -63,6 +63,23 @@ regression, which shipped a blank site).
 
 Preview locally with `bun run preview`. Source lives under `src/`.
 
+## WebMCP tools (multiplayer demo)
+
+The `/multiplayer` page registers [WebMCP](https://github.com/webmachinelearning/webmcp)
+tools against `document.modelContext` &mdash; the proposed browser API that lets a
+page expose live, in-browser functionality directly to an AI agent, sharing
+state with the visible UI instead of a separate headless API. Where a browser
+or extension hasn't implemented the API, registration is a documented no-op
+(`src/lib/webmcp.ts`); nothing else on the site behaves differently.
+
+Registered tools (`src/components/multiplayer/webmcp-tools.tsx`): `mkit_get_identity`,
+`mkit_list_branches`, `mkit_get_commit_log`, `mkit_get_commit`, and
+`mkit_select_branch` read the room; `mkit_push_commit`, `mkit_remix_commit`, and
+`mkit_branch_commit` sign and push through the same `usePushCommit` / `useDerive`
+hooks the Compose/RepoLog UI uses &mdash; an agent's commit and a visitor's click
+are indistinguishable on the wire, and both require an unlocked identity (the
+write tools return a clear error, not a missing tool, while locked).
+
 ## Agent skill (`/SKILL.md`)
 
 The site also serves the project's CLI Agent Skill at
