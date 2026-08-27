@@ -16,12 +16,14 @@
 // locked, or before the backend has loaded, fails with the same explanatory message the UI shows instead of just
 // disappearing from the tool list.
 
+import { type QueryClient, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef } from 'react'
 import { useIdentityStore } from '../../lib/identity-store'
 import {
   CasConflictError,
   type CommitLogEntry,
   IdentityLockedError,
+  repoKeys,
   usePushCommit,
   useRepoBackend,
   type RepoBackend,
@@ -48,6 +50,15 @@ type Latest = {
   selectedRef: string
   onSelectRef: (ref: string) => void
   onSelectCommit: (hash: string | null) => void
+  /**
+   * The SAME QueryClient RefsPanel/RepoLog/Compose read. Reads that share a query key with those hooks (an object by
+   * hash, a branch's head, a limit-suffixed commit-log page) go through this via `fetchQuery` instead of `backend.*`
+   * directly, so a tool call and the visible UI dedupe requests and stay one cache the WebSocket keeps live-patched —
+   * not two independent reads of the same room. `mkit_list_branches` is the one exception: `useRefs`' cache holds
+   * paginated `useInfiniteQuery` pages, a different shape than the flat list this tool returns, so sharing that key
+   * would corrupt the branches panel's cache rather than warm it — it still calls `backend.listRefs` directly.
+   */
+  queryClient: QueryClient
 }
 
 const DEFAULT_LOG_LIMIT = 20
@@ -67,9 +78,24 @@ function mapWriteError(e: unknown): string {
  * One decoded commit/remix, shaped for a tool result — mirrors `CommitDetail`'s decode, minus the JSX. Decodes the
  * object bytes exactly once (`object_kind` then the matching decoder), unlike `CommitDetail`'s own copy of this logic
  * which currently decodes twice.
+ *
+ * Fetches the raw bytes through `queryClient`, under the exact key/staleTime `useObject` uses — objects are
+ * content-addressed and immutable, so a hash `CommitDetail` (or an earlier tool call) already resolved is served
+ * straight from cache, with no network round-trip and no risk of ever seeing stale bytes for it.
  */
-async function describeCommit(api: MkitApi, backend: RepoBackend, room: string, hash: string) {
-  const bytes = await backend.getObject(room, hash)
+async function describeCommit(
+  api: MkitApi,
+  backend: RepoBackend,
+  queryClient: QueryClient,
+  room: string,
+  hash: string,
+) {
+  const bytes = await queryClient.fetchQuery({
+    queryKey: repoKeys.object(room, hash),
+    queryFn: () => backend.getObject(room, hash),
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+  })
   if (!bytes) return null
   let kind: string
   try {
@@ -167,9 +193,17 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         const backend = l.backend
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         const ref = args.ref?.trim() || 'main'
+        const limit = args.limit ?? DEFAULT_LOG_LIMIT
         try {
-          const entries: CommitLogEntry[] = await backend.commitLog(l.room, ref, {
-            limit: args.limit ?? DEFAULT_LOG_LIMIT,
+          // `useCommitLog` keys an uncapped read as `repoKeys.log(room, ref)` and a capped one (e.g. the lobby feed) as
+          // that same key plus the limit — this tool always passes a limit, so it always uses the suffixed form. That
+          // keeps it from ever writing a truncated result under the bare key an uncapped RepoLog reader relies on, while
+          // still sharing the WS-invalidation path: `repoKeys.log(room, ref)` is a PREFIX of this key, and
+          // `useRepoEvents`'s push-driven `invalidateQueries` matches by prefix, so a push refreshes this cache entry
+          // too.
+          const entries: CommitLogEntry[] = await l.queryClient.fetchQuery({
+            queryKey: [...repoKeys.log(l.room, ref), limit],
+            queryFn: () => backend.commitLog(l.room, ref, { limit }),
           })
           return webMcpText(
             JSON.stringify({
@@ -202,7 +236,7 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         if (!args.hash?.trim()) return webMcpError('A commit hash is required.')
         try {
-          const info = await describeCommit(l.api, backend, l.room, args.hash.trim())
+          const info = await describeCommit(l.api, backend, l.queryClient, l.room, args.hash.trim())
           if (!info) return webMcpError(`No commit found for hash ${args.hash}.`)
           return webMcpText(JSON.stringify(info))
         } catch (e) {
@@ -247,7 +281,13 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         const targetRef = args.ref?.trim() || before.selectedRef || 'main'
         try {
-          const parentHash = (await backend.getRef(before.room, targetRef)) ?? ''
+          // Same key `useRef` reads (Compose/RefsPanel), so a concurrent identical read dedupes against theirs and this
+          // fetch's result lands in the same cache entry they're subscribed to.
+          const parentHash =
+            (await before.queryClient.fetchQuery({
+              queryKey: repoKeys.ref(before.room, targetRef),
+              queryFn: () => backend.getRef(before.room, targetRef),
+            })) ?? ''
           // Re-read the live state after the `await` above (a real network round-trip against the wasm backend) rather
           // than trusting `before`: if the identity got locked while that call was in flight, this bails out instead of
           // signing with a seed the visitor no longer intends to have in memory.
@@ -349,6 +389,7 @@ export function WebMcpTools({
   const pubkeyHex = useIdentityStore((s) => (s.unlocked ? s.ed25519PubkeyHex : null))
   const push = usePushCommit()
   const derive = useDerive(api, room, seedHex)
+  const queryClient = useQueryClient()
 
   const latest = useRef<Latest>({
     room,
@@ -361,9 +402,22 @@ export function WebMcpTools({
     selectedRef,
     onSelectRef,
     onSelectCommit,
+    queryClient,
   })
   useEffect(() => {
-    latest.current = { room, api, backend, seedHex, pubkeyHex, push, derive, selectedRef, onSelectRef, onSelectCommit }
+    latest.current = {
+      room,
+      api,
+      backend,
+      seedHex,
+      pubkeyHex,
+      push,
+      derive,
+      selectedRef,
+      onSelectRef,
+      onSelectCommit,
+      queryClient,
+    }
   })
 
   // Built once (stable identity for the component's lifetime): every `execute` reads `latest.current`, so the tool

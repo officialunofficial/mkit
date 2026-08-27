@@ -2,8 +2,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { useIdentityStore } from '../../lib/identity-store'
+import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import { mkit } from '../../lib/mkit'
+import { repoKeys } from '../../lib/repo-api'
 import type { WebMcpModelContext, WebMcpTool } from '../../lib/webmcp'
 import { MultiplayerDemo } from '../multiplayer-demo'
 import { renderSuspended } from '../test-support'
@@ -45,9 +46,9 @@ async function unlockIdentity() {
 }
 
 async function renderDemo() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const result = await renderSuspended(
-    <QueryClientProvider client={client}>
+    <QueryClientProvider client={queryClient}>
       <MultiplayerDemo />
     </QueryClientProvider>,
     mkit(),
@@ -57,7 +58,7 @@ async function renderDemo() {
   // while `ComposeDisabled`'s inert `<option value="main">main</option>` is
   // also on screen (plain `findByText('main')` matches both).
   await screen.findByRole('button', { pressed: true })
-  return result
+  return { ...result, queryClient }
 }
 
 describe('WebMcpTools (multiplayer demo)', () => {
@@ -133,6 +134,27 @@ describe('WebMcpTools (multiplayer demo)', () => {
     const parsed = jsonOf(result) as { ref: string; commits: Array<{ message: string }> }
     expect(parsed.ref).toBe('main')
     expect(parsed.commits.length).toBeGreaterThan(0)
+  })
+
+  it('mkit_get_commit_log reads through the same QueryClient, under a limit-suffixed key', async () => {
+    const { queryClient } = await renderDemo()
+    await tools.get('mkit_get_commit_log')!.execute({ ref: 'main', limit: 5 }, { signal: new AbortController().signal })
+    // The limit-suffixed key is this tool's own cache entry — populated by the call above, distinct from RepoLog's
+    // uncapped `repoKeys.log(room, ref)` reader (already populated at render, independent of this tool call), so a
+    // capped tool read can never write a truncated result under the key an uncapped UI reader relies on.
+    expect(queryClient.getQueryData([...repoKeys.log(DEFAULT_ROOM, 'main'), 5])).toBeDefined()
+  })
+
+  it('mkit_get_commit populates the same object cache useObject reads (immutable, content-addressed)', async () => {
+    const { queryClient } = await renderDemo()
+    const log = await tools
+      .get('mkit_get_commit_log')!
+      .execute({ ref: 'main' }, { signal: new AbortController().signal })
+    const hash = (jsonOf(log) as { commits: Array<{ hash: string }> }).commits[0]!.hash
+
+    const result = await tools.get('mkit_get_commit')!.execute({ hash }, { signal: new AbortController().signal })
+    expect(result.isError).toBeFalsy()
+    expect(queryClient.getQueryData(repoKeys.object(DEFAULT_ROOM, hash))).toBeInstanceOf(Uint8Array)
   })
 
   it('mkit_push_commit refuses to sign while locked', async () => {
