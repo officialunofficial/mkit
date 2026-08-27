@@ -4,8 +4,10 @@
 // `document.modelContext` tools that let an in-page or browser-embedded agent read the room's branches and commit
 // history, and — once the visitor has unlocked an identity — push, remix, or branch on their behalf. Every write tool
 // goes through the SAME backend + signing hooks as the Compose/RepoLog UI (`usePushCommit`, `useDerive`), so an
-// agent's actions and the visitor's clicks produce identical, indistinguishable signed commits, and a tool call also
-// drives the visible branch/commit selection — the "shared context" WebMCP is for, not a parallel headless API.
+// agent's actions and the visitor's clicks produce identical, indistinguishable signed commits. Only `mkit_select_branch`
+// drives the visible branch/commit selection (mirroring a click on a branch row) — the write tools deliberately don't,
+// since that selection doubles as Compose's push-target field and a write tool succeeding mid-edit would otherwise
+// silently discard a branch name the visitor is still typing.
 //
 // Renders nothing. A sibling of the panels it mirrors, not a wrapper around them, so tool registration doesn't couple
 // into their render trees. The tool list is registered ONCE (stable across renders): every `execute` reads current
@@ -20,7 +22,6 @@ import {
   CasConflictError,
   type CommitLogEntry,
   IdentityLockedError,
-  decodeLogObject,
   usePushCommit,
   useRepoBackend,
   type RepoBackend,
@@ -29,6 +30,7 @@ import { webMcpError, webMcpText, type WebMcpTool } from '../../lib/webmcp'
 import { useMkit } from '../use-mkit'
 import { useWebMcpTools } from '../use-web-mcp-tools'
 import { useDerive } from './compose'
+import { CAS_CONFLICT_COPY, IDENTITY_LOCKED_COPY, errMsg } from './shared'
 
 type MkitApi = ReturnType<typeof useMkit>
 type PushCommit = ReturnType<typeof usePushCommit>
@@ -40,6 +42,7 @@ type Latest = {
   api: MkitApi
   backend: RepoBackend | null
   seedHex: string | null
+  pubkeyHex: string | null
   push: PushCommit
   derive: Derive
   selectedRef: string
@@ -50,28 +53,56 @@ type Latest = {
 const DEFAULT_LOG_LIMIT = 20
 const DEFAULT_REFS_LIMIT = 50
 
-/** One decoded commit/remix, shaped for a tool result — mirrors `CommitDetail`'s decode, minus the JSX. */
+/**
+ * Map a write-tool failure to the same copy the Compose/RepoLog UI shows for the identical error, via `humanizeError`
+ * for anything else — so a WebMCP-facing error never disagrees with the UI's, and never leaks raw technical detail.
+ */
+function mapWriteError(e: unknown): string {
+  if (e instanceof CasConflictError) return CAS_CONFLICT_COPY
+  if (e instanceof IdentityLockedError) return IDENTITY_LOCKED_COPY
+  return errMsg(e)
+}
+
+/**
+ * One decoded commit/remix, shaped for a tool result — mirrors `CommitDetail`'s decode, minus the JSX. Decodes the
+ * object bytes exactly once (`object_kind` then the matching decoder), unlike `CommitDetail`'s own copy of this logic
+ * which currently decodes twice.
+ */
 async function describeCommit(api: MkitApi, backend: RepoBackend, room: string, hash: string) {
   const bytes = await backend.getObject(room, hash)
   if (!bytes) return null
-  const decoded = decodeLogObject(api, bytes, hash, '')
-  if (!decoded) return null
-  const isRemix = decoded.entry.kind === 'remix'
+  let kind: string
+  try {
+    kind = api.object_kind(bytes)
+  } catch {
+    return null
+  }
+  if (kind !== 'commit' && kind !== 'remix') return null
+  const isRemix = kind === 'remix'
   const info = isRemix ? api.remix_decode(bytes) : api.commit_decode(bytes)
   const parents: string[] = []
   for (let i = 0; i < info.parent_count; i++) {
     const p = info.parent(i)
     if (p) parents.push(p)
   }
+  const sources: Array<{ upstreamIdHex: string; commitHashHex: string }> = []
+  if (isRemix) {
+    const remixInfo = info as ReturnType<MkitApi['remix_decode']>
+    for (let i = 0; i < remixInfo.source_count; i++) {
+      const s = remixInfo.source(i)
+      if (s) sources.push({ upstreamIdHex: s.upstream_id_hex, commitHashHex: s.commit_hash_hex })
+    }
+  }
   return {
     hash,
-    kind: decoded.entry.kind ?? 'commit',
+    kind,
     message: info.message,
     signerHex: info.signer_hex,
     timestamp: Number(info.timestamp),
     treeHex: info.tree_hex,
+    signatureHex: info.signature_hex,
     parents,
-    sources: decoded.entry.sources ?? [],
+    sources,
   }
 }
 
@@ -85,7 +116,9 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
       inputSchema: { type: 'object', properties: {} },
       async execute() {
         const l = latest.current
-        return webMcpText(JSON.stringify({ unlocked: !!l.seedHex, room: l.room, selectedRef: l.selectedRef }))
+        return webMcpText(
+          JSON.stringify({ unlocked: !!l.seedHex, pubkeyHex: l.pubkeyHex, room: l.room, selectedRef: l.selectedRef }),
+        )
       },
     },
     {
@@ -102,13 +135,21 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         const l = latest.current
         const backend = l.backend
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
-        const page = await backend.listRefs(l.room, args.prefix, { pageSize: args.limit ?? DEFAULT_REFS_LIMIT })
-        return webMcpText(
-          JSON.stringify({
-            total: page.total,
-            branches: page.refs.map((r) => ({ name: r.name, head: r.objectIdHex })),
-          }),
-        )
+        const limit = args.limit ?? DEFAULT_REFS_LIMIT
+        // `listRefs`'s pageSize<=0 means "unpaginated: return everything" (its legacy default), the opposite of what
+        // a caller-supplied `limit: 0` means here — short-circuit before that page-size sentinel kicks in.
+        if (limit <= 0) return webMcpText(JSON.stringify({ total: 0, branches: [] }))
+        try {
+          const page = await backend.listRefs(l.room, args.prefix, { pageSize: limit })
+          return webMcpText(
+            JSON.stringify({
+              total: page.total,
+              branches: page.refs.map((r) => ({ name: r.name, head: r.objectIdHex })),
+            }),
+          )
+        } catch (e) {
+          return webMcpError(errMsg(e))
+        }
       },
     },
     {
@@ -126,21 +167,25 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         const backend = l.backend
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         const ref = args.ref?.trim() || 'main'
-        const entries: CommitLogEntry[] = await backend.commitLog(l.room, ref, {
-          limit: args.limit ?? DEFAULT_LOG_LIMIT,
-        })
-        return webMcpText(
-          JSON.stringify({
-            ref,
-            commits: entries.map((e) => ({
-              hash: e.hash,
-              message: e.message,
-              author: e.authorPubkey,
-              createdAt: e.createdAt,
-              kind: e.kind ?? 'commit',
-            })),
-          }),
-        )
+        try {
+          const entries: CommitLogEntry[] = await backend.commitLog(l.room, ref, {
+            limit: args.limit ?? DEFAULT_LOG_LIMIT,
+          })
+          return webMcpText(
+            JSON.stringify({
+              ref,
+              commits: entries.map((e) => ({
+                hash: e.hash,
+                message: e.message,
+                author: e.authorPubkey,
+                createdAt: e.createdAt,
+                kind: e.kind ?? 'commit',
+              })),
+            }),
+          )
+        } catch (e) {
+          return webMcpError(errMsg(e))
+        }
       },
     },
     {
@@ -194,15 +239,21 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
         required: ['message'],
       },
       async execute(args: { message: string; ref?: string }) {
-        const l = latest.current
+        const before = latest.current
         if (!args.message?.trim()) return webMcpError('A commit message is required.')
-        if (!l.seedHex)
+        if (!before.seedHex)
           return webMcpError('Unlock an identity in this tab before pushing — the tool needs a signing key.')
-        const backend = l.backend
+        const backend = before.backend
         if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
-        const targetRef = args.ref?.trim() || l.selectedRef || 'main'
+        const targetRef = args.ref?.trim() || before.selectedRef || 'main'
         try {
-          const parentHash = (await backend.getRef(l.room, targetRef)) ?? ''
+          const parentHash = (await backend.getRef(before.room, targetRef)) ?? ''
+          // Re-read the live state after the `await` above (a real network round-trip against the wasm backend) rather
+          // than trusting `before`: if the identity got locked while that call was in flight, this bails out instead of
+          // signing with a seed the visitor no longer intends to have in memory.
+          const l = latest.current
+          if (!l.seedHex)
+            return webMcpError('Unlock an identity in this tab before pushing — the tool needs a signing key.')
           const tree = l.api.tree_encode('[]')
           const nowSecs = BigInt(Math.floor(Date.now() / 1000))
           const commit = l.api.commit_encode_and_sign(tree.hash_hex, parentHash, args.message, nowSecs, l.seedHex)
@@ -216,19 +267,9 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
             message: args.message,
             parentHash,
           })
-          l.onSelectRef(targetRef)
-          l.onSelectCommit(null)
           return webMcpText(`Pushed commit ${commit.hash_hex} to "${targetRef}".`)
         } catch (e) {
-          return webMcpError(
-            e instanceof CasConflictError
-              ? 'Someone pushed to this branch first. Try again to build on the new head.'
-              : e instanceof IdentityLockedError
-                ? 'Your identity is locked. Unlock it and try again.'
-                : e instanceof Error
-                  ? e.message
-                  : String(e),
-          )
+          return webMcpError(mapWriteError(e))
         }
       },
     },
@@ -243,24 +284,20 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
       },
       async execute(args: { hash: string }) {
         const l = latest.current
-        if (!args.hash?.trim()) return webMcpError('A commit hash is required.')
+        const hash = args.hash?.trim()
+        if (!hash) return webMcpError('A commit hash is required.')
         if (!l.seedHex) return webMcpError('Unlock an identity in this tab before remixing.')
+        const backend = l.backend
+        if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         try {
-          const ref = await l.derive.remix(args.hash.trim())
+          // The UI only ever calls remix()/branch() with a hash it already fetched and decoded; a WebMCP caller can
+          // pass anything, so confirm the object actually exists before recording it as a signed remix source.
+          if (!(await backend.getObject(l.room, hash))) return webMcpError(`No commit found for hash ${hash}.`)
+          const ref = await l.derive.remix(hash)
           if (!ref) return webMcpError('Could not remix that commit — the repository backend is not ready yet.')
-          l.onSelectRef(ref)
-          l.onSelectCommit(null)
-          return webMcpText(`Remixed ${args.hash} onto new branch "${ref}".`)
+          return webMcpText(`Remixed ${hash} onto new branch "${ref}".`)
         } catch (e) {
-          return webMcpError(
-            e instanceof CasConflictError
-              ? 'Someone pushed first — try again.'
-              : e instanceof IdentityLockedError
-                ? 'Your identity is locked. Unlock it and try again.'
-                : e instanceof Error
-                  ? e.message
-                  : String(e),
-          )
+          return webMcpError(mapWriteError(e))
         }
       },
     },
@@ -275,16 +312,20 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
       },
       async execute(args: { hash: string }) {
         const l = latest.current
-        if (!args.hash?.trim()) return webMcpError('A commit hash is required.')
+        const hash = args.hash?.trim()
+        if (!hash) return webMcpError('A commit hash is required.')
         if (!l.seedHex) return webMcpError('Unlock an identity in this tab before branching.')
+        const backend = l.backend
+        if (!backend) return webMcpError('The repository backend is not ready yet. Try again in a moment.')
         try {
-          const ref = await l.derive.branch(args.hash.trim())
+          // Same existence guard as mkit_remix_commit: the UI's Branch button only ever fires on an already-fetched
+          // real commit, but a WebMCP caller can pass anything.
+          if (!(await backend.getObject(l.room, hash))) return webMcpError(`No commit found for hash ${hash}.`)
+          const ref = await l.derive.branch(hash)
           if (!ref) return webMcpError('Could not branch that commit — the repository backend is not ready yet.')
-          l.onSelectRef(ref)
-          l.onSelectCommit(null)
-          return webMcpText(`Branched ${args.hash} onto new branch "${ref}".`)
+          return webMcpText(`Branched ${hash} onto new branch "${ref}".`)
         } catch (e) {
-          return webMcpError(e instanceof Error ? e.message : String(e))
+          return webMcpError(mapWriteError(e))
         }
       },
     },
@@ -305,6 +346,7 @@ export function WebMcpTools({
   const api = useMkit()
   const backend = useRepoBackend()
   const seedHex = useIdentityStore((s) => (s.unlocked ? s.seedHex : null))
+  const pubkeyHex = useIdentityStore((s) => (s.unlocked ? s.ed25519PubkeyHex : null))
   const push = usePushCommit()
   const derive = useDerive(api, room, seedHex)
 
@@ -313,6 +355,7 @@ export function WebMcpTools({
     api,
     backend,
     seedHex,
+    pubkeyHex,
     push,
     derive,
     selectedRef,
@@ -320,7 +363,7 @@ export function WebMcpTools({
     onSelectCommit,
   })
   useEffect(() => {
-    latest.current = { room, api, backend, seedHex, push, derive, selectedRef, onSelectRef, onSelectCommit }
+    latest.current = { room, api, backend, seedHex, pubkeyHex, push, derive, selectedRef, onSelectRef, onSelectCommit }
   })
 
   // Built once (stable identity for the component's lifetime): every `execute` reads `latest.current`, so the tool
