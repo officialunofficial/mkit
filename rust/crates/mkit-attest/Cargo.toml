@@ -62,7 +62,7 @@ mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 buffa = "0.9.1"
 blake3 = "1"
-base64 = "0.22"
+base64 = "0.23"
 thiserror = "2"
 # Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
 # from stack memory before they leave the constructor frame.
