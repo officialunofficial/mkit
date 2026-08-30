@@ -1542,7 +1542,7 @@ dependencies = [
 name = "mkit-sign-ctap"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "buffa",
  "ctap-hid-fido2",
  "dirs",
