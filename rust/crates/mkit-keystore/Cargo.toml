@@ -72,7 +72,7 @@ tempfile = "=3.27.0"
 # crypto crates so they can dealer/sign/aggregate alongside the
 # keystore. Same versions as mkit-attest pins.
 commonware-codec = "=2026.7.1"
-commonware-cryptography = "=2026.7.0"
+commonware-cryptography = "=2026.7.1"
 commonware-utils = "=2026.7.1"
 
 # The windows-credential backend's search-pattern test compiles the
