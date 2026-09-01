@@ -423,7 +423,7 @@ jobs:
           fetch-depth: 0
 
       - name: Generate CycloneDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
           path: .
           format: cyclonedx-json
@@ -482,7 +482,7 @@ jobs:
       # same way the cargo-nextest/cargo-semver-checks installs above do, so
       # this job never compiles cargo-about from source.
       - name: Install cargo-about
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518  # v2
+        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d  # v2
         with:
           tool: cargo-about@0.9.1
 
