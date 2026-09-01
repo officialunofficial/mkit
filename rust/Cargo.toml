@@ -54,13 +54,13 @@ authors = ["Official Unofficial, Inc."]
 # direct path/version dep instead. The commonware crates only have a
 # `std` default that we always pass explicitly anyway, so this is safe.
 commonware-storage = { version = "=2026.7.0", default-features = false }
-commonware-cryptography = { version = "=2026.7.0", default-features = false }
-commonware-runtime = { version = "=2026.7.0" }
+commonware-cryptography = { version = "=2026.7.1", default-features = false }
+commonware-runtime = { version = "=2026.7.1" }
 commonware-coding = { version = "=2026.7.0" }
 commonware-codec = { version = "=2026.7.1", default-features = false }
 commonware-parallel = { version = "=2026.7.1", default-features = false }
 commonware-utils = { version = "=2026.7.1", default-features = false }
-commonware-stream = { version = "=2026.7.0" }
+commonware-stream = { version = "=2026.7.1" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
