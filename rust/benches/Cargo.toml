@@ -128,7 +128,7 @@ mkit-cli = { path = "../crates/mkit-cli" }
 blake3 = "1"
 sha1 = "0.11"
 sha2 = "0.10"
-blake2 = "0.10"
+blake2 = "0.11"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
