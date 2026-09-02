@@ -347,9 +347,21 @@ fn add_whole_worktree(
     // part — open + read + BLAKE3, streaming through `FastCdc` for large
     // files — happens in `hash_pending_batch`, sequentially or via
     // rayon depending on how many files are pending (see
-    // `HASH_FANOUT_THRESHOLD`).
+    // `hash_fanout_threshold`). Index mutation stays single-threaded and
+    // in walk order below regardless of which path hashed the files, so
+    // `remove_directory_conflicts`/`upsert_entry` (via `stage_hashed`)
+    // see the same order the fully-sequential pre-parallelism code did.
     let hashed = hash_pending_batch(&pending, sink);
 
+    // Any single failure aborts the whole command — the caller never
+    // calls `batch.commit()`/`index::write_index()` on an `Err` path, so
+    // nothing persists regardless of how many files hashed successfully
+    // first. That's why it's fine to skip applying anything to `idx`
+    // below once a failure is known, and why `hash_one`'s `aborted` flag
+    // is worth having: it lets not-yet-started hashes skip entirely
+    // once one file has failed, instead of every pending file paying
+    // its full hash cost only to have the result discarded.
+    //
     // Report the first failure in walk order (`hashed` mirrors
     // `pending`'s order 1:1) — the same file `add` would have stopped
     // on before this was parallelized — printed exactly once here
@@ -378,24 +390,66 @@ fn add_whole_worktree(
     Ok(())
 }
 
-/// Below this many pending files, [`hash_pending_batch`] hashes them
-/// sequentially instead of fanning out across rayon's thread pool.
+/// Files-per-thread budget below which [`hash_pending_batch`] hashes
+/// sequentially instead of fanning out across rayon's thread pool, for
+/// a pool of a given size.
 ///
-/// Measured with `cargo bench -p mkit-benches --bench
-/// add_hash_fanout` (PR #951 Slack thread) on a 4-core box: rayon's
-/// pool-dispatch overhead makes it 25-100% slower than a plain loop
-/// for 1-16 files, roughly ties a plain loop at 32, and wins clearly
-/// from 64 files up (the realistic-bulk-add case `add_staging`'s
-/// 10k/100k cases already cover). 32 sits on the conservative side of
-/// that crossover: below it, rayon never wins by more than noise, so
-/// there is nothing to give up by staying sequential.
-const HASH_FANOUT_THRESHOLD: usize = 32;
+/// Measured with `cargo bench -p mkit-benches --bench add_hash_fanout`
+/// (PR #951 Slack thread) on a 4-core box: rayon's pool-dispatch
+/// overhead makes it 25-100% slower than a plain loop for 1-16 files,
+/// roughly ties a plain loop at 32, and wins clearly from 64 files up
+/// (the realistic-bulk-add case `add_staging`'s 10k/100k cases already
+/// cover) — 32 files / 4 threads = 8 files/thread, the conservative
+/// side of that crossover. [`hash_fanout_threshold`] scales this by
+/// the *actual* pool size rather than hardcoding 32, so the decision
+/// stays meaningful on a CI runner or contributor machine with a
+/// different core count than the one this was measured on — the ratio
+/// is assumed to hold rather than re-measured per core count.
+///
+/// A `commonware_parallel::Rayon`-backed adaptive strategy (raised in
+/// the same Slack thread, see `mkit-core/src/pack_shard.rs`'s
+/// `should_use_parallel_strategy`) was considered and rejected: that
+/// function is the same kind of static threshold as this one (a plain
+/// byte-length comparison), not commonware's learned-history policy,
+/// and it only needs `OnceLock`-memoized pool construction because it
+/// is forced to own a dedicated `commonware_parallel::Rayon` pool.
+/// Plain `rayon::prelude::*` (used here) already reuses rayon's own
+/// cached global pool across calls for free, so adopting
+/// commonware-parallel here would add its dependency weight to
+/// mkit-cli for no benefit over what this file already does.
+const HASH_FANOUT_FILES_PER_THREAD: usize = 8;
+
+/// The pending-file count below which [`hash_pending_batch`] hashes
+/// sequentially — see [`HASH_FANOUT_FILES_PER_THREAD`] for where the
+/// budget comes from. Reads rayon's already-initialized global pool
+/// size (cheap: an atomic load after first use, no allocation).
+fn hash_fanout_threshold() -> usize {
+    HASH_FANOUT_FILES_PER_THREAD.saturating_mul(rayon::current_num_threads())
+}
+
+/// Hash one [`PendingHash`], short-circuiting to [`HashOutcome::Skipped`]
+/// once `aborted` is set by an earlier failure (from this call or a
+/// concurrent one). Shared by both branches of [`hash_pending_batch`]
+/// — an `AtomicBool` costs nothing extra in the sequential branch's
+/// single-threaded loop, and sharing this closure keeps the two
+/// branches' fail-fast/`Skipped` semantics from drifting apart.
+fn hash_one(sink: &dyn ObjectSink, aborted: &AtomicBool, p: &PendingHash) -> HashOutcome {
+    if aborted.load(Ordering::Relaxed) {
+        return HashOutcome::Skipped;
+    }
+    match hash_pending(sink, p) {
+        Ok(v) => HashOutcome::Done(v),
+        Err(e) => {
+            aborted.store(true, Ordering::Relaxed);
+            HashOutcome::Failed(e)
+        }
+    }
+}
 
 /// Hash every `pending` file — sequentially below
-/// [`HASH_FANOUT_THRESHOLD`], via rayon's global thread pool at or
-/// above it (see that constant's doc for why the cutover exists).
-/// Output mirrors `pending`'s order 1:1 either way, and both paths
-/// stop starting new hashes once one file has failed (see
+/// [`hash_fanout_threshold`], via rayon's global thread pool at or
+/// above it. Output mirrors `pending`'s order 1:1 either way, and both
+/// paths stop starting new hashes once one file has failed (see
 /// [`HashOutcome::Skipped`]) — nothing downstream uses a `Skipped`
 /// entry's value, since [`add_whole_worktree`] discards all of
 /// `hashed` on any [`HashOutcome::Failed`].
@@ -406,40 +460,16 @@ const HASH_FANOUT_THRESHOLD: usize = 32;
 /// this is the "future parallel ingest" its own doc comment
 /// anticipated.
 fn hash_pending_batch(pending: &[PendingHash], sink: &(dyn ObjectSink + Sync)) -> Vec<HashOutcome> {
-    if pending.len() < HASH_FANOUT_THRESHOLD {
-        let mut out = Vec::with_capacity(pending.len());
-        let mut aborted = false;
-        for p in pending {
-            if aborted {
-                out.push(HashOutcome::Skipped);
-                continue;
-            }
-            match hash_pending(sink, p) {
-                Ok(v) => out.push(HashOutcome::Done(v)),
-                Err(e) => {
-                    aborted = true;
-                    out.push(HashOutcome::Failed(e));
-                }
-            }
-        }
-        return out;
-    }
-
     let aborted = AtomicBool::new(false);
+    if pending.len() < hash_fanout_threshold() {
+        return pending
+            .iter()
+            .map(|p| hash_one(sink, &aborted, p))
+            .collect();
+    }
     pending
         .par_iter()
-        .map(|p| {
-            if aborted.load(Ordering::Relaxed) {
-                return HashOutcome::Skipped;
-            }
-            match hash_pending(sink, p) {
-                Ok(v) => HashOutcome::Done(v),
-                Err(e) => {
-                    aborted.store(true, Ordering::Relaxed);
-                    HashOutcome::Failed(e)
-                }
-            }
-        })
+        .map(|p| hash_one(sink, &aborted, p))
         .collect()
 }
 
