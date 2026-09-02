@@ -4,10 +4,11 @@
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use mkit_core::hash::ZERO;
+use mkit_core::hash::{Hash, ZERO};
 use mkit_core::ignore::{self, IgnoreList};
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::layout::RepoLayout;
@@ -16,6 +17,7 @@ use mkit_core::ops::{HunkLineKind, PatchHunk, apply_hunks_subset, enumerate_hunk
 use mkit_core::serialize;
 use mkit_core::store::{ObjectSink, ObjectStore};
 use mkit_core::worktree;
+use rayon::prelude::*;
 
 use crate::clap_shim;
 use crate::exit;
@@ -314,7 +316,11 @@ pub fn run(args: &[String]) -> u8 {
 /// Stage every non-ignored worktree file under `root`, then mark any
 /// tracked path missing from the worktree as removed. Backs both
 /// `mkit add .` and `mkit add -A`.
-fn add_whole_worktree(root: &Path, sink: &dyn ObjectSink, idx: &mut Index) -> Result<(), u8> {
+fn add_whole_worktree(
+    root: &Path,
+    sink: &(dyn ObjectSink + Sync),
+    idx: &mut Index,
+) -> Result<(), u8> {
     let ignores = match ignore::load(root) {
         Ok(i) => i,
         Err(e) => {
@@ -325,19 +331,193 @@ fn add_whole_worktree(root: &Path, sink: &dyn ObjectSink, idx: &mut Index) -> Re
         }
     };
     let mut seen = HashSet::new();
-    add_tree(root, root, false, sink, idx, &ignores, &mut seen)?;
+    let mut pending = Vec::new();
+    add_tree(
+        root,
+        root,
+        false,
+        sink,
+        idx,
+        &ignores,
+        &mut seen,
+        &mut pending,
+    )?;
+
+    // The walk above only stats/validates paths (cheap); the expensive
+    // part — open + read + BLAKE3, streaming through `FastCdc` for large
+    // files — happens in `hash_pending_batch`, sequentially or via
+    // rayon depending on how many files are pending (see
+    // `hash_fanout_threshold`). Index mutation stays single-threaded and
+    // in walk order below regardless of which path hashed the files, so
+    // `remove_directory_conflicts`/`upsert_entry` (via `stage_hashed`)
+    // see the same order the fully-sequential pre-parallelism code did.
+    let hashed = hash_pending_batch(&pending, sink);
+
+    // Any single failure aborts the whole command — the caller never
+    // calls `batch.commit()`/`index::write_index()` on an `Err` path, so
+    // nothing persists regardless of how many files hashed successfully
+    // first. That's why it's fine to skip applying anything to `idx`
+    // below once a failure is known, and why `hash_one`'s `aborted` flag
+    // is worth having: it lets not-yet-started hashes skip entirely
+    // once one file has failed, instead of every pending file paying
+    // its full hash cost only to have the result discarded.
+    //
+    // Report the first failure in walk order (`hashed` mirrors
+    // `pending`'s order 1:1) — the same file `add` would have stopped
+    // on before this was parallelized — printed exactly once here
+    // rather than once per failing closure.
+    if let Some(pos) = hashed
+        .iter()
+        .position(|h| matches!(h, HashOutcome::Failed(_)))
+    {
+        let HashOutcome::Failed(e) = &hashed[pos] else {
+            unreachable!("position() just matched a Failed variant")
+        };
+        return Err(emit_err(&e.message, e.code));
+    }
+
+    for (p, outcome) in pending.into_iter().zip(hashed) {
+        let HashOutcome::Done(hashed_file) = outcome else {
+            unreachable!(
+                "Skipped only occurs once a Failed entry exists, and the check above already returned on any Failed entry"
+            )
+        };
+        stage_hashed(idx, p.rel_str.clone(), hashed_file);
+        seen.insert(p.rel_str);
+    }
+
     mark_missing_paths_removed(root, idx, &seen);
     Ok(())
 }
 
-fn add_one(
+/// Files-per-thread budget below which [`hash_pending_batch`] hashes
+/// sequentially instead of fanning out across rayon's thread pool, for
+/// a pool of a given size.
+///
+/// Measured with `cargo bench -p mkit-benches --bench add_hash_fanout`
+/// (PR #951 Slack thread) on a 4-core box: rayon's pool-dispatch
+/// overhead makes it 25-100% slower than a plain loop for 1-16 files,
+/// roughly ties a plain loop at 32, and wins clearly from 64 files up
+/// (the realistic-bulk-add case `add_staging`'s 10k/100k cases already
+/// cover) — 32 files / 4 threads = 8 files/thread, the conservative
+/// side of that crossover. [`hash_fanout_threshold`] scales this by
+/// the *actual* pool size rather than hardcoding 32, so the decision
+/// stays meaningful on a CI runner or contributor machine with a
+/// different core count than the one this was measured on — the ratio
+/// is assumed to hold rather than re-measured per core count.
+///
+/// A `commonware_parallel::Rayon`-backed adaptive strategy (raised in
+/// the same Slack thread, see `mkit-core/src/pack_shard.rs`'s
+/// `should_use_parallel_strategy`) was considered and rejected: that
+/// function is the same kind of static threshold as this one (a plain
+/// byte-length comparison), not commonware's learned-history policy,
+/// and it only needs `OnceLock`-memoized pool construction because it
+/// is forced to own a dedicated `commonware_parallel::Rayon` pool.
+/// Plain `rayon::prelude::*` (used here) already reuses rayon's own
+/// cached global pool across calls for free, so adopting
+/// commonware-parallel here would add its dependency weight to
+/// mkit-cli for no benefit over what this file already does.
+const HASH_FANOUT_FILES_PER_THREAD: usize = 8;
+
+/// The pending-file count below which [`hash_pending_batch`] hashes
+/// sequentially — see [`HASH_FANOUT_FILES_PER_THREAD`] for where the
+/// budget comes from. Reads rayon's already-initialized global pool
+/// size (cheap: an atomic load after first use, no allocation).
+fn hash_fanout_threshold() -> usize {
+    HASH_FANOUT_FILES_PER_THREAD.saturating_mul(rayon::current_num_threads())
+}
+
+/// Hash one [`PendingHash`], short-circuiting to [`HashOutcome::Skipped`]
+/// once `aborted` is set by an earlier failure (from this call or a
+/// concurrent one). Shared by both branches of [`hash_pending_batch`]
+/// — an `AtomicBool` costs nothing extra in the sequential branch's
+/// single-threaded loop, and sharing this closure keeps the two
+/// branches' fail-fast/`Skipped` semantics from drifting apart.
+fn hash_one(sink: &dyn ObjectSink, aborted: &AtomicBool, p: &PendingHash) -> HashOutcome {
+    if aborted.load(Ordering::Relaxed) {
+        return HashOutcome::Skipped;
+    }
+    match hash_pending(sink, p) {
+        Ok(v) => HashOutcome::Done(v),
+        Err(e) => {
+            aborted.store(true, Ordering::Relaxed);
+            HashOutcome::Failed(e)
+        }
+    }
+}
+
+/// Hash every `pending` file — sequentially below
+/// [`hash_fanout_threshold`], via rayon's global thread pool at or
+/// above it. Output mirrors `pending`'s order 1:1 either way, and both
+/// paths stop starting new hashes once one file has failed (see
+/// [`HashOutcome::Skipped`]) — nothing downstream uses a `Skipped`
+/// entry's value, since [`add_whole_worktree`] discards all of
+/// `hashed` on any [`HashOutcome::Failed`].
+///
+/// `WriteBatch::write` (batch.rs) short-locks only its staged-dedup
+/// check and does file I/O outside that lock specifically so
+/// concurrent writers sharing one batch don't convoy on each other —
+/// this is the "future parallel ingest" its own doc comment
+/// anticipated.
+fn hash_pending_batch(pending: &[PendingHash], sink: &(dyn ObjectSink + Sync)) -> Vec<HashOutcome> {
+    let aborted = AtomicBool::new(false);
+    if pending.len() < hash_fanout_threshold() {
+        return pending
+            .iter()
+            .map(|p| hash_one(sink, &aborted, p))
+            .collect();
+    }
+    pending
+        .par_iter()
+        .map(|p| hash_one(sink, &aborted, p))
+        .collect()
+}
+
+/// Result of hashing one [`PendingHash`] inside [`hash_pending_batch`].
+enum HashOutcome {
+    Done(HashedFile),
+    Failed(HashError),
+    /// A different file already failed (`aborted` was set) — this one
+    /// never ran `hash_pending` at all.
+    Skipped,
+}
+
+/// A regular file whose staging was routed by [`route_path`] but whose
+/// hash is not yet computed — the expensive part (open + read + BLAKE3,
+/// possibly a whole-file streaming chunk pass) is deferred so a
+/// tree-wide walk can run it across files in parallel (see
+/// [`add_whole_worktree`]).
+struct PendingHash {
+    abs: PathBuf,
+    rel_str: String,
+    previous_status: EntryStatus,
+}
+
+/// Outcome of routing one worktree path through the shared validate /
+/// ignore / stat-cache checks that used to live inline in `add_one`.
+enum Routed {
+    /// Already staged byte-for-byte (stat cache hit, or nothing to do).
+    Done(String),
+    /// Regular file that needs hashing — see [`PendingHash`].
+    NeedsHash(PendingHash),
+}
+
+/// Validate `abs`/`rel`, resolve the ignore/stat-cache decision, and
+/// stage symlinks inline (cheap: no file-content I/O). Regular files are
+/// handed back as a [`PendingHash`] rather than hashed here, so callers
+/// that stage many files at once (the `add_tree` walk) can hash them in
+/// parallel instead of one at a time.
+///
+/// Shared by [`add_one`] (single explicit path, hashed synchronously)
+/// and [`add_tree`] (whole-worktree walk, hashed via rayon).
+fn route_path(
     root: &Path,
     rel: &Path,
     sink: &dyn ObjectSink,
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
-) -> Result<String, u8> {
+) -> Result<Routed, u8> {
     let abs = if rel.is_absolute() {
         rel.to_path_buf()
     } else {
@@ -374,23 +554,20 @@ fn add_one(
     if let Some(existing) = existing_pos
         && worktree::stat_matches(&idx.entries[existing], &meta)
     {
-        return Ok(rel_str);
+        return Ok(Routed::Done(rel_str));
     }
-    // Regular files route through `store_file_object` so large
-    // (> CHUNK_THRESHOLD) content lands as a ChunkedBlob, matching
-    // `worktree::{build_tree,hash_file}` (#203). Symlinks stay a single
-    // Blob of their target path.
-    let (status, h, stat) = if meta.file_type().is_file() {
-        let (h, opened_meta) = worktree::hash_file_with_metadata(sink, &abs).map_err(|e| {
-            let code = worktree_err_exit_code(&e);
-            emit_err(&format!("{}: {e}", abs.display()), code)
-        })?;
-        let stat = worktree::stat_cache_fields(&opened_meta);
-        (
-            file_status_from_meta(&opened_meta, previous_status),
-            h,
-            stat,
-        )
+    // Regular files route through `store_file_object` (via
+    // `hash_file_with_metadata`, called by the caller once hashing
+    // actually runs) so large (> CHUNK_THRESHOLD) content lands as a
+    // ChunkedBlob, matching `worktree::{build_tree,hash_file}` (#203).
+    // Symlinks stay a single Blob of their target path and are cheap
+    // enough (no file-content I/O) to stage right here.
+    if meta.file_type().is_file() {
+        Ok(Routed::NeedsHash(PendingHash {
+            abs,
+            rel_str,
+            previous_status,
+        }))
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs)
             .map_err(|e| emit_err(&format!("read link {}: {e}", abs.display()), exit::NOINPUT))?;
@@ -412,16 +589,68 @@ fn add_one(
         let h = sink
             .put(&ser)
             .map_err(|e| emit_err(&format!("store: {e}"), exit::CANTCREAT))?;
-        // Symlinks never stat-match (see worktree::stat_matches).
-        (EntryStatus::Symlink, h, (0, 0, 0, 0))
+        let entry = IndexEntry {
+            path: rel_str.clone(),
+            // Symlinks never stat-match (see worktree::stat_matches).
+            status: EntryStatus::Symlink,
+            object_hash: h,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        };
+        idx.remove_directory_conflicts(&entry.path);
+        idx.upsert_entry(entry);
+        Ok(Routed::Done(rel_str))
     } else {
-        return Err(emit_err(
+        Err(emit_err(
             &format!("not a regular file: {}", abs.display()),
             exit::NOINPUT,
-        ));
-    };
+        ))
+    }
+}
+
+/// A hashed file's staging fields: status, content hash, and the
+/// `(mtime_ns, size, ino, ctime_ns)` stat-cache tuple.
+type HashedFile = (EntryStatus, Hash, (u64, u64, u64, u64));
+
+/// A hashing failure that hasn't been reported yet: message + sysexits
+/// code, matching what `emit_err` takes. Kept unprinted until exactly
+/// one survives (see [`hash_pending`]'s doc) — `hash_pending` runs
+/// concurrently across a rayon thread pool, and `emit_err` prints as a
+/// side effect, so printing inside it would echo one line per failing
+/// file in the batch instead of the single error the command ultimately
+/// returns.
+struct HashError {
+    message: String,
+    code: u8,
+}
+
+/// Hash a [`PendingHash`]'s file content. Pure function of `sink` and
+/// `p` (no index access, no printing), so it is safe to call
+/// concurrently across a batch's `PendingHash` list — `sink` (a
+/// `WriteBatch`) short-locks only its staged-dedup check and runs file
+/// I/O outside that lock. Callers report the error themselves via
+/// `emit_err` at the one point it's known to be *the* reported error
+/// (see [`add_one`] and [`add_whole_worktree`]).
+fn hash_pending(sink: &dyn ObjectSink, p: &PendingHash) -> Result<HashedFile, HashError> {
+    let (h, opened_meta) =
+        worktree::hash_file_with_metadata(sink, &p.abs).map_err(|e| HashError {
+            message: format!("{}: {e}", p.abs.display()),
+            code: worktree_err_exit_code(&e),
+        })?;
+    let stat = worktree::stat_cache_fields(&opened_meta);
+    let status = file_status_from_meta(&opened_meta, p.previous_status);
+    Ok((status, h, stat))
+}
+
+/// Build the index entry for a successfully-hashed file and apply it —
+/// the tail shared by [`add_one`]'s single-path hash and
+/// [`add_whole_worktree`]'s parallel-hash apply loop.
+fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
+    let (status, h, stat) = hashed;
     let entry = IndexEntry {
-        path: rel_str.clone(),
+        path: rel_str,
         status,
         object_hash: h,
         mtime_ns: stat.0,
@@ -431,9 +660,31 @@ fn add_one(
     };
     idx.remove_directory_conflicts(&entry.path);
     idx.upsert_entry(entry);
-    Ok(rel_str)
 }
 
+fn add_one(
+    root: &Path,
+    rel: &Path,
+    sink: &dyn ObjectSink,
+    idx: &mut Index,
+    ignores: &IgnoreList,
+    force: bool,
+) -> Result<String, u8> {
+    match route_path(root, rel, sink, idx, ignores, force)? {
+        Routed::Done(rel_str) => Ok(rel_str),
+        Routed::NeedsHash(p) => {
+            let hashed = hash_pending(sink, &p).map_err(|e| emit_err(&e.message, e.code))?;
+            stage_hashed(idx, p.rel_str.clone(), hashed);
+            Ok(p.rel_str)
+        }
+    }
+}
+
+/// Walk `dir`, routing each included file/symlink through [`route_path`].
+/// Symlinks (and stat-cache hits) are fully staged as they're visited;
+/// regular files that need hashing are appended to `pending` instead, so
+/// [`add_whole_worktree`] can hash the whole tree's files in parallel
+/// once the (cheap, metadata-only) walk finishes.
 fn add_tree(
     root: &Path,
     dir: &Path,
@@ -442,6 +693,7 @@ fn add_tree(
     idx: &mut Index,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
+    pending: &mut Vec<PendingHash>,
 ) -> Result<(), u8> {
     let rd = std::fs::read_dir(dir)
         .map_err(|e| emit_err(&format!("read dir {}: {e}", dir.display()), exit::NOINPUT))?;
@@ -468,12 +720,16 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, sink, idx, ignores, seen)?;
+            add_tree(root, &p, entry_ignored, sink, idx, ignores, seen, pending)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The include decision was made above, so `force` skips a
-            // redundant ignore re-check in `add_one`.
-            let rel = add_one(root, &p, sink, idx, ignores, true)?;
-            seen.insert(rel);
+            // redundant ignore re-check in `route_path`.
+            match route_path(root, &p, sink, idx, ignores, true)? {
+                Routed::Done(rel) => {
+                    seen.insert(rel);
+                }
+                Routed::NeedsHash(pend) => pending.push(pend),
+            }
         }
     }
     Ok(())

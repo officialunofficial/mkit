@@ -129,6 +129,13 @@ mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 # `mkit-transport-enc`'s internals.
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
 buffa = "0.9.1"
+# `mkit add -A`/`add .` hashes untracked/modified worktree files in
+# parallel (commands/add.rs) — each file's read+BLAKE3 pass is
+# independent and `WriteBatch` (mkit-core's batch.rs) was already built
+# to accept concurrent writers (short-locked staged-dedup check, file
+# I/O outside the lock). Native-only: mkit-core stays wasm-clean, so
+# this lives in the CLI crate rather than mkit-core.
+rayon = "1"
 
 # `wrap_help` is intentionally disabled so help-text output stays
 # deterministic across terminal widths. `derive` is enabled so the
