@@ -146,8 +146,10 @@ serde_json = "1"
 # `mkit self update` (commands/self_update.rs): release download over
 # rustls (same feature set + version as mkit-transport-http — zero new
 # TLS supply chain), sha256 sidecar check, and single-member tar.gz
-# extraction of the new binary.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+# extraction of the new binary. Cert verification is via
+# rustls-platform-verifier (OS trust store), reqwest 0.13's default —
+# see docs/specs/SPEC-TRANSPORT-CONNECT.md.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "json"] }
 sha2 = "0.11"
 flate2 = "1"
 tar = "0.4"
