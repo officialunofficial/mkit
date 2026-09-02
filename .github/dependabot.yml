@@ -25,6 +25,28 @@ updates:
           - "minor"
           - "patch"
 
+  # A `directory: "/"` github-actions entry only scans .github/workflows/ —
+  # it does NOT reach into composite actions under .github/actions/, so each
+  # composite action needs its own entry to get version-pin bumps at all.
+  - package-ecosystem: "github-actions"
+    directory: "/.github/actions/setup-rust"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci(actions)"
+    groups:
+      actions-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "cargo"
     directory: "/rust"
     # buffa & connectrpc are vendored-codegen deps: their generated code is
@@ -53,7 +75,96 @@ updates:
           - "minor"
           - "patch"
 
-  - package-ecosystem: "npm"
+  # apps/repo-worker, apps/vcs-worker, apps/keys-worker, and
+  # apps/mkit-worker-common are separate Cargo workspaces (own Cargo.lock)
+  # that path-depend on rust/crates/mkit-core; a bump in /rust does not
+  # touch their locks, so they need their own entries to get security and
+  # transitive updates at all. repo-worker and vcs-worker also vendor
+  # buffa/connectrpc codegen under generated/ (see /rust's ignore comment
+  # above) — the same ignore applies here for the same reason.
+  - package-ecosystem: "cargo"
+    directory: "/apps/keys-worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(workers)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/apps/repo-worker"
+    ignore:
+      - dependency-name: "buffa*"
+      - dependency-name: "connectrpc*"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(workers)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/apps/vcs-worker"
+    ignore:
+      - dependency-name: "buffa*"
+      - dependency-name: "connectrpc*"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(workers)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/apps/mkit-worker-common"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(workers)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "bun"
     directory: "/apps/web"
     schedule:
       interval: "weekly"
@@ -91,7 +202,7 @@ updates:
           - "minor"
           - "patch"
 
-  - package-ecosystem: "npm"
+  - package-ecosystem: "bun"
     directory: "/apps/og"
     schedule:
       interval: "weekly"
@@ -104,6 +215,24 @@ updates:
       - "og"
     commit-message:
       prefix: "deps(og)"
+    groups:
+      npm-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "bun"
+    directory: "/apps/spammer-worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps(spammer-worker)"
     groups:
       npm-minor:
         update-types:

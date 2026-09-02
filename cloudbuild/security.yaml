@@ -56,6 +56,16 @@ steps:
         ( cd rust && run_audit )
         ( cd contrib/signers && run_audit )
 
+        # apps/{keys,repo,vcs}-worker and apps/mkit-worker-common are separate
+        # Cargo workspaces (own Cargo.lock, path-dep on rust/crates/mkit-core)
+        # that the two audits above never see. None of them use
+        # yubikey/openpgp-card, so a plain `cargo audit --deny warnings`
+        # (no ignore list) is enough.
+        ( cd apps/keys-worker && cargo audit --deny warnings )
+        ( cd apps/repo-worker && cargo audit --deny warnings )
+        ( cd apps/vcs-worker && cargo audit --deny warnings )
+        ( cd apps/mkit-worker-common && cargo audit --deny warnings )
+
         # cargo-deny reads rust/deny.toml (resolved relative to the manifest).
         # --all-features is a top-level cargo-deny flag, not a `check` subcommand
         # flag — it must come before `check` or cargo-deny rejects it.
