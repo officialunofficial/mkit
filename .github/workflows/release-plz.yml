@@ -5,16 +5,24 @@
 # rationale. This workflow is kept only as an OPTIONAL path back to release-plz-
 # managed versioning; nothing here runs automatically.
 #
-# Two jobs:
-#  - release-plz-release (`cargo publish` to crates.io) runs on push to main but
-#    is INERT: `release_always = false` (release-plz.toml) makes it skip unless
-#    the pushed commit is a merged release-plz Release PR, which this flow never
-#    produces. crates-publish.yml does the real publishing.
+# Two jobs, BOTH manual (`workflow_dispatch`) only — see `inputs.mode` below:
+#  - release-plz-release (`cargo publish` to crates.io). Historically ran on
+#    push to main, guarded by `release_always = false` (release-plz.toml) on
+#    the assumption that guard would always skip since this flow "never
+#    produces" a merged release-plz Release PR. That assumption broke on the
+#    v0.4.2 release (2026-09-02): the mkit-release skill's own procedure DOES
+#    merge release-plz's PR as the release-prep PR, and release-plz recognized
+#    that merge commit as a real release and actually published every crate —
+#    ~5 minutes before crates-publish.yml's tag-driven publish got there,
+#    which then failed with "already exists" (harmless — publishes are
+#    idempotent by version — but a confusing red X on the release tag). The
+#    push trigger is removed for exactly this reason: crates-publish.yml is
+#    the sole real publish path, and this job must never fire on its own.
 #  - release-plz-pr (open a Release PR — next lockstep version, rewritten
-#    internal dep requirements, CHANGELOG, cargo-semver-checks) runs ONLY on
-#    manual `workflow_dispatch`. OPTIONAL/unused while the workspace hand-owns
-#    versioning (it errors when the version is already bumped ahead of crates.io
-#    with the tag cut); kept for the option of handing versioning to release-plz.
+#    internal dep requirements, CHANGELOG, cargo-semver-checks). OPTIONAL/
+#    unused while the workspace hand-owns versioning (it errors when the
+#    version is already bumped ahead of crates.io with the tag cut); kept for
+#    the option of handing versioning to release-plz.
 #
 # TOKENS (provision before enabling — see docs/RELEASE.md):
 #  - CRATES_PACKAGE_KEY — crates.io API token (scopes: publish-new +
@@ -29,9 +37,13 @@
 name: "Release: release-plz (manual)"
 
 on:
-  workflow_dispatch:        # open/update the Release PR (release-plz-pr).
-  push:
-    branches: [main]        # release-plz-release (INERT: release_always = false).
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which release-plz command to run"
+        type: choice
+        options: [release-pr, release]
+        default: release-pr
 
 permissions:
   contents: read
@@ -41,14 +53,13 @@ env:
   RUST_VERSION: "1.95.0"
 
 jobs:
-  # crates.io publish when a Release PR merges (push to main). No-op otherwise
-  # (release_always = false). Push-only; and gated on the `RELEASE_PLZ_ENABLED`
-  # repo variable so the whole workflow stays DORMANT until you've provisioned
-  # the secrets and flip the variable to `true` — merging this setup PR before
-  # then is a clean skip (no failed App-token mint).
+  # crates.io publish, manual-dispatch only (mode: release) — see the header
+  # comment for why this no longer runs on push. Also gated on the
+  # `RELEASE_PLZ_ENABLED` repo variable so the whole workflow stays DORMANT
+  # until you've provisioned the secrets and flip the variable to `true`.
   release-plz-release:
     name: release-plz release
-    if: github.event_name == 'push' && vars.RELEASE_PLZ_ENABLED == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'release' && vars.RELEASE_PLZ_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -91,11 +102,12 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_PACKAGE_KEY }}
 
-  # Open/update the single Release PR. MANUAL only, and likewise gated on
-  # RELEASE_PLZ_ENABLED so a stray dispatch before setup does nothing.
+  # Open/update the single Release PR (mode: release-pr, the default). MANUAL
+  # only, and likewise gated on RELEASE_PLZ_ENABLED so a stray dispatch before
+  # setup does nothing.
   release-plz-pr:
     name: release-plz PR
-    if: github.event_name == 'workflow_dispatch' && vars.RELEASE_PLZ_ENABLED == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'release-pr' && vars.RELEASE_PLZ_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
