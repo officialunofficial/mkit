@@ -3345,6 +3345,7 @@ dependencies = [
  "predicates",
  "proptest",
  "rand_core 0.10.1",
+ "rayon",
  "reqwest",
  "serde_json",
  "sha2 0.11.0",
