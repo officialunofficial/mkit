@@ -76,10 +76,10 @@ serde_json = "1"
 tempfile = "3"
 # Re-used directly so signer_repo_key + verify can talk to the SAME dalek
 # version mkit-core::sign already pulls in. We inherit the same default-
-# features = false + std posture so the dep graph does not widen.
+# features = false + alloc posture so the dep graph does not widen.
 # Gated behind `algo-ed25519`: when disabled, `RepoKeySigner` and the
 # Ed25519 verifier dispatch compile out cleanly.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"], optional = true }
 # secp256k1 / ES256K (COSE -47) signer + verifier — gated behind
 # `algo-secp256k1`. Pinned to the `0.14` line shared across the
 # RustCrypto `ecdsa` ecosystem.
@@ -93,7 +93,7 @@ p256 = { version = "0.14", optional = true, default-features = false, features =
 # emits a sha256 digest alongside blake3 (SPEC-ATTESTATIONS §4.2) so
 # cosign / `gh attestation verify` / the SLSA verifier can read it,
 # regardless of which signing algorithms are compiled in.
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
 # commonware-cryptography's default `std` feature. The whole dep tree is
 # default-off; opt-in carries the cost. `commonware-codec` is the
@@ -117,7 +117,7 @@ rand_core = { version = "0.10", optional = true, default-features = false }
 hex = "0.4"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.

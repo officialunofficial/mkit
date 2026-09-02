@@ -7,11 +7,15 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - '.github/actionlint.yaml'
+      - '.github/dependabot.yml'
+      - 'scripts/check-dependabot-coverage.sh'
   pull_request:
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
       - '.github/actionlint.yaml'
+      - '.github/dependabot.yml'
+      - 'scripts/check-dependabot-coverage.sh'
 
 permissions:
   contents: read
@@ -41,4 +45,13 @@ jobs:
           ${{ steps.get_actionlint.outputs.executable }} \
             -color \
             -shellcheck="shellcheck -S error"
+        shell: bash
+
+      # Dependabot opens a PR that edits a manifest but never touches a
+      # lockfile of the wrong format, which then fails CI's frozen-lockfile
+      # install and gets closed unmerged (see .github/dependabot.yml's
+      # per-entry comments). Catch a mismatched or missing entry here,
+      # before it costs a PR round-trip.
+      - name: Check Dependabot coverage
+        run: bash scripts/check-dependabot-coverage.sh
         shell: bash

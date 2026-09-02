@@ -28,8 +28,14 @@ mkit-core = { version = "0.4", path = "../mkit-core" }
 bytes = "1"
 # rustls-only — the whole point of this crate is no system TLS baggage.
 # default-features = false drops default-tls (native-tls on desktop).
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+# reqwest 0.13 verifies certs via rustls-platform-verifier (OS trust
+# store) by default; this crate accepts that as the intended trust
+# model rather than pinning back to a bundled webpki-roots list.
+# Not the same trust model as mkit-transport-connect's hyper-rustls
+# client (explicit webpki-roots, SPEC-TRANSPORT-CONNECT.md §7.3) — the
+# two transports are independent and don't need to agree.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "blocking",
     "json",
 ] }

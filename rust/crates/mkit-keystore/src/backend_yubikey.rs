@@ -228,9 +228,15 @@ impl KeySigner for YubiKeyOpenPgpSigner {
 
         let mut card = open_card_by_ident(&self.card.ident)?;
         let mut transaction = card.transaction().map_err(map_openpgp_error)?;
+        // openpgp-card 0.7 split the old `Hash::EdDSA(msg)` combined
+        // algorithm+data variant into separate `algo`/`digest` params.
+        // `SigningAlgo::ECC` reproduces the old EdDSA path exactly: per
+        // `signature_for_hash`'s own doc comment, ECC data is "processed
+        // as is" (no digest-info wrapping), matching Ed25519's
+        // no-pre-hash signing semantics.
         let signature = transaction
             .card()
-            .signature_for_hash(openpgp_card::ocard::crypto::Hash::EdDSA(msg))
+            .signature_for_hash(openpgp_card::ocard::crypto::SigningAlgo::ECC, msg)
             .map_err(map_openpgp_error)?;
         normalize_ed25519_signature(signature)
     }

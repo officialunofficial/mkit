@@ -56,6 +56,21 @@ steps:
         ( cd rust && run_audit )
         ( cd contrib/signers && run_audit )
 
+        # apps/{keys,repo,vcs}-worker and apps/mkit-worker-common are separate
+        # Cargo workspaces (own Cargo.lock, path-dep on rust/crates/mkit-core)
+        # that the two audits above never see. None of them use
+        # yubikey/openpgp-card (RUSTSEC-2023-0071 / RUSTSEC-2025-0055 don't
+        # apply), but repo-worker and vcs-worker path-dep on mkit-core, which
+        # pulls commonware-codec -> paste (unmaintained, RUSTSEC-2024-0436) —
+        # the same advisory already ignored for rust/ and contrib/signers/
+        # above. keys-worker and mkit-worker-common don't pull mkit-core
+        # (keys-worker deliberately avoids it, see its Cargo.toml) so a plain
+        # `cargo audit --deny warnings` is enough for those two.
+        ( cd apps/keys-worker && cargo audit --deny warnings )
+        ( cd apps/repo-worker && cargo audit --deny warnings --ignore RUSTSEC-2024-0436 )
+        ( cd apps/vcs-worker && cargo audit --deny warnings --ignore RUSTSEC-2024-0436 )
+        ( cd apps/mkit-worker-common && cargo audit --deny warnings )
+
         # cargo-deny reads rust/deny.toml (resolved relative to the manifest).
         # --all-features is a top-level cargo-deny flag, not a `check` subcommand
         # flag — it must come before `check` or cargo-deny rejects it.
