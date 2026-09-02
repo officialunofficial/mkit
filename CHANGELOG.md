@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/officialunofficial/mkit/compare/v0.4.1...v0.4.2) - 2026-09-02
+
+### Performance
+
+- *(cli)* parallel worktree hashing for `add -A`/`add .` ([#951](https://github.com/officialunofficial/mkit/pull/951))
+
+### Other
+
+- upgrade connectrpc 0.8.x to 0.9.0 and buffa 0.8.1 to 0.9.1 ([#939](https://github.com/officialunofficial/mkit/pull/939))
+
 ## [0.4.1](https://github.com/officialunofficial/mkit/compare/v0.4.0...v0.4.1) - 2026-07-16
 
 ### Bug Fixes
