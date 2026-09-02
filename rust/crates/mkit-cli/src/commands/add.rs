@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use mkit_core::hash::{Hash, ZERO};
@@ -352,27 +353,68 @@ fn add_whole_worktree(
     // anticipated. Index mutation stays single-threaded and in walk
     // order below, so `remove_directory_conflicts`/`upsert_entry` see
     // the same order as the pre-parallelism sequential walk did.
-    let hashed: Vec<Result<HashedFile, u8>> =
-        pending.par_iter().map(|p| hash_pending(sink, p)).collect();
+    //
+    // Any single failure aborts the whole command — the caller never
+    // calls `batch.commit()`/`index::write_index()` on an `Err` path, so
+    // nothing persists regardless of how many files hashed successfully
+    // before the failure. That means: (1) it's fine to skip applying
+    // anything to `idx` once a failure is known, and (2) `aborted` lets
+    // not-yet-started closures skip their hash entirely once one file
+    // has already failed, instead of every pending file paying its full
+    // hash cost only to have the result discarded.
+    let aborted = AtomicBool::new(false);
+    let hashed: Vec<HashOutcome> = pending
+        .par_iter()
+        .map(|p| {
+            if aborted.load(Ordering::Relaxed) {
+                return HashOutcome::Skipped;
+            }
+            match hash_pending(sink, p) {
+                Ok(v) => HashOutcome::Done(v),
+                Err(e) => {
+                    aborted.store(true, Ordering::Relaxed);
+                    HashOutcome::Failed(e)
+                }
+            }
+        })
+        .collect();
 
-    for (p, result) in pending.into_iter().zip(hashed) {
-        let (status, h, stat) = result?;
-        let entry = IndexEntry {
-            path: p.rel_str.clone(),
-            status,
-            object_hash: h,
-            mtime_ns: stat.0,
-            size: stat.1,
-            ino: stat.2,
-            ctime_ns: stat.3,
+    // Report the first failure in walk order (`hashed` mirrors
+    // `pending`'s order 1:1) — the same file `add` would have stopped
+    // on before this was parallelized — printed exactly once here
+    // rather than once per failing closure.
+    if let Some(pos) = hashed
+        .iter()
+        .position(|h| matches!(h, HashOutcome::Failed(_)))
+    {
+        let HashOutcome::Failed(e) = &hashed[pos] else {
+            unreachable!("position() just matched a Failed variant")
         };
-        idx.remove_directory_conflicts(&entry.path);
-        idx.upsert_entry(entry);
+        return Err(emit_err(&e.message, e.code));
+    }
+
+    for (p, outcome) in pending.into_iter().zip(hashed) {
+        let HashOutcome::Done(hashed_file) = outcome else {
+            unreachable!(
+                "Skipped only occurs once a Failed entry exists, and the check above already returned on any Failed entry"
+            )
+        };
+        stage_hashed(idx, p.rel_str.clone(), hashed_file);
         seen.insert(p.rel_str);
     }
 
     mark_missing_paths_removed(root, idx, &seen);
     Ok(())
+}
+
+/// Result of hashing one [`PendingHash`] inside [`add_whole_worktree`]'s
+/// parallel fan-out.
+enum HashOutcome {
+    Done(HashedFile),
+    Failed(HashError),
+    /// A different file already failed (`aborted` was set) — this one
+    /// never ran `hash_pending` at all.
+    Skipped,
 }
 
 /// A regular file whose staging was routed by [`route_path`] but whose
@@ -507,18 +549,52 @@ fn route_path(
 /// `(mtime_ns, size, ino, ctime_ns)` stat-cache tuple.
 type HashedFile = (EntryStatus, Hash, (u64, u64, u64, u64));
 
+/// A hashing failure that hasn't been reported yet: message + sysexits
+/// code, matching what `emit_err` takes. Kept unprinted until exactly
+/// one survives (see [`hash_pending`]'s doc) — `hash_pending` runs
+/// concurrently across a rayon thread pool, and `emit_err` prints as a
+/// side effect, so printing inside it would echo one line per failing
+/// file in the batch instead of the single error the command ultimately
+/// returns.
+struct HashError {
+    message: String,
+    code: u8,
+}
+
 /// Hash a [`PendingHash`]'s file content. Pure function of `sink` and
-/// `p` (no index access), so it is safe to call concurrently across a
-/// batch's `PendingHash` list — `sink` (a `WriteBatch`) short-locks only
-/// its staged-dedup check and runs file I/O outside that lock.
-fn hash_pending(sink: &dyn ObjectSink, p: &PendingHash) -> Result<HashedFile, u8> {
-    let (h, opened_meta) = worktree::hash_file_with_metadata(sink, &p.abs).map_err(|e| {
-        let code = worktree_err_exit_code(&e);
-        emit_err(&format!("{}: {e}", p.abs.display()), code)
-    })?;
+/// `p` (no index access, no printing), so it is safe to call
+/// concurrently across a batch's `PendingHash` list — `sink` (a
+/// `WriteBatch`) short-locks only its staged-dedup check and runs file
+/// I/O outside that lock. Callers report the error themselves via
+/// `emit_err` at the one point it's known to be *the* reported error
+/// (see [`add_one`] and [`add_whole_worktree`]).
+fn hash_pending(sink: &dyn ObjectSink, p: &PendingHash) -> Result<HashedFile, HashError> {
+    let (h, opened_meta) =
+        worktree::hash_file_with_metadata(sink, &p.abs).map_err(|e| HashError {
+            message: format!("{}: {e}", p.abs.display()),
+            code: worktree_err_exit_code(&e),
+        })?;
     let stat = worktree::stat_cache_fields(&opened_meta);
     let status = file_status_from_meta(&opened_meta, p.previous_status);
     Ok((status, h, stat))
+}
+
+/// Build the index entry for a successfully-hashed file and apply it —
+/// the tail shared by [`add_one`]'s single-path hash and
+/// [`add_whole_worktree`]'s parallel-hash apply loop.
+fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
+    let (status, h, stat) = hashed;
+    let entry = IndexEntry {
+        path: rel_str,
+        status,
+        object_hash: h,
+        mtime_ns: stat.0,
+        size: stat.1,
+        ino: stat.2,
+        ctime_ns: stat.3,
+    };
+    idx.remove_directory_conflicts(&entry.path);
+    idx.upsert_entry(entry);
 }
 
 fn add_one(
@@ -532,18 +608,8 @@ fn add_one(
     match route_path(root, rel, sink, idx, ignores, force)? {
         Routed::Done(rel_str) => Ok(rel_str),
         Routed::NeedsHash(p) => {
-            let (status, h, stat) = hash_pending(sink, &p)?;
-            let entry = IndexEntry {
-                path: p.rel_str.clone(),
-                status,
-                object_hash: h,
-                mtime_ns: stat.0,
-                size: stat.1,
-                ino: stat.2,
-                ctime_ns: stat.3,
-            };
-            idx.remove_directory_conflicts(&entry.path);
-            idx.upsert_entry(entry);
+            let hashed = hash_pending(sink, &p).map_err(|e| emit_err(&e.message, e.code))?;
+            stage_hashed(idx, p.rel_str.clone(), hashed);
             Ok(p.rel_str)
         }
     }
