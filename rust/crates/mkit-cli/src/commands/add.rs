@@ -345,39 +345,10 @@ fn add_whole_worktree(
 
     // The walk above only stats/validates paths (cheap); the expensive
     // part — open + read + BLAKE3, streaming through `FastCdc` for large
-    // files — runs here, fanned out across rayon's global thread pool.
-    // `WriteBatch::write` (batch.rs) short-locks only its staged-dedup
-    // check and does the file I/O outside that lock specifically so
-    // concurrent writers sharing one batch don't convoy on each other —
-    // this is the "future parallel ingest" its own doc comment
-    // anticipated. Index mutation stays single-threaded and in walk
-    // order below, so `remove_directory_conflicts`/`upsert_entry` see
-    // the same order as the pre-parallelism sequential walk did.
-    //
-    // Any single failure aborts the whole command — the caller never
-    // calls `batch.commit()`/`index::write_index()` on an `Err` path, so
-    // nothing persists regardless of how many files hashed successfully
-    // before the failure. That means: (1) it's fine to skip applying
-    // anything to `idx` once a failure is known, and (2) `aborted` lets
-    // not-yet-started closures skip their hash entirely once one file
-    // has already failed, instead of every pending file paying its full
-    // hash cost only to have the result discarded.
-    let aborted = AtomicBool::new(false);
-    let hashed: Vec<HashOutcome> = pending
-        .par_iter()
-        .map(|p| {
-            if aborted.load(Ordering::Relaxed) {
-                return HashOutcome::Skipped;
-            }
-            match hash_pending(sink, p) {
-                Ok(v) => HashOutcome::Done(v),
-                Err(e) => {
-                    aborted.store(true, Ordering::Relaxed);
-                    HashOutcome::Failed(e)
-                }
-            }
-        })
-        .collect();
+    // files — happens in `hash_pending_batch`, sequentially or via
+    // rayon depending on how many files are pending (see
+    // `HASH_FANOUT_THRESHOLD`).
+    let hashed = hash_pending_batch(&pending, sink);
 
     // Report the first failure in walk order (`hashed` mirrors
     // `pending`'s order 1:1) — the same file `add` would have stopped
@@ -407,8 +378,72 @@ fn add_whole_worktree(
     Ok(())
 }
 
-/// Result of hashing one [`PendingHash`] inside [`add_whole_worktree`]'s
-/// parallel fan-out.
+/// Below this many pending files, [`hash_pending_batch`] hashes them
+/// sequentially instead of fanning out across rayon's thread pool.
+///
+/// Measured with `cargo bench -p mkit-benches --bench
+/// add_hash_fanout` (PR #951 Slack thread) on a 4-core box: rayon's
+/// pool-dispatch overhead makes it 25-100% slower than a plain loop
+/// for 1-16 files, roughly ties a plain loop at 32, and wins clearly
+/// from 64 files up (the realistic-bulk-add case `add_staging`'s
+/// 10k/100k cases already cover). 32 sits on the conservative side of
+/// that crossover: below it, rayon never wins by more than noise, so
+/// there is nothing to give up by staying sequential.
+const HASH_FANOUT_THRESHOLD: usize = 32;
+
+/// Hash every `pending` file — sequentially below
+/// [`HASH_FANOUT_THRESHOLD`], via rayon's global thread pool at or
+/// above it (see that constant's doc for why the cutover exists).
+/// Output mirrors `pending`'s order 1:1 either way, and both paths
+/// stop starting new hashes once one file has failed (see
+/// [`HashOutcome::Skipped`]) — nothing downstream uses a `Skipped`
+/// entry's value, since [`add_whole_worktree`] discards all of
+/// `hashed` on any [`HashOutcome::Failed`].
+///
+/// `WriteBatch::write` (batch.rs) short-locks only its staged-dedup
+/// check and does file I/O outside that lock specifically so
+/// concurrent writers sharing one batch don't convoy on each other —
+/// this is the "future parallel ingest" its own doc comment
+/// anticipated.
+fn hash_pending_batch(pending: &[PendingHash], sink: &(dyn ObjectSink + Sync)) -> Vec<HashOutcome> {
+    if pending.len() < HASH_FANOUT_THRESHOLD {
+        let mut out = Vec::with_capacity(pending.len());
+        let mut aborted = false;
+        for p in pending {
+            if aborted {
+                out.push(HashOutcome::Skipped);
+                continue;
+            }
+            match hash_pending(sink, p) {
+                Ok(v) => out.push(HashOutcome::Done(v)),
+                Err(e) => {
+                    aborted = true;
+                    out.push(HashOutcome::Failed(e));
+                }
+            }
+        }
+        return out;
+    }
+
+    let aborted = AtomicBool::new(false);
+    pending
+        .par_iter()
+        .map(|p| {
+            if aborted.load(Ordering::Relaxed) {
+                return HashOutcome::Skipped;
+            }
+            match hash_pending(sink, p) {
+                Ok(v) => HashOutcome::Done(v),
+                Err(e) => {
+                    aborted.store(true, Ordering::Relaxed);
+                    HashOutcome::Failed(e)
+                }
+            }
+        })
+        .collect()
+}
+
+/// Result of hashing one [`PendingHash`] inside [`hash_pending_batch`].
 enum HashOutcome {
     Done(HashedFile),
     Failed(HashError),
