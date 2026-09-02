@@ -27,7 +27,14 @@ cd "$(dirname "$0")/.."
 fail=0
 
 # Cargo workspaces/standalone packages that may declare these crates.
-MANIFESTS=$(find rust contrib/signers apps -name Cargo.toml -not -path '*/target/*')
+# Built as an array (not a plain string) so a path is never re-split
+# on whitespace; `mapfile`/`readarray` need Bash 4+, unavailable on
+# macOS's stock /bin/bash (3.2), so this uses a Bash-3.2-safe
+# NUL-delimited read loop instead.
+MANIFESTS=()
+while IFS= read -r -d '' manifest; do
+  MANIFESTS+=("$manifest")
+done < <(find rust contrib/signers apps -name Cargo.toml -not -path '*/target/*' -print0)
 
 # Extracts the version string after either `crate = "X.Y"` or
 # `crate = { version = "X.Y", ... }`, then normalizes it to Cargo's
@@ -42,7 +49,7 @@ check_crate() {
   local crate="$1"
   local channels
   channels=$(
-    sed -nE "s/^${crate}[[:space:]]*=[[:space:]]*(\\{[^}]*version[[:space:]]*=[[:space:]]*)?\"([0-9]+(\\.[0-9]+)?).*/\\2/p" $MANIFESTS 2>/dev/null \
+    sed -nE "s/^${crate}[[:space:]]*=[[:space:]]*(\\{[^}]*version[[:space:]]*=[[:space:]]*)?\"([0-9]+(\\.[0-9]+)?).*/\\2/p" "${MANIFESTS[@]}" 2>/dev/null \
       | channel_of \
       | sort -u
   )
@@ -50,7 +57,7 @@ check_crate() {
   count=$(echo "$channels" | grep -c . || true)
   if [ "$count" -gt 1 ]; then
     echo "error: ${crate} is pinned to more than one Cargo-compatible version across the repo: $(echo "$channels" | tr '\n' ' ')"
-    grep -n -E "^${crate}[[:space:]]*=" $MANIFESTS
+    grep -n -E "^${crate}[[:space:]]*=" "${MANIFESTS[@]}"
     fail=1
   fi
 }

@@ -147,8 +147,11 @@ serde_json = "1"
 # rustls (same feature set + version as mkit-transport-http — zero new
 # TLS supply chain), sha256 sidecar check, and single-member tar.gz
 # extraction of the new binary. Cert verification is via
-# rustls-platform-verifier (OS trust store), reqwest 0.13's default —
-# see docs/specs/SPEC-TRANSPORT-CONNECT.md.
+# rustls-platform-verifier (OS trust store), reqwest 0.13's own default.
+# Not the same trust model as mkit-transport-connect's hyper-rustls
+# client, which pins an explicit webpki-roots list instead (see that
+# crate's Cargo.toml and SPEC-TRANSPORT-CONNECT.md §7.3) — the two
+# transports are independent and don't need to agree.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "json"] }
 sha2 = "0.11"
 flate2 = "1"
