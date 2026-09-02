@@ -120,7 +120,7 @@ a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.2
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
@@ -129,7 +129,7 @@ tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.2
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/mkit/releases/download/${TAG}/mkit-${VERSION}-${TARGET}.tar.gz"
@@ -299,7 +299,7 @@ version:
 
 ```sh
 $ mkit version
-mkit 0.3.0
+mkit 0.4.2
 ```
 
 The exact format `mkit <X.Y.Z>\n` (no extra whitespace, no banner) is
@@ -320,7 +320,7 @@ binary can update itself:
 ```sh
 mkit self update            # update to the latest release
 mkit self update --check    # just report whether an update exists
-mkit self update --version v0.4.0   # pin a specific release
+mkit self update --version v0.4.2   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform and, when

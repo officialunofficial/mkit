@@ -69,7 +69,7 @@ Detects your OS and architecture, downloads the matching signed
 release archive, verifies its cosign signature by default, and
 installs `mkit` into `~/.local/bin`. Equivalent explicit form:
 `curl -sSfL https://mkit.sh/install.sh | sh`; append
-`-s -- --version v0.3.0` to pin an exact release.
+`-s -- --version v0.4.2` to pin an exact release.
 
 On native Windows (PowerShell, no WSL/Git-Bash), use the PowerShell
 installer instead:
@@ -99,7 +99,7 @@ Cosign-signed archives for Linux (x86_64 plus arm64), macOS (arm64 plus
 x86_64), and Windows (x86_64) on every `v*.*.*` tag:
 
 ```sh
-VERSION=0.3.0
+VERSION=0.4.2
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/mkit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "mkit-${VERSION}-${TARGET}.tar.gz"

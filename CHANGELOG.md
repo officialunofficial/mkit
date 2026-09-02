@@ -9,23 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.2](https://github.com/officialunofficial/mkit/compare/v0.4.1...v0.4.2) - 2026-09-02
 
-### Bug Fixes
-
-- *(deps)* regenerate mcp bun.lock, settle oxfmt output, refresh stale comments
-
 ### Performance
 
-- *(cli)* parallel worktree hashing for add -A/add ., re-measured perf docs ([#951](https://github.com/officialunofficial/mkit/pull/951))
+- *(cli)* parallel worktree hashing for `add -A`/`add .` ([#951](https://github.com/officialunofficial/mkit/pull/951))
 
-### Deps
+### Other
 
-- fix dependabot coverage, unyank chacha20, bump JS/Cargo deps ([#946](https://github.com/officialunofficial/mkit/pull/946))
-- *(rust)* bump base64 from 0.22.1 to 0.23.1 in /rust ([#938](https://github.com/officialunofficial/mkit/pull/938))
-- *(rust,signers)* bump p256 and k256 to 0.14
-- *(rust)* bump the cargo-minor group in /rust with 4 updates ([#942](https://github.com/officialunofficial/mkit/pull/942))
-- *(rust)* bump the cargo-minor group across 1 directory with 6 updates ([#936](https://github.com/officialunofficial/mkit/pull/936))
-- *(rust)* bump openpgp-card from 0.6.1 to 0.7.0 in /rust ([#937](https://github.com/officialunofficial/mkit/pull/937))
-- *(rust)* bump the cargo-minor group across 1 directory with 15 updates
+- upgrade connectrpc 0.8.x to 0.9.0 and buffa 0.8.1 to 0.9.1 ([#939](https://github.com/officialunofficial/mkit/pull/939))
 
 ## [0.4.1](https://github.com/officialunofficial/mkit/compare/v0.4.0...v0.4.1) - 2026-07-16
 
