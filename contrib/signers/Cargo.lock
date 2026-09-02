@@ -1434,7 +1434,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mkit-attest"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "bytes",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "mkit-rpc"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "buffa",
  "buffa-build",
