@@ -287,16 +287,21 @@ secret must grant this repo access, and its crates.io account must own the
 crates (via the `makechain` team). Migrating to crates.io Trusted Publishing
 (OIDC) to drop the long-lived token is a recommended follow-up.
 
-> `release-plz` publishes nothing, but it is not fully dormant: the
-> `release-plz-release` job in `.github/workflows/release-plz.yml` runs on
-> **every push to `main`** (gated on the repo variable
-> `RELEASE_PLZ_ENABLED == 'true'`, currently true). With `release_always =
-> false` in `rust/release-plz.toml` it no-ops on publishing (skips with
-> "commit is not from a release PR"), but it still does the
-> checkout/toolchain/App-token work each push. The `release-plz-pr` job is
-> `workflow_dispatch`-only, kept as an escape hatch if versioning is ever
-> handed back to release-plz. To truly disable the per-push job, set
-> `RELEASE_PLZ_ENABLED` to `false`.
+> Both jobs in `.github/workflows/release-plz.yml` (`release-plz-release`,
+> `release-plz-pr`) are `workflow_dispatch`-only, gated on the repo variable
+> `RELEASE_PLZ_ENABLED == 'true'` (currently true). Neither runs on push.
+>
+> This used to be different: `release-plz-release` ran on every push to
+> `main`, on the assumption that `release_always = false` in
+> `rust/release-plz.toml` would always no-op it ("commit is not from a
+> release PR"). That assumption broke on the v0.4.2 release (2026-09-02):
+> the mkit-release skill's own procedure merges release-plz's own PR as the
+> release-prep PR, and release-plz recognized that merge commit as a real
+> release and actually ran `cargo publish` for every crate — racing (and
+> mostly winning against) the tag-driven `crates-publish.yml` publish, which
+> then failed with a harmless-but-confusing "already exists" error. The push
+> trigger was removed for this reason: `crates-publish.yml` is the sole real
+> publish path, and this job must never fire on its own.
 
 ### Gotchas
 
