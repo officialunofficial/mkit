@@ -22,7 +22,7 @@ worker = { version = "0.8", features = ["http"] }
 # SAME `verify_strict` line apps/repo-worker uses. Verify-only: no RNG needed,
 # so no getrandom backend feature is required (unlike repo-worker, which pulls
 # the k256/p256 keygen stack).
-ed25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "3", default-features = false }
 
 # BLAKE3 content-address primitive — the envelope's body digest + signing digest
 # are plain BLAKE3, matching the web client's `api.blake3_hex`.

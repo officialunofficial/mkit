@@ -1,0 +1,36 @@
+name: "Meta: crypto-stack version"
+
+# Enforces docs/INVARIANTS.md's "Single crypto-stack version across
+# workspaces" invariant. Pure text check (grep/sed/awk over Cargo.toml),
+# no toolchain needed, so this stays a fast standalone workflow rather than
+# riding along inside the Rust CI (Cloud Build) or the GitHub-Actions-
+# focused "Meta: actionlint" workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**/Cargo.toml'
+      - 'contrib/signers/**/Cargo.toml'
+      - 'apps/*/Cargo.toml'
+      - 'scripts/check-crypto-stack-version.sh'
+  pull_request:
+    paths:
+      - 'rust/**/Cargo.toml'
+      - 'contrib/signers/**/Cargo.toml'
+      - 'apps/*/Cargo.toml'
+      - 'scripts/check-crypto-stack-version.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check crypto-stack version alignment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Check ed25519-dalek / sha2 version alignment
+        run: bash scripts/check-crypto-stack-version.sh
+        shell: bash

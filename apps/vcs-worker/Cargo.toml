@@ -38,7 +38,7 @@ mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
 
 # Ed25519 strict verify for the write envelope — see apps/repo-worker's
 # rationale; identical envelope shape, so identical verify line.
-ed25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "3", default-features = false }
 
 # http / body plumbing for the worker::Request <-> connectrpc adapter.
 http = "1"
@@ -56,8 +56,8 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 connectrpc-build = "0.9.0"
 
 [dev-dependencies]
-ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
-rand_core = "0.6"
+ed25519-dalek = { version = "3", default-features = false, features = ["rand_core"] }
+rand_core = "0.10"
 # Host-side grpc.health.v1.Health Connect-dispatch integration test
 # (tests/health_check_dispatch.rs, mkit#796) needs an executor for
 # `#[tokio::test]`; the worker itself never depends on tokio (its runtime is

@@ -63,7 +63,7 @@ mkit-attest = { path = "../../rust/crates/mkit-attest" }
 # mkit_core::sign::verify (which applies domain_digest). We strict-verify
 # directly with the SAME dalek `verify_strict` mkit-core uses under the
 # hood — byte-for-byte the same RFC-8032/ZIP-215-off line.
-ed25519-dalek = { version = "2", default-features = false }
+ed25519-dalek = { version = "3", default-features = false }
 
 # http / body plumbing for the worker::Request <-> connectrpc adapter.
 http = "1"
@@ -93,8 +93,8 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 connectrpc-build = "0.9.0"
 
 [dev-dependencies]
-ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
-rand_core = "0.6"
+ed25519-dalek = { version = "3", default-features = false, features = ["rand_core"] }
+rand_core = "0.10"
 # Host-side WatchRefs Connect-streaming integration test
 # (tests/watch_refs_stream.rs) needs an executor for `#[tokio::test]`; the
 # worker itself never depends on tokio (its runtime is wasm_bindgen_futures on

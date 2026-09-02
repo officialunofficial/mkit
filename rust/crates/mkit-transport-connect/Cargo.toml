@@ -124,7 +124,7 @@ mkit-transport-memory = { version = "0.4", path = "../mkit-transport-memory" }
 # reimplementation of `apps/vcs-worker`'s server-side `verify_envelope` /
 # `verify_stream_envelope`, so a canonical-string or header regression is
 # caught here rather than only by a live `wrangler dev` run.
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "rand_core"] }
 hex = "0.4"
 # `tests/roundtrip.rs` builds its own in-process `TransportService` server
 # directly against `connectrpc::server`/`Router` (the client-side regression

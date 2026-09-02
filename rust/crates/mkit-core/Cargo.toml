@@ -50,7 +50,7 @@ commonware-utils = { workspace = true, optional = true, features = ["std"] }
 # runtime owned by mkit-core. Default builds (and the `sparse-checkout`
 # / `pack-shards` paths, which stay async-internal) don't pull tokio.
 tokio = { version = "1", optional = true, features = ["rt-multi-thread", "fs", "sync", "io-util", "time"] }
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
 # `SecretSeed` PartialEq. dalek pulls it transitively but we depend on

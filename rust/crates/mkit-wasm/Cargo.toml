@@ -59,8 +59,8 @@ bao = "0.13"
 # Direct dep for the raw Ed25519 wasm exports (`ed25519_sign`,
 # `ed25519_pubkey_from_seed`). Same major as the transitive copy
 # mkit-core::sign + mkit-attest already pull in (default-features off,
-# `std` on) — keeps the dep graph at a single dalek version.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+# `alloc` on) — keeps the dep graph at a single dalek version.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 # `Zeroizing<[u8; 32]>` wrappers carry the scrub-on-drop contract for
 # every Rust-side temporary holding a JS-passed seed. The seed can't be
 # scrubbed on the JS side (we can't reach into the ArrayBuffer), but
@@ -87,7 +87,7 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # deterministic P-256 signer and re-derive the clientDataJSON hash.
 # Versions match the copies mkit-attest already pulls in.
 [dev-dependencies]
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", default-features = false }
 base64 = "0.23"
 
 [features]
