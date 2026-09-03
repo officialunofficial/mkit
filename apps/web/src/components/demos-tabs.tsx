@@ -42,7 +42,7 @@ const TABS: Tab[] = [
   {
     id: 'tree',
     label: 'Tree',
-    title: 'Merkle Trees, File to Commit',
+    title: 'Folders, All the Way Down',
     blurb: 'Each folder’s hash is built from its children’s hashes, forming one Merkle root: file → folder → commit.',
     body: (
       <>
