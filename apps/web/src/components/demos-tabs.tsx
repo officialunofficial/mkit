@@ -42,8 +42,8 @@ const TABS: Tab[] = [
   {
     id: 'tree',
     label: 'Tree',
-    title: 'Folders, All the Way Down',
-    blurb: 'Folders of hashes fold up into one Merkle root: file → folder → commit.',
+    title: 'Merkle Trees, File to Commit',
+    blurb: 'Each folder’s hash is built from its children’s hashes, forming one Merkle root: file → folder → commit.',
     body: (
       <>
         A folder lists its entries by their BLAKE3 hashes and each parent’s hash is built from its children’s, so the

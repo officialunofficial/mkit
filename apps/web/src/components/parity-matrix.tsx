@@ -138,7 +138,7 @@ export function ParityMatrix() {
           <div className='rule-square pb-2'>
             <h2 className='ds-h2'>Safer Than Git</h2>
             <p className='ds-note mt-1'>
-              Where mkit refuses git&rsquo;s silent-data-loss defaults. Features, not gaps.
+              Where mkit refuses git&rsquo;s silent-data-loss defaults. These are deliberate choices, not missing git behavior.
             </p>
           </div>
           <div className='data-frame mt-2'>
