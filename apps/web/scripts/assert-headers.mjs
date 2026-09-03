@@ -44,6 +44,16 @@ for (const directive of ['wasm-unsafe-eval', 'frame-ancestors', 'Strict-Transpor
   }
 }
 
+// /assets/* is content-hashed by the build and must ship long-lived immutable caching —
+// Cloudflare's Assets-binding default (`max-age=0, must-revalidate`) forces a revalidation
+// round trip on every visit otherwise, needlessly delaying font/CSS/JS availability.
+if (!/^\/assets\/\*\s*$/m.test(contents)) {
+  failures.push('no `/assets/*` rule found')
+}
+if (!contents.includes('Cache-Control: public, max-age=31536000, immutable')) {
+  failures.push('missing or mismatched header: Cache-Control (immutable) on /assets/*')
+}
+
 if (failures.length) {
   console.error('assert-headers: dist/public/_headers is broken —')
   for (const f of failures) console.error(`  - ${f}`)
