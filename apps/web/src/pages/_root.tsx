@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react'
+import dmSansWoff2 from '@fontsource-variable/dm-sans/files/dm-sans-latin-wght-normal.woff2?url'
+import dmMonoWoff2 from '@fontsource/dm-mono/files/dm-mono-latin-400-normal.woff2?url'
 
 type RootProps = { children: ReactNode }
 
@@ -24,6 +26,14 @@ export default function RootElement({ children }: RootProps) {
   return (
     <html lang='en' suppressHydrationWarning>
       <head>
+        {/* Preload the two Latin-subset font files actually used to render page text (styles.css imports
+            @fontsource-variable/dm-sans and @fontsource/dm-mono, both font-display: swap) — without this the
+            browser only discovers them once it's parsed the CSS that declares the @font-face rules, serializing
+            the fetch behind the stylesheet and lengthening the fallback-to-webfont swap. `crossOrigin` is required
+            even though these are same-origin: @font-face fetches always run in CORS mode, and a preload without a
+            matching crossorigin attribute is treated as a separate cache entry and fetched twice. */}
+        <link rel='preload' href={dmSansWoff2} as='font' type='font/woff2' crossOrigin='anonymous' />
+        <link rel='preload' href={dmMonoWoff2} as='font' type='font/woff2' crossOrigin='anonymous' />
         <script dangerouslySetInnerHTML={{ __html: NO_FLASH }} />
       </head>
       <body>{children}</body>
