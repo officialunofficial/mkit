@@ -76,7 +76,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-binstall
-        uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d  # v2
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf  # v2
         with:
           tool: cargo-binstall
 
