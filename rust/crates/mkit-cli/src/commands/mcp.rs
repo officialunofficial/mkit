@@ -45,6 +45,14 @@ struct McpOpts {
     /// subdirectories). Strongly recommended for agent use.
     #[arg(long, short = 'r', value_name = "PATH")]
     repository: Option<PathBuf>,
+    /// Serve over streamable HTTP at this address (e.g. 127.0.0.1:8899)
+    /// instead of stdio. Requires `--features mcp-v2`: rmcp's stdio
+    /// transport is what the default build speaks, and HTTP needs a real
+    /// listener besides. Binds to localhost-family addresses only by
+    /// default (rmcp's own DNS-rebinding guard — see `mcp_v2.rs`).
+    #[cfg(feature = "mcp-v2")]
+    #[arg(long, value_name = "ADDR")]
+    http: Option<String>,
 }
 
 /// Entry point for `mkit mcp`.
@@ -65,7 +73,7 @@ pub fn run(args: &[String]) -> u8 {
         },
         None => None,
     };
-    dispatch(allowed)
+    dispatch(allowed, &opts)
 }
 
 /// `mcp-v2` swaps the whole `mkit mcp` implementation over to the rmcp-based
@@ -76,12 +84,12 @@ pub fn run(args: &[String]) -> u8 {
 /// `dispatch` is the only thing that differs: the tool catalog, argv-building,
 /// path confinement, and injection defenses below are shared unconditionally.
 #[cfg(feature = "mcp-v2")]
-fn dispatch(allowed: Option<PathBuf>) -> u8 {
-    super::mcp_v2::serve(allowed.as_deref())
+fn dispatch(allowed: Option<PathBuf>, opts: &McpOpts) -> u8 {
+    super::mcp_v2::serve(allowed.as_deref(), opts.http.as_deref())
 }
 
 #[cfg(not(feature = "mcp-v2"))]
-fn dispatch(allowed: Option<PathBuf>) -> u8 {
+fn dispatch(allowed: Option<PathBuf>, _opts: &McpOpts) -> u8 {
     serve(allowed.as_deref())
 }
 
