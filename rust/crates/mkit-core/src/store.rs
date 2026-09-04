@@ -163,7 +163,19 @@ impl BulkWriter<'_> {
             self.files.insert(final_path);
             return Ok(h);
         }
-        fs::create_dir_all(shard_dir)?;
+        // `self.dirs` already records every shard this session has
+        // touched — a shard present there was `create_dir_all`'d (or
+        // observed via the byte-match branch above, which also implies
+        // it exists) by an earlier `write` call in this same session,
+        // so a repeat `create_dir_all` here is a guaranteed-redundant
+        // mkdir + is_dir stat (std's fallback path on `AlreadyExists`).
+        // At most 256 shards exist, so memoizing saves ~2 syscalls per
+        // object on large bulk ingests (git-import) — the same
+        // `created_shards` memoization `WriteBatch::write_prehashed`
+        // already applies to the batched-add path.
+        if !self.dirs.contains(shard_dir) {
+            fs::create_dir_all(shard_dir)?;
+        }
         // Content fsync happens BEFORE the rename, so the object is
         // durable the instant it becomes visible. Only the rename's
         // durability (the shard dir fsync) is deferred to commit.

@@ -51,6 +51,14 @@ harness = false
 name = "store_write"
 harness = false
 
+# `ObjectStore::bulk_writer` ingest cost (the `git-import` object-sink
+# path) — regression guard for the shard-dir `create_dir_all`
+# memoization in `BulkWriter::write`. No feature gate: bulk_writer is
+# always compiled.
+[[bench]]
+name = "bulk_writer"
+harness = false
+
 # Issue #644 — refs::update_ref CAS-variant latency + list_refs at
 # increasing ref counts. No feature gate: refs are always compiled.
 [[bench]]
