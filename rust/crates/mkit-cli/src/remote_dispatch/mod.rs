@@ -30,11 +30,11 @@ use std::sync::Arc;
 
 use applied_packs::AppliedPacks;
 
-use mkit_core::hash::{HASH_LEN, Hash};
+use mkit_core::hash::Hash;
 use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::restore;
-use mkit_core::pack::{self, PackError, PackWriter};
+use mkit_core::pack::{self, PackError, PackWriter, PreparedDelta, PreparedRaw};
 use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
@@ -43,6 +43,7 @@ use mkit_transport_connect::ConnectTransport;
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
+use rayon::prelude::*;
 
 use packmap::{
     ChainAction, advance_packmap, apply_fetched_chain, commit_head, packmap_ref, probe_chain,
@@ -848,7 +849,9 @@ pub fn push_branch_with_limits(
 /// running total, so a sealed pack never exceeds `payload_cap` — it may
 /// under-fill when compression bites, yielding more packs than the
 /// theoretical minimum, never fewer. Peak memory is one pack buffer
-/// (bounded by `payload_cap`), not every pack held at once.
+/// (bounded by `payload_cap`) plus one prepared batch (bounded by
+/// [`pack_fanout_threshold`]-many entries — see [`prepare_raw_batch`]),
+/// not every pack held at once.
 ///
 /// The caller only reaches this with a non-empty `plan` (an empty plan
 /// takes the head-only fast path before this is called), so the final
@@ -863,28 +866,95 @@ fn build_and_upload_packs(
     let mut pack_keys = Vec::new();
     let mut w = PackWriter::new();
 
-    for h in &plan.raw {
-        let bytes = store.read(h)?;
-        if should_seal(&w, bytes.len() as u64, payload_cap) {
-            seal_pack(tx, &mut w, &mut pack_keys)?;
+    for chunk in plan.raw.chunks(pack_fanout_threshold().max(1)) {
+        for entry in prepare_raw_batch(store, chunk)? {
+            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
+                seal_pack(tx, &mut w, &mut pack_keys)?;
+            }
+            w.push_prepared_raw(entry)?;
+            // Honest progress (#711): one real object just got staged into
+            // the outgoing pack. Never git's fabricated
+            // Enumerating/Counting/Compressing lines — see `crate::progress`.
+            crate::progress::report(crate::progress::Event::ObjectsPacked(1));
         }
-        w.push_raw(*h, &bytes)?;
-        // Honest progress (#711): one real object just got staged into
-        // the outgoing pack. Never git's fabricated
-        // Enumerating/Counting/Compressing lines — see `crate::progress`.
-        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
-    for d in &plan.deltas {
-        let bound = (HASH_LEN + d.stream.len()) as u64;
-        if should_seal(&w, bound, payload_cap) {
-            seal_pack(tx, &mut w, &mut pack_keys)?;
+    for chunk in plan.deltas.chunks(pack_fanout_threshold().max(1)) {
+        for entry in prepare_delta_batch(chunk) {
+            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
+                seal_pack(tx, &mut w, &mut pack_keys)?;
+            }
+            w.push_prepared_delta(entry)?;
+            crate::progress::report(crate::progress::Event::ObjectsPacked(1));
         }
-        w.push_delta(&d.base, &d.stream)?;
-        crate::progress::report(crate::progress::Event::ObjectsPacked(1));
     }
 
     seal_pack(tx, &mut w, &mut pack_keys)?;
     Ok(pack_keys)
+}
+
+/// Entries-per-thread budget below which [`prepare_raw_batch`] /
+/// [`prepare_delta_batch`] read + zstd-compress sequentially instead of
+/// fanning out across rayon's thread pool, for a pool of a given size.
+/// Same crossover shape as `add.rs`'s `HASH_FANOUT_FILES_PER_THREAD`
+/// (PR #951) — rayon's pool-dispatch overhead loses to a plain loop
+/// below a few entries per thread and wins clearly above it — measured
+/// for the pack-build path specifically with `cargo bench -p
+/// mkit-benches --bench pack_create`.
+///
+/// Also doubles as the batch size `build_and_upload_packs` chunks
+/// `plan.raw`/`plan.deltas` into: each chunk is prepared (read +
+/// compressed) as one unit before any of its entries are pushed, so
+/// peak extra memory (bytes read/compressed but not yet appended into
+/// `w`) stays bounded to one chunk's worth of objects rather than the
+/// whole plan's, mirroring the "peak memory is one pack buffer" bound
+/// this function's doc comment already promises for the writer side.
+const PACK_FANOUT_ENTRIES_PER_THREAD: usize = 8;
+
+/// The per-chunk entry count [`build_and_upload_packs`] fans out across
+/// rayon at — see [`PACK_FANOUT_ENTRIES_PER_THREAD`]. Reads rayon's
+/// already-initialized global pool size (cheap: an atomic load after
+/// first use, no allocation).
+fn pack_fanout_threshold() -> usize {
+    PACK_FANOUT_ENTRIES_PER_THREAD.saturating_mul(rayon::current_num_threads())
+}
+
+/// Read + compression-prepare one chunk of raw object hashes —
+/// sequentially below [`pack_fanout_threshold`], via rayon's global
+/// thread pool at or above it. Output mirrors `chunk`'s order 1:1
+/// either way: `plan.raw` is already ordered (non-blobs before blobs,
+/// each group in BLAKE3 order — see [`transfer::PackPlan`]'s doc
+/// comment), and that order is the wire order the pack is built in, so
+/// a parallel fan-out must not reshuffle it.
+fn prepare_raw_batch(
+    store: &ObjectStore,
+    chunk: &[Hash],
+) -> Result<Vec<PreparedRaw>, DispatchError> {
+    if chunk.len() < pack_fanout_threshold() {
+        return chunk
+            .iter()
+            .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
+            .collect();
+    }
+    chunk
+        .par_iter()
+        .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
+        .collect()
+}
+
+/// The delta-entry counterpart of [`prepare_raw_batch`]. Delta streams
+/// are already resident in `plan.deltas` (no store read needed), so
+/// this only fans out the zstd compression step.
+fn prepare_delta_batch(chunk: &[transfer::PlannedDelta]) -> Vec<PreparedDelta> {
+    if chunk.len() < pack_fanout_threshold() {
+        return chunk
+            .iter()
+            .map(|d| PackWriter::prepare_delta(d.base, d.stream.clone()))
+            .collect();
+    }
+    chunk
+        .par_iter()
+        .map(|d| PackWriter::prepare_delta(d.base, d.stream.clone()))
+        .collect()
 }
 
 /// Would pushing an entry of (conservative, uncompressed) size

@@ -80,6 +80,17 @@ harness = false
 name = "add_hash_fanout"
 harness = false
 
+# Push-path pack building's per-entry compression fan-out —
+# `PackWriter::prepare_raw`/`prepare_delta`, added alongside
+# `mkit-cli`'s `build_and_upload_packs` rayon fan-out so a push
+# serialising many objects compresses them across threads instead of
+# one at a time. Same isolation shape as `add_hash_fanout` above: just
+# the fan-out decision, not the surrounding plan/seal/upload cost. No
+# feature gate: `pack-zstd` is a default feature of `mkit-core`.
+[[bench]]
+name = "pack_build_fanout"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
