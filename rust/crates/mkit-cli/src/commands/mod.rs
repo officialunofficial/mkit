@@ -288,7 +288,7 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
 /// common dir and worktree state dir coincide there — see
 /// `mkit_core::layout`). Local mutating commands never take this lock
 /// themselves; they only [`probe_exclusive`](mkit_core::repo_lock::probe_exclusive)
-/// it via [`warn_if_served`] to detect a live `serve`.
+/// it via `warn_if_served` to detect a live `serve`.
 pub const SERVE_LOCK: &str = "serve.lock";
 
 /// Warn on stderr when at least one `mkit serve` is currently alive
