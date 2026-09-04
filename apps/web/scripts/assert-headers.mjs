@@ -54,6 +54,23 @@ if (!contents.includes('Cache-Control: public, max-age=31536000, immutable')) {
   failures.push('missing or mismatched header: Cache-Control (immutable) on /assets/*')
 }
 
+// Non-hashed static files (favicon, logo, install script) still need a rule, or they fall
+// back to Cloudflare's must-revalidate default.
+for (const ext of ['svg', 'png', 'ico', 'webp']) {
+  if (!new RegExp(`^/\\*\\.${ext}\\s*$`, 'm').test(contents)) {
+    failures.push(`no \`/*.${ext}\` rule found`)
+  }
+}
+
+// The prerendered demo pages + their RSC payloads are real content that can change on a
+// redeploy at the same path — they need a short-TTL rule (not immutable) or they inherit
+// the must-revalidate default same as everything else.
+for (const route of ['/concepts', '/multiplayer', '/parity', '/performance', '/specs', '/RSC/*']) {
+  if (!contents.includes(`${route}\n  Cache-Control: public, max-age=300, stale-while-revalidate=86400`)) {
+    failures.push(`missing or mismatched short-TTL Cache-Control rule for ${route}`)
+  }
+}
+
 if (failures.length) {
   console.error('assert-headers: dist/public/_headers is broken —')
   for (const f of failures) console.error(`  - ${f}`)
