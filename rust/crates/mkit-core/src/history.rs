@@ -59,7 +59,7 @@
 //! tokio runtime *before returning* — so the `Context` handed back is
 //! already post-shutdown. Subsequent async ops are driven through the
 //! caller-supplied executor, never by spawning through this `Context`;
-//! see [`JournaledBackend`]'s `ctx` field and `docs/INVARIANTS.md`,
+//! see `JournaledBackend`'s `ctx` field and `docs/INVARIANTS.md`,
 //! "The shared commonware Context is post-shutdown after `open_at`".
 //!
 //! This means production callers only need to construct an executor
