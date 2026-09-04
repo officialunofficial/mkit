@@ -71,6 +71,7 @@
 //! | `stash`                  | worktree | [`crate::ops::stash`]   |
 //! | `sparse-checkout`        | worktree | [`crate::ops::restore`] |
 //! | `worktree.lock`          | worktree | CLI lock helper         |
+//! | `serve.lock`             | common   | CLI `serve` guard (SPEC-CONCURRENCY §2/§3.1) |
 //!
 //! Rationale for the git-divergent entries: `shallow` is shared because
 //! it constrains the one shared object graph; the stash is per-worktree

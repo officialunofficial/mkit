@@ -18,7 +18,7 @@ rust/
 │   │                           # ignore, repo_lock, ops/*, sign, protocol
 │   ├── mkit-transport-memory/
 │   ├── mkit-transport-file/
-│   ├── mkit-transport-http/
+│   ├── mkit-transport-http/    # legacy JSON dialect, superseded by mkit-transport-connect
 │   ├── mkit-transport-connect/  # ConnectRPC client for mkit.transport.v1.TransportService
 │   │                           # (SPEC-TRANSPORT-CONNECT); used for mkit+https:// / mkit+http://
 │   ├── mkit-transport-s3/

@@ -27,7 +27,7 @@ of two classes:
 
 | Class | Contents |
 |---|---|
-| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `recovery-log`, `attestations/`, `applied-packs/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history-<branch>.lock`, `worktrees.lock` |
+| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `recovery-log`, `attestations/`, `applied-packs/`, `git/`, `sparse/`, `pack-shards/`, `worktrees/`, `refs-history-<branch>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
 | **worktree state dir** (private to one tree) | `HEAD`, `index`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `mkit-conflicts`, `MKIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock` |
 
 In the classic single-worktree layout both directories are the same

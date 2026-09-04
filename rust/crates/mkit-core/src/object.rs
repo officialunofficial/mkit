@@ -678,6 +678,19 @@ pub enum MkitError {
     /// with a misleading "length mismatch".
     #[error("delta length {len} exceeds u32::MAX for field `{field}`")]
     DeltaLengthOverflow { field: &'static str, len: usize },
+    /// Structural corruption in a v1 delta instruction stream (MKIT-13):
+    /// anything `delta::decode` rejects that is neither a version
+    /// mismatch ([`Self::UnsupportedObjectVersion`]) nor a truncated
+    /// stream ([`Self::UnexpectedEof`]). Distinct from
+    /// [`Self::TrailingData`] — which SPEC-DELTA §10 and
+    /// `serialize.rs` reserve for the genuine "non-empty trailing bytes
+    /// after a complete object" condition — so callers can tell
+    /// "well-formed but truncated/wrong-version" apart from
+    /// "structurally corrupt" without conflating either with an
+    /// unrelated serialization boundary. See [`crate::delta::DeltaCorruption`]
+    /// for the specific corruption kind.
+    #[error("delta stream is structurally corrupt: {0}")]
+    DeltaCorrupt(crate::delta::DeltaCorruption),
 }
 
 impl fmt::Display for Object {

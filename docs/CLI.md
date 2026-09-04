@@ -1057,7 +1057,13 @@ Remote / sync:
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve <path>` &mdash; internal SSH transport server. Speaks the
-  mkit-rpc SSH framing on stdin/stdout by default.
+  mkit-rpc SSH framing on stdin/stdout by default. Holds a shared
+  `serve.lock` in `<path>/.mkit` for as long as the process is alive
+  (any number of concurrent `serve` processes may hold it at once); a
+  local worktree-mutating command or `gc` run against that same path
+  while it is held prints a warning to stderr and proceeds &mdash; it is not
+  refused, and this is detection, not coordination (SPEC-CONCURRENCY
+  §3.1).
 - `mkit serve <path> --listen-enc <addr>` &mdash; bind a TCP socket on
   `<addr>` (for example, `0.0.0.0:9418`) and serve the same protocol over
   an encrypted-stream transport. Requires building the binary with
@@ -1305,7 +1311,12 @@ Config / keys / version:
     values **never** feed it. They are repo-safe (stored in
     `.mkit/config`) precisely because they cannot influence the signed
     author &mdash; unlike `user.identity`, which stays user-scoped and in
-    `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship.
+    `REPO_FORBIDDEN_KEYS` so a hostile clone cannot spoof authorship. The
+    **first** time either alias is set in a repo that has never set
+    `user.identity` (or the other alias), `mkit config` prints a
+    one-time warning to stderr pointing at `user.identity` &mdash; a user
+    coming from git might otherwise reasonably expect these to control
+    authorship.
   - `core.*` &mdash; git-compatibility keys. An **inert** allowlist
     (`core.autocrlf`, `core.bare`, `core.filemode`, `core.ignorecase`,
     `core.quotepath`, `core.symlinks`) is accepted and round-tripped for

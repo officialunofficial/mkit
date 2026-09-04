@@ -40,15 +40,16 @@ document points here.
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ref-write + history-MMR-append critical section for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own `Match` CAS critical section (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** by every live `mkit serve` process for its whole lifetime; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
 
 ## 3. Cross-subsystem interactions
 
-### 3.1 File-transport CAS vs. local worktree operations (open gap)
+### 3.1 File-transport CAS vs. local worktree operations (detected, not coordinated)
 
-`<root>/.mkit/refs/.lock` (last row of §2) serializes the file
+`<root>/.mkit/refs/.lock` (fourth row of §2) serializes the file
 transport's own `Match` CAS critical section against **other file
 transport instances pointed at the same root** &mdash; nothing more. It does
 not coordinate with `worktree.lock`, `worktrees.lock`, or
@@ -56,15 +57,42 @@ not coordinate with `worktree.lock`, `worktrees.lock`, or
 no knowledge of those locks or of the `RepoLayout` abstraction they're
 keyed on.
 
-This is a real, permanent gap, not a rule that closes it: a local
+This is a real, permanent gap, not one this document closes: a local
 `mkit commit`/`checkout`/`gc` running directly against a directory that
 is *simultaneously* being served by `mkit serve` (a file-transport
 listener) over that same directory is not coordinated against by the
-transport's lock, and vice versa. mkit's supported deployment shape for
-the file transport is a bare/shared remote a worktree-owning process
-does not also mutate directly &mdash; see SPEC-TRANSPORT's scope note.
-Running local worktree commands directly against a live `mkit serve`
-root is unsupported; nothing detects or rejects it.
+transport's lock, and vice versa &mdash; a `gc` sweep can still race a
+concurrent push's object write, or a local ref write can still race a
+client's CAS update. mkit's supported deployment shape for the file
+transport is a bare/shared remote a worktree-owning process does not
+also mutate directly. Running local worktree commands directly against
+a live `mkit serve` root remains unsupported.
+
+**MKIT-11/#655 turned this from silent into detected**, without closing
+it: every live `mkit serve` process holds a **shared** kernel lock
+(`std::fs::File::lock_shared`, never exclusive &mdash; SPEC-TRANSPORT
+documents multiple concurrent `serve` processes against one root, e.g.
+one per SSH forced-command connection, as a supported deployment, so
+`serve` instances must not exclude each other) on `serve.lock` (fifth
+row of §2, in the common dir) for its whole lifetime. `worktree.lock`
+and `worktrees.lock` acquisition (`mkit-cli`'s `acquire_worktree_lock`
+and `acquire_worktrees_registry_lock`) each follow up with a
+non-blocking exclusive probe of that same `serve.lock`
+(`mkit_core::repo_lock::probe_exclusive`); when the probe finds it busy
+(i.e. at least one `serve` is alive), the command prints a warning to
+stderr and proceeds anyway &mdash; it does not refuse or block. This makes
+every worktree-mutating command and `gc` (which takes both locks) emit
+the warning; commands that skip both helpers (`tag`, `fetch`/`pull`,
+`attest` &mdash; see §4's per-command table) do not.
+
+Residual gaps this warning does **not** close:
+
+- A push made directly against the file transport (`mkit push
+  mkit+file:///path`, bypassing `mkit serve` entirely) is not detected
+  &mdash; nothing takes `serve.lock` on that path.
+- Detection is one-directional: a `mkit serve` that starts *during* a
+  local command's already-in-flight critical section is not itself
+  warned, since `serve` does not probe the worktree locks.
 
 ### 3.2 Recovery-log `record`/`expire` synchronization
 
@@ -126,6 +154,15 @@ worktrees.lock  ≺  per-tree worktree.lock(s)  ≺  refs-history-<branch>.lock(
 `<root>/.mkit/refs/.lock` (the file-transport lock) are leaves &mdash; no
 documented code path takes either alongside any other lock in this
 table, so they have no ordering constraint relative to the chain above.
+
+`serve.lock` is never held alongside another lock in this table by the
+same process &mdash; a `serve` process holds only `serve.lock` for its
+whole lifetime, and a local command only ever *probes* it (non-blocking,
+released immediately) rather than holding it, from inside its own
+`worktree.lock`/`worktrees.lock` critical section. It therefore has no
+ordering constraint either, and is excluded from the per-command lock
+sets below (every command that takes `worktree.lock` or
+`worktrees.lock` probes it implicitly &mdash; see §3.1).
 
 Per-command lock sets (extends SPEC-WORKTREE §4.3's holder list with
 the history lock):

@@ -1,5 +1,12 @@
 # mkit-transport-http
 
+**Legacy:** superseded by `mkit-transport-connect`, which is what
+`mkit+https://`/`mkit+http://` actually dispatch to in `mkit-cli` &mdash;
+`HttpTransport` here is never constructed by any shipped CLI path. Retained
+only as the reference implementation of the `sparse-checkout`/`pack-shards`
+extensions (SPEC-TRANSPORT §6-§7), which have no CLI or server consumer
+either. See SPEC-TRANSPORT-CONNECT §8 for the removal-decision status.
+
 HTTP/HTTPS transport for mkit, with rustls TLS, a JSON REST dialect, and
 bounded body sizes.
 

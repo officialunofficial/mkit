@@ -282,7 +282,11 @@ of itself &mdash; it does not, on its own, coordinate against a `commit`,
 rule that closes this gap** &mdash; see SPEC-CONCURRENCY §3.1, which documents
 it as a real, currently unresolved coordination gap, and states mkit's
 supported deployment shape (a served root a worktree-owning process
-does not also mutate directly) rather than a locking fix.
+does not also mutate directly) rather than a locking fix. MKIT-11/#655
+added detection (a stderr warning when a local command runs against a
+root a live `mkit serve` holds `serve.lock` on) without closing the
+gap &mdash; see SPEC-CONCURRENCY §3.1 for exactly what is and is not
+covered.
 
 ### 5.2 ETag encoding divergence
 

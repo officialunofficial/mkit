@@ -23,6 +23,57 @@
 
 use crate::object::MkitError;
 
+/// The specific kind of structural corruption a v1 delta stream failed
+/// on (MKIT-13), carried by [`MkitError::DeltaCorrupt`]. `#[non_exhaustive]`
+/// so a future delta-stream kind (v2, say) can add a corruption variant
+/// without that being a breaking change for downstream `match`es.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DeltaCorruption {
+    /// The stream's declared `base_len` header field does not match the
+    /// actual length of the base object passed to `decode`.
+    #[error("declared base_len {declared} does not match the actual base length {actual}")]
+    BaseLenMismatch { declared: u32, actual: usize },
+    /// A `COPY` opcode had one or more of its reserved low 7 bits set.
+    #[error("COPY opcode {0:#04x} has reserved low bits set")]
+    ReservedOpcodeBits(u8),
+    /// The reserved `0x00` opcode appeared in the instruction stream.
+    #[error("opcode 0x00 is reserved and must not appear in the instruction stream")]
+    ZeroOpcode,
+    /// A `COPY` opcode declared a zero-length copy, which SPEC-DELTA §3
+    /// forbids (`length` MUST be `>= 1`).
+    #[error("COPY opcode declared a zero-length copy")]
+    ZeroLengthCopy,
+    /// A `COPY` opcode's `offset + length` exceeds the base length (or
+    /// overflows while computing it), reading past the end of the base.
+    #[error("COPY offset {offset} + length {length} exceeds base_len {base_len} (or overflowed)")]
+    CopyPastBase {
+        offset: u32,
+        length: u16,
+        base_len: usize,
+    },
+    /// Applying the next instruction would emit more bytes than the
+    /// stream's declared `result_len`.
+    #[error(
+        "emitting {requested} more byte(s) after {emitted} would exceed the declared result_len {result_len}"
+    )]
+    ResultLenOverrun {
+        emitted: usize,
+        requested: usize,
+        result_len: usize,
+    },
+    /// The instruction stream ended having emitted fewer bytes than the
+    /// declared `result_len`.
+    #[error("stream ended after emitting {actual} byte(s), declared result_len is {expected}")]
+    ResultLenUnderrun { expected: usize, actual: usize },
+}
+
+/// Shorthand: wrap a [`DeltaCorruption`] as the corresponding
+/// [`MkitError`] variant, so `decode`'s error sites stay one-liners.
+fn corrupt(kind: DeltaCorruption) -> MkitError {
+    MkitError::DeltaCorrupt(kind)
+}
+
 /// Version byte at offset 0 of every v1 delta stream.
 pub const STREAM_VERSION: u8 = 0x01;
 /// `COPY` opcode — top bit set, low seven bits reserved (must be zero).
@@ -180,9 +231,12 @@ pub(crate) fn check_length_bounds(base_len: usize, result_len: usize) -> Result<
 ///
 /// Returns [`MkitError::UnsupportedObjectVersion`] for stream version
 /// other than `0x01`, [`MkitError::UnexpectedEof`] for truncated input,
-/// and [`MkitError::TrailingData`] for any other corruption (zero
-/// opcode, COPY past base, length mismatch at end-of-stream, reserved
-/// bits set, etc.).
+/// and [`MkitError::DeltaCorrupt`] (carrying a [`DeltaCorruption`]) for
+/// any other corruption (zero opcode, COPY past base, length mismatch at
+/// end-of-stream, reserved bits set, etc.) — distinct from
+/// [`MkitError::TrailingData`], which is reserved for the unrelated
+/// "non-empty trailing bytes after a complete object" condition in
+/// `serialize.rs` (MKIT-13).
 ///
 /// # Panics
 ///
@@ -199,7 +253,14 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
     let base_len = u32::from_le_bytes(stream[1..5].try_into().expect("4 bytes")) as usize;
     let result_len = u32::from_le_bytes(stream[5..9].try_into().expect("4 bytes")) as usize;
     if base_len != base.len() {
-        return Err(MkitError::TrailingData);
+        // `base_len` was decoded from a `u32` field above, so this cast
+        // back is lossless.
+        #[allow(clippy::cast_possible_truncation)]
+        let declared = base_len as u32;
+        return Err(corrupt(DeltaCorruption::BaseLenMismatch {
+            declared,
+            actual: base.len(),
+        }));
     }
 
     // Bound the pre-allocation against attacker-controlled length fields.
@@ -217,30 +278,41 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
         if op & 0x80 != 0 {
             // COPY. Reserved low seven bits MUST be zero in v1.
             if op & 0x7F != 0 {
-                return Err(MkitError::TrailingData);
+                return Err(corrupt(DeltaCorruption::ReservedOpcodeBits(op)));
             }
             if pos + 6 > stream.len() {
                 return Err(MkitError::UnexpectedEof);
             }
-            let offset =
-                u32::from_le_bytes(stream[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+            let offset_u32 = u32::from_le_bytes(stream[pos..pos + 4].try_into().expect("4 bytes"));
+            let offset = offset_u32 as usize;
             pos += 4;
-            let length =
-                u16::from_le_bytes(stream[pos..pos + 2].try_into().expect("2 bytes")) as usize;
+            let length_u16 = u16::from_le_bytes(stream[pos..pos + 2].try_into().expect("2 bytes"));
+            let length = length_u16 as usize;
             pos += 2;
             if length == 0 {
-                return Err(MkitError::TrailingData);
+                return Err(corrupt(DeltaCorruption::ZeroLengthCopy));
             }
+            let copy_past_base = || {
+                corrupt(DeltaCorruption::CopyPastBase {
+                    offset: offset_u32,
+                    length: length_u16,
+                    base_len: base.len(),
+                })
+            };
             // Use checked math: an attacker-controlled offset could
             // overflow `usize` on 32-bit targets when added to length, so
             // reject the input rather than wrapping or clamping.
-            let end = offset.checked_add(length).ok_or(MkitError::TrailingData)?;
+            let end = offset.checked_add(length).ok_or_else(copy_past_base)?;
             if end > base.len() {
-                return Err(MkitError::TrailingData);
+                return Err(copy_past_base());
             }
             // Don't overshoot the declared result_len.
             if out.len().checked_add(length).is_none_or(|v| v > result_len) {
-                return Err(MkitError::TrailingData);
+                return Err(corrupt(DeltaCorruption::ResultLenOverrun {
+                    emitted: out.len(),
+                    requested: length,
+                    result_len,
+                }));
             }
             out.extend_from_slice(&base[offset..end]);
         } else if op > 0 {
@@ -250,17 +322,24 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
                 return Err(MkitError::UnexpectedEof);
             }
             if out.len().checked_add(length).is_none_or(|v| v > result_len) {
-                return Err(MkitError::TrailingData);
+                return Err(corrupt(DeltaCorruption::ResultLenOverrun {
+                    emitted: out.len(),
+                    requested: length,
+                    result_len,
+                }));
             }
             out.extend_from_slice(&stream[pos..pos + length]);
             pos += length;
         } else {
             // 0x00 reserved.
-            return Err(MkitError::TrailingData);
+            return Err(corrupt(DeltaCorruption::ZeroOpcode));
         }
     }
     if out.len() != result_len {
-        return Err(MkitError::TrailingData);
+        return Err(corrupt(DeltaCorruption::ResultLenUnderrun {
+            expected: result_len,
+            actual: out.len(),
+        }));
     }
     Ok(out)
 }
@@ -375,7 +454,10 @@ mod tests {
         let mut stream = header(0, 0).to_vec();
         stream.push(0x00);
         let err = decode(&[], &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::ZeroOpcode)
+        ));
     }
 
     #[test]
@@ -419,7 +501,10 @@ mod tests {
         stream.extend_from_slice(&0u32.to_le_bytes());
         stream.extend_from_slice(&100u16.to_le_bytes());
         let err = decode(base, &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::CopyPastBase { .. })
+        ));
     }
 
     #[test]
@@ -430,14 +515,23 @@ mod tests {
         stream.extend_from_slice(&0u32.to_le_bytes());
         stream.extend_from_slice(&0u16.to_le_bytes());
         let err = decode(&base, &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::ZeroLengthCopy)
+        ));
     }
 
     #[test]
     fn rejects_base_len_mismatch() {
         let stream = header(16, 0).to_vec();
         let err = decode(&[0u8; 8], &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::BaseLenMismatch {
+                declared: 16,
+                actual: 8
+            })
+        ));
     }
 
     #[test]
@@ -447,7 +541,10 @@ mod tests {
         stream.push(5);
         stream.extend_from_slice(b"hello");
         let err = decode(&[], &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::ResultLenOverrun { .. })
+        ));
     }
 
     #[test]
@@ -455,11 +552,14 @@ mod tests {
         // Regression: a 9-byte header claiming result_len = u32::MAX MUST NOT
         // trigger a 4 GiB `Vec::with_capacity`. The pre-allocation is now
         // capped against the stream+base size. The decoder still returns an
-        // error (TrailingData) because no ops follow — but the point is that
-        // it does so without first reserving 4 GiB of virtual memory.
+        // error (`ResultLenUnderrun`) because no ops follow — but the point
+        // is that it does so without first reserving 4 GiB of virtual memory.
         let stream = header(0, u32::MAX);
         let err = decode(&[], &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::ResultLenUnderrun { .. })
+        ));
     }
 
     #[test]
@@ -470,7 +570,10 @@ mod tests {
         stream.extend_from_slice(&0u32.to_le_bytes());
         stream.extend_from_slice(&4u16.to_le_bytes());
         let err = decode(&base, &stream).unwrap_err();
-        assert!(matches!(err, MkitError::TrailingData));
+        assert!(matches!(
+            err,
+            MkitError::DeltaCorrupt(DeltaCorruption::ReservedOpcodeBits(0x81))
+        ));
     }
 
     #[test]
@@ -501,6 +604,69 @@ mod tests {
             cap < 1024 * 1024,
             "cap_hint {cap} must stay well below 1 MiB for a 9-byte stream",
         );
+    }
+
+    /// MKIT-13: structural delta corruption must be reported as
+    /// [`MkitError::DeltaCorrupt`], not the generic [`MkitError::TrailingData`]
+    /// (which SPEC-DELTA §10 reserves for the genuine trailing-bytes-after-
+    /// a-complete-object case in `serialize.rs`). This collects one crafted
+    /// stream per corruption kind `decode()` rejects; every one of them must
+    /// come back as something other than `TrailingData`.
+    #[test]
+    fn delta_corruption_is_not_reported_as_trailing_data() {
+        // base_len mismatch.
+        let base_len_mismatch = header(16, 0).to_vec();
+        // reserved COPY opcode bits set.
+        let mut reserved_bits = header(16, 4).to_vec();
+        reserved_bits.push(OP_COPY | 0x01);
+        reserved_bits.extend_from_slice(&0u32.to_le_bytes());
+        reserved_bits.extend_from_slice(&4u16.to_le_bytes());
+        // zero opcode.
+        let mut zero_opcode = header(0, 0).to_vec();
+        zero_opcode.push(0x00);
+        // zero-length COPY.
+        let mut zero_length_copy = header(16, 16).to_vec();
+        zero_length_copy.push(OP_COPY);
+        zero_length_copy.extend_from_slice(&0u32.to_le_bytes());
+        zero_length_copy.extend_from_slice(&0u16.to_le_bytes());
+        // COPY past base end.
+        let mut copy_past_base = header(5, 100).to_vec();
+        copy_past_base.push(OP_COPY);
+        copy_past_base.extend_from_slice(&0u32.to_le_bytes());
+        copy_past_base.extend_from_slice(&100u16.to_le_bytes());
+        // result_len overrun via a mid-stream COPY (out.len() would exceed
+        // result_len even though the COPY itself stays within base bounds).
+        let mut copy_result_overrun = header(16, 4).to_vec();
+        copy_result_overrun.push(OP_COPY);
+        copy_result_overrun.extend_from_slice(&0u32.to_le_bytes());
+        copy_result_overrun.extend_from_slice(&8u16.to_le_bytes());
+        // result_len mismatch at end-of-stream (INSERT sums to less than
+        // declared result_len).
+        let mut result_len_underrun = header(0, 3).to_vec();
+        result_len_underrun.push(5);
+        result_len_underrun.extend_from_slice(b"hello");
+
+        let cases: &[(&str, Vec<u8>, &[u8])] = &[
+            ("base_len_mismatch", base_len_mismatch, &[0u8; 8]),
+            ("reserved_bits", reserved_bits, &[0u8; 16]),
+            ("zero_opcode", zero_opcode, &[]),
+            ("zero_length_copy", zero_length_copy, &[0u8; 16]),
+            ("copy_past_base", copy_past_base, b"short"),
+            ("copy_result_overrun", copy_result_overrun, &[0u8; 16]),
+            ("result_len_underrun", result_len_underrun, &[]),
+        ];
+        for (name, stream, base) in cases {
+            let err = decode(base, stream).expect_err(&format!("{name} must be rejected"));
+            assert!(
+                !matches!(err, MkitError::TrailingData),
+                "{name} must not be reported as TrailingData, got {err:?}"
+            );
+        }
+
+        // Well-formed streams are unaffected.
+        let data = b"0123456789abcdef".repeat(4);
+        let stream = encode(&data, &data).unwrap();
+        assert_eq!(decode(&data, &stream).unwrap(), data);
     }
 
     /// `encode()` used to saturate `base_len`/`result_len` to

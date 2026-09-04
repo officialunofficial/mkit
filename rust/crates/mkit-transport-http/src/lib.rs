@@ -3,6 +3,11 @@
 //!
 //! mkit HTTP/HTTPS transport.
 //!
+//! **Legacy (MKIT-14):** see the crate README above (included via
+//! `include_str!`) — this dialect is superseded by
+//! `mkit-transport-connect`; new transport work should target that
+//! crate instead.
+//!
 //! Speaks a simple JSON REST dialect against a mkit VCS Worker (e.g.
 //! Cloudflare Worker + R2). User-facing URL shape:
 //! `mkit+https://<host>/<project>`. The `mkit+` prefix is stripped

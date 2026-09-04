@@ -1,6 +1,6 @@
 [package]
 name = "mkit-transport-http"
-description = "HTTP/HTTPS transport for mkit, with rustls TLS, JSON REST dialect, and bounded body sizes"
+description = "Legacy JSON-REST HTTP/HTTPS transport for mkit, superseded by mkit-transport-connect; retained for the sparse-checkout/pack-shards reference extensions"
 keywords = ["mkit", "transport", "http", "https", "reqwest"]
 categories = ["network-programming"]
 readme = "README.md"

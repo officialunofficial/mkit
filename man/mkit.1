@@ -1185,6 +1185,11 @@ they never set the signed commit author (that is
 .Cm user.identity
 or the signing key), so they are repo-safe, unlike
 .Cm user.identity .
+The first time either alias is set in a repo that has never set
+.Cm user.identity
+(or the other alias), a one-time warning is printed to stderr pointing
+at
+.Cm user.identity .
 .It Cm serve Ar path
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
