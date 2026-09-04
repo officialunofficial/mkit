@@ -105,8 +105,9 @@ When it is correct to use words instead of symbols:
 
 ### Referencing operating systems and platforms
 
-mkit targets Linux, macOS, and Windows. When you list them, order
-them alphabetically: **"Linux, macOS, and Windows"**.
+mkit targets Linux and macOS (Windows is not a supported target &mdash;
+MKIT-6; see [`docs/INVARIANTS.md`](INVARIANTS.md)). When you list
+supported platforms, order them alphabetically: **"Linux and macOS"**.
 
 Capitalize platform names as the vendors do: Linux, macOS, Windows,
 FreeBSD. Spell "macOS" with a lowercase "m" and capital "OS".
@@ -363,8 +364,8 @@ headings, callouts, and changelog entries.
 
 When referencing how to install or run a Rust binary, use Cargo as
 the canonical entry point. For mkit specifically, prefer the
-documented install channels (`cargo install`, Homebrew, Scoop, the
-`install.sh`/`install.ps1` scripts, or a release binary) and link to
+documented install channels (`cargo install`, Homebrew, the
+`install.sh` script, or a release binary) and link to
 [`docs/INSTALL.md`](INSTALL.md) for the full set.
 
 - Correct: `cargo install --git https://github.com/officialunofficial/mkit mkit-cli`

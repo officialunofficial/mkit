@@ -43,10 +43,6 @@ fn write_slow_editor_script(
 /// resolved, so the window is free.
 #[test]
 fn editor_window_does_not_hold_the_write_lock() {
-    if cfg!(windows) {
-        return;
-    }
-
     let repo = Repo::new();
     repo.write("hello.txt", b"hi\n");
     repo.ok(&["add", "."]);
@@ -123,10 +119,6 @@ fn editor_window_does_not_hold_the_write_lock() {
 /// blocking or timing out."
 #[test]
 fn concurrent_tag_completes_promptly_during_editor_window() {
-    if cfg!(windows) {
-        return;
-    }
-
     let repo = Repo::new();
     // A base commit so HEAD exists and `tag` has something to point at.
     repo.commit_file("base.txt", b"base\n", "base");

@@ -2,28 +2,29 @@ name: "Release: verify distribution channels"
 
 # Manually dispatched verification that mkit actually installs and works
 # from every distribution channel this project ships — crates.io, npm,
-# the curl-pipe install script, cargo binstall, Homebrew, and Scoop —
-# each in an isolated environment. This is the automated, multi-channel
-# completion of docs/RELEASE.md's "Smoke test" section (which
-# scripts/release-smoke.sh already mechanizes for the GitHub Release
-# archive itself); this workflow extends that same idea across every
-# OTHER channel. NOT a release gate: nothing here runs automatically on
-# push or pull_request. Dispatch it manually against an already-published
-# version — typically right after cutting a release, or periodically to
-# catch drift in a channel nobody happened to test by hand.
+# the curl-pipe install script, cargo binstall, and Homebrew — each in an
+# isolated environment. This is the automated, multi-channel completion of
+# docs/RELEASE.md's "Smoke test" section (which scripts/release-smoke.sh
+# already mechanizes for the GitHub Release archive itself); this workflow
+# extends that same idea across every OTHER channel. NOT a release gate:
+# nothing here runs automatically on push or pull_request. Dispatch it
+# manually against an already-published version — typically right after
+# cutting a release, or periodically to catch drift in a channel nobody
+# happened to test by hand. Windows is not a supported target (MKIT-6; see
+# docs/INVARIANTS.md), so there is no Windows/Scoop channel to verify.
 #
 # CURRENT LIMITATION (as of 2026-07-14, ahead of #779's public-repo flip):
-# install.sh, cargo binstall's prebuilt-binary path, Homebrew, and Scoop
-# all resolve through GitHub Releases or a tap/bucket that mirrors them —
-# all of which need the repo to be PUBLIC for anonymous access. The
-# Homebrew tap and Scoop bucket also don't have a real formula/manifest
-# yet (see docs/RELEASE.md's pre-release checklist). Until the repo goes
-# public AND a real release has gone through Phase 5 distribution, expect
-# `install-script`, `homebrew`, and `scoop` below to fail, and
-# `cargo-binstall` to silently fall back to a from-source build instead of
-# fetching a prebuilt binary. `cargo-install` and `npm` are unaffected —
-# crates.io and the npm registry are already public today regardless of
-# this repo's visibility — so those two are meaningful right now.
+# install.sh, cargo binstall's prebuilt-binary path, and Homebrew all
+# resolve through GitHub Releases or a tap that mirrors them — all of
+# which need the repo to be PUBLIC for anonymous access. The Homebrew tap
+# also doesn't have a real formula yet (see docs/RELEASE.md's pre-release
+# checklist). Until the repo goes public AND a real release has gone
+# through Phase 5 distribution, expect `install-script` and `homebrew`
+# below to fail, and `cargo-binstall` to silently fall back to a
+# from-source build instead of fetching a prebuilt binary. `cargo-install`
+# and `npm` are unaffected — crates.io and the npm registry are already
+# public today regardless of this repo's visibility — so those two are
+# meaningful right now.
 
 on:
   workflow_dispatch:
@@ -205,54 +206,3 @@ jobs:
 
       - name: Basic flow smoke
         run: bash scripts/basic-flow-smoke.sh "$(command -v mkit)" "${{ inputs.version }}"
-
-  scoop:
-    name: scoop install (Windows)
-    # See the limitation note at the top of this file — expected to fail
-    # until officialunofficial/scoop-bucket exists with a real mkit.json.
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Install Scoop
-        shell: pwsh
-        run: |
-          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-          Invoke-RestMethod get.scoop.sh | Invoke-Expression
-
-      - name: scoop bucket add + install
-        shell: pwsh
-        run: |
-          scoop bucket add officialunofficial https://github.com/officialunofficial/scoop-bucket
-          scoop install officialunofficial/mkit
-
-      - name: Basic flow smoke
-        shell: pwsh
-        run: |
-          $bin = (Get-Command mkit.exe).Source
-          $out = & $bin version
-          $expected = "mkit ${{ inputs.version }}"
-          if ($out -ne $expected) { throw "version contract violated: got [$out], expected [$expected]" }
-          Write-Host "version contract OK: $out"
-          $repo = Join-Path $env:RUNNER_TEMP "scoop-smoke-repo"
-          New-Item -ItemType Directory -Path $repo | Out-Null
-          Push-Location $repo
-          & $bin init
-          & $bin keygen
-          "hello" | Out-File -FilePath README.md -Encoding utf8
-          & $bin add README.md
-          & $bin commit -m "smoke test commit"
-          Pop-Location
-          Write-Host "basic init/keygen/add/commit flow OK"
-
-      # The Windows-only curl-pipe one-liner from a fresh PowerShell
-      # session — docs/RELEASE.md's smoke test calls this out explicitly
-      # as its own checklist item, separate from the Scoop path above.
-      - name: install.ps1 one-liner (fresh session)
-        shell: pwsh
-        env:
-          MKIT_VERSION: "v${{ inputs.version }}"
-        run: |
-          irm "https://raw.githubusercontent.com/officialunofficial/mkit/main/install.ps1" | iex
-          mkit version

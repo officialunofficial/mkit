@@ -148,10 +148,6 @@ fn merge_conclusion_commit_succeeds_after_branch_moved_since_merge_started() {
 /// nothing actually still holds.
 #[test]
 fn plain_commit_succeeds_and_builds_on_a_branch_moved_during_message_composition() {
-    if cfg!(windows) {
-        return;
-    }
-
     let repo = Repo::new();
     repo.commit_file("base.txt", b"base\n", "base");
     repo.ok(&["branch", "other"]);

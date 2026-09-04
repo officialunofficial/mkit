@@ -16,7 +16,7 @@
 #   to a clean state between runs; sizes via du -k.
 #
 # Provenance (#607 — keep in sync with perf-data.ts's `methodology.commit`):
-# `mkit --version` is a byte-exact Homebrew/Scoop contract (`mkit
+# `mkit --version` is a byte-exact Homebrew contract (`mkit
 # <X.Y.Z>\n`, see rust/crates/mkit-cli/tests/version_snapshot.rs) and does
 # NOT carry a commit hash, so this script derives the measured binary's
 # provenance itself: `mkit --version` plus `git -C "$REPO_ROOT" rev-parse

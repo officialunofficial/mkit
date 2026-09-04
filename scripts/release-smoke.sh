@@ -55,7 +55,7 @@ fi
 case "$archive" in
   *.tar.gz) ;;
   *)
-    echo "release-smoke: only .tar.gz archives are supported here — use scripts/release-smoke.ps1 for the Windows .zip archive" >&2
+    echo "release-smoke: only .tar.gz archives are supported here" >&2
     exit 2
     ;;
 esac

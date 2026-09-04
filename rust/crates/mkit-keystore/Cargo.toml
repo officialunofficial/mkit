@@ -26,7 +26,6 @@ bls-threshold = ["attest", "mkit-attest/bls-threshold"]
 backend-linux-secret-service = ["linux-secret-service"]
 backend-macos-keychain = ["macos-keychain"]
 backend-systemd-creds = ["systemd-creds"]
-backend-windows-credential = ["windows-credential"]
 backend-yubikey = ["dep:card-backend-pcsc", "dep:der", "dep:openpgp-card", "dep:yubikey", "p256/pkcs8"]
 fuzzing = []
 linux-secret-service = [
@@ -36,7 +35,6 @@ linux-secret-service = [
 ]
 macos-keychain = ["dep:security-framework"]
 systemd-creds = []
-windows-credential = ["dep:keyring-core", "dep:windows-native-keyring-store"]
 
 [dependencies]
 mkit-core = { version = "0.4", path = "../mkit-core" }
@@ -63,9 +61,6 @@ zbus-secret-service-keyring-store = { version = "1.0.0", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.186"
 
-[target.'cfg(windows)'.dependencies]
-windows-native-keyring-store = { version = "1.0.0", optional = true }
-
 [dev-dependencies]
 tempfile = "=3.27.0"
 # BLS share storage round-trip tests need access to the codec +
@@ -75,15 +70,9 @@ commonware-codec = "=2026.9.0"
 commonware-cryptography = "=2026.9.0"
 commonware-utils = "=2026.9.0"
 
-# The windows-credential backend's search-pattern test compiles the
-# pattern to verify its matching semantics (same regex engine family
-# keyring-core's store search uses).
-[target.'cfg(windows)'.dev-dependencies]
-regex = "=1.13.1"
-
 [package.metadata.docs.rs]
 # NOT `all-features`: `backend-yubikey` pulls `card-backend-pcsc` → `pcsc-sys`,
 # whose build script needs system `libpcsclite` that docs.rs doesn't provide.
-# Document the Linux-buildable, no-system-library backends instead (the macOS /
-# Windows backends are target-gated and wouldn't render on docs.rs anyway).
+# Document the Linux-buildable, no-system-library backends instead (the macOS
+# backend is target-gated and wouldn't render on docs.rs anyway).
 features = ["attest", "bls-threshold", "backend-linux-secret-service", "backend-systemd-creds"]

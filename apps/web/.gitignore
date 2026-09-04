@@ -14,6 +14,5 @@ vendor/mkit-wasm/pkg/
 # Staged at build time from the canonical repo-root files (scripts/stage-public.mjs)
 public/SKILL.md
 public/install.sh
-public/install.ps1
 # Generated at build time from src/security-policy.ts (scripts/gen-headers.mjs)
 public/_headers

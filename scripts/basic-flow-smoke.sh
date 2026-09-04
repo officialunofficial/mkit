@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
 # Minimal smoke check shared by release-verify.yml's per-distribution-
-# channel jobs (crates.io, cargo binstall, install.sh, Homebrew, Scoop):
+# channel jobs (crates.io, cargo binstall, install.sh, Homebrew):
 # version contract, then a basic init/keygen/add/commit flow. Distinct
 # from scripts/release-smoke.sh, which additionally verifies a GitHub
 # Release ARCHIVE's cosign signature, SHA256SUMS entry, and bundled man

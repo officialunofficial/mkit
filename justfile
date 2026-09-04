@@ -9,12 +9,14 @@
 #     test) and sccache/GCS wiring.
 #   - cloudbuild/ci.yaml's apps/repo-worker and apps/keys-worker legs
 #     (separate Cloudflare Workers builds, own toolchain/workspace).
-#   - rust.yml's keystore-backends matrix (3-OS native keystore backends —
+#   - rust.yml's keystore-backends matrix (2-OS native keystore backends —
 #     stays workflow_dispatch-only by design; run it on GitHub, not here).
 #
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
-# `just ci-macos` / `just ci-windows` / `just ci-security` / `just ci-docs` /
-# `just ci-geiger` to check one gate in isolation.
+# `just ci-macos` / `just ci-security` / `just ci-docs` /
+# `just ci-geiger` to check one gate in isolation. Windows is not a
+# supported target (MKIT-6; see docs/INVARIANTS.md), so there is no
+# `just ci-windows`.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -23,9 +25,8 @@ ci:
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{ os() }}" in
-      macos)   just ci-macos ;;
-      windows) just ci-windows ;;
-      *)       just ci-linux ;;
+      macos) just ci-macos ;;
+      *)     just ci-linux ;;
     esac
     just ci-security
     just ci-docs
@@ -77,13 +78,6 @@ ci-macos:
     just _version-contract
     ( cd rust && cargo build --locked -p mkit-cli --features enc-transport )
     ( cd rust && cargo test --locked -p mkit-transport-enc --features tcp --no-fail-fast )
-
-# Mirrors .github/workflows/rust.yml's `windows-smoke` job (fast subset).
-ci-windows:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ( cd rust && cargo build --locked --workspace )
-    ( cd rust && cargo test --locked --workspace --lib --no-fail-fast )
 
 # Mirrors cloudbuild/security.yaml (cargo-audit + cargo-deny). Unlike its
 # source (Linux-only, GNU grep), this target also runs on macOS, so the

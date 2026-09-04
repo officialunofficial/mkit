@@ -396,8 +396,8 @@ Security assumptions:
 - `software-raw:<label>` is the explicit raw-file compatibility backend. It
   keeps deterministic raw-key behavior for compatibility tests and migration
   workflows and is not the secure default.
-- Linux Secret Service, macOS Keychain, Windows Credential Manager, and
-  `systemd-creds` store extractable 32-byte signing secrets behind their
+- Linux Secret Service, macOS Keychain, and `systemd-creds` store
+  extractable 32-byte signing secrets behind their
   platform protection boundary. They do not claim hardware binding,
   non-extractability, or user presence unless a future implementation changes
   the storage primitive and capability report together.
@@ -495,8 +495,10 @@ matching update here.
   behavior and the atomic-write contract.
 - CI matrix: `cargo fmt --check`, `cargo clippy --all-targets --
   -D warnings`, `cargo test --workspace --locked`, keystore backend feature
-  jobs for Linux/macOS/Windows with opt-in live native-backend roundtrips,
+  jobs for Linux/macOS with opt-in live native-backend roundtrips,
   `cargo deny`, reproducible-build smoke, `mkit version` byte-exact assertion.
+  Windows is not a supported build/test/release target (MKIT-6; see
+  `docs/INVARIANTS.md`).
 
 ---
 

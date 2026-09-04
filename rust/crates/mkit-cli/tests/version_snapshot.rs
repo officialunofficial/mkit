@@ -1,6 +1,6 @@
 //! Snapshot test for the `mkit version` stdout contract.
 //!
-//! This is the byte-exact contract asserted by Homebrew / Scoop. Any
+//! This is the byte-exact contract asserted by Homebrew. Any
 //! cosmetic change — extra whitespace, a newline at the wrong place,
 //! a prefix like `mkit-rs` — breaks downstream packaging and must be
 //! treated as a major-version semver break. See `docs/CLI.md`.

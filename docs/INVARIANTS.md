@@ -197,3 +197,37 @@ resulting test as unable to prove what its name claims.
 `round_trip_with_explicit_parallel_strategy` (compiles + round-trips a
 real `Rayon` strategy) as the remaining guard; the comment block above it
 records why the invocation-count assertion cannot be rebuilt.
+
+## Windows is not a build, test, or release target
+
+**Always:** no workflow, action, `justfile` recipe, crate manifest, or
+installer targets Windows — no `windows-latest` / `pc-windows-msvc` CI
+runner, no `backend-windows-credential` / `windows-credential` keystore
+feature, no `install.ps1` or Scoop packaging, and no
+`[target.'cfg(windows)'.dependencies]` stanza in any `Cargo.toml`.
+`BackendKind` has no Windows Credential Manager variant.
+
+**Because:** commonware-runtime 2026.9.0's storage-sync path calls
+`libc::sync()` on every non-Linux target (`rust/crates/mkit-transport-enc`
+depends on `commonware-runtime` unconditionally, and `mkit-core`'s
+`history-mmr`/`sparse-checkout` features and dev-dependencies pull it in
+too) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
+workspace and its test suite no longer build there. Maintaining a Windows
+CI/release leg that cannot actually build or test the workspace would ship
+an untested binary, so Windows was dropped as a supported target (MKIT-6)
+rather than worked around. Windows users run mkit under WSL, which uses
+the Linux binary.
+
+**If violated:** a reintroduced Windows CI leg goes red on every PR (the
+workspace fails to build there); a reintroduced Windows release leg ships
+a binary no test ever exercised; a reintroduced
+`backend-windows-credential` feature reopens a semver-breaking
+`BackendKind` variant on a published crate (`mkit-keystore`) without the
+required major bump.
+
+**Enforced by:** `scripts/check-no-windows-target.sh`, run by the
+"Meta: actionlint" workflow on any change to the CI workflows, `justfile`,
+crate manifests, `install.sh`, or the web app's installer-staging scripts.
+`mkit-keystore`'s `windows_credential_backend_name_is_not_recognized` test
+(`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
+unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
