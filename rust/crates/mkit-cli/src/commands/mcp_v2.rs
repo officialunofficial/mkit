@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
@@ -107,7 +108,10 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
 /// or over streamable HTTP when `--http <addr>` was given. `mcp.rs::dispatch`
 /// is the only caller.
 pub(crate) fn serve(allowed: Option<&Path>, http: Option<&str>) -> u8 {
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("mkit mcp: failed to start async runtime: {e}");
@@ -174,7 +178,11 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str) -> Result<(), String> 
     eprintln!("mkit mcp: listening on http://{bound}");
 
     let service = TowerToHyperService::new(StreamableHttpService::new(
-        move || Ok(MkitServer { allowed: allowed.clone() }),
+        move || {
+            Ok(MkitServer {
+                allowed: allowed.clone(),
+            })
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     ));
@@ -187,7 +195,9 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str) -> Result<(), String> 
         let io = TokioIo::new(stream);
         let service = service.clone();
         tokio::spawn(async move {
-            let _ = Builder::new(TokioExecutor::default()).serve_connection(io, service).await;
+            let _ = Builder::new(TokioExecutor::default())
+                .serve_connection(io, service)
+                .await;
         });
     }
 }

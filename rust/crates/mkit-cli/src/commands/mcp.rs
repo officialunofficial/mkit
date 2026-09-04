@@ -73,7 +73,7 @@ pub fn run(args: &[String]) -> u8 {
         },
         None => None,
     };
-    dispatch(allowed, &opts)
+    dispatch(allowed.as_deref(), &opts)
 }
 
 /// `mcp-v2` swaps the whole `mkit mcp` implementation over to the rmcp-based
@@ -84,13 +84,13 @@ pub fn run(args: &[String]) -> u8 {
 /// `dispatch` is the only thing that differs: the tool catalog, argv-building,
 /// path confinement, and injection defenses below are shared unconditionally.
 #[cfg(feature = "mcp-v2")]
-fn dispatch(allowed: Option<PathBuf>, opts: &McpOpts) -> u8 {
-    super::mcp_v2::serve(allowed.as_deref(), opts.http.as_deref())
+fn dispatch(allowed: Option<&Path>, opts: &McpOpts) -> u8 {
+    super::mcp_v2::serve(allowed, opts.http.as_deref())
 }
 
 #[cfg(not(feature = "mcp-v2"))]
-fn dispatch(allowed: Option<PathBuf>, _opts: &McpOpts) -> u8 {
-    serve(allowed.as_deref())
+fn dispatch(allowed: Option<&Path>, _opts: &McpOpts) -> u8 {
+    serve(allowed)
 }
 
 /// Blocking JSON-RPC loop: one message per line, responses flushed
@@ -624,7 +624,11 @@ impl CallOutcome {
 /// `Err(_)` is a protocol-level error (unknown tool); per-call
 /// validation and execution failures come back as `Ok` with
 /// `is_error: true` so the agent sees an explanatory message.
-pub(crate) fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOutcome, String> {
+pub(crate) fn call_tool(
+    name: &str,
+    args: &Value,
+    allowed: Option<&Path>,
+) -> Result<CallOutcome, String> {
     if !TOOLS.iter().any(|t| t.name == name) {
         return Err(format!("unknown tool: {name}"));
     }

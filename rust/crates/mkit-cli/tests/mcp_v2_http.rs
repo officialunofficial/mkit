@@ -34,13 +34,19 @@ impl Drop for HttpMcp {
 
 impl HttpMcp {
     /// Spawn `mkit mcp --repository <repo> --http 127.0.0.1:0` and block
-    /// until its "listening on http://ADDR" stderr line reveals the
+    /// until its "listening on `http://ADDR`" stderr line reveals the
     /// OS-assigned port (see `mcp_v2.rs::serve_http`'s `local_addr()` doc
     /// comment — this test is exactly why that logs the resolved address
     /// rather than the requested one).
     fn spawn(repo: &std::path::Path) -> Self {
         let mut child = Command::new(mkit_bin())
-            .args(["mcp", "--repository", repo.to_str().unwrap(), "--http", "127.0.0.1:0"])
+            .args([
+                "mcp",
+                "--repository",
+                repo.to_str().unwrap(),
+                "--http",
+                "127.0.0.1:0",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -49,8 +55,14 @@ impl HttpMcp {
         let mut lines = BufReader::new(stderr).lines();
         let deadline = Instant::now() + Duration::from_secs(10);
         let addr = loop {
-            assert!(Instant::now() < deadline, "server did not report a listening address in time");
-            let line = lines.next().expect("stderr closed before reporting an address").unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "server did not report a listening address in time"
+            );
+            let line = lines
+                .next()
+                .expect("stderr closed before reporting an address")
+                .unwrap();
             if let Some(addr) = line.strip_prefix("mkit mcp: listening on http://") {
                 break addr.to_string();
             }
@@ -82,7 +94,8 @@ impl HttpMcp {
     fn request(&self, id: i64, method: &str, params: Value) -> Value {
         let mut params = params;
         params["_meta"]["io.modelcontextprotocol/protocolVersion"] = json!("2026-07-28");
-        params["_meta"]["io.modelcontextprotocol/clientInfo"] = json!({ "name": "mkit-mcp-http-tests", "version": "0" });
+        params["_meta"]["io.modelcontextprotocol/clientInfo"] =
+            json!({ "name": "mkit-mcp-http-tests", "version": "0" });
         params["_meta"]["io.modelcontextprotocol/clientCapabilities"] = json!({});
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
 
@@ -115,7 +128,8 @@ impl HttpMcp {
                 .lines()
                 .find_map(|l| l.strip_prefix("data:"))
                 .unwrap_or_else(|| panic!("no 'data:' line in SSE body: {text}"));
-            serde_json::from_str(data_line.trim()).unwrap_or_else(|e| panic!("SSE data is not JSON: {e}: {data_line}"))
+            serde_json::from_str(data_line.trim())
+                .unwrap_or_else(|e| panic!("SSE data is not JSON: {e}: {data_line}"))
         } else {
             serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("response is not JSON (status {status}): {e}: {text}"))
@@ -128,7 +142,11 @@ impl HttpMcp {
             status.is_success() || parsed.get("error").is_some(),
             "status: {status}, body: {parsed}"
         );
-        assert_eq!(parsed.get("id").and_then(Value::as_i64), Some(id), "id mismatch: {parsed}");
+        assert_eq!(
+            parsed.get("id").and_then(Value::as_i64),
+            Some(id),
+            "id mismatch: {parsed}"
+        );
         parsed
     }
 }
@@ -139,9 +157,16 @@ fn tools_list_over_http_matches_the_stdio_catalog() {
     let server = HttpMcp::spawn(repo.path());
 
     let resp = server.request(1, "tools/list", json!({}));
-    let tools = resp.pointer("/result/tools").and_then(Value::as_array).unwrap_or_else(|| panic!("{resp}"));
+    let tools = resp
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{resp}"));
     assert_eq!(tools.len(), 18, "tool count is part of the public surface");
-    assert!(tools.iter().any(|t| t.get("name").and_then(Value::as_str) == Some("mkit_status")));
+    assert!(
+        tools
+            .iter()
+            .any(|t| t.get("name").and_then(Value::as_str) == Some("mkit_status"))
+    );
 }
 
 #[test]
@@ -150,7 +175,11 @@ fn tool_call_round_trip_over_http_operates_the_real_repo() {
     let server = HttpMcp::spawn(repo.path());
     let repo_path = repo.path().to_str().unwrap();
 
-    let init = server.request(1, "tools/call", json!({ "name": "mkit_init", "arguments": { "repo_path": repo_path } }));
+    let init = server.request(
+        1,
+        "tools/call",
+        json!({ "name": "mkit_init", "arguments": { "repo_path": repo_path } }),
+    );
     assert!(!is_tool_error(&init), "{init}");
 
     let keygen = server.request(
@@ -160,16 +189,25 @@ fn tool_call_round_trip_over_http_operates_the_real_repo() {
     );
     assert!(!is_tool_error(&keygen), "{keygen}");
 
-    let status = server.request(3, "tools/call", json!({ "name": "mkit_status", "arguments": { "repo_path": repo_path } }));
+    let status = server.request(
+        3,
+        "tools/call",
+        json!({ "name": "mkit_status", "arguments": { "repo_path": repo_path } }),
+    );
     assert!(!is_tool_error(&status), "{status}");
-    assert!(repo.path().join(".mkit").is_dir(), "mkit_init actually created .mkit/ on disk");
+    assert!(
+        repo.path().join(".mkit").is_dir(),
+        "mkit_init actually created .mkit/ on disk"
+    );
 }
 
 /// rmcp always serializes `isError` (`Some(false)` on success), unlike the
 /// hand-rolled stdio server's serde default-omits-false shape — check the
 /// value, not its presence.
 fn is_tool_error(resp: &Value) -> bool {
-    resp.pointer("/result/isError").and_then(Value::as_bool).unwrap_or(false)
+    resp.pointer("/result/isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 #[test]
@@ -177,6 +215,10 @@ fn unknown_tool_is_a_protocol_error_over_http() {
     let repo = tempfile::tempdir().unwrap();
     let server = HttpMcp::spawn(repo.path());
 
-    let resp = server.request(1, "tools/call", json!({ "name": "mkit_push", "arguments": { "repo_path": "." } }));
+    let resp = server.request(
+        1,
+        "tools/call",
+        json!({ "name": "mkit_push", "arguments": { "repo_path": "." } }),
+    );
     assert!(resp.get("error").is_some(), "{resp}");
 }
