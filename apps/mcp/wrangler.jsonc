@@ -4,11 +4,17 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-05-31",
   "compatibility_flags": ["nodejs_compat"],
-  // Durable Object backs the MCP agent's session/SSE transport.
-  "durable_objects": {
-    "bindings": [{ "name": "MCP", "class_name": "MkitMCP" }]
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MkitMCP"] }],
+  // No Durable Object binding: MCP 2026-07-28 dropped the session/handshake
+  // model, so `createMcpHandler` (@modelcontextprotocol/server) serves every
+  // request — modern and legacy alike — statelessly, straight off the
+  // `fetch` handler. The migration below formally retires the `MkitMCP` DO
+  // class from the v1-era `agents/mcp` implementation (tag "v1"): Wrangler
+  // requires an explicit `deleted_classes` step for a class dropped from
+  // `durable_objects.bindings`, or deploy fails demanding one.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MkitMCP"] },
+    { "tag": "v2", "deleted_classes": ["MkitMCP"] }
+  ],
   // D1 holds the baked corpus (crate source, SPEC docs, READMEs, CLI reference,
   // SKILL.md) + FTS indexes. Populated at deploy time by scripts/build-index.mjs
   // (baked from the source tree, not cron-fetched at runtime). Run `npm run db:create`
