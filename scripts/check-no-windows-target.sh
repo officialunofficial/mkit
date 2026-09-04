@@ -15,9 +15,14 @@
 # config-time error instead of a red build discovered later.
 #
 # Scope: workflow/action YAML, the justfile, every crate manifest, the POSIX
-# installer, and the web app's build scripts/manifest. CHANGELOG.md and other
-# prose that documents the removal itself are excluded — they are expected to
-# mention Windows by name.
+# installer, and the web app's installer-asset assertion script/manifest.
+# CHANGELOG.md and other prose that documents the removal itself are
+# excluded — they are expected to mention Windows by name. Deliberately NOT
+# a glob over every apps/web/scripts/*.mjs: an unrelated script (e.g.
+# gen-headers.mjs) can legitimately name "install.ps1" in prose (to say what
+# it does NOT cover) without that being a reintroduced Windows artifact —
+# scope this to the one script whose job is asserting installer assets
+# exist.
 
 set -euo pipefail
 
@@ -53,7 +58,7 @@ SEARCH_PATHS=(
   'contrib/**/Cargo.toml'
   'install.sh'
   'apps/web/package.json'
-  'apps/web/scripts/*.mjs'
+  'apps/web/scripts/assert-installer.mjs'
   'apps/web/.gitignore'
 )
 
