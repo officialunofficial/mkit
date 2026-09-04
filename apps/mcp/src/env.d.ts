@@ -1,7 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
 export interface Env {
-  MCP: DurableObjectNamespace;
   SEARCH_DB: D1Database;
 }
 

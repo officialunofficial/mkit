@@ -28,7 +28,9 @@
 //!   they begin with `-` so a value can never be parsed as a flag by
 //!   the child CLI (which has no `--` separator on `add`).
 
-use std::io::{BufRead, Write};
+#[cfg(not(feature = "mcp-v2"))]
+use std::io::BufRead;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -63,11 +65,29 @@ pub fn run(args: &[String]) -> u8 {
         },
         None => None,
     };
+    dispatch(allowed)
+}
+
+/// `mcp-v2` swaps the whole `mkit mcp` implementation over to the rmcp-based
+/// server (MCP 2026-07-28) at compile time — the same "feature changes the
+/// command's behavior, off by default" shape `enc-transport`/`http-transport`
+/// use elsewhere in this crate — rather than adding a runtime flag, so there
+/// is exactly one code path per build to test and reason about. Either way
+/// `dispatch` is the only thing that differs: the tool catalog, argv-building,
+/// path confinement, and injection defenses below are shared unconditionally.
+#[cfg(feature = "mcp-v2")]
+fn dispatch(allowed: Option<PathBuf>) -> u8 {
+    super::mcp_v2::serve(allowed.as_deref())
+}
+
+#[cfg(not(feature = "mcp-v2"))]
+fn dispatch(allowed: Option<PathBuf>) -> u8 {
     serve(allowed.as_deref())
 }
 
 /// Blocking JSON-RPC loop: one message per line, responses flushed
 /// immediately. Returns when stdin reaches EOF (client disconnect).
+#[cfg(not(feature = "mcp-v2"))]
 fn serve(allowed: Option<&Path>) -> u8 {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
@@ -117,9 +137,12 @@ fn serve(allowed: Option<&Path>) -> u8 {
 /// Protocol revisions this server interoperates with. The wire framing
 /// and tools surface are common across these; `initialize` negotiates
 /// the requested one when supported, else falls back to the latest.
+#[cfg(not(feature = "mcp-v2"))]
 const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+#[cfg(not(feature = "mcp-v2"))]
 const LATEST_PROTOCOL: &str = "2025-06-18";
 
+#[cfg(not(feature = "mcp-v2"))]
 fn write_msg(stdout: &mut impl Write, msg: &Value) {
     // serde_json compact form contains no raw newlines, so one
     // message per line is structurally guaranteed.
@@ -132,6 +155,7 @@ fn write_msg(stdout: &mut impl Write, msg: &Value) {
 /// Dispatch one JSON-RPC message. Returns `None` for notifications
 /// (nothing is written back). `initialized` tracks the MCP lifecycle:
 /// set on `initialize`, required before any tool traffic.
+#[cfg(not(feature = "mcp-v2"))]
 fn handle_message(msg: &Value, allowed: Option<&Path>, initialized: &mut bool) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str)?;
     let id = msg.get("id");
@@ -205,7 +229,7 @@ fn handle_message(msg: &Value, allowed: Option<&Path>, initialized: &mut bool) -
     }
 }
 
-const INSTRUCTIONS: &str = "Operate local mkit repositories (content-addressed VCS with \
+pub(crate) const INSTRUCTIONS: &str = "Operate local mkit repositories (content-addressed VCS with \
 Ed25519-signed commits and in-toto/DSSE attestation). Every tool takes a repo_path. \
 Typical flow: mkit_init -> mkit_keygen (REQUIRED before the first commit) -> mkit_add -> \
 mkit_commit -> mkit_log/mkit_show. Differentiators: mkit_verify (check a commit/tag \
@@ -222,12 +246,16 @@ resolve OUTSIDE it. For docs/specs/source of mkit itself, use the separate mkit 
 // Tool table
 // ---------------------------------------------------------------------------
 
-struct ToolSpec {
-    name: &'static str,
-    description: &'static str,
+// `pub(crate)` on this table and on `call_tool`/`CallOutcome` below: shared
+// with `mcp_v2.rs` (the `--features mcp-v2` rmcp-based server) so the tool
+// catalog, argv-building, path confinement, and injection defenses live in
+// exactly one place regardless of which protocol layer is compiled in.
+pub(crate) struct ToolSpec {
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
     /// (`read_only`, `destructive`, `idempotent`)
-    hints: (bool, bool, bool),
-    schema: fn() -> Value,
+    pub(crate) hints: (bool, bool, bool),
+    pub(crate) schema: fn() -> Value,
 }
 
 fn prop(desc: &str) -> Value {
@@ -249,7 +277,7 @@ fn repo_prop() -> (&'static str, Value) {
     )
 }
 
-const TOOLS: &[ToolSpec] = &[
+pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_status",
         description: "Show staged and working-tree changes (porcelain v2; empty means clean).",
@@ -544,6 +572,7 @@ const TOOLS: &[ToolSpec] = &[
     },
 ];
 
+#[cfg(not(feature = "mcp-v2"))]
 fn tool_descriptors() -> Value {
     Value::Array(
         TOOLS
@@ -570,9 +599,9 @@ fn tool_descriptors() -> Value {
 // Tool execution
 // ---------------------------------------------------------------------------
 
-struct CallOutcome {
-    text: String,
-    is_error: bool,
+pub(crate) struct CallOutcome {
+    pub(crate) text: String,
+    pub(crate) is_error: bool,
 }
 
 impl CallOutcome {
@@ -587,7 +616,7 @@ impl CallOutcome {
 /// `Err(_)` is a protocol-level error (unknown tool); per-call
 /// validation and execution failures come back as `Ok` with
 /// `is_error: true` so the agent sees an explanatory message.
-fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOutcome, String> {
+pub(crate) fn call_tool(name: &str, args: &Value, allowed: Option<&Path>) -> Result<CallOutcome, String> {
     if !TOOLS.iter().any(|t| t.name == name) {
         return Err(format!("unknown tool: {name}"));
     }
@@ -999,6 +1028,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(feature = "mcp-v2"))]
     fn tool_table_is_complete_and_annotated() {
         let tools = tool_descriptors();
         let arr = tools.as_array().unwrap();
@@ -1015,6 +1045,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "mcp-v2"))]
     fn read_only_tools_are_marked() {
         let tools = tool_descriptors();
         for t in tools.as_array().unwrap() {
@@ -1117,6 +1148,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "mcp-v2"))]
     fn checkout_is_marked_destructive() {
         // Checkout rewrites tracked worktree files; clients use
         // destructiveHint to decide whether to confirm.
@@ -1166,6 +1198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "mcp-v2"))]
     fn initialize_negotiates_protocol_and_lists_tools() {
         let mut init_state = false;
 

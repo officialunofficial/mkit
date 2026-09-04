@@ -114,6 +114,13 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "macros",
 ], optional = true }
+# Optional: `mkit mcp`'s modern (MCP 2026-07-28) local stdio server, behind
+# the `mcp-v2` feature. `default-features = false` + `server`/`transport-io`
+# only: no reqwest/HTTP transports, no client-side bits — this is a local
+# stdio-only server. Off by default so the baseline `mkit-cli` build doesn't
+# pay tokio's compile cost, mirroring `enc-transport`/`http-transport`. See
+# `commands/mcp_v2.rs`.
+rmcp = { version = "3", default-features = false, features = ["server", "transport-io"], optional = true }
 # Constant-time bearer-token comparison for the `--http-token` auth gate —
 # already resolved transitively (ed25519-dalek pulls it), so this is not a
 # new supply-chain root.
@@ -287,6 +294,13 @@ enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:common
 # default so the baseline `mkit-cli` build doesn't pay axum/hyper's compile
 # cost, mirroring `enc-transport`. See SPEC-TRANSPORT-CONNECT.md.
 http-transport = ["mkit-transport-connect/server", "dep:connectrpc", "dep:axum", "dep:tokio", "dep:subtle", "dep:http"]
+# Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
+# `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by
+# default: rmcp pulls in tokio, contradicting the tokio-free baseline build
+# (see commands/mcp.rs's module doc); the pre-existing hand-rolled stdio
+# server stays the default `mkit mcp` implementation either way. Turn on via
+# `--features mcp-v2`.
+mcp-v2 = ["dep:rmcp", "dep:tokio"]
 # The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's

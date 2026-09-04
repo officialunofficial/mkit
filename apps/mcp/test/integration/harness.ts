@@ -1,12 +1,15 @@
 /**
  * Integration test harness for the mkit MCP Worker.
  *
- * Drives the *real* public interface — the streamable-HTTP MCP endpoint served
- * by `MkitMCP.serve("/")` over a Durable Object, backed by a miniflare D1 — so
- * tests verify observable tool behavior, not private helpers. We use the
- * canonical `@modelcontextprotocol/sdk` client, pointing its streamable-HTTP
- * transport at the test Worker via the `fetch` injection (routes to `SELF`
- * instead of the global). That keeps the harness to the part that is actually
+ * Drives the *real* public interface — the stateless MCP endpoint served by
+ * `createMcpHandler` straight off the Worker's `fetch`, backed by a
+ * miniflare D1 — so tests verify observable tool behavior, not private
+ * helpers. This harness uses the legacy (v1) `@modelcontextprotocol/sdk`
+ * client with its streamable-HTTP transport, pointing it at the test Worker
+ * via the `fetch` injection (routes to `SELF` instead of the global) — which
+ * exercises `createMcpHandler`'s 2025-era stateless fallback leg. See
+ * `test/integration/modern.test.ts` for a client on the 2026-07-28 modern
+ * path. Either way this keeps the harness to the part that is actually
  * specific to mkit — seeding a corpus — and leaves protocol concerns (the
  * initialize handshake, session-id tracking, SSE framing) to the SDK.
  */
