@@ -196,17 +196,24 @@ async function search(
 function buildServer(env: Env): McpServer {
   const server = new McpServer({ name: "mkit", version: pkg.version }, { instructions: INSTRUCTIONS });
 
-  // Thin wrapper preserving zod-schema -> handler-arg typing while keeping the
-  // same call shape the tool table used pre-migration. Every callback is
-  // wrapped in `guardTool` so a D1 outage, an empty corpus, or any other throw
-  // becomes a graceful MCP error result (logged for observability) instead of
-  // an unhandled exception to the client.
+  // Thin wrapper preserving zod-schema -> handler-arg typing while casting
+  // around the @modelcontextprotocol/server McpServer overload skew (same
+  // approach the pre-migration v1 code used here, and elsewhere in the org):
+  // `registerTool`'s overloads don't resolve through a wrapper generic over
+  // TShape (TS can't narrow a generic TShape to either overload's expected
+  // schema shape), so the call itself is escaped to `unknown[]` — the real
+  // type safety is `tool()`'s own signature below, enforced at every call site.
   const tool = <TShape extends Record<string, z.ZodTypeAny>>(
     name: string,
     description: string,
     params: TShape,
     cb: (args: { [K in keyof TShape]: z.infer<TShape[K]> }) => Promise<ToolResult> | ToolResult,
-  ) => server.registerTool(name, { description, inputSchema: params }, guardTool(name, cb));
+  ) =>
+    (server.registerTool as (...args: unknown[]) => unknown)(
+      name,
+      { description, inputSchema: params },
+      guardTool(name, cb),
+    );
 
   // --- get_file ----------------------------------------------------------
   tool(
