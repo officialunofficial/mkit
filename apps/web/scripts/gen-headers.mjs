@@ -36,6 +36,41 @@ ${body}
 # over that block for any header both set (none currently overlap).
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Image files served at a fixed, non-hashed public/ path (grid-fallback.svg today). These
+# aren't content-hashed, so a real content change at the same URL won't bust the cache
+# until max-age expires — the same tradeoff officialunofficial.com's _headers makes for its
+# own favicon/logo. Acceptable for images this static; rename the file to force a refresh.
+# Deliberately does NOT cover install.sh/install.ps1/SKILL.md/robots.txt — those can change
+# between releases and immutable caching would be actively wrong for them.
+/*.svg
+  Cache-Control: public, max-age=31536000, immutable
+/*.png
+  Cache-Control: public, max-age=31536000, immutable
+/*.ico
+  Cache-Control: public, max-age=31536000, immutable
+/*.webp
+  Cache-Control: public, max-age=31536000, immutable
+
+# The prerendered demo pages and their RSC payloads are also Assets-binding-served — same
+# must-revalidate-on-every-visit default as above, but these are real HTML/RSC responses
+# whose content CAN change at the same path on a redeploy, so they get a short max-age
+# (not immutable) plus stale-while-revalidate so a redeploy's staleness window is bounded
+# rather than serving the old page forever until explicitly revalidated. \`/\` is excluded:
+# it's the sole run_worker_first route (see src/cache-headers.ts), so the Assets binding
+# never serves it and a rule here would be dead code.
+/concepts
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+/multiplayer
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+/parity
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+/performance
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+/specs
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
+/RSC/*
+  Cache-Control: public, max-age=300, stale-while-revalidate=86400
 `
 
 const previous = (() => {
