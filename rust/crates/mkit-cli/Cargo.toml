@@ -174,12 +174,12 @@ zeroize = "1"
 # Used by `mkit key generate --algorithm bls12381-thr` to feed the
 # trusted-dealer ceremony with `UnwrapErr(getrandom::SysRng)`. Gated on
 # `bls-threshold` so the default build doesn't pull rand_core. 0.10 to
-# match the rand_core edge commonware-cryptography 2026.7.0 depends on.
+# match the rand_core edge commonware-cryptography 2026.9.0 depends on.
 rand_core = { version = "0.10", optional = true }
 # Wire-encodes `Share` values for storage in the keystore — same
 # version mkit-attest pulls. Tightened to `=` to match every other
 # commonware-* pin in the workspace (previously the one outlier).
-commonware-codec = { version = "=2026.7.1", optional = true }
+commonware-codec = { version = "=2026.9.0", optional = true }
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses mkit_core::sign which has
@@ -199,9 +199,6 @@ mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backe
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-linux-secret-service", "backend-systemd-creds"] }
-
-[target.'cfg(windows)'.dependencies]
-mkit-keystore = { version = "0.4", path = "../mkit-keystore", features = ["backend-windows-credential"] }
 
 [build-dependencies]
 # build.rs enforces CLI_VERSION == CARGO_PKG_VERSION at compile time by

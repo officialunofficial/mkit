@@ -16,11 +16,6 @@ pub(super) mod macos;
 #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
 pub(super) use macos::MacosKeychainProtector;
 
-#[cfg(all(windows, feature = "windows-credential"))]
-pub(super) mod windows;
-#[cfg(all(windows, feature = "windows-credential"))]
-pub(super) use windows::WindowsCredentialProtector;
-
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 pub(super) mod linux_secret_service;
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]

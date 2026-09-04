@@ -20,10 +20,10 @@
 # with no key file and no WIF. The build SA needs roles/storage.objectAdmin on
 # $_CACHE_BUCKET.
 #
-# Cross-platform note: the macOS leg of build-and-test, the Windows smoke leg
-# (windows-smoke), and the keystore-backends matrix (macOS/Windows native
-# keystores) CANNOT run on Cloud Build (Linux containers only) and stay on
-# GitHub Actions.
+# Cross-platform note: the macOS leg of build-and-test and the
+# keystore-backends matrix (macOS native keystores) CANNOT run on Cloud
+# Build (Linux containers only) and stay on GitHub Actions. Windows is not
+# a supported target (MKIT-6; see docs/INVARIANTS.md).
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache

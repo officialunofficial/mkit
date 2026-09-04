@@ -28,10 +28,6 @@ fn write_editor_script(payload: &str) -> (tempfile::TempDir, std::path::PathBuf)
 
 #[test]
 fn commit_without_message_honours_editor_env_var() {
-    if cfg!(windows) {
-        return;
-    }
-
     let td = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     Command::new(mkit_bin())
@@ -81,10 +77,6 @@ fn commit_without_message_honours_editor_env_var() {
 
 #[test]
 fn commit_without_message_and_empty_editor_output_aborts() {
-    if cfg!(windows) {
-        return;
-    }
-
     let td = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     Command::new(mkit_bin())

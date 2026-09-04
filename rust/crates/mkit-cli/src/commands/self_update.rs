@@ -38,11 +38,6 @@
 //! * `MKIT_SELF_UPDATE_API_BASE` — override the API base URL
 //!   (`https://api.github.com/repos/officialunofficial/mkit`). For
 //!   tests and mirrors.
-//!
-//! Windows: not yet supported (there are no Windows release binaries);
-//! exits `UNAVAILABLE` with a clear message. The swap step needs the
-//! rename-old-then-move dance on Windows — revisit when a
-//! `windows-msvc` target ships.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -136,14 +131,6 @@ fn run_update_cli(args: &[String]) -> u8 {
         return super::error(
             "--allow-downgrade requires an explicit --version pin",
             exit::USAGE,
-        );
-    }
-
-    if cfg!(windows) {
-        return super::error(
-            "self update is not yet supported on Windows (there are no Windows \
-             release binaries yet); reinstall manually when a new release ships",
-            exit::UNAVAILABLE,
         );
     }
 

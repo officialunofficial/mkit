@@ -166,7 +166,7 @@ pub fn aggregate(sharing: &Sharing<V>, partials: &[Vec<u8>]) -> Result<Vec<u8>, 
         decoded.push(ps);
     }
 
-    let sig = threshold::recover::<V, _, N3f1>(sharing, &decoded, &Sequential)
+    let sig = threshold::recover::<V, _>(sharing, &decoded, &Sequential)
         .map_err(|_| Error::BlsThresholdInsufficientPartials)?;
 
     Ok(sig.encode().to_vec())
@@ -215,7 +215,12 @@ pub fn trusted_dealer<R: rand_core::CryptoRng>(
     rng: &mut R,
     n: core::num::NonZeroU32,
 ) -> (Sharing<V>, Vec<Share>) {
-    dkg::feldman_desmedt::deal_anonymous::<V, N3f1>(rng, Mode::default(), n)
+    // `Mode` lost its `Default` impl in commonware 2026.9.0 (its
+    // former `#[default]` was exactly this variant) — name it
+    // explicitly so the derivation path stays pinned; see
+    // `trusted_dealer_is_deterministic_for_a_seeded_rng` below, which
+    // golden-vectors this exact call.
+    dkg::feldman_desmedt::deal_anonymous::<V, N3f1>(rng, Mode::NonZeroCounter, n)
 }
 
 /// N3f1-quorum threshold for `n` holders under the N3f1 fault model.
@@ -505,5 +510,35 @@ mod tests {
         // Pin the wire integer: this test fails if anyone renumbers
         // the enum.
         assert_eq!(RpcAlgorithm::Bls12381Threshold as i32, 5);
+    }
+
+    /// Golden vector: `trusted_dealer` (and therefore
+    /// `dkg::feldman_desmedt::deal_anonymous`) must derive the exact
+    /// same cohort public key for a fixed seeded RNG and cohort size
+    /// across a commonware version bump. This pins the derivation
+    /// path — including the `Mode` passed to `deal_anonymous` — so a
+    /// future edit that changes `Mode::default()` to an explicit
+    /// variant (or an upstream DKG change) that alters share/point
+    /// derivation is caught here, rather than only showing up as a
+    /// mismatched keyid between two mkit builds signing the same
+    /// cohort.
+    ///
+    /// Captured on commonware `2026.7.1` (`Mode::default()` ==
+    /// `Mode::NonZeroCounter`, `sharing.rs:28-32` upstream at that
+    /// tag). Must stay byte-identical after the `2026.9.0` bump,
+    /// where `Mode` lost its `Default` impl and callers must name the
+    /// variant explicitly.
+    #[test]
+    fn trusted_dealer_is_deterministic_for_a_seeded_rng() {
+        let mut rng = TestRng::new(0x1357_9bdf);
+        let (sharing, shares) = trusted_dealer(&mut rng, NZU32!(4));
+
+        assert_eq!(shares.len(), 4);
+        assert_eq!(
+            mkit_core::to_hex_bytes(&sharing.public().encode()),
+            "8bdb735ad697430b7ff022196750e30b53c6b6596947c59c18c6f498410cd7\
+b3e93f3080b7772033b12fe2a3f3d02b4b08a6b9827d9dcb53be24ff40f5b8e48\
+4612fdc8fffa694cc8d4b5234715f58c8845dce9e29b3e5cb2fe1361bca819893"
+        );
     }
 }

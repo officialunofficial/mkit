@@ -61,8 +61,8 @@ Shipped against this spec:
 - Software-raw compatibility backend (`software-raw:<label>`), reusing
   `mkit_core::sign::{load_raw_32, save_raw_32}` hardening.
 - OS-native backends behind feature flags: `macos-keychain`,
-  `windows-credential` (Credential Manager via DPAPI), `linux-secret-service`,
-  `systemd-creds`.
+  `linux-secret-service`, `systemd-creds`. (Windows is not a supported
+  target &mdash; MKIT-6; see §6.4.)
 - `YubiKey` backend behind `backend-yubikey` &mdash; OpenPGP signing slot (Ed25519)
   and PIV signing slot (P-256). secp256k1 is reported `UnsupportedAlgorithm`;
   FIDO2/CTAP keys are not handled in this backend and remain on the external
@@ -280,7 +280,6 @@ pub enum BackendKind {
     Software,
     SoftwareRaw,
     MacosKeychain,
-    WindowsCredentialManager,
     LinuxSecretService,
     SystemdCreds,
     YubiKey,
@@ -617,8 +616,8 @@ Storage-security modes:
   - Bind record version, backend token, label, algorithm, public key, key ID,
     and key attributes as AEAD associated data.
   - Protect or wrap the DEK with an OS-native protection mechanism for the
-    current platform: macOS Keychain, Windows DPAPI/Credential Manager,
-    Linux Secret Service, or `systemd-creds` for headless/server Linux.
+    current platform: macOS Keychain, Linux Secret Service, or
+    `systemd-creds` for headless/server Linux.
   - On Linux, the `software` backend may auto-select Secret Service only when a
     desktop session is detected and the protector opens cleanly. Secret Service
     errors must fail closed rather than silently falling back to a weaker
@@ -765,7 +764,7 @@ see also §6 of `SPEC-RELEASE-THRESHOLD.md`). The contract:
   `SPEC-RELEASE-THRESHOLD.md` §2.1 and `mkit-cli`'s `mkit key
   generate --algorithm bls12381-thr --threshold M --total N --label
   <base>` surface.
-- Hostile backends (`yubikey`, `macos-keychain`, `windows-credential`,
+- Hostile backends (`yubikey`, `macos-keychain`,
   `linux-secret-service`, `systemd-creds`) MUST reject
   `Bls12381Threshold` with `UnsupportedAlgorithm`. BLS share storage is
   software-backend-only; extending it to native backends with their own
@@ -808,27 +807,19 @@ Requirements:
 - Ed25519 must not be advertised as Secure Enclave-backed. Apple Secure
   Enclave does not provide Ed25519 signing.
 
-### 6.4 Windows backend
+### 6.4 Windows backend (removed)
 
-Feature name: `backend-windows-credential`.
-
-Default target: Windows only.
-
-Requirements:
-
-- Use Windows-native user-bound storage. Uses Credential Manager with
-  DPAPI-protected extractable records unless a CNG provider-backed key
-  implementation is added.
-- Implement deterministic listing of keys created by the mkit target-name scheme
-  so `mkit key list --backend windows-credential` works.
-- create/import refuses existing `(label, algorithm)` values in the normal
-  sequential case. Concurrent same-target create/import atomicity depends on the
-  Credential Manager primitive exposed by the selected dependency and is not a
-  cross-process lock guarantee.
-- Report TPM/provider-backed behavior only when actually using a TPM-capable
-  provider such as `MS_PLATFORM_CRYPTO_PROVIDER`. Does not claim
-  TPM/provider-backed behavior for Credential Manager records.
-- Ed25519 hardware support must be capability-detected, not assumed.
+Windows is not a supported mkit target (MKIT-6; see
+`docs/INVARIANTS.md`): commonware-runtime 2026.9.0's non-Linux
+storage-sync path calls `libc::sync()`, which does not exist on
+`x86_64-pc-windows-msvc`, so the workspace and its test suite no longer
+build there. The `backend-windows-credential` feature, the
+`WindowsCredentialManager` `BackendKind` variant, and the Windows
+Credential Manager implementation described in this section were
+removed rather than shipped untested. `"windows-credential"` is now an
+unrecognized backend name (`Error::BackendUnavailable`, not a
+fail-closed platform check). This section number is kept unused, rather
+than renumbered, so cross-references to §6.5+ stay stable.
 
 ### 6.5 Linux Secret Service backend
 
@@ -929,7 +920,6 @@ Examples:
 software:default
 software-raw:default
 macos-keychain:default
-windows-credential:default
 linux-secret-service:default
 systemd-creds:release
 yubikey:main
@@ -939,7 +929,7 @@ Rules:
 
 - Backend names are lowercase ASCII tokens &mdash; see `BackendKind::as_str` for the
   authoritative list (`software`, `software-raw`, `macos-keychain`,
-  `windows-credential`, `linux-secret-service`, `systemd-creds`, `yubikey`,
+  `linux-secret-service`, `systemd-creds`, `yubikey`,
   `external`, `cloud`, `memory`).
 - Labels are backend-local but must pass the label validation in section 5.7.
 - A key ref must not contain paths, URLs, shell metacharacter semantics, or
@@ -1465,14 +1455,15 @@ the per-section requirements above remain normative.
   (XChaCha20-Poly1305, length-prefixed AAD, OS protector wrapping the DEK).
 - Move raw compatibility persistence to `software-raw`. **Shipped** as
   `SoftwareRawKeystore`.
-- Implement macOS Keychain, Windows DPAPI/Credential Manager, Linux Secret
-  Service, `systemd-creds`, and YubiKey OpenPGP/PIV/FIDO2 backends behind
-  feature flags with honest capabilities. **Shipped** for macOS Keychain
-  (`macos-keychain`), Windows Credential Manager (`windows-credential`),
-  Linux Secret Service (`linux-secret-service`), `systemd-creds`
+- Implement macOS Keychain, Linux Secret Service, `systemd-creds`, and
+  YubiKey OpenPGP/PIV/FIDO2 backends behind feature flags with honest
+  capabilities. **Shipped** for macOS Keychain (`macos-keychain`), Linux
+  Secret Service (`linux-secret-service`), `systemd-creds`
   (`systemd-creds`), and YubiKey OpenPGP + PIV (`backend-yubikey`).
   **Not shipped:** a dedicated YubiKey FIDO2/CTAP routing in this backend
-  &mdash; FIDO2 stays on the external signer path per §6.7.
+  &mdash; FIDO2 stays on the external signer path per §6.7. **Removed:**
+  the Windows Credential Manager backend (§6.4) &mdash; Windows is not a
+  supported target (MKIT-6).
 - Add backend factory/resolution so CLI, commit signing, and attestation signing
   route by full key ref. **Shipped** &mdash; `open_backend` plus `selection_for`
   in `commands/key.rs`, mirrored in commit and attest paths.
@@ -1481,7 +1472,8 @@ the per-section requirements above remain normative.
 ### CI and documentation
 
 - Cross-platform CI for Linux desktop-compatible paths, Linux
-  headless/server-compatible paths, macOS, and Windows: live OS-native backend tests are
+  headless/server-compatible paths, and macOS (Windows is not a
+  supported target &mdash; MKIT-6): live OS-native backend tests are
   gated by `MKIT_RUN_NATIVE_KEYSTORE_TESTS=1` per §14.4; not every CI runner
   currently exercises every backend.
 - Golden vectors and verification-equivalence tests: **shipped** for
@@ -1493,8 +1485,8 @@ the per-section requirements above remain normative.
 
 ## 16. Design decisions and defaults
 
-- `mkit-keystore` includes macOS Keychain, Windows DPAPI/Credential Manager,
-  Linux Secret Service, `systemd-creds`, and YubiKey backends with capability
+- `mkit-keystore` includes macOS Keychain, Linux Secret Service,
+  `systemd-creds`, and YubiKey backends with capability
   reports limited to what they actually implement.
 - The encrypted software-file design is OS-protected envelope encryption. The
   `software` backend is encrypted-at-rest; raw compatibility is explicit via

@@ -40,16 +40,16 @@ it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
 
-1. **GitHub Release** with native binaries for five targets:
+1. **GitHub Release** with native binaries for four targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu`
    - `x86_64-unknown-linux-gnu`
-   - `x86_64-pc-windows-msvc` (`.zip`, `mkit.exe`, `backend-windows-credential`
-     keystore feature enabled &mdash; see [Artifacts attached to every
-     release](#artifacts-attached-to-every-release))
 
-   Each archive contains the `mkit`/`mkit.exe` binary, licenses, README,
+   Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
+   Windows users should run mkit under WSL, which uses the Linux binary.
+
+   Each archive contains the `mkit` binary, licenses, README,
    optional changelog, `share/man/man1/mkit.1`, and shell completions under
    `share/completions/`. Each archive is cosign-signed (keyless OIDC, Rekor
    logged) and ships alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an
@@ -75,12 +75,6 @@ allowlisted release fingerprint, and points at a commit reachable from
 > only LICENSE plus README &mdash; there is no `Formula/` directory, so `brew install`
 > fails until a formula is pushed. The Distribution step that targets the tap
 > is live and expected to be performed at the next release.
->
-> **Scoop bucket status: not yet provisioned.** Unlike the Homebrew tap,
-> `officialunofficial/scoop-bucket` does not exist yet &mdash; creating it (empty
-> bucket repo, then `bucket/mkit.json` from `contrib/scoop/mkit.json`) is
-> part of the Distribution step below, same pattern as the Homebrew tap's
-> initial setup.
 
 Run top to bottom. Do not skip steps.
 
@@ -93,10 +87,6 @@ Run top to bottom. Do not skip steps.
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
   - [ ] `--target=aarch64-unknown-linux-gnu`
-  - [ ] `--target=x86_64-pc-windows-msvc` (requires a Windows host or the
-        `windows-latest` CI runner &mdash; cross-compiling this target isn't
-        possible here, same reasoning as the `keystore-backends` matrix in
-        `rust.yml`: `windows-native-keyring-store` is `cfg(windows)`-gated)
 - [ ] `[workspace.package].version` in `rust/Cargo.toml` is bumped to a version
       **not already published** (crates.io versions are immutable &mdash; a re-publish
       of an existing version fails the whole `cargo publish` run).
@@ -115,15 +105,15 @@ Run top to bottom. Do not skip steps.
       `git verify-tag`.
 - [ ] `SECURITY.md` disclosure contact confirmed reachable.
 - [ ] Manually dispatch `rust.yml`'s `keystore-backends` job
-      (`gh workflow run rust.yml --ref main`) and confirm all three legs
-      (Linux Secret Service+systemd-creds+YubiKey, macOS Keychain+YubiKey,
-      Windows Credential Manager) succeed. It stays `workflow_dispatch`-only
-      (3-OS matrix cost) and is not exercised by any automatic trigger, so this
-      is the only per-release check that native keystore backends still work.
+      (`gh workflow run rust.yml --ref main`) and confirm both legs
+      (Linux Secret Service+systemd-creds+YubiKey, macOS Keychain+YubiKey)
+      succeed. It stays `workflow_dispatch`-only (2-OS matrix cost) and is
+      not exercised by any automatic trigger, so this is the only
+      per-release check that native keystore backends still work.
 
 ### Wait for the release workflows
 
-- [ ] `release.yml` succeeded through `validate-release-tag` and all five
+- [ ] `release.yml` succeeded through `validate-release-tag` and all four
       platform builds.
 - [ ] `crates-publish.yml` succeeded (every publishable crate indexed).
 - [ ] `mcp-release.yml` succeeded (docs MCP corpus indexed for the tag).
@@ -131,23 +121,20 @@ Run top to bottom. Do not skip steps.
 - [ ] Archives present:
       `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
-      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`,
-      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, and
-      `mkit-X.Y.Z-x86_64-pc-windows-msvc.zip`.
+      `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
+      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
 - [ ] `sbom.cdx.json` present.
 - [ ] `THIRD-PARTY-NOTICES` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
       `SHA256SUMS.cosign.bundle` present.
-- [ ] Per-archive `.cosign.bundle` present for every archive (including the
-      `.zip`).
+- [ ] Per-archive `.cosign.bundle` present for every archive.
 - [ ] `mkit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
       `gh attestation verify <archive> --repo officialunofficial/mkit`
-      succeeds for at least one archive (including the `.zip`).
+      succeeds for at least one archive.
 
 ### Smoke test
 
-On at least one Linux box, one macOS box, and one Windows box (or
-`windows-latest` via `gh workflow run`), download the archive for your
+On at least one Linux box and one macOS box, download the archive for your
 platform, then run the mechanized checklist below instead of the steps by
 hand:
 
@@ -156,35 +143,26 @@ hand:
 scripts/release-smoke.sh --archive mkit-X.Y.Z-<target>.tar.gz --version X.Y.Z
 ```
 
-```powershell
-# Windows
-.\scripts\release-smoke.ps1 -Archive mkit-X.Y.Z-x86_64-pc-windows-msvc.zip -Version X.Y.Z
-```
-
-The script covers every item below in one pass **except** the "Windows
-only" `install.ps1` one-liner check, which still needs to be run by hand
-against a fresh PowerShell session: cosign signature, the `SHA256SUMS`
-entry, `mkit version`/`mkit.exe version` against the tag, the bundled man
-page and completions, a basic `mkit init` → `mkit keygen` → add a file →
-`mkit commit` flow, and (unless `--skip-npm`/`-SkipNpm`) `npm view
-@officialunofficial/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the same
-script used for a pre-flight dry run against a locally packaged archive
-before tagging (missing sidecars like the cosign bundle are skipped with a
-warning, not a failure, in that case) &mdash; this checklist is the spec of
-record the script implements, so if the two ever disagree, fix the script:
+The script covers every item below in one pass: cosign signature, the
+`SHA256SUMS` entry, `mkit version` against the tag, the bundled man page
+and completions, a basic `mkit init` → `mkit keygen` → add a file →
+`mkit commit` flow, and (unless `--skip-npm`) `npm view
+@officialunofficial/mkit-wasm@X.Y.Z` plus `npm audit signatures`. It's the
+same script used for a pre-flight dry run against a locally packaged
+archive before tagging (missing sidecars like the cosign bundle are
+skipped with a warning, not a failure, in that case) &mdash; this
+checklist is the spec of record the script implements, so if the two ever
+disagree, fix the script:
 
 - [ ] Download the archive for your platform.
 - [ ] Verify the cosign signature (see [below](#verify-a-downloaded-archive)).
 - [ ] Verify `SHA256SUMS` matches the archive.
-- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` (Linux/macOS) or
-      `.\mkit-X.Y.Z-x86_64-pc-windows-msvc\mkit.exe version` (Windows) &mdash;
-      version string matches the tag.
+- [ ] Extract and run `./mkit-X.Y.Z-<target>/mkit version` &mdash; version
+      string matches the tag.
 - [ ] Extracted archive contains `share/man/man1/mkit.1`,
       `share/completions/mkit.bash`, `share/completions/_mkit`, and
       `share/completions/mkit.fish`.
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
-- [ ] Windows only: `irm https://mkit.sh/install.ps1 | iex` installs
-      `mkit.exe` and `mkit version` runs from a fresh PowerShell session.
 - [ ] `npm view @officialunofficial/mkit-wasm@X.Y.Z` and `npm audit signatures`.
 
 ### Distribution and announce
@@ -193,23 +171,17 @@ record the script implements, so if the two ever disagree, fix the script:
       into `Formula/mkit.rb`, update the version, and replace every
       `PLACEHOLDER_SHA_*` with the matching archive hash from release
       `SHA256SUMS`.
-- [ ] In `officialunofficial/scoop-bucket` (create the bucket repo if it
-      doesn't exist yet &mdash; same pattern as `homebrew-tap`), copy
-      `contrib/scoop/mkit.json` into `bucket/mkit.json`, update `version`
-      and `url`, and replace `PLACEHOLDER_SHA_X86_64_PC_WINDOWS_MSVC` with
-      the `x86_64-pc-windows-msvc.zip` hash from release `SHA256SUMS`.
 - [ ] Release notes reviewed (auto-generated by `softprops/action-gh-release`
       plus the signing snippet).
 - [ ] Pin the release in the repo sidebar; post in relevant channels.
-- [ ] Once the Homebrew/Scoop steps above are done, dispatch
+- [ ] Once the Homebrew step above is done, dispatch
       [`release-verify.yml`](../.github/workflows/release-verify.yml)
       (`gh workflow run release-verify.yml -f version=X.Y.Z`) to check
       every distribution channel end to end in an isolated environment —
       `cargo install`, `cargo binstall`, npm, the curl-pipe install
-      script (Debian/Ubuntu/Fedora), Homebrew, and Scoop (including the
-      Windows `install.ps1` one-liner). Not a substitute for the smoke
-      test above (which verifies the archive itself); this verifies every
-      OTHER way a user actually gets `mkit` onto their machine.
+      script (Debian/Ubuntu/Fedora), and Homebrew. Not a substitute for the
+      smoke test above (which verifies the archive itself); this verifies
+      every OTHER way a user actually gets `mkit` onto their machine.
 
 ### Post-release
 
@@ -330,26 +302,19 @@ release signature cannot be reused on any other artifact. The installer
 
 ### Artifacts attached to every release
 
-For each of the five target archives, release archives build the production
+For each of the four target archives, release archives build the production
 `mkit-cli` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
 targets without changing the lean default feature set of the `mkit-keystore`
-library crate. On Windows the CLI additionally enables the native
-`backend-windows-credential` keystore backend unconditionally (via
-`mkit-cli`'s `[target.'cfg(windows)'.dependencies]`), matching the
-`windows-credential` leg of `rust.yml`'s `keystore-backends` matrix.
+library crate.
 
 | File | Purpose |
 | --- | --- |
-| `mkit-X.Y.Z-<triple>.tar.gz` (Linux/macOS) or `.zip` (Windows) | Binary, licenses, README, manpage, completions. |
+| `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
 | `...sha256` | SHA256 of the archive (convenience). |
 | `...sig` | Raw cosign signature (base64). |
 | `...crt` | Fulcio-issued code-signing certificate. |
 | `...cosign.bundle` | Bundle: sig plus cert plus Rekor entry. |
-
-The Windows archive is not Authenticode-signed (no code-signing
-certificate); trust is the cosign signature above, same as every other
-target.
 
 Plus one top-level set for the aggregate:
 
@@ -487,8 +452,8 @@ a small, auditable set of inputs. This section is the contract.
   deliberately small &mdash; see `rust/Cargo.toml` and each crate's `[dependencies]`.
 - **System libs:** default release builds link musl (Linux) or the platform C
   runtime (macOS). Optional keystore backend features may use platform services
-  (Security.framework, Windows Credential Manager, D-Bus Secret Service, PC/SC,
-  `systemd-creds`). These are off by default, platform-gated, and fail closed
+  (Security.framework, D-Bus Secret Service, PC/SC, `systemd-creds`). These
+  are off by default, platform-gated, and fail closed
   when the required service or device is unavailable. The Linux Secret Service
   feature selects the pure-Rust crypto runtime, not OpenSSL. Production
   `mkit-cli` builds enable the target-appropriate software protector feature so
@@ -525,8 +490,7 @@ from default builds unless listed as always-on.
 | `chacha20poly1305 = 0.10.1` | XChaCha20-Poly1305 software-key envelope encryption | always-on keystore crypto | Apache-2.0 OR MIT |
 | `zeroize = 1.8.2` | Secret-memory clearing | always-on keystore crypto | Apache-2.0 OR MIT |
 | `security-framework = 3.7.0` | macOS Keychain bindings | `backend-macos-keychain` (macOS only) | MIT OR Apache-2.0 |
-| `keyring-core = 1.0.0` | Shared keyring abstraction | `backend-windows-credential`, `backend-linux-secret-service` | MIT OR Apache-2.0 |
-| `windows-native-keyring-store = 1.0.0` | Windows Credential Manager store | `backend-windows-credential` (Windows only) | MIT OR Apache-2.0 |
+| `keyring-core = 1.0.0` | Shared keyring abstraction | `backend-linux-secret-service` | MIT OR Apache-2.0 |
 | `zbus-secret-service-keyring-store = 1.0.0` | Linux Secret Service store | `backend-linux-secret-service` (Linux only; OpenSSL-free) | MIT OR Apache-2.0 |
 | `card-backend-pcsc = 0.5.1` | PC/SC card discovery | `backend-yubikey` | MIT OR Apache-2.0 |
 | `openpgp-card = 0.6.1` | OpenPGP card protocol | `backend-yubikey` | MIT OR Apache-2.0 |
@@ -584,7 +548,7 @@ byte-identical binary to the one published on GitHub Releases.
 
 1. **Rust toolchain version** &mdash; pinned in `rust-toolchain.toml`; the workflow
    installs it verbatim.
-2. **Target triple** &mdash; one of the five release triples, passed as
+2. **Target triple** &mdash; one of the four release triples, passed as
    `--target=<triple>`.
 3. **Build profile** &mdash; `release`.
 4. **Source tree hash** &mdash; the Git commit the tag points at; every source file is
@@ -623,10 +587,6 @@ before the next tag.
 Binaries built on your local macOS are not expected to match GitHub's `macos-14`
 runner byte-for-byte unless your OS, SDK, and linker versions match. The Linux
 x86_64 build is the most reliable reproducibility target for third parties.
-Windows (`x86_64-pc-windows-msvc`) additionally embeds a PDB path and MSVC
-linker/toolset version into the binary, so byte-identical reproduction there
-also requires matching Visual Studio Build Tools versions &mdash; treat it as even
-less reliable than the macOS case until that's verified.
 
 ## Required GitHub Actions secrets and variables
 

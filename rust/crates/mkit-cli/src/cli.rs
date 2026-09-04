@@ -3,8 +3,8 @@
 //!
 //! `CLI_VERSION` MUST equal `env!("CARGO_PKG_VERSION")` — `build.rs`
 //! enforces this at compile time so cosmetic edits to `Cargo.toml` can
-//! never desync the Homebrew / Scoop contract documented in
-//! `docs/CLI.md`. `mkit version` MUST emit exactly `"mkit <X.Y.Z>\n"`.
+//! never desync the Homebrew contract documented in `docs/CLI.md`.
+//! `mkit version` MUST emit exactly `"mkit <X.Y.Z>\n"`.
 
 /// Version string rendered by `mkit version`. Pinned to the package
 /// version at compile time via `env!`.

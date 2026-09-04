@@ -28,10 +28,14 @@ algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256"]
 algo-p256 = ["dep:p256"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
-# OFF by default: commonware-cryptography pulls blst (a sizeable
-# precompiled BLS library) and a portion of the commonware monorepo's
-# dep tree. We don't want every default `cargo add mkit-attest` to
-# pay for that — release-party tooling explicitly opts in.
+# OFF by default: commonware-cryptography's `std` feature pulls blst
+# (a sizeable precompiled BLS library, via the `bls12381` feature `std`
+# enables — commonware 2026.9.0 made `blst` `optional`/feature-gated;
+# at 2026.7.1 it was an unconditional dependency with no way to opt
+# out even with `default-features = false`) and a portion of the
+# commonware monorepo's dep tree. We don't want every default `cargo
+# add mkit-attest` to pay for that — release-party tooling explicitly
+# opts in.
 bls-threshold = [
     "dep:commonware-cryptography",
     "dep:commonware-codec",
@@ -95,8 +99,12 @@ p256 = { version = "0.14", optional = true, default-features = false, features =
 # regardless of which signing algorithms are compiled in.
 sha2 = { version = "0.11", default-features = false }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
-# commonware-cryptography's default `std` feature. The whole dep tree is
-# default-off; opt-in carries the cost. `commonware-codec` is the
+# commonware-cryptography's `std` feature (which, since 2026.9.0, enables
+# the now-optional `bls12381` feature that gates `dep:blst` — `std` is
+# still requested unconditionally here, so the practical effect on this
+# crate is unchanged, but `blst` is no longer pulled by every
+# commonware-cryptography consumer the way it was through 2026.7.1). The
+# whole dep tree is default-off; opt-in carries the cost. `commonware-codec` is the
 # `Encode`/`Decode` companion crate used to ship partial signatures on
 # the wire between holders and aggregator. Version pin lives at
 # `[workspace.dependencies]` in `rust/Cargo.toml`.
@@ -109,7 +117,7 @@ commonware-utils = { workspace = true, optional = true, features = ["std"] }
 # `CryptoRng` for the trusted-dealer helper. Pulled by
 # commonware-cryptography anyway; explicit here so the call site can
 # accept any RNG without re-exporting commonware's prelude. 0.10 to
-# match the rand_core edge commonware-cryptography 2026.7.0 depends on
+# match the rand_core edge commonware-cryptography 2026.9.0 depends on
 # (its `CryptoRng` bound is a different, incompatible trait pre-0.10).
 rand_core = { version = "0.10", optional = true, default-features = false }
 

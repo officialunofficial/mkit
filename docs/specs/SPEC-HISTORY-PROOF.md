@@ -44,7 +44,8 @@ this design needs an authenticated data structure whose root commits to the
 canonical fit: append-only, dense leaf indices, stable positions, root
 hash compresses arbitrary history into one digest.
 
-mkit reuses [`commonware-storage`'s MMR][cw-mmr] pinned to `=2026.5.0`:
+mkit reuses [`commonware-storage`'s MMR][cw-mmr], pinned to the commonware
+train fixed in `rust/Cargo.toml` (`=2026.9.0` as of this revision):
 - `merkle::mmr::mem::Mmr` for the in-memory mem-only flavor
   ([`CommitHistory::open`]).
 - `merkle::mmr::full::Mmr` for the journaled persisted flavor
@@ -58,7 +59,7 @@ below). mkit accepts that crate's ALPHA stability marker: while
 document's wire and on-disk formats are not yet frozen against upstream
 changes to that crate &mdash; see §4 and §5.
 
-[cw-mmr]: https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/
+[cw-mmr]: https://docs.rs/commonware-storage/2026.9.0/commonware_storage/merkle/mmr/
 
 ---
 
@@ -208,11 +209,11 @@ round-trip and the bit-flip tamper case.
 
 The persisted MMR for each branch lives under `<mkit_dir>/history/`.
 mkit does **not** invent a custom format: the durable representation
-is commonware-storage's native full-MMR shape pinned to the
-`=2026.5.0` release train. mkit owns the directory layout that selects
-*which* journal to open; the byte layout *inside* each partition is
-commonware's, documented at
-<https://docs.rs/commonware-storage/2026.5.0/commonware_storage/merkle/mmr/full/>.
+is commonware-storage's native full-MMR shape, pinned to the commonware
+train fixed in `rust/Cargo.toml` (`=2026.9.0` as of this revision). mkit
+owns the directory layout that selects *which* journal to open; the byte
+layout *inside* each partition is commonware's, documented at
+<https://docs.rs/commonware-storage/2026.9.0/commonware_storage/merkle/mmr/full/>.
 
 ### 4.1 Directory layout
 
@@ -387,6 +388,55 @@ branch (for example, two concurrent `update-ref` calls, which deliberately
 skip the worktree lock) both observe an empty journal and
 both independently backfill, corrupting the journal's leaf positions.
 
+### 4.6 Behavior changes from the commonware `2026.9.0` train
+
+Bumping the pinned commonware train from `2026.7.1` to `2026.9.0`
+(MKIT-2) surfaced three upstream behaviors this document did not
+previously account for. None changes the wire/on-disk *bytes*
+documented above; all three are call-site/process-level behavior.
+
+- **Blob layout is now versioned, and the upgrade is one-way.** New
+  journal blobs commonware writes get a versioned header; a journal
+  written by mkit on an older (`2026.7.1`-era) commonware build stays
+  readable, but a journal touched by the `2026.9.0`-era build cannot
+  be reopened by an older mkit build. Consistent with §5's
+  unfrozen-while-opt-in stance (`history-mmr` is default-off), this is
+  accepted rather than pinned back to the old layout — see
+  `docs/INVARIANTS.md`, "History-journal page size and peak-bagging
+  strategy are format-frozen" for the related, still-in-force
+  invariant on page size and bagging.
+- **Opening a second branch's journal in the same process now blocks
+  until the first is closed**, rather than opening independently.
+  commonware-runtime added a per-storage-directory advisory lock file
+  taken when the underlying `Context` is bootstrapped and held for as
+  long as any handle derived from it is alive; every branch under one
+  `<mkit_dir>/history` directory shares the same storage directory.
+  `CommitHistory` shares one bootstrapped `Context` per history
+  directory across every branch opened in the same process specifically
+  to avoid a same-process deadlock here — see `docs/INVARIANTS.md`,
+  "One commonware storage Context per history dir per process". A
+  *different* process opening the same directory concurrently still
+  waits on this lock (by design — it is what makes the lock
+  meaningful across processes); that process-level contention is
+  additional to, not a replacement for, the `refs-history-<branch>.lock`
+  critical section in §4.3.
+- **The `Context` `CommitHistory::open_at` bootstraps is post-shutdown
+  by the time it is returned.** `commonware_runtime::tokio::Runner::start`
+  now aborts its task tree, closes task admission, and drops its inner
+  tokio runtime before returning control to its `start` closure — so
+  the `Context` `bootstrap_commonware_context` hands back (and every
+  `JournaledBackend.ctx` clone derived from it) can no longer be
+  spawned through: a `Spawner::spawn` call on it resolves to
+  `Err(Error::Closed)` instead of running. This does not affect
+  durability: every blob read/write/fsync on the journaled path runs
+  via ambient `tokio::task::spawn_blocking` on mkit's OWN executor
+  (the caller-supplied `Executor` this module is generic over), never
+  by spawning through the shared `Context`. What the shared `Context`
+  is still held for is the per-storage-directory `.hold` flock, the
+  storage/network buffer pools, and the metrics registry — see
+  `docs/INVARIANTS.md`, "The shared commonware Context is
+  post-shutdown after `open_at`".
+
 ## 5. Feature-flag status and stability
 
 `mkit-core::history` implements two capabilities, both behind the
@@ -397,7 +447,8 @@ than a numbered release sequence:
 - **In-memory MMR** &mdash; `mem`-backed MMR, `CommitHistory::{open, append,
   root, prove}`, `verify_inclusion()` (§1–§3).
 - **Journaled persistence** &mdash; via
-  `commonware-storage::merkle::mmr::full::Mmr` pinned to `=2026.5.0`,
+  `commonware-storage::merkle::mmr::full::Mmr` pinned to the commonware
+  train fixed in `rust/Cargo.toml` (`=2026.9.0` as of this revision),
   with `Bagging::ForwardFold`: `CommitHistory::open_at`,
   `refs::update_ref_with_history`, `rebuild_from_chain` (§4).
 
@@ -420,9 +471,10 @@ The feature deliberately does *not*:
   `history-mmr` (default off) and only compiles when consumers opt in.
 
 Stability call: commonware-storage is ALPHA. mkit pins to an exact
-`=2026.5.0` and accept that future minor versions may change the
-proof's `digests` layout *and* the on-disk partition shape described
-in §4. The wire format documented in §2 and the on-disk format
+version (the commonware train fixed in `rust/Cargo.toml`, `=2026.9.0`
+as of this revision) and accepts that future minor versions may change
+the proof's `digests` layout *and* the on-disk partition shape
+described in §4. The wire format documented in §2 and the on-disk format
 documented in §4 are both unfrozen while `history-mmr` stays opt-in:
 nothing outside the flag depends on today's bytes, so an upstream
 commonware change before default-on promotion is absorbed directly,
@@ -445,7 +497,7 @@ with no separate compatibility break to manage.
 | A backfill fsyncs once for the whole batch, not once per commit | `rebuild_from_chain` accumulates leaves via `CommitHistory::append_no_sync` and calls `CommitHistory::sync` once at the end (§4.5) |
 | A crash leaves the ref at most one commit ahead of the MMR, and the next write heals it without manual intervention | ref CAS precedes the append; the next `update_ref_with_history`/`update_ref_with_history_and_backfill` call detects a non-empty journal's stale last leaf via an inclusion-proof check and appends the ref's current value directly, or (empty journal) backfills from the object store, all under the same lock (§4.3, §4.5) |
 | Reopening a half-written journal never panics or silently exposes stale data | torn trailing leaf rewound by `mmr::full::Mmr::init`; anything deeper surfaces as `HistoryError::Corrupted` (§4.4) |
-| Proof bytes decode identically for every consumer | commonware-codec at the pinned `=2026.5.0` (§2.2) |
+| Proof bytes decode identically for every consumer | commonware-codec at the commonware train pinned in `rust/Cargo.toml` (§2.2) |
 
 These invariants are unfrozen while `history-mmr` remains opt-in (§5):
 any upstream commonware change to the proof layout or partition shape
