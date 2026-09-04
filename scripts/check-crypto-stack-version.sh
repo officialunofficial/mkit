@@ -65,10 +65,62 @@ check_crate() {
 check_crate "ed25519-dalek"
 check_crate "sha2"
 
+# The commonware-* family ships as a single release train (see
+# docs/INVARIANTS.md, "Single commonware release train"): every
+# `commonware-<name>` dependency, in every manifest AND every
+# lockfile that pins one, must resolve to the exact same version
+# string (not just semver-compatible — an exact match, since every
+# manifest pin is itself exact, e.g. `=2026.9.0`). Unlike
+# `check_crate` above (which only compares compatibility channels)
+# this compares full version strings, and also checks Cargo.lock
+# files, because a manifest bump with a stale `cargo update` leaves
+# the lockfile pinned to the old train even though the manifest text
+# is already correct.
+check_commonware_family() {
+  local manifest_versions
+  manifest_versions=$(
+    sed -nE 's/^commonware-[A-Za-z0-9_-]+[[:space:]]*=[[:space:]]*(\{[^}]*version[[:space:]]*=[[:space:]]*)?"=?([0-9]+\.[0-9]+\.[0-9]+).*/\2/p' "${MANIFESTS[@]}" 2>/dev/null
+  )
+
+  local lockfiles=()
+  while IFS= read -r -d '' lockfile; do
+    lockfiles+=("$lockfile")
+  done < <(find rust contrib/signers apps -name Cargo.lock -not -path '*/target/*' -print0)
+
+  local lock_versions=""
+  if [ "${#lockfiles[@]}" -gt 0 ]; then
+    # Cargo.lock entries look like:
+    #   name = "commonware-cryptography"
+    #   version = "2026.9.0"
+    # on consecutive lines. Grab the version line immediately after
+    # each matching name line.
+    lock_versions=$(
+      grep -A1 -h -E '^name = "commonware-' "${lockfiles[@]}" 2>/dev/null \
+        | sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/p'
+    )
+  fi
+
+  local all_versions
+  all_versions=$(printf '%s\n%s\n' "$manifest_versions" "$lock_versions" | sed '/^$/d' | sort -u)
+  local count
+  count=$(echo "$all_versions" | grep -c . || true)
+  if [ "$count" -gt 1 ]; then
+    echo "error: commonware-* crates are pinned to more than one version across manifests/lockfiles: $(echo "$all_versions" | tr '\n' ' ')"
+    echo "  manifest occurrences:"
+    grep -n -E '^commonware-[A-Za-z0-9_-]+[[:space:]]*=' "${MANIFESTS[@]}" 2>/dev/null | sed 's/^/    /'
+    if [ "${#lockfiles[@]}" -gt 0 ]; then
+      echo "  lockfile versions found: $(echo "$lock_versions" | sed '/^$/d' | sort -u | tr '\n' ' ')"
+    fi
+    fail=1
+  fi
+}
+
+check_commonware_family
+
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "See docs/INVARIANTS.md ('Single crypto-stack version across workspaces')."
+  echo "See docs/INVARIANTS.md ('Single crypto-stack version across workspaces', 'Single commonware release train')."
   exit 1
 fi
 
-echo "ok: ed25519-dalek and sha2 are each pinned to a single Cargo-compatible version"
+echo "ok: ed25519-dalek, sha2 are each pinned to a single Cargo-compatible version; commonware-* is a single version across manifests and lockfiles"

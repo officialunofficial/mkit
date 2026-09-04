@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- bump the commonware crate family from the `2026.7.1` release train to `2026.9.0` across every Rust workspace (`rust/`, `contrib/signers/`, `apps/repo-worker`, `apps/vcs-worker`) (MKIT-2). Notable upstream changes this required adapting to:
+  - `merkle::full::Merkle::{apply_batch, sync}` now take `self` by value; `CommitHistory`'s journaled backend handles a failed mutation by leaving the handle poisoned (`HistoryError::Poisoned`) instead of panicking, and `root()`/`len()` fall back to the last known-good value rather than requiring a `Result`.
+  - `commonware-runtime` 2026.9.0 added a per-storage-directory advisory `.hold` file lock, which deadlocked opening a second branch's history journal in the same process; `CommitHistory` now shares one bootstrapped `Context` per `<mkit_dir>/history` directory across every branch opened in-process (see `docs/INVARIANTS.md`, "One commonware storage Context per history dir per process").
+  - `threshold::recover` dropped its `Faults` generic and `sharing::Mode` lost its `Default` impl; `mkit-attest`'s BLS threshold signer names `Mode::NonZeroCounter` explicitly (same value the old default resolved to — pinned by a new golden-vector test).
+  - `commonware_parallel::Strategy` can no longer be implemented outside the `commonware-parallel` crate (`Manual::new` was removed); `pack_shard.rs`'s spy-based `CountingStrategy` test was removed accordingly (see `docs/INVARIANTS.md`).
+  - blst is now opt-in upstream (only pulled in via `commonware-cryptography`'s `std` → `bls12381` feature chain), not unconditional as the 2026.7.0-era comments said.
+  - Windows: commonware-runtime 2026.9.0's non-Linux storage-sync fallback calls `libc::sync()`, which does not exist on the Windows target — `commonware-runtime`, and therefore most of this workspace, no longer compiles for `x86_64-pc-windows-msvc`. Not yet remediated; tracked as a follow-up decision (mkit still ships a Windows CLI binary and runs Windows CI on every PR).
+
 ## [0.4.2](https://github.com/officialunofficial/mkit/compare/v0.4.1...v0.4.2) - 2026-09-02
 
 ### Performance

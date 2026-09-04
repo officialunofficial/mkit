@@ -67,8 +67,8 @@ mkit+enc://h.example?pubkey=AAAAAA…AAA            # b64-url, 43 chars
 ## 2. Cryptographic layer
 
 The encrypted layer is provided verbatim by
-[`commonware_stream::encrypted`] (version `2026.5.0` pinned in
-`Cargo.toml`). mkit does **not** implement its own handshake or AEAD;
+[`commonware_stream::encrypted`] (pinned to the commonware train fixed in
+`rust/Cargo.toml`, `=2026.9.0` as of this revision). mkit does **not** implement its own handshake or AEAD;
 this section documents the parameters mkit configures.
 
 ### 2.1 Handshake parameters

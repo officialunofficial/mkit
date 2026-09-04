@@ -167,13 +167,15 @@ fn freezer_put_get_byte_identical() {
         let mut freezer: Freezer<_, ObjKey, Bytes> =
             Freezer::init(context, cfg, None).await.unwrap();
 
+        // `Freezer::put`/`sync` take `self` by value in commonware
+        // 2026.9.0 (were `&mut self`) — reassign on every call.
         for (id, bytes) in &objects {
-            freezer
+            (freezer, _) = freezer
                 .put(to_key(id), Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
-        freezer.sync().await.unwrap();
+        let (freezer, _checkpoint) = freezer.sync().await.unwrap();
 
         for (id, bytes) in &objects {
             let got = freezer
@@ -207,13 +209,15 @@ fn freezer_has_no_per_key_delete() {
         let mut freezer: Freezer<_, ObjKey, Bytes> =
             Freezer::init(context, cfg, None).await.unwrap();
 
+        // See the reassign-on-every-call note in
+        // `freezer_put_get_byte_identical` above.
         for (id, bytes) in &objects {
-            freezer
+            (freezer, _) = freezer
                 .put(to_key(id), Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
-        freezer.sync().await.unwrap();
+        let (freezer, _checkpoint) = freezer.sync().await.unwrap();
 
         // Every object present.
         for (id, _) in &objects {
@@ -243,6 +247,7 @@ fn archive_cfg(
 ) -> prunable::Config<FourCap, RangeCfg<usize>> {
     prunable::Config {
         translator: FourCap,
+        metadata_partition: format!("spike-archive-metadata-{suffix}"),
         key_partition: format!("spike-archive-key-{suffix}"),
         key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: format!("spike-archive-value-{suffix}"),
@@ -276,13 +281,16 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         let mut archive: prunable::Archive<FourCap, _, ObjKey, Bytes> =
             prunable::Archive::init(context, cfg).await.unwrap();
 
+        // `Archive::put`/`sync`/`prune` take `self` by value in
+        // commonware 2026.9.0 (were `&mut self`) — reassign on every
+        // call.
         for (i, (id, bytes)) in objects.iter().enumerate() {
-            archive
+            archive = archive
                 .put(i as u64, to_key(id), Bytes::from(bytes.clone()))
                 .await
                 .unwrap();
         }
-        archive.sync().await.unwrap();
+        let archive = archive.sync().await.unwrap();
 
         // All 5 present before any pruning.
         for (id, _) in &objects {
@@ -304,7 +312,7 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         // first_index/last_index/sync/destroy). The closest lever is
         // pruning everything below index 3, which is the smallest prune
         // point that removes index 2.
-        archive.prune(3).await.unwrap();
+        let archive = archive.prune(3).await.unwrap();
 
         // The target is gone, as intended...
         assert!(
@@ -353,13 +361,22 @@ fn archive_prune_deletes_a_prefix_not_a_single_index() {
         );
 
         // Recovering indices 0 and 1 (mkit's GC would never have wanted
-        // them deleted) is not possible from here: `put` below a pruned
-        // section is rejected outright.
-        let reinsert = archive
+        // them deleted) is not possible from here: a `put` below the
+        // prune floor is silently ignored (commonware 2026.9.0's
+        // `put_internal`, `archive/prunable/storage.rs` — at 2026.7.1
+        // the same call returned `Error::AlreadyPrunedTo` instead; the
+        // *outcome* mkit's GC cares about — the value never comes
+        // back — is unchanged, only how a caller observes it is).
+        let archive = archive
             .put(0, to_key(&objects[0].0), Bytes::from(objects[0].1.clone()))
-            .await;
+            .await
+            .expect("a put below the prune floor is a silent no-op, not an error");
         assert!(
-            reinsert.is_err(),
+            archive
+                .get(ArchiveIdentifier::Key(&to_key(&objects[0].0)))
+                .await
+                .unwrap()
+                .is_none(),
             "a pruned index cannot be resurrected; the only recovery path is a full rebuild \
              from a separately retained copy of the live objects"
         );

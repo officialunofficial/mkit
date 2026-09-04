@@ -101,7 +101,7 @@ bytes) yet still a plain `#[test]` on stable, and on failure prints a
 `Builder::default().with_reproduce("0x...")`.
 
 `commonware-invariants` is a **dev-dependency only** (pinned to the
-commonware 2026.5.x train); the libfuzzer binaries never link it. The
+commonware train fixed in `rust/Cargo.toml`, `2026.9.x` as of this revision); the libfuzzer binaries never link it. The
 same six guardrails apply: `with_search_limit(MAX_ITER)` caps iterations,
 `with_seed(RNG_SEED)` keeps the run deterministic, and the body still
 truncates to `MAX_INPUT` and runs under the per-iteration wall-clock cap.

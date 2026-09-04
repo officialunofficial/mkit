@@ -762,151 +762,24 @@ mod tests {
     // `const STRATEGY: Sequential = Sequential;` and pass `&STRATEGY`
     // into every `RsScheme::encode` / `RsScheme::decode` call — no
     // caller, test, or config could ever supply a different
-    // `commonware_parallel::Strategy` impl. The tests below prove two
-    // separate things:
+    // `commonware_parallel::Strategy` impl. `round_trip_with_explicit_parallel_strategy`
+    // below proves `encode_pack_to_shards_with_strategy` /
+    // `decode_pack_from_shards_with_strategy` are generic over `S: Strategy`
+    // and that a real (non-default) strategy round-trips correctly end to
+    // end — a hardcoded const could never allow that to compile.
     //
-    // 1. `encode_pack_to_shards_with_strategy` /
-    //    `decode_pack_from_shards_with_strategy` are generic over
-    //    `S: Strategy` — a caller-supplied strategy compiles at all,
-    //    which a hardcoded const could never allow.
-    // 2. The supplied strategy is actually *invoked* by the encode /
-    //    decode core (via a spy that counts calls into
-    //    `Strategy::fold_init`), not merely accepted and discarded.
-
-    /// A `Strategy` that counts how many times `fold_init` is invoked
-    /// and otherwise behaves exactly like [`Sequential`]. Lets a test
-    /// assert the supplied strategy was genuinely exercised by the
-    /// encode/decode core, rather than silently ignored in favour of
-    /// some other, hidden strategy.
-    #[derive(Clone, Debug)]
-    struct CountingStrategy {
-        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl CountingStrategy {
-        fn new() -> Self {
-            Self {
-                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    impl Strategy for CountingStrategy {
-        fn manual(&self) -> commonware_parallel::Manual<Self> {
-            commonware_parallel::Manual::new(self.clone(), std::num::NonZeroUsize::new(1).unwrap())
-        }
-
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
-        where
-            F: FnOnce(Self) -> T + Send + 'static,
-            T: Send + 'static,
-        {
-            let result = f(self.clone());
-            async move { result }
-        }
-
-        fn run<R, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> R
-        where
-            R: Send,
-            SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            serial()
-        }
-
-        fn try_run<R, E, SEQ, PAR>(&self, _len: usize, serial: SEQ, _parallel: PAR) -> Result<R, E>
-        where
-            R: Send,
-            E: Send,
-            SEQ: FnOnce() -> Result<R, E> + Send,
-            PAR: FnOnce() -> Result<R, E> + Send,
-        {
-            serial()
-        }
-
-        fn fold_init<I, INIT, T, R, ID, F, RD>(
-            &self,
-            iter: I,
-            init: INIT,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
-        }
-
-        fn try_fold<I, R, E, ID, F, RD>(
-            &self,
-            iter: I,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> Result<R, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            E: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            Sequential.try_fold(iter, identity, fold_op, reduce_op)
-        }
-
-        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-        where
-            A: FnOnce() -> RA + Send,
-            B: FnOnce() -> RB + Send,
-            RA: Send,
-            RB: Send,
-        {
-            Sequential.join(a, b)
-        }
-
-        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-        where
-            T: Send,
-            C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
-        {
-            Sequential.sort_by(items, compare);
-        }
-    }
-
-    #[test]
-    fn explicit_strategy_is_actually_exercised_by_encode_and_decode() {
-        let pack = synthetic_pack(64 * 1024);
-        let config = default_config();
-        let spy = CountingStrategy::new();
-
-        let (shards, manifest) = encode_pack_to_shards_with_strategy(&pack, config, &spy).unwrap();
-        let calls_after_encode = spy.calls();
-        assert!(
-            calls_after_encode > 0,
-            "encode_pack_to_shards_with_strategy never invoked the supplied strategy"
-        );
-
-        let subset: Vec<Shard> = shards.into_iter().take(16).collect();
-        let recovered = decode_pack_from_shards_with_strategy(&subset, &manifest, &spy).unwrap();
-        assert_eq!(recovered, pack);
-        assert!(
-            spy.calls() > calls_after_encode,
-            "decode_pack_from_shards_with_strategy never invoked the supplied strategy"
-        );
-    }
+    // commonware 2026.9.0 dropped `Manual::new` (`Manual`'s fields are
+    // private and there is no public constructor left) and added a
+    // `len: usize` parameter to `Strategy::spawn` — together these mean
+    // `Strategy` can no longer be implemented outside the
+    // `commonware-parallel` crate (`fn manual(&self) -> Manual<Self>` has
+    // no value an external impl can construct). This removed the spy
+    // `CountingStrategy` this test module used to define (`impl Strategy
+    // for CountingStrategy`, counting `fold_init` calls) to assert the
+    // supplied strategy was genuinely *invoked*, not merely accepted and
+    // discarded — see docs/INVARIANTS.md ("commonware `Strategy` cannot be
+    // spied on from outside commonware-parallel") for the invariant this
+    // leaves in place instead.
 
     #[test]
     fn round_trip_with_explicit_parallel_strategy() {

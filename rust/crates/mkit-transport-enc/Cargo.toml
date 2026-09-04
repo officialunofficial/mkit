@@ -22,7 +22,7 @@ mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 buffa = "0.9.1"
 thiserror = "2"
 
-# commonware: pinned at workspace root to the 2026.5.x train. All
+# commonware: pinned at workspace root to the 2026.9.x train. All
 # crates share the same release cadence so they're version-locked at
 # `[workspace.dependencies]` and selected here with `workspace = true`.
 commonware-stream = { workspace = true }
@@ -46,7 +46,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 # `sys_rng` provides `getrandom::SysRng`, the rand_core 0.10 `TryRng`
 # source `TokioContext` wraps in `UnwrapErr` for its `CryptoRng` impl.
 # 0.10 to match the rand_core edge commonware-cryptography /
-# commonware-stream 2026.7.0 depend on (their `CryptoRng` bound is a
+# commonware-stream 2026.9.0 depend on (their `CryptoRng` bound is a
 # different, incompatible trait pre-0.10) — no plain `rand` dep needed,
 # this crate never used more than `OsRng`.
 getrandom = { version = "0.4", features = ["sys_rng"], optional = true }

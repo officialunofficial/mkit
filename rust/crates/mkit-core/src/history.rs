@@ -67,8 +67,9 @@
 //! interact — `tokio::fs` and `tokio::sync::Mutex` are runtime-agnostic
 //! and work whichever runtime is driving the poll.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use commonware_cryptography::{Blake3, Hasher as CHasher};
 use commonware_parallel::Sequential;
@@ -193,6 +194,22 @@ pub enum HistoryError {
     /// Failed to set up the on-disk history directory.
     #[error("history directory I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// A previous mutation (`append`/`sync`) failed partway through
+    /// and left this handle without a usable in-memory MMR.
+    ///
+    /// commonware 2026.9.0's `Merkle::{apply_batch, sync}` take `self`
+    /// by value and return `Result<Self, Error>` — on `Err` the
+    /// consumed value is dropped inside the failing call, so mkit has
+    /// nothing to put back. Rather than panic on the next call, the
+    /// handle records the loss and every subsequent journaled
+    /// operation returns this error until [`CommitHistory::reopen`]
+    /// re-derives a fresh in-memory MMR from what is actually on disk.
+    /// [`CommitHistory::root`] and [`CommitHistory::len`] are the
+    /// exception — they have no `Result` in their signature, so they
+    /// keep answering with the last known-good value instead (see
+    /// their doc comments).
+    #[error("history journal handle is poisoned by a previous failed mutation; call reopen()")]
+    Poisoned,
 }
 
 // ---------------------------------------------------------------------
@@ -271,13 +288,36 @@ struct JournaledBackend<X: Executor> {
     // surviving tokio runtime. In practice commonware's
     // `Journaled` only flushes synchronously in `sync`, but the
     // ordering is cheap insurance.
-    mmr: JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest, Sequential>,
+    //
+    // `Option` because commonware 2026.9.0's `apply_batch`/`sync` take
+    // `self` by value (`Result<Self, Error>`): on success the new
+    // value is put back, on failure there is nothing to put back and
+    // the field is left `None` — see `HistoryError::Poisoned`.
+    mmr: Option<
+        JournaledMmr<commonware_runtime::tokio::Context, <Blake3 as CHasher>::Digest, Sequential>,
+    >,
+    // Root + leaf count as of the last successful mutation. `root()`
+    // and `len()` have no `Result` in their public signature, so when
+    // `mmr` is `None` (poisoned) they fall back to these instead of
+    // panicking — see `HistoryError::Poisoned` and those methods' doc
+    // comments. Kept in sync every time `mmr` transitions to `Some`.
+    cached_root: Hash,
+    cached_len: u64,
     executor: Arc<X>,
     // Held to keep the bootstrap tokio runtime (inside the Context's
     // executor `Arc`) alive for the whole CommitHistory lifetime, AND
     // read by `reopen` (issue #640) to derive a labelled child Context
     // instead of paying for a second `bootstrap_commonware_context`.
-    ctx: commonware_runtime::tokio::Context,
+    //
+    // `Arc` because this is the SHARED, process-wide Context for this
+    // branch's `<mkit_dir>/history` storage directory (see
+    // `shared_commonware_context`) — every branch opened against the
+    // same `mkit_dir` in this process holds a clone of the same Arc, so
+    // there is exactly one `.hold` flock per history directory per
+    // process, not one per branch (see `HistoryError`'s module docs and
+    // `docs/INVARIANTS.md`, "One commonware storage Context per history
+    // dir per process").
+    ctx: Arc<commonware_runtime::tokio::Context>,
     // Held so update_ref_with_history can take a fresh RepoLock for
     // every append. None for the mem-only flavour. This is the COMMON
     // dir: history is shared state across worktrees (#493).
@@ -293,12 +333,18 @@ impl<X: Executor> core::fmt::Debug for CommitHistory<X> {
                 .field("leaves", &u64::from(mmr.leaves()))
                 .field("size", &u64::from(mmr.size()))
                 .finish_non_exhaustive(),
-            Backend::Journaled(b) => f
-                .debug_struct("CommitHistory::Journaled")
-                .field("branch", &b.branch)
-                .field("leaves", &u64::from(b.mmr.leaves()))
-                .field("size", &u64::from(b.mmr.size()))
-                .finish_non_exhaustive(),
+            Backend::Journaled(b) => {
+                let mut s = f.debug_struct("CommitHistory::Journaled");
+                s.field("branch", &b.branch);
+                if let Some(mmr) = &b.mmr {
+                    s.field("leaves", &u64::from(mmr.leaves()));
+                    s.field("size", &u64::from(mmr.size()));
+                } else {
+                    s.field("poisoned", &true);
+                    s.field("cached_leaves", &b.cached_len);
+                }
+                s.finish_non_exhaustive()
+            }
         }
     }
 }
@@ -366,16 +412,19 @@ impl<X: Executor + 'static> CommitHistory<X> {
         let history_dir = common_dir.join(HISTORY_DIR);
         std::fs::create_dir_all(&history_dir)?;
 
-        // Bootstrap a commonware tokio Context rooted at
-        // `<mkit_dir>/history`. The Context survives the bootstrap
-        // runner's drop because its inner `Arc<Executor>` (the
-        // commonware Executor, not ours) holds the tokio runtime alive.
+        // Get (bootstrapping on first use, per process) the commonware
+        // tokio Context SHARED by every branch under this
+        // `<mkit_dir>/history` directory — see `shared_commonware_context`
+        // and `docs/INVARIANTS.md`, "One commonware storage Context per
+        // history dir per process". The Context survives past this
+        // call's return because its inner `Arc<Executor>` (the
+        // commonware Executor, not ours) holds the tokio runtime alive
+        // for as long as any clone of the returned `Arc` is.
         //
-        // This is the ONLY place a fresh Context gets bootstrapped.
         // [`Self::reopen`] re-derives state via [`Self::init_journaled`]
-        // against its already-live Context instead of calling this
-        // again — see issue #640.
-        let ctx = bootstrap_commonware_context(&history_dir)?;
+        // against the SAME shared `Arc` (cloned, not re-fetched from the
+        // cache) instead of calling this again — see issue #640.
+        let ctx = shared_commonware_context(&history_dir)?;
 
         Self::init_journaled(executor, ctx, common_dir, branch)
     }
@@ -393,7 +442,7 @@ impl<X: Executor + 'static> CommitHistory<X> {
     /// bootstrap itself.
     fn init_journaled(
         executor: Arc<X>,
-        ctx: commonware_runtime::tokio::Context,
+        ctx: Arc<commonware_runtime::tokio::Context>,
         common_dir: &Path,
         branch: &str,
     ) -> Result<Self, HistoryError> {
@@ -408,8 +457,12 @@ impl<X: Executor + 'static> CommitHistory<X> {
             // that pruning later doesn't carry stale data around.
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),
+            // Sequential-read buffer used only during journal replay
+            // (crash recovery on `init`) — matches `write_buffer` for
+            // the same reasoning (see its comment above).
+            replay_buffer: NZUsize!(4096),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(&ctx, NZU16!(4096), NZUsize!(8)),
+            page_cache: CacheRef::from_pooler(ctx.as_ref(), NZU16!(4096), NZUsize!(8)),
         };
 
         let hasher = history_hasher();
@@ -431,9 +484,18 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 .map_err(|e| HistoryError::Corrupted(e.to_string()))?
         };
 
+        let cached_root = mmr
+            .root(&hasher, 0)
+            .expect("0 inactive peaks is always a valid root request");
+        let mut cached_root_bytes = [0u8; HASH_LEN];
+        cached_root_bytes.copy_from_slice(cached_root.as_ref());
+        let cached_len = u64::from(mmr.leaves());
+
         Ok(Self {
             backend: Backend::Journaled(Box::new(JournaledBackend {
-                mmr,
+                mmr: Some(mmr),
+                cached_root: cached_root_bytes,
+                cached_len,
                 executor,
                 ctx,
                 common_dir: common_dir.to_path_buf(),
@@ -504,10 +566,13 @@ impl<X: Executor + 'static> CommitHistory<X> {
         let Backend::Journaled(b) = &self.backend else {
             return Ok(());
         };
-        // Reuse the already-bootstrapped Context — see the doc comment
-        // above and `bootstrap_commonware_context`'s doc comment for
-        // why a second bootstrap must not happen here.
-        let ctx = b.ctx.child("mmr_reopen");
+        // Reuse the already-bootstrapped shared Context (cheap `Arc`
+        // clone, same underlying `.hold` — see `shared_commonware_context`)
+        // — see the doc comment above and `bootstrap_commonware_context`'s
+        // doc comment for why a second bootstrap must not happen here.
+        // `init_journaled` derives its own fresh labelled child from
+        // this for the actual `JournaledMmr::init` call.
+        let ctx = Arc::clone(&b.ctx);
         let fresh = Self::init_journaled(b.executor.clone(), ctx, &b.common_dir, &b.branch)?;
         *self = fresh;
         Ok(())
@@ -559,13 +624,31 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 Ok(Position(u64::from(leaf_loc)))
             }
             Backend::Journaled(b) => {
-                let leaf_loc = b.mmr.leaves();
-                let batch = b.mmr.new_batch().add(&self.hasher, &leaf);
-                let batch = b.mmr.with_mem(|mem| batch.merkleize(mem, &self.hasher));
-                b.mmr
-                    .apply_batch(&batch)
-                    .map_err(|e| HistoryError::Mmr(e.to_string()))?;
-                Ok(Position(u64::from(leaf_loc)))
+                let Some(mmr) = b.mmr.as_ref() else {
+                    return Err(HistoryError::Poisoned);
+                };
+                let leaf_loc = mmr.leaves();
+                let batch = mmr.new_batch().add(&self.hasher, &leaf);
+                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &self.hasher));
+                // `apply_batch` takes `self` by value (commonware
+                // 2026.9.0) — `.take()` moves it out. On success the
+                // new value goes back into `b.mmr`; on failure there is
+                // nothing to put back (commonware dropped it inside the
+                // failing call), so the field is left `None` — see
+                // `HistoryError::Poisoned`.
+                let mmr = b.mmr.take().expect("checked Some above");
+                match mmr.apply_batch(&batch) {
+                    Ok(mmr) => {
+                        let root = mmr
+                            .root(&self.hasher, 0)
+                            .expect("0 inactive peaks is always a valid root request");
+                        b.cached_root.copy_from_slice(root.as_ref());
+                        b.cached_len = u64::from(mmr.leaves());
+                        b.mmr = Some(mmr);
+                        Ok(Position(u64::from(leaf_loc)))
+                    }
+                    Err(e) => Err(HistoryError::Mmr(e.to_string())),
+                }
             }
         }
     }
@@ -580,13 +663,24 @@ impl<X: Executor + 'static> CommitHistory<X> {
         if let Backend::Journaled(b) = &mut self.backend {
             #[cfg(test)]
             record_sync_call();
+            // `sync` takes `self` by value (commonware 2026.9.0) —
+            // `.take()` moves it out. On success the returned value
+            // goes back into `b.mmr`; on failure there is nothing to
+            // put back, so the field is left `None` (poisoned — see
+            // `HistoryError::Poisoned`) rather than left dangling or
+            // reused stale.
+            let Some(mmr) = b.mmr.take() else {
+                return Err(HistoryError::Poisoned);
+            };
             // Flush to disk synchronously so a SIGKILL between this
             // call and the caller's next ref-write does not lose any
             // leaf appended (via `append_no_sync`) since the last sync.
-            let sync_fut = b.mmr.sync();
-            b.executor
-                .block_on(sync_fut)
-                .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+            match b.executor.block_on(mmr.sync()) {
+                Ok(mmr) => {
+                    b.mmr = Some(mmr);
+                }
+                Err(e) => return Err(HistoryError::Mmr(e.to_string())),
+            }
         }
         Ok(())
     }
@@ -595,6 +689,12 @@ impl<X: Executor + 'static> CommitHistory<X> {
     ///
     /// Defined for an empty history — commonware returns a
     /// deterministic empty-MMR root (see SPEC-HISTORY-PROOF §2.3).
+    ///
+    /// If this handle is poisoned (see [`HistoryError::Poisoned`]) —
+    /// a previous `append`/`sync` failed partway through — this
+    /// returns the root as of the last successful mutation rather
+    /// than panicking. Call [`Self::reopen`] to clear the poisoned
+    /// state and get the true current on-disk root.
     ///
     /// # Panics
     ///
@@ -610,22 +710,42 @@ impl<X: Executor + 'static> CommitHistory<X> {
         // `Digest`. Both backends are sync here (Journaled reads its
         // in-memory cache); 0 inactive peaks is always a valid request,
         // so the `Result` is always `Ok` — see the `# Panics` note above.
-        let digest = match &self.backend {
-            Backend::Mem { mmr } => mmr.root(&self.hasher, 0),
-            Backend::Journaled(b) => b.mmr.root(&self.hasher, 0),
+        match &self.backend {
+            Backend::Mem { mmr } => {
+                let digest = mmr
+                    .root(&self.hasher, 0)
+                    .expect("0 inactive peaks is always a valid root request");
+                let mut out = [0u8; HASH_LEN];
+                out.copy_from_slice(digest.as_ref());
+                out
+            }
+            Backend::Journaled(b) => match &b.mmr {
+                Some(mmr) => {
+                    let digest = mmr
+                        .root(&self.hasher, 0)
+                        .expect("0 inactive peaks is always a valid root request");
+                    let mut out = [0u8; HASH_LEN];
+                    out.copy_from_slice(digest.as_ref());
+                    out
+                }
+                None => b.cached_root,
+            },
         }
-        .expect("0 inactive peaks is always a valid root request");
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(digest.as_ref());
-        out
     }
 
     /// Number of leaves (commits) appended so far.
+    ///
+    /// If this handle is poisoned (see [`HistoryError::Poisoned`]),
+    /// returns the count as of the last successful mutation rather
+    /// than panicking — same fallback as [`Self::root`].
     #[must_use]
     pub fn len(&self) -> u64 {
         match &self.backend {
             Backend::Mem { mmr } => u64::from(mmr.leaves()),
-            Backend::Journaled(b) => u64::from(b.mmr.leaves()),
+            Backend::Journaled(b) => match &b.mmr {
+                Some(mmr) => u64::from(mmr.leaves()),
+                None => b.cached_len,
+            },
         }
     }
 
@@ -643,8 +763,11 @@ impl<X: Executor + 'static> CommitHistory<X> {
                 .proof(&self.hasher, loc, 0)
                 .map_err(|e| HistoryError::Mmr(e.to_string())),
             Backend::Journaled(b) => {
+                let Some(mmr) = b.mmr.as_ref() else {
+                    return Err(HistoryError::Poisoned);
+                };
                 let hasher = self.hasher.clone();
-                let proof_fut = b.mmr.proof(&hasher, loc, 0);
+                let proof_fut = mmr.proof(&hasher, loc, 0);
                 // Drive the async proof builder via the executor. The
                 // future borrows `mmr` immutably for the duration of
                 // `block_on`; the borrow ends when `block_on` returns.
@@ -693,6 +816,9 @@ impl<X: Executor + 'static> CommitHistory<X> {
                     ctx: _ctx,
                     ..
                 } = *b;
+                let Some(mmr) = mmr else {
+                    return Err(HistoryError::Poisoned);
+                };
                 executor
                     .block_on(mmr.destroy())
                     .map_err(|e| HistoryError::Mmr(e.to_string()))
@@ -914,6 +1040,73 @@ fn bootstrap_commonware_context(
     .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
 }
 
+/// Process-global cache of bootstrapped commonware `Context`s, keyed by
+/// canonicalized `storage_directory`. See
+/// [`shared_commonware_context`](docs/INVARIANTS.md "One commonware
+/// storage Context per history dir per process").
+///
+/// `Weak` so a directory with no live `CommitHistory` handle referencing
+/// it (every strong `Arc` clone dropped) falls back to a fresh bootstrap
+/// next time, rather than pinning the cache — and the OS-level `.hold`
+/// lock — open forever for a repo that has since been closed.
+type ContextCache = Mutex<HashMap<PathBuf, Weak<commonware_runtime::tokio::Context>>>;
+
+fn context_cache() -> &'static ContextCache {
+    static CACHE: OnceLock<ContextCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the shared, process-wide bootstrapped commonware `Context` for
+/// `storage_directory`, bootstrapping one on first use and reusing it
+/// (via `Weak::upgrade`) for every later call against the same directory
+/// in this process — including calls for different branches, which all
+/// resolve to the same `<mkit_dir>/history` storage directory.
+///
+/// # Why this exists
+///
+/// commonware-runtime 2026.9.0 added a per-`storage_directory` advisory
+/// `.hold` file lock taken (and blocked on) inside `Storage::new`. Two
+/// independent [`bootstrap_commonware_context`] calls against the same
+/// directory take two independent, mutually exclusive flocks on that
+/// file — the second call's `Storage::new` blocks on the first's,
+/// forever, since the first is held for as long as this process keeps a
+/// `CommitHistory` open on that branch. Sharing one bootstrapped
+/// `Context` (and therefore one flock) across every branch under the
+/// same history directory, in this process, avoids that deadlock. See
+/// `docs/INVARIANTS.md`, "One commonware storage Context per history dir
+/// per process".
+fn shared_commonware_context(
+    storage_directory: &Path,
+) -> Result<Arc<commonware_runtime::tokio::Context>, HistoryError> {
+    // Canonicalize so `<mkit_dir>/history` reached via two different
+    // (but filesystem-identical, e.g. one through a symlink) paths still
+    // hits the same cache entry — and therefore shares the same hold —
+    // rather than each independently bootstrapping and deadlocking on
+    // the other. `create_dir_all` has already run by the time every
+    // caller reaches this (see `CommitHistory::open_at_common_dir`), so
+    // canonicalization failing here would mean a race with an external
+    // deletion, not a routine "doesn't exist yet" case; fall back to the
+    // uncanonicalized path rather than fail the open for that.
+    let key = std::fs::canonicalize(storage_directory)
+        .unwrap_or_else(|_| storage_directory.to_path_buf());
+
+    let mut cache = context_cache().lock().unwrap_or_else(|poisoned| {
+        // A panic elsewhere while the lock was held cannot corrupt the
+        // map itself (it only ever holds Weak pointers behind plain
+        // inserts/removals) — recovering here just means a later
+        // bootstrap isn't lost, not that we contribute a further panic.
+        poisoned.into_inner()
+    });
+
+    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        return Ok(existing);
+    }
+
+    let ctx = Arc::new(bootstrap_commonware_context(&key)?);
+    cache.insert(key, Arc::downgrade(&ctx));
+    Ok(ctx)
+}
+
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -937,6 +1130,40 @@ mod tests {
 
     fn fresh_executor() -> Arc<TokioExecutor> {
         Arc::new(TokioExecutor::new().expect("tokio runtime"))
+    }
+
+    /// Run `f` on a background thread and fail (rather than hang the
+    /// whole `cargo test` run forever) if it does not finish within
+    /// `timeout`. commonware 2026.9.0's per-storage-directory `.hold`
+    /// advisory lock (see docs/INVARIANTS.md, "One commonware storage
+    /// Context per history dir per process") turns a same-process
+    /// double bootstrap against the same `history_dir` into a silent
+    /// deadlock rather than a fast error — every test that opens more
+    /// than one `CommitHistory` against the same `mkit_dir` in one
+    /// process is wrapped in this so a regression here is a normal
+    /// test *failure*, not a hung test binary someone has to `kill -9`.
+    fn assert_completes_within<F, T>(timeout: std::time::Duration, f: F) -> T
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            // The receiver may already be gone if we already timed out
+            // — that's fine, there is nothing left to report to.
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(e) => panic!(
+                "did not complete within {timeout:?} ({e}) — likely deadlocked opening a \
+                 second CommitHistory against the same history dir in this process (see \
+                 docs/INVARIANTS.md, \"One commonware storage Context per history dir per \
+                 process\")"
+            ),
+        }
     }
 
     // ---- mem-only API (unchanged from issue #157) -----------------
@@ -1178,13 +1405,39 @@ mod tests {
 
     #[test]
     fn open_at_distinct_branches_have_distinct_roots() {
-        let (_tmp, mkit_dir) = fresh_mkit_dir();
-        let exec = fresh_executor();
-        let mut main = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
-        let mut dev = CommitHistory::open_at(exec.clone(), &mkit_dir, "dev").unwrap();
-        main.append(&synth(0)).unwrap();
-        dev.append(&synth(1)).unwrap();
-        assert_ne!(main.root(), dev.root());
+        assert_completes_within(std::time::Duration::from_secs(10), || {
+            let (_tmp, mkit_dir) = fresh_mkit_dir();
+            let exec = fresh_executor();
+            let mut main = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+            let mut dev = CommitHistory::open_at(exec.clone(), &mkit_dir, "dev").unwrap();
+            main.append(&synth(0)).unwrap();
+            dev.append(&synth(1)).unwrap();
+            assert_ne!(main.root(), dev.root());
+        });
+    }
+
+    /// Dedicated regression test for the `.hold` deadlock (see
+    /// `assert_completes_within`'s doc comment): opening a second
+    /// branch's `CommitHistory` against the same `mkit_dir`, from a
+    /// second thread, while the first is still open, must complete —
+    /// not block forever waiting on the first handle's advisory lock.
+    #[test]
+    fn two_branches_open_concurrently_in_one_process_does_not_block() {
+        assert_completes_within(std::time::Duration::from_secs(10), || {
+            let (_tmp, mkit_dir) = fresh_mkit_dir();
+            let exec = fresh_executor();
+            let _main = CommitHistory::open_at(exec.clone(), &mkit_dir, "main").unwrap();
+
+            let mkit_dir_for_thread = mkit_dir.clone();
+            let exec_for_thread = exec.clone();
+            let dev = std::thread::spawn(move || {
+                CommitHistory::open_at(exec_for_thread, &mkit_dir_for_thread, "dev").unwrap()
+            })
+            .join()
+            .expect("dev-branch open thread must not panic");
+
+            assert!(dev.is_empty());
+        });
     }
 
     #[test]
@@ -1271,25 +1524,27 @@ mod tests {
 
     #[test]
     fn destroy_of_one_branch_does_not_touch_a_sibling_branch() {
-        let (_tmp, mkit_dir) = fresh_mkit_dir();
-        let exec = fresh_executor();
+        assert_completes_within(std::time::Duration::from_secs(10), || {
+            let (_tmp, mkit_dir) = fresh_mkit_dir();
+            let exec = fresh_executor();
 
-        let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "a").unwrap();
-        let mut b = CommitHistory::open_at(exec.clone(), &mkit_dir, "b").unwrap();
-        a.append(&synth(0)).unwrap();
-        b.append(&synth(1)).unwrap();
-        let b_root = b.root();
-        drop(b);
+            let mut a = CommitHistory::open_at(exec.clone(), &mkit_dir, "a").unwrap();
+            let mut b = CommitHistory::open_at(exec.clone(), &mkit_dir, "b").unwrap();
+            a.append(&synth(0)).unwrap();
+            b.append(&synth(1)).unwrap();
+            let b_root = b.root();
+            drop(b);
 
-        a.destroy().unwrap();
+            a.destroy().unwrap();
 
-        let b_reopened = CommitHistory::open_at(exec, &mkit_dir, "b").unwrap();
-        assert_eq!(
-            b_reopened.len(),
-            1,
-            "destroying branch 'a' must not affect sibling branch 'b'"
-        );
-        assert_eq!(b_reopened.root(), b_root);
+            let b_reopened = CommitHistory::open_at(exec, &mkit_dir, "b").unwrap();
+            assert_eq!(
+                b_reopened.len(),
+                1,
+                "destroying branch 'a' must not affect sibling branch 'b'"
+            );
+            assert_eq!(b_reopened.root(), b_root);
+        });
     }
 
     #[test]
@@ -1486,6 +1741,76 @@ mod tests {
             }
             Err(other) => panic!("unexpected error on truncated journal: {other:?}"),
         }
+    }
+
+    /// commonware 2026.9.0's `Merkle::{apply_batch, sync}` take `self`
+    /// by value: on `Err` the consumed value is dropped inside the
+    /// failing call and there is nothing to put back into
+    /// `JournaledBackend.mmr` (see that field's doc comment and
+    /// `HistoryError::Poisoned`). This test drives that exact
+    /// post-failure state directly — `b.mmr = None` — rather than
+    /// forcing a real commonware I/O failure: an already-open blob fd
+    /// keeps accepting writes after `chmod` (permissions are checked
+    /// at `open`, not per `write`), so the only portable way to make a
+    /// real write fail is a `chmod`'d directory at the moment a new
+    /// blob is created past `items_per_blob` = 4096 — thousands of
+    /// appends, too slow for a unit test — so the poisoned state
+    /// itself, not how it's reached, is what's under test here.
+    #[test]
+    fn poisoned_journaled_handle_answers_without_panicking_and_reopen_recovers() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let commits: Vec<Hash> = (0..5u64).map(synth).collect();
+
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        for c in &commits {
+            h.append(c).unwrap();
+        }
+        let root_before = h.root();
+        let len_before = h.len();
+        assert_eq!(len_before, 5);
+
+        let Backend::Journaled(b) = &mut h.backend else {
+            panic!("open_at must produce the journaled backend");
+        };
+        b.mmr = None;
+
+        // root()/len() have no `Result` in their signature — they must
+        // answer with the last known-good value, never panic.
+        assert_eq!(h.root(), root_before, "root() must not panic when poisoned");
+        assert_eq!(h.len(), len_before, "len() must not panic when poisoned");
+
+        // Every operation that touches the MMR must return the typed
+        // error instead of panicking.
+        assert!(matches!(h.append(&synth(99)), Err(HistoryError::Poisoned)));
+        assert!(matches!(h.prove(Position(0)), Err(HistoryError::Poisoned)));
+
+        // reopen() re-derives from disk and clears the poisoned state;
+        // the handle is fully usable again afterwards.
+        h.reopen().unwrap();
+        assert_eq!(h.len(), len_before);
+        assert_eq!(h.root(), root_before);
+        h.append(&synth(100)).unwrap();
+        assert_eq!(h.len(), len_before + 1);
+    }
+
+    /// Same poisoned-state contract as the test above, for `destroy`:
+    /// consuming a poisoned handle must return
+    /// [`HistoryError::Poisoned`] instead of panicking on the `None`
+    /// `mmr`.
+    #[test]
+    fn poisoned_journaled_handle_destroy_returns_error_instead_of_panicking() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+        h.append(&synth(1)).unwrap();
+
+        let Backend::Journaled(b) = &mut h.backend else {
+            panic!("open_at must produce the journaled backend");
+        };
+        b.mmr = None;
+
+        assert!(matches!(h.destroy(), Err(HistoryError::Poisoned)));
     }
 
     // ---- Rebuild shim --------------------------------------------

@@ -189,9 +189,9 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "commonware-codec"
-version = "2026.7.1"
+version = "2026.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "785ff1148d798363638d83a1dfcca9db8ac6001a27292a23dc10a8595e1ee480"
+checksum = "4d1e1bd11366f81e304c737c098eb0c075cef59e21daff44c3227952c2f75b49"
 dependencies = [
  "bytes",
  "cfg-if",
@@ -203,9 +203,9 @@ dependencies = [
 
 [[package]]
 name = "commonware-codec-macros"
-version = "2026.7.1"
+version = "2026.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e308eca99c0be5ae7d8c19ecb5c2c85b7484b3b7e24f6e36eaed46a9a7cad0c"
+checksum = "54ccca449c618a38da9b867c128ec1e7be55cfe0b69b8814c25daac229ac6cc9"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -215,18 +215,18 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "2026.7.1"
+version = "2026.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b49853beaa75a447c448eaf6a48a38ba247a85792807956bc4487565a35fa35b"
+checksum = "3058bc70420515d6e92d99510ec2b2a2e1d029a6aced44d243c05ce8d60c6493"
 dependencies = [
  "commonware-macros-impl",
 ]
 
 [[package]]
 name = "commonware-macros-impl"
-version = "2026.7.1"
+version = "2026.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4b099d6d10014a6ab1ae0b112c8329570adacc1fdbf6b27c9aebb38195f4eee"
+checksum = "bbcf77c39d7486af7394b1d1c4d268d08a5763036b813a2e6aba2ee825b5bd45"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1542,26 +1542,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.9.12+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned",
- "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 0.7.15",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.7.5+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
-dependencies = [
- "serde_core",
+ "winnow",
 ]
 
 [[package]]
@@ -1580,9 +1571,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
  "indexmap",
- "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_datetime",
  "toml_parser",
- "winnow 1.0.4",
+ "winnow",
 ]
 
 [[package]]
@@ -1591,7 +1582,7 @@ version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
- "winnow 1.0.4",
+ "winnow",
 ]
 
 [[package]]
@@ -1788,12 +1779,6 @@ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
-
-[[package]]
-name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 
 [[package]]
 name = "winnow"
