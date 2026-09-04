@@ -388,12 +388,12 @@ branch (for example, two concurrent `update-ref` calls, which deliberately
 skip the worktree lock) both observe an empty journal and
 both independently backfill, corrupting the journal's leaf positions.
 
-### 4.6 Two behavior changes from the commonware `2026.9.0` train
+### 4.6 Behavior changes from the commonware `2026.9.0` train
 
 Bumping the pinned commonware train from `2026.7.1` to `2026.9.0`
-(MKIT-2) surfaced two upstream behaviors this document did not
-previously account for. Neither changes the wire/on-disk *bytes*
-documented above; both are call-site/process-level behavior.
+(MKIT-2) surfaced three upstream behaviors this document did not
+previously account for. None changes the wire/on-disk *bytes*
+documented above; all three are call-site/process-level behavior.
 
 - **Blob layout is now versioned, and the upgrade is one-way.** New
   journal blobs commonware writes get a versioned header; a journal
@@ -420,6 +420,22 @@ documented above; both are call-site/process-level behavior.
   meaningful across processes); that process-level contention is
   additional to, not a replacement for, the `refs-history-<branch>.lock`
   critical section in §4.3.
+- **The `Context` `CommitHistory::open_at` bootstraps is post-shutdown
+  by the time it is returned.** `commonware_runtime::tokio::Runner::start`
+  now aborts its task tree, closes task admission, and drops its inner
+  tokio runtime before returning control to its `start` closure — so
+  the `Context` `bootstrap_commonware_context` hands back (and every
+  `JournaledBackend.ctx` clone derived from it) can no longer be
+  spawned through: a `Spawner::spawn` call on it resolves to
+  `Err(Error::Closed)` instead of running. This does not affect
+  durability: every blob read/write/fsync on the journaled path runs
+  via ambient `tokio::task::spawn_blocking` on mkit's OWN executor
+  (the caller-supplied `Executor` this module is generic over), never
+  by spawning through the shared `Context`. What the shared `Context`
+  is still held for is the per-storage-directory `.hold` flock, the
+  storage/network buffer pools, and the metrics registry — see
+  `docs/INVARIANTS.md`, "The shared commonware Context is
+  post-shutdown after `open_at`".
 
 ## 5. Feature-flag status and stability
 

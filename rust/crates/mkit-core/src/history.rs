@@ -52,20 +52,26 @@
 //! the caller. The commonware `Context` needed to drive the
 //! journaled MMR is bootstrapped *internally* via a one-shot
 //! [`commonware_runtime::tokio::Runner::start`] on a fresh OS thread
-//! (the standard workaround documented in transport-enc):
-//! the runner returns a Context clone, the outer `Arc<Executor>` inside
-//! the Context keeps tokio's runtime alive, and the bootstrap thread
-//! joins immediately. Subsequent async ops are driven through the
-//! caller-supplied executor.
+//! (the standard workaround documented in transport-enc): the runner
+//! returns a Context clone, and the bootstrap thread joins
+//! immediately. As of commonware-runtime 2026.9.0, `Runner::start`
+//! aborts its task tree, closes task admission, and drops its inner
+//! tokio runtime *before returning* — so the `Context` handed back is
+//! already post-shutdown. Subsequent async ops are driven through the
+//! caller-supplied executor, never by spawning through this `Context`;
+//! see [`JournaledBackend`]'s `ctx` field and `docs/INVARIANTS.md`,
+//! "The shared commonware Context is post-shutdown after `open_at`".
 //!
 //! This means production callers only need to construct an executor
 //! ([`crate::history::tokio_executor::TokioExecutor`] is provided when
 //! the `history-mmr` feature is on); mkit-core handles the
 //! commonware-side wiring. The trade-off: every [`CommitHistory`]
 //! owns one tokio runtime (via its executor) AND one commonware
-//! Context with its own inner tokio runtime. The two never need to
-//! interact — `tokio::fs` and `tokio::sync::Mutex` are runtime-agnostic
-//! and work whichever runtime is driving the poll.
+//! Context — but the Context's own inner tokio runtime is dead by the
+//! time `open_at` returns. All I/O the journaled MMR performs against
+//! that `Context` (blob reads/writes, fsync) runs on mkit's executor
+//! via ambient `tokio::task::spawn_blocking`, not on the Context's own
+//! (shut-down) runtime.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -283,11 +289,15 @@ enum Backend<X: Executor> {
 }
 
 struct JournaledBackend<X: Executor> {
-    // Order matters for Drop: `mmr` must drop before `ctx` so
-    // any pending async-resource shutdowns can still poll on the
-    // surviving tokio runtime. In practice commonware's
-    // `Journaled` only flushes synchronously in `sync`, but the
-    // ordering is cheap insurance.
+    // Order matters for Drop: `mmr` must drop before `ctx` so any
+    // resource that borrows `ctx` (buffer pools, metrics registrations)
+    // is torn down first. This is NOT about a surviving tokio runtime
+    // draining pending async work on drop — `ctx`'s inner tokio runtime
+    // is already shut down by the time this struct is even constructed
+    // (see `docs/INVARIANTS.md`, "The shared commonware Context is
+    // post-shutdown after `open_at`"); commonware's `Journaled` only
+    // flushes synchronously in `sync`, driven on mkit's OWN executor.
+    // The field ordering is cheap insurance regardless.
     //
     // `Option` because commonware 2026.9.0's `apply_batch`/`sync` take
     // `self` by value (`Result<Self, Error>`): on success the new
@@ -304,10 +314,21 @@ struct JournaledBackend<X: Executor> {
     cached_root: Hash,
     cached_len: u64,
     executor: Arc<X>,
-    // Held to keep the bootstrap tokio runtime (inside the Context's
-    // executor `Arc`) alive for the whole CommitHistory lifetime, AND
-    // read by `reopen` (issue #640) to derive a labelled child Context
-    // instead of paying for a second `bootstrap_commonware_context`.
+    // Held for the whole CommitHistory lifetime because it is what
+    // keeps the `.hold` flock, buffer pools, and metrics registry
+    // alive — NOT because its inner tokio runtime is alive: commonware
+    // 2026.9.0's `Runner::start` (via `bootstrap_commonware_context`)
+    // aborts the task tree, closes task admission, and drops that
+    // runtime before `open_at` even returns. Never `Spawner::spawn`
+    // through this `Context` (or a child of it) — it silently resolves
+    // to `Err(Error::Closed)` instead of running. See
+    // `docs/INVARIANTS.md`, "The shared commonware Context is
+    // post-shutdown after `open_at`", and the module-level `#
+    // Executor / Context ownership` doc above.
+    //
+    // Also read by `reopen` (issue #640) to derive a labelled child
+    // Context instead of paying for a second
+    // `bootstrap_commonware_context`.
     //
     // `Arc` because this is the SHARED, process-wide Context for this
     // branch's `<mkit_dir>/history` storage directory (see
@@ -417,9 +438,13 @@ impl<X: Executor + 'static> CommitHistory<X> {
         // `<mkit_dir>/history` directory — see `shared_commonware_context`
         // and `docs/INVARIANTS.md`, "One commonware storage Context per
         // history dir per process". The Context survives past this
-        // call's return because its inner `Arc<Executor>` (the
-        // commonware Executor, not ours) holds the tokio runtime alive
-        // for as long as any clone of the returned `Arc` is.
+        // call's return because the returned `Arc` is held by every
+        // live `CommitHistory` for this history dir — NOT because its
+        // inner tokio runtime is still alive; that runtime is already
+        // shut down by the time this function returns (see
+        // `docs/INVARIANTS.md`, "The shared commonware Context is
+        // post-shutdown after `open_at`"). What surviving keeps alive
+        // is the `.hold` flock, buffer pools, and metrics registry.
         //
         // [`Self::reopen`] re-derives state via [`Self::init_journaled`]
         // against the SAME shared `Arc` (cloned, not re-fetched from the
@@ -468,9 +493,11 @@ impl<X: Executor + 'static> CommitHistory<X> {
         let hasher = history_hasher();
         let mmr = {
             let hasher_inner = history_hasher();
-            // `child` returns an owned child Context, leaving `ctx` usable for
-            // the surviving CommitHistory (which keeps the bootstrap runtime
-            // alive via its inner executor Arc).
+            // `child` returns an owned child Context, leaving `ctx` usable
+            // for the surviving CommitHistory (which holds it for the
+            // `.hold` flock, buffer pools, and metrics registry — its
+            // inner tokio runtime is already shut down, not alive; see
+            // the `JournaledBackend.ctx` doc comment).
             let ctx_for_init = ctx.child("mmr_init");
             executor
                 .block_on(async move {
@@ -802,12 +829,13 @@ impl<X: Executor + 'static> CommitHistory<X> {
         match self.backend {
             Backend::Mem { .. } => Ok(()),
             Backend::Journaled(b) => {
-                // Destructure so `executor` and `ctx` (which keeps the
-                // bootstrap commonware runtime alive — see the
-                // `JournaledBackend` doc comment) both stay in scope for
-                // the duration of `block_on`, exactly like every other
-                // method on this type. `ctx` itself is unused here beyond
-                // that lifetime-extension role (see #640, which made the
+                // Destructure so `executor` and `ctx` both stay in scope
+                // for the duration of `block_on`, exactly like every
+                // other method on this type. `ctx`'s own inner tokio
+                // runtime is already shut down (see the
+                // `JournaledBackend.ctx` doc comment) — it is unused
+                // here beyond keeping the `.hold` flock / buffer pools
+                // alive for the duration (see #640, which made the
                 // field readable elsewhere but `destroy` has no need to
                 // read it).
                 let JournaledBackend {
@@ -1002,8 +1030,14 @@ mod bootstrap_probe {
 /// The bootstrap is done on a fresh OS thread because tokio refuses to
 /// nest `runtime::Builder::build()` inside an already-active runtime
 /// (the `TokioExecutor`'s runtime is already alive in the caller's
-/// thread). The returned Context's inner `Arc<Executor>` keeps the
-/// bootstrap runtime alive after the bootstrap thread joins.
+/// thread). As of commonware-runtime 2026.9.0, `Runner::start` aborts
+/// its task tree, closes task admission, and drops its inner tokio
+/// runtime *before returning* — so the returned `Context` is already
+/// post-shutdown by the time this function's caller sees it. See
+/// `docs/INVARIANTS.md`, "The shared commonware Context is
+/// post-shutdown after `open_at`": callers must drive all async work
+/// through their OWN executor (e.g. via ambient `spawn_blocking`),
+/// never by `Spawner::spawn`-ing through this returned Context.
 ///
 /// See `docs/specs/SPEC-HISTORY-PROOF.md` §4.1 for the design rationale and
 /// the trade-off with the alternative "share the caller's tokio
@@ -1029,10 +1063,14 @@ fn bootstrap_commonware_context(
         // Return an owned, labelled child Context. `Context::clone` and
         // `Metrics::with_label` were both removed in 2026.5.0;
         // `Supervisor::child` returns an owned Context that clones the
-        // inner `executor: Arc<Executor>`, which keeps the tokio runtime
-        // alive after the bootstrap Runner is dropped at the end of
-        // `start`. The label is best-effort so any commonware metrics
-        // surfaced through this Context are easy to spot in a debugger.
+        // inner `executor: Arc<Executor>`. That `Arc` no longer keeps a
+        // LIVE tokio runtime alive as of commonware-runtime 2026.9.0 —
+        // `Runner::start` shuts its runtime down and closes task
+        // admission before returning the Context to its `start`
+        // closure — so what survives is the `.hold` flock, buffer
+        // pools, and metrics registry, not a runnable executor. The
+        // label is best-effort so any commonware metrics surfaced
+        // through this Context are easy to spot in a debugger.
         runner
             .start(|ctx| async move { commonware_runtime::Supervisor::child(&ctx, "mkit_history") })
     })
@@ -1811,6 +1849,44 @@ mod tests {
         b.mmr = None;
 
         assert!(matches!(h.destroy(), Err(HistoryError::Poisoned)));
+    }
+
+    /// commonware-runtime 2026.9.0's `Runner::start` aborts the task
+    /// tree, closes task admission, and drops the bootstrap tokio
+    /// runtime before returning (see `docs/INVARIANTS.md`, "The shared
+    /// commonware Context is post-shutdown after `open_at`"). Pins the
+    /// precondition this module now relies on: `JournaledBackend.ctx`
+    /// must never be spawned through — a `Spawner::spawn` call on it
+    /// (or a child of it) is admitted into an already-closed task tree
+    /// and resolves to `Err(Error::Closed)`, silently dropping the
+    /// work rather than running it.
+    #[test]
+    fn shared_commonware_context_is_post_shutdown_and_must_not_be_spawned_through() {
+        use commonware_runtime::Spawner as _;
+
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let exec = fresh_executor();
+        let mut h = CommitHistory::open_at(exec, &mkit_dir, "main").unwrap();
+
+        let Backend::Journaled(b) = &h.backend else {
+            panic!("open_at must produce the journaled backend");
+        };
+
+        let handle = b.ctx.child("probe").spawn(|_ctx| async { 1u32 });
+        let result = b.executor.block_on(handle);
+        assert!(
+            matches!(result, Err(commonware_runtime::Error::Closed)),
+            "expected a spawn through the shared Context to be rejected by its \
+             already-closed task tree, got {result:?}"
+        );
+
+        // The journaled path itself does not depend on that dead
+        // runtime: commonware drives blob I/O via ambient
+        // `spawn_blocking` on mkit's OWN executor, not by spawning
+        // through `ctx`, so append/reopen/len all still work.
+        h.append(&synth(0)).unwrap();
+        h.reopen().unwrap();
+        assert_eq!(h.len(), 1);
     }
 
     // ---- Rebuild shim --------------------------------------------
