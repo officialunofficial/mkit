@@ -22,6 +22,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
 | `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest plus rustls transport with bearer auth and `If-Match` CAS         |
+| `mkit-transport-connect`       | `rust/crates/mkit-transport-connect/` | ConnectRPC client implementing `mkit.transport.v1.TransportService` (`specs/SPEC-TRANSPORT-CONNECT.md`); the transport `mkit-cli` actually constructs for `mkit+https://` / `mkit+http://` |
 | `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`specs/SPEC-TRANSPORT-ENC.md`) |
