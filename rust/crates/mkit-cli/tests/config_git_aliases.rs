@@ -193,3 +193,90 @@ fn user_name_does_not_spoof_the_signed_author() {
         "the non-authoritative alias must never appear as the commit author: {log_s:?}"
     );
 }
+
+// ---------- MKIT-12: warn when user.name/user.email is set without ----
+// ---------- user.identity ----------------------------------------------
+
+#[test]
+fn first_alias_set_without_identity_warns() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+
+    let out = run_in(root, x, &["config", "user.name", "Alice"]);
+    assert!(out.status.success(), "config set failed: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("does not affect the signed commit author"),
+        "expected the alias warning on stderr, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn global_alias_set_without_identity_warns() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+
+    let out = run_in(
+        root,
+        x,
+        &["config", "--global", "user.email", "a@example.com"],
+    );
+    assert!(out.status.success(), "config set failed: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("does not affect the signed commit author"),
+        "expected the alias warning on stderr for --global, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn alias_set_with_identity_present_does_not_warn() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(
+        run_in(root, x, &["config", "user.identity", "mid:42"])
+            .status
+            .success()
+    );
+
+    let out = run_in(root, x, &["config", "user.name", "Alice"]);
+    assert!(out.status.success(), "config set failed: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("does not affect the signed commit author"),
+        "must not warn once user.identity is set: {stderr:?}"
+    );
+}
+
+#[test]
+fn second_alias_set_does_not_warn_again() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(
+        run_in(root, x, &["config", "user.name", "Alice"])
+            .status
+            .success()
+    );
+
+    let out = run_in(root, x, &["config", "user.name", "Alice Two"]);
+    assert!(out.status.success(), "config set failed: {out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        !stderr.contains("does not affect the signed commit author"),
+        "must warn only once per repo setup: {stderr:?}"
+    );
+}
+
+#[test]
+fn alias_set_stdout_is_unchanged() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+
+    let out = run_in(root, x, &["config", "user.name", "Alice"]);
+    assert!(out.status.success(), "config set failed: {out:?}");
+    assert!(
+        out.stdout.is_empty(),
+        "a config set must not print anything to stdout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

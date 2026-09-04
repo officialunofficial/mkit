@@ -272,11 +272,47 @@ pub fn acquire_worktree_lock(layout: &RepoLayout) -> Result<mkit_core::repo_lock
     // Per-worktree state: the lock serialises THIS tree's worktree/
     // index mutations (#493 Phase 3 adds a separate shared lock for
     // store/refs/gc mutation).
-    mkit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).map_err(|e| {
+    let lock = mkit_core::repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK)
+        .map_err(|e| {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "error: repo lock: {e}");
+            exit::TEMPFAIL
+        })?;
+    warn_if_served(layout);
+    Ok(lock)
+}
+
+/// Basename of the shared lock a live `mkit serve` process holds for its
+/// whole lifetime (SPEC-CONCURRENCY §3.1, MKIT-11/#655). Lives in the
+/// common dir (`FileTransport` always serves a single-worktree root, so
+/// common dir and worktree state dir coincide there — see
+/// `mkit_core::layout`). Local mutating commands never take this lock
+/// themselves; they only [`probe_exclusive`](mkit_core::repo_lock::probe_exclusive)
+/// it via [`warn_if_served`] to detect a live `serve`.
+pub const SERVE_LOCK: &str = "serve.lock";
+
+/// Warn on stderr when at least one `mkit serve` is currently alive
+/// against `layout`'s common dir. Called by [`acquire_worktree_lock`]
+/// and [`acquire_worktrees_registry_lock`] right after they take their
+/// own lock, so every worktree-mutating command and `gc` gets the
+/// warning "for free."
+///
+/// This is detection, not coordination: `FileTransport`'s only lock
+/// (`refs/.lock`) serializes file-transport instances against each
+/// other, not against local worktree mutation or `gc` — see
+/// SPEC-CONCURRENCY §3.1. A probe failure (I/O error) is swallowed:
+/// this is a best-effort diagnostic, never a reason to fail the calling
+/// command.
+fn warn_if_served(layout: &RepoLayout) {
+    if let Ok(false) = mkit_core::repo_lock::probe_exclusive(layout.common_dir(), SERVE_LOCK) {
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "error: repo lock: {e}");
-        exit::TEMPFAIL
-    })
+        let _ = writeln!(
+            stderr,
+            "warning: {} is currently being served by `mkit serve`; concurrent worktree \
+             mutation and `gc` are not coordinated with it (SPEC-CONCURRENCY §3.1)",
+            layout.worktree_root().display()
+        );
+    }
 }
 
 /// Basename of the common-dir lock serialising linked-worktree
@@ -301,13 +337,14 @@ pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
 pub fn acquire_worktrees_registry_lock(
     layout: &RepoLayout,
 ) -> Result<mkit_core::repo_lock::RepoLock, u8> {
-    mkit_core::repo_lock::acquire_default(layout.common_dir(), WORKTREES_REGISTRY_LOCK).map_err(
-        |e| {
+    let lock = mkit_core::repo_lock::acquire_default(layout.common_dir(), WORKTREES_REGISTRY_LOCK)
+        .map_err(|e| {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "error: worktree registry lock: {e}");
             exit::TEMPFAIL
-        },
-    )
+        })?;
+    warn_if_served(layout);
+    Ok(lock)
 }
 
 /// Every worktree of `layout`'s repository as `(tree root, layout)`

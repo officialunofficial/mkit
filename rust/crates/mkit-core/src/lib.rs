@@ -120,7 +120,9 @@ pub use chunker::{
 };
 
 // Delta instruction stream (SPEC-DELTA v1).
-pub use delta::{HEADER_LEN as DELTA_HEADER_LEN, MAX_INSERT_LEN, OP_COPY, STREAM_VERSION};
+pub use delta::{
+    DeltaCorruption, HEADER_LEN as DELTA_HEADER_LEN, MAX_INSERT_LEN, OP_COPY, STREAM_VERSION,
+};
 
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{

@@ -112,9 +112,14 @@ pub struct Config {
     /// and round-tripped for parity with `git config user.name`, but it
     /// NEVER feeds the cryptographic commit author (which is
     /// [`user_identity`](Self::user_identity) / the signing key). Repo-safe.
+    /// `mkit config` warns on stderr the first time this or
+    /// [`user_email`](Self::user_email) is set while `user_identity` is
+    /// still empty (MKIT-12), since a user coming from git might
+    /// otherwise expect it to control authorship.
     pub user_name: String,
     /// Git-compatibility alias `user.email`. Non-authoritative, exactly
-    /// like [`user_name`](Self::user_name) — never feeds the signed author.
+    /// like [`user_name`](Self::user_name) — never feeds the signed author,
+    /// and shares its first-set-without-`user_identity` warning.
     pub user_email: String,
     /// Exact remote endpoint the user has explicitly trusted for
     /// ambient HTTP/S3 environment credentials. User-scoped only.

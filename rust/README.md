@@ -18,7 +18,7 @@ rust/
 │   │                           # ignore, repo_lock, ops/*, sign, protocol
 │   ├── mkit-transport-memory/
 │   ├── mkit-transport-file/
-│   ├── mkit-transport-http/
+│   ├── mkit-transport-http/    # legacy JSON dialect, superseded by mkit-transport-connect
 │   ├── mkit-transport-s3/
 │   ├── mkit-transport-ssh/
 │   ├── mkit-transport-enc/     # mkit+enc:// no-OpenSSH encrypted transport

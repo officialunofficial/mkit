@@ -123,6 +123,7 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{e}"), exit::CONFIG_ERROR);
     }
+    warn_if_alias_without_identity(&layered.merged, key);
     let forbidden = REPO_FORBIDDEN_KEYS.contains(&key);
     if opts.local && forbidden {
         return emit_err(
@@ -260,6 +261,38 @@ fn is_path_key(key: &str) -> bool {
             | "attest.secp256k1_key_path"
             | "attest.p256_key_path"
     )
+}
+
+/// Warn on stderr the first time `user.name`/`user.email` is set in a
+/// repo that has never set `user.identity` (MKIT-12/#655): these are
+/// git-compatibility aliases that never feed the signed commit author
+/// (see `user_name_does_not_spoof_the_signed_author` in
+/// `tests/config_git_aliases.rs`), and a user coming from git may
+/// otherwise reasonably expect them to.
+///
+/// "First time" is: neither alias nor `user.identity` has a value yet in
+/// the pre-write merged view (`merged`, read before this set is
+/// applied). Once any of the three is set, the warning never fires again
+/// for this repo — including for the second alias, so setting
+/// `user.name` then `user.email` warns only once. Unsetting all three
+/// re-arms it.
+fn warn_if_alias_without_identity(merged: &Config, key: &str) {
+    if !matches!(key, "user.name" | "user.email") {
+        return;
+    }
+    if !merged.user_identity.is_empty()
+        || !merged.user_name.is_empty()
+        || !merged.user_email.is_empty()
+    {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "warning: `{key}` is a git-compatibility alias and does not affect the signed commit \
+         author; commits are signed as `user.identity` (unset) or, by default, the signing \
+         key's identity — set it with `mkit config user.identity <value>` (SPEC-SIGNING §6)"
+    );
 }
 
 fn write_user_scoped(key: &str, value: &str) -> u8 {

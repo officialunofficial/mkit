@@ -60,3 +60,38 @@ cross-service inconsistency, not a build error.
 **Enforced by:** `scripts/check-crypto-stack-version.sh`, run by the
 "Meta: crypto-stack version" workflow on any change to a `Cargo.toml` under
 `rust/`, `contrib/signers/`, or `apps/`.
+
+## A live `mkit serve` is detectable by local worktree commands
+
+**Always:** every live `mkit serve` process holds a **shared** kernel
+lock (`mkit_core::repo_lock::acquire_shared`) on `<common_dir>/serve.lock`
+for its entire lifetime, across all three of its modes (stdin SSH-frame,
+`--listen-enc`, `--http`). Every command that acquires `worktree.lock`
+or `worktrees.lock` (`mkit-cli`'s `acquire_worktree_lock` /
+`acquire_worktrees_registry_lock`) immediately probes that same
+`serve.lock` non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`)
+and, if it finds the lock busy, prints a warning to stderr naming the
+served root before proceeding.
+
+**Because:** `mkit-transport-file`'s only lock (`<root>/.mkit/refs/.lock`)
+serializes file-transport instances against *each other*, not against
+local worktree mutation or `gc` (SPEC-CONCURRENCY §3.1). Running `mkit
+gc` or a worktree-mutating command directly against a root a live `mkit
+serve` is also operating on is unsupported and uncoordinated; without
+this invariant, nothing distinguishes that misuse from an ordinary,
+safe invocation, and the failure (a `gc` sweep racing a concurrent
+push's object write, or a lost ref update) surfaces only as
+after-the-fact corruption with no diagnostic pointing at the cause.
+
+**If violated:** a `gc` can silently sweep objects a concurrent `mkit
+serve` client just uploaded, or a local commit/checkout can silently
+lose a race against a client push — both without any warning ever
+appearing, leaving an operator no reason to suspect the concurrent-serve
+misconfiguration until data is already gone. This is detection only,
+not coordination: a direct `mkit push mkit+file:///path` (bypassing
+`mkit serve`) and a `serve` that starts *during* an already-in-flight
+local critical section both remain undetected — see SPEC-CONCURRENCY
+§3.1 for the full statement of what this warning does and does not
+cover.
+
+**Enforced by:** `mkit-cli/tests/serve_guard.rs`.

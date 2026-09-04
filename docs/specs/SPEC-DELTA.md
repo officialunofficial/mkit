@@ -59,12 +59,20 @@ MUST verify:
   reader enforces this per-opcode, not only at end-of-stream).
 - The sum of all emitted bytes equals `result_len` at end-of-stream.
 
-Mismatches yield `DeltaCorrupt`. The Rust implementation collapses
+Mismatches yield `DeltaCorrupt`. The Rust implementation surfaces this
+as `MkitError::DeltaCorrupt(DeltaCorruption)` (MKIT-13; prior to this,
 "COPY past base", "reserved bits set", "zero opcode", "zero-length
-COPY", "result_len overrun", and "result_len underrun at EOF" into
-the single error `MkitError::TrailingData`; matching on the variant
-discriminates only "truncated input" (`UnexpectedEof`) from
-"structurally corrupt" (`TrailingData`).
+COPY", "result_len overrun", and "result_len underrun at EOF" were all
+collapsed into the generic `MkitError::TrailingData`, which
+`serialize.rs` also uses for the unrelated "trailing bytes after a
+complete object" condition — the two could not be told apart by
+matching on the variant). `DeltaCorruption` is a
+`#[non_exhaustive]` enum with one variant per condition below —
+`BaseLenMismatch`, `ReservedOpcodeBits`, `ZeroOpcode`, `ZeroLengthCopy`,
+`CopyPastBase`, `ResultLenOverrun`, `ResultLenUnderrun` — so callers can
+still coarsely match `MkitError::DeltaCorrupt(_)` for "structurally
+corrupt" (as opposed to `UnexpectedEof` for "truncated input"), or
+match the specific `DeltaCorruption` variant when they need to.
 
 ---
 
@@ -220,22 +228,25 @@ are inline byte arrays so any framing drift trips immediately.
 4. **Mixed near-duplicate**: same-text base + small trailing edit;
    delta MUST be smaller than the target
    (`near_duplicate_yields_smaller_delta`).
-5. **Reject 0x00 opcode** → `DeltaCorrupt` / `MkitError::TrailingData`
+5. **Reject 0x00 opcode** → `DeltaCorrupt` /
+   `MkitError::DeltaCorrupt(DeltaCorruption::ZeroOpcode)`
    (`rejects_zero_opcode`).
-6. **Reject COPY past base_len** → `DeltaCorrupt`
-   (`rejects_copy_past_base_end`).
+6. **Reject COPY past base_len** → `DeltaCorrupt` /
+   `DeltaCorruption::CopyPastBase` (`rejects_copy_past_base_end`).
 7. **Reject stream_version 0x02** → `UnsupportedDeltaVersion` /
    `MkitError::UnsupportedObjectVersion` (`rejects_unknown_version`).
 8. **Reject result_len mismatch** (INSERT sums > declared result_len)
-   → `DeltaCorrupt` (`rejects_result_len_mismatch_at_end`). The v1
-   reader fails this as soon as `out.len() + length > result_len`, not
-   only at end-of-stream.
+   → `DeltaCorrupt` / `DeltaCorruption::ResultLenOverrun`
+   (`rejects_result_len_mismatch_at_end`). The v1 reader fails this as
+   soon as `out.len() + length > result_len`, not only at end-of-stream.
 9. **Reject base_len mismatch** (stream says 16, base supplied is 8) →
-   `DeltaCorrupt` (`rejects_base_len_mismatch`).
+   `DeltaCorrupt` / `DeltaCorruption::BaseLenMismatch`
+   (`rejects_base_len_mismatch`).
 10. **Reject COPY with reserved low bits** (opcode `0x81`) →
-    `DeltaCorrupt` (`rejects_copy_with_reserved_low_bits`).
-11. **Reject COPY with `length == 0`** → `DeltaCorrupt`
-    (`rejects_copy_with_zero_length`).
+    `DeltaCorrupt` / `DeltaCorruption::ReservedOpcodeBits`
+    (`rejects_copy_with_reserved_low_bits`).
+11. **Reject COPY with `length == 0`** → `DeltaCorrupt` /
+    `DeltaCorruption::ZeroLengthCopy` (`rejects_copy_with_zero_length`).
 12. **Truncated header/COPY/INSERT** → `UnexpectedEof`
     (`rejects_truncated_header`, `rejects_truncated_copy`,
     `rejects_truncated_insert`).
@@ -250,6 +261,11 @@ are inline byte arrays so any framing drift trips immediately.
 15. **Fuzz harness**: `apply(base, arbitrary_bytes)` MUST NOT panic,
     MUST NOT read out of bounds, MUST either succeed or return a
     well-defined error (see red-team R-18).
+16. **MKIT-13 regression**: every corruption kind above (vectors 5, 6, 8,
+    9, 10, 11, plus a mid-stream COPY result_len overrun) MUST come back
+    as `MkitError::DeltaCorrupt(_)`, never the generic
+    `MkitError::TrailingData` that `serialize.rs` reserves for the
+    unrelated trailing-bytes condition (`delta_corruption_is_not_reported_as_trailing_data`).
 
 ---
 

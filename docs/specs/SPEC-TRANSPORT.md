@@ -120,8 +120,8 @@ Programs MUST NOT pattern-match on the advisory message strings.
 |---|---|---|
 | `mkit+memory://…` | In-memory (`MemoryTransport`) | Test / fuzz only. Cannot be opened by `remote_dispatch::open` &mdash; the URL is accepted by `mkit remote add` for round-tripping, but actual construction happens in-process. |
 | `mkit+file:///abs/path` | Filesystem (`FileTransport`) | Triple slash; everything after `mkit+file://` is taken as the on-disk root path. |
-| `mkit+https://host/project` | HTTPS REST and JSON (`HttpTransport`) | The `mkit+` prefix is stripped before the inner `reqwest` call; production uses `https://`. |
-| `mkit+http://localhost…` | Plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
+| `mkit+https://host/project` | ConnectRPC (`mkit-transport-connect`'s `ConnectTransport`) &mdash; see [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) | The `mkit+` prefix is stripped before the inner call; production uses `https://`. `HttpTransport`'s legacy JSON dialect (§5) is no longer constructed for this scheme. |
+| `mkit+http://localhost…` | Same dispatch as above, plain HTTP for local dev | Plain `http://` is restricted to loopback hosts (`127.0.0.1`, `::1`, `localhost`) per `validate_http_scheme`; any other host returns `InsecureScheme`. |
 | `mkit+s3://endpoint/bucket[/prefix]` | S3-compatible (`S3Transport`) | The endpoint becomes `https://<endpoint>`; R2 is the primary target, AWS S3 also works but its CAS semantics are weaker (see §6.3). |
 | `mkit+ssh://user@host[:port]/path` | SSH child and `mkit serve` (`SshTransport`) | The `user@` prefix is REQUIRED. Path is restricted to `[A-Za-z0-9._-/]` with no empty/`.`/`..` segments. SCP-style `mkit+ssh://user@host:path`/`mkit+ssh://user@host:port:path` are also accepted (see [`mkit-transport-ssh/src/url.rs`](../../rust/crates/mkit-transport-ssh/src/url.rs)). |
 | `mkit+enc://[user@]host[:port]/path?pubkey=<…>` | Encrypted-stream (`EncTransport`) | Self-contained ChaCha20-Poly1305 and ed25519 transport &mdash; does not shell out to `ssh(1)`. The server's static public key MUST be carried out-of-band in the URL. URL parsing and CLI plumbing are part of the TCP transport; see [SPEC-TRANSPORT-ENC](SPEC-TRANSPORT-ENC.md). |
@@ -341,7 +341,14 @@ redoes the application `Hello` before retrying. See
 
 ---
 
-## 5. HTTP transport
+## 5. HTTP transport (legacy JSON dialect &mdash; superseded, reference only)
+
+For `mkit+https://`/`mkit+http://` as `mkit-cli` actually dispatches
+them today, read [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md)
+first; this section documents the JSON dialect `mkit-transport-http`
+still implements, kept in-tree only as the reference implementation of
+the `sparse-checkout`/`pack-shards` extensions (§5.6 below, and §6's S3
+equivalent) &mdash; see MKIT-14.
 
 **Superseded as the active `mkit+https://` implementation.** As of
 mkit#701, `mkit-cli`'s `mkit+https://`/`mkit+http://` dispatch uses

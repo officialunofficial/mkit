@@ -21,7 +21,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 | `mkit-rpc`                     | `rust/crates/mkit-rpc/`               | Shared stdio framing for subprocess protocols (`specs/SPEC-RPC.md`)          |
 | `mkit-transport-memory`        | `rust/crates/mkit-transport-memory/`  | In-process transport, used by tests                                    |
 | `mkit-transport-file`          | `rust/crates/mkit-transport-file/`    | Local-filesystem transport, atomic CAS via `link(2)` on POSIX          |
-| `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | reqwest plus rustls transport with bearer auth and `If-Match` CAS         |
+| `mkit-transport-http`          | `rust/crates/mkit-transport-http/`    | (legacy, superseded by `mkit-transport-connect`; see SPEC-TRANSPORT §5) reqwest plus rustls transport with bearer auth and `If-Match` CAS |
 | `mkit-transport-s3`            | `rust/crates/mkit-transport-s3/`      | Hand-rolled SigV4 transport (R2 plus S3-compatible)                       |
 | `mkit-transport-ssh`           | `rust/crates/mkit-transport-ssh/`     | Spawns system `ssh(1)`; framed protocol over stdio                     |
 | `mkit-transport-enc`           | `rust/crates/mkit-transport-enc/`     | `mkit+enc://` no-OpenSSH encrypted transport (`specs/SPEC-TRANSPORT-ENC.md`) |

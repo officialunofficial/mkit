@@ -153,6 +153,26 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
+    // Held for the whole lifetime of this `serve` process, across all
+    // three modes below (SPEC-CONCURRENCY §3.1, MKIT-11/#655): local
+    // worktree-mutating commands and `gc` probe this same lock (see
+    // `commands::warn_if_served`) to detect a live `serve` and warn.
+    // SHARED, not exclusive — SPEC-TRANSPORT documents multiple
+    // concurrent `serve` processes against one root (e.g. one per SSH
+    // forced-command connection) as a supported deployment, so `serve`
+    // instances must not exclude each other.
+    let _serve_guard = match mkit_core::repo_lock::acquire_shared(
+        &repo_root.join(".mkit"),
+        crate::commands::SERVE_LOCK,
+        mkit_core::repo_lock::DEFAULT_TIMEOUT,
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("mkit serve: serve lock: {e}");
+            return exit::TEMPFAIL;
+        }
+    };
+
     if let Some(addr) = opts.listen_enc.as_deref() {
         if opts.http.is_some() {
             eprintln!("mkit serve: --listen-enc and --http are mutually exclusive");

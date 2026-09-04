@@ -160,6 +160,72 @@ impl Drop for RepoLock {
 ///   (`/`, `\`) or a NUL byte.
 /// - [`LockError::Io`] for underlying filesystem failures.
 pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock> {
+    acquire_with(dir, name, timeout, File::try_lock, File::lock)
+}
+
+/// Acquire a **shared** repo-level lock at `<dir>/<name>`. Any number of
+/// shared holders may coexist; a shared lock only conflicts with an
+/// [`acquire`] (exclusive) holder or an in-progress [`probe_exclusive`].
+///
+/// Used by `mkit serve` (#655/MKIT-11): every live `serve` process holds
+/// a shared lock on `<common_dir>/serve.lock` for its lifetime, so
+/// [`probe_exclusive`] on that same name reports "busy" for as long as
+/// at least one `serve` is alive, without serve instances excluding each
+/// other (SPEC-CONCURRENCY §3.1 documents multiple concurrent `serve`
+/// processes against one root as a supported deployment).
+///
+/// # Errors
+/// See [`acquire`].
+pub fn acquire_shared(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock> {
+    acquire_with(dir, name, timeout, File::try_lock_shared, File::lock_shared)
+}
+
+/// Convenience wrapper: acquire with the default timeout.
+///
+/// # Errors
+/// See [`acquire`].
+pub fn acquire_default(dir: &Path, name: &str) -> LockResult<RepoLock> {
+    acquire(dir, name, DEFAULT_TIMEOUT)
+}
+
+/// Non-blocking probe: is `<dir>/<name>` currently held by anyone (shared
+/// or exclusive)? Attempts a non-blocking **exclusive** `try_lock`
+/// (which only ever succeeds when no holder — shared or exclusive — is
+/// present) and immediately releases it on success, so the probe leaves
+/// no lock behind either way.
+///
+/// Returns `Ok(true)` when the lock was free (the probe's own momentary
+/// exclusive hold has already been dropped by the time this returns), or
+/// `Ok(false)` when another process currently holds it.
+///
+/// Used by `mkit serve`'s local-command guard (#655/MKIT-11) to detect
+/// "is at least one `serve` alive against this root?" without blocking —
+/// a local command that finds the lock busy proceeds anyway and only
+/// emits a warning (see `mkit-cli`'s `commands::warn_if_served`).
+///
+/// # Errors
+/// - [`LockError::NameLength`]/[`LockError::InvalidName`] as in
+///   [`acquire`].
+/// - [`LockError::Io`] for underlying filesystem failures.
+pub fn probe_exclusive(dir: &Path, name: &str) -> LockResult<bool> {
+    let (_path, file) = open_sentinel(dir, name)?;
+    match file.try_lock() {
+        Ok(()) => {
+            // Drop releases the kernel lock (and the fd); the sentinel
+            // file at `_path` is intentionally left in place.
+            drop(file);
+            Ok(true)
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(LockError::Io(e)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+    }
+}
+
+/// Validate `name` and open-or-create the never-unlinked sentinel file at
+/// `<dir>/<name>`. Shared by every acquire/probe entry point so the
+/// validation rules and sentinel-opening semantics never drift between
+/// them (see the module doc for why the sentinel is never unlinked).
+fn open_sentinel(dir: &Path, name: &str) -> LockResult<(PathBuf, File)> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(LockError::NameLength(name.len()));
     }
@@ -171,22 +237,33 @@ pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock
         return Err(LockError::InvalidName(name.to_string()));
     }
     let path = dir.join(name);
-    let start = Instant::now();
-
-    // Open-or-create the never-unlinked sentinel. Unlike the old
-    // `O_EXCL`-create-new scheme, whether this call creates the file or
-    // reopens an existing one carries no meaning — the file's mere
-    // presence says nothing about whether anyone holds the kernel lock.
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&path)?;
+    Ok((path, file))
+}
+
+/// Shared acquisition core for [`acquire`] and [`acquire_shared`],
+/// parameterized over the lock-mode's non-blocking (`try_lock`) and
+/// blocking (`lock`) primitives so the two modes cannot drift on
+/// validation, sentinel handling, the fast/slow-path split, or the
+/// bounded-wait/no-leak behavior documented in the module doc.
+fn acquire_with(
+    dir: &Path,
+    name: &str,
+    timeout: Duration,
+    try_lock: fn(&File) -> Result<(), std::fs::TryLockError>,
+    lock: fn(&File) -> io::Result<()>,
+) -> LockResult<RepoLock> {
+    let start = Instant::now();
+    let (path, file) = open_sentinel(dir, name)?;
 
     // Fast path: try the non-blocking lock first so the common
     // uncontended case never pays for a thread spawn.
-    match file.try_lock() {
+    match try_lock(&file) {
         Ok(()) => {
             return Ok(RepoLock {
                 file: Some(file),
@@ -210,7 +287,7 @@ pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock
     // the lock into an unreachable holder.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = file.lock().map(|()| file);
+        let result = lock(&file).map(|()| file);
         let _ = tx.send(result);
     });
 
@@ -225,14 +302,6 @@ pub fn acquire(dir: &Path, name: &str, timeout: Duration) -> LockResult<RepoLock
             "repo lock wait thread exited without reporting a result",
         ))),
     }
-}
-
-/// Convenience wrapper: acquire with the default timeout.
-///
-/// # Errors
-/// See [`acquire`].
-pub fn acquire_default(dir: &Path, name: &str) -> LockResult<RepoLock> {
-    acquire(dir, name, DEFAULT_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -391,6 +460,52 @@ mod tests {
             "acquire should not pay anywhere near the timeout on an orphaned lock, took {elapsed:?}"
         );
         drop(lock);
+    }
+
+    // -----------------------------------------------------------------
+    // MKIT-11 — shared lock + non-blocking exclusive probe.
+    // -----------------------------------------------------------------
+
+    /// Two shared holders may coexist on the same lock name: this is
+    /// exactly the semantics `mkit serve` needs, since SPEC-TRANSPORT
+    /// supports multiple concurrent `serve` processes against one root.
+    #[test]
+    fn two_shared_acquires_coexist() {
+        let dir = TempDir::new().unwrap();
+        let a = acquire_shared(dir.path(), "serve.lock", Duration::from_millis(200)).unwrap();
+        let b = acquire_shared(dir.path(), "serve.lock", Duration::from_millis(200)).unwrap();
+        drop(a);
+        drop(b);
+    }
+
+    /// `probe_exclusive` reports the lock as unavailable (`Ok(false)`)
+    /// while a shared guard is alive, and available (`Ok(true)`) again
+    /// once it is dropped.
+    #[test]
+    fn probe_exclusive_reflects_a_live_shared_holder() {
+        let dir = TempDir::new().unwrap();
+        let shared = acquire_shared(dir.path(), "serve.lock", DEFAULT_TIMEOUT).unwrap();
+        assert!(
+            !probe_exclusive(dir.path(), "serve.lock").unwrap(),
+            "probe must report busy while a shared holder is alive"
+        );
+        drop(shared);
+        assert!(
+            probe_exclusive(dir.path(), "serve.lock").unwrap(),
+            "probe must report free once the shared holder releases"
+        );
+    }
+
+    /// With nobody holding the lock, probing it must not itself leave a
+    /// lingering hold behind (i.e. it must be a true probe, not a leak).
+    #[test]
+    fn probe_exclusive_does_not_leak_the_lock_it_takes() {
+        let dir = TempDir::new().unwrap();
+        assert!(probe_exclusive(dir.path(), "serve.lock").unwrap());
+        // If the previous probe leaked its lock, this exclusive acquire
+        // would time out.
+        let l = acquire(dir.path(), "serve.lock", Duration::from_millis(200)).unwrap();
+        drop(l);
     }
 
     /// INV-8/INV-16: a genuinely blocking waiter must observe the actual
