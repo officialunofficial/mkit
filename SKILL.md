@@ -87,7 +87,7 @@ mkit tag -s <name> -m "msg"              # signed tag (always pass -m; no -m ope
 
 Instead of the repo-local file, an **Ed25519** key in the OS keystore can sign
 (custody that persists across repos &mdash; Keychain / libsecret / systemd-creds /
-YubiKey / Windows Credential Manager):
+YubiKey):
 
 ```sh
 mkit key generate            # also: list | import | export | delete

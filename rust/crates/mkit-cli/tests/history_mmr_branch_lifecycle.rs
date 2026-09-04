@@ -171,12 +171,25 @@ fn branch_rename_destroys_the_old_names_journal() {
     );
     assert!(new_journal.exists(), "new name must have its own journal");
 
-    let hist_new = open_history(root, "new-name");
-    assert_eq!(
-        hist_new.len(),
-        1,
-        "renamed branch's journal must seed fresh, exactly one leaf for the existing tip"
-    );
+    // Scoped and dropped before the `ok(...)` calls below spawn further
+    // `mkit` subprocesses against this same repo: commonware-runtime
+    // 2026.9.0's per-storage-directory `.hold` advisory lock (see
+    // docs/INVARIANTS.md, "One commonware storage Context per history
+    // dir per process") is held for as long as ANY live handle derived
+    // from this process's bootstrap survives — including across
+    // processes, not just within one. Leaving `hist_new` alive here
+    // would block every subsequent subprocess's own `open_at` on this
+    // repo's `history/` directory for as long as this test process
+    // keeps it open, i.e. forever (this test never drops it again) —
+    // a real deadlock this test hit after the MKIT-2 commonware bump.
+    {
+        let hist_new = open_history(root, "new-name");
+        assert_eq!(
+            hist_new.len(),
+            1,
+            "renamed branch's journal must seed fresh, exactly one leaf for the existing tip"
+        );
+    }
 
     // Recreating "old-name" afterward must not resume the destroyed
     // incarnation's two leaves (creation + commit "a") — the new

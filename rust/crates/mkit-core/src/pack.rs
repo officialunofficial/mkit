@@ -189,6 +189,64 @@ pub struct UnpackReport {
     pub stored: Vec<Hash>,
 }
 
+/// A raw entry whose pack-compression decision has already been made by
+/// [`PackWriter::prepare_raw`], off any [`PackWriter`] instance — the
+/// CPU-bound step, safe to run in parallel across entries before any of
+/// them touch the writer's sequential state. Feed it to
+/// [`PackWriter::push_prepared_raw`] to append it in order.
+#[derive(Debug)]
+pub struct PreparedRaw {
+    hash: Hash,
+    bytes: Vec<u8>,
+    frame: Option<Vec<u8>>,
+}
+
+impl PreparedRaw {
+    /// The object hash this entry was prepared for — lets a caller
+    /// batching many entries (and a test asserting order-preservation
+    /// across that batching) identify which input produced which
+    /// prepared output without re-deriving it.
+    #[must_use]
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
+    /// Conservative (uncompressed) wire-size bound for this entry —
+    /// the same quantity a caller would use, pre-compression, to decide
+    /// whether pushing it risks exceeding a payload cap (compression
+    /// only ever shrinks the actual wire size, never grows it).
+    #[must_use]
+    pub fn conservative_len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+/// The delta-entry counterpart of [`PreparedRaw`], produced by
+/// [`PackWriter::prepare_delta`] and appended via
+/// [`PackWriter::push_prepared_delta`].
+#[derive(Debug)]
+pub struct PreparedDelta {
+    base: Hash,
+    stream: Vec<u8>,
+    frame: Option<Vec<u8>>,
+}
+
+impl PreparedDelta {
+    /// The delta base hash this entry was prepared against — see
+    /// [`PreparedRaw::hash`].
+    #[must_use]
+    pub fn base(&self) -> Hash {
+        self.base
+    }
+
+    /// Conservative (uncompressed) wire-size bound for this entry — see
+    /// [`PreparedRaw::conservative_len`].
+    #[must_use]
+    pub fn conservative_len(&self) -> usize {
+        hash::HASH_LEN + self.stream.len()
+    }
+}
+
 /// Builds a packfile, enforcing entry/payload caps and streaming each
 /// pushed entry's frame directly into the final output buffer as it
 /// arrives. [`Self::finish`] only patches the header's entry count
@@ -251,7 +309,54 @@ impl PackWriter {
     /// never need to opt in. Either way the returned/stored identity
     /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
     pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
-        if let Some(frame) = maybe_compress(bytes) {
+        let frame = maybe_compress(bytes);
+        self.append_raw_frame(hash_of_bytes, bytes, frame)
+    }
+
+    /// Pure (no `&self`) compression step for a raw entry, split out of
+    /// [`Self::push_raw`] so a caller building a pack out of many
+    /// independent objects (e.g. a push serialising a whole plan) can
+    /// run the CPU-bound zstd compression for each entry off the
+    /// thread-pool of its choosing — in parallel, since one entry's
+    /// compression never depends on another's — and only then replay
+    /// the writer's sequential, order-preserving append via
+    /// [`Self::push_prepared_raw`].
+    ///
+    /// Takes `bytes` by value (unlike `push_raw`'s `&[u8]`): callers
+    /// with a single object already own the bytes fresh out of the
+    /// object store, and a fan-out across a thread pool needs an owned,
+    /// `'static` value to move into each task anyway, so there is no
+    /// zero-copy path to preserve here the way `push_raw` does.
+    #[must_use]
+    pub fn prepare_raw(hash_of_bytes: Hash, bytes: Vec<u8>) -> PreparedRaw {
+        let frame = maybe_compress(&bytes);
+        PreparedRaw {
+            hash: hash_of_bytes,
+            bytes,
+            frame,
+        }
+    }
+
+    /// Append a [`PreparedRaw`] produced by [`Self::prepare_raw`].
+    /// Identical wire result and cap-check semantics to `push_raw`
+    /// called on the same bytes — compression already happened, so
+    /// this only replays the cheap bookkeeping + buffer append.
+    pub fn push_prepared_raw(&mut self, entry: PreparedRaw) -> Result<Hash, PackError> {
+        self.append_raw_frame(entry.hash, &entry.bytes, entry.frame)
+    }
+
+    /// Shared tail of `push_raw`/`push_prepared_raw`: given `bytes` and
+    /// an already-decided `frame` (zstd output, or `None` when
+    /// compression wasn't worth it), do the cap check, bookkeeping, and
+    /// buffer append. The only difference between the two public
+    /// entry points is where `frame` was computed.
+    fn append_raw_frame(
+        &mut self,
+        hash_of_bytes: Hash,
+        bytes: &[u8],
+        frame: Option<Vec<u8>>,
+    ) -> Result<Hash, PackError> {
+        if let Some(frame) = frame {
             let uncompressed_len: u32 = bytes
                 .len()
                 .try_into()
@@ -282,7 +387,42 @@ impl PackWriter {
     /// zstd-delta when the stream compresses strictly smaller on the
     /// wire and is long enough to bother; `0x02` delta otherwise.
     pub fn push_delta(&mut self, base_hash: &Hash, delta_stream: &[u8]) -> Result<(), PackError> {
-        if let Some(frame) = maybe_compress(delta_stream) {
+        let frame = maybe_compress(delta_stream);
+        self.append_delta_frame(base_hash, delta_stream, frame)
+    }
+
+    /// Pure (no `&self`) compression step for a delta entry — the
+    /// delta-entry counterpart of [`Self::prepare_raw`]; see its doc
+    /// comment for why this exists and how it's meant to be used (fan
+    /// out `prepare_delta` across a thread pool, then replay results in
+    /// order via [`Self::push_prepared_delta`]).
+    #[must_use]
+    pub fn prepare_delta(base_hash: Hash, delta_stream: Vec<u8>) -> PreparedDelta {
+        let frame = maybe_compress(&delta_stream);
+        PreparedDelta {
+            base: base_hash,
+            stream: delta_stream,
+            frame,
+        }
+    }
+
+    /// Append a [`PreparedDelta`] produced by [`Self::prepare_delta`].
+    /// Identical wire result and cap-check semantics to `push_delta`
+    /// called on the same base/stream.
+    pub fn push_prepared_delta(&mut self, entry: PreparedDelta) -> Result<(), PackError> {
+        self.append_delta_frame(&entry.base, &entry.stream, entry.frame)
+    }
+
+    /// Shared tail of `push_delta`/`push_prepared_delta` — see
+    /// [`Self::append_raw_frame`]'s doc comment for the analogous raw-entry
+    /// split.
+    fn append_delta_frame(
+        &mut self,
+        base_hash: &Hash,
+        delta_stream: &[u8],
+        frame: Option<Vec<u8>>,
+    ) -> Result<(), PackError> {
+        if let Some(frame) = frame {
             let uncompressed_len: u32 = delta_stream
                 .len()
                 .try_into()
@@ -1074,6 +1214,92 @@ mod tests {
         assert_eq!(report.delta_count, 0);
         assert_eq!(report.stored, vec![h]);
         assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    // =================================================================
+    // `prepare_raw`/`push_prepared_raw` and `prepare_delta`/
+    // `push_prepared_delta` — the pure-compression / sequential-append
+    // split added so a caller (mkit-cli's `build_and_upload_packs`) can
+    // run compression across a thread pool before replaying the
+    // append in order. Must produce byte-identical output to the
+    // original `push_raw`/`push_delta` and preserve call order when
+    // interleaved with them — a future refactor of `append_raw_frame`/
+    // `append_delta_frame` (the shared tail both paths funnel through)
+    // must not let the two paths drift apart.
+    // =================================================================
+
+    #[test]
+    fn prepared_raw_produces_identical_pack_bytes_to_push_raw() {
+        let blob = write_blob_via_serialize(b"hello prepared packfile");
+        let h = hash::hash(&blob);
+
+        let mut direct = PackWriter::new();
+        direct.push_raw(h, &blob).unwrap();
+        let direct_pack = direct.finish().unwrap();
+
+        let prepared = PackWriter::prepare_raw(h, blob.clone());
+        assert_eq!(prepared.hash(), h);
+        assert_eq!(prepared.conservative_len(), blob.len());
+        let mut via_prepared = PackWriter::new();
+        via_prepared.push_prepared_raw(prepared).unwrap();
+        let prepared_pack = via_prepared.finish().unwrap();
+
+        assert_eq!(
+            direct_pack, prepared_pack,
+            "push_raw and prepare_raw+push_prepared_raw must produce byte-identical packs"
+        );
+    }
+
+    #[test]
+    fn prepared_delta_produces_identical_pack_bytes_to_push_delta() {
+        let base = write_blob_via_serialize(&incompressible_bytes(0xD00D_0000, 2048));
+        let target = write_blob_via_serialize(&incompressible_bytes(0xFEED_0000, 2048));
+        let base_hash = hash::hash(&base);
+        let stream = delta::encode(&base, &target).unwrap();
+
+        let mut direct = PackWriter::new();
+        direct.push_delta(&base_hash, &stream).unwrap();
+        let direct_pack = direct.finish().unwrap();
+
+        let prepared = PackWriter::prepare_delta(base_hash, stream.clone());
+        assert_eq!(prepared.base(), base_hash);
+        let mut via_prepared = PackWriter::new();
+        via_prepared.push_prepared_delta(prepared).unwrap();
+        let prepared_pack = via_prepared.finish().unwrap();
+
+        assert_eq!(
+            direct_pack, prepared_pack,
+            "push_delta and prepare_delta+push_prepared_delta must produce byte-identical packs"
+        );
+    }
+
+    #[test]
+    fn prepared_and_direct_entries_interleave_in_push_order() {
+        // A caller mixing a compression-fan-out batch's prepared
+        // entries with directly-pushed ones (e.g. across a
+        // pack-splitting boundary) must see them land in the pack in
+        // exactly the order they were pushed, whichever path each one
+        // took.
+        let a = write_blob_via_serialize(b"first entry, pushed directly");
+        let ha = hash::hash(&a);
+        let b = write_blob_via_serialize(b"second entry, pushed via prepare");
+        let hb = hash::hash(&b);
+
+        let mut w = PackWriter::new();
+        w.push_raw(ha, &a).unwrap();
+        let prepared_b = PackWriter::prepare_raw(hb, b.clone());
+        w.push_prepared_raw(prepared_b).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(
+            report.stored,
+            vec![ha, hb],
+            "entries must appear in push order regardless of which path prepared them"
+        );
+        assert_eq!(store.read(&ha).unwrap(), a);
+        assert_eq!(store.read(&hb).unwrap(), b);
     }
 
     #[test]

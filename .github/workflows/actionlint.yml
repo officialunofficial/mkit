@@ -9,6 +9,14 @@ on:
       - '.github/actionlint.yaml'
       - '.github/dependabot.yml'
       - 'scripts/check-dependabot-coverage.sh'
+      - 'scripts/check-no-windows-target.sh'
+      - 'justfile'
+      - 'rust/crates/*/Cargo.toml'
+      - 'contrib/**/Cargo.toml'
+      - 'install.sh'
+      - 'apps/web/package.json'
+      - 'apps/web/scripts/*.mjs'
+      - 'apps/web/.gitignore'
   pull_request:
     paths:
       - '.github/workflows/**'
@@ -16,6 +24,14 @@ on:
       - '.github/actionlint.yaml'
       - '.github/dependabot.yml'
       - 'scripts/check-dependabot-coverage.sh'
+      - 'scripts/check-no-windows-target.sh'
+      - 'justfile'
+      - 'rust/crates/*/Cargo.toml'
+      - 'contrib/**/Cargo.toml'
+      - 'install.sh'
+      - 'apps/web/package.json'
+      - 'apps/web/scripts/*.mjs'
+      - 'apps/web/.gitignore'
 
 permissions:
   contents: read
@@ -54,4 +70,14 @@ jobs:
       # before it costs a PR round-trip.
       - name: Check Dependabot coverage
         run: bash scripts/check-dependabot-coverage.sh
+        shell: bash
+
+      # Windows is not a supported build/test/release target (MKIT-6; see
+      # docs/INVARIANTS.md) — commonware-runtime 2026.9.0's non-Linux sync
+      # path calls a libc function absent on the Windows MSVC target, so the
+      # workspace no longer builds there. Catch a reintroduced Windows CI
+      # leg, keystore backend, or installer artifact here instead of a red
+      # build discovered later.
+      - name: Check no Windows target
+        run: bash scripts/check-no-windows-target.sh
         shell: bash

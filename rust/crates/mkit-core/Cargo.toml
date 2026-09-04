@@ -23,7 +23,7 @@ blake3 = "1"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
 bytes = "1"
-# commonware-* (pinned at workspace root to the 2026.5.x train).
+# commonware-* (pinned at workspace root to the 2026.9.x train).
 #
 # `commonware-codec` is NON-optional: the transfer packlist node
 # (transfer.rs) is encoded with it (idiomatic Option/Vec + RangeCfg cap).
@@ -105,7 +105,7 @@ pack-zstd = ["dep:zstd"]
 #     async journaled-MMR ops behind the sync mkit-core API.
 # Both are dragged in together because dropping either re-introduces
 # the rejected mem-only shape.
-# `commonware-parallel` is required (since the 2026.5.x train) to name the
+# `commonware-parallel` is required (since the 2026.9.x train) to name the
 # `Sequential` fold strategy that `commonware-storage`'s MMR/bitmap now take
 # as a type parameter — it is the crate that defines `Sequential`/`Strategy`
 # (commonware-storage itself depends on it), so there is no lighter source.

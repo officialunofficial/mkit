@@ -27,6 +27,13 @@ breaking-change record.
 CHANGELOG documents MSRV bumps; the policy is "current stable minus
 one" unless a feature requires otherwise.
 
+**Platform support:** Linux and macOS (build, test, and release
+targets). Windows is not supported (MKIT-6) &mdash; commonware-runtime
+2026.9.0's non-Linux `sync` path calls `libc::sync()`, which does not
+exist on `x86_64-pc-windows-msvc`, so the workspace no longer builds
+there. Windows users should run mkit under WSL, which uses the Linux
+binary. See [`docs/INVARIANTS.md`](docs/INVARIANTS.md).
+
 ## Quick start
 
 ```sh
@@ -71,12 +78,9 @@ installs `mkit` into `~/.local/bin`. Equivalent explicit form:
 `curl -sSfL https://mkit.sh/install.sh | sh`; append
 `-s -- --version v0.4.2` to pin an exact release.
 
-On native Windows (PowerShell, no WSL/Git-Bash), use the PowerShell
-installer instead:
-
-```powershell
-irm https://mkit.sh/install.ps1 | iex
-```
+Windows is not a supported target &mdash; Windows users should run mkit
+under [WSL](https://learn.microsoft.com/windows/wsl/), which runs the
+Linux binary.
 
 ### From source
 
@@ -95,8 +99,8 @@ on first build). Drops `mkit` into `~/.cargo/bin/`.
 
 ### From GitHub Releases
 
-Cosign-signed archives for Linux (x86_64 plus arm64), macOS (arm64 plus
-x86_64), and Windows (x86_64) on every `v*.*.*` tag:
+Cosign-signed archives for Linux (x86_64 plus arm64) and macOS (arm64 plus
+x86_64) on every `v*.*.*` tag:
 
 ```sh
 VERSION=0.4.2
@@ -129,7 +133,7 @@ top-level Cargo workspace at `rust/`, so the install path is
 git clone https://github.com/officialunofficial/mkit
 cd mkit/contrib/signers
 cargo install --path mkit-sign-file                  # any platform
-cargo install --path mkit-sign-tpm --features tpm2   # Linux/Windows TPM 2.0
+cargo install --path mkit-sign-tpm --features tpm2   # Linux TPM 2.0
 cargo install --path mkit-sign-ctap                  # FIDO2 / CTAP-HID
 # Apple Secure Enclave (macOS, Swift):
 cd mkit-sign-se && swift build -c release \
@@ -146,8 +150,8 @@ recognizes:
 
 - **software** / **software-raw** &mdash; encrypted-at-rest software vault
   on disk; the cross-platform foundation backend.
-- **macos-keychain**, **windows-credential**, **linux-secret-service**
-  &mdash; native OS keychains where available.
+- **macos-keychain**, **linux-secret-service** &mdash; native OS keychains
+  where available.
 - **systemd-creds** &mdash; systemd's encrypted credential store on Linux
   hosts that have it.
 - **yubikey** &mdash; hardware-backed via PIV / OpenPGP applets.

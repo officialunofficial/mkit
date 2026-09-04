@@ -47,6 +47,13 @@ ignore = [
     # `cargo tree -i paste` shows v1.0.15 entering as a proc-macro via
     # commonware-codec -> commonware-coding -> mkit-core, so it still
     # expands at compile time and contributes no runtime code.
+    #
+    # Re-confirmed 2026-09-04 on the commonware 2026.9.0 train (MKIT-2
+    # bump from 2026.7.1): `cargo tree -i paste` still shows v1.0.15
+    # entering as a proc-macro, now via commonware-codec ->
+    # commonware-cryptography -> commonware-runtime -> commonware-storage
+    # -> mkit-core (the exact intermediate crates shifted; the macro-only,
+    # compile-time-only shape did not).
     { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-* feature-gated deps; macro-only, no runtime exposure. Re-justify by 2026-11-19." },
     # RUSTSEC-2025-0055 (tracing-subscriber 0.2.25 ANSI-escape log
     # injection) REMOVED 2026-07-15: it came in via commonware-runtime

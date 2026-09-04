@@ -7,8 +7,8 @@
 # atomically into $MKIT_INSTALL_DIR (default: ~/.local/bin).
 #
 # This script targets Darwin and Linux (including WSL, which runs the real
-# Linux binary). Native Windows (PowerShell, no POSIX layer) has its own
-# installer: install.ps1 — `irm https://mkit.sh/install.ps1 | iex`.
+# Linux binary). Windows is not a supported target (MKIT-6; see
+# docs/INVARIANTS.md) — Windows users should run mkit under WSL.
 #
 # Usage:
 #   curl mkit.sh | sh
@@ -155,9 +155,9 @@ case "$uname_os" in
   Darwin)  os_part="apple-darwin" ;;
   Linux)   os_part="unknown-linux-gnu" ;;   # Also matches WSL, which runs the real Linux binary.
   MINGW*|MSYS*|CYGWIN*)
-    die "this is install.sh (POSIX sh) running under a Windows POSIX layer ($uname_os) — use the native PowerShell installer instead: irm https://mkit.sh/install.ps1 | iex"
+    die "Windows is not supported ($uname_os) — use WSL, which runs the Linux binary"
     ;;
-  *)       die "unsupported OS: $uname_os (only Darwin and Linux have prebuilt binaries; Windows users see install.ps1)" ;;
+  *)       die "unsupported OS: $uname_os (only Darwin and Linux have prebuilt binaries; Windows is not supported — use WSL)" ;;
 esac
 
 case "$uname_arch" in

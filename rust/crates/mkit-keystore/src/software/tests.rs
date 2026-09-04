@@ -904,8 +904,7 @@ fn software_capabilities_are_backend_accurate() {
 #[cfg(not(any(
     feature = "linux-secret-service",
     feature = "macos-keychain",
-    feature = "systemd-creds",
-    feature = "windows-credential"
+    feature = "systemd-creds"
 )))]
 #[test]
 fn software_capabilities_report_structural_support_without_protector() {

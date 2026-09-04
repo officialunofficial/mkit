@@ -145,8 +145,9 @@ a self-consistent shard set with a different `commitment`.
 ## 4. Encoder/decoder algorithm
 
 The implementation lives in `mkit_core::pack_shard` and wraps
-[`commonware-coding`](https://docs.rs/commonware-coding) **v2026.5.0**
-(ALPHA stability &mdash; pinned exactly in `Cargo.toml`).
+[`commonware-coding`](https://docs.rs/commonware-coding), pinned exactly
+to the commonware train fixed in `rust/Cargo.toml` (`=2026.9.0` as of this
+revision) (ALPHA stability &mdash; pinned exactly in `Cargo.toml`).
 
 The reference scheme is `commonware_coding::ReedSolomon<Blake3>`.
 Producers and consumers MUST use the same scheme and digest. The

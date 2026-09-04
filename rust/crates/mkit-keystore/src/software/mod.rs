@@ -24,8 +24,6 @@ use protectors::LinuxSecretServiceProtector;
 use protectors::MacosKeychainProtector;
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 use protectors::SystemdCredsProtector;
-#[cfg(all(windows, feature = "windows-credential"))]
-use protectors::WindowsCredentialProtector;
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 use protectors::linux_desktop_session_available;
 #[cfg(all(test, target_os = "linux", feature = "systemd-creds"))]
@@ -821,11 +819,6 @@ fn default_protector_for_write(root: &Path) -> Result<Arc<dyn KeyProtector>> {
         let _ = root;
         return Ok(Arc::new(MacosKeychainProtector));
     }
-    #[cfg(all(windows, feature = "windows-credential"))]
-    {
-        let _ = root;
-        return Ok(Arc::new(WindowsCredentialProtector));
-    }
     #[cfg(target_os = "linux")]
     {
         #[cfg(feature = "linux-secret-service")]
@@ -857,8 +850,6 @@ fn default_protector_by_id(root: &Path, id: &str) -> Result<Arc<dyn KeyProtector
     match id {
         #[cfg(all(target_os = "macos", feature = "macos-keychain"))]
         MacosKeychainProtector::ID => Ok(Arc::new(MacosKeychainProtector)),
-        #[cfg(all(windows, feature = "windows-credential"))]
-        WindowsCredentialProtector::ID => Ok(Arc::new(WindowsCredentialProtector)),
         #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
         LinuxSecretServiceProtector::ID => Ok(Arc::new(LinuxSecretServiceProtector)),
         #[cfg(all(target_os = "linux", feature = "systemd-creds"))]

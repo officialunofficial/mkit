@@ -1135,8 +1135,7 @@ envelope must still verify regardless of the filter, so it cannot be used to
 require that a specific algorithm signed.
 .It Cm key Cm generate | Cm list | Cm import | Cm export | Cm delete
 Manage user-scoped keystore keys backed by the platform keystore
-(Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux, Credential
-Manager on Windows). Unlike
+(Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux). Unlike
 .Cm keygen
 (which writes to a repo-local file), these keys persist across repos.
 .It Cm keygen Oo Fl Fl algorithm Cm ed25519 | Cm secp256k1 | Cm p256 Oc Oo Fl Fl force Oc Op Fl Fl print-pubkey
@@ -1326,7 +1325,7 @@ Receipts
 .Pq Pa .mkit-installed-tag , MKIT_STATE_DIR/installed-tag
 are rewritten after a successful swap, in the installer's format.
 There is no background update check; the command only ever acts when
-invoked. Not yet supported on Windows.
+invoked.
 .It Cm version
 Print the version to stdout as
 .Ql mkit <X.Y.Z> .
@@ -1351,10 +1350,8 @@ when neither
 nor
 .Fl F
 is supplied, tried in that order. If none is set it falls back to
-.Xr vi 1
-(Unix) or
-.Ic notepad
-(Windows), matching git. In a headless or non-interactive context, pass
+.Xr vi 1 ,
+matching git. In a headless or non-interactive context, pass
 .Fl m
 or
 .Fl F
@@ -1495,20 +1492,11 @@ et al. for the on-disk format.
 Report issues at the project's source repository. Known limitations:
 .Bl -bullet
 .It
-Windows support is newer and less battle-tested than macOS/Linux: a
-prebuilt
-.Pa mkit.exe
-ships on every release (built with the
-.Cm backend-windows-credential
-keystore feature), but
+Windows is not a supported target: the workspace and its test suite do
+not build there (commonware-runtime's non-Linux storage-sync path calls
+a libc function absent on Windows). Windows users should run
 .Nm
-started as POSIX-only, so macOS and Linux remain the most exercised
-platforms. Install via the PowerShell installer
-.Pq Sy irm https://mkit.sh/install.ps1 | iex
-documented in
-.Pa docs/INSTALL.md ;
-.Nm mkit self update
-does not yet support Windows installs.
+under WSL, which runs the Linux binary.
 .It
 Per-subcommand man pages
 .Po Nm mkit-commit 1 Pc

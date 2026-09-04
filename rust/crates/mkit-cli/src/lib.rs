@@ -26,6 +26,7 @@ pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod exit;
+mod fanout;
 pub mod format;
 pub mod progress;
 pub mod remote_dispatch;
@@ -72,8 +73,8 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "version" | "--version" | "-V" => {
             let mut stdout = std::io::stdout().lock();
             // Byte-exact `"mkit <X.Y.Z>\n"` — pinned by the snapshot
-            // test in tests/version_snapshot.rs AND by Homebrew /
-            // Scoop shell asserts. Any refactor that widens this must
+            // test in tests/version_snapshot.rs AND by Homebrew shell
+            // asserts. Any refactor that widens this must
             // update docs/CLI.md and ship a 1.0 major bump. The
             // top-level `--version`/`-V` flags are aliases of the
             // `version` subcommand (git-parity, #248) and emit the same

@@ -367,8 +367,6 @@ pub enum BackendKind {
     SoftwareRaw,
     /// macOS Keychain backend.
     MacosKeychain,
-    /// Windows Credential Manager or CNG backend.
-    WindowsCredentialManager,
     /// Linux Secret Service backend.
     LinuxSecretService,
     /// systemd-creds backend.
@@ -391,7 +389,6 @@ impl BackendKind {
             Self::Software => "software",
             Self::SoftwareRaw => "software-raw",
             Self::MacosKeychain => "macos-keychain",
-            Self::WindowsCredentialManager => "windows-credential",
             Self::LinuxSecretService => "linux-secret-service",
             Self::SystemdCreds => "systemd-creds",
             Self::YubiKey => "yubikey",
@@ -416,7 +413,6 @@ impl FromStr for BackendKind {
             "software" => Ok(Self::Software),
             "software-raw" => Ok(Self::SoftwareRaw),
             "macos-keychain" => Ok(Self::MacosKeychain),
-            "windows-credential" => Ok(Self::WindowsCredentialManager),
             "linux-secret-service" => Ok(Self::LinuxSecretService),
             "systemd-creds" => Ok(Self::SystemdCreds),
             "yubikey" => Ok(Self::YubiKey),

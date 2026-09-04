@@ -1354,7 +1354,7 @@ Config / keys / version:
     raises the unauthenticated GitHub API rate limit), `MKIT_STATE_DIR`,
     `MKIT_SELF_UPDATE_API_BASE` (test/mirror override).
   - There is **no background update check** &mdash; the command only ever
-    acts when invoked. Not yet supported on Windows.
+    acts when invoked.
 - `mkit version` &mdash; print the version. Emits exactly `mkit <X.Y.Z>\n`.
   The top-level `mkit --version` / `mkit -V` flags are aliases of this
   subcommand and emit the identical string. Note this is `mkit <X.Y.Z>`,
@@ -1513,7 +1513,7 @@ which routes them to the user scope automatically.
 | `attest.signer` | `repo-key` / `keystore` / `external` | `repo-key` | User-scoped attestation signer |
 
 Keystore backend names include `software`, `software-raw`, `macos-keychain`,
-`windows-credential`, `linux-secret-service`, `systemd-creds`, and `yubikey`
+`linux-secret-service`, `systemd-creds`, and `yubikey`
 when the target build enables the corresponding backend feature. Security-
 sensitive selector keys are ignored from repo-local config; set them in
 `$XDG_CONFIG_HOME/mkit/config` or with explicit command flags.
@@ -1586,7 +1586,7 @@ protocols.
 mkit <X.Y.Z>\n
 ```
 
-Downstream packagers (Homebrew, Scoop) assert on this substring. The
+Downstream packagers (Homebrew) assert on this substring. The
 format is pinned by a snapshot test in the CLI crate.
 
 ## *nix conventions
@@ -1620,9 +1620,9 @@ parsing stderr.
 
 - **`GIT_EDITOR` / `EDITOR` / `VISUAL`** &mdash; the editor `mkit commit`
   opens when neither `-m` nor `-F` is supplied, tried in that order. If
-  none is set it falls back to `vi` (Unix) / `notepad` (Windows),
-  matching git. In a headless or non-interactive context (CI, an agent),
-  always pass `-m`/`-F` so the commit never blocks on an editor.
+  none is set it falls back to `vi`, matching git. In a headless or
+  non-interactive context (CI, an agent), always pass `-m`/`-F` so the
+  commit never blocks on an editor.
 - **`NO_COLOR`** &mdash; if set (any value, including empty) ANSI color on
   stdout is suppressed. See <https://no-color.org>.
 - **`CLICOLOR_FORCE=1`** &mdash; force ANSI color even when stdout is piped.

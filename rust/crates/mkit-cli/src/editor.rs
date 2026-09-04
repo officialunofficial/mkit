@@ -2,8 +2,8 @@
 //!
 //! Behaviour:
 //! * Honour `$GIT_EDITOR` first, then `$EDITOR`, then `$VISUAL`.
-//! * Fall back to `vi` on Unix / `notepad` on Windows when no env var
-//!   is set, so `mkit commit` works out-of-the-box.
+//! * Fall back to `vi` when no env var is set, so `mkit commit` works
+//!   out-of-the-box.
 //! * Write `template` to a tempfile, spawn the editor, wait, read the
 //!   file back, strip any line whose first non-whitespace byte is `#`,
 //!   and return the trimmed message.
@@ -24,7 +24,7 @@ pub const MAX_COMMIT_MSG_BYTES: u64 = 1024 * 1024;
 /// 1. `$GIT_EDITOR`
 /// 2. `$EDITOR`
 /// 3. `$VISUAL`
-/// 4. platform default (`vi` on Unix, `notepad` on Windows)
+/// 4. platform default (`vi`)
 ///
 /// The editor invocation parses the chosen value as a shell-like
 /// command: the first whitespace-separated token is the program, the
@@ -96,7 +96,7 @@ fn pick_editor() -> String {
 /// Test-friendly variant of [`pick_editor`] — `resolver` is called
 /// once per candidate env var, and the first non-empty trimmed value
 /// wins. On a fully-empty environment, falls back to the platform
-/// default (`vi` / `notepad`).
+/// default (`vi`).
 fn pick_editor_with(resolver: impl Fn(&str) -> Option<String>) -> String {
     for var in ["GIT_EDITOR", "EDITOR", "VISUAL"] {
         if let Some(v) = resolver(var)
@@ -105,11 +105,7 @@ fn pick_editor_with(resolver: impl Fn(&str) -> Option<String>) -> String {
             return v;
         }
     }
-    if cfg!(windows) {
-        "notepad".to_string()
-    } else {
-        "vi".to_string()
-    }
+    "vi".to_string()
 }
 
 /// Strip all lines whose first non-whitespace byte is `#`, then trim
@@ -191,10 +187,6 @@ mod tests {
     #[test]
     fn pick_editor_falls_back_to_platform_default() {
         let got = pick_editor_with(|_| None);
-        if cfg!(windows) {
-            assert_eq!(got, "notepad");
-        } else {
-            assert_eq!(got, "vi");
-        }
+        assert_eq!(got, "vi");
     }
 }

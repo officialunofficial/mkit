@@ -41,6 +41,26 @@ fn assert_key_list_json_includes_capabilities(root: &std::path::Path) {
     assert!(stdout.contains("\"supports_non_extractable\":false"));
 }
 
+/// `windows-credential` was dropped as a backend (Windows is no longer a
+/// supported target, MKIT-6): `mkit key list --backend windows-credential`
+/// now fails to even parse the backend name, so it exits `CONFIG_ERROR`
+/// (an unrecognized backend string) rather than the old `UNAVAILABLE`
+/// exit a compiled-in-but-unimplemented backend produced.
+#[test]
+fn key_list_rejects_windows_credential_backend_as_unknown() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("repo")).expect("repo dir");
+
+    let out = run(
+        td.path(),
+        &["key", "list", "--backend", "windows-credential"],
+    );
+
+    assert_eq!(out.status.code(), Some(78), "expected CONFIG_ERROR (78)");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("key backend:"), "stderr: {stderr}");
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn key_import_list_export_delete_roundtrip() {
@@ -954,8 +974,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 // Linux CI runs this job without a DBus session or gnome-keyring, so the
 // `software` backend can't resolve a key protector — see the `Keystore
 // backends (linux-secret-systemd-yubikey)` matrix job which DOES set those
-// up via `dbus-run-session` and exercises the live backends. macOS and
-// Windows CI runners ship a native protector and run this test for real.
+// up via `dbus-run-session` and exercises the live backends. macOS CI
+// runners ship a native protector and run this test for real.
 #[test]
 #[cfg_attr(
     target_os = "linux",

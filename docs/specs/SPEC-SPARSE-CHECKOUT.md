@@ -49,7 +49,8 @@ against the manifest and rejects any mismatch.
 
 The authenticated bitmap is
 [`commonware-storage::AuthenticatedBitMap`](https://docs.rs/commonware-storage)
-v`2026.5.0` &mdash; an ALPHA-tier std-only crate that provides a Merkleized
+at the commonware train pinned in `rust/Cargo.toml`
+(`=2026.9.0` as of this revision) &mdash; an ALPHA-tier std-only crate that provides a Merkleized
 bitmap with per-bit inclusion proofs. mkit pins the version and
 re-exports its `Proof` type rather than forking the wire format.
 

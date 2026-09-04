@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Windows is no longer a supported build, test, or release target (MKIT-6).** commonware-runtime `2026.9.0`'s non-Linux storage-sync path calls `libc::sync()`, which does not exist on `x86_64-pc-windows-msvc` — the workspace and its test suite (not just the default-feature `mkit` binary) no longer build there. Rather than ship a Windows CI/release leg that cannot actually build or test the workspace, or maintain an untested Windows-only subset, Windows was dropped: the `windows-smoke` CI job, the `x86_64-pc-windows-msvc` release leg (and its `.zip` archive), the `install.ps1` installer, the Scoop packaging manifest and `release-verify.yml`'s Scoop channel check, and the `windows-credential` leg of the `keystore-backends` CI matrix are all gone. `mkit-keystore`'s `backend-windows-credential` feature and its `BackendKind::WindowsCredentialManager` variant were removed — `"windows-credential"` is now an unrecognized backend name (`key backend: ...` / exit `CONFIG_ERROR`) rather than a compiled-in-but-platform-unavailable one (previously exit `UNAVAILABLE`, "requires Windows"). Removing a public enum variant from a published crate is semver-breaking: `mkit-keystore` (and, per the workspace's lockstep versioning, every `mkit-*` crate) needs a `0.5.0` release, not `0.4.3`, to ship this. Windows users should run mkit under WSL, which uses the Linux binary — see `docs/INVARIANTS.md`'s "Windows is not a build, test, or release target" entry.
+
+### Other
+
+- bump the commonware crate family from the `2026.7.1` release train to `2026.9.0` across every Rust workspace (`rust/`, `contrib/signers/`, `apps/repo-worker`, `apps/vcs-worker`) (MKIT-2). Notable upstream changes this required adapting to:
+  - `merkle::full::Merkle::{apply_batch, sync}` now take `self` by value; `CommitHistory`'s journaled backend handles a failed mutation by leaving the handle poisoned (`HistoryError::Poisoned`) instead of panicking, and `root()`/`len()` fall back to the last known-good value rather than requiring a `Result`.
+  - `commonware-runtime` 2026.9.0 added a per-storage-directory advisory `.hold` file lock, which deadlocked opening a second branch's history journal in the same process; `CommitHistory` now shares one bootstrapped `Context` per `<mkit_dir>/history` directory across every branch opened in-process (see `docs/INVARIANTS.md`, "One commonware storage Context per history dir per process").
+  - `threshold::recover` dropped its `Faults` generic and `sharing::Mode` lost its `Default` impl; `mkit-attest`'s BLS threshold signer names `Mode::NonZeroCounter` explicitly (same value the old default resolved to — pinned by a new golden-vector test).
+  - `commonware_parallel::Strategy` can no longer be implemented outside the `commonware-parallel` crate (`Manual::new` was removed); `pack_shard.rs`'s spy-based `CountingStrategy` test was removed accordingly (see `docs/INVARIANTS.md`).
+  - blst is now opt-in upstream (only pulled in via `commonware-cryptography`'s `std` → `bls12381` feature chain), not unconditional as the 2026.7.0-era comments said.
+  - Windows: see the Removed entry above — this is what motivated dropping Windows as a supported target.
+
 ## [0.4.2](https://github.com/officialunofficial/mkit/compare/v0.4.1...v0.4.2) - 2026-09-02
 
 ### Performance

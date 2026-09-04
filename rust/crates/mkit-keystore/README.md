@@ -15,7 +15,6 @@ independent and continues to own canonical object signing bytes.
 - `backend-linux-secret-service` &mdash; the Secret Service D-Bus API (GNOME
   Keyring, `KWallet`).
 - `backend-systemd-creds` &mdash; `systemd-creds`-sealed credentials on Linux.
-- `backend-windows-credential` &mdash; Windows Credential Manager.
 - `backend-yubikey` &mdash; `YubiKey` via `OpenPGP` card/PIV (`card-backend-pcsc`,
   `yubikey`).
 

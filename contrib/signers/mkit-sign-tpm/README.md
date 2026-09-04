@@ -36,9 +36,13 @@ Headline properties:
 ### Windows
 
 The `tss-esapi` crate supports the Windows TBS (TPM Base Services)
-TCTI. Build with `--features tpm2` plus `tss-esapi`'s `tbs` feature
-once it's wired into this crate &mdash; currently untested; contributions
-welcome.
+TCTI, and this signer still builds there. Build with `--features tpm2`
+plus `tss-esapi`'s `tbs` feature once it's wired into this crate &mdash;
+currently untested; contributions welcome. Note that the main `mkit`
+CLI itself is not a supported Windows target (MKIT-6; see
+`docs/INVARIANTS.md` in the repo root) &mdash; this signer talks to
+`mkit` over the external-signer stdio protocol, so pairing it with a
+Windows-native `mkit` is not possible; run `mkit` under WSL instead.
 
 ### macOS
 

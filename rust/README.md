@@ -19,6 +19,8 @@ rust/
 │   ├── mkit-transport-memory/
 │   ├── mkit-transport-file/
 │   ├── mkit-transport-http/    # legacy JSON dialect, superseded by mkit-transport-connect
+│   ├── mkit-transport-connect/  # ConnectRPC client for mkit.transport.v1.TransportService
+│   │                           # (SPEC-TRANSPORT-CONNECT); used for mkit+https:// / mkit+http://
 │   ├── mkit-transport-s3/
 │   ├── mkit-transport-ssh/
 │   ├── mkit-transport-enc/     # mkit+enc:// no-OpenSSH encrypted transport

@@ -15,8 +15,6 @@ mod backend_linux_secret_service;
 mod backend_macos_keychain;
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 mod backend_systemd_creds;
-#[cfg(all(windows, feature = "windows-credential"))]
-mod backend_windows_credential;
 #[cfg(feature = "backend-yubikey")]
 mod backend_yubikey;
 mod encrypted_record;
@@ -24,8 +22,7 @@ mod error;
 #[cfg(any(
     all(target_os = "linux", feature = "linux-secret-service"),
     all(target_os = "linux", feature = "systemd-creds"),
-    all(target_os = "macos", feature = "macos-keychain"),
-    all(windows, feature = "windows-credential")
+    all(target_os = "macos", feature = "macos-keychain")
 ))]
 mod native_list;
 mod software;
@@ -38,8 +35,6 @@ pub use backend_linux_secret_service::LinuxSecretServiceKeystore;
 pub use backend_macos_keychain::MacosKeychainKeystore;
 #[cfg(all(target_os = "linux", feature = "systemd-creds"))]
 pub use backend_systemd_creds::SystemdCredsKeystore;
-#[cfg(all(windows, feature = "windows-credential"))]
-pub use backend_windows_credential::WindowsCredentialKeystore;
 #[cfg(feature = "backend-yubikey")]
 pub use backend_yubikey::YubiKeyKeystore;
 pub use error::{Error, Result};
@@ -250,6 +245,15 @@ mod tests {
         assert_eq!(key_ref.backend(), BackendKind::SoftwareRaw);
         assert_eq!(key_ref.label(), "default");
         assert_eq!(key_ref.to_string(), "software-raw:default");
+    }
+
+    #[test]
+    fn windows_credential_backend_name_is_not_recognized() {
+        assert!(matches!(
+            "windows-credential".parse::<BackendKind>(),
+            Err(Error::BackendUnavailable(_))
+        ));
+        assert!("windows-credential:default".parse::<KeyRef>().is_err());
     }
 
     #[test]
