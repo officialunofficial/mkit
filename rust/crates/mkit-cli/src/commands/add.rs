@@ -424,7 +424,7 @@ const HASH_FANOUT_FILES_PER_THREAD: usize = 8;
 /// budget comes from. Reads rayon's already-initialized global pool
 /// size (cheap: an atomic load after first use, no allocation).
 fn hash_fanout_threshold() -> usize {
-    HASH_FANOUT_FILES_PER_THREAD.saturating_mul(rayon::current_num_threads())
+    crate::fanout::threshold(HASH_FANOUT_FILES_PER_THREAD)
 }
 
 /// Hash one [`PendingHash`], short-circuiting to [`HashOutcome::Skipped`]

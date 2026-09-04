@@ -202,6 +202,15 @@ pub struct PreparedRaw {
 }
 
 impl PreparedRaw {
+    /// The object hash this entry was prepared for — lets a caller
+    /// batching many entries (and a test asserting order-preservation
+    /// across that batching) identify which input produced which
+    /// prepared output without re-deriving it.
+    #[must_use]
+    pub fn hash(&self) -> Hash {
+        self.hash
+    }
+
     /// Conservative (uncompressed) wire-size bound for this entry —
     /// the same quantity a caller would use, pre-compression, to decide
     /// whether pushing it risks exceeding a payload cap (compression
@@ -223,6 +232,13 @@ pub struct PreparedDelta {
 }
 
 impl PreparedDelta {
+    /// The delta base hash this entry was prepared against — see
+    /// [`PreparedRaw::hash`].
+    #[must_use]
+    pub fn base(&self) -> Hash {
+        self.base
+    }
+
     /// Conservative (uncompressed) wire-size bound for this entry — see
     /// [`PreparedRaw::conservative_len`].
     #[must_use]
@@ -1198,6 +1214,92 @@ mod tests {
         assert_eq!(report.delta_count, 0);
         assert_eq!(report.stored, vec![h]);
         assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    // =================================================================
+    // `prepare_raw`/`push_prepared_raw` and `prepare_delta`/
+    // `push_prepared_delta` — the pure-compression / sequential-append
+    // split added so a caller (mkit-cli's `build_and_upload_packs`) can
+    // run compression across a thread pool before replaying the
+    // append in order. Must produce byte-identical output to the
+    // original `push_raw`/`push_delta` and preserve call order when
+    // interleaved with them — a future refactor of `append_raw_frame`/
+    // `append_delta_frame` (the shared tail both paths funnel through)
+    // must not let the two paths drift apart.
+    // =================================================================
+
+    #[test]
+    fn prepared_raw_produces_identical_pack_bytes_to_push_raw() {
+        let blob = write_blob_via_serialize(b"hello prepared packfile");
+        let h = hash::hash(&blob);
+
+        let mut direct = PackWriter::new();
+        direct.push_raw(h, &blob).unwrap();
+        let direct_pack = direct.finish().unwrap();
+
+        let prepared = PackWriter::prepare_raw(h, blob.clone());
+        assert_eq!(prepared.hash(), h);
+        assert_eq!(prepared.conservative_len(), blob.len());
+        let mut via_prepared = PackWriter::new();
+        via_prepared.push_prepared_raw(prepared).unwrap();
+        let prepared_pack = via_prepared.finish().unwrap();
+
+        assert_eq!(
+            direct_pack, prepared_pack,
+            "push_raw and prepare_raw+push_prepared_raw must produce byte-identical packs"
+        );
+    }
+
+    #[test]
+    fn prepared_delta_produces_identical_pack_bytes_to_push_delta() {
+        let base = write_blob_via_serialize(&incompressible_bytes(0xD00D_0000, 2048));
+        let target = write_blob_via_serialize(&incompressible_bytes(0xFEED_0000, 2048));
+        let base_hash = hash::hash(&base);
+        let stream = delta::encode(&base, &target).unwrap();
+
+        let mut direct = PackWriter::new();
+        direct.push_delta(&base_hash, &stream).unwrap();
+        let direct_pack = direct.finish().unwrap();
+
+        let prepared = PackWriter::prepare_delta(base_hash, stream.clone());
+        assert_eq!(prepared.base(), base_hash);
+        let mut via_prepared = PackWriter::new();
+        via_prepared.push_prepared_delta(prepared).unwrap();
+        let prepared_pack = via_prepared.finish().unwrap();
+
+        assert_eq!(
+            direct_pack, prepared_pack,
+            "push_delta and prepare_delta+push_prepared_delta must produce byte-identical packs"
+        );
+    }
+
+    #[test]
+    fn prepared_and_direct_entries_interleave_in_push_order() {
+        // A caller mixing a compression-fan-out batch's prepared
+        // entries with directly-pushed ones (e.g. across a
+        // pack-splitting boundary) must see them land in the pack in
+        // exactly the order they were pushed, whichever path each one
+        // took.
+        let a = write_blob_via_serialize(b"first entry, pushed directly");
+        let ha = hash::hash(&a);
+        let b = write_blob_via_serialize(b"second entry, pushed via prepare");
+        let hb = hash::hash(&b);
+
+        let mut w = PackWriter::new();
+        w.push_raw(ha, &a).unwrap();
+        let prepared_b = PackWriter::prepare_raw(hb, b.clone());
+        w.push_prepared_raw(prepared_b).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(
+            report.stored,
+            vec![ha, hb],
+            "entries must appear in push order regardless of which path prepared them"
+        );
+        assert_eq!(store.read(&ha).unwrap(), a);
+        assert_eq!(store.read(&hb).unwrap(), b);
     }
 
     #[test]

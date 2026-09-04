@@ -26,6 +26,7 @@ pub mod commands;
 pub mod config;
 pub mod editor;
 pub mod exit;
+mod fanout;
 pub mod format;
 pub mod progress;
 pub mod remote_dispatch;
