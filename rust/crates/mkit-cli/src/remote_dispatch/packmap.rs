@@ -39,6 +39,7 @@ use mkit_core::refs;
 use mkit_core::sign::{verify_commit, verify_remix, verify_tag};
 use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
+use rayon::prelude::*;
 
 use super::DispatchError;
 use super::applied_packs::AppliedPacks;
@@ -665,6 +666,25 @@ pub(crate) fn apply_fetched_chain(
     }
 }
 
+/// Entries-per-thread budget below which [`verify_new_object_signatures`]
+/// checks signatures sequentially instead of fanning out across rayon's
+/// thread pool, for a pool of a given size. Same crossover shape as
+/// `remote_dispatch/mod.rs`'s `PACK_FANOUT_ENTRIES_PER_THREAD` (rayon's
+/// pool-dispatch overhead loses to a plain loop below a few entries per
+/// thread and wins clearly above it) but tuned lower: each entry here is
+/// only a `store.read_object` (disk read + BLAKE3 re-hash) plus one
+/// Ed25519 `verify_strict` — cheaper per item than the zstd-compression
+/// fan-out `PACK_FANOUT_ENTRIES_PER_THREAD` guards, so fewer entries per
+/// thread are enough to amortize dispatch. Measured with `cargo bench -p
+/// mkit-benches --bench verify_fanout`.
+const VERIFY_FANOUT_ENTRIES_PER_THREAD: usize = 2;
+
+/// The total entry count [`verify_new_object_signatures`] fans out across
+/// rayon at — see [`VERIFY_FANOUT_ENTRIES_PER_THREAD`].
+fn verify_fanout_threshold() -> usize {
+    crate::fanout::threshold(VERIFY_FANOUT_ENTRIES_PER_THREAD)
+}
+
 /// Verify the Ed25519 signature on every commit/remix/tag in `stored` —
 /// the digests [`unpack_downloaded_packs`] just wrote, i.e. the objects
 /// this fetch actually introduced (issue #692). Uses the exact same check
@@ -678,6 +698,17 @@ pub(crate) fn apply_fetched_chain(
 /// `require_signed = false` (the explicit opt-out) short-circuits to
 /// `Ok(())` without reading any object — a no-op, not a "verify but
 /// ignore the result".
+///
+/// Each entry's read + verify is independent of every other's, so at or
+/// above [`verify_fanout_threshold`] entries this fans out across rayon's
+/// global thread pool (mirroring `add.rs`'s hash fan-out and
+/// `remote_dispatch/mod.rs`'s pack-build fan-out) instead of running one
+/// entry at a time — `store.read_object`'s BLAKE3 re-hash and
+/// `verify_commit`/`verify_remix`/`verify_tag`'s Ed25519 check are both
+/// CPU-bound, so a large fetch's verification pass parallelizes cleanly
+/// across cores. Which entry's error surfaces first is not guaranteed to
+/// match `stored`'s order on the parallel path — any invalid signature
+/// must reject the fetch regardless of which one is reported.
 fn verify_new_object_signatures(
     store: &ObjectStore,
     stored: &[Hash],
@@ -686,24 +717,26 @@ fn verify_new_object_signatures(
     if !require_signed {
         return Ok(());
     }
-    for h in stored {
+    let verify_one = |h: &Hash| -> Result<(), DispatchError> {
         let obj = store.read_object(h)?;
         let result = match &obj {
             Object::Commit(c) => verify_commit(c),
             Object::Remix(r) => verify_remix(r),
             Object::Tag(t) => verify_tag(t),
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
-                continue;
+                return Ok(());
             }
         };
-        if let Err(e) = result {
-            return Err(DispatchError::UnsignedOrInvalidObject {
-                hash: hash::to_hex(h),
-                reason: e.to_string(),
-            });
-        }
+        result.map_err(|e| DispatchError::UnsignedOrInvalidObject {
+            hash: hash::to_hex(h),
+            reason: e.to_string(),
+        })
+    };
+    if stored.len() >= verify_fanout_threshold() {
+        stored.par_iter().try_for_each(verify_one)
+    } else {
+        stored.iter().try_for_each(verify_one)
     }
-    Ok(())
 }
 
 /// Download every key in `chain` not already recorded in `applied`,
@@ -1007,5 +1040,93 @@ mod tests {
             resolve_pack_chain(&tx, "main", new_head).unwrap(),
             vec![k1, k1, k2, k3],
         );
+    }
+
+    // ---- verify_new_object_signatures — sequential/rayon fan-out parity ----
+
+    /// A validly-signed, independently-hashing commit — every `seed`
+    /// produces a distinct object, matching the bench fixtures'
+    /// no-dedup convention.
+    fn signed_commit_bytes(kp: &mkit_core::sign::KeyPair, seed: usize) -> Vec<u8> {
+        use mkit_core::object::{Commit, Identity};
+        let mut c = Commit::new_unannotated(
+            hash::hash(format!("tree #{seed}").as_bytes()),
+            Vec::new(),
+            Identity::ed25519(kp.public.0),
+            kp.public.0,
+            format!("packmap fanout test fixture #{seed}").into_bytes(),
+            1_700_000_000 + seed as u64,
+            [0u8; 64],
+        );
+        c.signature = mkit_core::sign::sign_commit(&c, kp).unwrap().0;
+        mkit_core::serialize::serialize(&Object::Commit(c)).unwrap()
+    }
+
+    /// Large enough that `stored.len()` clears
+    /// [`verify_fanout_threshold`] on any realistic thread-pool size
+    /// (`VERIFY_FANOUT_ENTRIES_PER_THREAD` * rayon's pool size), so
+    /// these tests exercise the `par_iter` branch rather than the
+    /// sequential one the integration tests in
+    /// `tests/verify_signatures_on_fetch.rs` already cover.
+    const LARGE_BATCH: usize = 512;
+
+    #[test]
+    fn verify_new_object_signatures_accepts_a_large_validly_signed_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let kp = mkit_core::sign::KeyPair::generate().unwrap();
+        let stored: Vec<Hash> = (0..LARGE_BATCH)
+            .map(|i| store.write(&signed_commit_bytes(&kp, i)).unwrap())
+            .collect();
+        assert!(stored.len() >= verify_fanout_threshold());
+
+        verify_new_object_signatures(&store, &stored, true)
+            .expect("every commit in the batch is validly signed");
+    }
+
+    #[test]
+    fn verify_new_object_signatures_rejects_one_bad_signature_in_a_large_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let kp = mkit_core::sign::KeyPair::generate().unwrap();
+        let mut stored: Vec<Hash> = (0..LARGE_BATCH)
+            .map(|i| store.write(&signed_commit_bytes(&kp, i)).unwrap())
+            .collect();
+        assert!(stored.len() >= verify_fanout_threshold());
+
+        // Tamper one commit's signature in place — content-addressing stays
+        // intact (re-written under a new hash), only the crypto is wrong,
+        // same attacker model as `tamper_head_commit_signature` in the
+        // integration test.
+        let Object::Commit(mut c) = store.read_object(&stored[LARGE_BATCH / 2]).unwrap() else {
+            panic!("expected commit");
+        };
+        c.signature[0] ^= 0xff;
+        let tampered_bytes = mkit_core::serialize::serialize(&Object::Commit(c)).unwrap();
+        let tampered_hash = store.write(&tampered_bytes).unwrap();
+        stored[LARGE_BATCH / 2] = tampered_hash;
+
+        let err = verify_new_object_signatures(&store, &stored, true)
+            .expect_err("a batch with one bad signature must be rejected");
+        assert!(matches!(err, DispatchError::UnsignedOrInvalidObject { .. }));
+    }
+
+    #[test]
+    fn verify_new_object_signatures_require_signed_false_skips_a_large_batch() {
+        // `require_signed = false` must short-circuit to `Ok(())` without
+        // reading the store at all, regardless of batch size — pass a
+        // digest list naming objects that were never written, so any
+        // attempted read would panic/error and fail the test.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let stored: Vec<Hash> = (0..LARGE_BATCH)
+            .map(|i| h(&format!("never-written-{i}")))
+            .collect();
+
+        verify_new_object_signatures(&store, &stored, false)
+            .expect("require_signed=false must no-op regardless of batch size");
     }
 }
