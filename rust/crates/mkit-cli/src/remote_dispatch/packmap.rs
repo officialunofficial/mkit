@@ -750,10 +750,9 @@ fn verify_new_object_signatures(
     if stored.len() < threshold {
         return stored.iter().try_for_each(verify_one);
     }
-    for chunk in stored.chunks(threshold) {
-        chunk.par_iter().try_for_each(verify_one)?;
-    }
-    Ok(())
+    stored
+        .chunks(threshold)
+        .try_for_each(|chunk| chunk.par_iter().try_for_each(verify_one))
 }
 
 /// Download every key in `chain` not already recorded in `applied`,
