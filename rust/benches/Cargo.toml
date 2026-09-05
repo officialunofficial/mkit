@@ -99,6 +99,17 @@ harness = false
 name = "pack_build_fanout"
 harness = false
 
+# clone/pull/fetch's post-download signature-verification pass
+# (`verify_new_object_signatures` in `mkit-cli`'s
+# `remote_dispatch/packmap.rs`, issue #692) — per-object
+# store.read_object + Ed25519 verify_commit fan-out, same
+# sequential-vs-rayon crossover shape as `add_hash_fanout`/
+# `pack_build_fanout` above. No feature gate: signature verification
+# is always compiled.
+[[bench]]
+name = "verify_fanout"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
