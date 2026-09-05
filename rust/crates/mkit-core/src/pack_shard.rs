@@ -49,6 +49,8 @@ use commonware_parallel::{Rayon, Sequential, Strategy};
 
 use crate::hash::{self, HASH_LEN, Hash};
 
+pub mod download;
+
 // Re-exports so callers don't need to depend on `commonware-coding` directly.
 pub use commonware_coding::Config;
 // Re-export so callers building an explicit strategy (e.g. via the
@@ -435,6 +437,14 @@ pub fn decode_pack_from_shards(
 /// Same as [`decode_pack_from_shards`].
 pub fn decode_pack_from_shards_with_strategy<S: Strategy>(
     shards: &[Shard],
+    manifest: &ShardSet,
+    strategy: &S,
+) -> Result<Vec<u8>, ShardError> {
+    decode_shard_iter(shards.iter(), manifest, strategy)
+}
+
+fn decode_shard_iter<'a, S: Strategy>(
+    shards: impl ExactSizeIterator<Item = &'a Shard>,
     manifest: &ShardSet,
     strategy: &S,
 ) -> Result<Vec<u8>, ShardError> {

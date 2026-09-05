@@ -296,8 +296,11 @@ fn collect_ancestors_with_depth(
     Ok(ancestors)
 }
 
-fn hash_and_mode_eq(a: &TreeEntry, b: &TreeEntry) -> bool {
-    a.mode == b.mode && a.object_hash == b.object_hash
+fn hash_and_mode_eq(store: &ObjectStore, a: &TreeEntry, b: &TreeEntry) -> Result<bool, StoreError> {
+    Ok(a.mode == b.mode
+        && (a.object_hash == b.object_hash
+            || (a.mode != EntryMode::Tree
+                && crate::worktree::content_eq(store, &a.object_hash, &b.object_hash)?)))
 }
 
 fn min_of_three<'a>(
@@ -438,9 +441,9 @@ fn merge_entries_recursive(
         // binds the references directly, so there is nothing to `unwrap`.
         match (base_entry, ours_entry, theirs_entry) {
             (Some(b), Some(o), Some(t)) => {
-                let b_eq_o = hash_and_mode_eq(b, o);
-                let b_eq_t = hash_and_mode_eq(b, t);
-                let o_eq_t = hash_and_mode_eq(o, t);
+                let b_eq_o = hash_and_mode_eq(store, b, o)?;
+                let b_eq_t = hash_and_mode_eq(store, b, t)?;
+                let o_eq_t = hash_and_mode_eq(store, o, t)?;
                 if b_eq_o && b_eq_t {
                     add_entry(merged, min_name, b.mode, b.object_hash);
                 } else if b_eq_t && !b_eq_o {
@@ -543,7 +546,7 @@ fn merge_entries_recursive(
                 add_entry(merged, min_name, t.mode, t.object_hash);
             }
             (None, Some(o), Some(t)) => {
-                if hash_and_mode_eq(o, t) {
+                if hash_and_mode_eq(store, o, t)? {
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 } else if o.mode == EntryMode::Tree && t.mode == EntryMode::Tree {
                     recurse_subtree_merge(
@@ -571,7 +574,7 @@ fn merge_entries_recursive(
                 }
             }
             (Some(b), Some(o), None) => {
-                if hash_and_mode_eq(b, o) {
+                if hash_and_mode_eq(store, b, o)? {
                     // Ours unchanged, theirs deleted -> delete.
                 } else {
                     conflicts.push(Conflict {
@@ -587,7 +590,7 @@ fn merge_entries_recursive(
                 }
             }
             (Some(b), None, Some(t)) => {
-                if hash_and_mode_eq(b, t) {
+                if hash_and_mode_eq(store, b, t)? {
                     // Theirs unchanged, ours deleted -> delete.
                 } else {
                     conflicts.push(Conflict {

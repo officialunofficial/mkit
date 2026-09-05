@@ -262,10 +262,7 @@ fn branch_rename_racing_commit_never_loses_the_commit() {
 
     // Not a hard requirement (the race window is narrow and OS process
     // spawn/schedule timing isn't controlled), but recorded for honesty
-    // about this test's actual power on this run — same convention as
-    // `delete_ref_with_history_races_update_without_tearing_ref_and_journal`
-    // in `mkit-core`, which documents that its own race didn't reliably
-    // reproduce in manual verification either.
+    // about this test's actual power on this run.
     eprintln!(
         "branch_rename_racing_commit_never_loses_the_commit: at least one round raced to a \
          durable-but-unreachable commit: {ever_raced_to_an_unreachable_landing}"

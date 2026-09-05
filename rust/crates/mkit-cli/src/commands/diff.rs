@@ -44,7 +44,7 @@ use mkit_core::layout::RepoLayout;
 use mkit_core::object::{EntryMode, Object};
 use mkit_core::ops::merge::find_merge_base;
 use mkit_core::ops::{
-    DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode, detect_exact_renames, diff_trees,
+    DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode, detect_content_renames, diff_trees,
     unified_hunks_opts,
 };
 use mkit_core::refs;
@@ -242,8 +242,10 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE);
         }
     }
-    if !opts.no_renames {
-        detect_exact_renames(&mut result.entries);
+    if !opts.no_renames
+        && let Err(e) = detect_content_renames(&snapshot, &mut result.entries)
+    {
+        return emit_err(&format!("rename detection: {e}"), exit::GENERAL_ERROR);
     }
 
     let normalized: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
@@ -642,8 +644,14 @@ fn worktree_tree_filtered(
 ) -> Result<Hash, (String, u8)> {
     let idx =
         super::read_or_seed_index_from_head(layout, store).map_err(|e| (e, exit::GENERAL_ERROR))?;
-    worktree::build_tree_filtered(snapshot, layout.worktree_root(), Some(&idx))
-        .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
+    worktree::build_tree_filtered_observed_with_source(
+        snapshot,
+        snapshot,
+        layout.worktree_root(),
+        Some(&idx),
+        &mut Vec::new(),
+    )
+    .map_err(|e| (format!("build tree: {e}"), exit::GENERAL_ERROR))
 }
 
 fn rev_to_tree(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> Result<Hash, (String, u8)> {

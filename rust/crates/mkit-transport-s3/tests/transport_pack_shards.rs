@@ -76,6 +76,43 @@ fn key_for(pack: &[u8]) -> PackKey {
     PackKey::new(hash(pack))
 }
 
+#[test]
+fn requested_pack_identity_rejects_foreign_manifest_before_shards() {
+    let mut server = mockito::Server::new();
+    let key = key_for(b"requested pack A");
+    let other = synthetic_pack(64 * 1024);
+    let (shards, manifest) = encode_pack_to_shards(&other, default_config()).unwrap();
+    let _manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/packs/{}/shards.manifest", key.to_hex()).as_str(),
+        )
+        .with_status(200)
+        .with_body(encode_manifest(&manifest).unwrap())
+        .create();
+    let shard_mocks: Vec<_> = shards
+        .iter()
+        .map(|shard| {
+            server
+                .mock(
+                    "GET",
+                    format!("/bucket/packs/{}/shards/{}", key.to_hex(), shard.index).as_str(),
+                )
+                .with_status(200)
+                .with_body(shard.bytes.clone())
+                .expect(0)
+                .create()
+        })
+        .collect();
+    assert!(matches!(
+        build_transport(&server.url()).download_pack(&key),
+        Err(TransportError::InvalidResponse)
+    ));
+    for shard in shard_mocks {
+        shard.assert();
+    }
+}
+
 /// Publish a sharded pack at the mockito server. Drop the requested
 /// shard indices (404 them) so the test can exercise loss scenarios.
 fn publish_sharded(
@@ -357,11 +394,17 @@ fn s3_shard_get_retries_on_503_then_succeeds() {
         .with_body(shards[0].bytes.clone())
         .expect(1)
         .create();
+    // Leave only minimum-1 other shards available, forcing the retry to
+    // complete before reconstruction can cancel redundant workers.
     for shard in shards.iter().skip(1) {
         let path = format!("/bucket/packs/{hex}/shards/{}", shard.index);
         let _m = server
             .mock("GET", path.as_str())
-            .with_status(200)
+            .with_status(if shard.index < manifest.config.minimum_shards.get() {
+                200
+            } else {
+                404
+            })
             .with_body(shard.bytes.clone())
             .create();
     }
@@ -373,8 +416,8 @@ fn s3_shard_get_retries_on_503_then_succeeds() {
 }
 
 /// #181 fix A: a shard GET returning 403 is NOT retried (terminal).
-/// The mock asserts it was hit exactly once. Quorum is reached from
-/// the remaining shards so the overall download still succeeds.
+/// Four unavailable extras force this final terminal failure to be observed;
+/// the mock asserts the denied shard was attempted exactly once.
 #[test]
 fn s3_shard_get_does_not_retry_on_403() {
     let mut server = mockito::Server::new();
@@ -403,13 +446,17 @@ fn s3_shard_get_does_not_retry_on_403() {
         let path = format!("/bucket/packs/{hex}/shards/{}", shard.index);
         let _m = server
             .mock("GET", path.as_str())
-            .with_status(200)
+            .with_status(if shard.index < manifest.config.minimum_shards.get() {
+                200
+            } else {
+                404
+            })
             .with_body(shard.bytes.clone())
             .create();
     }
 
     let t = build_transport(&server.url()); // 5-attempt ladder
-    assert_eq!(t.download_pack(&key).unwrap(), pack);
+    assert!(t.download_pack(&key).is_err());
     denied.assert();
 }
 
@@ -466,11 +513,17 @@ fn s3_shard_retry_preserves_effective_prefix() {
         .with_body(shards[0].bytes.clone())
         .expect(1)
         .create();
+    // Leave only minimum-1 other shards available, forcing the retry to
+    // complete before reconstruction can cancel redundant workers.
     for shard in shards.iter().skip(1) {
         let path = format!("/bucket/{prefix}/packs/{hex}/shards/{}", shard.index);
         let _m = server
             .mock("GET", path.as_str())
-            .with_status(200)
+            .with_status(if shard.index < manifest.config.minimum_shards.get() {
+                200
+            } else {
+                404
+            })
             .with_body(shard.bytes.clone())
             .create();
     }

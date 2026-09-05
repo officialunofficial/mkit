@@ -79,7 +79,7 @@ forward-compat slot.
 | `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `mkit push` to MITM.                                                                                                              |
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
-| `transport_auth`                     | SAFE       | Write-auth MODE selector for `mkit+https://`/`mkit+http://` (`""`/`bearer` vs `envelope`, `mkit-transport-connect::ConnectTransport`). Same shape as `remote_type`: it picks which wire-auth mechanism applies, not *which* key or backend signs &mdash; that remains `signer`/`signing_key`/`key.*`, all UNSAFE and unchanged. Flipping it to `envelope` makes `mkit push` sign each write RPC's canonical string (procedure + body digest + timestamp + idempotency key) with the user's existing commit-signing Ed25519 key, but that key *already* signs the pushed commit/remix/tag objects themselves for any remote (gated only by `remote_endpoint`'s credential trust, §2's `remote_endpoint` row) &mdash; Ed25519 is EUF-CMA secure against chosen-message signing requests, so a repo-chosen endpoint attacker-influencing a signed *request digest* does not expand what a repo-chosen endpoint already gets by attacker-influencing signed *commit content* through the same key. |
+| `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
 | `attest.external_signer_path`        | **UNSAFE** | Arbitrary executable path → RCE under the user's UID.                                                                                                                              |
@@ -113,14 +113,9 @@ forward-compat slot.
   regardless of which ref is nominated as default. A hostile clone
   pointing `default_branch = main` at attacker-controlled commits
   does not bypass signature verification.
-- **`transport_auth`**: same borderline shape as `remote_type` &mdash; it is a
-  wire-auth MODE selector, not a key/backend selector (those stay
-  UNSAFE). If a future auth mode's canonical string were ever extended
-  to cover repo-controlled data with materially *more* signing power than
-  a commit signature already grants under the same key (for example, something
-  that could be replayed to authorize an unrelated action, unlike the
-  scoped, freshness-windowed, procedure-and-digest-bound write envelope),
-  this key MUST be reclassified UNSAFE.
+- **`transport_auth`**: UNSAFE. Signing request authorization is a distinct
+  capability from signing repository objects. Cryptographic domain separation
+  does not authorize a repository to invoke the user's ambient signer.
 
 ---
 
@@ -159,7 +154,6 @@ durability.objects
 remote_endpoint
 remote_bucket
 remote_type
-transport_auth
 remote.<name>.url / remote.<name>.type   (per named remote)
 branch.<name>.remote / branch.<name>.merge   (per-branch upstream tracking)
 core.<key>                               (allow-listed git-compat keys)
@@ -182,7 +176,7 @@ The exact text is snapshot-tested
 (`crates/mkit-cli/tests/snapshots/repo_config_forbidden_keys__repo_config_forbidden_warning.snap`).
 Any wording change requires a reviewable `cargo insta` snapshot diff.
 
-### 3.4 Runtime credential gate
+### 3.4 Runtime credential and request-signing gates
 
 `remote_endpoint` is repo-safe to *read*, but `mkit push`, `mkit pull`,
 and `mkit fetch` call `enforce_trusted_remote_endpoint` before
@@ -195,6 +189,13 @@ attaching ambient credentials. The gate fires when ALL of:
   merged endpoint,
 - the relevant ambient credential env var is set
   (`MKIT_API_TOKEN` for HTTP, `MKIT_R2_*` for S3).
+
+Independently, selecting user-scoped `transport_auth = envelope` for any
+HTTP(S) endpoint MUST require exact equality with user-scoped
+`trusted_remote_endpoint`, before loading a key or constructing a signer.
+This applies whether or not a bearer token is present, and to explicit clone
+URLs as well as configured remotes. Repository and CLI-supplied destination
+selection cannot confer signing trust on that destination.
 
 When the gate fires, the command exits with a typed error directing
 the user to `mkit config trusted_remote_endpoint <endpoint>`, which

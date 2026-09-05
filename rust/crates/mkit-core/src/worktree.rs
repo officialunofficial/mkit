@@ -61,7 +61,7 @@ pub enum WorktreeError {
 pub type WorktreeResult<T> = Result<T, WorktreeError>;
 
 mod blob;
-pub use blob::{LoadedBlob, read_blob};
+pub use blob::{LoadedBlob, content_eq, content_eq_bytes, content_fingerprint, read_blob};
 
 /// Validate a symlink target: must be relative and contain no `..`
 /// segments.
@@ -147,6 +147,32 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
+    build_tree_observed_impl(sink, None, dir, index, observations)
+}
+
+/// Build a snapshot with read access to newly written and indexed objects.
+/// On a cache miss, equal bytes preserve the staged object identity even when
+/// the current chunker would choose a different representation.
+///
+/// # Errors
+/// See [`WorktreeError`]; unreadable staged content is an error.
+pub fn build_tree_filtered_observed_with_source<S: ObjectSink + ?Sized>(
+    sink: &S,
+    source: &dyn crate::store::ObjectSource,
+    dir: &Path,
+    index: Option<&Index>,
+    observations: &mut Vec<StatObservation>,
+) -> WorktreeResult<Hash> {
+    build_tree_observed_impl(sink, Some(source), dir, index, observations)
+}
+
+fn build_tree_observed_impl<S: ObjectSink + ?Sized>(
+    sink: &S,
+    source: Option<&dyn crate::store::ObjectSource>,
+    dir: &Path,
+    index: Option<&Index>,
+    observations: &mut Vec<StatObservation>,
+) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
@@ -163,7 +189,8 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
         // single-worktree root. Linked-worktree callers (#493 Phase 1+)
         // must pass `Some(index)` or this fallback reads the wrong
         // index; the CLI always passes the discovered layout's index.
-        loaded = index::read_index(&crate::layout::RepoLayout::single(dir)).unwrap_or_default();
+        loaded = index::read_index(&crate::layout::RepoLayout::single(dir))
+            .map_err(|e| WorktreeError::Io(io::Error::other(e)))?;
         &loaded
     };
     // O(1) per-file entry lookups; `Index::find_entry` is a linear scan
@@ -172,6 +199,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
     build_tree_inner(
         sink,
+        source,
         dir,
         "",
         &ignores,
@@ -182,6 +210,20 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
     )
 }
 
+fn retained_content_hash(
+    source: Option<&dyn crate::store::ObjectSource>,
+    indexed: Option<&crate::index::IndexEntry>,
+    fresh: Hash,
+) -> WorktreeResult<Hash> {
+    if let (Some(entry), Some(source)) = (indexed, source)
+        && entry.status != crate::index::EntryStatus::Removed
+        && content_eq(source, &entry.object_hash, &fresh)?
+    {
+        return Ok(entry.object_hash);
+    }
+    Ok(fresh)
+}
+
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
 /// root), so ignore patterns can be matched against full repo-relative paths
 /// rather than bare basenames. `parent_ignored` carries down whether an
@@ -190,6 +232,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
 #[allow(clippy::too_many_arguments)]
 fn build_tree_inner<S: ObjectSink + ?Sized>(
     sink: &S,
+    source: Option<&dyn crate::store::ObjectSource>,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
@@ -243,7 +286,8 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
             let (object_hash, mode) = if let Some(e) = cached {
                 (e.object_hash, entry_mode_from_file_metadata(&meta))
             } else {
-                let (h, opened_meta) = hash_file_with_metadata(sink, &entry.path())?;
+                let (mut h, opened_meta) = hash_file_with_metadata(sink, &entry.path())?;
+                h = retained_content_hash(source, indexed, h)?;
                 // Cache miss that re-hashed back to the staged hash:
                 // report the observation (stat captured from the opened
                 // fd BEFORE the content read) so callers can heal the
@@ -279,6 +323,7 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
             }
             let h = build_tree_inner(
                 sink,
+                source,
                 &entry.path(),
                 &rel_path,
                 ignores,

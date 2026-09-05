@@ -133,108 +133,106 @@ function fakeClient(methods: {
   } as unknown as RepoConnectClient
 }
 
-describe('Connect-flavored envelope construction', () => {
-  it('canonical string joins the exact 5 fields in order with newlines', () => {
-    const s = canonicalString({
-      procedure: procedures.UpdateRef,
-      bodyDigest: 'deadbeef',
-      createdAt: '2026-06-23T00:00:00.000Z',
-      idempotencyKey: 'idem-1',
-    })
-    expect(s).toBe(
-      ['mkit-write:v1', '/mkit.repo.v1.RepoService/UpdateRef', 'deadbeef', '2026-06-23T00:00:00.000Z', 'idem-1'].join(
-        '\n',
-      ),
-    )
-    expect(s.split('\n')).toHaveLength(5)
-    expect(s.split('\n')[0]).toBe('mkit-write:v1')
-    expect(s.split('\n')[1]).toBe(procedures.UpdateRef)
-  })
-
-  it('signs the BLAKE3 of the canonical string with Ed25519, verifiable by the server path', async () => {
-    const api = await mkit()
-    const env: SignedEnvelope = buildSignedEnvelope(api, SEED, {
-      procedure: procedures.UpdateRef,
-      bodyDigest: 'abc',
-      createdAt: '2026-06-23T00:00:00.000Z',
-      idempotencyKey: 'fixed-idem',
-    })
-
-    expect(env.digestHex).toBe(api.blake3_hex(new TextEncoder().encode(env.canonical)))
-    expect(env.publicKeyHex).toBe(api.keypair_from_seed(SEED).pubkey_hex)
-
-    const ok = api.ed25519_verify(hexToBytes(env.signatureHex), hexToBytes(env.digestHex), hexToBytes(env.publicKeyHex))
-    expect(ok).toBe(true)
-
-    const bad = api.ed25519_verify(
-      hexToBytes(env.signatureHex),
-      hexToBytes('00'.repeat(32)),
-      hexToBytes(env.publicKeyHex),
-    )
-    expect(bad).toBe(false)
-  })
-
-  it('a deterministic envelope (fixed createdAt + idempotencyKey) is reproducible', async () => {
-    const api = await mkit()
+describe('destination-bound envelope', () => {
+  it('changes the signed bytes across service and repository boundaries', () => {
     const parts = {
-      procedure: procedures.PutObject,
-      bodyDigest: 'ff',
-      createdAt: '2026-06-23T00:00:00.000Z',
-      idempotencyKey: 'k',
+      audience: 'https://repo.example',
+      repository: 'one',
+      procedure: procedures.UpdateRef,
+      bodyDigest: 'ab'.repeat(32),
+      createdAt: '1700000000000',
+      expiresAt: '1700000300000',
+      idempotencyKey: '01'.repeat(32),
     }
-    const a = buildSignedEnvelope(api, SEED, parts)
-    const b = buildSignedEnvelope(api, SEED, parts)
-    expect(a.signatureHex).toBe(b.signatureHex)
-    expect(a.digestHex).toBe(b.digestHex)
+    expect(canonicalString(parts)).not.toBe(canonicalString({ ...parts, audience: 'https://other.example' }))
+    expect(canonicalString(parts)).not.toBe(canonicalString({ ...parts, repository: 'two' }))
   })
 })
 
-describe('server-parity envelope contract (X-* headers + sign-callback)', () => {
-  it('emits all five envelope headers, with X-Digest = the raw-body digest', async () => {
-    const api = await mkit()
-    const env = buildSignedEnvelope(api, SEED, {
-      procedure: procedures.UpdateRef,
-      bodyDigest: 'deadbeef',
-      createdAt: '1700000000000',
-      idempotencyKey: 'idem-1',
-    })
-    const h = envelopeHeaders(env)
-    expect(h['X-Public-Key']).toBe(env.publicKeyHex)
-    expect(h['X-Signature']).toBe(env.signatureHex)
-    // X-Digest is the RAW request body digest the server recomputes — NOT the signing digest.
-    expect(h['X-Digest']).toBe('deadbeef')
-    expect(h['X-Created-At']).toBe('1700000000000')
-    expect(h['Idempotency-Key']).toBe('idem-1')
-  })
+describe('auth v2 envelope construction', () => {
+  const parts = {
+    audience: 'https://repo.example',
+    repository: 'one',
+    procedure: procedures.UpdateRef,
+    bodyDigest: 'ab'.repeat(32),
+    createdAt: '1700000000000',
+    expiresAt: '1700000300000',
+    idempotencyKey: '01'.repeat(32),
+  }
 
-  it('defaults createdAt to epoch-millis (String(Date.now())), not ISO-8601', async () => {
-    const api = await mkit()
-    const env = buildSignedEnvelope(api, SEED, { procedure: procedures.PutObject, bodyDigest: 'ab' })
-    // epoch-ms is all digits; ISO-8601 would contain a 'T'.
-    expect(env.createdAt).toMatch(/^\d+$/)
-    expect(Number.isFinite(Number(env.createdAt))).toBe(true)
-  })
-
-  it('makeSignFn signs the wasm-supplied body digest and echoes it as digestHex', async () => {
-    const api = await mkit()
-    const sign = makeSignFn(api, SEED, procedures.UpdateRef)
-    const bodyDigest = api.blake3_hex(new TextEncoder().encode('serialized-protobuf-body'))
-    const out = sign(bodyDigest)
-    expect(out.digestHex).toBe(bodyDigest) // echoes the supplied raw-body digest
-    expect(out.publicKeyHex).toBe(api.keypair_from_seed(SEED).pubkey_hex)
-    // The signature must verify over BLAKE3(canonical(bodyDigest, ...)).
-    const canonical = canonicalString({
-      procedure: procedures.UpdateRef,
-      bodyDigest,
-      createdAt: out.createdAt,
-      idempotencyKey: out.idempotencyKey,
-    })
-    const ok = api.ed25519_verify(
-      hexToBytes(out.signatureHex),
-      hexToBytes(api.blake3_hex(new TextEncoder().encode(canonical))),
-      hexToBytes(out.publicKeyHex),
+  it('pins all eight canonical fields', () => {
+    expect(canonicalString(parts)).toBe(
+      [
+        'mkit-write:v2',
+        'https://repo.example',
+        'one',
+        procedures.UpdateRef,
+        `body:${'ab'.repeat(32)}`,
+        '1700000000000',
+        '1700000300000',
+        '01'.repeat(32),
+      ].join('\n'),
     )
-    expect(ok).toBe(true)
+  })
+
+  it('signs a deterministic digest and rejects other destinations', async () => {
+    const api = await mkit()
+    const env: SignedEnvelope = buildSignedEnvelope(api, SEED, parts)
+    expect(buildSignedEnvelope(api, SEED, parts).signatureHex).toBe(env.signatureHex)
+    for (const changed of [
+      parts,
+      { ...parts, audience: 'https://other.example' },
+      { ...parts, repository: 'two' },
+      { ...parts, bodyDigest: 'cd'.repeat(32) },
+    ]) {
+      const digest = api.blake3_hex(new TextEncoder().encode(canonicalString(changed)))
+      expect(api.ed25519_verify(hexToBytes(env.signatureHex), hexToBytes(digest), hexToBytes(env.publicKeyHex))).toBe(
+        changed === parts,
+      )
+    }
+  })
+
+  it('emits the complete v2 header set', async () => {
+    const env = buildSignedEnvelope(await mkit(), SEED, parts)
+    expect(envelopeHeaders(env)).toEqual({
+      'X-Envelope-Version': '2',
+      'X-Audience': parts.audience,
+      'X-Repository': parts.repository,
+      'X-Content-Commitment': `body:${parts.bodyDigest}`,
+      'X-Expires-At': parts.expiresAt,
+      'X-Public-Key': env.publicKeyHex,
+      'X-Signature': env.signatureHex,
+      'X-Digest': parts.bodyDigest,
+      'X-Created-At': parts.createdAt,
+      'Idempotency-Key': parts.idempotencyKey,
+    })
+  })
+
+  it('keeps nonce and signature stable for retries and rejects another body', async () => {
+    const api = await mkit()
+    const sign = makeSignFn(api, SEED, procedures.UpdateRef, 'https://repo.example/path', 'one')
+    const first = sign(parts.bodyDigest)
+    expect(sign(parts.bodyDigest)).toEqual(first)
+    expect(first.idempotencyKey).toMatch(/^[0-9a-f]{64}$/)
+    expect(first.digestHex).toBe(parts.bodyDigest)
+    expect(first.audience).toBe(parts.audience)
+    expect(Number(first.expiresAt) - Number(first.createdAt)).toBe(300_000)
+    expect(() => sign('ff'.repeat(32))).toThrow(/another operation/)
+    expect(
+      makeSignFn(api, SEED, procedures.UpdateRef, parts.audience, 'one')(parts.bodyDigest).idempotencyKey,
+    ).not.toBe(first.idempotencyKey)
+  })
+
+  it('rejects ambiguous fields before signing', () => {
+    for (const changed of [
+      { ...parts, repository: 'one\ntwo' },
+      { ...parts, audience: 'https://repo.example/' },
+      { ...parts, bodyDigest: 'AB'.repeat(32) },
+      { ...parts, expiresAt: parts.createdAt },
+      { ...parts, idempotencyKey: 'legacy-uuid' },
+    ]) {
+      expect(() => canonicalString(changed)).toThrow()
+    }
   })
 })
 

@@ -20,7 +20,7 @@ use mkit_core::protocol::{
 use mkit_core::refs::Ref;
 use url::{Host, Url};
 
-use crate::envelope::{EnvelopeSigner, EnvelopeTransport};
+use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{ErrorContext, map_connect_error};
 use crate::executor::TokioExecutor;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
@@ -251,7 +251,18 @@ impl ConnectTransport {
         } else {
             HttpClient::plaintext()
         };
-        let transport = EnvelopeTransport::new(transport, signer);
+        let repository = parsed.path().trim_matches('/');
+        let repository = if repository.is_empty() {
+            "default"
+        } else {
+            repository
+        };
+        let transport = EnvelopeTransport::new(
+            transport,
+            signer,
+            parsed.origin().ascii_serialization(),
+            repository.to_owned(),
+        );
 
         // The underlying `ClientConfig` default is a defense-in-depth
         // fallback only: every RPC below sets an explicit per-call
@@ -302,10 +313,15 @@ impl ConnectTransport {
         base_uri: Uri,
         signer: Option<Arc<dyn EnvelopeSigner>>,
     ) -> Self {
+        let audience = format!(
+            "{}://{}",
+            base_uri.scheme_str().unwrap_or("http"),
+            base_uri.authority().expect("test authority")
+        );
         let config = ClientConfig::new(base_uri).with_default_timeout(Duration::from_secs(10));
         Self {
             client: TransportServiceClient::new(
-                EnvelopeTransport::new(HttpClient::plaintext(), signer),
+                EnvelopeTransport::new(HttpClient::plaintext(), signer, audience, "default".into()),
                 config,
             ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
@@ -480,9 +496,19 @@ impl Transport for ConnectTransport {
             return Err(TransportError::PayloadTooLarge(bytes.len()));
         }
         let requests = build_upload_requests(bytes, key);
+        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
+                let options = identity
+                    .apply(CallOptions::default().with_timeout(self.pack_transfer_timeout))
+                    .with_header(
+                        "x-content-commitment",
+                        format!(
+                            "pack:{}:{}",
+                            mkit_core::hash::to_hex(key.as_bytes()),
+                            bytes.len()
+                        ),
+                    );
                 self.client
                     .upload_pack_with_options(connectrpc::stream_iter(requests.clone()), options)
                     .await
@@ -596,9 +622,11 @@ impl Transport for ConnectTransport {
         hash: &Hash,
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
+        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let options =
+                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
                 self.client
                     .update_ref_with_options(
                         UpdateRefRequest {
@@ -685,9 +713,11 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<CoreAdvanceOutcome> {
         let (head_expectation, head_expected_id) = condition_to_wire(head_condition);
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
+        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let options =
+                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
                 let resp = self
                     .client
                     .advance_refs_with_options(

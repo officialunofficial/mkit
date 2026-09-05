@@ -3,7 +3,7 @@
 //!
 //! These spawn the built `mkit` binary so they exercise the real CLI
 //! dispatch, signing, and ref-history paths end-to-end. The
-//! journal-specific assertions are gated behind `--features
+//! ancestry-specific assertions are gated behind `--features
 //! history-mmr`; the rest run in every build.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -97,7 +97,7 @@ fn reflog_lists_branch_chain_newest_first() {
 
     let out = ok(root, &["reflog"]);
     let text = String::from_utf8(out.stdout).unwrap();
-    // Entry lines (skip the optional `# journal:` summary, which only
+    // Entry lines (skip the optional `# ancestry:` summary, which only
     // appears on history-mmr builds).
     let entries: Vec<&str> = text
         .lines()
@@ -137,9 +137,9 @@ fn reflog_json_emits_one_record_per_entry() {
     assert!(lines[0].contains("\"index\":0"));
     assert!(lines[0].contains("\"title\":\"second\""));
     assert!(json_str_field(lines[0], "hash").is_some());
-    // `journaled` is present on every record (bool on history-mmr
+    // `ancestry_verified` is present on every record (bool on history-mmr
     // builds, null otherwise).
-    assert!(lines[0].contains("\"journaled\":"));
+    assert!(lines[0].contains("\"ancestry_verified\":"));
 }
 
 #[test]
@@ -322,15 +322,15 @@ fn parents_of(line: &str) -> Vec<String> {
 }
 
 // ------------------------------------------------------------------
-// Journal cross-check (history-mmr only)
+// Ancestry cross-check (history-mmr only)
 // ------------------------------------------------------------------
 
-/// On a history-mmr build, reflog prints the recorded-advance summary
-/// and marks every reachable entry `[journaled]` (verified against the
-/// MMR root), and amend records its move in the journal.
+/// On a history-mmr build, reflog prints the first-parent summary
+/// and marks every reachable entry `[ancestry verified]` (verified against the
+/// MMR root), and amend records its move in the ancestry.
 #[cfg(feature = "history-mmr")]
 #[test]
-fn reflog_journal_cross_check_marks_entries_journaled() {
+fn reflog_ancestry_cross_check_marks_entries_ancestry_verified() {
     let td = init_repo();
     let root = td.path();
     commit_file(root, "a.txt", "a\n", "first");
@@ -339,21 +339,27 @@ fn reflog_journal_cross_check_marks_entries_journaled() {
     let out = ok(root, &["reflog"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.lines().any(|l| l.starts_with("# journal:")),
-        "history-mmr build must print the journal summary:\n{text}"
+        text.lines().any(|l| l.starts_with("# ancestry:")),
+        "history-mmr build must print the ancestry summary:\n{text}"
     );
     assert!(
-        text.contains("recorded advance(s) on 'main'"),
+        text.contains("first-parent commit(s) on 'main'"),
         "summary must name the branch:\n{text}"
     );
-    // Both reachable entries verify against the journaled MMR root.
-    let marked = text.lines().filter(|l| l.contains("[journaled]")).count();
-    assert_eq!(marked, 2, "both entries must verify as journaled:\n{text}");
+    // Both reachable entries verify against the ancestry_verified MMR root.
+    let marked = text
+        .lines()
+        .filter(|l| l.contains("[ancestry verified]"))
+        .count();
+    assert_eq!(
+        marked, 2,
+        "both entries must verify as ancestry_verified:\n{text}"
+    );
 }
 
-/// The journal cross-check is rewrite-robust: after `--amend`, the
-/// reachable chain ({amended, first}) both verify as journaled, even
-/// though the journal now carries three leaves (first, superseded
+/// The ancestry cross-check is rewrite-robust: after `--amend`, the
+/// reachable chain ({amended, first}) both verify as `ancestry_verified`, even
+/// though the ancestry now carries three leaves (first, superseded
 /// second, amended) and the reachable chain length no longer matches
 /// the leaf count.
 #[cfg(feature = "history-mmr")]
@@ -368,8 +374,8 @@ fn reflog_cross_check_survives_amend() {
     let out = ok(root, &["reflog"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
-        text.contains("3 recorded advance(s)"),
-        "journal must show three advances after amend:\n{text}"
+        text.contains("2 first-parent commit(s)"),
+        "ancestry must contain only first + amended after amend:\n{text}"
     );
     let entries: Vec<&str> = text
         .lines()
@@ -380,53 +386,47 @@ fn reflog_cross_check_survives_amend() {
         2,
         "reachable chain is amended + first:\n{text}"
     );
-    // Both reachable commits were journaled at some leaf → both marked.
-    let marked = text.lines().filter(|l| l.contains("[journaled]")).count();
+    // Both reachable commits were ancestry_verified at some leaf → both marked.
+    let marked = text
+        .lines()
+        .filter(|l| l.contains("[ancestry verified]"))
+        .count();
     assert_eq!(
         marked, 2,
-        "both reachable commits must verify as journaled after amend:\n{text}"
+        "both reachable commits must verify as ancestry_verified after amend:\n{text}"
     );
     assert!(
-        !text.contains("[NOT in journal]"),
+        !text.contains("[NOT in ancestry]"),
         "no reachable commit should be flagged missing:\n{text}"
     );
 }
 
 #[cfg(feature = "history-mmr")]
 #[test]
-fn amend_advance_is_recorded_in_journal() {
-    use std::sync::Arc;
-
-    use mkit_core::history::{CommitHistory, TokioExecutor};
-
+fn amend_advance_is_recorded_in_ancestry() {
+    use mkit_core::history::AncestrySnapshot;
     let td = init_repo();
     let root = td.path();
     commit_file(root, "a.txt", "a\n", "first");
     commit_file(root, "b.txt", "b\n", "second");
-    // 2 commits → 2 recorded advances so far.
+    let layout = mkit_core::layout::RepoLayout::single(root);
+    let old = AncestrySnapshot::load(&layout, "main").unwrap();
     ok(root, &["commit", "--amend", "-m", "amended"]);
-    // amend moves the branch via write_ref_recording_history → 3rd
-    // recorded advance.
-    let exec = Arc::new(TokioExecutor::new().expect("tokio runtime"));
-    let history =
-        CommitHistory::open_at(exec, &mkit_core::layout::RepoLayout::single(root), "main")
-            .expect("reopen journal");
+    let history = AncestrySnapshot::load(&layout, "main").unwrap();
     assert_eq!(
         history.len(),
-        3,
-        "two commits + one amend must record three advances in the journal"
+        2,
+        "amend replaces the tip in a new ancestry generation"
     );
+    assert_ne!(history.descriptor().generation, old.descriptor().generation);
+    assert_eq!(history.position_of(&old.descriptor().tip), None);
 }
 
-/// Issue #648, part (b): a multi-commit rebase only appends ONE leaf at
-/// finalize (`rebase.rs`'s replay loop moves detached HEAD per replayed
-/// commit via `write_head_detached`, never `write_ref_recording_history`).
-/// `reflog` must present the resulting gap on the intermediate replayed
-/// commit as an expected absence (`[not journaled]`), not as the old
-/// alarming `[NOT in journal]` wording that reads as tamper evidence.
+/// Finalizing a rebase publishes the complete replayed first-parent ancestry,
+/// including intermediate commits created while HEAD was detached.
 #[cfg(feature = "history-mmr")]
 #[test]
-fn reflog_labels_intermediate_rebase_replay_commit_as_not_journaled() {
+fn reflog_verifies_intermediate_rebase_replay_commit_in_ancestry() {
     let td = init_repo();
     let root = td.path();
     commit_file(root, "root.txt", "root\n", "root");
@@ -445,7 +445,7 @@ fn reflog_labels_intermediate_rebase_replay_commit_as_not_journaled() {
     let text = String::from_utf8(out.stdout).unwrap();
 
     assert!(
-        !text.contains("[NOT in journal]"),
+        !text.contains("[NOT in ancestry]"),
         "must use the new neutral wording, not the old tamper-signal-\
          reading wording:\n{text}"
     );
@@ -461,8 +461,8 @@ fn reflog_labels_intermediate_rebase_replay_commit_as_not_journaled() {
     // `@{0}` = the rebase's finalize tip (f2, replayed last) — this one
     // DOES go through `write_ref_recording_history` and must verify.
     assert!(
-        entries[0].contains("[journaled]") && !entries[0].contains("[not journaled]"),
-        "rebase finalize tip must be journaled:\n{text}"
+        entries[0].contains("[ancestry verified]") && !entries[0].contains("[ancestry unverified]"),
+        "rebase finalize tip must be ancestry_verified:\n{text}"
     );
     // `@{1}` = the intermediate replayed commit (f1) — moved via
     // `write_head_detached` only, so it is EXPECTED to be unverified.
@@ -470,8 +470,7 @@ fn reflog_labels_intermediate_rebase_replay_commit_as_not_journaled() {
     // as a normal consequence of one-leaf-per-ref-write, not a tamper
     // signal.
     assert!(
-        entries[1].contains("[not journaled]"),
-        "intermediate rebase-replayed commit must show the neutral \
-         'not journaled' marker:\n{text}"
+        entries[1].contains("[ancestry verified]") && !entries[1].contains("[ancestry unverified]"),
+        "intermediate rebase-replayed commit must be included in first-parent ancestry:\n{text}"
     );
 }

@@ -19,8 +19,8 @@ use std::path::PathBuf;
 
 use mkit_core::object::{EntryMode, Tree, TreeEntry};
 use mkit_core::sparse::{
-    SparseResponse, build_sparse, decode_sparse_response, encode_sparse_response, hash_filter,
-    tree_hash, verify_sparse,
+    build_sparse, decode_sparse_response, encode_sparse_response, hash_filter, tree_hash,
+    verify_sparse,
 };
 
 fn entry(name: &[u8]) -> TreeEntry {
@@ -38,90 +38,55 @@ fn tree_for(names: &[&[u8]]) -> Tree {
 
 #[test]
 fn local_round_trip_recovers_subset() {
-    let tree = tree_for(&[
-        b"docs",
-        b"src/lib.rs",
-        b"src/main.rs",
-        b"tests/integration.rs",
-    ]);
-    let filter = vec![PathBuf::from("src")];
-    let (delivered, manifest, proof) = build_sparse(&tree, &filter).unwrap();
-
-    assert_eq!(delivered.len(), 2);
-    assert_eq!(delivered[0].name, b"src/lib.rs");
-    assert_eq!(delivered[1].name, b"src/main.rs");
-    assert!(verify_sparse(&manifest, &delivered, &filter, &proof));
-
-    // Filter hash is committed into the manifest.
-    assert_eq!(manifest.filter_hash, hash_filter(&filter));
-    // Tree hash binds to the canonical SPEC-OBJECTS hash.
-    assert_eq!(manifest.tree_hash, tree_hash(&tree));
+    let tree = tree_for(&[b"docs", b"lib.rs", b"main.rs", b"tests"]);
+    let root = tree_hash(&tree);
+    let filter = vec![PathBuf::from("lib.rs"), PathBuf::from("main.rs")];
+    let response = build_sparse(&tree, &filter).unwrap();
+    let verified = verify_sparse(&root, &filter, &response).unwrap();
+    assert_eq!(verified.entries, vec![entry(b"lib.rs"), entry(b"main.rs")]);
+    assert_eq!(response.manifest.filter_hash, hash_filter(&filter));
+    assert_eq!(response.manifest.tree_hash, root);
 }
 
 #[test]
 fn local_wire_envelope_round_trip() {
     let tree = tree_for(&[b"a", b"b", b"c", b"d", b"e"]);
     let filter = vec![PathBuf::from("a"), PathBuf::from("c")];
-    let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
-    let resp = SparseResponse {
-        manifest,
-        entries,
-        proof,
-    };
-    let bytes = encode_sparse_response(&resp).unwrap();
+    let response = build_sparse(&tree, &filter).unwrap();
+    let bytes = encode_sparse_response(&response).unwrap();
     let parsed = decode_sparse_response(&bytes).unwrap();
-
-    assert_eq!(parsed.manifest, resp.manifest);
-    assert_eq!(parsed.entries.len(), resp.entries.len());
-    assert!(verify_sparse(
-        &parsed.manifest,
-        &parsed.entries,
-        &filter,
-        &parsed.proof
-    ));
-}
-
-#[test]
-fn tampered_extra_bit_in_bitmap_is_rejected() {
-    let tree = tree_for(&[b"a", b"b", b"c"]);
-    let filter = vec![PathBuf::from("a")];
-    let (entries, manifest, mut proof) = build_sparse(&tree, &filter).unwrap();
-
-    // Server flips a bit it didn't earn (claims it included entry b),
-    // without updating the manifest's bitmap_root.
-    proof.bitmap_bytes[0] ^= 0b0000_0010;
-
-    assert!(
-        !verify_sparse(&manifest, &entries, &filter, &proof),
-        "verifier MUST reject a bitmap that diverges from manifest.bitmap_root"
+    assert_eq!(parsed.manifest, response.manifest);
+    assert_eq!(
+        verify_sparse(&tree_hash(&tree), &filter, &parsed)
+            .unwrap()
+            .entries,
+        vec![entry(b"a"), entry(b"c")]
     );
 }
 
 #[test]
-fn tampered_extra_entry_in_delivery_is_rejected() {
+fn tampered_witness_is_rejected() {
     let tree = tree_for(&[b"a", b"b", b"c"]);
     let filter = vec![PathBuf::from("a")];
-    let (mut entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+    let mut response = build_sparse(&tree, &filter).unwrap();
+    response.proof.tree_bytes[0] ^= 2;
+    assert!(verify_sparse(&tree_hash(&tree), &filter, &response).is_err());
+}
 
-    // Server tries to slip in entry "b" — bitmap commits to 1 set bit,
-    // delivered count would be 2. Cardinality check catches it.
-    entries.push(entry(b"b"));
-    assert!(
-        !verify_sparse(&manifest, &entries, &filter, &proof),
-        "verifier MUST reject a delivery whose entry count exceeds the bitmap's set-bit count"
-    );
+#[test]
+fn omitted_selected_entry_in_witness_is_rejected() {
+    let tree = tree_for(&[b"a", b"b", b"c"]);
+    let filter = vec![PathBuf::from("a")];
+    let mut response = build_sparse(&tree, &filter).unwrap();
+    response.proof = build_sparse(&tree_for(&[b"b", b"c"]), &filter)
+        .unwrap()
+        .proof;
+    assert!(verify_sparse(&tree_hash(&tree), &filter, &response).is_err());
 }
 
 #[test]
 fn filter_swap_is_rejected() {
-    // Manifest committed against filter A. Client supplies filter B.
-    // Filter-binding check fires before any bitmap reconstruction.
     let tree = tree_for(&[b"a", b"b"]);
-    let (entries, manifest, proof) = build_sparse(&tree, &[PathBuf::from("a")]).unwrap();
-    assert!(!verify_sparse(
-        &manifest,
-        &entries,
-        &[PathBuf::from("b")],
-        &proof,
-    ));
+    let response = build_sparse(&tree, &[PathBuf::from("a")]).unwrap();
+    assert!(verify_sparse(&tree_hash(&tree), &[PathBuf::from("b")], &response).is_err());
 }

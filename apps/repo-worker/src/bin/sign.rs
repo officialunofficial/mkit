@@ -15,7 +15,7 @@
 // of 0x07 (the deterministic test signer) so output is reproducible.
 
 use ed25519_dalek::{Signer, SigningKey};
-use mkit_repo_worker::envelope::envelope_signing_digest;
+use mkit_core::write_auth::{Context, Operation};
 use mkit_repo_worker::hashing::blake3_hex;
 
 fn main() {
@@ -36,7 +36,13 @@ fn main() {
     }
     let procedure = &args[1];
     let body = &args[2];
-    let idem = args.get(3).cloned().unwrap_or_default();
+    let idem = args
+        .get(3)
+        .cloned()
+        .expect("a fresh 64-hex nonce is required");
+    let audience = std::env::var("AUTH_AUDIENCE").expect("AUTH_AUDIENCE is required");
+    let parsed: serde_json::Value = serde_json::from_str(body).expect("body must be JSON");
+    let repository = parsed["room"].as_str().expect("body room is required");
     let seed_hex = args.get(4).cloned().unwrap_or_else(|| "07".repeat(32));
 
     let seed: [u8; 32] = {
@@ -54,10 +60,27 @@ fn main() {
         .unwrap()
         .as_millis() as i64;
 
-    let digest = envelope_signing_digest(procedure, &body_digest, created_at, &idem);
+    let expires_at = created_at + 300_000;
+    let commitment = format!("body:{body_digest}");
+    let digest = Operation {
+        context: Context {
+            audience: &audience,
+            repository,
+        },
+        procedure,
+        commitment: &commitment,
+        created_at,
+        expires_at,
+        nonce: &idem,
+    }
+    .digest()
+    .expect("invalid auth v2 fields");
     let signature = hex::encode(sk.sign(&digest).to_bytes());
 
     // Emit curl -H flags.
+    print!(
+        "-H 'X-Envelope-Version: 2' -H 'X-Audience: {audience}' -H 'X-Repository: {repository}' -H 'X-Content-Commitment: {commitment}' -H 'X-Expires-At: {expires_at}' "
+    );
     print!(
         "-H 'X-Public-Key: {pubkey}' \
 -H 'X-Signature: {signature}' \

@@ -89,6 +89,10 @@ describe('keys-client — registry enabled', () => {
       expect(url).toBe(`${BASE}/name/${PUBKEY}`)
       expect(init?.method).toBe('PUT')
       const h = init?.headers as Record<string, string>
+      expect(h['X-Envelope-Version']).toBe('2')
+      expect(h['X-Audience']).toBe(new URL(BASE).origin)
+      expect(h['X-Repository']).toBe('keys')
+      expect(h['X-Content-Commitment']).toBe('body:' + 'aa'.repeat(32))
       expect(h['X-Public-Key']).toBe(PUBKEY)
       expect(h['X-Signature']).toBe('00'.repeat(64))
       expect(h['X-Digest']).toBe('aa'.repeat(32))

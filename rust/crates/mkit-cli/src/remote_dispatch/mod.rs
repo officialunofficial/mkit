@@ -223,6 +223,11 @@ pub(crate) fn open_with_config(
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
+            return Err(DispatchError::UntrustedRemote(format!(
+                "refusing request signing for untrusted destination `{url}`; run `mkit config trusted_remote_endpoint {url}` before using ambient signing identity"
+            )));
+        }
         envelope_signer_from_config(cfg, layout)?
     } else {
         None
@@ -1530,6 +1535,35 @@ mod tests {
     // rather than relying on an end-to-end push to happen to exercise
     // them on whatever hardware runs the test.
     // =================================================================
+
+    #[test]
+    fn envelope_destination_trust_precedes_missing_key_resolution() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(directory.path());
+        for endpoint in ["mkit+https://untrusted.example", "mkit+http://127.0.0.1:1"] {
+            let mut cfg = Config {
+                transport_auth: "envelope".into(),
+                signer: "legacy".into(),
+                signing_key: ".mkit/keys/missing-signing-key".into(),
+                ..Config::default()
+            };
+            let error = super::open_with_config(endpoint, &cfg, &layout)
+                .err()
+                .expect("untrusted signing must fail");
+            assert!(
+                matches!(error, super::DispatchError::UntrustedRemote(_)),
+                "destination rejection must precede key access: {error}"
+            );
+            cfg.trusted_remote_endpoint = endpoint.into();
+            let error = super::open_with_config(endpoint, &cfg, &layout)
+                .err()
+                .expect("trusted endpoint now resolves the absent key");
+            assert!(
+                error.to_string().contains("requires a signing key"),
+                "trusted destination should reach key resolution: {error}"
+            );
+        }
+    }
 
     #[test]
     fn batch_lens_empty_input_is_no_batches() {

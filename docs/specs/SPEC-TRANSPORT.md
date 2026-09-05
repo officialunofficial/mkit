@@ -48,6 +48,13 @@ internal `Mutex` so the trait object remains object-safe.
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
 | `write_ref(name, hash)` | Convenience: `update_ref(name, RefWriteCondition::Any, hash)`. A default trait impl delegates here, so transports only need to implement `update_ref`. |
 
+Consumers MUST verify that downloaded pack and auxiliary-blob bytes hash to
+the caller's requested PackKey before parsing them into authoritative state,
+writing objects, or recording a pack as applied. BLAKE3 covers the entire
+returned byte sequence, including a pack's trailer. A transport's internal
+checks, a valid pack trailer, or a content-addressed lookup URL do not replace
+this consumer-boundary check. Mismatch is `InvalidResponse` and is not retryable.
+
 ### 1.1 Streaming pack transfer (additive, opt-in)
 
 `upload_pack_streaming(key, total_bytes, chunks)` and
@@ -726,3 +733,27 @@ These hold for every conformant transport, regardless of scheme:
 
 Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
 the normative summary is the table in §7.1.
+
+### Bounded pack-chain fetch staging
+
+Fetch MUST authenticate each requested pack and pack-list node before decoding
+or applying it. The CLI stages missing packs sequentially in a private temporary
+directory outside the repository lock. It retains keys and file descriptors,
+then reads and applies one staged pack at a time under the existing repository
+lock. Signature and closure validation still precede ref publication; GC
+exclusion is unchanged. A failed download, digest check, write or apply drops
+the temporary-directory owner, removing completed and partial stage files.
+
+The CLI limits staged payloads to 64 GiB, chain packs to one million, and
+pack-list nodes to 100,000. Disk exhaustion and limit failures abort before ref
+publication. Applied-pack markers are rechecked under the lock; stale markers
+retain the existing object-closure recovery behavior. Stored-object ID lists
+are checked per pack and are not accumulated over the chain.
+
+HTTP/S3 shard readers share a process-wide 4 GiB + 1 MiB encoded-buffer budget
+and 32-worker ceiling. Buffer reservations remain attached while queued and
+decoded. Completion or failure cancels the download group; blocked reads remain
+bounded by transport timeouts. Stragglers cannot obtain a fresh per-request
+budget. Reconstruction and unpack working memory remain bounded by one pack
+and its selected shard inputs, rather than total chain payload size. This is
+not a chunk-streaming pack parser and does not claim a small fixed RSS ceiling.

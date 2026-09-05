@@ -43,8 +43,11 @@ fixed-cost overhead exceeds the redundancy benefit.
 
 ## 2. ShardSet manifest wire shape
 
-The manifest is fetched once, before any shards. It is the
-content-addressed root of trust for a sharded pack.
+The manifest is fetched once, before any shards. The caller's requested
+PackKey is the root of trust, not the manifest or its lookup URL. A receiver
+MUST compare `manifest.pack_hash` to that requested key before requesting any
+shard and MUST reject a mismatch. After reconstruction it MUST verify the
+whole pack's BLAKE3 digest against the same requested key.
 
 ```text
 field             type         description
@@ -105,8 +108,9 @@ Decoders MUST:
 * Reject any input that exceeds `MANIFEST_MAX_BYTES` (1 MiB).
 * Reject trailing bytes after the last hash.
 
-The manifest is itself content-addressed by `pack_hash` &mdash; that is, the
-publish path is `/packs/<lower-hex(pack_hash)>/shards.manifest`.
+The manifest is published at `/packs/<lower-hex(pack_hash)>/shards.manifest`.
+This is an address derived from the pack, not a digest of the manifest bytes;
+the URL alone does not authenticate the returned manifest.
 
 ---
 
@@ -137,8 +141,9 @@ This double-check (BLAKE3 envelope hash + commonware's own Merkle
 proof) is intentional. The envelope BLAKE3 lets a transport reject
 bad shards cheaply, without paying the Merkle-proof cost. The Merkle
 proof inside the chunk additionally binds the shard to the manifest's
-`commitment`, which prevents a coordinated attacker from substituting
-a self-consistent shard set with a different `commitment`.
+`commitment`. A complete self-consistent replacement of the manifest and shards
+is detected by the independently requested PackKey checks in §2, not by the
+manifest's internal hashes alone.
 
 ---
 
@@ -305,9 +310,9 @@ packs. The v0 default `(16, 4)` was picked to balance:
 | The manifest parses one way or not at all | `b"MKSH"` magic + version check, non-zero `(minimum, extra)`, `shard_hashes_len == minimum + extra`, `MANIFEST_MAX_BYTES` cap, trailing bytes rejected (§2.1) |
 | A corrupted or substituted shard never reaches the Reed-Solomon decoder | `BLAKE3(shard.bytes)` checked against `manifest.shard_hashes[index]` first → `ShardHashMismatch` (§3, §4.2 step 2c) |
 | A shard cannot claim a foreign index | `index < T`, index-vs-fetch-URL match (§3), duplicate indices rejected (§4.2 step 2b) |
-| A self-consistent substitute shard *set* is detected | commonware BMT `commitment` in the manifest; per-shard Merkle proof checked by `ReedSolomon::check` (§2, §3, §4.2 step 2e) |
+| A self-consistent substitute shard *set* is detected | `manifest.pack_hash` equals the caller's requested PackKey before fetch, and the reconstructed pack hashes to that requested key (§2) |
 | Any `minimum_shards` of the `T` shards suffice; fewer fail loudly | `checked.len() >= minimum_shards` requirement, typed `ShardError` short-circuit (§4.2 step 3) |
-| The manifest is the content-addressed root of trust | fetched first, published at `/packs/<hex(pack_hash)>/shards.manifest` (§2) |
+| The caller's requested PackKey is the root of trust | manifest and reconstructed pack bound to that key; the lookup URL alone is insufficient (§2) |
 | A failed sharded fetch degrades, never corrupts; an undecodable manifest never silently downgrades | HTTP: `extra_shards + 1` failures short-circuit to `PackNotFound`; S3: only a manifest `404` falls back to the monolithic pack key &mdash; a present-but-undecodable manifest propagates as `InvalidResponse` on both S3 and HTTP (§5) |
 | Per-shard memory is bounded | each shard buffered whole under `PACK_BODY_LIMIT` (§5) |
 

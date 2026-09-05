@@ -5,6 +5,132 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Git audit establishes correspondence without a signing key
+
+**Always:** imported graph edges and translated unsigned fields are derived
+from retained Git bytes and checked under the pinned public key. A head's
+provenance claim must match its exact subject, ref, source and versions.
+
+**Because:** valid signatures on unrelated twins do not authenticate a mutable
+Git-to-mkit mapping cache.
+
+**If violated:** swapped mappings or unrelated attestations can pass an audit.
+
+**Enforced by:** `rust/crates/mkit-cli/tests/git_import_integration.rs` mapping
+swap, unrelated attestation and private-key removal regressions; the full
+45-test integration suite passes. Golden translated bytes remain unchanged.
+
+## File equality survives valid representation changes
+
+**Always:** different file object IDs compare by verified byte streams; modes
+remain separate. Restaging identical content keeps the staged ID. Chunk failures
+remain errors, including after the first differing byte.
+
+**Because:** an inline Blob, fixed-size manifest and CDC manifest may describe
+the same bytes with different immutable object identities.
+
+**If violated:** clean worktrees appear modified, restaging changes identity,
+and merge or overwrite decisions depend on chunk boundaries.
+
+**Enforced by:** core `worktree::blob::equality_tests`,
+`ops::diff::tests::equal_content_different_chunk_layout_is_clean`, and
+`rust/crates/mkit-cli/tests/content_representation_integration.rs`. Comparison
+holds at most one chunk per side plus manifests; rename fingerprints are
+memoized for one diff and confirmed by byte comparison.
+
+## Requested transport identities are checked before effects
+
+**Always:** fetched packs and metadata match their requested keys; shard
+manifests name the requested pack before reconstruction. Sparse selections are
+derived from canonical Tree witnesses verified against independently known IDs.
+
+**Because:** internally valid content can still be a substituted response.
+
+**If violated:** transports can publish unrequested objects or incomplete paths.
+
+**Enforced by:** packmap substitution tests, HTTP/S3 shard suites, core sparse
+v2 mutation/completeness tests and `rust/tests/golden/sparse/response_v2.bin`.
+
+## Every ref mutation participates in its lock protocol
+
+**Always:** local Any, Missing, Match and deletion take the same full-ref guard.
+The order is registry, worktrees, history, then ref mutation locks; peers within
+a class use canonical order. File transport serializes all condition variants
+within its separate transport lock domain.
+
+**Because:** an unconditional writer can invalidate a conditional writer's
+observation just as another CAS writer can.
+
+**If violated:** reported successful updates lose writes or expose invalid
+history publication states.
+
+**Enforced by:** core refs and file-transport contention regressions, CLI
+history lifecycle and publication retry tests.
+
+## History evidence binds ancestry, generation and context
+
+**Always:** a trusted proof describes the canonical first-parent chain for the
+expected repository, ref, tip and generation. Pending durable intents pin both
+previous and target tips as GC roots even without the history feature enabled.
+
+**Because:** a mutation journal is not an ancestry proof, and publication spans
+multiple durable files.
+
+**If violated:** rewinds, resets, ABA or interrupted writes can issue misleading
+proofs or let GC remove objects needed to recover.
+
+**Enforced by:** `history/ancestry.rs` chain/context/generation and six-boundary
+failure tests, and core GC intent-root tests. Current descriptors establish
+local trust only; snapshots/reconstruction cost O(chain length), capped at one
+million leaves. Only canonical ancestry snapshots are supported.
+
+## Staging selections are durable; stat caches are disposable
+
+**Always:** current index data preserves path, mode, staged object and deletion
+intent. Only checksummed v3 is accepted. Unknown, empty or corrupt index data
+stops operations that rely on staging, including GC; it is never converted or
+rebuilt from working files.
+
+**Because:** HEAD and the working file cannot reconstruct a partial selection.
+
+**If violated:** recovery silently replaces staged A with working B or garbage
+collect the only copy of staged content.
+
+**Enforced by:** current index checksum/round-trip and unsupported-version
+rejection tests, current golden fixtures, and GC no-sweep-on-corruption coverage.
+
+## Authenticated write effects and replay state commit together
+
+**Always:** auth v2 verifies configured audience, decoded repository, procedure,
+content commitment, times and nonce before effects. Retries keep their operation
+identity. SQLite adapters commit mutable effects, quota and replay response in
+one transaction; immutable publication records a recoverable reservation first.
+
+**Because:** signature validity alone cannot prevent cross-service replay or
+repeating an effect after a crash.
+
+**If violated:** a captured request can move a ref back, toggle a reaction twice,
+restore an old name or charge duplicate upload quota.
+
+**Enforced by:** shared core canonical/context tests; Connect retry tests;
+actual local Workers regressions in `apps/{repo-worker,vcs-worker,keys-worker}/tests/`;
+web/spammer envelope tests. Keys failure injection after name and result writes
+rolls back both; saved results survive a full Worker restart. Production builds
+omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
+
+## External signer capabilities precede signing material
+
+**Always:** the external signer returns compatible protocol, algorithm,
+message-size and interaction capabilities before receiving SignRequest bytes.
+All subprocess I/O retains frame and wall-clock bounds.
+
+**Because:** advertising capabilities after signing cannot enforce them.
+
+**If violated:** an incompatible signer can perform a request before rejection.
+
+**Enforced by:** external signer no-sign-on-incompatible-handshake regressions,
+PIN/timeout subprocess tests and the bundled file signer's end-to-end test.
+
 ## Dependabot ecosystem matches the lockfile format
 
 **Always:** every directory with its own lockfile has a `.github/dependabot.yml`
@@ -108,7 +234,7 @@ range), AND every `Cargo.lock` in those same trees that contains a
 **Because:** the commonware crates (`-storage`, `-cryptography`,
 `-runtime`, `-coding`, `-codec`, `-parallel`, `-utils`, `-stream`,
 `-invariants`) ship as one coordinated release; mkit's on-disk formats
-(the history-journal MMR, the BLS threshold derivation) and wire
+(the ancestry MMR, the BLS threshold derivation) and wire
 compatibility depend on the exact same version being linked everywhere a
 crate touches them. A manifest bump without a matching `cargo update` in
 every workspace leaves the *text* aligned while the *lockfile* — what
@@ -126,142 +252,6 @@ bumped one.
 `check_commonware_family`, run by the "Meta: crypto-stack version"
 workflow (trigger paths include `**/Cargo.lock` under `rust/`,
 `contrib/signers/`, and `apps/*`, not just `Cargo.toml`).
-
-## History-journal page size and peak-bagging strategy are format-frozen
-
-**Always:** `CommitHistory::open_at`'s journaled-MMR config
-(`crates/mkit-core/src/history.rs`, `init_journaled`'s `JConfig`) keeps
-these three parameters exactly as they are today: `items_per_blob =
-4096`; the `CacheRef::from_pooler` page size passed as `NZU16!(4096)`
-(a *logical* page size — the on-disk *physical* page is 4108 bytes,
-logical + `commonware_runtime::buffer::paged::CHECKSUM_SIZE` = 12);
-and `HISTORY_BAGGING = Bagging::ForwardFold`. In particular, do not
-"upgrade" the page size to
-`commonware_runtime::buffer::paged::page_size(4096)` (= 4084,
-commonware 2026.9.0's own *aligned* logical size, chosen so 4084 + 12
-divides the OS page evenly) — that is exactly the destructive change
-this invariant exists to block. None of the three may change without
-a new on-disk format version and an explicit migration.
-
-**Because:** commonware-runtime 2026.9.0 documents blob layout and page
-size as destructive format parameters — changing them truncates an
-existing journal's blobs to empty on the next open rather than
-reinterpreting the bytes. A page-size or bagging-strategy change is
-therefore not a config tweak; it silently discards every already-written
-`history/<branch>/` journal on the next `mkit` invocation that touches it.
-
-**If violated:** every existing branch's history journal truncates (or its
-stored root/proofs stop matching a fresh replay) the next time
-`CommitHistory::open_at` runs against it after the change ships — a silent
-data-loss-on-upgrade bug, not a build or test failure, because the bug
-only manifests against pre-existing on-disk state a CI run never has.
-
-**Enforced by:** nothing today catches a page-size or bagging change
-before it ships. `crates/mkit-core/src/history.rs`'s
-`open_at_root_matches_live_mem_root`-family tests and
-`open_at_round_trip_100_commits` / `open_at_prove_after_reopen` build
-and read back a journal within the SAME test run (same build, same
-process) — a page-size or bagging change that is internally consistent
-passes them just as well as the frozen values do, because there is no
-fixture written by a *previous* build for them to reopen. Catching a
-regression here needs a fixture generated by a build that predates the
-change (a previously-written `history/<branch>/` journal directory
-committed to the repo, reopened by the current build) — see MKIT-4 for
-why that fixture has not been added yet.
-
-## The shared commonware Context is post-shutdown after `open_at`
-
-**Always:** `mkit-core`'s history module drives the shared
-`commonware_runtime::tokio::Context` it bootstraps (see
-`JournaledBackend.ctx` in `crates/mkit-core/src/history.rs`) only
-through mkit's OWN executor (`Executor::block_on` — ambient
-`tokio::task::spawn_blocking` inside commonware's blob/journal calls
-runs there). Nothing on the journaled-history path ever calls
-`commonware_runtime::Spawner::spawn` (or anything that internally
-spawns, e.g. `Handle`/`Signal` machinery) on that shared `Context` or
-a clone/child of it.
-
-**Because:** commonware-runtime 2026.9.0's
-`commonware_runtime::tokio::Runner::start` aborts its task tree,
-closes task admission, and drops its inner tokio runtime *before*
-returning control to the closure passed to `start` — so the `Context`
-`bootstrap_commonware_context` returns (and therefore every
-`JournaledBackend.ctx` clone) is already post-shutdown by the time
-`CommitHistory::open_at` returns. At the previous pinned train
-(`2026.7.1`), `Executor` was an owned `Runtime` and the Context's
-inner `Arc<Executor>` genuinely kept that runtime alive for as long as
-a clone survived; that was true then and is false now. The `Context`
-is still held for the whole `CommitHistory` lifetime, but only for its
-`.hold` flock, buffer pools, and metrics registry — not a runnable
-executor.
-
-**If violated:** a `Spawner::spawn` call through this `Context` is
-silently admitted into an already-closed task tree and resolves to
-`Err(commonware_runtime::Error::Closed)` — the spawned work never
-runs, with no panic and no I/O error at the call site. A future change
-that tried to route an fsync or a blob write through `ctx.spawn(...)`
-instead of mkit's own executor would be a silent durability hole:
-`CommitHistory::append`/`sync` would return `Ok` (or a channel-recv
-error, depending on how the dropped work was awaited) without the
-write having actually happened.
-
-**Enforced by:** `crates/mkit-core/src/history.rs`'s
-`shared_commonware_context_is_post_shutdown_and_must_not_be_spawned_through`,
-which spawns a no-op task through `JournaledBackend.ctx` and asserts
-it resolves to `Err(Error::Closed)`, then appends/reopens through the
-same handle to confirm the journaled path itself is unaffected.
-
-## One commonware storage Context per history dir per process
-
-**Always:** every in-process `CommitHistory::open_at` call against the
-same `<mkit_dir>/history` directory shares one bootstrapped
-`commonware_runtime::tokio::Context` (cached by canonicalized history
-directory path, released once the last handle referencing it drops) —
-`open_at` never bootstraps a second, independent `Context` against a
-history directory that already has a live one in this process.
-
-**Because:** commonware-runtime 2026.9.0 added a per-`storage_directory`
-advisory `.hold` file lock, taken (and blocked on) inside
-`Storage::new`/`Runner::start` and held for as long as any clone of that
-bootstrap's storage handle is alive. Two independent bootstraps against
-the same directory — e.g. opening `CommitHistory` for two different
-branches under the same `mkit_dir`, which both resolve to the same
-`history/` storage directory — take two independent, mutually exclusive
-flocks on the same file. commonware's `Storage::new` blocks (with only a
-`tracing::warn!`, which mkit-cli does not surface — no subscriber is
-installed) rather than erroring, so the second bootstrap in the same
-process deadlocks forever instead of failing fast.
-
-**If violated:** any code path that opens more than one branch's history
-in one process (`mkit branch -d`/`-m` cleanup, multi-branch CLI commands,
-a long-running `mkit serve` handling several branches, or simply two
-sequential `CommitHistory::open_at` calls in a test) hangs indefinitely
-instead of returning or erroring.
-
-**Related cross-process gotcha (not fixed by the above, by design):**
-the shared-`Context` cache only dedupes bootstraps *within one process*.
-A live `CommitHistory` handle held by a test or long-running process
-still blocks a *different* process's `open_at` against the same
-`history/` directory — including a CLI subprocess spawned by that same
-test. `crates/mkit-cli/tests/history_mmr_branch_lifecycle.rs`'s
-`branch_rename_destroys_the_old_names_journal` hit exactly this after
-the MKIT-2 bump: it kept an in-process `CommitHistory` handle alive
-across several subsequent `mkit` subprocess invocations on the same
-repo, and the second subprocess's `open_at` blocked forever on the
-first (in-process) handle's still-held lock. Fixed by scoping the
-handle to drop before the next subprocess call — the general rule for
-any test mixing in-process `CommitHistory::open_at` with subprocess
-`mkit` invocations against the same repo.
-
-**Enforced by:** `crates/mkit-core/src/history.rs`'s
-`two_branches_open_concurrently_in_one_process_does_not_block`, plus
-`open_at_distinct_branches_have_distinct_roots` and
-`destroy_of_one_branch_does_not_touch_a_sibling_branch`, all wrapped in
-that module's `assert_completes_within` helper so a regression here is a
-test *failure* (bounded timeout) rather than a hung `cargo test` binary.
-The cross-process gotcha itself is enforced only by
-`branch_rename_destroys_the_old_names_journal` no longer hanging (no
-timeout wrapper on `mkit-cli`'s integration tests today).
 
 ## commonware `Strategy` cannot be spied on from outside commonware-parallel
 
@@ -302,7 +292,7 @@ feature, no `install.ps1` or Scoop packaging, and no
 **Because:** commonware-runtime 2026.9.0's storage-sync path calls
 `libc::sync()` on every non-Linux target (`rust/crates/mkit-transport-enc`
 depends on `commonware-runtime` unconditionally, and `mkit-core`'s
-`history-mmr`/`sparse-checkout` features and dev-dependencies pull it in
+dev-dependencies pull it in
 too) — `libc::sync()` does not exist on `x86_64-pc-windows-msvc`, so the
 workspace and its test suite no longer build there. Maintaining a Windows
 CI/release leg that cannot actually build or test the workspace would ship

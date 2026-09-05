@@ -40,16 +40,8 @@ bytes = "1"
 commonware-codec = { workspace = true }
 commonware-storage = { workspace = true, features = ["std"], optional = true }
 commonware-cryptography = { workspace = true, features = ["std"], optional = true }
-commonware-runtime = { workspace = true, optional = true }
 commonware-coding = { workspace = true, optional = true }
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
-commonware-utils = { workspace = true, optional = true, features = ["std"] }
-# tokio is opt-in via `history-mmr`: the journaled MMR persistence path
-# bridges sync mkit APIs to commonware-storage's async surface, and
-# bootstrapping a `commonware-runtime::tokio::Context` requires a tokio
-# runtime owned by mkit-core. Default builds (and the `sparse-checkout`
-# / `pack-shards` paths, which stay async-internal) don't pull tokio.
-tokio = { version = "1", optional = true, features = ["rt-multi-thread", "fs", "sync", "io-util", "time"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
@@ -93,52 +85,23 @@ default = ["pack-zstd"]
 # means this build's `PackWriter` never emits them and this build's
 # `PackReader` can't decompress ones it receives.
 pack-zstd = ["dep:zstd"]
-# Issue #157 — append-only MMR over the commit chain.
-#
-# The mem-only path (`CommitHistory::open`) needs only the in-process
-# MMR primitive from `commonware-storage` and the BLAKE3 hasher from
-# `commonware-cryptography`. The on-disk journaled path (this build,
-# `CommitHistory::open_at`) additionally needs:
-#   - `commonware-runtime` for the `Storage + Clock + Metrics` Context
-#     that backs the journaled MMR's blob/metadata stores; and
-#   - `tokio` for the long-lived multi-thread runtime that drives the
-#     async journaled-MMR ops behind the sync mkit-core API.
-# Both are dragged in together because dropping either re-introduces
-# the rejected mem-only shape.
-# `commonware-parallel` is required (since the 2026.9.x train) to name the
-# `Sequential` fold strategy that `commonware-storage`'s MMR/bitmap now take
-# as a type parameter — it is the crate that defines `Sequential`/`Strategy`
-# (commonware-storage itself depends on it), so there is no lighter source.
-# We pin `Sequential` (single-threaded folding) deliberately; `Rayon` is never
-# used here.
-# commonware-storage / -cryptography / -codec are non-optional (object
-# identity depends on bmt), so these features only pull the extra crates
-# the heavy paths still need on top of the always-present base.
-history-mmr = [
-    "dep:commonware-storage",
-    "dep:commonware-cryptography",
-    "dep:commonware-runtime",
-    "dep:commonware-parallel",
-    "dep:commonware-utils",
-    "dep:tokio",
-]
-# Issue #158 — verifiable sparse-checkout via AuthenticatedBitMap.
-sparse-checkout = [
-    "dep:commonware-storage",
-    "dep:commonware-runtime",
-    "dep:commonware-cryptography",
-    "dep:commonware-parallel",
-]
+# Canonical first-parent snapshots use the synchronous in-memory MMR primitive.
+history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
+# Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
+sparse-checkout = []
 # Issue #159 — erasure-coded pack delivery via Reed-Solomon.
 pack-shards = [
-        "commonware-codec/std",
+    "commonware-codec/std",
     "dep:commonware-coding",
-        "dep:commonware-cryptography",
+    "dep:commonware-cryptography",
     "dep:commonware-parallel",
-    "dep:commonware-utils",
 ]
 
 [dev-dependencies]
+# Storage experiments need the deterministic runtime, not the shipped history API.
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true, features = ["std"] }
+serde_json = "1"
 # Native-only: cross-verify `merkle.rs`'s vendored BMT against the
 # canonical `commonware_storage::bmt` so the vendored construction stays
 # byte-for-byte identical to the house primitive (the wasm build uses the

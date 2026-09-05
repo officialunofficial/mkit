@@ -1118,16 +1118,16 @@ mod sparse_fetch {
         Hash, Method, PACK_BODY_LIMIT_USIZE, S3Transport, TransportError, TransportResult, to_hex,
     };
     use mkit_core::sparse::{
-        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+        SPARSE_WIRE_MAX_BYTES, VerifiedSparseTree, decode_sparse_response, hash_filter,
     };
     use std::path::PathBuf;
 
     impl S3Transport {
         /// Build the S3 object key for a sparse delivery:
-        /// `sparse/<tree-hex>/<filter-hex>`.
+        /// `sparse/v2/<tree-hex>/<filter-hex>`.
         #[must_use]
         pub fn sparse_object_key(tree_hash: &Hash, filter_hash: &Hash) -> String {
-            format!("sparse/{}/{}", to_hex(tree_hash), to_hex(filter_hash))
+            format!("sparse/v2/{}/{}", to_hex(tree_hash), to_hex(filter_hash))
         }
 
         /// Fetch the precomputed sparse delivery for `(tree_hash,
@@ -1135,10 +1135,8 @@ mod sparse_fetch {
         /// assumes a server has pre-built them under the canonical
         /// key.
         ///
-        /// As with the HTTP transport, this function does NOT verify
-        /// the manifest — the caller MUST run
-        /// [`mkit_core::sparse::verify_sparse`] on the result before
-        /// trusting any delivered entries.
+        /// Authenticates the witness against the requested tree and filter,
+        /// then returns the locally derived selection.
         ///
         /// # Errors
         ///
@@ -1153,7 +1151,9 @@ mod sparse_fetch {
             &self,
             tree_hash: &Hash,
             filter: &[PathBuf],
-        ) -> TransportResult<SparseResponse> {
+        ) -> TransportResult<VerifiedSparseTree> {
+            mkit_core::sparse::validate_filter(filter)
+                .map_err(|_| TransportError::InvalidResponse)?;
             let filter_hash = hash_filter(filter);
             let key = Self::sparse_object_key(tree_hash, &filter_hash);
             // Cap body size at the wire-format max — far smaller than
@@ -1164,8 +1164,12 @@ mod sparse_fetch {
             let cap = SPARSE_WIRE_MAX_BYTES.min(PACK_BODY_LIMIT_USIZE);
             let resp = self.http_request_pub(&Method::GET, &key, "", None, &[], Some(cap))?;
             match resp.status_pub() {
-                200 => decode_sparse_response(resp.body_pub())
-                    .map_err(|_| TransportError::InvalidResponse),
+                200 => {
+                    let response = decode_sparse_response(resp.body_pub())
+                        .map_err(|_| TransportError::InvalidResponse)?;
+                    mkit_core::sparse::verify_sparse(tree_hash, filter, &response)
+                        .map_err(|_| TransportError::InvalidResponse)
+                }
                 404 => Err(TransportError::PackNotFound),
                 403 | 401 => Err(TransportError::AccessDenied),
                 s => Err(TransportError::ServerError { status: s }),
@@ -1235,12 +1239,15 @@ fn fetch_one_shard_with_retry(
     clock: fn() -> i64,
     backoff: fn() -> BackoffIterator,
     sleeper: fn(Duration),
-) -> TransportResult<Vec<u8>> {
+    cancel: &mkit_core::pack_shard::download::Cancellation,
+) -> TransportResult<mkit_core::pack_shard::download::DownloadedShard> {
     let mut ladder = backoff();
     loop {
+        cancel.check()?;
         let ts = clock();
-        let err = match fetch_one_shard(client, endpoint, bucket, prefix, creds, digest, index, ts)
-        {
+        let err = match fetch_one_shard(
+            client, endpoint, bucket, prefix, creds, digest, index, ts, cancel,
+        ) {
             Ok(bytes) => return Ok(bytes),
             Err(e) => e,
         };
@@ -1255,6 +1262,7 @@ fn fetch_one_shard_with_retry(
 }
 
 #[cfg(feature = "pack-shards")]
+#[allow(clippy::too_many_arguments)] // Worker request carries signing context and cancellation.
 fn fetch_one_shard(
     client: &Client,
     endpoint: &str,
@@ -1264,7 +1272,8 @@ fn fetch_one_shard(
     digest: &Hash,
     index: u16,
     ts: i64,
-) -> TransportResult<Vec<u8>> {
+    cancel: &mkit_core::pack_shard::download::Cancellation,
+) -> TransportResult<mkit_core::pack_shard::download::DownloadedShard> {
     let canonical_key = S3Transport::shard_object_key(digest, index);
     let object_key = prefix.map_or_else(
         || canonical_key.clone(),
@@ -1287,13 +1296,7 @@ fn fetch_one_shard(
         .map_err(|_| TransportError::ConnectionFailed)?;
     let status = resp.status().as_u16();
     match status {
-        200 => {
-            let bytes = resp.bytes().map_err(|_| TransportError::ConnectionFailed)?;
-            if bytes.len() > PACK_BODY_LIMIT_USIZE {
-                return Err(TransportError::PayloadTooLarge(bytes.len()));
-            }
-            Ok(bytes.to_vec())
-        }
+        200 => mkit_core::pack_shard::download::DownloadedShard::read(index, resp, cancel),
         404 => Err(TransportError::PackNotFound),
         401 | 403 => Err(TransportError::AccessDenied),
         s => Err(TransportError::ServerError { status: s }),
@@ -1303,9 +1306,10 @@ fn fetch_one_shard(
 #[cfg(feature = "pack-shards")]
 impl S3Transport {
     fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Option<Vec<u8>>> {
-        use mkit_core::pack_shard::{
-            MANIFEST_MAX_BYTES, Shard, decode_manifest, decode_pack_from_shards,
+        use mkit_core::pack_shard::download::{
+            DownloadGroup, DownloadedShard, WorkerSlot, decode_downloaded_pack,
         };
+        use mkit_core::pack_shard::{MANIFEST_MAX_BYTES, decode_manifest};
         use std::sync::mpsc;
 
         let manifest_key = Self::shard_manifest_object_key(key.as_bytes());
@@ -1332,6 +1336,9 @@ impl S3Transport {
         }
         let manifest =
             decode_manifest(&manifest_resp.body).map_err(|_| TransportError::InvalidResponse)?;
+        if manifest.pack_hash != *key.as_bytes() {
+            return Err(TransportError::InvalidResponse);
+        }
 
         let total = manifest.config.total_shards();
         let minimum = manifest.config.minimum_shards.get();
@@ -1342,7 +1349,7 @@ impl S3Transport {
         }
         let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
 
-        let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
+        let (tx, rx) = mpsc::channel::<(u16, TransportResult<DownloadedShard>)>();
         let digest: Hash = *key.as_bytes();
         // Workers are *detached* (never joined): once quorum or the
         // failure threshold is reached the collection loop stops waiting
@@ -1351,6 +1358,7 @@ impl S3Transport {
         let clock = self.clock;
         let backoff = self.backoff;
         let sleeper = self.sleeper;
+        let group = DownloadGroup::default();
         for i in 0..total_u16 {
             let tx = tx.clone();
             let endpoint = self.endpoint.clone();
@@ -1358,29 +1366,35 @@ impl S3Transport {
             let prefix = self.prefix.clone();
             let creds = self.creds.clone();
             let client = self.client.clone();
-            std::thread::spawn(move || {
-                let result = fetch_one_shard_with_retry(
-                    &client,
-                    &endpoint,
-                    &bucket,
-                    prefix.as_deref(),
-                    &creds,
-                    &digest,
-                    i,
-                    clock,
-                    backoff,
-                    sleeper,
-                );
-                let _ = tx.send((i, result));
-            });
+            let cancel = group.token();
+            let slot = WorkerSlot::acquire()?;
+            std::thread::Builder::new()
+                .spawn(move || {
+                    let _slot = slot;
+                    let result = fetch_one_shard_with_retry(
+                        &client,
+                        &endpoint,
+                        &bucket,
+                        prefix.as_deref(),
+                        &creds,
+                        &digest,
+                        i,
+                        clock,
+                        backoff,
+                        sleeper,
+                        &cancel,
+                    );
+                    let _ = tx.send((i, result));
+                })
+                .map_err(|_| TransportError::ConnectionFailed)?;
         }
         drop(tx);
 
-        let mut shards: Vec<Shard> = Vec::with_capacity(minimum as usize);
+        let mut shards: Vec<DownloadedShard> = Vec::with_capacity(minimum as usize);
         let mut failures: u16 = 0;
-        for (index, res) in &rx {
-            if let Ok(bytes) = res {
-                shards.push(Shard { index, bytes });
+        for (_index, res) in &rx {
+            if let Ok(shard) = res {
+                shards.push(shard);
                 if shards.len() >= minimum as usize {
                     break;
                 }
@@ -1394,13 +1408,13 @@ impl S3Transport {
         // Detached workers are not joined; stragglers are bounded by
         // SHARD_REQUEST_TIMEOUT.
 
+        group.cancel();
+        drop(rx);
         if shards.len() < minimum as usize {
             return Err(TransportError::PackNotFound);
         }
 
-        let pack = decode_pack_from_shards(&shards, &manifest)
-            .map_err(|_| TransportError::InvalidResponse)?;
-        Ok(Some(pack))
+        decode_downloaded_pack(&shards, &manifest, key).map(Some)
     }
 }
 

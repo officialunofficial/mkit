@@ -328,6 +328,19 @@ SPEC-FASTCDC.
 Reassembly: concatenate each `chunk_hash` blob's contents in order.
 The concatenated length MUST equal `total_size`.
 
+File-content equality MUST be independent of the chosen valid Blob or
+ChunkedBlob representation. Equal object IDs permit a fast path; otherwise
+comparisons MUST verify the referenced objects and compare the full ordered
+byte stream, bounded by the manifest and one chunk per side. A missing chunk,
+wrong-type chunk or inconsistent total length is an error even if an earlier
+byte already differed. Mode equality is a separate condition. Derived raw
+content hashes may index rename candidates, but MUST NOT replace object IDs;
+candidate matches are confirmed by byte comparison.
+
+Status, diff, staging, merge decisions and overwrite protection use this
+content contract. Restaging equal bytes preserves the previous staged object
+ID. Writer chunking policy does not invalidate an otherwise conforming object.
+
 `chunk_count > 1_000_000` → `TooManyChunks`.
 
 **Identity:** a `ChunkedBlob`'s object id is its Binary Merkle Tree root

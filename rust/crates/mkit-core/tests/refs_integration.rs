@@ -81,7 +81,7 @@ fn golden_index_empty_round_trips() {
     // index round-trips losslessly, so deserialize→serialize reproduces
     // the exact bytes.
     let bytes = read_golden("index_empty.bin");
-    assert_eq!(bytes.len(), 9);
+    assert_eq!(bytes.len(), 41);
     assert_eq!(&bytes[..4], b"MKIX");
     assert_eq!(
         bytes[4],

@@ -850,10 +850,9 @@ fn resolve_amend_target(layout: &RepoLayout, store: &ObjectStore) -> Result<Comm
 /// to `commit_hash`.
 ///
 /// Routes through [`super::write_ref_recording_history`] so a build
-/// with `--features history-mmr` records every advance in the branch's
-/// journaled MMR under the repo's `refs-history.lock`. Detached HEAD
-/// advances bypass the journal: per-branch history is keyed on a
-/// branch name and a detached HEAD has none.
+/// with `--features history-mmr` publishes the branch's canonical ancestry
+/// snapshot under its history and ref mutation guards. Detached HEAD advances
+/// bypass branch ancestry: a detached HEAD has no branch name.
 ///
 /// `expected` is the tip this commit was actually built on top of —
 /// `Some(parent)` for a normal advance, `None` for a root commit or an
@@ -911,23 +910,37 @@ fn advance_head(
 #[cfg(test)]
 mod advance_head_tests {
     use super::*;
-    use mkit_core::hash::hash;
+    use mkit_core::hash::Hash;
     use mkit_core::layout::RepoLayout;
     use tempfile::TempDir;
 
     fn fresh_repo() -> (TempDir, RepoLayout) {
         let dir = TempDir::new().unwrap();
         let layout = RepoLayout::single(dir.path());
-        // On `--features history-mmr` builds, `advance_head` routes
-        // through `write_ref_recording_history`, which opens the object
-        // store (for the empty-journal backfill's `parent_of` walker)
-        // even though these tests never actually need a commit object
-        // read. `ObjectStore::init` (which also creates the common dir
-        // — it errors if the dir already exists) must run BEFORE
-        // `refs::init` for exactly that reason.
+        // Ancestry validation reads the real persisted first-parent graph.
         mkit_core::store::ObjectStore::init(&layout).unwrap();
         refs::init(&layout).unwrap();
         (dir, layout)
+    }
+
+    fn commit(layout: &RepoLayout, message: &[u8], parents: Vec<Hash>) -> Hash {
+        let store = ObjectStore::open(layout).unwrap();
+        let tree = Object::Tree(mkit_core::object::Tree {
+            entries: Vec::new(),
+        });
+        let tree_hash = store.write(&mkit_core::serialize(&tree).unwrap()).unwrap();
+        let commit = Object::Commit(mkit_core::object::Commit::new_unannotated(
+            tree_hash,
+            parents,
+            Identity::ed25519([1; 32]),
+            [1; 32],
+            message.to_vec(),
+            0,
+            [0; 64],
+        ));
+        store
+            .write(&mkit_core::serialize(&commit).unwrap())
+            .unwrap()
     }
 
     /// The core Fix B regression: if the branch moved to a value other
@@ -939,14 +952,8 @@ mod advance_head_tests {
     #[test]
     fn advance_head_conflicts_when_branch_moved_since_expected_was_captured() {
         let (_dir, layout) = fresh_repo();
-        let t0 = hash(b"t0");
-        // Seeded via the same `write_ref_recording_history` helper
-        // `advance_head` itself uses (not a raw `refs::write_ref`): on
-        // `--features history-mmr` builds a bare ref write with no
-        // journal entry makes the NEXT history-aware write try to
-        // backfill from `t0` as a real commit object, which it isn't
-        // here. `Missing` establishes a proper from-empty journal
-        // instead, matching how a real first commit would seed it.
+        let t0 = commit(&layout, b"t0", vec![]);
+        // Seed the persisted root through the same ancestry-aware publication path.
         super::super::write_ref_recording_history(
             &layout,
             "main",
@@ -958,7 +965,7 @@ mod advance_head_tests {
         // A concurrent writer (e.g. another commit, or `update-ref`)
         // advances "main" past what this commit's `expected` snapshot
         // (`t0`) describes.
-        let moved = hash(b"moved-concurrently");
+        let moved = commit(&layout, b"moved-concurrently", vec![t0]);
         super::super::write_ref_recording_history(
             &layout,
             "main",
@@ -967,7 +974,7 @@ mod advance_head_tests {
         )
         .unwrap();
 
-        let new_commit = hash(b"new-commit");
+        let new_commit = commit(&layout, b"new-commit", vec![t0]);
         let (msg, code) = advance_head(&layout, &new_commit, Some(t0)).unwrap_err();
         assert_eq!(code, exit::TEMPFAIL);
         assert!(
@@ -986,7 +993,7 @@ mod advance_head_tests {
     #[test]
     fn advance_head_succeeds_when_expected_matches_current_value() {
         let (_dir, layout) = fresh_repo();
-        let t0 = hash(b"t0");
+        let t0 = commit(&layout, b"t0", vec![]);
         super::super::write_ref_recording_history(
             &layout,
             "main",
@@ -995,7 +1002,7 @@ mod advance_head_tests {
         )
         .unwrap();
 
-        let c1 = hash(b"c1");
+        let c1 = commit(&layout, b"c1", vec![t0]);
         advance_head(&layout, &c1, Some(t0)).unwrap();
         assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c1));
     }
@@ -1006,7 +1013,7 @@ mod advance_head_tests {
     #[test]
     fn advance_head_missing_condition_succeeds_for_a_fresh_branch() {
         let (_dir, layout) = fresh_repo();
-        let c1 = hash(b"root-commit");
+        let c1 = commit(&layout, b"root-commit", vec![]);
         advance_head(&layout, &c1, None).unwrap();
         assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c1));
     }
@@ -1017,7 +1024,7 @@ mod advance_head_tests {
     #[test]
     fn advance_head_missing_condition_conflicts_when_branch_already_exists() {
         let (_dir, layout) = fresh_repo();
-        let raced_in = hash(b"raced-in-first");
+        let raced_in = commit(&layout, b"raced-in-first", vec![]);
         super::super::write_ref_recording_history(
             &layout,
             "main",
@@ -1026,7 +1033,7 @@ mod advance_head_tests {
         )
         .unwrap();
 
-        let c1 = hash(b"root-commit");
+        let c1 = commit(&layout, b"root-commit", vec![]);
         let (_, code) = advance_head(&layout, &c1, None).unwrap_err();
         assert_eq!(code, exit::TEMPFAIL);
         assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(raced_in));

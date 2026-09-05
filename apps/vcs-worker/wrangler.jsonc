@@ -16,6 +16,8 @@
   },
 
   "observability": { "enabled": true },
+  // Override AUTH_AUDIENCE with the exact published origin before deployment.
+  "vars": { "AUTH_AUDIENCE": "http://localhost:8787", "AUTH_REPOSITORY": "default" },
 
   // Smart Placement: run the Worker close to its back-end (the RefStore DO +
   // R2), not just at the edge nearest the client.
