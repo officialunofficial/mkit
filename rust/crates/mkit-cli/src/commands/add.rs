@@ -74,6 +74,8 @@ pub(super) fn stage_tracked_changes(
     let root = layout.worktree_root();
     let mut idx = super::read_or_seed_index_from_head(layout, store)?;
 
+    let previous = idx.clone();
+
     // One durability batch for every restaged object; committed below,
     // before the index write that references them.
     let batch = store.batch();
@@ -152,6 +154,7 @@ pub(super) fn stage_tracked_changes(
     // Durability ordering: objects first, then the index that
     // references them.
     batch.commit().map_err(|e| format!("store: {e}"))?;
+    retain_content_identities(store, &previous, &mut idx)?;
     index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
 }
 
@@ -254,6 +257,8 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
 
+    let previous = idx.clone();
+
     // One durability batch for the whole command: every staged object
     // costs zero full flushes until the single commit() below, which
     // runs before the index write that references them.
@@ -307,10 +312,41 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = batch.commit() {
         return emit_err(&format!("store: {e}"), exit::CANTCREAT);
     }
+    if let Err(e) = retain_content_identities(&store, &previous, &mut idx) {
+        return emit_err(&e, exit::DATAERR);
+    }
     match index::write_index(&layout, &idx) {
         Ok(()) => exit::OK,
         Err(e) => emit_err(&format!("write index: {e}"), exit::CANTCREAT),
     }
+}
+
+/// Preserve an existing staged representation when restaging identical content.
+/// Called after the object batch is durable, so comparison reads the exact bytes
+/// just hashed (never a second, potentially raced worktree read).
+fn retain_content_identities(
+    store: &ObjectStore,
+    previous: &Index,
+    next: &mut Index,
+) -> Result<(), String> {
+    let old: std::collections::HashMap<_, _> = previous
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e))
+        .collect();
+    for entry in &mut next.entries {
+        if entry.status == EntryStatus::Removed {
+            continue;
+        }
+        if let Some(before) = old.get(entry.path.as_str())
+            && before.status != EntryStatus::Removed
+            && worktree::content_eq(store, &before.object_hash, &entry.object_hash)
+                .map_err(|e| format!("compare staged {}: {e}", entry.path))?
+        {
+            entry.object_hash = before.object_hash;
+        }
+    }
+    Ok(())
 }
 
 /// Stage every non-ignored worktree file under `root`, then mark any

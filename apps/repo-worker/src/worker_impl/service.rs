@@ -12,13 +12,14 @@
 // satisfy the bound. `worker::Env` is itself `unsafe impl Send + Sync`, so it
 // lives in the service struct.
 
+use connectrpc::ConnectError;
 use connectrpc::{RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream};
 use futures_util::StreamExt;
 use serde::Serialize;
 use worker::send::SendFuture;
 use worker::{Env, Method, Request as WorkerRequest, RequestInit, WebSocket, WebsocketEvent};
 
-use super::auth::{AuthorPubkey, IdempotencyKey};
+use super::auth::AuthorPubkey;
 use super::wire::{
     CommitMetaWire, CommitRowWire, GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListReq,
     ListResp, MessagesReq, MessagesResp, PostReq, PostResp, PurgeResp, ReactReq, ReactResp,
@@ -176,8 +177,7 @@ fn row_to_entry(row: CommitRowWire) -> CommitEntry {
 }
 
 /// Issue a JSON POST to the room's RefStore DO and decode the response.
-/// `pub(crate)` so `auth.rs`'s write-quota check reuses the SAME DO-call
-/// plumbing (retry-free, one round trip) rather than a second copy.
+/// Shared with the health probe; each call makes one DO round trip.
 pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,
     room: &str,
@@ -206,7 +206,11 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         .map_err(|e| ce_storage(StorageOp::RefstoreFetch, e))?;
 
     if resp.status_code() >= 400 {
+        let status = resp.status_code();
         let msg = resp.text().await.unwrap_or_default();
+        if status == 429 {
+            return Err(ConnectError::resource_exhausted(msg));
+        }
         return Err(ce_invalid(format!("refstore {op}: {msg}")));
     }
     resp.json::<Resp>()
@@ -359,7 +363,7 @@ fn hex_to_bytes_opt(s: &Option<String>) -> Option<Vec<u8>> {
 impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
     async fn put_object(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, PutObjectRequest>,
     ) -> ServiceResult<PutObjectResponse> {
         let msg = request.to_owned_message();
@@ -381,14 +385,41 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            // Idempotent content-addressed store in ONE round-trip (the key IS
-            // the verified hash; a re-put is a no-op). `put_addressed` returns
-            // false when the key already existed, so `duplicate` stays accurate
-            // without a separate head().
-            let stored = put_addressed(&env, &object_key(&room, &object_id), bytes).await?;
+            let proof = proof(&ctx)?;
+            let byte_count = bytes.len() as u64;
+            let reservation: super::wire::ObjectWriteResp = do_call(
+                &env,
+                &room,
+                "/object",
+                &super::wire::ObjectWriteReq {
+                    proof: proof.clone(),
+                    bytes: byte_count,
+                    result: None,
+                },
+            )
+            .await?;
+            let result = if let Some(result) = reservation.result {
+                result
+            } else {
+                let stored = put_addressed(&env, &object_key(&room, &object_id), bytes).await?;
+                let completed: super::wire::ObjectWriteResp = do_call(
+                    &env,
+                    &room,
+                    "/object",
+                    &super::wire::ObjectWriteReq {
+                        proof,
+                        bytes: byte_count,
+                        result: Some(super::wire::ObjectWriteResult { stored }),
+                    },
+                )
+                .await?;
+                completed
+                    .result
+                    .ok_or_else(|| ConnectError::internal("object publication not finalized"))?
+            };
             Ok(Response::new(PutObjectResponse {
-                stored: Some(stored),
-                duplicate: Some(!stored),
+                stored: Some(result.stored),
+                duplicate: Some(!result.stored),
                 ..Default::default()
             }))
         })
@@ -490,21 +521,12 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
 
         // The verified writer pubkey stashed by the auth interceptor.
         let author = ctx.extensions().get::<AuthorPubkey>().map(|a| a.0.clone());
-        // The request's Idempotency-Key (verified in the envelope) — the DO
-        // uses it, together with `author` and `name`, to dedupe a replayed
-        // signed UpdateRef into its original result instead of re-running the
-        // CAS (closes the REF_EXPECTATION_ANY replay-clobber hole).
-        let idem = ctx
-            .extensions()
-            .get::<IdempotencyKey>()
-            .map(|k| k.0.clone())
-            .unwrap_or_default();
-
         let env = self.env.clone();
         SendFuture::new(async move {
             // Decode the pushed object once to dual-write the DO commit index.
             let commit = read_commit_meta_wire(&env, &room, &new_id).await;
             let body = UpdateReq {
+                proof: proof(&ctx)?,
                 name,
                 new: hex::encode(&new_id),
                 expectation,
@@ -515,7 +537,6 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 },
                 author,
                 commit,
-                idem,
             };
             let resp: UpdateResp = do_call(&env, &room, "/update", &body).await?;
             let current = hex_to_bytes_opt(&resp.current).unwrap_or_default();
@@ -679,13 +700,14 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .ok_or_else(|| {
                 connectrpc::ConnectError::unauthenticated("missing verified author pubkey")
             })?;
-        // The request's Idempotency-Key (verified in the envelope) — the DO uses
-        // it to dedupe a replayed signature into the original message.
         let idem = ctx
             .extensions()
-            .get::<IdempotencyKey>()
-            .map(|k| k.0.clone())
-            .unwrap_or_default();
+            .get::<mkit_core::write_auth::Authorized>()
+            .ok_or_else(|| {
+                connectrpc::ConnectError::unauthenticated("missing verified write authorization")
+            })?
+            .nonce
+            .clone();
 
         // `message_id` folds the signed per-post idempotency key into the content
         // hash, so each send is a DISTINCT object (identical text posted twice →
@@ -706,10 +728,10 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 &room,
                 "/post",
                 &PostReq {
+                    proof: proof(&ctx)?,
                     id: hex::encode(id),
                     author,
                     text,
-                    idem,
                 },
             )
             .await?;
@@ -804,14 +826,6 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
             .ok_or_else(|| {
                 connectrpc::ConnectError::unauthenticated("missing verified author pubkey")
             })?;
-        // The request's Idempotency-Key — the DO dedupes a replayed signed React
-        // (a toggle) into its original result rather than flipping state again.
-        let idem = ctx
-            .extensions()
-            .get::<IdempotencyKey>()
-            .map(|k| k.0.clone())
-            .unwrap_or_default();
-
         let env = self.env.clone();
         SendFuture::new(async move {
             let resp: ReactResp = do_call(
@@ -819,10 +833,10 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
                 &room,
                 "/react",
                 &ReactReq {
+                    proof: proof(&ctx)?,
                     target,
                     emoji,
                     author,
-                    idem,
                 },
             )
             .await?;
@@ -1067,4 +1081,11 @@ impl crate::proto::mkit::repo::v1::RepoService for RepoServer {
         })
         .await
     }
+}
+
+fn proof(ctx: &RequestContext) -> Result<mkit_worker_common::replay::Proof, ConnectError> {
+    ctx.extensions()
+        .get::<mkit_core::write_auth::Authorized>()
+        .map(mkit_worker_common::replay::Proof::from)
+        .ok_or_else(|| ConnectError::unauthenticated("missing authorization"))
 }

@@ -13,20 +13,19 @@
 //
 // Internal wire protocol (the worker -> DO via `stub.fetch_with_request`),
 // JSON over HTTP to a `https://refstore/<op>` URL — see wire.rs for the
-// exact request/response shapes. This also includes `/quota`: the
-// per-author rolling write-quota ledger (`write_quota` table,
-// `handle_quota_check`) gating `UpdateRef`/`AdvanceRefs`/`UploadPack`, ported
-// from apps/repo-worker/src/worker_impl/refstore.rs's identical table minus
-// the room dimension (see `crate::write_quota`'s module docs).
+// exact request/response shapes. The replay ledger, write quota, and mutable
+// effects share one SQLite transaction; object writes reserve quota once.
 
+use mkit_worker_common::replay::{Ledger, Proof, Reply};
 use serde::Deserialize;
+use std::rc::Rc;
 use worker::{
     Date, DurableObject, Env, Request, Response, Result, State, durable_object, wasm_bindgen,
 };
 
 use super::wire::{
     AdvanceOutcome, AdvanceReq, AdvanceResp, GetReq, GetResp, ListEntry, ListReq, ListResp,
-    QuotaCheckReq, QuotaCheckResp, UpdateReq, UpdateResp,
+    ObjectWriteResp, UpdateReq, UpdateResp,
 };
 use crate::refs::{CasDecision, ConflictReason, RefExpectation, evaluate_cas};
 use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evaluate_quota};
@@ -49,8 +48,10 @@ fn prefix_successor(prefix: &str) -> Option<String> {
 }
 
 #[durable_object]
+#[derive(Clone)]
 pub struct RefStore {
-    state: State,
+    state: Rc<State>,
+    ledger: Ledger,
 }
 
 impl DurableObject for RefStore {
@@ -58,7 +59,11 @@ impl DurableObject for RefStore {
         // Defer table creation to the first storage op (`ensure_table`) so a
         // transient DDL failure surfaces as a clean error, not a construction
         // panic.
-        Self { state }
+        let ledger = Ledger::new(state);
+        Self {
+            state: ledger.state.clone(),
+            ledger,
+        }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
@@ -69,7 +74,7 @@ impl DurableObject for RefStore {
         match req.path().as_str() {
             "/get" => {
                 let body: GetReq = req.json().await?;
-                let value = self.read_ref(&body.name);
+                let value = self.read_ref(&body.name)?;
                 Response::from_json(&GetResp {
                     exists: value.is_some(),
                     value,
@@ -77,7 +82,10 @@ impl DurableObject for RefStore {
             }
             "/update" => {
                 let body: UpdateReq = req.json().await?;
-                self.handle_update(body)
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.mutate(proof, 0, true, move || owned.handle_update(body))?
+                    .response()
             }
             "/list" => {
                 let body: ListReq = req.json().await?;
@@ -86,14 +94,20 @@ impl DurableObject for RefStore {
             }
             "/advance" => {
                 let body: AdvanceReq = req.json().await?;
-                self.handle_advance(body)
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.mutate(proof, 0, true, move || owned.handle_advance(body))?
+                    .response()
             }
-            "/quota" => {
-                if let Err(e) = self.ensure_write_quota_table() {
-                    return Response::error(format!("storage init failed: {e}"), 500);
-                }
-                let body: QuotaCheckReq = req.json().await?;
-                self.handle_quota_check(body)
+            "/object" => {
+                let body: super::wire::ObjectWriteReq = req.json().await?;
+                self.mutate(body.proof, body.bytes, body.complete, || {
+                    Reply::json(&ObjectWriteResp {
+                        allowed: true,
+                        reason: None,
+                    })
+                })?
+                .response()
             }
             _ => Response::error("not found", 404),
         }
@@ -105,6 +119,8 @@ impl RefStore {
     /// so a transient DDL failure surfaces as a clean error instead of
     /// panicking the isolate.
     fn ensure_table(&self) -> Result<()> {
+        self.ledger.initialize()?;
+        self.ensure_write_quota_table()?;
         self.state.storage().sql().exec(
             "CREATE TABLE IF NOT EXISTS refs (path TEXT PRIMARY KEY, value TEXT NOT NULL);",
             None,
@@ -113,7 +129,7 @@ impl RefStore {
     }
 
     /// Read a ref's current hex value, or None if absent.
-    fn read_ref(&self, name: &str) -> Option<String> {
+    fn read_ref(&self, name: &str) -> Result<Option<String>> {
         #[derive(Deserialize)]
         struct Row {
             value: String,
@@ -125,11 +141,17 @@ impl RefStore {
             .exec(
                 "SELECT value FROM refs WHERE path = ? LIMIT 1;",
                 vec![name.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| r.value)
+            )?
+            .to_array()?;
+        let value = rows.into_iter().next().map(|r| r.value);
+        if let Some(value) = value.as_deref()
+            && !mkit_core::write_auth::is_hex(value, 32)
+        {
+            return Err(worker::Error::RustError(
+                "stored ref is not a canonical object id".into(),
+            ));
+        }
+        Ok(value)
     }
 
     /// Upsert `name` -> `new` unconditionally (the CAS decision has already
@@ -146,8 +168,8 @@ impl RefStore {
 
     /// Apply a single-ref CAS update serially: read the current value,
     /// evaluate the pure CAS decision, and on commit upsert.
-    fn handle_update(&self, req: UpdateReq) -> Result<Response> {
-        let current = self.read_ref(&req.name);
+    fn handle_update(&self, req: UpdateReq) -> Result<Reply> {
+        let current = self.read_ref(&req.name)?;
         let expectation = RefExpectation::from_wire(req.expectation);
         let expected_bytes = req.expected.as_ref().and_then(|s| hex::decode(s).ok());
         let current_bytes = current.as_ref().and_then(|s| hex::decode(s).ok());
@@ -161,7 +183,7 @@ impl RefStore {
         match decision {
             CasDecision::Committed => {
                 self.write_ref(&req.name, &req.new)?;
-                Response::from_json(&UpdateResp {
+                Reply::json(&UpdateResp {
                     committed: true,
                     conflict: false,
                     current: Some(req.new),
@@ -172,13 +194,13 @@ impl RefStore {
                     ConflictReason::Missing => None,
                     _ => current,
                 };
-                Response::from_json(&UpdateResp {
+                Reply::json(&UpdateResp {
                     committed: false,
                     conflict: true,
                     current,
                 })
             }
-            CasDecision::Invalid(msg) => Response::error(msg, 400),
+            CasDecision::Invalid(msg) => Reply::error(msg, 400),
         }
     }
 
@@ -190,8 +212,8 @@ impl RefStore {
     /// which is the whole point of running this inside one serial DO fetch
     /// instead of two independent `update_ref` calls: this deployment
     /// advertises atomic advance (no window where the two refs disagree).
-    fn handle_advance(&self, req: AdvanceReq) -> Result<Response> {
-        let packmap_current = self.read_ref(&req.packmap_ref);
+    fn handle_advance(&self, req: AdvanceReq) -> Result<Reply> {
+        let packmap_current = self.read_ref(&req.packmap_ref)?;
         let packmap_expectation = RefExpectation::from_wire(req.packmap_expectation);
         let packmap_expected = req
             .packmap_expected
@@ -204,16 +226,16 @@ impl RefStore {
             packmap_expected.as_deref(),
         );
         match packmap_decision {
-            CasDecision::Invalid(msg) => return Response::error(msg, 400),
+            CasDecision::Invalid(msg) => return Reply::error(msg, 400),
             CasDecision::Conflict(_) => {
-                return Response::from_json(&AdvanceResp {
+                return Reply::json(&AdvanceResp {
                     outcome: AdvanceOutcome::PackmapConflict,
                 });
             }
             CasDecision::Committed => {}
         }
 
-        let head_current = self.read_ref(&req.head_ref);
+        let head_current = self.read_ref(&req.head_ref)?;
         let head_expectation = RefExpectation::from_wire(req.head_expectation);
         let head_expected = req.head_expected.as_ref().and_then(|s| hex::decode(s).ok());
         let head_current_bytes = head_current.as_ref().and_then(|s| hex::decode(s).ok());
@@ -223,9 +245,9 @@ impl RefStore {
             head_expected.as_deref(),
         );
         match head_decision {
-            CasDecision::Invalid(msg) => return Response::error(msg, 400),
+            CasDecision::Invalid(msg) => return Reply::error(msg, 400),
             CasDecision::Conflict(_) => {
-                return Response::from_json(&AdvanceResp {
+                return Reply::json(&AdvanceResp {
                     outcome: AdvanceOutcome::HeadConflict,
                 });
             }
@@ -236,8 +258,17 @@ impl RefStore {
         // serial fetch, so no concurrent request can observe one written and
         // not the other.
         self.write_ref(&req.packmap_ref, &req.packmap_new)?;
+        #[cfg(feature = "test-faults")]
+        if req.head_ref.starts_with("refs/heads/__test_fail_once-") {
+            thread_local! { static FAILED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default(); }
+            if FAILED.with(|failed| failed.borrow_mut().insert(req.head_ref.clone())) {
+                return Err(worker::Error::RustError(
+                    "injected failure after packmap write".into(),
+                ));
+            }
+        }
         self.write_ref(&req.head_ref, &req.head_new)?;
-        Response::from_json(&AdvanceResp {
+        Reply::json(&AdvanceResp {
             outcome: AdvanceOutcome::Committed,
         })
     }
@@ -292,7 +323,7 @@ impl RefStore {
             None,
         )?;
         // Seeks the stale tail so the opportunistic prune in
-        // `handle_quota_check` doesn't full-scan the whole author set on
+        // `charge_quota` doesn't full-scan the whole author set on
         // every accepted write.
         sql.exec(
             "CREATE INDEX IF NOT EXISTS write_quota_window ON write_quota(window_start);",
@@ -311,44 +342,54 @@ impl RefStore {
     /// accepted one persists the updated `(window_start, ops, bytes)` and
     /// prunes rows whose window elapsed more than one window ago (bounded
     /// storage, mirrors apps/repo-worker's identical prune).
-    fn handle_quota_check(&self, req: QuotaCheckReq) -> Result<Response> {
+    fn charge_quota(&self, author: &str, bytes: u64) -> Result<Option<Reply>> {
         let now = Date::now().as_millis() as i64;
-        let current = self.read_quota_state(&req.author);
-
-        match evaluate_quota(current, now, req.bytes) {
+        match evaluate_quota(self.read_quota_state(author)?, now, bytes) {
             QuotaDecision::Allowed(state) => {
-                let sql = self.state.storage().sql();
-                sql.exec(
-                    "INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) \
-                     ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, \
-                       ops = excluded.ops, bytes = excluded.bytes;",
-                    vec![
-                        req.author.into(),
-                        state.window_start.into(),
-                        i64::from(state.ops).into(),
-                        (state.bytes as i64).into(),
-                    ],
-                )?;
-                let _ = sql.exec(
+                self.state.storage().sql().exec("INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, ops = excluded.ops, bytes = excluded.bytes", vec![author.into(), state.window_start.into(), i64::from(state.ops).into(), (state.bytes as i64).into()])?;
+                self.state.storage().sql().exec(
                     "DELETE FROM write_quota WHERE window_start < ?;",
                     vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
-                );
-                Response::from_json(&QuotaCheckResp {
-                    allowed: true,
-                    reason: None,
-                })
+                )?;
+                Ok(None)
             }
-            QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
-                allowed: false,
-                reason: Some(reason.to_string()),
-            }),
+            QuotaDecision::Exhausted { reason } => Ok(Some(Reply::error(reason, 429)?)),
         }
+    }
+
+    fn mutate(
+        &self,
+        proof: Proof,
+        bytes: u64,
+        complete: bool,
+        action: impl FnOnce() -> Result<Reply> + 'static,
+    ) -> Result<Reply> {
+        let owned = self.clone();
+        self.ledger.transaction(move || {
+            let prior = owned
+                .ledger
+                .reserve(&proof, Date::now().as_millis() as i64)?;
+            if let Some(Some(reply)) = prior {
+                return Ok(reply);
+            }
+            if prior.is_none()
+                && let Some(reply) = owned.charge_quota(&proof.author, bytes)?
+            {
+                owned.ledger.finish(&proof, &reply)?;
+                return Ok(reply);
+            }
+            let reply = action()?;
+            if complete {
+                owned.ledger.finish(&proof, &reply)?;
+            }
+            Ok(reply)
+        })
     }
 
     /// The author's persisted quota state, or `None` if they've never
     /// written (or their row was pruned as stale) — the input to
     /// `write_quota::evaluate_quota`.
-    fn read_quota_state(&self, author: &str) -> Option<QuotaState> {
+    fn read_quota_state(&self, author: &str) -> Result<Option<QuotaState>> {
         #[derive(Deserialize)]
         struct Row {
             window_start: i64,
@@ -362,14 +403,12 @@ impl RefStore {
             .exec(
                 "SELECT window_start, ops, bytes FROM write_quota WHERE author = ? LIMIT 1;",
                 vec![author.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| QuotaState {
+            )?
+            .to_array()?;
+        Ok(rows.into_iter().next().map(|r| QuotaState {
             window_start: r.window_start,
             ops: r.ops.max(0) as u32,
             bytes: r.bytes.max(0) as u64,
-        })
+        }))
     }
 }

@@ -388,28 +388,22 @@ pub fn sparse_verify_one_iteration(input: &[u8]) {
         filter.push(PathBuf::from(format!("{}{}", a as char, b as char)));
     }
 
-    let Ok((delivered, manifest, proof)) = build_sparse(&tree, &filter) else {
+    let Ok(mut response) = build_sparse(&tree, &filter) else {
         return;
     };
+    let root = mkit_core::sparse::tree_hash(&tree);
     assert!(
-        verify_sparse(&manifest, &delivered, &filter, &proof),
-        "freshly built sparse delivery must verify"
+        verify_sparse(&root, &filter, &response).is_ok(),
+        "fresh witness must verify"
     );
-
-    // Adversarial: feed the verifier a proof whose bitmap is raw fuzz
-    // bytes (arbitrary length, arbitrary content) against the real
-    // manifest/filter/delivered set. Never panic.
-    let bogus_proof = SparseProof {
-        bitmap_bytes: input.to_vec(),
+    let honest = response.proof.clone();
+    response.proof = SparseProof {
+        tree_bytes: input.to_vec(),
     };
-    let _ = verify_sparse(&manifest, &delivered, &filter, &bogus_proof);
-
-    // Adversarial: a bitmap one byte shorter than the manifest commits
-    // to (empty when the honest one was already 0 or 1 bytes is fine —
-    // `verify_sparse` must still just return `false`, never panic).
-    let mut truncated = proof.clone();
-    truncated.bitmap_bytes.pop();
-    let _ = verify_sparse(&manifest, &delivered, &filter, &truncated);
+    let _ = verify_sparse(&root, &filter, &response);
+    response.proof = honest;
+    response.proof.tree_bytes.pop();
+    let _ = verify_sparse(&root, &filter, &response);
 }
 
 /// Single-shot: invoke `body(input)` exactly once, with the

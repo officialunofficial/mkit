@@ -829,9 +829,13 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
+ "getrandom 0.4.3",
  "http",
  "http-body",
  "http-body-util",
+ "mkit-core",
+ "serde",
+ "serde_json",
  "tower",
  "worker",
 ]

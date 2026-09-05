@@ -70,7 +70,7 @@ use mkit_core::Hash;
 use mkit_core::index::{self, EntryStatus, Index};
 use mkit_core::layout::RepoLayout;
 use mkit_core::ops::{
-    DiffEntry, DiffKind, StatusEntry, StatusStaging, detect_exact_renames, status_diff_observed,
+    DiffEntry, DiffKind, StatusEntry, StatusStaging, detect_content_renames, status_diff_observed,
 };
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
@@ -187,7 +187,10 @@ pub fn run(args: &[String]) -> u8 {
     // Rename detection (on by default, like git): pair identical-content
     // staged deletes and adds into a single `R` entry.
     if !opts.no_renames {
-        entries = detect_status_renames(entries);
+        entries = match detect_status_renames(&store, entries) {
+            Ok(entries) => entries,
+            Err(e) => return emit_err(&format!("status: {e}"), exit::GENERAL_ERROR),
+        };
     }
 
     if porcelain {
@@ -679,15 +682,18 @@ fn human_path(e: &StatusEntry) -> String {
 /// entries, matching git's rename detection in `status`.
 ///
 /// Scoped to the staged leg: `git mv` (and `mkit mv`) stage both sides, so
-/// they share a staging state and — because mkit is content-addressed — an
-/// object id. An *unstaged* move leaves the destination untracked (`??`),
+/// their equal content is compared within one staging state. An *unstaged*
+/// move leaves the destination untracked (`??`),
 /// which git never folds into a rename, so the worktree leg is left alone.
-fn detect_status_renames(entries: Vec<StatusEntry>) -> Vec<StatusEntry> {
+fn detect_status_renames(
+    store: &ObjectStore,
+    entries: Vec<StatusEntry>,
+) -> Result<Vec<StatusEntry>, mkit_core::store::StoreError> {
     let (staged, others): (Vec<StatusEntry>, Vec<StatusEntry>) = entries
         .into_iter()
         .partition(|e| e.staging == StatusStaging::Staged);
     let mut staged_diffs: Vec<DiffEntry> = staged.into_iter().map(|e| e.diff).collect();
-    detect_exact_renames(&mut staged_diffs);
+    detect_content_renames(store, &mut staged_diffs)?;
     let mut out: Vec<StatusEntry> = staged_diffs
         .into_iter()
         .map(|d| StatusEntry {
@@ -703,7 +709,7 @@ fn detect_status_renames(entries: Vec<StatusEntry>) -> Vec<StatusEntry> {
             .cmp(&b.diff.path)
             .then_with(|| staging_rank(a.staging).cmp(&staging_rank(b.staging)))
     });
-    out
+    Ok(out)
 }
 
 fn staging_rank(s: StatusStaging) -> u8 {

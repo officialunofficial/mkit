@@ -6,9 +6,9 @@
 //! Conversation per sign call:
 //!
 //! ```text
-//! parent → child:    Hello{ protocol = v1, want_capabilities = false }
+//! parent → child:    Hello{ protocol = v1, want_capabilities = true }
 //!                    SignRequest{ algorithm, key_form, key_ref, payload }
-//! child  → parent:   HelloResponse{ ... }   (capabilities; we discard)
+//! child  → parent:   HelloResponse{ protocol, capabilities } (validated before SignRequest)
 //!                    SignResponse{ signature, public_key, key_id }
 //!                      OR
 //!                    Error{ code, message }
@@ -251,17 +251,14 @@ impl ExternalSigner {
             stderr_join: Some(stderr_join),
         };
 
-        // --- Write the request (Hello + SignRequest) --------------
-        //
-        // Fired together so the signer can pipeline. The write runs on
-        // its own thread so a child that never reads stdin (while its
-        // stdout pipe fills) cannot wedge us past the deadline.
+        // Each write is bounded by the same conversation deadline. Send
+        // only Hello until the peer's protocol and capabilities are known.
         let hello = SignerFrame {
             body: Some(signer_frame::Body::Hello(Box::new(
                 Hello::default()
                     .with_protocol(ProtocolVersion::ProtocolVersion1)
                     .with_caller_id(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION")))
-                    .with_want_capabilities(false),
+                    .with_want_capabilities(true),
             ))),
             ..Default::default()
         };
@@ -280,7 +277,7 @@ impl ExternalSigner {
         let Some(stdin) = conv.child.stdin.take() else {
             return Err(conv.fail(Error::ExternalSignerSpawn("stdin not piped".into())));
         };
-        let write_rx = spawn_request_writer(stdin, hello, sign_req);
+        let write_rx = spawn_request_writer(stdin, hello);
         let mut stdin = match recv_until_deadline(&write_rx, deadline) {
             Ok(Ok(stdin)) => stdin,
             Ok(Err(e)) => return Err(conv.fail(e)),
@@ -294,12 +291,8 @@ impl ExternalSigner {
         let stdout_rx = spawn_stdout_reader(stdout);
 
         // SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4: the version handshake
-        // MUST complete (a HelloResponse) before any other request is
-        // processed. A signer that pipelines straight to SignResponse
-        // or Error, skipping HelloResponse, is non-conforming — fail
-        // closed rather than silently tolerating it, so a signer that
-        // never negotiated a protocol version can't slip a response
-        // through unnoticed.
+        // MUST complete before the signing request is sent. A terminal
+        // Error may abort the handshake; a SignResponse cannot replace it.
         let hello_resp = match recv_frame_until_deadline(&stdout_rx, deadline) {
             Ok(frame) => frame,
             Err(FrameTimeout::Timeout) => {
@@ -307,9 +300,16 @@ impl ExternalSigner {
             }
             Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
         };
-        if let Err(e) = require_hello_response(&hello_resp) {
+        if let Err(e) = validate_hello_capabilities(&hello_resp, self.algorithm, pae.len()) {
             return Err(conv.fail(e));
         }
+        // write_frame checks the encoded frame cap before writing any bytes.
+        let write_rx = spawn_request_writer(stdin, sign_req);
+        stdin = match recv_until_deadline(&write_rx, deadline) {
+            Ok(Ok(stdin)) => stdin,
+            Ok(Err(e)) => return Err(conv.fail(e)),
+            Err(()) => return Err(conv.fail(Error::ExternalSignerTimeout("request-write"))),
+        };
 
         // --- Read until a terminal frame, answering PinPrompt -----
         //
@@ -533,7 +533,7 @@ fn spawn_stderr_drainer<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandl
     })
 }
 
-/// Spawn a thread that writes the Hello + `SignRequest` frames to the
+/// Spawn a thread that writes one negotiated conversation frame to the
 /// child's stdin. On success, hands `stdin` back over the channel
 /// instead of closing it: the caller keeps it open for the rest of the
 /// conversation so a mid-sign `PinPrompt` can be answered with a
@@ -545,16 +545,13 @@ fn spawn_stderr_drainer<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandl
 /// any write error anyway.
 fn spawn_request_writer(
     mut stdin: std::process::ChildStdin,
-    hello: SignerFrame,
-    sign_req: SignerFrame,
+    frame: SignerFrame,
 ) -> mpsc::Receiver<Result<std::process::ChildStdin, Error>> {
     let (tx, rx) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let result = (|| {
-            write_frame(&mut stdin, &hello)
-                .map_err(|e| Error::ExternalSignerSpawn(format!("write hello: {e}")))?;
-            write_frame(&mut stdin, &sign_req)
-                .map_err(|e| Error::ExternalSignerSpawn(format!("write sign request: {e}")))?;
+            write_frame(&mut stdin, &frame)
+                .map_err(|e| Error::ExternalSignerSpawn(format!("write frame: {e}")))?;
             Ok(stdin)
         })();
         let _ = tx.send(result);
@@ -1089,11 +1086,61 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+/// Validate negotiation before sending any signing request. An explicit
+/// handshake Error is terminal; it never authorizes a signing operation.
+fn validate_hello_capabilities(
+    frame: &SignerFrame,
+    algorithm: Algorithm,
+    payload_len: usize,
+) -> Result<(), Error> {
+    if let Some(signer_frame::Body::Error(error)) = &frame.body {
+        return Err(Error::ExternalSignerFailed(
+            error.message.clone().unwrap_or_default(),
+        ));
+    }
+    require_hello_response(frame)?;
+    let Some(signer_frame::Body::HelloResponse(hello)) = &frame.body else {
+        unreachable!("frame checked above");
+    };
+    if hello.protocol != Some(ProtocolVersion::ProtocolVersion1.into()) {
+        return Err(Error::ExternalSignerBadResponse(
+            "unsupported or missing handshake protocol".into(),
+        ));
+    }
+    let capabilities = hello
+        .capabilities
+        .as_option()
+        .ok_or_else(|| Error::ExternalSignerBadResponse("missing signer capabilities".into()))?;
+    if !capabilities
+        .algorithms
+        .contains(&rpc_algorithm_for(algorithm).into())
+        || !capabilities
+            .key_forms
+            .contains(&rpc_key_form_for(algorithm).into())
+    {
+        return Err(Error::ExternalSignerBadResponse(
+            "signer capabilities do not support requested algorithm and key form".into(),
+        ));
+    }
+    let advertised = capabilities.max_payload_bytes.unwrap_or(0);
+    let limit = if advertised == 0 {
+        mkit_rpc::MAX_FRAME_BYTES
+    } else {
+        advertised.min(mkit_rpc::MAX_FRAME_BYTES)
+    };
+    if payload_len > limit as usize {
+        return Err(Error::ExternalSignerBadResponse(
+            "payload exceeds signer capabilities limit".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Require that `frame` is a `HelloResponse` — the version handshake
 /// SPEC-EXTERNAL-SIGNER §4 / SPEC-RPC §4 mandates before any other
-/// request is processed. A signer that pipelines a `SignResponse` or
-/// `Error` straight through, skipping `HelloResponse`, never completed
-/// the handshake and is rejected outright rather than tolerated.
+/// signing request is sent. A premature `SignResponse` cannot complete the
+/// handshake. A terminal `Error` is handled by the caller as a failed
+/// handshake, without transmitting signing material.
 fn require_hello_response(frame: &SignerFrame) -> Result<(), Error> {
     match &frame.body {
         Some(signer_frame::Body::HelloResponse(_)) => Ok(()),
@@ -1155,6 +1202,77 @@ mod tests {
     use mkit_rpc::mkit::rpc::v1::signer::WebAuthnData;
 
     const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
+
+    fn compatible_hello() -> mkit_rpc::mkit::rpc::v1::signer::HelloResponse {
+        use mkit_rpc::mkit::rpc::v1::signer::{Capabilities, HelloResponse};
+        HelloResponse {
+            protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
+            capabilities: Some(Capabilities {
+                algorithms: vec![RpcAlgorithm::Ed25519.into()],
+                key_forms: vec![KeyForm::RawBytes.into()],
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn handshake_requires_protocol_key_form_and_payload_capacity() {
+        let frame = |hello| SignerFrame {
+            body: Some(signer_frame::Body::HelloResponse(Box::new(hello))),
+            ..Default::default()
+        };
+        let mut hello = compatible_hello();
+        validate_hello_capabilities(&frame(hello.clone()), Algorithm::Ed25519, PAE.len()).unwrap();
+        hello.protocol = None;
+        assert!(validate_hello_capabilities(&frame(hello), Algorithm::Ed25519, 1).is_err());
+        let mut hello = compatible_hello();
+        hello.capabilities = buffa::MessageField::default();
+        assert!(validate_hello_capabilities(&frame(hello), Algorithm::Ed25519, 1).is_err());
+        let mut hello = compatible_hello();
+        hello
+            .capabilities
+            .as_option_mut()
+            .unwrap()
+            .key_forms
+            .clear();
+        assert!(validate_hello_capabilities(&frame(hello), Algorithm::Ed25519, 1).is_err());
+        let mut hello = compatible_hello();
+        hello
+            .capabilities
+            .as_option_mut()
+            .unwrap()
+            .max_payload_bytes = Some(1);
+        assert!(validate_hello_capabilities(&frame(hello), Algorithm::Ed25519, 2).is_err());
+        let mut hello = compatible_hello();
+        hello
+            .capabilities
+            .as_option_mut()
+            .unwrap()
+            .max_payload_bytes = Some(0);
+        assert!(
+            validate_hello_capabilities(
+                &frame(hello),
+                Algorithm::Ed25519,
+                mkit_rpc::MAX_FRAME_BYTES as usize + 1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn handshake_error_is_terminal_without_capabilities() {
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::Error(Box::new(
+                mkit_rpc::mkit::rpc::v1::Error::default().with_message("signer unavailable"),
+            ))),
+            ..Default::default()
+        };
+        assert!(
+            matches!(validate_hello_capabilities(&frame, Algorithm::Ed25519, 1), Err(Error::ExternalSignerFailed(message)) if message == "signer unavailable")
+        );
+    }
 
     #[test]
     fn new_rejects_relative_path() {
@@ -1529,7 +1647,7 @@ mod tests {
             (dir, path)
         }
 
-        /// Exact byte length of the Hello + `SignRequest` frames
+        /// Exact byte length of the Hello frame
         /// `ExternalSigner::sign` writes for `(Algorithm::Ed25519, PAE)`.
         ///
         /// The host now keeps the child's stdin open for the whole
@@ -1546,29 +1664,16 @@ mod tests {
                     Hello::default()
                         .with_protocol(ProtocolVersion::ProtocolVersion1)
                         .with_caller_id(format!("mkit-attest/{}", env!("CARGO_PKG_VERSION")))
-                        .with_want_capabilities(false),
-                ))),
-                ..Default::default()
-            };
-            let sign_req = SignerFrame {
-                body: Some(signer_frame::Body::SignRequest(Box::new(
-                    SignRequest::default()
-                        .with_algorithm(RpcAlgorithm::Ed25519)
-                        .with_key_form(KeyForm::RawBytes)
-                        .with_key_ref(Vec::new())
-                        .with_payload(PAE.to_vec())
-                        .with_context(Vec::new()),
+                        .with_want_capabilities(true),
                 ))),
                 ..Default::default()
             };
             let mut buf = Vec::new();
             write_frame(&mut buf, &hello).unwrap();
-            write_frame(&mut buf, &sign_req).unwrap();
             buf.len()
         }
 
-        /// Shell snippet that drains exactly the initial Hello +
-        /// `SignRequest` request off stdin without relying on EOF.
+        /// Shell snippet that drains exactly the initial Hello request off stdin without relying on EOF.
         fn drain_initial_request() -> String {
             format!(
                 "dd bs=1 count={} 2>/dev/null >/dev/null\n",
@@ -1586,9 +1691,8 @@ mod tests {
             let pk = sk.verifying_key().to_bytes().to_vec();
             let sig = sk.sign(PAE).to_bytes().to_vec();
             let hello_resp = SignerFrame {
-                body: Some(signer_frame::Body::HelloResponse(Box::<
-                    mkit_rpc::mkit::rpc::v1::signer::HelloResponse,
-                >::default(
+                body: Some(signer_frame::Body::HelloResponse(Box::new(
+                    compatible_hello(),
                 ))),
                 ..Default::default()
             };
@@ -1716,6 +1820,42 @@ mod tests {
         }
 
         #[test]
+        fn incompatible_capabilities_reject_before_signing() {
+            use mkit_rpc::mkit::rpc::v1::signer::{Capabilities, HelloResponse};
+            let dir = tempfile::tempdir().unwrap();
+            let response = valid_response_frames_file(dir.path());
+            let original = std::fs::read(&response).unwrap();
+            let mut input = original.as_slice();
+            let _: SignerFrame = read_frame(&mut input).unwrap();
+            let incompatible = SignerFrame {
+                body: Some(signer_frame::Body::HelloResponse(Box::new(HelloResponse {
+                    protocol: Some(ProtocolVersion::ProtocolVersion1.into()),
+                    capabilities: Some(Capabilities {
+                        algorithms: vec![RpcAlgorithm::P256.into()],
+                        key_forms: vec![KeyForm::RawBytes.into()],
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            };
+            let mut output = Vec::new();
+            write_frame(&mut output, &incompatible).unwrap();
+            output.extend_from_slice(input);
+            std::fs::write(&response, output).unwrap();
+            // Send incompatible negotiation followed by a valid signature.
+            // A host that ignores capabilities accepts this signer.
+            let script = format!("#!/bin/sh\ncat '{}'\ncat >/dev/null\n", response.display());
+            let (_script_dir, binary) = write_script(&script);
+            let mut signer = ExternalSigner::new(&binary).unwrap();
+            let error = signer
+                .sign(PAE)
+                .expect_err("unsupported advertised algorithm must reject");
+            assert!(error.to_string().contains("capabilities"), "{error}");
+        }
+
+        #[test]
         fn valid_response_and_clean_exit_succeeds() {
             // Control: the same valid response, but the child exits
             // promptly. This must succeed within the timeout, proving the
@@ -1723,7 +1863,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let resp = valid_response_frames_file(dir.path());
             let script = format!(
-                "#!/bin/sh\n{}cat '{}'\n",
+                "#!/bin/sh\n{}cat '{}'\ncat >/dev/null\n",
                 drain_initial_request(),
                 resp.display()
             );
@@ -1778,7 +1918,7 @@ mod tests {
             std::fs::write(&resp, &bytes).unwrap();
 
             let script = format!(
-                "#!/bin/sh\n{}cat '{}'\n",
+                "#!/bin/sh\n{}cat '{}'\ncat >/dev/null\n",
                 drain_initial_request(),
                 resp.display()
             );
@@ -1802,6 +1942,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::too_many_lines)] // Full subprocess PIN exchange fixture.
         fn pin_prompt_round_trip_completes_sign() {
             // SPEC-EXTERNAL-SIGNER §4: the signer MAY interleave a
             // PinPrompt before its terminal response. The child here
@@ -1831,9 +1972,8 @@ mod tests {
 
             let hello_and_prompt = {
                 let hello_resp = SignerFrame {
-                    body: Some(signer_frame::Body::HelloResponse(Box::<
-                        mkit_rpc::mkit::rpc::v1::signer::HelloResponse,
-                    >::default(
+                    body: Some(signer_frame::Body::HelloResponse(Box::new(
+                        compatible_hello(),
                     ))),
                     ..Default::default()
                 };
@@ -1890,11 +2030,27 @@ mod tests {
                 path
             };
 
+            let mut sign_request = Vec::new();
+            write_frame(
+                &mut sign_request,
+                &SignerFrame {
+                    body: Some(signer_frame::Body::SignRequest(Box::new(
+                        SignRequest::default()
+                            .with_algorithm(RpcAlgorithm::Ed25519)
+                            .with_key_form(KeyForm::RawBytes)
+                            .with_key_ref(Vec::new())
+                            .with_payload(PAE.to_vec())
+                            .with_context(Vec::new()),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let script = format!(
                 "#!/bin/sh\n{}cat '{}'\ndd bs=1 count={} 2>/dev/null >/dev/null\ncat '{}'\n",
                 drain_initial_request(),
                 hello_and_prompt.display(),
-                pin_response_len,
+                pin_response_len + sign_request.len(),
                 sign_response.display(),
             );
             let bin = dir.path().join("signer.sh");

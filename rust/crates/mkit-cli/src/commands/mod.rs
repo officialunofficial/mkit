@@ -557,7 +557,7 @@ pub(crate) fn absolute_arg_to_repo_relative(
 /// would miss.
 pub(crate) fn worktree_entry_state(
     root: &Path,
-    store: &ObjectStore,
+    store: &dyn mkit_core::store::ObjectSink,
     path: &str,
 ) -> Result<Option<(EntryStatus, Hash)>, String> {
     let abs = root.join(path);
@@ -592,7 +592,7 @@ pub(crate) fn worktree_entry_state(
             data: target_str.as_bytes().to_vec(),
         });
         let ser = mkit_core::serialize::serialize(&blob).map_err(|e| format!("serialize: {e}"))?;
-        let h = store.write(&ser).map_err(|e| format!("store: {e}"))?;
+        let h = store.put(&ser).map_err(|e| format!("store: {e}"))?;
         Ok(Some((EntryStatus::Symlink, h)))
     } else {
         Ok(None)
@@ -628,77 +628,14 @@ pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
 // History-MMR ref-write helper (feature: history-mmr)
 // ---------------------------------------------------------------------------
 //
-// Branch-ref history journaling (issue #157). Every CLI subcommand that
-// advances a branch ref MUST route the write through this helper instead of calling
-// `refs::write_ref` / `refs::update_ref` directly. Default builds
-// (no `history-mmr` feature) keep the old direct semantics; the
-// feature-gated path opens a per-branch journaled `CommitHistory`, takes
-// a single repo-level lock around (ref-write + MMR-append), and syncs
-// the journal to disk before returning.
-//
-// The executor is a **process-global** `Arc<TokioExecutor>` — we
-// construct exactly one per process via `OnceLock` so multiple branch
-// advances share one tokio runtime. Threading the executor through
-// every CLI helper would force `history-mmr` into the signature of
-// every subcommand entry point, so we keep it local to this module.
+// CLI branch writes publish versioned first-parent ancestry when enabled.
+// History locking precedes the full-ref mutation guard.
 
-/// Construct (lazily) and share the process-wide `TokioExecutor` used
-/// by every history-MMR-coupled ref write in the CLI.
-///
-/// One executor per process: each `TokioExecutor` owns a multi-thread
-/// tokio runtime, and re-constructing it per ref-write would burn a
-/// fresh runtime for every commit. The `OnceLock` is initialised on the
-/// first call; subsequent calls reuse the same `Arc` clone.
-#[cfg(feature = "history-mmr")]
-pub(crate) fn history_executor() -> std::sync::Arc<mkit_core::history::TokioExecutor> {
-    use std::sync::{Arc, OnceLock};
-    static EXECUTOR: OnceLock<Arc<mkit_core::history::TokioExecutor>> = OnceLock::new();
-    EXECUTOR
-        .get_or_init(|| {
-            let exec = mkit_core::history::TokioExecutor::new()
-                .expect("history-mmr tokio runtime must initialise");
-            Arc::new(exec)
-        })
-        .clone()
-}
-
-/// CLI-side ref-write helper that records every advance in the
-/// branch's history MMR when `history-mmr` is enabled.
-///
-/// Behaviour matrix:
-///
-/// - **Default build (no `history-mmr`)** — exactly equivalent to
-///   `refs::update_ref(mkit_dir, branch, condition, new_hash)`.
-/// - **`--features history-mmr`** — takes the `refs-history.lock`
-///   repo lock, THEN opens a journaled `CommitHistory` for `branch`
-///   under `<mkit_dir>/history/` (lock-then-open, not the reverse —
-///   see `mkit_core::refs::open_and_update_ref_with_history_and_backfill`'s
-///   doc comment for why), performs the CAS ref-write, appends
-///   `new_hash` to the MMR, and `sync()`s the journal before
-///   returning. The journal survives `SIGKILL` immediately after the
-///   call returns. See
-///   `mkit-core::refs::open_and_update_ref_with_history_and_backfill`
-///   and SPEC-HISTORY-PROOF §4 for the contract.
-///
-/// If the journal is empty but `branch` already has a ref value on
-/// disk (a v0.1.x-era repo enabling `history-mmr` for the first time,
-/// or a crash on the branch's very first tracked write), this backfills
-/// the full known chain via [`mkit_core::history::rebuild_from_chain`]
-/// before proceeding — SPEC-HISTORY-PROOF §4.5. The empty-journal check
-/// AND the backfill loop run inside
-/// [`mkit_core::refs::update_ref_with_history_and_backfill`]'s
-/// `refs-history.lock` critical section (issue #638 / INV-18): running
-/// them before the lock (as this used to) let two ref-only writers on
-/// the same never-before-journaled branch — e.g. two concurrent
-/// `update-ref` calls, which deliberately skip the worktree lock — both
-/// observe an empty journal and both independently backfill, corrupting
-/// the journal's leaf positions.
-///
-/// All CLI subcommands that move a branch ref MUST funnel through this
-/// helper rather than calling `refs::write_ref` or `refs::update_ref`
-/// directly. Detached-HEAD writes (`refs::write_head_detached`) are
-/// not history-tracked: the per-branch journal is keyed on the branch
-/// name, and detached HEADs have none.
+/// Publish a branch tip and a versioned first-parent ancestry snapshot when
+/// history-mmr is enabled. The helper locks history then the full ref identity;
+/// pending publication is recovered before accepting another write.
+/// Detached HEAD updates do not claim branch
+/// membership and continue through their existing per-worktree path.
 pub fn write_ref_recording_history(
     layout: &RepoLayout,
     branch: &str,
@@ -707,41 +644,9 @@ pub fn write_ref_recording_history(
 ) -> Result<(), RefError> {
     #[cfg(feature = "history-mmr")]
     {
-        let exec = history_executor();
-
-        // Opening the object store is read-only and touches none of the
-        // history-journal state that's actually racy here, so it's fine
-        // to do before the lock.
         let store = ObjectStore::open(layout)
             .map_err(|e| RefError::InvalidRef(format!("{branch}: open object store: {e}")))?;
-
-        // `open_and_update_ref_with_history_and_backfill` (not the
-        // open-then-call shape this used to have) acquires the
-        // per-branch lock BEFORE opening the journal, closing a race
-        // two concurrent first-writers on a never-before-journaled
-        // branch could hit: `CommitHistory::open_at` reads the on-disk
-        // metadata blob, and reading it while the OTHER thread is mid
-        // -`sync` (writing that same blob under its own lock hold) can
-        // observe a torn/zeroed blob and fail as "corrupt" even though
-        // nothing is actually wrong once the write finishes. See
-        // `mkit_core::refs::update_ref_with_history_critical_section`'s
-        // doc comment for the full mechanism.
-        refs::open_and_update_ref_with_history_and_backfill(
-            layout,
-            branch,
-            condition,
-            new_hash,
-            exec,
-            |h| match store.read_object(h) {
-                Ok(Object::Commit(c)) => Ok(c.parents.first().copied()),
-                Ok(Object::Remix(r)) => Ok(r.parents.first().copied()),
-                Ok(_) => Err(format!(
-                    "{}: object is not a commit or remix",
-                    mkit_core::hash::to_hex(h)
-                )),
-                Err(e) => Err(e.to_string()),
-            },
-        )
+        refs::update_ref_with_ancestry(layout, branch, condition, new_hash, &store)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
@@ -749,30 +654,17 @@ pub fn write_ref_recording_history(
     }
 }
 
-/// `mkit branch -d`/`-D` helper: deletes a branch ref and, on
-/// `--features history-mmr` builds, also destroys its history-MMR
-/// journal partition (issue #648). Refuses the checked-out branch, same
-/// as plain `refs::delete_ref_safe`.
-///
-/// Without this, a branch recreated under a previously-deleted name
-/// would reopen the dead incarnation's non-empty journal (the
-/// commonware partition is keyed on the sanitized branch name, not any
-/// per-incarnation identifier) and resume appending on top of its old
-/// leaves — the new branch's MMR root would then span two unrelated
-/// incarnations, and the deleted incarnation's stale leaves would keep
-/// producing valid-looking inclusion proofs "on this branch". See
-/// [`mkit_core::refs::delete_ref_safe_with_history`] for the full
-/// crash-ordering contract.
-///
-/// - **Default build (no `history-mmr`)** — exactly
-///   `refs::delete_ref_safe(layout, branch)`.
-/// - **`--features history-mmr`** — routes through
-///   [`mkit_core::refs::delete_ref_safe_with_history`], sharing the same
-///   process-global executor as [`write_ref_recording_history`].
+/// Delete a non-current branch and invalidate its current ancestry pointer.
+/// Historical generation snapshots are preserved. A later
+/// recreation gets a fresh generation bound to the new chain.
 pub fn delete_ref_recording_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
     #[cfg(feature = "history-mmr")]
     {
-        refs::delete_ref_safe_with_history(layout, branch, history_executor())
+        if matches!(refs::read_head(layout)?, refs::Head::Branch(current) if current == branch) {
+            return Err(RefError::CurrentBranch(branch.to_string()));
+        }
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, None, &store)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
@@ -780,27 +672,14 @@ pub fn delete_ref_recording_history(layout: &RepoLayout, branch: &str) -> Result
     }
 }
 
-/// `mkit branch -m` helper: deletes the OLD name's ref after a rename
-/// and, on `--features history-mmr` builds, also destroys its history-MMR
-/// journal partition (issue #648).
-///
-/// Unlike [`delete_ref_recording_history`], this does NOT refuse the
-/// checked-out branch — `branch -m` legitimately renames the current
-/// branch and moves HEAD to the new name immediately after this call.
-/// The NEW name's ref is created first by the caller (via
-/// [`write_ref_recording_history`], which seeds it with a fresh
-/// journal), so by the time this runs the old and new incarnations are
-/// already disjoint; this just makes sure the OLD name's journal is not
-/// left behind to be inherited by a future branch of the same name.
-///
-/// - **Default build (no `history-mmr`)** — exactly
-///   `refs::delete_ref(layout, branch)`.
-/// - **`--features history-mmr`** — routes through
-///   [`mkit_core::refs::delete_ref_with_history`].
+/// Delete the old name after rename, including its current ancestry pointer.
+/// The caller creates the destination with a distinct full-ref identity first.
+/// This helper permits deleting the checked-out name during HEAD relocation.
 pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<(), RefError> {
     #[cfg(feature = "history-mmr")]
     {
-        refs::delete_ref_with_history(layout, branch, history_executor())
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, None, &store)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
@@ -808,24 +687,9 @@ pub fn delete_ref_dropping_history(layout: &RepoLayout, branch: &str) -> Result<
     }
 }
 
-/// CAS-guarded sibling of [`delete_ref_dropping_history`] (issue #658):
-/// only deletes `branch` (and, on `--features history-mmr` builds,
-/// destroys its journal) if its current value is exactly `expected`.
-///
-/// `mkit branch -m` uses this — not the unconditional version — for
-/// BOTH the source-branch drop and, on a lost race, the rollback delete
-/// of the just-created destination: an unconditional delete here can't
-/// tell "the branch tip I read is still current" from "a concurrent
-/// `commit` just advanced it out from under me", so it would silently
-/// destroy the concurrently-landed commit's only ref. See
-/// [`mkit_core::refs::delete_ref_if_matches`] for the full race
-/// analysis.
-///
-/// - **Default build (no `history-mmr`)** — exactly
-///   `refs::delete_ref_if_matches(layout, branch, expected)`.
-/// - **`--features history-mmr`** — routes through
-///   [`mkit_core::refs::delete_ref_with_history_if_matches`], sharing
-///   the same process-global executor as [`write_ref_recording_history`].
+/// Delete a ref only if its tip still matches, invalidating current ancestry
+/// while preserving historical evidence. Used for rename source removal and
+/// destination rollback so a concurrent advance is never deleted.
 pub fn delete_ref_dropping_history_if_matches(
     layout: &RepoLayout,
     branch: &str,
@@ -833,7 +697,8 @@ pub fn delete_ref_dropping_history_if_matches(
 ) -> Result<(), RefError> {
     #[cfg(feature = "history-mmr")]
     {
-        refs::delete_ref_with_history_if_matches(layout, branch, expected, history_executor())
+        let store = ObjectStore::open(layout).map_err(|e| RefError::InvalidRef(e.to_string()))?;
+        refs::delete_ref_with_ancestry(layout, branch, Some(expected), &store)
     }
     #[cfg(not(feature = "history-mmr"))]
     {
@@ -1017,8 +882,14 @@ pub fn ensure_restore_safe_with_options(
         ));
     }
 
-    let worktree_tree = core_worktree::build_tree_filtered(&snapshot, root, Some(&idx))
-        .map_err(|e| format!("check working tree changes: {e}"))?;
+    let worktree_tree = core_worktree::build_tree_filtered_observed_with_source(
+        &snapshot,
+        &snapshot,
+        root,
+        Some(&idx),
+        &mut Vec::new(),
+    )
+    .map_err(|e| format!("check working tree changes: {e}"))?;
     let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     if let Some(entry) = unstaged
@@ -1127,9 +998,12 @@ pub(crate) fn locally_modified_dropped_path(
     store: &ObjectStore,
     dropped: &[(String, EntryStatus, Hash)],
 ) -> Result<Option<String>, String> {
+    let snapshot = mkit_core::store::EphemeralSink::new(store);
     for (path, idx_status, idx_hash) in dropped {
-        if let Some((wt_status, wt_hash)) = worktree_entry_state(cwd, store, path)?
-            && (wt_status != *idx_status || wt_hash != *idx_hash)
+        if let Some((wt_status, wt_hash)) = worktree_entry_state(cwd, &snapshot, path)?
+            && (wt_status != *idx_status
+                || !core_worktree::content_eq(&snapshot, &wt_hash, idx_hash)
+                    .map_err(|e| e.to_string())?)
         {
             return Ok(Some(path.clone()));
         }
@@ -1288,10 +1162,9 @@ mod tests {
     #[test]
     fn write_ref_recording_history_backfills_v01x_style_repo_from_object_store() {
         use super::write_ref_recording_history;
-        use mkit_core::history::{CommitHistory, Position, TokioExecutor, verify_inclusion};
+        use mkit_core::history::{AncestrySnapshot, Position, verify_inclusion};
         use mkit_core::refs::{self, RefWriteCondition};
         use mkit_core::store::ObjectStore;
-        use std::sync::Arc;
 
         let td = tempfile::tempdir().unwrap();
         let repo_root = td.path();
@@ -1300,8 +1173,8 @@ mod tests {
 
         // Build a 3-commit chain entirely via the object store and point
         // `refs/heads/main` at the tip directly — simulating a repo
-        // whose commits predate `history-mmr`: the ref exists, but
-        // `<mkit_dir>/history/` has never been touched.
+        // written without `history-mmr`: the ref exists, but
+        // no canonical ancestry snapshot has been published.
         let c0 = write_commit(&store, vec![], 1);
         let c1 = write_commit(&store, vec![c0], 2);
         let c2 = write_commit(&store, vec![c1], 3);
@@ -1316,8 +1189,7 @@ mod tests {
 
         // The journal must now hold the full backfilled chain (c0, c1,
         // c2) PLUS the new c3 — not just c3 alone.
-        let exec = Arc::new(TokioExecutor::new().unwrap());
-        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
         assert_eq!(hist.len(), 4);
         let root = hist.root();
         for (i, c) in [c0, c1, c2, c3].into_iter().enumerate() {
@@ -1334,10 +1206,9 @@ mod tests {
     #[test]
     fn write_ref_recording_history_does_not_backfill_a_genuinely_fresh_branch() {
         use super::write_ref_recording_history;
-        use mkit_core::history::{CommitHistory, TokioExecutor};
+        use mkit_core::history::AncestrySnapshot;
         use mkit_core::refs::RefWriteCondition;
         use mkit_core::store::ObjectStore;
-        use std::sync::Arc;
 
         let td = tempfile::tempdir().unwrap();
         let repo_root = td.path();
@@ -1349,8 +1220,7 @@ mod tests {
         let c0 = write_commit(&store, vec![], 1);
         write_ref_recording_history(&layout, "main", RefWriteCondition::Missing, &c0).unwrap();
 
-        let exec = Arc::new(TokioExecutor::new().unwrap());
-        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
         assert_eq!(
             hist.len(),
             1,
@@ -1364,29 +1234,13 @@ mod tests {
     #[cfg(feature = "history-mmr")]
     const CONCURRENT_BACKFILL_CHAIN_LEN: usize = 500;
 
-    /// INV-18 regression (issue #638): the empty-journal check and the
-    /// entire backfill-from-object-store loop must run *inside*
-    /// `refs-history.lock`, not before it. `update-ref`/`branch` calls
-    /// deliberately skip the worktree lock, so two ref-only writers on
-    /// the same never-before-journaled branch can both call this
-    /// function concurrently. Pre-fix, both threads independently
-    /// observe an empty journal (the check happens before any lock is
-    /// taken) and both independently backfill the whole chain, landing
-    /// duplicate leaves. Post-fix, only one of them may see the empty
-    /// journal and perform the backfill; the other must see a
-    /// non-empty journal once it acquires the lock and skip straight to
-    /// its own append.
-    ///
-    /// The chain is long enough (500 commits) that the pre-fix unlocked
-    /// backfill loop — which, before the fsync-batching fix also lands,
-    /// syncs once per commit — takes long enough in wall-clock terms
-    /// for both threads (released simultaneously via a barrier) to
-    /// almost certainly overlap.
+    /// Concurrent initial publications serialize ancestry construction under
+    /// the history lock and produce one complete chain without duplicate leaves.
     #[cfg(feature = "history-mmr")]
     #[test]
-    fn write_ref_recording_history_concurrent_backfill_does_not_duplicate_journal_leaves() {
+    fn write_ref_recording_history_concurrent_backfill_does_not_duplicate_leaves() {
         use super::write_ref_recording_history;
-        use mkit_core::history::{CommitHistory, TokioExecutor};
+        use mkit_core::history::AncestrySnapshot;
         use mkit_core::refs::{self, RefWriteCondition};
         use mkit_core::store::ObjectStore;
         use std::sync::{Arc, Barrier};
@@ -1427,15 +1281,12 @@ mod tests {
         res_a.expect("writer a must succeed");
         res_b.expect("writer b must succeed");
 
-        let exec = Arc::new(TokioExecutor::new().unwrap());
-        let hist = CommitHistory::open_at(exec, &layout, "main").unwrap();
+        let hist = AncestrySnapshot::load(&layout, "main").unwrap();
         assert_eq!(
             hist.len(),
-            CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 2,
-            "two concurrent first-writers on a never-journaled branch \
-             must backfill the shared chain exactly once between them \
-             (plus their own two real appends) — a leaf count above \
-             this means the backfill ran twice and duplicated leaves"
+            CONCURRENT_BACKFILL_CHAIN_LEN as u64 + 1,
+            "the winning tip must have exactly its own first-parent ancestry; \
+             the superseded sibling writer is not an ancestor"
         );
     }
 

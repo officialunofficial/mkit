@@ -391,24 +391,70 @@ default build path &mdash; Cloudflare Workers Builds and CI images lack a
 protoc new enough for `edition = "2023"`), R2 for pack storage, and a
 single global Durable Object for ref CAS (one Worker deployment = one
 repository &mdash; no per-project room split). Unlike `repo-worker`'s
-open-write demo, `UpdateRef`/`AdvanceRefs`/`UploadPack` are gated behind
-a signed write envelope (mkit#699's chosen mechanism: the SAME
-canonical-string Ed25519 envelope `repo-worker`'s `Interceptor` already
-uses for its writes, not a bearer token &mdash; see `apps/vcs-worker/README.md`
-"Auth" for the client-streaming adaptation `UploadPack` needs). This is
-still an open-write / same-author-not-authority trust model, same as
-`repo-worker`'s; this server itself does not implement
-`mkit-transport-http`'s `MKIT_API_TOKEN` bearer scheme (SPEC-TRANSPORT
-§5.2) &mdash; a production deployment wanting bearer-token gating on THIS
-server would need a follow-up change (§7.3's client-side envelope auth
-mode does not add server-side bearer support). See
-`apps/vcs-worker/README.md` "Known limitations" for two bugs this
-envelope-auth verification pass found and fixed in this server's HTTP
-bridge (a wasm32 `Instant::now()` panic on any client-asserted deadline
-header, and `ListRefs` not stripping the request `prefix` from returned
-names per SPEC-REFS §4) &mdash; neither is an auth change; both were blocking
-any real Connect client, not just an envelope-signing one, from working
-against this server at all.
+open-write demo, all mutating procedures require the versioned signed-write
+contract below. This verifies the writer's identity; it does not impose an
+allow-list. The deployment config supplies `AUTH_AUDIENCE` (exact canonical
+HTTP(S) origin) and `AUTH_REPOSITORY` (the single repository identity).
+Repo Worker instead obtains the repository identity from the decoded room;
+Keys Worker uses `keys`. Host or forwarded request headers MUST NOT establish
+the server's trusted audience.
+
+#### Auth v2 contract
+
+All producers and verifiers MUST use the following eight newline-separated
+UTF-8 fields, with no final newline:
+
+```text
+mkit-write:v2
+<audience>
+<repository>
+<full procedure>
+<content commitment>
+<created epoch milliseconds>
+<expiry epoch milliseconds>
+<nonce>
+```
+
+The signature is strict Ed25519 over the 32-byte BLAKE3 of those bytes. The
+origin is the URL's lowercase ASCII HTTP(S) origin with no userinfo, path,
+query, fragment, trailing dot, or default port. Repository and procedure are
+nonempty printable ASCII fields; newlines and whitespace are rejected. The
+shared `mkit_core::write_auth` validator enforces bounded canonical fields.
+A unary commitment is `body:<64 lowercase hex BLAKE3 of exact request bytes>`.
+An UploadPack commitment is `pack:<64 lowercase hex pack id>:<decimal byte count>`.
+The streaming handler MUST compare both fields with the first UploadPack
+header before reserving quota or reading chunks, and verify the actual byte
+count and BLAKE3 before publishing the immutable object.
+
+Required headers are `X-Envelope-Version: 2`, `X-Audience`, `X-Repository`,
+`X-Content-Commitment`, `X-Created-At`, `X-Expires-At`, `Idempotency-Key`,
+`X-Public-Key`, and `X-Signature`; unary requests additionally carry `X-Digest`
+matching the body commitment. Nonces are 32 cryptographically random bytes
+encoded as 64 lowercase hexadecimal characters, generated once per logical
+operation and retained with timestamps across every transport retry.
+The validity interval MUST be positive and at most 300,000 ms; sender clocks
+may lead the server by at most 30,000 ms. Expired requests MUST be rejected,
+including requests whose results remain cached. Missing or unsupported auth
+versions MUST fail closed.
+
+A valid signature alone is insufficient replay protection. Each service MUST
+persist a nonce reservation scoped to audience/repository/signer, together
+with the full authenticated operation fingerprint. Reusing a nonce for a
+different operation MUST fail. Same-operation retries MUST return the saved
+result and MUST NOT repeat mutable effects or charge quota again. Nonce,
+quota, reference changes (including both AdvanceRefs writes), chat sequence,
+and reaction toggles MUST commit in one explicit SQLite transaction. A
+transaction failure rolls them all back; broadcasts occur only after commit.
+Replay records MUST remain until the signed expiry has passed.
+
+Immutable object publication uses a durable pending reservation that charges
+quota once, followed by a conditional content-addressed R2 put and a durable
+result finalization. An interruption after reservation or publication is
+resumed by the same signed operation. Concurrent finalizers return the first
+saved result. An unreachable ledger or failed quota read fails closed.
+
+`AUTH_AUDIENCE` must be explicitly configured for every deployment and local
+development origin.
 
 ### 7.2 `mkit serve`
 
@@ -458,25 +504,13 @@ a deployment can require either, both, or neither:
   the environment at `connect()` time, sent as `Authorization: Bearer
   <token>` on every call. This is `mkit-transport-http`'s scheme
   (SPEC-TRANSPORT §5.2) and is what `mkit serve --http` (§7.2) expects.
-- **Ed25519 write envelope** (new): a native, non-wasm reimplementation
-  of the SAME canonical-string envelope §7.1's reference Worker (and
-  `apps/repo-worker` before it) verify &mdash;
-  `rust/crates/mkit-transport-connect/src/envelope.rs`'s
-  `EnvelopeTransport<T: ClientTransport>` wraps the inner transport and,
-  for `UpdateRef`/`AdvanceRefs` (unary, body-bound digest) and
-  `UploadPack` (streaming, establishment-only, no body digest), attaches
-  `X-Public-Key`/`X-Signature`/`X-Digest`/`X-Created-At`/
-  `Idempotency-Key` headers signed via an `EnvelopeSigner`
-  implementation (BLAKE3 digest, raw Ed25519 sign &mdash; no SPEC-SIGNING
-  domain prefix, matching the server's plain-envelope contract exactly).
-  `mkit-cli` resolves the signer via a new `transport_auth = envelope`
-  config key (repo-safe, mirrors `remote_type`): when set, it reuses the
-  EXACT commit-signing signer resolution (`signer` = `""`/`"legacy"` →
-  the repo key file at `signing_key`, via `mkit_attest::RepoKeySigner`;
-  `signer = "keystore"` → `key.ed25519_ref` via `mkit_keystore::KeySigner`)
-  rather than a parallel key path &mdash; the write envelope authenticates
-  with the SAME Ed25519 identity that already signs the user's commits.
-  See `rust/crates/mkit-cli/src/remote_dispatch/{mod.rs,envelope_signer.rs}`.
+- **Ed25519 write envelope**: `EnvelopeTransport` signs the auth v2 contract
+  in §7.1, with an exact request body commitment for unary writes and the
+  declared pack id and length for streaming writes. `transport_auth = envelope`
+  is user-scoped and repository-forbidden. The CLI requires exact user-scoped
+  `trusted_remote_endpoint` approval before resolving the commit-signing
+  Ed25519 identity, independently of bearer-token presence. Domain separation
+  alone does not grant a repository permission to invoke ambient signing.
 
 Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
 local `wrangler dev` instance of `apps/vcs-worker` &mdash; see

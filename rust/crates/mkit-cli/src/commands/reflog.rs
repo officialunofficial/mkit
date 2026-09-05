@@ -1,74 +1,11 @@
-//! `mkit reflog [<ref>]` — read-only view over the persisted
-//! ref-history journal (issue #231).
-//!
-//! # What the journal actually records
-//!
-//! mkit's ref-history is the per-branch, append-only **commit-history
-//! MMR** (`mkit_core::history::CommitHistory`, the `refs-history.lock`
-//! journal written by `write_ref_recording_history`). It records one
-//! leaf per **branch ref WRITE**, not one leaf per commit that ends up
-//! reachable from the tip. For most operations — a plain commit,
-//! branch creation, merge, cherry-pick, amend, a rebase `--abort`
-//! rollback, fetch/pull tip update — each new commit corresponds to
-//! exactly one ref write, so "one leaf per advance" and "one leaf per
-//! commit" coincide in practice.
-//!
-//! **`rebase` is the documented exception** (issue #648): a
-//! multi-commit rebase detaches HEAD for the whole operation and moves
-//! it once per replayed commit (`refs::write_head_detached`, NOT
-//! `write_ref_recording_history`), then performs exactly ONE branch ref
-//! write at finalize. A rebase that replays five commits therefore
-//! appends exactly one leaf, not five — the intermediate replayed
-//! commits are perfectly valid, reachable, mkit-created commits that
-//! were simply never in scope for per-commit journaling. The same gap
-//! applies to any future op that moves detached HEAD through multiple
-//! commits before a single branch-ref finalize. The journal therefore
-//! stores:
-//!
-//! - the **count** of recorded ref writes (`len()`), and
-//! - a tamper-evident **root** plus per-leaf inclusion proofs.
-//!
-//! It deliberately does **not** store what a Git reflog stores: there
-//! is no op label, no old→new pair, no per-entry timestamp or message,
-//! and — crucially — the leaf digests are BLAKE3 values with the leaf
-//! position mixed in, so the original commit hashes **cannot be read
-//! back out of the MMR**. The MMR can only *confirm* a hash you already
-//! hold (via `verify_inclusion`).
-//!
-//! # What `mkit reflog` therefore surfaces
-//!
-//! Because the readable hashes can only come from the object store, not
-//! the MMR, `reflog` walks the branch tip's **first-parent chain**
-//! (newest → oldest) — the same reconstruction
-//! `history::rebuild_from_chain` uses — and presents it as the branch's
-//! movement history, addressed `<branch>@{N}` with `@{0}` = current
-//! tip. On a build with `--features history-mmr` it additionally
-//! **cross-checks each commit against the journaled MMR root**: it asks
-//! the journal to confirm, via an inclusion proof, that the commit was
-//! recorded as a branch advance at some leaf position. The
-//! recorded-advance count is reported in the summary line. The check is
-//! rewrite-robust — a reachable commit shows `[journaled]` as long as it
-//! was journaled at some point, even after a later amend/reset shifted
-//! the journal's leaf count past the reachable chain length.
-//!
-//! A reachable commit that does **not** verify is printed as `[not
-//! journaled]`, deliberately worded to describe absence rather than
-//! imply tampering: per the rebase gap above, an intermediate
-//! rebase-replayed commit is expected to show this marker every time —
-//! it is a normal consequence of one-leaf-per-ref-write, not evidence
-//! of anything wrong with the commit or the journal. A `[not journaled]`
-//! marker on a commit that was NOT created by a mid-rebase replay (e.g.
-//! a plain commit, or a rebase's own finalize tip) is the more
-//! interesting case worth investigating.
-//!
-//! This is **not** a full Git reflog: `@{N}` indexes the reachable
-//! first-parent chain (which drops superseded commits — e.g. after an
-//! `--amend` or a reset the old tip is no longer listed), not the raw
-//! append log of every movement. See the help text / `man mkit` for the
-//! exact contract.
-//!
-//! Read-only: this command never mutates refs, the journal, or any
-//! object.
+//! Read-only first-parent history. `@{0}` is the current tip, not a raw
+//! ref-movement event. With history-mmr, cross-check against the versioned
+//! local ancestry snapshot whose repository/ref/generation/tip context and
+//! complete parent chain have been verified. Missing snapshots and pending
+//! publications cannot produce a verified marker.
+//! Detached replay intermediates are included when the final branch tip is
+//! published; reset/amend start a new generation containing the new ancestry.
+//! This command does not recover or rewrite snapshots.
 
 use std::io::Write;
 
@@ -92,12 +29,12 @@ enum Format {
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit reflog",
-    about = "Show a branch's recorded movement history (read-only).",
+    about = "Show a branch's first-parent ancestry (read-only).",
     disable_version_flag = true
 )]
 struct ReflogOpts {
     /// Branch whose history to show. Defaults to the branch HEAD points
-    /// at. The journal is keyed per-branch, so a detached HEAD needs an
+    /// at. The ancestry is keyed per-branch, so a detached HEAD needs an
     /// explicit ref.
     #[arg(value_name = "REF")]
     reference: Option<String>,
@@ -150,23 +87,20 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("read ref '{branch}': {e}"), exit::DATAERR),
     };
 
-    // Walk the first-parent chain newest → oldest. This is the readable
-    // reconstruction of the branch's movement history; the MMR journal
-    // itself stores opaque leaf digests that cannot be decoded back to
-    // hashes (see module docs).
+    // Walk verified first-parent commits newest to oldest for display.
     let chain = match collect_chain(&store, tip) {
         Ok(c) => c,
         Err((m, c)) => return emit_err(&m, c),
     };
 
-    // Optional journal cross-check (only meaningful on history-mmr
-    // builds). `journal` carries `(recorded_advances, root)` and a
+    // Optional ancestry cross-check (only meaningful on history-mmr
+    // builds). `ancestry` carries `(leaf_count, root)` and a
     // verifier closure that confirms a commit's inclusion at a position.
-    let journal = open_journal(&layout, &branch);
+    let ancestry = open_ancestry(&layout, &branch);
 
     let mut stdout = std::io::stdout().lock();
     if let Format::Default = fmt
-        && let Some(j) = &journal
+        && let Some(j) = &ancestry
         && let Some(summary) = j.summary_line(&branch)
     {
         let _ = writeln!(stdout, "{summary}");
@@ -183,21 +117,8 @@ pub fn run(args: &[String]) -> u8 {
         }
         // `@{0}` is the current tip (chain[0]); `@{N}` walks back.
         let selector = i;
-        // Journal cross-check: was this reachable commit ever recorded
-        // as a journaled branch ref write? We can't decode the opaque
-        // MMR leaves, so we ask the journal to *confirm* the commit at
-        // some leaf position via an inclusion proof. This is
-        // rewrite-robust: a commit reachable today verifies as long as
-        // it was journaled at some point (even if a later amend/reset
-        // shifted leaf counts). `None` on a default build (no journal).
-        //
-        // `Some(false)` is NOT a tamper signal by itself (see the
-        // module doc's rebase gap, issue #648): mkit journals one leaf
-        // per branch REF WRITE, not one per commit, so an intermediate
-        // commit created by a multi-commit rebase's detached-HEAD
-        // replay is expected to come back `Some(false)` every time —
-        // only the rebase's own finalize tip gets a leaf.
-        let verified = journal.as_ref().map(|j| j.verify_present(&commit));
+        // Membership is in the trusted snapshot's exact first-parent chain.
+        let verified = ancestry.as_ref().map(|j| j.verify_present(&commit));
 
         let obj = match store.read_object(&commit) {
             Ok(o) => o,
@@ -222,14 +143,8 @@ pub fn run(args: &[String]) -> u8 {
         match fmt {
             Format::Default => {
                 let mark = match verified {
-                    Some(true) => " [journaled]",
-                    // Deliberately "not journaled" rather than "NOT in
-                    // journal" — this describes an absence, not a
-                    // tamper signal. It is the EXPECTED marker for an
-                    // intermediate rebase-replayed commit (module doc,
-                    // issue #648): mkit records one leaf per branch ref
-                    // write, not one per commit.
-                    Some(false) => " [not journaled]",
+                    Some(true) => " [ancestry verified]",
+                    Some(false) => " [ancestry unverified]",
                     None => "",
                 };
                 let _ = writeln!(
@@ -251,11 +166,11 @@ pub fn run(args: &[String]) -> u8 {
 ///
 /// ```json
 /// {"ref":"main","selector":"main@{0}","index":0,
-///  "hash":"<64-hex>","title":"...","journaled":true|false|null}
+///  "hash":"<64-hex>","title":"...","ancestry_verified":true|false|null}
 /// ```
 ///
-/// `journaled` is `null` on a default build (no history-mmr feature, so
-/// no journal to verify against).
+/// `ancestry_verified` is `null` on a default build (no history-mmr feature, so
+/// no ancestry to verify against).
 fn emit_json_entry(
     out: &mut impl Write,
     branch: &str,
@@ -276,10 +191,10 @@ fn emit_json_entry(
     let _ = write!(out, ",\"title\":\"{}\"", format::json_escape(title));
     match verified {
         Some(b) => {
-            let _ = write!(out, ",\"journaled\":{b}");
+            let _ = write!(out, ",\"ancestry_verified\":{b}");
         }
         None => {
-            let _ = out.write_all(b",\"journaled\":null");
+            let _ = out.write_all(b",\"ancestry_verified\":null");
         }
     }
     let _ = out.write_all(b"}\n");
@@ -296,7 +211,7 @@ fn resolve_branch(
     match refs::read_head(layout) {
         Ok(Head::Branch(name)) => Ok(name),
         Ok(Head::Detached(_)) => Err((
-            "HEAD is detached; pass an explicit <ref> (the ref-history journal is per-branch)"
+            "HEAD is detached; pass an explicit <ref> (the ref-history ancestry is per-branch)"
                 .to_owned(),
             exit::USAGE,
         )),
@@ -339,79 +254,75 @@ fn first_line(message: &[u8]) -> String {
 use super::error as emit_err;
 
 // ---------------------------------------------------------------------
-// Journal cross-check (feature: history-mmr)
+// Ancestry cross-check (feature: history-mmr)
 // ---------------------------------------------------------------------
 
-/// A handle to the opened ref-history journal used to cross-check the
-/// reconstructed chain. Carries the recorded-advance count and root for
-/// display, plus the live `CommitHistory` to build inclusion proofs.
+/// A handle to the opened ref-history ancestry used to cross-check the
+/// reconstructed chain. Carries the verified leaf count and root for
+/// display, plus the canonical snapshot used to build inclusion proofs.
 #[cfg(feature = "history-mmr")]
-struct Journal {
-    recorded_advances: u64,
+struct Ancestry {
+    leaf_count: u64,
     root: Hash,
-    history: mkit_core::history::CommitHistory<mkit_core::history::TokioExecutor>,
+    history: mkit_core::history::AncestrySnapshot,
 }
 
 #[cfg(feature = "history-mmr")]
-impl Journal {
-    /// One-line journal summary printed above the entries in the default
-    /// format: the recorded-advance count and the journal root.
+impl Ancestry {
+    /// One-line ancestry summary printed above the entries in the default
+    /// format: the first-parent commit count and the ancestry root.
     ///
     /// Returns `Option` to share the signature with the default-build
-    /// `Journal` (which has no journal and returns `None`).
+    /// `Ancestry` (which has no ancestry and returns `None`).
     #[allow(clippy::unnecessary_wraps)]
     fn summary_line(&self, branch: &str) -> Option<String> {
         Some(format!(
-            "# journal: {} recorded advance(s) on '{branch}', root {}",
-            self.recorded_advances,
+            "# ancestry: {} first-parent commit(s) on '{branch}', root {}",
+            self.leaf_count,
             format::short_hash(&self.root, 8)
         ))
     }
 
-    /// `true` iff `commit` was recorded as a journaled branch advance —
-    /// i.e. it verifies, against the current journal root, as the leaf
-    /// at *some* position. Scans newest-leaf-first (the common case is
-    /// the tip / a recent advance) and stops at the first match.
-    ///
-    /// O(advances) inclusion proofs in the worst case; reflog is a
-    /// diagnostic command and callers cap it with `-n`. `false` for an
-    /// empty journal or a commit that was never journaled.
+    /// Verify membership using the descriptor loaded from authoritative local
+    /// state. Leaf lookup is exact; no ref-event/ancestry ambiguity remains.
     fn verify_present(&self, commit: &Hash) -> bool {
-        let mut position = self.recorded_advances;
-        while position > 0 {
-            position -= 1;
-            let pos = mkit_core::history::Position(position);
-            let Ok(proof) = self.history.prove(pos) else {
-                continue;
-            };
-            if mkit_core::history::verify_inclusion(commit, pos, &proof, &self.root) {
-                return true;
-            }
-        }
-        false
+        let Some(position) = self.history.position_of(commit) else {
+            return false;
+        };
+        let Ok(proof) = self.history.prove(position) else {
+            return false;
+        };
+        let trusted = self.history.trusted_descriptor();
+        mkit_core::history::verify_ancestry(
+            commit,
+            position,
+            &proof,
+            self.history.descriptor(),
+            &trusted,
+            self.history.descriptor(),
+        )
     }
 }
 
-/// Open the per-branch ref-history journal for cross-checking, if the
-/// build has the `history-mmr` feature and the journal opens cleanly.
+/// Open the per-branch ref-history ancestry for cross-checking, if the
+/// build has the `history-mmr` feature and the ancestry opens cleanly.
 /// Read-only: opening does not append.
 #[cfg(feature = "history-mmr")]
-fn open_journal(layout: &mkit_core::layout::RepoLayout, branch: &str) -> Option<Journal> {
-    let exec = super::history_executor();
-    let history = mkit_core::history::CommitHistory::open_at(exec, layout, branch).ok()?;
-    Some(Journal {
-        recorded_advances: history.len(),
+fn open_ancestry(layout: &mkit_core::layout::RepoLayout, branch: &str) -> Option<Ancestry> {
+    let history = mkit_core::history::AncestrySnapshot::load(layout, branch).ok()?;
+    Some(Ancestry {
+        leaf_count: history.len(),
         root: history.root(),
         history,
     })
 }
 
-/// Default build: no journal to verify against.
+/// Default build: no ancestry to verify against.
 #[cfg(not(feature = "history-mmr"))]
-struct Journal;
+struct Ancestry;
 
 #[cfg(not(feature = "history-mmr"))]
-impl Journal {
+impl Ancestry {
     #[allow(clippy::unused_self)]
     fn summary_line(&self, _branch: &str) -> Option<String> {
         None
@@ -424,7 +335,7 @@ impl Journal {
 }
 
 #[cfg(not(feature = "history-mmr"))]
-fn open_journal(_layout: &mkit_core::layout::RepoLayout, _branch: &str) -> Option<Journal> {
+fn open_ancestry(_layout: &mkit_core::layout::RepoLayout, _branch: &str) -> Option<Ancestry> {
     None
 }
 
@@ -440,23 +351,23 @@ mod tests {
     }
 
     #[test]
-    fn json_entry_shape_default_build_is_null_journaled() {
+    fn json_entry_shape_default_build_is_null_ancestry_verified() {
         let mut buf = Vec::new();
         emit_json_entry(&mut buf, "main", 0, &[0xab; 32], "hello", None);
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("\"ref\":\"main\""));
         assert!(s.contains("\"selector\":\"main@{0}\""));
         assert!(s.contains("\"index\":0"));
-        assert!(s.contains("\"journaled\":null"));
+        assert!(s.contains("\"ancestry_verified\":null"));
         assert!(s.ends_with("}\n"));
     }
 
     #[test]
-    fn json_entry_journaled_true_renders_bool() {
+    fn json_entry_ancestry_verified_true_renders_bool() {
         let mut buf = Vec::new();
         emit_json_entry(&mut buf, "dev", 3, &[0x01; 32], "t", Some(true));
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("\"selector\":\"dev@{3}\""));
-        assert!(s.contains("\"journaled\":true"));
+        assert!(s.contains("\"ancestry_verified\":true"));
     }
 }

@@ -35,7 +35,7 @@ struct CloneOpts {
     /// One or more sparse-checkout patterns (issue #158).
     /// Pulls the full ref set + reachable pack, then runs the
     /// verifiable sparse pipeline on the new working tree's HEAD,
-    /// caching the bitmap and materialising only the matching files.
+    /// materialising only the matching files.
     /// Repeat the flag to add more patterns.
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
@@ -259,22 +259,11 @@ fn apply_sparse_after_clone(
         Err(e) => return Err((format!("read tree: {e}"), exit::GENERAL_ERROR)),
     };
 
-    // Build + verify against the same filter the manifest binds to.
-    let mut filter: Vec<StdPathBuf> = Vec::with_capacity(patterns.len());
-    for raw in patterns {
-        let trimmed = raw.trim_start_matches('/').trim_end_matches('/');
-        if trimmed.is_empty() || trimmed.starts_with('!') {
-            continue;
-        }
-        filter.push(StdPathBuf::from(trimmed));
-    }
-    // Cache-aware: a hit for this exact (tree, filter) skips the
-    // expensive build_sparse + verify_sparse Merkle-bitmap
-    // reconstruction entirely (SPEC-SPARSE-CHECKOUT §8). A miss
-    // (including a stale filter or a corrupt cache entry) falls
-    // through to a fresh build and rewrites the cache.
+    // Preserve the CLI grammar verbatim. Unsupported sparse prefixes use the
+    // authenticated full metadata already loaded above.
+    let filter: Vec<StdPathBuf> = patterns.iter().map(StdPathBuf::from).collect();
     match load_or_build(&layout, &tree, &filter) {
-        Ok(SparseOutcome::CacheHit) => {}
+        Ok(SparseOutcome::CacheHit | SparseOutcome::FullMetadata) => {}
         Ok(SparseOutcome::Built { store_error }) => {
             if let Some(e) = store_error {
                 let mut stderr = std::io::stderr().lock();

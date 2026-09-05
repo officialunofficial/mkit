@@ -42,62 +42,24 @@ document only calls out what differs.
               worker::Response
 ```
 
-## Auth (DEMO MODE &mdash; open write, no allow-list)
+## Auth v2 (open write, no allow-list)
 
-`UpdateRef` and `AdvanceRefs` require the SAME unary signed-write envelope
-`apps/repo-worker` uses (byte-for-byte identical canonical-string
-construction &mdash; see its README for the full spec); `PackExists`, `ReadRef`,
-and `ListRefs` are open reads.
+All writes require the destination-bound [auth v2 contract](../../docs/specs/SPEC-TRANSPORT-CONNECT.md#auth-v2-contract).
+The signature binds audience, repository, procedure, exact body or pack content,
+creation/expiry timestamps, and a mandatory random nonce. Configure `AUTH_AUDIENCE` to the exact public origin (and override it
+for local development); VCS also requires `AUTH_REPOSITORY`, default `default`.
+Repo requests use the decoded room as repository identity.
 
-`UploadPack` is client-streaming, which the unary envelope can't cover: the
-Connect interceptor that gates it (`Interceptor::intercept_streaming`) runs
-**once at stream establishment, before any message has arrived** &mdash; there is
-no request body yet to BLAKE3 and bind a signature to. This service therefore
-verifies a **narrower streaming envelope** for `UploadPack`
-(`src/envelope.rs`'s `verify_stream_envelope`): it binds the signature to
-`(procedure, createdAt, idempotencyKey)` only, proving "a holder of this key
-authorized an UploadPack call at this time" &mdash; not "…over these specific
-bytes." That is a deliberate, narrower claim than the unary envelope makes,
-not a content-integrity gap: the uploaded pack's integrity is separately and
-**unconditionally** enforced inside the handler regardless of auth
-(SPEC-TRANSPORT-CONNECT §6.1 &mdash; `BLAKE3(received bytes) == header.pack_id`, a
-mismatch is rejected before anything is stored).
-
-Both envelope kinds are open-write (same posture as repo-worker): any valid
-Ed25519 key may write. A valid signature proves request integrity and
-same-author, never authority.
-
-- **Per-key write quota.** A valid Ed25519 signature proves a *distinct* key,
-  not a *throttled* one, and a fresh key is free to mint &mdash; so `UpdateRef`,
-  `AdvanceRefs`, and `UploadPack` are additionally metered per author: at most
-  `WRITE_QUOTA_MAX_OPS` writes and `WRITE_QUOTA_MAX_BYTES` of `UploadPack`
-  bytes per author in a rolling `WRITE_QUOTA_WINDOW_MS` window (see
-  [`src/write_quota.rs`](src/write_quota.rs), ported from
-  `apps/repo-worker/src/write_quota.rs`). Unlike repo-worker's per-room
-  ledger, this service has a single global RefStore DO instance, so the
-  budget is keyed on `author` alone. `AuthInterceptor`
-  (`src/worker_impl/auth.rs`) checks-and-consumes the budget for `UpdateRef`/
-  `AdvanceRefs` against the RefStore DO (`POST /quota`,
-  `src/worker_impl/refstore.rs`) BEFORE the handler runs. `UploadPack`'s quota
-  check instead runs inside its own handler (`src/worker_impl/service.rs`),
-  right after decoding the stream's `header` message (the earliest point the
-  pack's declared size is known &mdash; the streaming `Interceptor::
-  intercept_streaming` runs before any message arrives, so it can't charge
-  bytes itself), still before any chunk is read or stored. Either way, the
-  counter lives in the DO's serial state rather than a Worker-global that
-  would race across isolates. Over-quota writes are rejected with Connect
-  `resource_exhausted`. A DO-unreachable quota check fails OPEN (logged,
-  write proceeds) rather than turning a transient infra hiccup into an outage
-  for every writer &mdash; every OTHER outcome (including the DO reachable and
-  reporting the budget exceeded) fails CLOSED. This is application-layer
-  defense; pair with a Cloudflare Rate Limiting rule keyed on `X-Public-Key`
-  at the edge for defense in depth (not configured here).
+SQLite transactions couple nonce replay records, quota, and mutable effects.
+Retries return their recorded result, including after a newer ref update, and
+never toggle a reaction or allocate a second message sequence. Immutable R2
+publication reserves quota once and resumes an interrupted conditional put.
+A failed ledger or quota read fails closed. Ref/event broadcasts occur only
+after the transaction commits. Any valid key can still write; this demo does
+not implement an allow-list.
 
 ### Known limitations
 
-- **Replay within the freshness window** (±5 min) &mdash; same caveat as
-  repo-worker; the idempotency key is signed but not deduplicated
-  server-side.
 - **Open write** &mdash; no allow-list; any valid key may advance any ref.
 - **Whole-pack buffering, not incremental streaming.** `UploadPack`
   accumulates the entire pack in memory (bounded by `MAX_PACK_BYTES`, 64 MiB)
@@ -200,8 +162,7 @@ same-author, never authority.
   native (BLAKE3 and Ed25519, no wasm/JS) &mdash; alongside its existing
   bearer-token mode (`mkit-transport-http`'s scheme, still used by #700's
   `mkit serve --http`, unchanged). `mkit-cli` wires it in via a new
-  `transport_auth = envelope` config key (repo-safe, mirroring
-  `remote_type`); when set, `mkit push`/`fetch`/`pull`/`clone` sign every
+  `transport_auth = envelope` config key (user-scoped, with explicit endpoint trust); when set, `mkit push`/`fetch`/`pull`/`clone` sign every
   write RPC (`UpdateRef`/`AdvanceRefs`/`UploadPack`) with the SAME Ed25519
   identity that already signs commits &mdash; resolved via the exact commit-
   signing signer resolution (`signer`/`signing_key`/`key.ed25519_ref`),
@@ -234,14 +195,13 @@ ConnectRPC, `POST /mkit.transport.v1.TransportService/<Method>`:
 **One global instance** (`env.durable_object("REFSTORE").id_from_name("root")`)
 &mdash; this service has no per-room/per-project split; a Worker deployment IS one
 repository. SQLite `refs(path TEXT PRIMARY KEY, value TEXT)`. Internal JSON
-wire protocol (`POST /get | /update | /list | /advance | /quota`) &mdash; see
+wire protocol (`POST /get | /update | /list | /advance | /object`) &mdash; see
 `src/worker_impl/wire.rs`. `AdvanceRefs` evaluates BOTH ref preconditions
 before writing EITHER ref (packmap checked first, matching
 `Transport::advance_refs`'s default precedence) &mdash; a true atomic transaction
 inside the DO's single serial `fetch`, never the packmap-then-head fallback a
 non-transactional backend would need. The per-key write-quota ledger
-(`write_quota` table, `POST /quota`) lives here too &mdash; see "Per-key write
-quota" above.
+(`write_quota` table) lives here too &mdash; see "Auth v2" above.
 
 ## Build and run
 
@@ -297,3 +257,12 @@ This reference server has not been deployed anywhere; it only runs against
 
 [workers-rs]: https://github.com/cloudflare/workers-rs
 [ConnectRPC]: https://connectrpc.com/
+
+## Auth v2 runtime regressions
+
+Build with `worker-build --dev --features test-faults`, run a local Worker with
+`AUTH_AUDIENCE=http://localhost:8791` and `AUTH_REPOSITORY=default`, then run
+`node tests/auth_v2.mjs http://localhost:8791 --fault`. The script checks
+concurrent replay, quota preservation, atomic two-ref rollback and retry,
+stream content binding, and interrupted immutable publication. The test fault
+hooks are absent unless the explicit `test-faults` feature is enabled.

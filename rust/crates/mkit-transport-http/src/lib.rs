@@ -700,8 +700,8 @@ impl Transport for HttpTransport {
 //     cache; the body filter is canonical input for cache misses.
 //   * Response body: opaque `application/x-mkit-sparse` bytes —
 //     [`mkit_core::sparse::decode_sparse_response`] decodes it into a
-//     `SparseResponse`. The verifier holds the trust boundary; this
-//     transport layer only enforces transport-level size caps.
+//     `SparseResponse`. The transport verifies the requested tree/filter and
+//     returns a locally derived `VerifiedSparseTree` selection.
 //   * 404 → tree not found on server; surfaces as `PackNotFound`
 //     (no dedicated `TreeNotFound` variant — the existing taxonomy
 //     covers "the addressed object is missing").
@@ -714,7 +714,7 @@ mod sparse_fetch {
     use super::{Hash, HttpTransport, RequestBuilder, TransportError, TransportResult, map_status};
     use mkit_core::hash::to_hex;
     use mkit_core::sparse::{
-        SPARSE_WIRE_MAX_BYTES, SparseResponse, decode_sparse_response, hash_filter,
+        SPARSE_WIRE_MAX_BYTES, VerifiedSparseTree, decode_sparse_response, hash_filter,
     };
     use serde::Serialize;
     use std::path::PathBuf;
@@ -744,7 +744,9 @@ mod sparse_fetch {
             &self,
             tree_hash: &Hash,
             filter: &[PathBuf],
-        ) -> TransportResult<SparseResponse> {
+        ) -> TransportResult<VerifiedSparseTree> {
+            mkit_core::sparse::validate_filter(filter)
+                .map_err(|_| TransportError::InvalidResponse)?;
             let filter_hash = hash_filter(filter);
             let url = self.sparse_tree_url(tree_hash, &filter_hash)?;
             let filter_strs: Vec<&str> = filter.iter().filter_map(|p| p.to_str()).collect();
@@ -781,7 +783,12 @@ mod sparse_fetch {
                 ));
             }
             let body_bytes = HttpTransport::read_body_capped_to_pub(resp, SPARSE_WIRE_MAX_BYTES)?;
-            decode_sparse_response(&body_bytes).map_err(|_| TransportError::InvalidResponse)
+            {
+                let response = decode_sparse_response(&body_bytes)
+                    .map_err(|_| TransportError::InvalidResponse)?;
+                mkit_core::sparse::verify_sparse(tree_hash, filter, &response)
+                    .map_err(|_| TransportError::InvalidResponse)
+            }
         }
     }
 }
@@ -857,9 +864,10 @@ impl HttpTransport {
     /// Shard-mode download: fetch the manifest, then fetch shards in
     /// parallel via std threads. Returns the reconstructed pack.
     fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        use mkit_core::pack_shard::{
-            MANIFEST_MAX_BYTES, Shard, decode_manifest, decode_pack_from_shards,
+        use mkit_core::pack_shard::download::{
+            DownloadGroup, DownloadedShard, WorkerSlot, decode_downloaded_pack,
         };
+        use mkit_core::pack_shard::{MANIFEST_MAX_BYTES, decode_manifest};
         use std::sync::mpsc;
 
         let manifest_url = self.manifest_url(key)?;
@@ -875,11 +883,14 @@ impl HttpTransport {
                 usize::try_from(len).unwrap_or(usize::MAX),
             ));
         }
-        let body = Self::read_body_capped(resp)?;
+        let body = Self::read_body_capped_to(resp, MANIFEST_MAX_BYTES)?;
         if body.len() > MANIFEST_MAX_BYTES {
             return Err(TransportError::PayloadTooLarge(body.len()));
         }
         let manifest = decode_manifest(&body).map_err(|_| TransportError::InvalidResponse)?;
+        if manifest.pack_hash != *key.as_bytes() {
+            return Err(TransportError::InvalidResponse);
+        }
 
         let total = manifest.config.total_shards();
         let minimum = manifest.config.minimum_shards.get();
@@ -889,7 +900,7 @@ impl HttpTransport {
             return Err(TransportError::InvalidResponse);
         }
 
-        let (tx, rx) = mpsc::channel::<(u16, TransportResult<Vec<u8>>)>();
+        let (tx, rx) = mpsc::channel::<(u16, TransportResult<DownloadedShard>)>();
         let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
         // Workers are intentionally *detached* (we never join them).
         // Once quorum or the failure threshold is reached the collection
@@ -899,25 +910,38 @@ impl HttpTransport {
         // terminates on its own instead of leaking.
         let backoff = self.backoff;
         let sleep = self.sleep;
+        let group = DownloadGroup::default();
         for i in 0..total_u16 {
             let tx = tx.clone();
             let url = self.shard_url(key, i)?;
             let client = self.client.clone();
             let token = self.token.clone();
-            std::thread::spawn(move || {
-                let result =
-                    fetch_shard_with_retry(&client, &url, token.as_deref(), backoff, sleep);
-                let _ = tx.send((i, result));
-            });
+            let cancel = group.token();
+            let slot = WorkerSlot::acquire()?;
+            std::thread::Builder::new()
+                .spawn(move || {
+                    let _slot = slot;
+                    let result = fetch_shard_with_retry(
+                        &client,
+                        &url,
+                        token.as_deref(),
+                        backoff,
+                        sleep,
+                        i,
+                        &cancel,
+                    );
+                    let _ = tx.send((i, result));
+                })
+                .map_err(|_| TransportError::ConnectionFailed)?;
         }
         drop(tx);
 
-        let mut shards: Vec<Shard> = Vec::with_capacity(minimum as usize);
+        let mut shards: Vec<DownloadedShard> = Vec::with_capacity(minimum as usize);
         let mut failures: u16 = 0;
         let max_failures = manifest.config.extra_shards.get();
-        for (index, res) in &rx {
-            if let Ok(bytes) = res {
-                shards.push(Shard { index, bytes });
+        for (_index, res) in &rx {
+            if let Ok(shard) = res {
+                shards.push(shard);
                 if shards.len() >= minimum as usize {
                     break;
                 }
@@ -931,11 +955,13 @@ impl HttpTransport {
         // Deliberately do not join the spawned workers: stragglers are
         // dropped, not awaited. They are bounded by SHARD_REQUEST_TIMEOUT.
 
+        group.cancel();
+        drop(rx);
         if shards.len() < minimum as usize {
             return Err(TransportError::PackNotFound);
         }
 
-        decode_pack_from_shards(&shards, &manifest).map_err(|_| TransportError::InvalidResponse)
+        decode_downloaded_pack(&shards, &manifest, key)
     }
 }
 
@@ -954,9 +980,12 @@ fn fetch_shard_with_retry(
     token: Option<&str>,
     backoff: fn() -> BackoffIterator,
     sleep: fn(Duration),
-) -> TransportResult<Vec<u8>> {
+    index: u16,
+    cancel: &mkit_core::pack_shard::download::Cancellation,
+) -> TransportResult<mkit_core::pack_shard::download::DownloadedShard> {
     mkit_core::protocol::retrying(
         || {
+            cancel.check()?;
             let mut req = client.get(url.clone()).timeout(SHARD_REQUEST_TIMEOUT);
             if let Some(t) = token
                 && let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}"))
@@ -968,7 +997,7 @@ fn fetch_shard_with_retry(
                     let status = resp.status();
                     if status.is_success() {
                         // Body-decode / size-cap failures are terminal — never retried.
-                        HttpTransport::read_body_capped(resp)
+                        mkit_core::pack_shard::download::DownloadedShard::read(index, resp, cancel)
                     } else {
                         Err(map_status(status, TransportError::PackNotFound))
                     }
@@ -1506,6 +1535,49 @@ mod tests {
             PackKey::new(mkit_core::hash::hash(pack))
         }
 
+        #[test]
+        fn requested_pack_identity_rejects_foreign_manifest_before_shards() {
+            let mut server = mockito::Server::new();
+            let key = key_for(b"requested pack A");
+            let other = synthetic_pack(64 * 1024);
+            let (shards, manifest) = encode_pack_to_shards(&other, default_config()).unwrap();
+            let _pack = server
+                .mock("GET", format!("/myproj/packs/{}", key.to_hex()).as_str())
+                .with_status(200)
+                .with_header(X_PACK_SHARDS_HEADER, "16+4")
+                .create();
+            let _manifest = server
+                .mock(
+                    "GET",
+                    format!("/myproj/packs/{}/shards.manifest", key.to_hex()).as_str(),
+                )
+                .with_status(200)
+                .with_body(encode_manifest(&manifest).unwrap())
+                .create();
+            let shard_mocks: Vec<_> = shards
+                .iter()
+                .map(|shard| {
+                    server
+                        .mock(
+                            "GET",
+                            format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index)
+                                .as_str(),
+                        )
+                        .with_status(200)
+                        .with_body(shard.bytes.clone())
+                        .expect(0)
+                        .create()
+                })
+                .collect();
+            assert!(matches!(
+                make_transport(&server, None).download_pack(&key),
+                Err(TransportError::InvalidResponse)
+            ));
+            for shard in shard_mocks {
+                shard.assert();
+            }
+        }
+
         /// Publish a sharded pack at the given mockito server. Returns
         /// the pack bytes, key, and a `Vec` of all mock handles (so
         /// the caller drops them at the end of the test).
@@ -1698,14 +1770,19 @@ mod tests {
                 .expect(1)
                 .create();
 
-            // Remaining shards always 200.
+            // Only the other minimum-1 shards succeed: shard 0 must finish
+            // its retry before reconstruction can cancel redundant workers.
             let mut others = Vec::new();
             for shard in shards.iter().skip(1) {
                 let path = format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index);
                 others.push(
                     server
                         .mock("GET", path.as_str())
-                        .with_status(200)
+                        .with_status(if shard.index < manifest.config.minimum_shards.get() {
+                            200
+                        } else {
+                            404
+                        })
                         .with_body(shard.bytes.clone())
                         .create(),
                 );
@@ -1750,23 +1827,26 @@ mod tests {
                 .with_status(403)
                 .expect(1)
                 .create();
-            // Remaining 19 shards all 200 — quorum (16) is reachable
-            // without shard 0, so the overall download still succeeds.
+            // Four unavailable extras force the denied shard to be observed
+            // before the failure threshold is reached. It must not retry.
             let mut others = Vec::new();
             for shard in shards.iter().skip(1) {
                 let path = format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index);
                 others.push(
                     server
                         .mock("GET", path.as_str())
-                        .with_status(200)
+                        .with_status(if shard.index < manifest.config.minimum_shards.get() {
+                            200
+                        } else {
+                            404
+                        })
                         .with_body(shard.bytes.clone())
                         .create(),
                 );
             }
 
             let t = make_transport_with_retry(&server, five_attempt_backoff, no_sleep);
-            let got = t.download_pack(&key).unwrap();
-            assert_eq!(got, pack);
+            assert!(t.download_pack(&key).is_err());
             denied.assert();
         }
 
@@ -1784,8 +1864,7 @@ mod tests {
             let dropped = [16u16, 17, 18, 19];
             let (pack, key, _mocks) = publish_sharded(&mut server, 64 * 1024, &dropped);
             let t = make_transport(&server, None);
-            let got = t.download_pack(&key).unwrap();
-            assert_eq!(got, pack);
+            assert_eq!(t.download_pack(&key).unwrap(), pack);
         }
     }
 

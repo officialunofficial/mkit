@@ -1,15 +1,5 @@
-//! Integration test for the history-MMR journal-lifecycle fix (issue
-//! #648): `mkit branch -d`/`-D` must destroy the deleted branch's
-//! `history/<branch>__*` journal partition, and `mkit branch -m` must
-//! destroy the renamed-away OLD name's partition. Without this, a
-//! branch recreated (or a name reused) after delete/rename would reopen
-//! a dead incarnation's non-empty journal and resume appending on top
-//! of its old leaves — the new branch's MMR root would then span two
-//! unrelated incarnations, with stale leaves from the deleted branch
-//! still producing valid-looking inclusion proofs "on this branch".
-//!
-//! This file is compiled only with `--features history-mmr` (a default
-//! build has no history journal to inspect).
+//! Branch deletion and rename invalidate the old name's current ancestry pointer.
+//! Recreating that name must establish a fresh generation.
 
 #![cfg(feature = "history-mmr")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -17,9 +7,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 
-use mkit_core::history::{CommitHistory, Position, TokioExecutor, verify_inclusion};
+use mkit_core::history::{AncestrySnapshot, Position, verify_inclusion};
 use mkit_core::layout::RepoLayout;
 use mkit_core::refs;
 
@@ -76,23 +65,25 @@ fn mkit_dir(root: &Path) -> PathBuf {
     root.join(mkit_core::MKIT_DIR)
 }
 
-fn journal_blobs_path(root: &Path, sanitized_branch: &str) -> PathBuf {
+fn current_pointer_path(root: &Path, branch: &str) -> PathBuf {
     mkit_dir(root)
-        .join("history")
-        .join(format!("{sanitized_branch}__journal-blobs"))
+        .join("history-v1/branches")
+        .join(mkit_core::hash::to_hex(&mkit_core::hash::hash(
+            format!("refs/heads/{branch}").as_bytes(),
+        )))
+        .join("current")
 }
 
-fn open_history(root: &Path, branch: &str) -> CommitHistory<TokioExecutor> {
-    let exec = Arc::new(TokioExecutor::new().expect("tokio runtime"));
-    CommitHistory::open_at(exec, &RepoLayout::single(root), branch).expect("open history")
+fn open_history(root: &Path, branch: &str) -> AncestrySnapshot {
+    AncestrySnapshot::load(&RepoLayout::single(root), branch).expect("open ancestry")
 }
 
 /// The core regression test (issue #648, TDD step 1): delete a branch
 /// via `mkit branch -d`, create a NEW branch with the SAME name, and
-/// advance it once. The new incarnation's on-disk journal must be
-/// fresh — one leaf, not resuming the deleted incarnation's leaves.
+/// advance it once. The new incarnation's on-disk ancestry must be
+/// fresh and contain the complete current chain.
 #[test]
-fn branch_delete_then_recreate_starts_a_fresh_journal() {
+fn branch_delete_then_recreate_starts_a_fresh_ancestry() {
     let td = init_repo();
     let root = td.path();
     commit_file(root, "root.txt", "root\n", "root");
@@ -103,8 +94,11 @@ fn branch_delete_then_recreate_starts_a_fresh_journal() {
     ok(root, &["checkout", "-b", "feature"]);
     commit_file(root, "a.txt", "a\n", "a");
     commit_file(root, "b.txt", "b\n", "b");
-    let feature_journal = journal_blobs_path(root, "feature");
-    assert!(feature_journal.exists(), "journal must exist after appends");
+    let feature_ancestry = current_pointer_path(root, "feature");
+    assert!(
+        feature_ancestry.exists(),
+        "ancestry must exist after appends"
+    );
     {
         let hist = open_history(root, "feature");
         assert_eq!(
@@ -123,14 +117,14 @@ fn branch_delete_then_recreate_starts_a_fresh_journal() {
         "branch ref must be gone"
     );
     assert!(
-        !feature_journal.exists(),
-        "branch -d must destroy the deleted branch's journal partition"
+        !feature_ancestry.exists(),
+        "branch -d must invalidate the deleted branch's current ancestry pointer"
     );
 
     // Recreate a NEW branch also named "feature" and advance it once.
     // The new incarnation gets its own creation leaf + one commit leaf
     // (two total) — NOT the old incarnation's three leaves plus these
-    // two, which is what resuming the dead incarnation's journal would
+    // two, which is what resuming the dead incarnation's ancestry would
     // produce.
     ok(root, &["checkout", "-b", "feature"]);
     commit_file(root, "c.txt", "c\n", "c (new incarnation)");
@@ -139,15 +133,15 @@ fn branch_delete_then_recreate_starts_a_fresh_journal() {
     assert_eq!(
         hist.len(),
         2,
-        "recreated branch's journal must contain only its OWN leaves \
+        "recreated branch's ancestry must contain only its OWN leaves \
          (creation + one commit), not resume the deleted incarnation's leaves"
     );
 }
 
-/// `mkit branch -m` must destroy the OLD name's journal partition, so a
+/// `mkit branch -m` must invalidate the OLD name's current ancestry pointer, so a
 /// later branch (re)using that name does not inherit it.
 #[test]
-fn branch_rename_destroys_the_old_names_journal() {
+fn branch_rename_invalidates_the_old_names_ancestry() {
     let td = init_repo();
     let root = td.path();
     commit_file(root, "root.txt", "root\n", "root");
@@ -155,9 +149,9 @@ fn branch_rename_destroys_the_old_names_journal() {
     ok(root, &["checkout", "-b", "old-name"]);
     commit_file(root, "a.txt", "a\n", "a");
 
-    let old_journal = journal_blobs_path(root, "old-name");
-    let new_journal = journal_blobs_path(root, "new-name");
-    assert!(old_journal.exists());
+    let old_ancestry = current_pointer_path(root, "old-name");
+    let new_ancestry = current_pointer_path(root, "new-name");
+    assert!(old_ancestry.exists());
 
     ok(root, &["branch", "-m", "old-name", "new-name"]);
 
@@ -166,32 +160,21 @@ fn branch_rename_destroys_the_old_names_journal() {
         None
     );
     assert!(
-        !old_journal.exists(),
-        "branch -m must destroy the renamed-away OLD name's journal partition"
+        !old_ancestry.exists(),
+        "branch -m must invalidate the renamed-away OLD name's current ancestry pointer"
     );
-    assert!(new_journal.exists(), "new name must have its own journal");
+    assert!(new_ancestry.exists(), "new name must have its own ancestry");
 
-    // Scoped and dropped before the `ok(...)` calls below spawn further
-    // `mkit` subprocesses against this same repo: commonware-runtime
-    // 2026.9.0's per-storage-directory `.hold` advisory lock (see
-    // docs/INVARIANTS.md, "One commonware storage Context per history
-    // dir per process") is held for as long as ANY live handle derived
-    // from this process's bootstrap survives — including across
-    // processes, not just within one. Leaving `hist_new` alive here
-    // would block every subsequent subprocess's own `open_at` on this
-    // repo's `history/` directory for as long as this test process
-    // keeps it open, i.e. forever (this test never drops it again) —
-    // a real deadlock this test hit after the MKIT-2 commonware bump.
     {
         let hist_new = open_history(root, "new-name");
         assert_eq!(
             hist_new.len(),
-            1,
-            "renamed branch's journal must seed fresh, exactly one leaf for the existing tip"
+            2,
+            "renamed branch starts a new generation over the whole existing ancestry"
         );
     }
 
-    // Recreating "old-name" afterward must not resume the destroyed
+    // Recreating "old-name" afterward must not resume the invalidateed
     // incarnation's two leaves (creation + commit "a") — the new
     // incarnation gets its own creation leaf + one commit leaf only.
     ok(root, &["checkout", "main"]);
@@ -202,7 +185,7 @@ fn branch_rename_destroys_the_old_names_journal() {
         hist_old_reopened.len(),
         2,
         "the new 'old-name' incarnation must start fresh (its own creation + one \
-         commit leaf), not resume the destroyed incarnation's leaves"
+         commit leaf), not resume the invalidateed incarnation's leaves"
     );
 }
 

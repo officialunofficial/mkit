@@ -38,6 +38,7 @@
   // apps/web/src/security-policy.js). `custom_domain` auto-provisions DNS + cert
   // on the mkit.sh zone. If you change this host, update the CSP + build env too.
   "routes": [{ "pattern": "api.mkit.sh", "custom_domain": true }],
+  "vars": { "AUTH_AUDIENCE": "https://api.mkit.sh" },
 
   // R2 object store for immutable, content-addressed mkit objects.
   // Key layout: {room}/objects/{hex(object_id)}, {room}/messages/{hex(id)}.
@@ -86,6 +87,7 @@
       // (and the web build's `VITE_REPO_BACKEND_URL`) if the web app needs to
       // target this host for end-to-end checks.
       "routes": [{ "pattern": "staging-api.mkit.sh", "custom_domain": true }],
+      "vars": { "AUTH_AUDIENCE": "https://staging-api.mkit.sh" },
 
       // Dedicated staging bucket (created via `wrangler r2 bucket create
       // mkit-repo-objects-staging`) — never the production

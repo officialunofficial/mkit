@@ -7,18 +7,10 @@
 // `worker::Request` <-> `http::Request` fetch-adapter skeleton (including
 // the `SendFuture`-wrapped `tower::Service` dispatch).
 //
-// Deliberately NOT here: the auth/quota business logic. An earlier audit
-// pass assumed `auth.rs` was near-verbatim duplicated too, but direct
-// comparison found the two crates' `auth.rs` have genuinely diverged —
-// repo-worker's carries envelope+quota+Analytics-Engine-audit logic,
-// vcs-worker's is a different signed-envelope write-auth model with its own
-// quota wiring, and vcs-worker has no `hashing.rs`/`constant_time_eq` at
-// all. Unifying that would mean forcing one Worker's business rules onto
-// the other, not extracting shared plumbing — so each Worker keeps its own
-// `auth.rs` untouched. The RPC handlers, the Router/service registration,
-// and the streamed-vs-buffered choice for the response bridge also stay put
-// (that choice IS the crates' one confirmed behavioral divergence — see
-// mkit#797 — and picking a single strategy here would paper over it).
+// The replay module also shares the explicit transactionSync bridge and
+// durable nonce/result ledger across repo, VCS and keys Workers. Each service
+// still owns its quota policy and effects; the pure auth v2 contract lives in
+// mkit-core::write_auth.
 //
 // Split into "pure" decision logic (host-testable; the `#[cfg(test)]`
 // modules in each file below exercise these directly) and thin
@@ -52,3 +44,6 @@ pub use adapter::{
 pub use body_cap::{CappedBody, body_len_exceeds, content_length_exceeds, read_capped_body};
 pub use cors::{cors_preflight_response, is_options_preflight, with_cors};
 pub use health::{HEALTH_PROBE_KEY, r2_head_probe, service_name_matches};
+
+/// Transactional authenticated operation replay storage.
+pub mod replay;

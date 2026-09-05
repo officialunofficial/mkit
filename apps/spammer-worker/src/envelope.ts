@@ -1,40 +1,23 @@
 // Signed envelope (Connect-flavored) + the per-procedure sign callback.
 //
-// Copied VERBATIM (logic unchanged) from `apps/web/src/lib/repo/envelope.ts`
-// — the `mkit-write:v1` envelope contract the deployed repo-worker's
-// `AuthInterceptor` verifies (see PLAN.md's "Idempotency-Key" research note).
-// The only adaptations, both purely about where types/helpers come from in
-// this package rather than the browser app:
-//   - `MkitApi` is imported from this package's `./wasm` (the Workers wasm
-//     init) instead of the browser app's `../mkit`. Both are `typeof
-//     MkitWasm` for the SAME `mkit-wasm` package, so the shape is identical.
-//   - `bytesToHex`/`hexToBytes` are imported from this package's own `./hex`
-//     instead of the browser app's `'../../components/use-mkit'` (a React
-//     component module that doesn't exist here, and shouldn't).
-// If `apps/web/src/lib/repo/envelope.ts`'s canonical-string contract ever
-// changes, mirror the change here too — see PLAN.md's "envelope.ts
-// duplication drift" risk. `test/scheduler.test.ts` pins the canonical-string
-// shape and verifies a built envelope's signature against wasm's own
-// `ed25519_verify`, so a drift shows up as a failing test, not a silent
-// desync.
+// Moved verbatim out of the former monolithic `repo-api.ts`; re-exported by the
+// `repo-api` barrel so existing `from '../lib/repo-api'` imports keep working.
 
-import type { DescMethod } from "@bufbuild/protobuf";
-import { RepoService } from "mkit-repo-proto";
-import { bytesToHex, hexToBytes } from "./hex";
-import type { MkitApi } from "./wasm";
+import type { DescMethod } from '@bufbuild/protobuf'
+import { RepoService } from 'mkit-repo-proto'
+import { bytesToHex, hexToBytes } from './hex'
+import type { MkitApi } from './wasm'
 
-const TEXT_ENCODER = new TextEncoder();
+const TEXT_ENCODER = new TextEncoder()
 
 /**
- * Fully-qualified Connect procedure path for a generated RPC method —
- * `/{service.typeName}/{method.name}`, the exact string the Connect protocol
- * puts on the wire and the server reconstructs into its canonical signed
- * string. Derived from the generated `RepoService` descriptor (not
- * hand-listed) so a `repo.proto` rename is a compile error here, not a silent
- * signature mismatch.
+ * Fully-qualified Connect procedure path for a generated RPC method — `/{service.typeName}/{method.name}`, the exact
+ * string the Connect protocol puts on the wire and the server reconstructs into its canonical signed string (see README
+ * §"The write envelope"). Derived from the generated `RepoService` descriptor (not hand-listed) so a `repo.proto`
+ * rename is a compile error here, not a silent signature mismatch.
  */
 function procedurePath(method: DescMethod): string {
-  return `/${method.parent.typeName}/${method.name}`;
+  return `/${method.parent.typeName}/${method.name}`
 }
 
 /** Fully-qualified Connect procedure paths — also the `procedure` field of the envelope. */
@@ -50,122 +33,159 @@ export const procedures = {
   React: procedurePath(RepoService.method.react),
   ListReactions: procedurePath(RepoService.method.listReactions),
   ListCommits: procedurePath(RepoService.method.listCommits),
-} as const;
+} as const
 
 // ---------------------------------------------------------------------------
 // Signed envelope (Connect-flavored)
 // ---------------------------------------------------------------------------
 
 export type EnvelopeParts = {
-  /** Connect procedure path, e.g. `/mkit.repo.v1.RepoService/UpdateRef`. */
-  procedure: string;
-  /** BLAKE3 hex of the raw (serialized) request body. */
-  bodyDigest: string;
-  createdAt: string;
-  idempotencyKey: string;
-};
+  audience: string
+  repository: string
+  procedure: string
+  bodyDigest: string
+  createdAt: string
+  expiresAt: string
+  idempotencyKey: string
+}
 
-/** Canonical string the server reconstructs + verifies (Connect-flavored envelope). */
+const component = (value: string, max: number) =>
+  value.length > 0 && value.length <= max && /^[\x21-\x7e]+$/.test(value)
+const hex = (value: string) => /^[0-9a-f]{64}$/.test(value)
+
+/** Auth v2 canonical encoding, shared with mkit-core/write_auth.rs. */
 export function canonicalString(p: EnvelopeParts): string {
-  return ["mkit-write:v1", p.procedure, p.bodyDigest, p.createdAt, p.idempotencyKey].join("\n");
+  const origin = new URL(p.audience)
+  if (!['https:', 'http:'].includes(origin.protocol) || origin.origin !== p.audience || origin.hostname.endsWith('.')) {
+    throw new Error('Noncanonical signing audience')
+  }
+  if (
+    !component(p.repository, 255) ||
+    !component(p.procedure, 512) ||
+    !p.procedure.startsWith('/') ||
+    !hex(p.bodyDigest) ||
+    !hex(p.idempotencyKey)
+  )
+    throw new Error('Invalid signed operation')
+  const created = Number(p.createdAt),
+    expires = Number(p.expiresAt)
+  if (
+    !Number.isSafeInteger(created) ||
+    !Number.isSafeInteger(expires) ||
+    created < 0 ||
+    String(created) !== p.createdAt ||
+    String(expires) !== p.expiresAt ||
+    expires <= created ||
+    expires - created > 300_000
+  ) {
+    throw new Error('Invalid signed validity interval')
+  }
+  return [
+    'mkit-write:v2',
+    p.audience,
+    p.repository,
+    p.procedure,
+    `body:${p.bodyDigest}`,
+    p.createdAt,
+    p.expiresAt,
+    p.idempotencyKey,
+  ].join('\n')
 }
 
-export type SignedEnvelope = {
-  publicKeyHex: string;
-  signatureHex: string;
-  /** BLAKE3 hex of the RAW request body — the `X-Digest` header the server recomputes. */
-  bodyDigest: string;
-  /** BLAKE3 hex of the canonical string (the bytes that are Ed25519-signed). */
-  digestHex: string;
-  /** Epoch-millis string (`String(Date.now())`) — the `X-Created-At` header. */
-  createdAt: string;
-  idempotencyKey: string;
-  canonical: string;
-};
+export type SignedEnvelope = EnvelopeParts & {
+  publicKeyHex: string
+  signatureHex: string
+  /** Digest of canonical signed bytes; distinct from the raw body digest. */
+  digestHex: string
+  commitment: string
+  canonical: string
+}
 
-/** BLAKE3 hex of a UTF-8 string (via WASM). */
 export function blake3OfString(api: MkitApi, s: string): string {
-  return api.blake3_hex(TEXT_ENCODER.encode(s));
+  return api.blake3_hex(TEXT_ENCODER.encode(s))
 }
 
-/**
- * Build + sign the request envelope. `bodyDigest` is the BLAKE3 of the raw
- * (serialized) request body. The signature is raw Ed25519 over the BLAKE3
- * digest of the canonical string — what the server's `ed25519_verify`
- * checks. The real Connect client attaches `publicKeyHex`/`signatureHex`/
- * `createdAt`/`idempotencyKey` as the X-* call headers.
- */
+function nonce(): string {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(32)))
+}
+
+/** Sign exact body bytes for an explicitly configured service and repository. */
 export function buildSignedEnvelope(
   api: MkitApi,
   seedHex: string,
-  parts: Pick<EnvelopeParts, "procedure" | "bodyDigest"> &
-    Partial<Pick<EnvelopeParts, "createdAt" | "idempotencyKey">>,
+  parts: Pick<EnvelopeParts, 'audience' | 'repository' | 'procedure' | 'bodyDigest'> &
+    Partial<Pick<EnvelopeParts, 'createdAt' | 'expiresAt' | 'idempotencyKey'>>,
 ): SignedEnvelope {
-  // `createdAt` MUST be epoch-ms (`String(Date.now())`) to match the server's
-  // `String(epoch ms)` canonical field — see apps/repo-worker/src/lib/envelope.ts.
-  const createdAt = parts.createdAt ?? String(Date.now());
-  const idempotencyKey = parts.idempotencyKey ?? crypto.randomUUID();
-  const canonical = canonicalString({ ...parts, createdAt, idempotencyKey });
-  const digestHex = blake3OfString(api, canonical);
-  const seed = hexToBytes(seedHex);
-  const sig = api.ed25519_sign(hexToBytes(digestHex), seed);
-  const pubkey = api.ed25519_pubkey_from_seed(seed);
+  const createdAt = parts.createdAt ?? String(Date.now())
+  const expiresAt = parts.expiresAt ?? String(Number(createdAt) + 300_000)
+  const idempotencyKey = parts.idempotencyKey ?? nonce()
+  const complete = { ...parts, createdAt, expiresAt, idempotencyKey }
+  const canonical = canonicalString(complete)
+  const digestHex = blake3OfString(api, canonical)
+  const seed = hexToBytes(seedHex)
   return {
-    publicKeyHex: bytesToHex(pubkey),
-    signatureHex: bytesToHex(sig),
-    bodyDigest: parts.bodyDigest,
+    ...complete,
+    publicKeyHex: bytesToHex(api.ed25519_pubkey_from_seed(seed)),
+    signatureHex: bytesToHex(api.ed25519_sign(hexToBytes(digestHex), seed)),
+    commitment: `body:${parts.bodyDigest}`,
     digestHex,
-    createdAt,
-    idempotencyKey,
     canonical,
-  };
+  }
 }
 
 export function envelopeHeaders(env: SignedEnvelope): Record<string, string> {
   return {
-    "X-Public-Key": env.publicKeyHex,
-    "X-Signature": env.signatureHex,
-    // Client-claimed BLAKE3 of the raw request body; server rejects on mismatch.
-    "X-Digest": env.bodyDigest,
-    "X-Created-At": env.createdAt,
-    "Idempotency-Key": env.idempotencyKey,
-  };
+    'X-Envelope-Version': '2',
+    'X-Audience': env.audience,
+    'X-Repository': env.repository,
+    'X-Content-Commitment': env.commitment,
+    'X-Expires-At': env.expiresAt,
+    'X-Public-Key': env.publicKeyHex,
+    'X-Signature': env.signatureHex,
+    'X-Digest': env.bodyDigest,
+    'X-Created-At': env.createdAt,
+    'Idempotency-Key': env.idempotencyKey,
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Per-procedure sign callback (used by the wasm backend)
-// ---------------------------------------------------------------------------
-
-/**
- * The sign-callback the wasm client invokes per write. It receives the
- * BLAKE3 hex of the RAW (serialized protobuf) request body — the EXACT bytes
- * the transport sends and the server re-hashes — and returns the
- * signed-write envelope. Computing the digest wasm-side (not in JS) is what
- * guarantees `X-Digest` matches `BLAKE3(actualBody)` on the server; JS could
- * not reproduce the protobuf bytes. See rust/crates/mkit-repo-client/README.md.
- *
- * The returned object's keys match what `SigningFetchTransport` reads:
- * `publicKeyHex`, `signatureHex`, `createdAt`, `idempotencyKey` (+ optional
- * `digestHex` echo, which must equal the supplied digest).
- */
 export type RepoSignFn = (bodyDigestHex: string) => {
-  publicKeyHex: string;
-  signatureHex: string;
-  createdAt: string;
-  idempotencyKey: string;
-  digestHex: string;
-};
+  publicKeyHex: string
+  signatureHex: string
+  audience: string
+  repository: string
+  commitment: string
+  createdAt: string
+  expiresAt: string
+  idempotencyKey: string
+  digestHex: string
+}
 
-/** Build a per-procedure sign-callback bound to the active identity seed. */
-export function makeSignFn(api: MkitApi, seedHex: string, procedure: string): RepoSignFn {
+/** One callback per logical operation; all transport retries reuse its nonce. */
+export function makeSignFn(
+  api: MkitApi,
+  seedHex: string,
+  procedure: string,
+  endpoint: string,
+  repository: string,
+): RepoSignFn {
+  const audience = new URL(endpoint).origin
+  const createdAt = String(Date.now())
+  const expiresAt = String(Number(createdAt) + 300_000)
+  const idempotencyKey = nonce()
+  let firstDigest: string | undefined
   return (bodyDigestHex: string) => {
-    const env = buildSignedEnvelope(api, seedHex, { procedure, bodyDigest: bodyDigestHex });
-    return {
-      publicKeyHex: env.publicKeyHex,
-      signatureHex: env.signatureHex,
-      createdAt: env.createdAt,
-      idempotencyKey: env.idempotencyKey,
-      digestHex: env.bodyDigest,
-    };
-  };
+    if (firstDigest !== undefined && firstDigest !== bodyDigestHex)
+      throw new Error('Signing callback reused for another operation')
+    const env = buildSignedEnvelope(api, seedHex, {
+      audience,
+      repository,
+      procedure,
+      bodyDigest: bodyDigestHex,
+      createdAt,
+      expiresAt,
+      idempotencyKey,
+    })
+    firstDigest = bodyDigestHex
+    return { ...env, digestHex: env.bodyDigest }
+  }
 }

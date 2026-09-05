@@ -16,7 +16,6 @@
 //                                                          -> { "committed", "conflict", "current"? }
 //   POST /list   { "prefix", "start_after", "page_size" }  -> { "refs": [ { "name", "value" } ],
 //                                                              "next_cursor", "total" }
-//   POST /quota  { "author", "bytes" }                      -> { "allowed", "reason"? }
 //   POST /purge  (no body)                                 -> { "refs_deleted", "messages_deleted", "reactions_deleted" }
 //   GET  /watch  (Upgrade: websocket)                      -> 101, streams RefEvent JSON frames
 //
@@ -24,8 +23,10 @@
 // CAS decision itself is the pure `refs::evaluate_cas` shared with the unit
 // tests, so the DO and the conformance vectors agree by construction.
 
+use mkit_worker_common::replay::{Ledger, Proof, Reply};
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::{cell::RefCell, rc::Rc};
 
 use serde::{Deserialize, Serialize};
 // `wasm_bindgen` must be in scope: the `#[durable_object]` macro emits glue
@@ -47,9 +48,8 @@ use crate::write_quota::{QuotaDecision, QuotaState, WRITE_QUOTA_WINDOW_MS, evalu
 use super::commit_index;
 use super::wire::{
     GetReq, GetResp, ListCommitsReq, ListCommitsResp, ListEntry, ListReq, ListResp, MessagesReq,
-    MessagesResp, MsgEntry, PostReq, PostResp, PurgeResp, QuotaCheckReq, QuotaCheckResp, ReactReq,
-    ReactResp, ReactionEntry, ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq,
-    UpdateResp,
+    MessagesResp, MsgEntry, PostReq, PostResp, PurgeResp, ReactReq, ReactResp, ReactionEntry,
+    ReactionsResp, RecordCommitsReq, RecordCommitsResp, UpdateReq, UpdateResp,
 };
 // `/watch` wire encoding: declared once (host+wasm target-independent) in
 // `crate::room_event` and shared with the WatchRefs Connect-streaming bridge
@@ -104,8 +104,11 @@ pub(crate) fn is_valid_pubkey(s: &str) -> bool {
 }
 
 #[durable_object]
+#[derive(Clone)]
 pub struct RefStore {
-    state: State,
+    state: Rc<State>,
+    ledger: Ledger,
+    pending_events: Rc<RefCell<Option<Vec<String>>>>,
     /// Per-isolate connection counter, combined with the wall clock in
     /// `next_conn_id` to mint a unique id per `/watch` socket (single-threaded
     /// wasm, so a `Cell` is enough — no synchronisation needed).
@@ -117,13 +120,18 @@ impl DurableObject for RefStore {
         // Defer table creation to the first storage op (`ensure_table`). A DDL
         // failure here would panic the isolate at construction; instead it now
         // surfaces as a clean error on the first fetch.
+        let ledger = Ledger::new(state);
         Self {
-            state,
+            state: ledger.state.clone(),
+            ledger,
+            pending_events: Rc::new(RefCell::new(None)),
             conn_seq: Cell::new(0),
         }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
+        self.ledger.initialize()?;
+        self.ensure_write_quota_table()?;
         let path = req.path();
 
         // WatchRefs subscription: accept a hibernatable server WebSocket.
@@ -164,13 +172,10 @@ impl DurableObject for RefStore {
                 if let Err(e) = self.ensure_table() {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
-                if path == "/update" {
-                    if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
-                        return Response::error(format!("storage init failed: {e}"), 500);
-                    }
-                    if let Err(e) = self.ensure_update_idem_table() {
-                        return Response::error(format!("storage init failed: {e}"), 500);
-                    }
+                if path == "/update"
+                    && let Err(e) = commit_index::ensure_table(&self.state.storage().sql())
+                {
+                    return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
             "/post" | "/messages" => {
@@ -185,11 +190,6 @@ impl DurableObject for RefStore {
             }
             "/list-commits" | "/record-commits" => {
                 if let Err(e) = commit_index::ensure_table(&self.state.storage().sql()) {
-                    return Response::error(format!("storage init failed: {e}"), 500);
-                }
-            }
-            "/quota" => {
-                if let Err(e) = self.ensure_write_quota_table() {
                     return Response::error(format!("storage init failed: {e}"), 500);
                 }
             }
@@ -216,7 +216,7 @@ impl DurableObject for RefStore {
         match path.as_str() {
             "/get" => {
                 let body: GetReq = req.json().await?;
-                let value = self.read_ref(&body.name);
+                let value = self.read_ref(&body.name)?;
                 Response::from_json(&GetResp {
                     exists: value.is_some(),
                     value,
@@ -224,7 +224,10 @@ impl DurableObject for RefStore {
             }
             "/update" => {
                 let body: UpdateReq = req.json().await?;
-                self.handle_update(body)
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.mutate(proof, Some(0), true, move || owned.handle_update(body))?
+                    .response()
             }
             "/list" => {
                 let body: ListReq = req.json().await?;
@@ -239,7 +242,10 @@ impl DurableObject for RefStore {
             }
             "/post" => {
                 let body: PostReq = req.json().await?;
-                self.handle_post(body)
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.mutate(proof, None, true, move || owned.handle_post(body))?
+                    .response()
             }
             "/messages" => {
                 let body: MessagesReq = req.json().await?;
@@ -248,7 +254,10 @@ impl DurableObject for RefStore {
             }
             "/react" => {
                 let body: ReactReq = req.json().await?;
-                self.handle_react(body)
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.mutate(proof, None, true, move || owned.handle_react(body))?
+                    .response()
             }
             "/reactions" => {
                 let reactions = self.list_reactions();
@@ -262,9 +271,15 @@ impl DurableObject for RefStore {
                 let body: RecordCommitsReq = req.json().await?;
                 self.handle_record_commits(body)
             }
-            "/quota" => {
-                let body: QuotaCheckReq = req.json().await?;
-                self.handle_quota_check(body)
+            "/object" => {
+                let body: super::wire::ObjectWriteReq = req.json().await?;
+                let complete = body.result.is_some();
+                self.mutate(body.proof, Some(body.bytes), complete, move || {
+                    Reply::json(&super::wire::ObjectWriteResp {
+                        result: body.result,
+                    })
+                })?
+                .response()
             }
             "/purge" => self.handle_purge(),
             _ => Response::error("not found", 404),
@@ -334,7 +349,7 @@ impl RefStore {
         let head = if !req.start_id.is_empty() {
             req.start_id.clone()
         } else {
-            match self.read_ref(&req.r#ref) {
+            match self.read_ref(&req.r#ref)? {
                 Some(h) => h,
                 None => {
                     return Response::from_json(&ListCommitsResp {
@@ -368,9 +383,7 @@ impl RefStore {
 
         sql.exec("DELETE FROM refs;", None)?;
         sql.exec("DELETE FROM messages;", None)?;
-        sql.exec("DELETE FROM idem_keys;", None)?;
         sql.exec("DELETE FROM reactions;", None)?;
-        sql.exec("DELETE FROM react_idem;", None)?;
         sql.exec("DELETE FROM react_rate;", None)?;
         sql.exec("DELETE FROM commits;", None)?;
 
@@ -400,7 +413,7 @@ impl RefStore {
     }
 
     /// Read a ref's current hex value, or None if absent.
-    fn read_ref(&self, name: &str) -> Option<String> {
+    fn read_ref(&self, name: &str) -> Result<Option<String>> {
         #[derive(Deserialize)]
         struct Row {
             value: String,
@@ -412,37 +425,23 @@ impl RefStore {
             .exec(
                 "SELECT value FROM refs WHERE path = ? LIMIT 1;",
                 vec![name.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| r.value)
+            )?
+            .to_array()?;
+        let value = rows.into_iter().next().map(|r| r.value);
+        if let Some(value) = value.as_deref()
+            && !mkit_core::write_auth::is_hex(value, 32)
+        {
+            return Err(worker::Error::RustError(
+                "stored ref is not a canonical object id".into(),
+            ));
+        }
+        Ok(value)
     }
 
-    /// Apply the CAS update serially. Reads the current value, evaluates the
-    /// pure CAS decision, and on commit upserts + broadcasts a RefEvent.
-    ///
-    /// Replay dedupe runs FIRST, mirroring `handle_post`/`handle_react`: a
-    /// re-submitted signed UpdateRef (same author + ref name + idempotency-key)
-    /// returns the ORIGINAL `(committed, conflict, current)` result instead of
-    /// re-evaluating the CAS against whatever the ref holds now. This is what
-    /// closes the `REF_EXPECTATION_ANY` replay hole — without it, a captured
-    /// signed ANY-update stays replayable (and re-clobbers the ref to the stale
-    /// value) for the whole envelope freshness window. UNLIKE chat/react, which
-    /// dedupe globally per author, the key here is `(author, name, idem)`: the
-    /// same idempotency key must not collide across two different refs.
-    fn handle_update(&self, req: UpdateReq) -> Result<Response> {
-        let author = req.author.clone().unwrap_or_default();
-        let now = Date::now().as_millis() as i64;
-
-        if !req.idem.is_empty()
-            && !author.is_empty()
-            && let Some(resp) = self.update_idem_lookup(&author, &req.name, &req.idem)
-        {
-            return Response::from_json(&resp);
-        }
-
-        let current = self.read_ref(&req.name);
+    /// Apply one CAS inside the caller's nonce/quota/effects transaction.
+    /// Broadcasts are buffered until that transaction commits.
+    fn handle_update(&self, req: UpdateReq) -> Result<Reply> {
+        let current = self.read_ref(&req.name)?;
         let expectation = RefExpectation::from_wire(req.expectation);
         let expected_bytes = req.expected.as_ref().and_then(|s| hex::decode(s).ok());
         let current_bytes = current.as_ref().and_then(|s| hex::decode(s).ok());
@@ -480,10 +479,7 @@ impl RefStore {
                     conflict: false,
                     current: Some(req.new),
                 };
-                if !req.idem.is_empty() && !author.is_empty() {
-                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
-                }
-                Response::from_json(&resp)
+                Reply::json(&resp)
             }
             CasDecision::Conflict(reason) => {
                 // On a precondition failure return the present value (if any)
@@ -497,103 +493,10 @@ impl RefStore {
                     conflict: true,
                     current,
                 };
-                if !req.idem.is_empty() && !author.is_empty() {
-                    self.record_update_idem(&author, &req.name, &req.idem, &resp, now);
-                }
-                Response::from_json(&resp)
+                Reply::json(&resp)
             }
-            CasDecision::Invalid(msg) => Response::error(msg, 400),
+            CasDecision::Invalid(msg) => Reply::error(msg, 400),
         }
-    }
-
-    /// Idempotently create the `update_idem` replay-dedupe ledger for
-    /// UpdateRef, mirroring `idem_keys` (chat) / `react_idem` (React). Keyed on
-    /// `(author, name, idem)` — UNLIKE chat/react, which dedupe globally per
-    /// author, UpdateRef must include the ref `name` in the key since the same
-    /// idempotency key must not collide across different refs.
-    fn ensure_update_idem_table(&self) -> Result<()> {
-        let sql = self.state.storage().sql();
-        sql.exec(
-            "CREATE TABLE IF NOT EXISTS update_idem (\
-               author TEXT NOT NULL, \
-               name TEXT NOT NULL, \
-               idem TEXT NOT NULL, \
-               committed INTEGER NOT NULL, \
-               conflict INTEGER NOT NULL, \
-               current TEXT, \
-               created_at INTEGER NOT NULL, \
-               PRIMARY KEY (author, name, idem));",
-            None,
-        )?;
-        // Index the time column so the per-update freshness prune
-        // (`DELETE … WHERE created_at < ?`) seeks the expired tail instead of
-        // full-scanning the whole room-wide ledger on every committed update.
-        sql.exec(
-            "CREATE INDEX IF NOT EXISTS update_idem_created ON update_idem(created_at);",
-            None,
-        )?;
-        Ok(())
-    }
-
-    /// A prior `(author, name, idem)` UpdateRef result, so a replay returns it
-    /// unchanged instead of re-running the CAS against the (possibly since
-    /// changed) current value. `None` on a first-seen key.
-    fn update_idem_lookup(&self, author: &str, name: &str, idem: &str) -> Option<UpdateResp> {
-        #[derive(Deserialize)]
-        struct Row {
-            committed: i64,
-            conflict: i64,
-            current: Option<String>,
-        }
-        let rows: Vec<Row> = self
-            .state
-            .storage()
-            .sql()
-            .exec(
-                "SELECT committed, conflict, current FROM update_idem \
-                 WHERE author = ? AND name = ? AND idem = ? LIMIT 1;",
-                vec![author.into(), name.into(), idem.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| UpdateResp {
-            committed: r.committed != 0,
-            conflict: r.conflict != 0,
-            current: r.current,
-        })
-    }
-
-    /// Record this `(author, name, idem)` → result for replay dedupe, then drop
-    /// entries older than the envelope freshness window (a replay that old
-    /// fails envelope verification, so its key is no longer needed).
-    fn record_update_idem(
-        &self,
-        author: &str,
-        name: &str,
-        idem: &str,
-        resp: &UpdateResp,
-        now: i64,
-    ) {
-        let sql = self.state.storage().sql();
-        let _ = sql.exec(
-            "INSERT OR REPLACE INTO update_idem \
-               (author, name, idem, committed, conflict, current, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?);",
-            vec![
-                author.into(),
-                name.into(),
-                idem.into(),
-                i64::from(resp.committed).into(),
-                i64::from(resp.conflict).into(),
-                resp.current.clone().into(),
-                now.into(),
-            ],
-        );
-        let _ = sql.exec(
-            "DELETE FROM update_idem WHERE created_at < ?;",
-            vec![(now - FRESHNESS_WINDOW_MS).into()],
-        );
     }
 
     /// List refs whose path starts with `prefix` (empty = all), optionally
@@ -750,7 +653,7 @@ impl RefStore {
             None,
         )?;
         // Seeks the stale tail so the opportunistic prune in
-        // `handle_quota_check` doesn't full-scan the whole per-room author
+        // `charge_quota` doesn't full-scan the whole per-room author
         // set on every accepted write.
         sql.exec(
             "CREATE INDEX IF NOT EXISTS write_quota_window ON write_quota(window_start);",
@@ -759,53 +662,65 @@ impl RefStore {
         Ok(())
     }
 
-    /// Check-and-consume one author's write budget for this room, serially —
-    /// the DO's single-threaded execution makes this read-evaluate-write
-    /// atomic, so two writes from the same author can't both slip past the
-    /// cap (same requirement `handle_post`'s rate-limit check has). Called by
-    /// `AuthInterceptor` for `PutObject`/`UpdateRef` BEFORE the handler runs.
-    /// A rejected write leaves the persisted state untouched; an accepted one
-    /// persists the updated `(window_start, ops, bytes)` and prunes rows
-    /// whose window elapsed more than one window ago (bounded storage,
-    /// mirrors `idem_keys`/`react_idem`).
-    fn handle_quota_check(&self, req: QuotaCheckReq) -> Result<Response> {
+    /// Charge the first reservation inside the nonce/effects transaction.
+    /// Replays reuse the saved result without consuming another write budget.
+    fn charge_quota(&self, author: &str, bytes: u64) -> Result<Option<Reply>> {
         let now = Date::now().as_millis() as i64;
-        let current = self.read_quota_state(&req.author);
-
-        match evaluate_quota(current, now, req.bytes) {
+        match evaluate_quota(self.read_quota_state(author)?, now, bytes) {
             QuotaDecision::Allowed(state) => {
-                let sql = self.state.storage().sql();
-                sql.exec(
-                    "INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) \
-                     ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, \
-                       ops = excluded.ops, bytes = excluded.bytes;",
-                    vec![
-                        req.author.into(),
-                        state.window_start.into(),
-                        i64::from(state.ops).into(),
-                        (state.bytes as i64).into(),
-                    ],
-                )?;
-                let _ = sql.exec(
+                self.state.storage().sql().exec("INSERT INTO write_quota (author, window_start, ops, bytes) VALUES (?, ?, ?, ?) ON CONFLICT(author) DO UPDATE SET window_start = excluded.window_start, ops = excluded.ops, bytes = excluded.bytes", vec![author.into(), state.window_start.into(), i64::from(state.ops).into(), (state.bytes as i64).into()])?;
+                self.state.storage().sql().exec(
                     "DELETE FROM write_quota WHERE window_start < ?;",
                     vec![(now - 2 * WRITE_QUOTA_WINDOW_MS).into()],
-                );
-                Response::from_json(&QuotaCheckResp {
-                    allowed: true,
-                    reason: None,
-                })
+                )?;
+                Ok(None)
             }
-            QuotaDecision::Exhausted { reason } => Response::from_json(&QuotaCheckResp {
-                allowed: false,
-                reason: Some(reason.to_string()),
-            }),
+            QuotaDecision::Exhausted { reason } => Ok(Some(Reply::error(reason, 429)?)),
         }
+    }
+
+    fn mutate(
+        &self,
+        proof: Proof,
+        bytes: Option<u64>,
+        complete: bool,
+        action: impl FnOnce() -> Result<Reply> + 'static,
+    ) -> Result<Reply> {
+        let owned = self.clone();
+        *self.pending_events.borrow_mut() = Some(Vec::new());
+        let result = self.ledger.transaction(move || {
+            let prior = owned
+                .ledger
+                .reserve(&proof, Date::now().as_millis() as i64)?;
+            if let Some(Some(reply)) = prior {
+                return Ok(reply);
+            }
+            if prior.is_none()
+                && let Some(bytes) = bytes
+                && let Some(reply) = owned.charge_quota(&proof.author, bytes)?
+            {
+                owned.ledger.finish(&proof, &reply)?;
+                return Ok(reply);
+            }
+            let reply = action()?;
+            if complete {
+                owned.ledger.finish(&proof, &reply)?;
+            }
+            Ok(reply)
+        });
+        let events = self.pending_events.borrow_mut().take().unwrap_or_default();
+        if result.is_ok() {
+            for event in events {
+                self.broadcast_str(&event);
+            }
+        }
+        result
     }
 
     /// The author's persisted quota state in this room, or `None` if they've
     /// never written here (or their row was pruned as stale) — the input to
     /// `write_quota::evaluate_quota`.
-    fn read_quota_state(&self, author: &str) -> Option<QuotaState> {
+    fn read_quota_state(&self, author: &str) -> Result<Option<QuotaState>> {
         #[derive(Deserialize)]
         struct Row {
             window_start: i64,
@@ -819,15 +734,13 @@ impl RefStore {
             .exec(
                 "SELECT window_start, ops, bytes FROM write_quota WHERE author = ? LIMIT 1;",
                 vec![author.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| QuotaState {
+            )?
+            .to_array()?;
+        Ok(rows.into_iter().next().map(|r| QuotaState {
             window_start: r.window_start,
             ops: r.ops.max(0) as u32,
             bytes: r.bytes.max(0) as u64,
-        })
+        }))
     }
 
     /// Idempotently create the `messages` table — the room's chat log. `seq` is
@@ -850,27 +763,6 @@ impl RefStore {
             "CREATE INDEX IF NOT EXISTS messages_author ON messages(author);",
             None,
         )?;
-        // Replay-dedupe ledger: the (author, idempotency-key) of each accepted
-        // post, with the seq/created_at it produced. A replay of a captured
-        // signed request (same author+key) returns the ORIGINAL result instead
-        // of inserting a duplicate row. Bounded to the envelope freshness window
-        // (older keys can't pass envelope verification anyway).
-        sql.exec(
-            "CREATE TABLE IF NOT EXISTS idem_keys (\
-               author TEXT NOT NULL, \
-               idem TEXT NOT NULL, \
-               seq INTEGER NOT NULL, \
-               created_at INTEGER NOT NULL, \
-               PRIMARY KEY (author, idem));",
-            None,
-        )?;
-        // Index the time column so the per-post freshness prune
-        // (`DELETE … WHERE created_at < ?`) seeks the expired tail instead of
-        // full-scanning the whole room-wide ledger on every accepted post.
-        sql.exec(
-            "CREATE INDEX IF NOT EXISTS idem_keys_created ON idem_keys(created_at);",
-            None,
-        )?;
         Ok(())
     }
 
@@ -880,27 +772,12 @@ impl RefStore {
     /// server clock + the new `seq`, then broadcast a `"chat"` frame to every
     /// `/watch` subscriber. The worker has already content-addressed + stored
     /// the message bytes in R2 and verified the author envelope.
-    fn handle_post(&self, req: PostReq) -> Result<Response> {
+    fn handle_post(&self, req: PostReq) -> Result<Reply> {
         let now = Date::now().as_millis() as i64;
 
-        // Replay dedupe FIRST (before the rate limit): a re-submitted signed
-        // request (same author + idempotency-key) returns the ORIGINAL result,
-        // so a captured signature can't be amplified into duplicate messages and
-        // a client retry is idempotent. A genuinely new post carries a fresh key.
-        if !req.idem.is_empty()
-            && let Some((seq, created_at)) = self.idem_lookup(&req.author, &req.idem)
-        {
-            return Response::from_json(&PostResp {
-                accepted: true,
-                rate_limited: false,
-                seq,
-                created_at,
-            });
-        }
-
-        let last = self.last_post_ms(&req.author);
+        let last = self.last_post_ms(&req.author)?;
         if is_rate_limited(last, now) {
-            return Response::from_json(&PostResp {
+            return Reply::json(&PostResp {
                 accepted: false,
                 rate_limited: true,
                 seq: 0,
@@ -925,21 +802,13 @@ impl RefStore {
             seq: i64,
         }
         let seq_rows: Vec<Seq> = sql
-            .exec("SELECT last_insert_rowid() AS seq;", None)
-            .and_then(|r| r.to_array())
-            .unwrap_or_default();
-        let seq: u64 = match seq_rows.into_iter().next() {
-            Some(r) => r.seq as u64,
-            // The row WAS inserted (the INSERT above used `?`); a missing rowid
-            // here means the SELECT itself failed — surface it rather than
-            // silently shipping a seq=0 that downstream can't order.
-            None => {
-                worker::console_error!(
-                    "post_message: last_insert_rowid() returned no row; persisted message broadcast with seq=0"
-                );
-                0
-            }
-        };
+            .exec("SELECT last_insert_rowid() AS seq;", None)?
+            .to_array()?;
+        let seq = seq_rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| worker::Error::RustError("missing inserted message sequence".into()))?
+            .seq as u64;
 
         // Bound the serving index: drop rows older than the most-recent
         // MESSAGES_RETAINED (R2 still holds every message permanently). seq is
@@ -948,20 +817,6 @@ impl RefStore {
             "DELETE FROM messages WHERE seq <= (SELECT MAX(seq) FROM messages) - ?;",
             vec![MESSAGES_RETAINED.into()],
         );
-
-        // Record this (author, idem) → result for replay dedupe, then drop keys
-        // older than the freshness window (a replay that old fails envelope
-        // verification, so its key is no longer needed).
-        if !req.idem.is_empty() {
-            let _ = sql.exec(
-                "INSERT OR REPLACE INTO idem_keys (author, idem, seq, created_at) VALUES (?, ?, ?, ?);",
-                vec![req.author.clone().into(), req.idem.clone().into(), (seq as i64).into(), now.into()],
-            );
-            let _ = sql.exec(
-                "DELETE FROM idem_keys WHERE created_at < ?;",
-                vec![(now - FRESHNESS_WINDOW_MS).into()],
-            );
-        }
 
         // Use the typed `broadcast` helper (like the Commit path) so a serialize
         // failure SKIPS the frame rather than fanning out an empty string "".
@@ -973,37 +828,12 @@ impl RefStore {
             seq,
         ));
 
-        Response::from_json(&PostResp {
+        Reply::json(&PostResp {
             accepted: true,
             rate_limited: false,
             seq,
             created_at: now,
         })
-    }
-
-    /// If this (author, idempotency-key) already produced a message, return its
-    /// (seq, created_at) so a replay can return the original result. None on a
-    /// first-seen key.
-    fn idem_lookup(&self, author: &str, idem: &str) -> Option<(u64, i64)> {
-        #[derive(Deserialize)]
-        struct Row {
-            seq: i64,
-            created_at: i64,
-        }
-        let rows: Vec<Row> = self
-            .state
-            .storage()
-            .sql()
-            .exec(
-                "SELECT seq, created_at FROM idem_keys WHERE author = ? AND idem = ? LIMIT 1;",
-                vec![author.into(), idem.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter()
-            .next()
-            .map(|r| (r.seq as u64, r.created_at))
     }
 
     /// Idempotently create the `reactions` table. One row per
@@ -1024,39 +854,16 @@ impl RefStore {
             "CREATE INDEX IF NOT EXISTS reactions_created ON reactions(created_at);",
             None,
         )?;
-        // Replay-dedupe for React: the (author, idempotency-key) of each accepted
-        // toggle and the result it produced. A replay returns the original result
-        // (no re-toggle). Bounded to the freshness window. NOTE: this is keyed on
-        // a PRESENT idempotency key, so it can't be the rate-limit input — a
-        // client may omit the key. The rate floor reads `react_rate` instead.
-        sql.exec(
-            "CREATE TABLE IF NOT EXISTS react_idem (\
-               author TEXT NOT NULL, \
-               idem TEXT NOT NULL, \
-               active INTEGER NOT NULL, \
-               count INTEGER NOT NULL, \
-               created_at INTEGER NOT NULL, \
-               PRIMARY KEY (author, idem));",
-            None,
-        )?;
-        // Per-author rate ledger: the time of each author's last ACCEPTED toggle,
-        // recorded UNCONDITIONALLY (independent of any idempotency key) so the
-        // anti-flood floor can't be sidestepped by omitting the key. One row per
-        // author; pruned by the freshness window alongside `react_idem`.
+        // Per-author timestamp of the last accepted toggle. Replay dedupe
+        // and rate limiting have independent ledgers; retries never toggle
+        // again or advance this timestamp.
         sql.exec(
             "CREATE TABLE IF NOT EXISTS react_rate (\
                author TEXT PRIMARY KEY, \
                last_ms INTEGER NOT NULL);",
             None,
         )?;
-        // Index the time columns both per-React prunes filter on, so each
-        // `DELETE … WHERE created_at < ?` / `WHERE last_ms < ?` seeks the expired
-        // tail instead of full-scanning the whole table on every accepted toggle
-        // (a reaction storm was O(reactions × authors) without these).
-        sql.exec(
-            "CREATE INDEX IF NOT EXISTS react_idem_created ON react_idem(created_at);",
-            None,
-        )?;
+        // Seek expired rate entries without scanning all authors.
         sql.exec(
             "CREATE INDEX IF NOT EXISTS react_rate_last ON react_rate(last_ms);",
             None,
@@ -1067,27 +874,19 @@ impl RefStore {
     /// Toggle a reaction serially, with the same guards the chat write path has:
     /// replay dedupe (a re-submitted signed toggle returns its original result),
     /// a per-author anti-flood rate limit, and a bound on the reactions table.
-    fn handle_react(&self, req: ReactReq) -> Result<Response> {
+    fn handle_react(&self, req: ReactReq) -> Result<Reply> {
         let sql = self.state.storage().sql();
         let now = Date::now().as_millis() as i64;
 
-        // 1) Replay dedupe: a re-submitted signed React (same author + idem)
-        // returns the ORIGINAL result instead of toggling state again.
-        if !req.idem.is_empty()
-            && let Some((active, count)) = self.react_idem_lookup(&req.author, &req.idem)
-        {
-            return Response::from_json(&ReactResp { active, count });
-        }
-
-        let had = self.reaction_exists(&req.target, &req.emoji, &req.author);
+        let had = self.reaction_exists(&req.target, &req.emoji, &req.author)?;
 
         // 2) Per-author anti-flood floor. On refusal, return the CURRENT state
         // unchanged (no toggle, no broadcast); the optimistic client reconciles
         // on its settle refetch.
-        let last = self.last_react_ms(&req.author);
+        let last = self.last_react_ms(&req.author)?;
         if last.is_some_and(|l| now - l < REACT_MIN_INTERVAL_MS) {
-            let count = self.reaction_count(&req.target, &req.emoji);
-            return Response::from_json(&ReactResp { active: had, count });
+            let count = self.reaction_count(&req.target, &req.emoji)?;
+            return Reply::json(&ReactResp { active: had, count });
         }
 
         // 3) Toggle.
@@ -1112,34 +911,14 @@ impl RefStore {
             )?;
         }
         let active = !had;
-        let count = self.reaction_count(&req.target, &req.emoji);
+        let count = self.reaction_count(&req.target, &req.emoji)?;
 
-        // 4a) Record the rate-limit timestamp UNCONDITIONALLY — this is the only
-        // input to the anti-flood floor, so it must run whether or not the client
-        // supplied an idempotency key (otherwise the floor is trivially bypassed).
-        let _ = sql.exec(
+        // Record the accepted toggle for the per-author anti-flood floor.
+        sql.exec(
             "INSERT OR REPLACE INTO react_rate (author, last_ms) VALUES (?, ?);",
             vec![req.author.clone().into(), now.into()],
-        );
+        )?;
 
-        // 4b) Record the idem result for replay dedupe (only when a key was sent),
-        // then prune both ledgers by freshness and bound the reactions table.
-        if !req.idem.is_empty() {
-            let _ = sql.exec(
-                "INSERT OR REPLACE INTO react_idem (author, idem, active, count, created_at) VALUES (?, ?, ?, ?, ?);",
-                vec![
-                    req.author.clone().into(),
-                    req.idem.clone().into(),
-                    i64::from(active).into(),
-                    i64::from(count).into(),
-                    now.into(),
-                ],
-            );
-        }
-        let _ = sql.exec(
-            "DELETE FROM react_idem WHERE created_at < ?;",
-            vec![(now - FRESHNESS_WINDOW_MS).into()],
-        );
         let _ = sql.exec(
             "DELETE FROM react_rate WHERE last_ms < ?;",
             vec![(now - FRESHNESS_WINDOW_MS).into()],
@@ -1162,16 +941,16 @@ impl RefStore {
             count,
         ));
 
-        Response::from_json(&ReactResp { active, count })
+        Reply::json(&ReactResp { active, count })
     }
 
     /// Whether (target, emoji, author) currently has a reaction row.
-    fn reaction_exists(&self, target: &str, emoji: &str, author: &str) -> bool {
+    fn reaction_exists(&self, target: &str, emoji: &str, author: &str) -> Result<bool> {
         #[derive(Deserialize)]
         struct Count {
             n: i64,
         }
-        self.state
+        Ok(self.state
             .storage()
             .sql()
             .exec(
@@ -1179,57 +958,35 @@ impl RefStore {
                 vec![target.into(), emoji.into(), author.into()],
             )
             .and_then(|r| r.to_array::<Count>())
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
+            ?
+            .into_iter().next()
             .map(|c| c.n > 0)
-            .unwrap_or(false)
+            .unwrap_or(false))
     }
 
     /// The number of reactors for (target, emoji).
-    fn reaction_count(&self, target: &str, emoji: &str) -> u32 {
+    fn reaction_count(&self, target: &str, emoji: &str) -> Result<u32> {
         #[derive(Deserialize)]
         struct Count {
             n: i64,
         }
-        self.state
+        Ok(self
+            .state
             .storage()
             .sql()
             .exec(
                 "SELECT COUNT(*) AS n FROM reactions WHERE target = ? AND emoji = ?;",
                 vec![target.into(), emoji.into()],
             )
-            .and_then(|r| r.to_array::<Count>())
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
-            .map(|c| c.n.max(0) as u32)
-            .unwrap_or(0)
-    }
-
-    /// A prior (author, idem) React result, so a replay returns it unchanged.
-    fn react_idem_lookup(&self, author: &str, idem: &str) -> Option<(bool, u32)> {
-        #[derive(Deserialize)]
-        struct Row {
-            active: i64,
-            count: i64,
-        }
-        let rows: Vec<Row> = self
-            .state
-            .storage()
-            .sql()
-            .exec(
-                "SELECT active, count FROM react_idem WHERE author = ? AND idem = ? LIMIT 1;",
-                vec![author.into(), idem.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter()
+            .and_then(|r| r.to_array::<Count>())?
+            .into_iter()
             .next()
-            .map(|r| (r.active != 0, r.count.max(0) as u32))
+            .map(|c| c.n.max(0) as u32)
+            .unwrap_or(0))
     }
 
     /// The author's most recent React time (epoch-ms) — the rate-limit input.
-    fn last_react_ms(&self, author: &str) -> Option<i64> {
+    fn last_react_ms(&self, author: &str) -> Result<Option<i64>> {
         #[derive(Deserialize)]
         struct Row {
             last_ms: i64,
@@ -1241,11 +998,9 @@ impl RefStore {
             .exec(
                 "SELECT last_ms FROM react_rate WHERE author = ? LIMIT 1;",
                 vec![author.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| r.last_ms)
+            )?
+            .to_array()?;
+        Ok(rows.into_iter().next().map(|r| r.last_ms))
     }
 
     /// Up to REACTIONS_RETAINED reactions in the room (the client aggregates
@@ -1278,7 +1033,7 @@ impl RefStore {
 
     /// The author's most recent post time (epoch-ms), or None if they've never
     /// posted — the input to the rate-limit decision.
-    fn last_post_ms(&self, author: &str) -> Option<i64> {
+    fn last_post_ms(&self, author: &str) -> Result<Option<i64>> {
         #[derive(Deserialize)]
         struct Row {
             created_at: i64,
@@ -1290,11 +1045,9 @@ impl RefStore {
             .exec(
                 "SELECT created_at FROM messages WHERE author = ? ORDER BY seq DESC LIMIT 1;",
                 vec![author.into()],
-            )
-            .ok()?
-            .to_array()
-            .ok()?;
-        rows.into_iter().next().map(|r| r.created_at)
+            )?
+            .to_array()?;
+        Ok(rows.into_iter().next().map(|r| r.created_at))
     }
 
     /// The most recent `limit` messages, returned OLDEST-FIRST (chat reading
@@ -1351,6 +1104,10 @@ impl RefStore {
     /// that reaches nobody is the signature of "messages persist but never reach
     /// other viewers", so it must be observable, not silent.
     fn broadcast_str(&self, payload: &str) {
+        if let Some(events) = self.pending_events.borrow_mut().as_mut() {
+            events.push(payload.to_owned());
+            return;
+        }
         let sockets = self.state.get_websockets();
         let total = sockets.len();
         let mut failed = 0usize;

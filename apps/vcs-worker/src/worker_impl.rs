@@ -53,7 +53,7 @@ const MAX_BODY_BYTES: usize = MAX_PACK_BYTES;
 /// Headers we expose for cross-origin clients (mirrors apps/repo-worker's
 /// CORS posture — this is a reference/demo deployment, not a locked-down
 /// production origin).
-const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created-at, \
+const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, \
      idempotency-key, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
@@ -89,11 +89,7 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // `grpc-timeout` calls `Instant::now()`, which panics on wasm32.
     let http_req = http_request_from_worker(&req, body, |k| !is_deadline_header(k))?;
 
-    // `AuthInterceptor` needs its own `Env` to address the RefStore DO for
-    // the write-quota check (`enforce_write_quota`), and `HealthServer` its
-    // own for the liveness probe — clone before `env` is moved into
-    // `TransportServer::new`. Cheap (see `worker::Env`'s doc note on
-    // apps/repo-worker's identical pattern).
+    // Share deployment context with auth, service, and health handlers.
     let auth_interceptor = AuthInterceptor::new(env.clone());
     let router: Router = Arc::new(TransportServer::new(env.clone())).register(Router::new());
     let router: Router = Arc::new(HealthServer::new(env)).register(router);

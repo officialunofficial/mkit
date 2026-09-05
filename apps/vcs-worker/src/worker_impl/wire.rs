@@ -12,7 +12,7 @@
 //   POST /update  UpdateReq  -> UpdateResp
 //   POST /list    ListReq    -> ListResp
 //   POST /advance AdvanceReq -> AdvanceResp
-//   POST /quota   QuotaCheckReq -> QuotaCheckResp
+//   POST /object  ObjectWriteReq -> ObjectWriteResp
 //
 // `expectation` is the proto wire number (1=ANY, 2=MISSING, 3=MATCH). Hex
 // fields are 64-char lowercase hex of a 32-byte object id.
@@ -32,6 +32,7 @@ pub struct GetResp {
 
 #[derive(Serialize, Deserialize)]
 pub struct UpdateReq {
+    pub proof: mkit_worker_common::replay::Proof,
     pub name: String,
     pub new: String,              // 64-hex target value
     pub expectation: i32,         // proto wire number
@@ -67,6 +68,7 @@ pub struct ListResp {
 /// transaction, not the trait's default packmap-then-head fallback).
 #[derive(Serialize, Deserialize)]
 pub struct AdvanceReq {
+    pub proof: mkit_worker_common::replay::Proof,
     pub head_ref: String,
     pub head_expectation: i32,
     pub head_expected: Option<String>,
@@ -94,19 +96,16 @@ pub struct AdvanceResp {
     pub outcome: AdvanceOutcome,
 }
 
-/// Check-and-consume one author's rolling write budget (see
-/// `crate::write_quota::evaluate_quota`). Unlike apps/repo-worker's per-room
-/// quota, this Worker serves a single global repository (one RefStore DO
-/// instance — see wrangler.jsonc), so the ledger is keyed on `author` alone,
-/// with no room dimension.
+/// Acknowledges an object reservation or its durable completion.
 #[derive(Serialize, Deserialize)]
-pub struct QuotaCheckReq {
-    pub author: String,
-    pub bytes: u64,
+pub struct ObjectWriteResp {
+    pub allowed: bool,
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct QuotaCheckResp {
-    pub allowed: bool,
-    pub reason: Option<String>,
+pub struct ObjectWriteReq {
+    pub proof: mkit_worker_common::replay::Proof,
+    pub bytes: u64,
+    pub complete: bool,
 }

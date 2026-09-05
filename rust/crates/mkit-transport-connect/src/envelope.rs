@@ -1,44 +1,6 @@
-//! Native (non-wasm) client-side implementation of the signed-write
-//! envelope some `mkit.transport.v1.TransportService` deployments require
-//! for write RPCs — e.g. `apps/vcs-worker`'s reference Cloudflare Worker
-//! server, whose `src/envelope.rs` is the canonical, server-verified spec
-//! this module ports to the native ConnectRPC client.
-//!
-//! Two shapes, matching the server exactly:
-//!
-//! 1. **Unary** (`UpdateRef`, `AdvanceRefs`) — binds the signature to the
-//!    exact serialized request body, byte-for-byte:
-//!
-//!    ```text
-//!    canonical = [ "mkit-write:v1", procedure, bodyDigestHex, createdAtMs,
-//!                  idempotencyKey ].join("\n")
-//!    signing_digest = BLAKE3(utf8(canonical))
-//!    signature = Ed25519_sign(signing_digest)
-//!    ```
-//!
-//! 2. **Streaming** (`UploadPack`) — a client-streaming call's transport
-//!    `send()` runs once at stream establishment, before any pack bytes are
-//!    known, so there is no request body to bind a digest to. The streaming
-//!    envelope binds only `(procedure, createdAtMs, idempotencyKey)`:
-//!
-//!    ```text
-//!    stream_canonical = [ "mkit-stream-write:v1", procedure, createdAtMs,
-//!                          idempotencyKey ].join("\n")
-//!    signing_digest = BLAKE3(utf8(stream_canonical))
-//!    signature = Ed25519_sign(signing_digest)
-//!    ```
-//!
-//! Both are PLAIN envelope digests — NOT mkit commit signatures — so the
-//! SPEC-SIGNING commit/remix/tag domain prefixes do NOT apply; the caller's
-//! [`EnvelopeSigner`] must sign the raw 32-byte digest directly (exactly
-//! what `mkit_core::sign`'s repo-key path and `mkit_keystore::KeySigner`
-//! both already do for other raw-digest signing needs — see
-//! `mkit-cli/src/remote_dispatch/mod.rs`'s `envelope_signer_from_config`).
-//!
-//! This is an ADDITIONAL auth mode alongside the existing bearer-token
-//! header (`Authorization: Bearer …`, still set independently via
-//! `ClientConfig::with_default_header` in `client.rs`) — a deployment can
-//! require either, both, or neither.
+//! Auth v2 client adapter: signs a configured destination and content commitment.
+//! The logical RPC allocates nonce/times once; transport retries reuse them.
+//! Upload metadata is known before streaming and no body is collected here.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,27 +11,41 @@ use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
 use http_body_util::BodyExt;
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
 
-/// Constant first line of the unary canonical string. Mirrors
-/// `apps/vcs-worker/src/envelope.rs::ENVELOPE_PREFIX` /
-/// `apps/repo-worker/src/envelope.rs`.
-const ENVELOPE_PREFIX: &str = "mkit-write:v1";
-/// Constant first line of the streaming (establishment-only) canonical
-/// string. Mirrors `apps/vcs-worker/src/envelope.rs::STREAM_ENVELOPE_PREFIX`.
-const STREAM_ENVELOPE_PREFIX: &str = "mkit-stream-write:v1";
+use mkit_core::write_auth::{Context, MAX_VALIDITY_MS, Operation};
 
-/// Header names carrying the envelope. Lowercase: HTTP header names are
-/// case-insensitive on the wire, but `http::HeaderName::from_static`
-/// requires a lowercase literal. Mirrors
-/// `mkit-repo-client::transport::header` and the names
-/// `apps/vcs-worker/src/worker_impl/auth.rs` reads
-/// (`x-public-key`/`x-signature`/`x-digest`/`x-created-at`/
-/// `idempotency-key`).
 mod header {
     pub const PUBLIC_KEY: &str = "x-public-key";
     pub const SIGNATURE: &str = "x-signature";
     pub const DIGEST: &str = "x-digest";
     pub const CREATED_AT: &str = "x-created-at";
     pub const IDEMPOTENCY_KEY: &str = "idempotency-key";
+}
+
+/// One logical operation's retry identity, allocated outside its retry loop.
+#[derive(Clone)]
+pub(crate) struct RetryIdentity {
+    nonce: String,
+    created_at: String,
+    expires_at: String,
+}
+impl RetryIdentity {
+    pub(crate) fn new() -> Result<Self, String> {
+        let now = now_ms();
+        Ok(Self {
+            nonce: random_idempotency_key()?,
+            created_at: now.to_string(),
+            expires_at: now.saturating_add(MAX_VALIDITY_MS).to_string(),
+        })
+    }
+    pub(crate) fn apply(
+        &self,
+        options: connectrpc::client::CallOptions,
+    ) -> connectrpc::client::CallOptions {
+        options
+            .with_header(header::CREATED_AT, self.created_at.as_str())
+            .with_header("x-expires-at", self.expires_at.as_str())
+            .with_header(header::IDEMPOTENCY_KEY, self.nonce.as_str())
+    }
 }
 
 /// A signer able to produce the Ed25519 material a write envelope needs:
@@ -102,29 +78,12 @@ fn requires_unary_write_auth(procedure: &str) -> bool {
 }
 
 /// `true` for the streaming write procedure (`UploadPack`) that needs the
-/// narrower establishment-only envelope. Mirrors
+/// signed pack-id and length commitment. Mirrors
 /// `apps/vcs-worker/src/worker_impl/auth.rs::requires_stream_write_auth`.
 fn requires_stream_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/UploadPack")
 }
 
-fn canonical_envelope(
-    procedure: &str,
-    body_digest_hex: &str,
-    created_at_ms: i64,
-    idempotency_key: &str,
-) -> String {
-    format!("{ENVELOPE_PREFIX}\n{procedure}\n{body_digest_hex}\n{created_at_ms}\n{idempotency_key}")
-}
-
-fn canonical_stream_envelope(procedure: &str, created_at_ms: i64, idempotency_key: &str) -> String {
-    format!("{STREAM_ENVELOPE_PREFIX}\n{procedure}\n{created_at_ms}\n{idempotency_key}")
-}
-
-/// Current epoch milliseconds. Native wall clock (unlike
-/// `apps/vcs-worker`'s wasm `worker::Date::now()`); only used for the
-/// server's ±5min freshness window, so ordinary wall-clock precision is
-/// sufficient.
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,22 +91,10 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// A fresh random idempotency key for one write call: 16 bytes of
-/// `getrandom` output, lowercase hex. The server does not currently
-/// enforce dedup on this value (`apps/vcs-worker`'s envelope is
-/// "DEMO MODE — verify-only, no allow-list") but it is still part of the
-/// signed canonical string, so each call gets its own value rather than a
-/// constant placeholder.
-fn random_idempotency_key() -> String {
-    let mut buf = [0u8; 16];
-    match getrandom::fill(&mut buf) {
-        Ok(()) => to_hex_bytes(&buf),
-        // getrandom failure is effectively unreachable on supported
-        // platforms; fall back to a timestamp-derived value rather than
-        // panicking a network call over it. Never used to make a security
-        // decision — see the trait doc comment.
-        Err(_) => format!("{:x}", now_ms()),
-    }
+fn random_idempotency_key() -> Result<String, String> {
+    let mut bytes = [0; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("request nonce entropy unavailable: {e}"))?;
+    Ok(to_hex_bytes(&bytes))
 }
 
 fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), String> {
@@ -168,11 +115,23 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
 pub struct EnvelopeTransport<T> {
     inner: T,
     signer: Option<Arc<dyn EnvelopeSigner>>,
+    audience: String,
+    repository: String,
 }
 
 impl<T> EnvelopeTransport<T> {
-    pub fn new(inner: T, signer: Option<Arc<dyn EnvelopeSigner>>) -> Self {
-        Self { inner, signer }
+    pub fn new(
+        inner: T,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+        audience: String,
+        repository: String,
+    ) -> Self {
+        Self {
+            inner,
+            signer,
+            audience,
+            repository,
+        }
     }
 }
 
@@ -215,6 +174,8 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
         request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
         let inner = self.inner.clone();
+        let audience = self.audience.clone();
+        let repository = self.repository.clone();
         let Some(signer) = self.signer.clone() else {
             return Box::pin(async move {
                 inner
@@ -233,46 +194,42 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
                     .map_err(|e| EnvelopeTransportError::Sign(format!("buffer request body: {e}")))?
                     .to_bytes();
                 let body_digest_hex = to_hex(&hash(body_bytes.as_ref()));
-                let created_at_ms = now_ms();
-                let idempotency_key = random_idempotency_key();
-                let canonical = canonical_envelope(
-                    &procedure,
-                    &body_digest_hex,
-                    created_at_ms,
-                    &idempotency_key,
-                );
-                let signing_digest = hash(canonical.as_bytes());
-                let signature_hex = signer
-                    .sign_hex(&signing_digest)
-                    .map_err(EnvelopeTransportError::Sign)?;
-                write_envelope_headers(
+                let commitment = format!("body:{body_digest_hex}");
+                sign_headers(
                     &mut parts.headers,
-                    &signer.public_key_hex(),
-                    &signature_hex,
-                    Some(&body_digest_hex),
-                    created_at_ms,
-                    &idempotency_key,
+                    &*signer,
+                    &audience,
+                    &repository,
+                    &procedure,
+                    &commitment,
                 )
                 .map_err(EnvelopeTransportError::Sign)?;
+                insert_header(&mut parts.headers, header::DIGEST, &body_digest_hex)
+                    .map_err(EnvelopeTransportError::Sign)?;
                 let req = Request::from_parts(parts, full_body(body_bytes));
                 inner.send(req).await.map_err(EnvelopeTransportError::Inner)
             } else if requires_stream_write_auth(&procedure) {
                 let (mut parts, body) = request.into_parts();
-                let created_at_ms = now_ms();
-                let idempotency_key = random_idempotency_key();
-                let canonical =
-                    canonical_stream_envelope(&procedure, created_at_ms, &idempotency_key);
-                let signing_digest = hash(canonical.as_bytes());
-                let signature_hex = signer
-                    .sign_hex(&signing_digest)
-                    .map_err(EnvelopeTransportError::Sign)?;
-                write_envelope_headers(
+                let commitment = parts
+                    .headers
+                    .get("x-content-commitment")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        EnvelopeTransportError::Sign("missing upload commitment".into())
+                    })?
+                    .to_owned();
+                if !commitment.starts_with("pack:") {
+                    return Err(EnvelopeTransportError::Sign(
+                        "upload requires pack commitment".into(),
+                    ));
+                }
+                sign_headers(
                     &mut parts.headers,
-                    &signer.public_key_hex(),
-                    &signature_hex,
-                    None,
-                    created_at_ms,
-                    &idempotency_key,
+                    &*signer,
+                    &audience,
+                    &repository,
+                    &procedure,
+                    &commitment,
                 )
                 .map_err(EnvelopeTransportError::Sign)?;
                 let req = Request::from_parts(parts, body);
@@ -287,23 +244,48 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_envelope_headers(
+fn sign_headers(
     headers: &mut HeaderMap,
-    public_key_hex: &str,
-    signature_hex: &str,
-    body_digest_hex: Option<&str>,
-    created_at_ms: i64,
-    idempotency_key: &str,
+    signer: &dyn EnvelopeSigner,
+    audience: &str,
+    repository: &str,
+    procedure: &str,
+    commitment: &str,
 ) -> Result<(), String> {
-    insert_header(headers, header::PUBLIC_KEY, public_key_hex)?;
-    insert_header(headers, header::SIGNATURE, signature_hex)?;
-    if let Some(digest) = body_digest_hex {
-        insert_header(headers, header::DIGEST, digest)?;
-    }
-    insert_header(headers, header::CREATED_AT, &created_at_ms.to_string())?;
-    if !idempotency_key.is_empty() {
-        insert_header(headers, header::IDEMPOTENCY_KEY, idempotency_key)?;
+    let get = |key| {
+        headers
+            .get(key)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| format!("missing operation identity header {key}"))
+    };
+    let created = get(header::CREATED_AT)?
+        .parse::<i64>()
+        .map_err(|_| "invalid start time")?;
+    let expires = get("x-expires-at")?
+        .parse::<i64>()
+        .map_err(|_| "invalid expiry")?;
+    let nonce = get(header::IDEMPOTENCY_KEY)?.to_owned();
+    let operation = Operation {
+        context: Context {
+            audience,
+            repository,
+        },
+        procedure,
+        commitment,
+        created_at: created,
+        expires_at: expires,
+        nonce: &nonce,
+    };
+    let signature = signer.sign_hex(&operation.digest().map_err(|e| e.to_string())?)?;
+    for (name, value) in [
+        ("x-mkit-auth-version", "2"),
+        ("x-audience", audience),
+        ("x-repository", repository),
+        ("x-content-commitment", commitment),
+        (header::PUBLIC_KEY, signer.public_key_hex().as_str()),
+        (header::SIGNATURE, signature.as_str()),
+    ] {
+        insert_header(headers, name, value)?;
     }
     Ok(())
 }
@@ -311,139 +293,6 @@ fn write_envelope_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn requires_unary_write_auth_matches_update_and_advance() {
-        assert!(requires_unary_write_auth(
-            "/mkit.transport.v1.TransportService/UpdateRef"
-        ));
-        assert!(requires_unary_write_auth(
-            "/mkit.transport.v1.TransportService/AdvanceRefs"
-        ));
-        assert!(!requires_unary_write_auth(
-            "/mkit.transport.v1.TransportService/ReadRef"
-        ));
-        assert!(!requires_unary_write_auth(
-            "/mkit.transport.v1.TransportService/ListRefs"
-        ));
-    }
-
-    #[test]
-    fn requires_stream_write_auth_matches_upload_pack_only() {
-        assert!(requires_stream_write_auth(
-            "/mkit.transport.v1.TransportService/UploadPack"
-        ));
-        assert!(!requires_stream_write_auth(
-            "/mkit.transport.v1.TransportService/DownloadPack"
-        ));
-    }
-
-    #[test]
-    fn canonical_envelope_matches_server_field_order() {
-        let s = canonical_envelope("/svc/UpdateRef", "deadbeef", 1_700_000_000_000, "idem-1");
-        assert_eq!(
-            s,
-            "mkit-write:v1\n/svc/UpdateRef\ndeadbeef\n1700000000000\nidem-1"
-        );
-    }
-
-    #[test]
-    fn canonical_stream_envelope_has_no_digest_field() {
-        let s = canonical_stream_envelope("/svc/UploadPack", 1_700_000_000_000, "idem-2");
-        assert_eq!(
-            s,
-            "mkit-stream-write:v1\n/svc/UploadPack\n1700000000000\nidem-2"
-        );
-    }
-
-    #[test]
-    fn unary_and_stream_digests_never_collide() {
-        // Same procedure/created_at/idem: the two envelope kinds must
-        // never produce the same signing digest (distinct prefixes +
-        // field counts) — mirrors the server-side regression test in
-        // `apps/vcs-worker/src/envelope.rs`.
-        let bd = to_hex(&hash(b"body"));
-        let unary = hash(canonical_envelope("/svc/UpdateRef", &bd, 1, "k").as_bytes());
-        let stream = hash(canonical_stream_envelope("/svc/UpdateRef", 1, "k").as_bytes());
-        assert_ne!(unary, stream);
-    }
-
-    #[test]
-    fn random_idempotency_key_is_64_lowercase_hex_chars() {
-        let k = random_idempotency_key();
-        assert_eq!(k.len(), 32);
-        assert!(k.bytes().all(|b| b.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn random_idempotency_key_is_not_constant() {
-        let a = random_idempotency_key();
-        let b = random_idempotency_key();
-        assert_ne!(a, b, "two calls must not reuse the same idempotency key");
-    }
-
-    struct FixedSigner {
-        public_key_hex: String,
-        signature_hex: String,
-    }
-    impl EnvelopeSigner for FixedSigner {
-        fn public_key_hex(&self) -> String {
-            self.public_key_hex.clone()
-        }
-        fn sign_hex(&self, _message: &[u8; 32]) -> Result<String, String> {
-            Ok(self.signature_hex.clone())
-        }
-    }
-
-    #[test]
-    fn write_envelope_headers_sets_all_five_for_unary() {
-        let mut headers = HeaderMap::new();
-        write_envelope_headers(&mut headers, "aa", "bb", Some("cc"), 42, "idem").unwrap();
-        assert_eq!(headers.get(header::PUBLIC_KEY).unwrap(), "aa");
-        assert_eq!(headers.get(header::SIGNATURE).unwrap(), "bb");
-        assert_eq!(headers.get(header::DIGEST).unwrap(), "cc");
-        assert_eq!(headers.get(header::CREATED_AT).unwrap(), "42");
-        assert_eq!(headers.get(header::IDEMPOTENCY_KEY).unwrap(), "idem");
-    }
-
-    #[test]
-    fn write_envelope_headers_omits_digest_for_stream() {
-        let mut headers = HeaderMap::new();
-        write_envelope_headers(&mut headers, "aa", "bb", None, 42, "idem").unwrap();
-        assert!(headers.get(header::DIGEST).is_none());
-    }
-
-    #[test]
-    fn write_envelope_headers_omits_empty_idempotency_key() {
-        let mut headers = HeaderMap::new();
-        write_envelope_headers(&mut headers, "aa", "bb", None, 42, "").unwrap();
-        assert!(headers.get(header::IDEMPOTENCY_KEY).is_none());
-    }
-
-    #[test]
-    fn fixed_signer_round_trips_through_header_writer() {
-        let signer: Arc<dyn EnvelopeSigner> = Arc::new(FixedSigner {
-            public_key_hex: "aa".repeat(32),
-            signature_hex: "bb".repeat(64),
-        });
-        assert_eq!(signer.public_key_hex().len(), 64);
-        assert_eq!(signer.sign_hex(&[0u8; 32]).unwrap().len(), 128);
-    }
-
-    // -----------------------------------------------------------------
-    // Parity tests: drive a real `EnvelopeTransport::send` through a
-    // capturing inner `ClientTransport` and independently re-verify the
-    // resulting headers with a from-scratch reimplementation of
-    // `apps/vcs-worker/src/envelope.rs`'s `verify_envelope` /
-    // `verify_stream_envelope` (raw Ed25519 `verify_strict` over
-    // `BLAKE3(canonical)`, canonical string built by hand here rather
-    // than by calling this module's own `canonical_envelope` /
-    // `canonical_stream_envelope` — a self-call couldn't catch a
-    // canonical-string regression). If the client's header/digest/
-    // signature construction ever drifts from the server's contract,
-    // this test — not just a live `wrangler dev` run — should catch it.
-    // -----------------------------------------------------------------
-
     mod parity {
         use super::*;
         use bytes::Bytes;
@@ -513,7 +362,18 @@ mod tests {
             if digest != actual_body_digest {
                 return false;
             }
-            let canonical = format!("mkit-write:v1\n{procedure}\n{digest}\n{created_at}\n{idem}");
+            let audience = get("x-audience");
+            let repository = get("x-repository");
+            let expires = get("x-expires-at");
+            if audience != "https://example.invalid"
+                || repository != "default"
+                || get("x-mkit-auth-version") != "2"
+            {
+                return false;
+            }
+            let canonical = format!(
+                "mkit-write:v2\n{audience}\n{repository}\n{procedure}\nbody:{digest}\n{created_at}\n{expires}\n{idem}"
+            );
             let signing_digest = hash(canonical.as_bytes());
 
             let Ok(pk_bytes) = hex::decode(public_key) else {
@@ -542,7 +402,19 @@ mod tests {
                 return false;
             }
 
-            let canonical = format!("mkit-stream-write:v1\n{procedure}\n{created_at}\n{idem}");
+            let audience = get("x-audience");
+            let repository = get("x-repository");
+            let expires = get("x-expires-at");
+            let commitment = get("x-content-commitment");
+            if audience != "https://example.invalid"
+                || repository != "default"
+                || get("x-mkit-auth-version") != "2"
+            {
+                return false;
+            }
+            let canonical = format!(
+                "mkit-write:v2\n{audience}\n{repository}\n{procedure}\n{commitment}\n{created_at}\n{expires}\n{idem}"
+            );
             let signing_digest = hash(canonical.as_bytes());
 
             let Ok(pk_bytes) = hex::decode(public_key) else {
@@ -564,6 +436,13 @@ mod tests {
             Request::builder()
                 .method("POST")
                 .uri(format!("https://example.invalid{procedure}"))
+                .header("x-created-at", "1000")
+                .header("x-expires-at", "2000")
+                .header("idempotency-key", "ab".repeat(32))
+                .header(
+                    "x-content-commitment",
+                    format!("pack:{}:25", "cd".repeat(32)),
+                )
                 .body(full_body(Bytes::from_static(body)))
                 .unwrap()
         }
@@ -576,7 +455,12 @@ mod tests {
             let inner = CapturingTransport {
                 captured: captured.clone(),
             };
-            let transport = EnvelopeTransport::new(inner, Some(signer));
+            let transport = EnvelopeTransport::new(
+                inner,
+                Some(signer),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
 
             let req = build_request(
                 "/mkit.transport.v1.TransportService/UpdateRef",
@@ -606,7 +490,12 @@ mod tests {
             let inner = CapturingTransport {
                 captured: captured.clone(),
             };
-            let transport = EnvelopeTransport::new(inner, Some(signer));
+            let transport = EnvelopeTransport::new(
+                inner,
+                Some(signer),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
 
             let req = build_request(
                 "/mkit.transport.v1.TransportService/AdvanceRefs",
@@ -623,14 +512,19 @@ mod tests {
         }
 
         #[test]
-        fn upload_pack_request_verifies_as_streaming_envelope_with_no_digest_header() {
+        fn upload_pack_request_binds_declared_pack_without_collecting_body() {
             let sk = SigningKey::from_bytes(&[13u8; 32]);
             let signer: Arc<dyn EnvelopeSigner> = Arc::new(DalekSigner(sk));
             let captured = Arc::new(Mutex::new(None));
             let inner = CapturingTransport {
                 captured: captured.clone(),
             };
-            let transport = EnvelopeTransport::new(inner, Some(signer));
+            let transport = EnvelopeTransport::new(
+                inner,
+                Some(signer),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
 
             let req = build_request(
                 "/mkit.transport.v1.TransportService/UploadPack",
@@ -653,7 +547,12 @@ mod tests {
             let inner = CapturingTransport {
                 captured: captured.clone(),
             };
-            let transport = EnvelopeTransport::new(inner, Some(signer));
+            let transport = EnvelopeTransport::new(
+                inner,
+                Some(signer),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
 
             for procedure in [
                 "/mkit.transport.v1.TransportService/ListRefs",
@@ -678,8 +577,12 @@ mod tests {
             let inner = CapturingTransport {
                 captured: captured.clone(),
             };
-            let transport: EnvelopeTransport<CapturingTransport> =
-                EnvelopeTransport::new(inner, None);
+            let transport: EnvelopeTransport<CapturingTransport> = EnvelopeTransport::new(
+                inner,
+                None,
+                "https://example.invalid".into(),
+                "default".into(),
+            );
 
             let req = build_request(
                 "/mkit.transport.v1.TransportService/UpdateRef",

@@ -14,8 +14,8 @@
 //! * push side: [`advance_packmap`] (chains one or more new packs on, gated by a CAS
 //!   on the packmap ref).
 //! * fetch side: [`resolve_pack_chain`] (walk + integrity check),
-//!   [`resolve_and_download_chain`] (network-only: walk + download, no
-//!   local writes), and [`apply_fetched_chain`] (unpack + verify + publish
+//!   [`resolve_and_download_chain`] (walk + download + private staging, no
+//!   object-store writes), and [`apply_fetched_chain`] (unpack + verify + publish
 //!   pre-check — must run under the repo lock).
 //!
 //! The fetch side is deliberately split into a network phase and a
@@ -30,6 +30,8 @@
 //! All entry points keep `pub(crate)` visibility so the orchestration in
 //! the parent [`super`] module (`push_branch`, `fetch_objects`) can call
 //! them.
+
+use std::io::{Read as _, Write as _};
 
 use mkit_core::hash::{self, Hash};
 use mkit_core::object::Object;
@@ -88,6 +90,13 @@ const PACKMAP_CAS_ATTEMPTS: u32 = 8;
 /// [`rebaseline_depth`] until this cap.
 const MAX_PACK_CHAIN_DEPTH: usize = 100_000;
 
+/// Bounds retained chain/stage metadata across all nodes, not only within one
+/// packlist. At most one million pack keys plus one hundred thousand nodes.
+const MAX_FETCH_PACKS: usize = 1_000_000;
+/// Private download staging has a separate disk ceiling from one-pack memory.
+/// A larger history must be fetched incrementally or re-baselined by its owner.
+const MAX_FETCH_STAGED_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
 /// Default chain depth at which a push re-baselines: resets the packlist
 /// chain to a single fresh self-contained node instead of appending to it
 /// (#406). Bounds clone cost, which otherwise grows with the chain length
@@ -124,7 +133,9 @@ fn download_packlist_node(
     tx: &dyn Transport,
     key: Hash,
 ) -> Result<transfer::PackListNode, DispatchError> {
-    let bytes = tx.download_blob(&PackKey::from_hash(key))?;
+    let requested = PackKey::from_hash(key);
+    let bytes = tx.download_blob(&requested)?;
+    requested.verify_bytes(&bytes)?;
     Ok(transfer::decode_packlist(&bytes)?)
 }
 
@@ -155,6 +166,7 @@ fn walk_pack_chain(
         branch: branch.to_owned(),
     };
     let mut nodes = Vec::new();
+    let mut pack_count = 0usize;
     let mut seen = std::collections::HashSet::new();
     let mut cursor = Some(head_key);
     while let Some(key) = cursor {
@@ -170,10 +182,19 @@ fn walk_pack_chain(
             // A referenced-but-undeliverable / undecodable node = broken
             // chain (distinct from a transient transport error).
             Err(
-                DispatchError::Transport(TransportError::PackNotFound) | DispatchError::PackList(_),
+                DispatchError::Transport(
+                    TransportError::PackNotFound | TransportError::InvalidResponse,
+                )
+                | DispatchError::PackList(_),
             ) => return Err(invalid()),
             Err(e) => return Err(e),
         };
+        pack_count = pack_count
+            .checked_add(node.packs.len())
+            .ok_or_else(invalid)?;
+        if pack_count > MAX_FETCH_PACKS {
+            return Err(invalid());
+        }
         cursor = node.prev;
         nodes.push(node);
     }
@@ -558,10 +579,9 @@ pub(crate) struct FetchedChain {
     /// [`apply_fetched_chain`] can re-download without re-walking the
     /// packlist chain.
     chain: Vec<Hash>,
-    /// Raw bytes of every chain pack NOT already recorded in the
-    /// `applied` snapshot passed to [`resolve_and_download_chain`], in
-    /// chain order.
-    downloaded: Vec<(PackKey, Vec<u8>)>,
+    /// Private, verified files for missing packs in apply order. Payload
+    /// bytes are never retained across download iterations.
+    downloaded: StagedPacks,
 }
 
 /// Phase 1 of a branch fetch (#642): walk `branch`'s packmap chain from
@@ -608,9 +628,8 @@ pub(crate) fn resolve_and_download_chain(
 ///
 /// # Signature verification (issue #692)
 ///
-/// Once the closure is confirmed complete, every commit/remix/tag
-/// [`unpack_downloaded_packs`] just wrote — the newly-fetched delta, NOT
-/// the whole closure — is run through [`verify_new_object_signatures`]
+/// Every commit/remix/tag in each freshly unpacked pack is run through
+/// [`verify_new_object_signatures`] before recording that pack as applied
 /// when `require_signed` is `true` (the CLI's default; `false` is the
 /// explicit `--no-verify-signatures` / `pull.require_signed = false`
 /// opt-out). A failure is [`DispatchError::UnsignedOrInvalidObject`],
@@ -638,14 +657,14 @@ pub(crate) fn apply_fetched_chain(
     require_signed: bool,
 ) -> Result<(), DispatchError> {
     let FetchedChain { chain, downloaded } = fetched;
-    let skipped = chain.len() - downloaded.len();
-    let stored = unpack_downloaded_packs(store, downloaded, applied)?;
+    let skipped = chain.len() - downloaded.packs.len();
+    unpack_downloaded_packs(store, downloaded, applied, require_signed)?;
 
     // Closure completeness. With skips this is the sole guarantee the
     // store is whole, and a `RemoteMissingObject` here is the ONLY
     // self-heal trigger.
     match super::verify_closure_present(store, &tip) {
-        Ok(()) => verify_new_object_signatures(store, &stored, require_signed),
+        Ok(()) => Ok(()),
         Err(e @ DispatchError::RemoteMissingObject(_)) if skipped > 0 => {
             eprintln!(
                 "note: applied-packs record for remote '{remote}' branch '{branch}' looks stale ({e}); clearing it and re-fetching the full pack chain"
@@ -658,9 +677,8 @@ pub(crate) fn apply_fetched_chain(
             // self-heal makes those entries just as stale.
             applied.clear();
             let downloaded = download_pack_chain(tx, branch, &chain, applied)?;
-            let stored = unpack_downloaded_packs(store, downloaded, applied)?;
-            super::verify_closure_present(store, &tip)?;
-            verify_new_object_signatures(store, &stored, require_signed)
+            unpack_downloaded_packs(store, downloaded, applied, require_signed)?;
+            super::verify_closure_present(store, &tip)
         }
         Err(e) => Err(e),
     }
@@ -755,18 +773,56 @@ fn verify_new_object_signatures(
         .try_for_each(|chunk| chunk.par_iter().try_for_each(verify_one))
 }
 
-/// Download every key in `chain` not already recorded in `applied`,
-/// returning each pack's key paired with its raw bytes, in chain order.
-/// Pure network I/O — never touches the local object store or `applied`
-/// (skipping is a read-only check; recording a pack as applied happens
-/// only once it is actually unpacked, in [`unpack_downloaded_packs`]).
+/// Owns all staging paths; success, cancellation and every error remove the
+/// private directory. Files are closed between operations, so a large history
+/// does not also require one live file descriptor per pack.
+struct StagedPacks {
+    directory: tempfile::TempDir,
+    packs: Vec<StagedPack>,
+    bytes: u64,
+}
+
+struct StagedPack {
+    key: PackKey,
+    bytes: usize,
+}
+
+/// Download to private files without holding the repo lock. Only one returned
+/// pack buffer exists at a time; chain metadata and staging disk have explicit
+/// aggregate limits. No authoritative objects or applied records are changed.
 fn download_pack_chain(
     tx: &dyn Transport,
     branch: &str,
     chain: &[Hash],
     applied: &AppliedPacks,
-) -> Result<Vec<(PackKey, Vec<u8>)>, DispatchError> {
-    let mut out = Vec::new();
+) -> Result<StagedPacks, DispatchError> {
+    download_pack_chain_with_limits(tx, branch, chain, applied, MAX_FETCH_STAGED_BYTES, None)
+}
+
+fn download_pack_chain_with_limits(
+    tx: &dyn Transport,
+    branch: &str,
+    chain: &[Hash],
+    applied: &AppliedPacks,
+    disk_limit: u64,
+    stage_parent: Option<&std::path::Path>,
+) -> Result<StagedPacks, DispatchError> {
+    if chain.len() > MAX_FETCH_PACKS {
+        return Err(DispatchError::PackChainInvalid {
+            branch: branch.to_owned(),
+        });
+    }
+    let directory = match stage_parent {
+        Some(parent) => tempfile::Builder::new()
+            .prefix("mkit-fetch-")
+            .tempdir_in(parent)?,
+        None => tempfile::Builder::new().prefix("mkit-fetch-").tempdir()?,
+    };
+    let mut staged = StagedPacks {
+        directory,
+        packs: Vec::new(),
+        bytes: 0,
+    };
     for &pk in chain {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -777,11 +833,6 @@ fn download_pack_chain(
         }
         let pack = match tx.download_pack(&key) {
             Ok(b) => b,
-            // The packmap PROMISED this pack. Its objects are delta/raw
-            // entries inside the pack, not stored under their own digests, so
-            // they cannot be recovered any other way. A missing advertised
-            // pack means a corrupt/incomplete remote — fail loudly rather
-            // than publish a ref to a history we can't reconstruct.
             Err(TransportError::PackNotFound) => {
                 return Err(DispatchError::AdvertisedPackMissing {
                     branch: branch.to_owned(),
@@ -790,43 +841,86 @@ fn download_pack_chain(
             }
             Err(e) => return Err(e.into()),
         };
-        out.push((key, pack));
+        #[cfg(test)]
+        observe_retained_pack_bytes(pack.capacity());
+        if pack.len() as u64 > mkit_core::protocol::PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(pack.len()).into());
+        }
+        key.verify_bytes(&pack)?;
+        let next_bytes = staged
+            .bytes
+            .checked_add(pack.len() as u64)
+            .filter(|&bytes| bytes <= disk_limit)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    format!("fetch staging exceeds the {disk_limit}-byte disk budget"),
+                )
+            })?;
+        let path = staged.directory.path().join(staged.packs.len().to_string());
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(&pack)?;
+        staged.packs.push(StagedPack {
+            key,
+            bytes: pack.len(),
+        });
+        staged.bytes = next_bytes;
+        // `pack` and the file handle drop before the next download. No fsync
+        // is needed for disposable staging: a crash never publishes a ref.
     }
-    Ok(out)
+    Ok(staged)
 }
 
-/// Unpack previously-downloaded packs (see [`download_pack_chain`]) into
-/// `store`, in order, inserting each newly-applied digest into `applied`
-/// as soon as its pack is successfully read. Pure local disk I/O — see
-/// [`apply_fetched_chain`] for the repo-lock contract this must run under.
-///
-/// Returns every hash newly written to `store` across all unpacked packs,
-/// in pack order — the exact set [`apply_fetched_chain`] hands to
-/// [`verify_new_object_signatures`] (issue #692) so the post-fetch
-/// signature check costs proportional to what THIS call fetched, not the
-/// tip's whole reachable closure.
+#[cfg(test)]
+std::thread_local! {
+    // Tracks owned download payloads at the retention boundary. Thread-local
+    // state keeps concurrently running unit tests independent.
+    static PEAK_RETAINED_PACK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn observe_retained_pack_bytes(bytes: usize) {
+    PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(peak.get().max(bytes)));
+}
+
+/// Apply staged packs in order while the caller holds the repo lock through
+/// ref publication. Signature checks run per pack, so the full history's
+/// newly stored-object IDs are not accumulated in memory. The applied key is
+/// recorded only after digest, unpack and signature checks succeed.
 fn unpack_downloaded_packs(
     store: &ObjectStore,
-    downloaded: Vec<(PackKey, Vec<u8>)>,
+    staged: StagedPacks,
     applied: &mut AppliedPacks,
-) -> Result<Vec<Hash>, DispatchError> {
-    let mut stored = Vec::new();
-    for (key, pack) in downloaded {
+    require_signed: bool,
+) -> Result<(), DispatchError> {
+    for (index, entry) in staged.packs.iter().enumerate() {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
         }
+        let path = staged.directory.path().join(index.to_string());
+        let file = std::fs::File::open(&path)?;
+        let mut pack = Vec::new();
+        // Bound the read even if local temporary bytes were modified. The
+        // independently requested digest is rechecked before store effects.
+        file.take(entry.bytes as u64 + 1).read_to_end(&mut pack)?;
+        if pack.len() != entry.bytes {
+            return Err(TransportError::InvalidResponse.into());
+        }
+        entry.key.verify_bytes(&pack)?;
         let report = PackReader::read(&pack, store)?;
-        // Honest progress (#711): real objects just landed in the local
-        // store, counted straight from the pack's own `UnpackReport` —
-        // never an estimate. See `crate::progress`.
         let unpacked = (report.raw_count + report.delta_count) as usize;
         if unpacked > 0 {
             crate::progress::report(crate::progress::Event::ObjectsUnpacked(unpacked));
         }
-        stored.extend(report.stored);
-        applied.insert(&key);
+        verify_new_object_signatures(store, &report.stored, require_signed)?;
+        applied.insert(&entry.key);
+        std::fs::remove_file(path)?;
     }
-    Ok(stored)
+    drop(staged);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -839,25 +933,174 @@ mod tests {
         hash::hash(seed.as_bytes())
     }
 
-    /// Upload a hand-built packlist node under an explicit key — not
-    /// necessarily the content hash of `bytes` — so a chain's shape
-    /// (including a cycle, impossible to build under real content
-    /// addressing) can be constructed directly for the walk/guard tests
-    /// below.
-    fn put_node(tx: &MemoryTransport, key: Hash, prev: Option<Hash>, packs: &[Hash]) {
+    #[test]
+    fn requested_pack_identity_rejects_valid_substitute_before_unpack() {
+        use mkit_core::layout::RepoLayout;
+        use mkit_core::object::Blob;
+        use mkit_core::pack::PackWriter;
+
+        let objects = [
+            Object::Blob(Blob {
+                data: b"first".to_vec(),
+            }),
+            Object::Blob(Blob {
+                data: b"second".to_vec(),
+            }),
+        ];
+        let mut a = PackWriter::new();
+        let mut b = PackWriter::new();
+        for object in &objects {
+            a.push_raw(
+                object.id().unwrap(),
+                &mkit_core::serialize::serialize(object).unwrap(),
+            )
+            .unwrap();
+        }
+        for object in objects.iter().rev() {
+            b.push_raw(
+                object.id().unwrap(),
+                &mkit_core::serialize::serialize(object).unwrap(),
+            )
+            .unwrap();
+        }
+        let a = a.finish().unwrap();
+        let b = b.finish().unwrap();
+        let key = pack::pack_key(&a);
+        assert_ne!(key, pack::pack_key(&b));
+        let tx = MemoryTransport::new();
+        tx.upload_pack(&b, &PackKey::from_hash(key)).unwrap();
+        let td = tempfile::tempdir().unwrap();
+        let applied = AppliedPacks::load(&RepoLayout::single(td.path()), "origin").unwrap();
+
+        assert!(matches!(
+            download_pack_chain(&tx, "main", &[key], &applied),
+            Err(DispatchError::Transport(TransportError::InvalidResponse))
+        ));
+        assert!(!applied.contains(&PackKey::from_hash(key)));
+    }
+
+    #[test]
+    fn requested_packlist_identity_rejects_substitute() {
+        let tx = MemoryTransport::new();
+        let a = transfer::encode_packlist(None, &[h("pack-a")]).unwrap();
+        let b = transfer::encode_packlist(None, &[h("pack-b")]).unwrap();
+        let key = hash::hash(&a);
+        tx.upload_blob(&b, &PackKey::from_hash(key)).unwrap();
+        assert!(matches!(
+            download_packlist_node(&tx, key),
+            Err(DispatchError::Transport(TransportError::InvalidResponse))
+        ));
+    }
+
+    #[test]
+    fn fetch_retains_at_most_one_downloaded_pack() {
+        let tx = MemoryTransport::new();
+        let bytes = vec![0xAB; 1024 * 1024];
+        let key = hash::hash(&bytes);
+        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
+        let td = tempfile::tempdir().unwrap();
+        let applied =
+            AppliedPacks::load(&mkit_core::layout::RepoLayout::single(td.path()), "origin")
+                .unwrap();
+        PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(0));
+        let downloaded = download_pack_chain(&tx, "main", &vec![key; 32], &applied).unwrap();
+        let peak = PEAK_RETAINED_PACK_BYTES.with(std::cell::Cell::get);
+        assert!(
+            peak <= bytes.len(),
+            "retained {peak} bytes for one-MiB packs"
+        );
+        drop(downloaded);
+    }
+
+    #[test]
+    fn fetch_staging_budget_failure_cleans_every_partial_file() {
+        let tx = MemoryTransport::new();
+        let bytes = vec![0xAB; 128];
+        let key = hash::hash(&bytes);
+        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
+        let td = tempfile::tempdir().unwrap();
+        let applied =
+            AppliedPacks::load(&mkit_core::layout::RepoLayout::single(td.path()), "origin")
+                .unwrap();
+        let result = download_pack_chain_with_limits(
+            &tx,
+            "main",
+            &[key, key],
+            &applied,
+            128,
+            Some(td.path()),
+        );
+        assert!(
+            matches!(result, Err(DispatchError::Io(ref error)) if error.kind() == std::io::ErrorKind::StorageFull)
+        );
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
+        assert!(!applied.contains(&PackKey::from_hash(key)));
+    }
+
+    #[test]
+    fn fetch_staging_drop_removes_successful_downloads() {
+        let tx = MemoryTransport::new();
+        let bytes = b"downloaded object bytes";
+        let key = hash::hash(bytes);
+        tx.upload_pack(bytes, &PackKey::from_hash(key)).unwrap();
+        let td = tempfile::tempdir().unwrap();
+        let applied =
+            AppliedPacks::load(&mkit_core::layout::RepoLayout::single(td.path()), "origin")
+                .unwrap();
+        let staged =
+            download_pack_chain_with_limits(&tx, "main", &[key], &applied, 1024, Some(td.path()))
+                .unwrap();
+        assert_eq!(
+            std::fs::read(staged.directory.path().join("0")).unwrap(),
+            bytes
+        );
+        assert_eq!(staged.bytes, bytes.len() as u64);
+        drop(staged);
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn fetch_staging_digest_failure_cleans_prior_downloads() {
+        let tx = MemoryTransport::new();
+        let valid = b"valid first bytes";
+        let first = hash::hash(valid);
+        let wrong = h("missing expected bytes");
+        tx.upload_pack(valid, &PackKey::from_hash(first)).unwrap();
+        tx.upload_pack(b"substitute", &PackKey::from_hash(wrong))
+            .unwrap();
+        let td = tempfile::tempdir().unwrap();
+        let applied =
+            AppliedPacks::load(&mkit_core::layout::RepoLayout::single(td.path()), "origin")
+                .unwrap();
+        assert!(matches!(
+            download_pack_chain_with_limits(
+                &tx,
+                "main",
+                &[first, wrong],
+                &applied,
+                1024,
+                Some(td.path())
+            ),
+            Err(DispatchError::Transport(TransportError::InvalidResponse))
+        ));
+        assert_eq!(std::fs::read_dir(td.path()).unwrap().count(), 0);
+    }
+
+    /// Publish a real content-addressed node. Corruption tests insert
+    /// forged bytes explicitly instead of teaching valid fixtures wrong IDs.
+    fn put_node(tx: &MemoryTransport, prev: Option<Hash>, packs: &[Hash]) -> Hash {
         let bytes = transfer::encode_packlist(prev, packs).unwrap();
+        let key = hash::hash(&bytes);
         tx.upload_blob(&bytes, &PackKey::from_hash(key)).unwrap();
+        key
     }
 
     #[test]
     fn probe_chain_depth_counts_nodes_and_matches_resolve_pack_chain() {
         let tx = MemoryTransport::new();
-        let n1 = h("n1");
-        let n2 = h("n2");
-        let n3 = h("n3");
-        put_node(&tx, n1, None, &[h("pack1")]);
-        put_node(&tx, n2, Some(n1), &[h("pack2")]);
-        put_node(&tx, n3, Some(n2), &[h("pack3")]);
+        let n1 = put_node(&tx, None, &[h("pack1")]);
+        let n2 = put_node(&tx, Some(n1), &[h("pack2")]);
+        let n3 = put_node(&tx, Some(n2), &[h("pack3")]);
 
         let probed = probe_chain(&tx, "main", n3).unwrap();
         assert_eq!(probed.depth, 3);
@@ -875,8 +1118,7 @@ mod tests {
     #[test]
     fn probe_chain_depth_of_a_single_node_chain_is_one() {
         let tx = MemoryTransport::new();
-        let solo = h("solo");
-        put_node(&tx, solo, None, &[h("pack-solo")]);
+        let solo = put_node(&tx, None, &[h("pack-solo")]);
         assert_eq!(probe_chain(&tx, "main", solo).unwrap().depth, 1);
     }
 
@@ -887,8 +1129,10 @@ mod tests {
         let b = h("cycle-b");
         // a -> b -> a: only reachable via hand-built (non-content-addressed)
         // nodes, exercising the shared cycle guard in `walk_pack_chain`.
-        put_node(&tx, a, Some(b), &[h("pack-a")]);
-        put_node(&tx, b, Some(a), &[h("pack-b")]);
+        let a_bytes = transfer::encode_packlist(Some(b), &[h("pack-a")]).unwrap();
+        let b_bytes = transfer::encode_packlist(Some(a), &[h("pack-b")]).unwrap();
+        tx.upload_blob(&a_bytes, &PackKey::from_hash(a)).unwrap();
+        tx.upload_blob(&b_bytes, &PackKey::from_hash(b)).unwrap();
 
         assert!(matches!(
             probe_chain(&tx, "main", a).unwrap_err(),
@@ -984,8 +1228,7 @@ mod tests {
         // — only the head still needs to move.
         let tx = MemoryTransport::new();
         let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
-        let prior_head = h("prior-node");
-        put_node(&tx, prior_head, None, &[k1, k2, k3]);
+        let prior_head = put_node(&tx, None, &[k1, k2, k3]);
         tx.update_ref(
             &packmap_ref("main"),
             refs::RefWriteCondition::Missing,
@@ -1022,8 +1265,7 @@ mod tests {
         // retried. A fresh node carrying the full new set is appended.
         let tx = MemoryTransport::new();
         let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
-        let prior_head = h("prior-node");
-        put_node(&tx, prior_head, None, &[k1]);
+        let prior_head = put_node(&tx, None, &[k1]);
         tx.update_ref(
             &packmap_ref("main"),
             refs::RefWriteCondition::Missing,

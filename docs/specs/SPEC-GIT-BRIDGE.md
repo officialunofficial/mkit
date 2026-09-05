@@ -654,16 +654,28 @@ segment is not bridge-shaped). The pinned third verification mode,
 **fork audit**, walks the closure from a bridge-translated head:
 
 1. deep-verifies (§9) every bridge-shaped object;
-2. at each boundary parent: loads the mkit twin from the store,
-   checks its importer signature against the pinned importer key
-   (SPEC-GIT-IMPORT §4), and checks the retained raw bytes hash to
-   the claimed sha1; for imported ref TIPS it additionally requires a
-   recorded `git-import/v1` attestation (head-scoped &mdash; §5 of
-   SPEC-GIT-IMPORT mints per head; per-commit envelope verification
-   is `verify-attest`'s job);
-3. for imported trees/blobs referenced by bridge objects: re-derives
-   the git bytes from the mkit twin (verbatim for blobs ≤ 1 MiB,
-   re-sort for trees, flatten for chunked) and compares the sha1.
+2. at each imported commit/tag: checks the retained raw bytes against
+   the claimed Git ID and staging bytes, derives the unsigned mkit
+   fields by SPEC-GIT-IMPORT under the pinned public key, and compares
+   every field and resolved tree/parent/target edge to the stored twin.
+   It MUST also verify the twin's signature under that key. These
+   operations require no private key and MUST NOT modify the store or
+   mapping cache. Independent validity of the two objects is insufficient.
+3. validates every reachable content correspondence against the Git
+   bytes and the canonical mkit object ID, including imported tree mode
+   normalization and the presence/content of manifest chunks. Bridge
+   objects' Git edges MUST correspond to their reconstructed signed
+   mkit edges; a mapping cache is only a lookup hint.
+4. for each imported ref tip, requires at least one cryptographically
+   verified `git-import/v1` claim under the pinned importer key binding
+   exactly its mkit subject, ref, Git ID, canonical source and supported
+   schema/predicate version. Unrelated envelopes do not satisfy this
+   requirement. Extra envelopes MAY be ignored. Ordinary import audits
+   MUST perform the same correspondence and required-claim checks.
+
+Audits MUST refuse unsupported recorded import-spec versions, missing
+required correspondences, and traversals exceeding the object/depth limits;
+they MUST NOT silently truncate a closure and report success.
 
 The SHA-1 collision claim is exactly this and no more: fork audit
 detects a swapped object **for every object whose bytes it checks

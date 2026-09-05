@@ -37,9 +37,9 @@ document points here.
 |---|---|---|---|---|
 | `worktree.lock` | each tree's state dir | per-tree | that tree's worktree/index read-modify-write | SPEC-WORKTREE §4.3 |
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
-| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ref-write + history-MMR-append critical section for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
-| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | `mkit_core::refs::cas_write`'s `Match` CAS arm for direct on-disk ref mutation outside the file transport (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
-| `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own `Match` CAS critical section (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
+| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
+| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
+| `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** by every live `mkit serve` process for its whole lifetime; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
@@ -49,32 +49,28 @@ The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 
 ### 3.1 File-transport CAS vs. local worktree operations (detected, not coordinated)
 
-`<root>/.mkit/refs/.lock` (fourth row of §2) serializes the file
-transport's own `Match` CAS critical section against **other file
-transport instances pointed at the same root** &mdash; nothing more. It does
-not coordinate with `worktree.lock`, `worktrees.lock`, or
-`refs-history-<branch>.lock` in any way, because the file transport has
-no knowledge of those locks or of the `RepoLayout` abstraction they're
-keyed on.
+`<root>/.mkit/refs/.lock` serializes all file-transport Any, Missing and
+Match writes against other file-transport instances pointed at the same root.
+Direct local ref mutations instead share the full-ref
+`<common_dir>/refs-<ref>.lock`, including unconditional writes and deletes.
+Each domain therefore prevents its own unconditional writer from bypassing a
+concurrent conditional write. The two domains use different lock files:
+the file transport does not acquire the local full-ref lock, `worktree.lock`,
+`worktrees.lock`, or `refs-history-<branch>.lock`.
 
-This is a real, permanent gap, not one this document closes: a local
-`mkit commit`/`checkout`/`gc` running directly against a directory that
-is *simultaneously* being served by `mkit serve` (a file-transport
-listener) over that same directory is not coordinated against by the
-transport's lock, and vice versa &mdash; a `gc` sweep can still race a
-concurrent push's object write, or a local ref write can still race a
-client's CAS update. mkit's supported deployment shape for the file
-transport is a bare/shared remote a worktree-owning process does not
-also mutate directly. Running local worktree commands directly against
-a live `mkit serve` root remains unsupported.
+The cross-domain gap remains: local `mkit commit`/`checkout`/`gc` against a
+directory simultaneously served by `mkit serve` is not coordinated with the
+transport. A local ref mutation can race a client CAS, and a GC sweep can race
+a push's object publication. The supported file-transport deployment is a
+bare/shared remote that a worktree-owning process does not also mutate directly.
+Local worktree commands against a live `mkit serve` root remain unsupported.
 
 **MKIT-11/#655 turned this from silent into detected**, without closing
 it: every live `mkit serve` process holds a **shared** kernel lock
 (`std::fs::File::lock_shared`, never exclusive &mdash; SPEC-TRANSPORT
 documents multiple concurrent `serve` processes against one root, e.g.
 one per SSH forced-command connection, as a supported deployment, so
-`serve` instances must not exclude each other) on `serve.lock` (fifth
-row of §2, in the common dir) for its whole lifetime. `worktree.lock`
+`serve` instances must not exclude each other) on `serve.lock` (in the common dir) for its whole lifetime. `worktree.lock`
 and `worktrees.lock` acquisition (`mkit-cli`'s `acquire_worktree_lock`
 and `acquire_worktrees_registry_lock`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`
@@ -117,29 +113,20 @@ lock" generically rather than naming a specific lock file, precisely
 because the guarantee comes from lock containment, not from a
 dedicated primitive.
 
-### 3.3 History-MMR empty-journal-then-backfill race
+### 3.3 First-parent history publication
 
-`mkit-cli`'s `write_ref_recording_history` backfills a branch's
-history-MMR journal from the object store the first time a
-never-before-journaled branch is written (a v0.1.x-era repo enabling
-`history-mmr`, or a crash on a branch's first tracked write) &mdash; see
-SPEC-HISTORY-PROOF §4.5.
+The history-enabled CLI uses `refs::update_ref_with_ancestry`, taking the
+branch history lock and then its full-ref mutation lock before reading state.
+Initial ancestry construction, multi-commit fast-forward, generation selection,
+intent persistence, ref publication and descriptor publication all run within
+these guards. Snapshot readers take the same pair, and reject pending intent.
+Guarded internal ref primitives MUST NOT reacquire the held mutation lock.
 
-The empty-journal check and the backfill loop MUST both run *inside*
-`refs-history-<branch>.lock`'s critical section
-(`mkit_core::refs::update_ref_with_history_and_backfill`), never before
-it. Only the
-first writer to acquire the lock for a given branch may observe an
-empty journal and perform the backfill; every subsequent concurrent
-writer reopens the journal after acquiring the same lock and finds it
-already non-empty, skipping straight to its own append.
-
-Checking before the lock is acquired is insufficient: two ref-only
-writers on the same never-before-journaled branch &mdash; for example, two
-concurrent `update-ref` calls, which deliberately skip `worktree.lock`
-&mdash; could both observe an empty journal and both independently backfill,
-writing to overlapping journal leaf positions from two disagreeing
-in-memory MMR states (invariant INV-18).
+Pending intent retains both its old and target ref as GC roots, even in a build
+without `history-mmr`; all raw mutation paths reject stepping over that intent.
+The exact durable state machine and generation semantics are
+SPEC-HISTORY-PROOF §4. Legacy event-journal APIs remain explicit low-level
+interfaces and do not establish first-parent ancestry.
 
 ## 4. Global lock order and per-command lock sets
 
@@ -147,30 +134,39 @@ A process that takes more than one lock from §2 MUST acquire them in
 this order:
 
 ```
-worktrees.lock  ≺  per-tree worktree.lock(s)  ≺  refs-history-<branch>.lock(s)
+worktrees.lock  ≺  per-tree worktree.lock(s)  ≺  refs-history-<branch>.lock(s)  ≺  refs-<ref>.lock(s)
 ```
 
-`refs-<ref>.lock` (the `cas_write` CAS lock) and
-`<root>/.mkit/refs/.lock` (the file-transport lock) are leaves &mdash; no
-documented code path takes either alongside any other lock in this
-table, so they have no ordering constraint relative to the chain above.
+All direct local mutations of a full ref path MUST hold its `refs-<ref>.lock`, including
+unconditional writes and deletes. An Any condition removes the value
+precondition, never the serialization requirement. The lock is nested inside
+history guards by history-aware writers; guarded internal primitives MUST NOT
+reacquire it. Multiple locks within a class MUST be acquired in canonical
+order before proceeding to the next class: main worktree first then registry
+IDs, branch names lexicographically, and full ref paths lexicographically.
+Current rename operations publish individual refs; this order does not promise
+an atomic multi-ref transaction.
 
-`serve.lock` is never held alongside another lock in this table by the
-same process &mdash; a `serve` process holds only `serve.lock` for its
-whole lifetime, and a local command only ever *probes* it (non-blocking,
-released immediately) rather than holding it, from inside its own
-`worktree.lock`/`worktrees.lock` critical section. It therefore has no
-ordering constraint either, and is excluded from the per-command lock
-sets below (every command that takes `worktree.lock` or
-`worktrees.lock` probes it implicitly &mdash; see §3.1).
+The file transport's `<root>/.mkit/refs/.lock` serializes every write condition
+within that transport. It is not composed with the local chain above; the
+served-root/local-worktree deployment restriction in §3.1 still applies.
+
+`serve.lock` is a lifetime detection guard, excluded from this acquisition
+chain. A server holds it shared while handling requests, including requests
+that acquire the file transport's `refs/.lock`. A local command only probes
+it non-blocking from inside its `worktree.lock`/`worktrees.lock` critical
+section and immediately releases a successful probe. Neither path waits for
+exclusive ownership of `serve.lock`, so detection introduces no blocking
+lock-order dependency. The per-command sets below omit these implicit probes
+(see §3.1).
 
 Per-command lock sets (extends SPEC-WORKTREE §4.3's holder list with
 the history lock):
 
 | Command/path | Lock set, in acquisition order |
 |---|---|
-| `add`, `commit`, `merge`, `checkout`, `rebase`, `cherry-pick`, `revert`, `reset`, `restore`, `rm`, `mv`, `stash`, `sparse-checkout`, `update-ref` | this tree's `worktree.lock`, then (if the command moves a branch ref and history-mmr is enabled) that branch's `refs-history-<branch>.lock` |
-| `checkout`/`switch` (branch-checked-out-elsewhere guard), `branch -d`/`-m` | `worktrees.lock`, then (branch-moving forms) `refs-history-<branch>.lock` |
+| `add`, `commit`, `merge`, `checkout`, `rebase`, `cherry-pick`, `revert`, `reset`, `restore`, `rm`, `mv`, `stash`, `sparse-checkout`, `update-ref` | this tree's `worktree.lock`, then (if the command moves a branch ref and history-mmr is enabled) that branch's `refs-history-<branch>.lock`, then the full ref's mutation lock |
+| `checkout`/`switch` (branch-checked-out-elsewhere guard), `branch -d`/`-m` | `worktrees.lock`, then (branch-moving forms) `refs-history-<branch>.lock`, then the full-ref mutation lock |
 | `worktree add` | `worktrees.lock` (guard re-verified after acquiring), then the new tree's `worktree.lock` |
 | `worktree remove` | `worktrees.lock`, then the condemned tree's `worktree.lock` |
 | `gc` | `worktrees.lock` first (freezes the worktree set), then every registered tree's `worktree.lock`, deterministic order (main tree first, then registry ids ascending) |

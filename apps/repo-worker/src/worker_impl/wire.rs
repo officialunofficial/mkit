@@ -49,6 +49,7 @@ pub struct CommitMetaWire {
 
 #[derive(Serialize, Deserialize)]
 pub struct UpdateReq {
+    pub proof: mkit_worker_common::replay::Proof,
     pub name: String,
     pub new: String,              // 64-hex target value
     pub expectation: i32,         // proto wire number
@@ -58,11 +59,6 @@ pub struct UpdateReq {
     /// non-commit/remix target, or from an older worker — `default` = None).
     #[serde(default)]
     pub commit: Option<CommitMetaWire>,
-    /// Request Idempotency-Key — replay dedupe, keyed together with `author`
-    /// and `name` (empty if none). Closes the `REF_EXPECTATION_ANY` replay
-    /// hole: a replayed signed UpdateRef returns its original
-    /// (committed, conflict, current) result instead of re-running the CAS.
-    pub idem: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,10 +116,10 @@ pub struct ListResp {
 
 #[derive(Serialize, Deserialize)]
 pub struct PostReq {
+    pub proof: mkit_worker_common::replay::Proof,
     pub id: String,     // 64-hex BLAKE3 message id (content address)
     pub author: String, // 64-hex Ed25519 pubkey of the verified signer
     pub text: String,
-    pub idem: String, // request Idempotency-Key — replay dedupe (empty if none)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,10 +156,10 @@ pub struct MessagesResp {
 
 #[derive(Serialize, Deserialize)]
 pub struct ReactReq {
+    pub proof: mkit_worker_common::replay::Proof,
     pub target: String, // hex id of the feed item
     pub emoji: String,
     pub author: String, // 64-hex Ed25519 pubkey of the verified reactor
-    pub idem: String,   // request Idempotency-Key — replay dedupe (empty if none)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,37 +226,12 @@ pub struct RecordCommitsResp {
     pub recorded: u32,
 }
 
-// --- Write quota (auth interceptor -> DO) -----------------------------------
-//
-//   POST /quota  QuotaCheckReq -> QuotaCheckResp
-//
-// Called by `AuthInterceptor` (auth.rs) for PutObject/UpdateRef, BEFORE the
-// handler runs, so the per-author write budget
-// (`crate::write_quota::evaluate_quota`) is checked-and-consumed serially
-// inside the room's DO (`refstore::handle_quota_check`) rather than raced
-// from the stateless Worker. `author` is the envelope-verified 64-hex Ed25519
-// pubkey; `bytes` is the incoming payload size counted against the budget
-// (the `PutObject` `bytes` field length, or 0 for `UpdateRef`).
-
-#[derive(Serialize, Deserialize)]
-pub struct QuotaCheckReq {
-    pub author: String,
-    pub bytes: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct QuotaCheckResp {
-    pub allowed: bool,
-    /// Set (and safe to surface to the client) when `allowed` is false.
-    pub reason: Option<String>,
-}
-
 // --- Room purge (worker -> DO) ----------------------------------------------
 //
 //   POST /purge (no body) -> PurgeResp
 //
 // Wipes every table row scoped to this DO instance (one instance per room):
-// refs, messages (+ idem_keys), reactions (+ react_idem/react_rate), and the
+// refs, messages, reactions (with react_rate), and the
 // commits index. The worker purges the room's R2 prefixes (objects/,
 // messages/) separately — the DO owns none of R2. See service.rs
 // `purge_room` and refstore.rs `handle_purge`.
@@ -270,4 +241,19 @@ pub struct PurgeResp {
     pub refs_deleted: u32,
     pub messages_deleted: u32,
     pub reactions_deleted: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ObjectWriteReq {
+    pub proof: mkit_worker_common::replay::Proof,
+    pub bytes: u64,
+    pub result: Option<ObjectWriteResult>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ObjectWriteResult {
+    pub stored: bool,
+}
+#[derive(Serialize, Deserialize)]
+pub struct ObjectWriteResp {
+    pub result: Option<ObjectWriteResult>,
 }

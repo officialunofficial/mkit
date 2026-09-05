@@ -161,7 +161,7 @@ pub fn run(args: &[String]) -> u8 {
 /// but differs from the staged blob — the case `git rm` refuses without
 /// `-f`. Returns `None` when the file is clean, absent, or a symlink
 /// whose hashing we treat the same as a regular blob.
-fn dirty_reason(root: &Path, _store: &ObjectStore, entry: &IndexEntry) -> Option<String> {
+fn dirty_reason(root: &Path, store: &ObjectStore, entry: &IndexEntry) -> Option<String> {
     let abs = root.join(&entry.path);
     let meta = abs.symlink_metadata().ok()?;
     // Compute the worktree object hash the same way `add` would.
@@ -170,13 +170,27 @@ fn dirty_reason(root: &Path, _store: &ObjectStore, entry: &IndexEntry) -> Option
         let target_str = target.to_str()?;
         symlink_blob_hash(target_str)?
     } else if meta.file_type().is_file() {
-        worktree::read_regular_file_bounded(&abs)
+        let clean = worktree::read_regular_file_bounded(&abs)
             .ok()
-            .and_then(|(_, data)| worktree::hash_file_object(&data).ok())?
+            .and_then(|(opened, data)| {
+                if super::file_exec_status(&opened) != entry.status {
+                    return Some(false);
+                }
+                worktree::content_eq_bytes(store, &entry.object_hash, &data).ok()
+            })
+            .unwrap_or(false);
+        return if clean {
+            None
+        } else {
+            Some(format!(
+                "'{}' has local modifications or unreadable staged content; use --cached to keep it, or --force to discard them",
+                entry.path
+            ))
+        };
     } else {
         return None;
     };
-    if work_hash == entry.object_hash {
+    if entry.status == EntryStatus::Symlink && work_hash == entry.object_hash {
         None
     } else {
         Some(format!(

@@ -118,8 +118,9 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     // One durability batch over the worktree snapshot, the staged-index
     // snapshot, and both commits — committed before the manifest write
     // that references them.
+    let staged = index::read_index(layout)?;
     let batch = store.batch();
-    let tree_hash = worktree::build_tree(&batch, layout.worktree_root())?;
+    let tree_hash = worktree::build_tree_filtered(&batch, layout.worktree_root(), Some(&staged))?;
     let head_hash = refs::resolve_head(layout)?;
 
     let timestamp_u64 = unix_seconds_now();
@@ -143,9 +144,9 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     // tree is never materialized into a worktree (only the `i` blob is read
     // back on `--index`).
     //
-    // A missing or empty index already reads as `Ok(Index::new())`, so the
-    // `?` only surfaces a genuine error (corrupt/locked/oversized index).
-    let staged = index::read_index(layout)?;
+    // The authoritative index was read before the worktree walk; pass the
+    // discovered layout's staging state rather than guessing a single-worktree
+    // .mkit directory (linked worktrees have a pointer file there).
     let staged_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
     let index_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
         data: staged.serialize(),

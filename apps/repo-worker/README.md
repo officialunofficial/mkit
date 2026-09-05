@@ -66,85 +66,21 @@ single-threaded, so each block that awaits a worker handle is wrapped in
 single thread). `worker::Env` is itself `unsafe impl Send + Sync`, so it lives
 in the service struct and is cheap to clone per request.
 
-## The write envelope (DEMO MODE &mdash; open write, no allow-list)
+## Auth v2 (open write, no allow-list)
 
-Auth rides in request **metadata (headers)**, not in the proto message, so one
-guard ([`src/worker_impl/auth.rs`](src/worker_impl/auth.rs), a ConnectRPC unary
-`Interceptor`) covers every write uniformly. The canonical signed string is
-built byte-for-byte by client and server
-([`src/envelope.rs`](src/envelope.rs)):
+All writes require the destination-bound [auth v2 contract](../../docs/specs/SPEC-TRANSPORT-CONNECT.md#auth-v2-contract).
+The signature binds audience, repository, procedure, exact body or pack content,
+creation/expiry timestamps, and a mandatory random nonce. Configure `AUTH_AUDIENCE` to the exact public origin (and override it
+for local development); VCS also requires `AUTH_REPOSITORY`, default `default`.
+Repo requests use the decoded room as repository identity.
 
-```
-canonical = [ "mkit-write:v1",
-              procedure,        // e.g. "/mkit.repo.v1.RepoService/UpdateRef"
-              bodyDigest,       // lowercase-hex BLAKE3 of the RAW request body bytes
-              createdAt,        // decimal epoch-ms
-              idempotencyKey ]  // the Idempotency-Key value, or "" if absent
-            .join("\n")
-
-signing_digest = BLAKE3(utf8(canonical))            // 32 bytes
-valid          = ed25519_verify_strict(pubkey, signing_digest, signature)
-```
-
-Headers: `X-Public-Key` (64-hex), `X-Signature` (128-hex), `X-Digest` (64-hex,
-the client-claimed BLAKE3 of the raw body), `X-Created-At` (epoch-ms),
-`Idempotency-Key` (optional).
-
-The server recomputes `BLAKE3(raw body)` and checks it equals `X-Digest`
-(`400 body digest mismatch` otherwise), enforces a **±5 min** freshness window
-(`401 stale or future signature`), and **strict-verifies** the Ed25519
-signature (`401 invalid signature`). This is a *plain* envelope digest &mdash; NOT an
-mkit commit signature &mdash; so the SPEC-SIGNING commit/remix/tag domain prefixes do
-**not** apply. Verification uses `ed25519_dalek::VerifyingKey::verify_strict`
-(RFC 8032/ZIP-215-off), the same strict line `mkit-core::sign` holds.
-
-Open-write: **any** valid Ed25519 key may write any ref; a valid signature
-proves request integrity and same-author, never authority. The verified writer
-pubkey is attributed onto each `RefEvent`.
-
-**Writes** (`PutObject`, `UpdateRef`) require the envelope. **Reads**
-(`GetObject`, `GetRef`, `ListRefs`, `WatchRefs`) are unauthenticated.
-
-### Security model/known limitations
-
-This is a DEMO server; the envelope proves request integrity and same-author,
-not authority. Be aware of:
-
-- **Replay within the freshness window.** A captured signed write is replayable
-  for as long as it stays fresh (the **±5 min** `X-Created-At` window), but the
-  `Idempotency-Key` IS deduplicated server-side for the writes where a replay
-  would otherwise be observable: `PostMessage` and `React` dedupe on
-  `(author, idem)`, and `UpdateRef` dedupes on `(author, name, idem)` &mdash; a
-  replayed request returns the ORIGINAL result instead of re-applying (see
-  `idem_keys` / `react_idem` / `update_idem` in `refstore.rs`). This closes the
-  `REF_EXPECTATION_ANY` ANY-clobber: a replayed ANY-update, resubmitted inside
-  the freshness window, returns its first result rather than re-running the CAS
-  against whatever the ref holds now. `MISSING`/`MATCH` updates were already
-  self-limiting (the precondition fails on replay) and remain so. For
-  content-addressed `PutObject` a replay is inert regardless (same `object_id`
-  → `duplicate=true`), so it has no dedupe table. Each ledger is pruned on the
-  same freshness-window schedule so it can't grow unbounded.
-- **Open write.** Any valid Ed25519 key may write any ref in any room; there is
-  no allow-list. The signature is integrity and attribution, never authorization.
-- **Input bounds.** `room` is validated `^[A-Za-z0-9._-]{1,64}$`; ref `name`/
-  `prefix` follow SPEC-REFS §3; request bodies (and the PutObject `bytes`
-  payload) are capped at 8 MiB. Invalid inputs are rejected with Connect
-  `invalid_argument` before any storage I/O.
-- **Per-key write quota.** A valid Ed25519 signature proves a *distinct* key,
-  not a *throttled* one, and a fresh key is free to mint &mdash; so `PutObject`/
-  `UpdateRef` are additionally metered per `(author, room)`: at most
-  `WRITE_QUOTA_MAX_OPS` writes and `WRITE_QUOTA_MAX_BYTES` of `PutObject`
-  bytes per author per room in a rolling `WRITE_QUOTA_WINDOW_MS` window (see
-  [`src/write_quota.rs`](src/write_quota.rs)). `AuthInterceptor`
-  (`src/worker_impl/auth.rs`) checks-and-consumes the budget against the
-  room's RefStore DO (`POST /quota`, `src/worker_impl/refstore.rs`) BEFORE
-  the handler runs, so the counter lives in the DO's serial per-room state
-  rather than a Worker-global that would race across isolates. Over-quota
-  writes are rejected with Connect `resource_exhausted`. A DO-unreachable
-  quota check fails OPEN (logged, write proceeds) rather than turning a
-  transient infra hiccup into an outage for every writer. This is
-  application-layer defense; pair with a Cloudflare Rate Limiting rule keyed
-  on `X-Public-Key` at the edge for defense in depth (not configured here).
+SQLite transactions couple nonce replay records, quota, and mutable effects.
+Retries return their recorded result, including after a newer ref update, and
+never toggle a reaction or allocate a second message sequence. Immutable R2
+publication reserves quota once and resumes an interrupted conditional put.
+A failed ledger or quota read fails closed. Ref/event broadcasts occur only
+after the transaction commits. Any valid key can still write; this demo does
+not implement an allow-list.
 
 ## Endpoints
 
@@ -279,8 +215,8 @@ Two independent mechanisms bound that:
 
 1. Every R2 object under `{room}/objects/` and `{room}/messages/` (paginated
    `list` and batched `delete_multiple`, 1000 keys/call).
-2. Every row the room's RefStore DO owns: `refs`, `messages` (plus `idem_keys`),
-   `reactions` (+ `react_idem`/`react_rate`), and the denormalized `commits`
+2. The room's content rows: `refs`, `messages`, `reactions` (plus `react_rate`),
+   and the denormalized `commits`
    index.
 
 It is **irreversible** &mdash; there is no soft-delete, undo, or grace period &mdash; and
@@ -375,12 +311,12 @@ grows account-scoped state.
 One instance per `room` (`env.durable_object("REFSTORE").id_from_name(room)`).
 Stores refs in SQLite &mdash; `refs(path TEXT PRIMARY KEY, value TEXT)`, `value` =
 64-hex of the 32-byte object id. The worker reaches it over an internal JSON
-HTTP protocol (`POST /get | /update | /list | /quota`, `GET /watch`). The CAS
+HTTP protocol (`POST /get | /update | /list | /object`, `GET /watch`). The CAS
 decision is the pure `refs::evaluate_cas` shared with the unit tests,
 evaluated inside the DO's single-threaded `fetch`, so concurrent `UpdateRef`s
 can't race. The same single-threaded serialization is why the per-author
-write-quota ledger (`write_quota` table, `POST /quota`) lives here too &mdash; see
-"Per-key write quota" above.
+write-quota ledger (`write_quota` table) lives here too &mdash; see
+"Auth v2" above.
 
 ## Build and run
 
@@ -409,7 +345,8 @@ hex, handy for deriving a PutObject `object_id`):
 
 ```sh
 BODY='{"room":"demo","name":"refs/heads/main","newId":"<b64>","expectation":"REF_EXPECTATION_MISSING"}'
-HDRS=$(cargo run -q --bin sign -- /mkit.repo.v1.RepoService/UpdateRef "$BODY" my-idem-key)
+NONCE=$(openssl rand -hex 32)
+HDRS=$(AUTH_AUDIENCE=http://localhost:8787 cargo run -q --bin sign -- /mkit.repo.v1.RepoService/UpdateRef "$BODY" "$NONCE")
 eval curl -s -X POST http://localhost:8787/mkit.repo.v1.RepoService/UpdateRef \
   -H "'Content-Type: application/json'" $HDRS -d "'$BODY'"
 ```
@@ -547,3 +484,11 @@ unmodified, just retargeted.
 
 [workers-rs]: https://github.com/cloudflare/workers-rs
 [ConnectRPC]: https://connectrpc.com/
+
+## Auth v2 runtime regressions
+
+After `worker-build --dev`, run a local Worker with
+`AUTH_AUDIENCE=http://localhost:8790`, then run
+`node tests/auth_v2.mjs http://localhost:8790`. It exercises actual SQLite/R2
+adapters for ref, object, chat and reaction replay, concurrent duplicates,
+nonce conflicts, destination separation, expiry and legacy rejection.

@@ -53,6 +53,7 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 pub mod transfer;
+pub mod write_auth;
 
 // Repository path layout (issue #493 Phase 0): the single authority
 // for resolving state under `.mkit/`, splitting shared (common-dir)
@@ -90,8 +91,8 @@ pub use sparse::{
     MAX_FILTER_PATHS as SPARSE_MAX_FILTER_PATHS, MAX_LEAVES as SPARSE_MAX_LEAVES, SPARSE_CACHE_DIR,
     SPARSE_CACHE_MAGIC, SPARSE_CACHE_VERSION, SPARSE_WIRE_MAGIC, SPARSE_WIRE_MAX_BYTES,
     SPARSE_WIRE_VERSION, SparseError, SparseManifest, SparseProof, SparseResponse, SparseWireError,
-    build_sparse, decode_sparse_cache, decode_sparse_response, encode_sparse_cache,
-    encode_sparse_response, hash_filter, verify_sparse,
+    VerifiedSparseTree, build_sparse, decode_sparse_cache, decode_sparse_response,
+    encode_sparse_cache, encode_sparse_response, hash_filter, verify_sparse,
 };
 
 pub use hash::{HASH_LEN, HEX_LEN, Hash, Hasher, to_hex, to_hex_bytes};

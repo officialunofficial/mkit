@@ -32,14 +32,8 @@ struct CheckoutOpts {
     /// stripped, a trailing `/` marks a directory-only match, and `!`
     /// negates. Repeat the flag to add more patterns.
     ///
-    /// When supplied, `mkit checkout` builds a verifiable sparse
-    /// manifest from the commit's top-level tree (via
-    /// `mkit_core::sparse::build_sparse`), re-runs the verifier on the
-    /// delivered subset, caches the bitmap under
-    /// `.mkit/sparse/<tree-hex>.bitmap`, and materialises only the
-    /// matching files. The patterns are NOT persisted to
-    /// `.mkit/sparse-checkout` — use `mkit sparse-checkout set` for
-    /// that.
+    /// Materialises only matching files. Patterns apply to this checkout;
+    /// use `mkit sparse-checkout set` to persist them.
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
     sparse: Vec<String>,
@@ -416,22 +410,10 @@ fn prune_empty_parents(root: &std::path::Path, rel_path: &str) {
     }
 }
 
-/// Drive the verifiable sparse-checkout pipeline for `tree_hash`
-/// against the supplied path-prefix patterns:
-///
-/// 1. Read the top-level tree from `store`.
-/// 2. Translate the CLI `--sparse <pattern>...` argv into both
-///    (a) a flat `Vec<PathBuf>` filter the sparse module understands,
-///    and
-///    (b) a `Vec<SparsePattern>` the restore code understands.
-/// 3. Call `build_sparse` → `verify_sparse` (the round-trip catches a
-///    self-inconsistency at the seam).
-/// 4. Persist the bitmap under `.mkit/sparse/<tree-hex>.bitmap`.
-/// 5. Return the `RestoreOptions` the caller hands to
-///    `restore_tree_to_worktree`.
-///
-/// On any failure, returns `(message, exit_code)` so the caller can
-/// thread it back through the existing `emit_err` plumbing.
+/// Authenticate and cache the top-level tree witness for literal prefixes.
+/// Unsupported pattern grammar uses the authenticated full metadata already
+/// available in the object store. Restoration always uses the CLI's patterns.
+/// Returns `(message, exit_code)` for errors reported by the caller.
 #[cfg(feature = "sparse-checkout")]
 fn prepare_sparse_restore(
     layout: &RepoLayout,
@@ -455,35 +437,11 @@ fn prepare_sparse_restore(
         Err(e) => return Err((format!("read tree: {e}"), exit::GENERAL_ERROR)),
     };
 
-    // The sparse module's filter is a flat list of `PathBuf` prefixes.
-    // The restore code's pattern grammar additionally supports `!`
-    // negation and `/`-anchored matches; we translate the CLI argv
-    // into both representations so the manifest's filter binding sees
-    // a stable canonical form while the restore code keeps its
-    // existing semantics. Negated patterns are excluded from the
-    // sparse-module filter (they're a worktree-side exclusion, not a
-    // server-side inclusion), but still flow through to the restore
-    // step so the user's intent survives.
-    let mut filter: Vec<PathBuf> = Vec::with_capacity(patterns.len());
-    for raw in patterns {
-        let trimmed = raw.trim_start_matches('/');
-        let trimmed = trimmed.trim_end_matches('/');
-        if trimmed.is_empty() || trimmed.starts_with('!') {
-            continue;
-        }
-        filter.push(PathBuf::from(trimmed));
-    }
-
-    // Cache-aware self-consistency round-trip: a cache hit for this
-    // exact (tree, filter) skips the expensive build_sparse +
-    // verify_sparse Merkle-bitmap reconstruction entirely
-    // (SPEC-SPARSE-CHECKOUT §8). A miss (including a stale filter or a
-    // corrupt cache entry) falls through to a fresh build — the local
-    // equivalent of "server delivers manifest, client checks it",
-    // catching a regression in either side without standing up a
-    // transport — and rewrites the cache.
+    // Preserve the CLI grammar verbatim. Unsupported sparse prefixes use the
+    // authenticated full metadata already loaded above.
+    let filter: Vec<PathBuf> = patterns.iter().map(PathBuf::from).collect();
     match load_or_build(layout, &tree, &filter) {
-        Ok(SparseOutcome::CacheHit) => {}
+        Ok(SparseOutcome::CacheHit | SparseOutcome::FullMetadata) => {}
         Ok(SparseOutcome::Built { store_error }) => {
             if let Some(e) = store_error {
                 let mut stderr = std::io::stderr().lock();

@@ -229,7 +229,7 @@ everything was skipped.
   Cross-machine discovery of "someone already imported this" is
   impossible by architecture (state and attestations do not travel
   over mkit transport); the in-store probe (§6.1) covers the
-  same-store case, and this requirement covers the rest.
+   same-store case, and this requirement covers the rest.
 
 ---
 
@@ -286,6 +286,19 @@ Three layers, from authoritative to advisory:
    forged slot is constructible. Verifiers MUST treat `content_digest`
    as a hint for locating/diffing retained bytes, never as something
    the signature vouches for.
+
+**Correspondence audit:** a signed head binds the mkit closure but does not
+by itself prove that a mutable mapping cache pairs each Git object with the
+correct mkit object. An auditor MUST derive each reachable imported object's
+unsigned fields from retained Git bytes under the recorded import-spec version,
+compare all translated fields and edges, and verify its signature with the
+pinned public key. It MUST validate a required head's attestation claim against
+the exact subject hash, full ref, Git ID, canonical source, predicate and schema
+versions. At least one complete matching claim is required; unrelated extra
+envelopes do not qualify and may be ignored. Native bridge objects' mapped
+parent/tree edges are checked against the same correspondence graph. Audit
+requires no private signing material and MUST NOT rewrite objects or caches.
+See SPEC-GIT-BRIDGE §14.3 for traversal limits and failure behavior.
 
 **Collision-resistant hashing (normative requirement):** because sha1
 here still functions as a lookup key over data an adversary may control

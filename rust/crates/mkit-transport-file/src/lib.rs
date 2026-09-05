@@ -411,6 +411,15 @@ impl Transport for FileTransport {
         self.check_ref_path(&dest)?;
         let wire = encode_ref_wire(hash);
 
+        // Every condition participates: an unconditional write must not
+        // interleave between a Match read and its publication.
+        let _process_guard = self
+            .cas_lock
+            .lock()
+            .expect("FileTransport cas_lock poisoned");
+        let _xproc_guard = RefLock::acquire(&self.root)
+            .map_err(|e| TransportError::RemoteError(format!("update_ref mutation lock: {e}")))?;
+
         match condition {
             RefWriteCondition::Any => {
                 // Unconditional atomic overwrite.
@@ -431,21 +440,6 @@ impl Transport for FileTransport {
             }
 
             RefWriteCondition::Match(expected) => {
-                // Serialise within-process first (fast, fair), then take
-                // the cross-process OS file lock for the read-check-write.
-                // The file lock is the source of truth for atomicity
-                // across processes sharing the same on-disk root.
-                let _process_guard = self
-                    .cas_lock
-                    .lock()
-                    .expect("FileTransport cas_lock poisoned");
-
-                let _xproc_guard = RefLock::acquire(&self.root).map_err(|e| {
-                    TransportError::RemoteError(format!(
-                        "update_ref(Match) file-lock acquire error: {e}"
-                    ))
-                })?;
-
                 let current = read_ref_raw(&dest).map_err(|e| {
                     TransportError::RemoteError(format!("update_ref(Match) read error: {e}"))
                 })?;
@@ -1064,6 +1058,38 @@ mod tests {
             dir.path().join(".mkit").join("refs").join(".lock").exists(),
             "RefLock sentinel file should be created on first Match CAS"
         );
+    }
+
+    #[test]
+    fn every_write_condition_waits_for_the_file_cas_guard() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        for condition in [RefWriteCondition::Any, RefWriteCondition::Missing] {
+            let dir = tmp();
+            let lock = RefLock::acquire(dir.path()).unwrap();
+            let root = dir.path().to_path_buf();
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let t = FileTransport::new(root);
+                tx.send(t.update_ref("refs/heads/main", condition, &blake3_hash(b"next")))
+                    .unwrap();
+            });
+            let premature = rx.recv_timeout(Duration::from_millis(100));
+            let observed = FileTransport::new(dir.path())
+                .read_ref("refs/heads/main")
+                .unwrap();
+            drop(lock);
+            worker.join().unwrap();
+            assert!(
+                matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+                "unconditional/create mutation bypassed a held CAS guard: {premature:?}"
+            );
+            assert_eq!(
+                observed, None,
+                "publication must wait for guard acquisition"
+            );
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        }
     }
 
     /// Cross-process race simulation.

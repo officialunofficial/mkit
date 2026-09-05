@@ -348,10 +348,10 @@ Writers and readers MUST use this exact layout. Lowercase hex only;
 comparison is byte-exact.
 
 The digest that names the pack is computed over the *entire packfile*
-including the 32-byte trailer. This is slightly redundant (trailer
-covers pack, digest covers trailer-covered bytes) but it means
-`upload_pack` callers can pass the same `digest` they used to compute
-the trailer.
+including the 32-byte trailer. It is distinct from the trailer, which hashes
+only the preceding bytes. Readers fetching a pack MUST compare the whole-pack
+digest to the caller's requested key before unpacking or recording it as
+applied. A valid internal trailer alone does not establish requested identity.
 
 ---
 
@@ -507,3 +507,15 @@ verification fails.
 The trailer detects accidental corruption; it is not a signature (§1).
 Authenticity rests on the caller-supplied content address (§7) and the
 per-object hash verification of §3.
+
+### Fetch staging resource limits
+
+The CLI stages authenticated missing packs to private temporary files before
+applying them in chain order under the repository lock. It retains at most one
+pack payload buffer in the staging layer, plus bounded chain metadata; the
+cumulative disk budget is 64 GiB, with one million packs and 100,000 pack-list
+nodes. A lifetime-owned temporary directory cleans up on every return path.
+Application uses one pack and one pack's stored-object IDs at a time. Ref
+publication follows signature and closure checks. See SPEC-TRANSPORT for shard
+buffer accounting and cancellation; unpack/reconstruction allocations are
+additional one-pack working memory.

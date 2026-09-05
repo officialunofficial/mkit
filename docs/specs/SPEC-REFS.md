@@ -264,7 +264,7 @@ in-process memory transport only. The file transport's `.match` is atomic
 across processes via the OS lock above. As of #637, the local `mkit-core`
 `refs::cas_write` helper used by commands that mutate refs directly on
 disk (without going through the file transport) is also atomic across
-processes: its `.match` arm takes a dedicated `<common_dir>/refs.lock`
+processes: every write condition takes a dedicated `<common_dir>/refs-<ref>.lock`
 OS exclusive lock (distinct from the file transport's
 `<root>/.mkit/refs/.lock`, but the same blocking-kernel-lock primitive)
 around the read-check-write, so two uncoordinated callers on the same
@@ -274,11 +274,23 @@ report success while one write is silently lost. Only the in-process
 memory transport's `.match` remains genuinely non-atomic (single-fiber
 races), matching the row above.
 
+**Direct local mixed mutation contract:** Any, Missing, Match, and both
+conditional and unconditional deletes MUST serialize on the same full-ref
+identity. This
+includes branch, tag, remote-tracking, and batched remote-tracking mutations.
+Any has no value precondition but MUST NOT bypass another operation's critical
+section. File transport Any/Missing/Match writes share its separate `RefLock`;
+that transport does not acquire the direct local full-ref guard.
+The complete nesting order, including history → ref mutation locks, is
+SPEC-CONCURRENCY §4. `every_ref_mutation_waits_for_the_cas_guard` and
+`every_write_condition_waits_for_the_file_cas_guard` enforce participation.
+
 *Coordination with local worktree operations:* `<root>/.mkit/refs/.lock`
 by itself only serializes the file transport against concurrent instances
 of itself &mdash; it does not, on its own, coordinate against a `commit`,
 `checkout`, or `gc` running locally against the same directory via the
-`worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock` path. **There is no
+`worktrees.lock`/`worktree.lock`/`refs-history-<branch>.lock`/
+`refs-<ref>.lock` path. **There is no
 rule that closes this gap** &mdash; see SPEC-CONCURRENCY §3.1, which documents
 it as a real, currently unresolved coordination gap, and states mkit's
 supported deployment shape (a served root a worktree-owning process
@@ -287,6 +299,13 @@ added detection (a stderr warning when a local command runs against a
 root a live `mkit serve` holds `serve.lock` on) without closing the
 gap &mdash; see SPEC-CONCURRENCY §3.1 for exactly what is and is not
 covered.
+
+History-enabled local branch writes publish the versioned first-parent
+ancestry descriptor under the same mutation guard (SPEC-HISTORY-PROOF §4).
+Raw writes that change a ref invalidate its active descriptor; deletion also
+invalidates it, so an ABA rewrite or delete/recreate cannot reuse a generation.
+A pending history intent blocks raw mutation until recovered. Neither this
+metadata nor the guard changes the 65-byte ref wire format.
 
 ### 5.2 ETag encoding divergence
 
