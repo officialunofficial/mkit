@@ -110,6 +110,19 @@ harness = false
 name = "verify_fanout"
 harness = false
 
+# Sequential-vs-parallel crossover for checkout/restore's per-blob
+# materialisation (`restore_blob` in `mkit-core`'s `ops/restore.rs`).
+# Negative result, kept for future regression tracking (mirroring
+# `pack_shard_transfer`/`history_mmr` below): parallelizing this step
+# with `batch::parallel_io`'s scoped-thread pool was measured slower
+# than sequential at every file count tried (1..512) because restore's
+# writes are deliberately unsynced, so there's no device latency for
+# extra threads to overlap — see the bench file's module doc for the
+# full writeup. No feature gate: restore is always compiled.
+[[bench]]
+name = "restore_fanout"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
