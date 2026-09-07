@@ -559,7 +559,8 @@ pub struct DeltaCandidate {
 /// delta stream would not actually shrink the payload — [`plan_pack`] and
 /// [`plan_pack_with`] both fall back to sending `target` raw in that case.
 ///
-/// Reads `target`'s bytes (`base`'s are read inside [`try_delta`]) and
+/// Reads `target`'s bytes (`base`'s are read inside this module's private
+/// delta-vs-raw comparison helper) and
 /// runs [`delta::encode`]'s block-hash-table build plus greedy scan —
 /// both CPU-bound and independent of every other candidate, which is why
 /// this is exposed as its own function: it's the unit [`plan_pack_with`]
