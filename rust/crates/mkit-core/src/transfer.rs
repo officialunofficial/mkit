@@ -522,6 +522,10 @@ impl PackPlan {
 /// changed chunks against same-path prior chunks where that actually
 /// saves bytes, falling back to raw otherwise.
 ///
+/// Delta candidates are encoded one at a time, sequentially — see
+/// [`plan_pack_with`] for a version that lets a caller fan that step out
+/// across a thread pool.
+///
 /// # Errors
 ///
 /// Propagates [`StoreError`] from reading the local closure. A missing
@@ -531,6 +535,94 @@ pub fn plan_pack(
     store: &ObjectStore,
     new_tip: Hash,
     old_tip: Option<Hash>,
+) -> Result<PackPlan, StoreError> {
+    plan_pack_with(store, new_tip, old_tip, |store, candidates| {
+        candidates
+            .iter()
+            .map(|&c| encode_delta_candidate(store, c))
+            .collect()
+    })
+}
+
+/// One delta-encoding candidate handed in a batch to [`plan_pack_with`]'s
+/// `encode_deltas` callback: encode `target` against `base` if the
+/// remote is already known to hold `base`.
+#[derive(Debug, Clone, Copy)]
+pub struct DeltaCandidate {
+    /// BLAKE3 of the blob to encode.
+    pub target: Hash,
+    /// BLAKE3 of the base object to encode `target` against.
+    pub base: Hash,
+}
+
+/// Encode one [`DeltaCandidate`] against `store`. Returns `None` when the
+/// delta stream would not actually shrink the payload — [`plan_pack`] and
+/// [`plan_pack_with`] both fall back to sending `target` raw in that case.
+///
+/// Reads `target`'s bytes (`base`'s are read inside this module's private
+/// delta-vs-raw comparison helper) and
+/// runs [`delta::encode`]'s block-hash-table build plus greedy scan —
+/// both CPU-bound and independent of every other candidate, which is why
+/// this is exposed as its own function: it's the unit [`plan_pack_with`]
+/// callers fan out per candidate rather than per whole batch.
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] from either read.
+pub fn encode_delta_candidate(
+    store: &ObjectStore,
+    candidate: DeltaCandidate,
+) -> Result<Option<PlannedDelta>, StoreError> {
+    let bytes = store.read(&candidate.target)?;
+    try_delta(store, candidate.target, candidate.base, &bytes)
+}
+
+/// A blob's slot in [`plan_pack_with`]'s final (BLAKE3-ordered)
+/// `blob_raw`/`deltas` split: either an immediate raw hash, or a
+/// placeholder pointing at its index in the candidates slice handed to
+/// `encode_deltas` — filled in once that callback returns.
+enum BlobSlot {
+    Raw(Hash),
+    Pending(usize),
+}
+
+/// [`plan_pack`], but with an explicit `encode_deltas` batch callback in
+/// place of the built-in sequential loop over [`encode_delta_candidate`].
+///
+/// `mkit-core` has no thread-pool dependency of its own — it stays usable
+/// from wasm targets, which have no OS threads — so the fan-out decision
+/// lives with the caller instead of living in this function. `mkit-cli`'s
+/// native, rayon-backed push path passes a parallel `encode_deltas`
+/// (mirroring the `prepare_raw_batch`/`prepare_delta_batch` compression
+/// fan-out already in `remote_dispatch/mod.rs`, but for the diffing step
+/// itself rather than the post-plan zstd pass); [`plan_pack`] passes a
+/// plain sequential loop.
+///
+/// `encode_deltas` receives every delta candidate for this plan in one
+/// batch, in the order they were discovered (BLAKE3/send-set order), and
+/// MUST return exactly one `Result` per input candidate, in the same
+/// order — a `None` for a given candidate falls back to sending that
+/// blob raw, matching [`encode_delta_candidate`]'s own "smaller or raw"
+/// rule.
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] from the local closure walk or from
+/// `encode_deltas`.
+///
+/// # Panics
+///
+/// Panics if `encode_deltas` returns a `Vec` of a different length than
+/// the candidate slice it was given — a contract violation by the
+/// caller, not a normal runtime condition.
+pub fn plan_pack_with(
+    store: &ObjectStore,
+    new_tip: Hash,
+    old_tip: Option<Hash>,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
 ) -> Result<PackPlan, StoreError> {
     let new_set = crate::ops::reachable_objects(store, &new_tip)?;
 
@@ -559,34 +651,48 @@ pub fn plan_pack(
     // Partition the send-set, iterating in BTreeSet (BLAKE3) order so the
     // plan — and therefore the pack bytes — is deterministic.
     let mut non_blob_raw = Vec::new();
-    let mut blob_raw = Vec::new();
-    let mut deltas = Vec::new();
+    let mut blob_slots = Vec::new();
+    let mut candidates: Vec<DeltaCandidate> = Vec::new();
 
     for h in &send {
         // Classify via the cheap 6-byte prologue check (`object_type`)
         // instead of a full read+verify of the object's bytes — the send-set
         // classification only needs the type tag, not the content (INV-14).
-        // Bytes are read (and BLAKE3-verified) below, lazily, only for the
-        // subset that are actually delta candidates.
+        // Bytes are read lazily, only for the subset that are actually
+        // delta candidates, by `encode_deltas` below.
         let is_blob = store.object_type(h)? == ObjectType::Blob;
+        if !is_blob {
+            non_blob_raw.push(*h);
+            continue;
+        }
 
         // Only blobs (FastCDC chunks) are delta candidates, and only against
         // a base the remote actually holds.
-        if is_blob
-            && let Some(base) = base_map.get(h)
-            && remote_set.contains(base)
-        {
-            let bytes = store.read(h)?;
-            if let Some(planned) = try_delta(store, *h, *base, &bytes)? {
-                deltas.push(planned);
-                continue;
+        match base_map.get(h) {
+            Some(&base) if remote_set.contains(&base) => {
+                blob_slots.push(BlobSlot::Pending(candidates.len()));
+                candidates.push(DeltaCandidate { target: *h, base });
             }
+            _ => blob_slots.push(BlobSlot::Raw(*h)),
         }
+    }
 
-        if is_blob {
-            blob_raw.push(*h);
-        } else {
-            non_blob_raw.push(*h);
+    let mut delta_results = encode_deltas(store, &candidates)?;
+    assert_eq!(
+        delta_results.len(),
+        candidates.len(),
+        "encode_deltas must return exactly one result per candidate"
+    );
+
+    let mut blob_raw = Vec::with_capacity(blob_slots.len());
+    let mut deltas = Vec::with_capacity(candidates.len());
+    for slot in blob_slots {
+        match slot {
+            BlobSlot::Raw(h) => blob_raw.push(h),
+            BlobSlot::Pending(idx) => match delta_results[idx].take() {
+                Some(planned) => deltas.push(planned),
+                None => blob_raw.push(candidates[idx].target),
+            },
         }
     }
 
