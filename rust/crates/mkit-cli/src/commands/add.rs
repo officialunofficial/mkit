@@ -793,8 +793,7 @@ fn add_one(
             // fan-out (that's `add_whole_worktree`'s `hash_pending_batch`
             // only) — chunk-level fan-out is the only parallelism
             // available for a large file here, so keep it on.
-            let hashed =
-                hash_pending(sink, &p, true).map_err(|e| emit_err(&e.message, e.code))?;
+            let hashed = hash_pending(sink, &p, true).map_err(|e| emit_err(&e.message, e.code))?;
             stage_hashed(idx, p.rel_str.clone(), hashed);
             Ok(p.rel_str)
         }

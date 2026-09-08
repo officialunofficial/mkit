@@ -53,7 +53,11 @@ impl HttpMcp {
     /// hook `mod auth`'s tests use to pass `--http-token`/exercise the
     /// `Authorization` header without duplicating the spawn/address-parsing
     /// dance.
-    fn spawn_with_args(repo: &std::path::Path, extra_args: &[&str], headers: &[(&str, &str)]) -> Self {
+    fn spawn_with_args(
+        repo: &std::path::Path,
+        extra_args: &[&str],
+        headers: &[(&str, &str)],
+    ) -> Self {
         let mut child = Command::new(mkit_bin())
             .args([
                 "mcp",
@@ -101,7 +105,10 @@ impl HttpMcp {
     /// gate tests, where the process is expected to print a config error
     /// and exit before ever binding. Returns the process's exit status and
     /// captured stderr.
-    fn spawn_expect_refusal(repo: &std::path::Path, extra_args: &[&str]) -> (std::process::ExitStatus, String) {
+    fn spawn_expect_refusal(
+        repo: &std::path::Path,
+        extra_args: &[&str],
+    ) -> (std::process::ExitStatus, String) {
         let output = Command::new(mkit_bin())
             .args([
                 "mcp",
@@ -293,8 +300,7 @@ mod auth {
     #[test]
     fn refuses_an_empty_token() {
         let repo = tempfile::tempdir().unwrap();
-        let (status, stderr) =
-            HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token", ""]);
+        let (status, stderr) = HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token", ""]);
         assert!(!status.success(), "should refuse to bind: {stderr}");
         assert!(stderr.contains("MUST NOT be empty"), "{stderr}");
     }

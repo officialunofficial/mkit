@@ -754,7 +754,12 @@ pub fn plan_pack_with(
 /// and [`encode_delta_candidate_with_base`]) read `base` themselves,
 /// from different sourcing strategies, so this pure comparison step
 /// doesn't need to know which.
-fn try_delta(target: Hash, base: Hash, target_bytes: &[u8], base_bytes: &[u8]) -> Option<PlannedDelta> {
+fn try_delta(
+    target: Hash,
+    base: Hash,
+    target_bytes: &[u8],
+    base_bytes: &[u8],
+) -> Option<PlannedDelta> {
     let Ok(stream) = delta::encode(base_bytes, target_bytes) else {
         // Over-u32 inputs can't happen here (object cap < 4 GiB), but treat
         // any encode failure as "send raw" rather than propagating.
@@ -1374,10 +1379,18 @@ mod tests {
         let c2 = commit_with_named_file(&s, b"small.txt", blob2, vec![c1], "v2");
 
         let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
-        assert_eq!(bases.get(&blob2), Some(&blob1), "sanity: expects a delta candidate");
+        assert_eq!(
+            bases.get(&blob2),
+            Some(&blob1),
+            "sanity: expects a delta candidate"
+        );
 
         let err = plan_pack_with(&s, c2, Some(c1), |_store, candidates| {
-            assert_eq!(candidates.len(), 1, "sanity: exactly one candidate expected");
+            assert_eq!(
+                candidates.len(),
+                1,
+                "sanity: exactly one candidate expected"
+            );
             Ok(Vec::new()) // drops the one candidate's result — the bug under test
         })
         .unwrap_err();
