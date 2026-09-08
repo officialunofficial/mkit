@@ -29,7 +29,7 @@ pub use conflict_state::{
 pub use diff::{
     BINARY_SNIFF_LEN, DEFAULT_CONTEXT_LINES, DiffEntry, DiffError, DiffKind, DiffResult, HunkLine,
     HunkLineKind, PatchHunk, StatusEntry, StatusStaging, WhitespaceMode, apply_hunks_subset,
-    detect_exact_renames, diff_line_counts, diff_trees, enumerate_hunks, is_binary,
+    detect_content_renames, diff_line_counts, diff_trees, enumerate_hunks, is_binary,
     merge_blob_3way, status_diff, status_diff_observed, text_patch, unified_hunks,
     unified_hunks_opts,
 };

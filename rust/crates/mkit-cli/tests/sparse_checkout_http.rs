@@ -11,9 +11,7 @@ use std::path::PathBuf;
 
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::object::{EntryMode, Tree, TreeEntry};
-use mkit_core::sparse::{
-    SparseResponse, build_sparse, encode_sparse_response, hash_filter, tree_hash, verify_sparse,
-};
+use mkit_core::sparse::{build_sparse, encode_sparse_response, hash_filter, tree_hash};
 use mkit_transport_http::HttpTransport;
 use mockito::{Matcher, Server};
 
@@ -52,13 +50,8 @@ fn http_sparse_fetch_round_trip_verifies() {
 
     // Server-side: build the sparse response just like the
     // Cloudflare Worker reference impl would.
-    let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
-    let body = encode_sparse_response(&SparseResponse {
-        manifest,
-        entries,
-        proof,
-    })
-    .unwrap();
+    let response = build_sparse(&tree, &filter).unwrap();
+    let body = encode_sparse_response(&response).unwrap();
 
     let mut server = Server::new();
     let path = sparse_path(&th);
@@ -77,13 +70,7 @@ fn http_sparse_fetch_round_trip_verifies() {
         .fetch_sparse_tree(&th, &filter)
         .expect("HTTP sparse fetch must succeed");
 
-    // Wire-level decode succeeded; now run the verifier end-to-end.
-    assert!(verify_sparse(
-        &resp.manifest,
-        &resp.entries,
-        &filter,
-        &resp.proof
-    ));
+    // The transport returns the selection derived from the verified witness.
     assert_eq!(resp.manifest.tree_hash, th);
     assert_eq!(resp.manifest.filter_hash, fh);
     assert_eq!(resp.entries.len(), 1);
@@ -91,23 +78,16 @@ fn http_sparse_fetch_round_trip_verifies() {
 }
 
 #[test]
-fn http_sparse_fetch_rejects_tampered_bitmap() {
+fn http_sparse_fetch_rejects_tampered_witness() {
     let tree = tree_for(&[b"a", b"b", b"c"]);
     let th = tree_hash(&tree);
     let filter = vec![PathBuf::from("a")];
 
-    // Build a legitimate response, then *tamper* with the bitmap bytes
-    // before encoding. The manifest's bitmap_root still commits to
-    // the original bitmap, so verify_sparse must reject after decode.
-    let (entries, manifest, mut proof) = build_sparse(&tree, &filter).unwrap();
-    proof.bitmap_bytes[0] ^= 0b0000_0010; // flip a high bit
-    let body = encode_sparse_response(&SparseResponse {
-        manifest,
-        entries,
-        proof,
-    })
-    .unwrap();
+    // Alter the encoded witness; the transport must reject it.
+    let response = build_sparse(&tree, &filter).unwrap();
+    let mut body = encode_sparse_response(&response).unwrap();
 
+    body[73] ^= 2;
     let mut server = Server::new();
     let path = sparse_path(&th);
     let _m = server
@@ -119,14 +99,8 @@ fn http_sparse_fetch_rejects_tampered_bitmap() {
         .create();
 
     let tx = make_transport(&server);
-    // The wire decode still succeeds — the transport doesn't verify
-    // semantic correctness — so we get a `SparseResponse` and the
-    // verifier rejects it.
-    let resp = tx.fetch_sparse_tree(&th, &filter).unwrap();
-    assert!(
-        !verify_sparse(&resp.manifest, &resp.entries, &filter, &resp.proof),
-        "tampered bitmap MUST be rejected by verify_sparse"
-    );
+    // Decode and requested-root verification reject the altered witness.
+    assert!(tx.fetch_sparse_tree(&th, &filter).is_err());
 }
 
 #[test]

@@ -15,9 +15,7 @@ use std::path::PathBuf;
 
 use mkit_core::hash::{Hash, to_hex};
 use mkit_core::object::{EntryMode, Tree, TreeEntry};
-use mkit_core::sparse::{
-    SparseResponse, build_sparse, encode_sparse_response, hash_filter, tree_hash, verify_sparse,
-};
+use mkit_core::sparse::{build_sparse, encode_sparse_response, hash_filter, tree_hash};
 use mkit_transport_s3::S3Transport;
 use mkit_transport_s3::sigv4::Credentials;
 use mockito::Server;
@@ -66,7 +64,7 @@ fn make_prefixed_transport(server: &Server, prefix: &str) -> S3Transport {
 
 fn sparse_path(tree_hash: &Hash, filter_hash: &Hash) -> String {
     format!(
-        "/mybucket/sparse/{}/{}",
+        "/mybucket/sparse/v2/{}/{}",
         to_hex(tree_hash),
         to_hex(filter_hash)
     )
@@ -74,7 +72,7 @@ fn sparse_path(tree_hash: &Hash, filter_hash: &Hash) -> String {
 
 fn prefixed_sparse_path(prefix: &str, tree_hash: &Hash, filter_hash: &Hash) -> String {
     format!(
-        "/mybucket/{prefix}/sparse/{}/{}",
+        "/mybucket/{prefix}/sparse/v2/{}/{}",
         to_hex(tree_hash),
         to_hex(filter_hash)
     )
@@ -87,13 +85,8 @@ fn s3_sparse_fetch_round_trip_verifies() {
     let filter = vec![PathBuf::from("a")];
     let fh = hash_filter(&filter);
 
-    let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
-    let body = encode_sparse_response(&SparseResponse {
-        manifest,
-        entries,
-        proof,
-    })
-    .unwrap();
+    let response = build_sparse(&tree, &filter).unwrap();
+    let body = encode_sparse_response(&response).unwrap();
 
     let mut server = Server::new();
     let path = sparse_path(&th, &fh);
@@ -107,12 +100,6 @@ fn s3_sparse_fetch_round_trip_verifies() {
     let resp = tx
         .fetch_sparse_tree(&th, &filter)
         .expect("S3 sparse fetch must succeed");
-    assert!(verify_sparse(
-        &resp.manifest,
-        &resp.entries,
-        &filter,
-        &resp.proof
-    ));
     assert_eq!(resp.manifest.tree_hash, th);
 }
 
@@ -123,13 +110,8 @@ fn s3_sparse_fetch_uses_url_prefix_namespace() {
     let filter = vec![PathBuf::from("a")];
     let fh = hash_filter(&filter);
 
-    let (entries, manifest, proof) = build_sparse(&tree, &filter).unwrap();
-    let body = encode_sparse_response(&SparseResponse {
-        manifest,
-        entries,
-        proof,
-    })
-    .unwrap();
+    let response = build_sparse(&tree, &filter).unwrap();
+    let body = encode_sparse_response(&response).unwrap();
 
     let mut server = Server::new();
     let path = prefixed_sparse_path("repo-a", &th, &fh);
@@ -143,12 +125,8 @@ fn s3_sparse_fetch_uses_url_prefix_namespace() {
     let resp = tx
         .fetch_sparse_tree(&th, &filter)
         .expect("S3 sparse fetch must succeed");
-    assert!(verify_sparse(
-        &resp.manifest,
-        &resp.entries,
-        &filter,
-        &resp.proof
-    ));
+    assert_eq!(resp.manifest.tree_hash, th);
+    assert_eq!(resp.entries, vec![entry(b"a")]);
 }
 
 #[test]
@@ -171,21 +149,16 @@ fn s3_sparse_fetch_404_is_pack_not_found() {
 }
 
 #[test]
-fn s3_sparse_fetch_rejects_tampered_bitmap() {
+fn s3_sparse_fetch_rejects_tampered_witness() {
     let tree = tree_for(&[b"a", b"b", b"c"]);
     let th = tree_hash(&tree);
     let filter = vec![PathBuf::from("a")];
     let fh = hash_filter(&filter);
 
-    let (entries, manifest, mut proof) = build_sparse(&tree, &filter).unwrap();
-    proof.bitmap_bytes[0] ^= 0b0000_0010;
-    let body = encode_sparse_response(&SparseResponse {
-        manifest,
-        entries,
-        proof,
-    })
-    .unwrap();
+    let response = build_sparse(&tree, &filter).unwrap();
+    let mut body = encode_sparse_response(&response).unwrap();
 
+    body[73] ^= 2;
     let mut server = Server::new();
     let path = sparse_path(&th, &fh);
     let _m = server
@@ -195,9 +168,5 @@ fn s3_sparse_fetch_rejects_tampered_bitmap() {
         .create();
 
     let tx = make_transport(&server);
-    let resp = tx.fetch_sparse_tree(&th, &filter).unwrap();
-    assert!(
-        !verify_sparse(&resp.manifest, &resp.entries, &filter, &resp.proof),
-        "tampered bitmap from S3 must still be rejected by verify_sparse"
-    );
+    assert!(tx.fetch_sparse_tree(&th, &filter).is_err());
 }

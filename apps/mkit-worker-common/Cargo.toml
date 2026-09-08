@@ -22,6 +22,9 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mkit-core = { path = "../../rust/crates/mkit-core", default-features = false }
 # workers-rs Request/Response/Headers/Method types the fetch-adapter glue
 # converts to/from. Same feature set as apps/repo-worker/apps/vcs-worker so
 # the type each crate imports is identical.
@@ -47,3 +50,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # itself never depends on tokio; its wasm32 runtime is
 # wasm_bindgen_futures).
 tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

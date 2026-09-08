@@ -405,3 +405,17 @@ fn accepts_key_with_owner_only_permissions() {
     let (_, resp) = sign_one(&key, RpcAlgorithm::Ed25519);
     assert!(resp.signature.is_some());
 }
+
+/// Drive the production host's two-phase handshake against the real file
+/// signer, rather than only pre-encoding both requests into one stdin buffer.
+#[test]
+fn production_external_signer_negotiates_before_sign_request() {
+    use mkit_attest::{ExternalSigner, Signer};
+    let dir = tempfile::tempdir().unwrap();
+    let key = write_key(dir.path(), &[0x42; 32]);
+    let mut signer = ExternalSigner::new(binary())
+        .unwrap()
+        .with_args(["--key".to_owned(), key.to_str().unwrap().to_owned()]);
+    let signature = signer.sign(b"negotiated payload").unwrap();
+    assert_eq!(signature.len(), 64);
+}

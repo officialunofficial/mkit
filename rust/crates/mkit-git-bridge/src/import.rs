@@ -420,93 +420,13 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         new_pairs: &mut Vec<(Sha1Id, Hash)>,
         normalized: &mut bool,
     ) -> Result<Hash, BridgeError> {
-        let parsed = gitparse::parse_tree(body).map_err(|e| {
-            BridgeError::from(Refusal::Unparsable {
-                object: hash20(id),
-                detail: format!("tree: {e}"),
-            })
+        let fork_mode = self.options.fork_mode;
+        let (tree, changed) = translate_tree_metadata(id, body, fork_mode, |child_id| {
+            let child = self.object(child_id, 0, depth + 1, new_pairs, normalized)?;
+            Ok((child, self.sink.kind_of(&child)))
         })?;
-        // Mirror the deserializer's entry-count cap (same pattern as
-        // the parents cap on commits): anything larger would store a
-        // signed tree the repo can never read back.
-        if parsed.len() > mkit_core::serialize::MAX_TREE_ENTRIES as usize {
-            return Err(Refusal::TooManyTreeEntries {
-                object: hash20(id),
-                count: parsed.len(),
-            }
-            .into());
-        }
-        let mut entries = Vec::with_capacity(parsed.len());
-        for e in parsed {
-            let mode = match gitparse::map_mode(&e.mode) {
-                ModeMapping::Canonical(m) => m,
-                ModeMapping::Normalized(m) => {
-                    if self.options.fork_mode {
-                        return Err(Refusal::NormalizedModeInFork {
-                            object: hash20(id),
-                            mode: String::from_utf8_lossy(&e.mode).into_owned(),
-                        }
-                        .into());
-                    }
-                    *normalized = true;
-                    m
-                }
-                ModeMapping::Gitlink => {
-                    return Err(Refusal::Gitlink {
-                        object: hash20(id),
-                        path: String::from_utf8_lossy(&e.name).into_owned(),
-                    }
-                    .into());
-                }
-                ModeMapping::Unknown => {
-                    return Err(Refusal::UnknownTreeMode {
-                        object: hash20(id),
-                        mode: String::from_utf8_lossy(&e.mode).into_owned(),
-                    }
-                    .into());
-                }
-            };
-            if !TreeEntry::validate_name(&e.name) {
-                return Err(Refusal::TreeEntryName {
-                    object: hash20(id),
-                    name: String::from_utf8_lossy(&e.name).into_owned(),
-                }
-                .into());
-            }
-            let child = self.object(&e.id, 0, depth + 1, new_pairs, normalized)?;
-            // The mode promised one kind; verify the TRANSLATED child
-            // actually is that kind (git tolerates e.g. mode 100644 →
-            // commit; mkit's model cannot). Best effort: a sink that
-            // cannot answer skips the check.
-            if let Some(kind) = self.sink.kind_of(&child) {
-                let ok = match mode {
-                    EntryMode::Tree => kind == ObjectType::Tree,
-                    _ => matches!(kind, ObjectType::Blob | ObjectType::ChunkedBlob),
-                };
-                if !ok {
-                    return Err(Refusal::TreeEntryKind {
-                        object: hash20(id),
-                        name: String::from_utf8_lossy(&e.name).into_owned(),
-                    }
-                    .into());
-                }
-            }
-            entries.push(TreeEntry {
-                name: e.name,
-                mode,
-                object_hash: child,
-            });
-        }
-        // git order → mkit byte-lex order. Duplicate names are
-        // git-representable (file `a` + dir `a` sort apart under
-        // git's `name+"/"` key) but undecodable in mkit — the
-        // serializer does NOT check on write, so refuse here or the
-        // store gains a poisoned signed object.
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        if entries.windows(2).any(|w| w[0].name == w[1].name) {
-            return Err(Refusal::DuplicateTreeEntry { object: hash20(id) }.into());
-        }
-        let bytes = ser(id, &Object::Tree(Tree { entries }))?;
+        *normalized |= changed;
+        let bytes = ser(id, &Object::Tree(tree))?;
         self.sink.write_object(&bytes)
     }
 
@@ -547,19 +467,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         let raw = raw_git_bytes(GitObjKind::Commit, body);
         (self.retain_raw)(id, &raw)?;
 
-        #[allow(clippy::cast_sign_loss)] // negative refused above
-        let timestamp = parsed.committer.timestamp as u64;
-        let mut commit = Commit {
-            tree_hash: tree,
-            parents,
-            author: Identity::opaque(parsed.author.identity),
-            signer: self.signer.public,
-            message: parsed.message,
-            timestamp,
-            message_hash: mkit_core::hash::ZERO,
-            content_digest: mkit_core::hash::hash(&raw),
-            signature: [0u8; 64],
-        };
+        let mut commit = unsigned_commit(id, body, self.signer.public, tree, parents)?;
         commit.signature = (self.signer.sign_commit)(&commit)?;
         let bytes = ser(id, &Object::Commit(commit))?;
         self.sink.write_object(&bytes)
@@ -583,78 +491,254 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
         if crate::refname::check_tag_name(&parsed.name).is_err() {
             return Err(Refusal::TagName { object: hash20(id) }.into());
         }
-        let target_type = match parsed.target_type.as_slice() {
-            b"commit" => ObjectType::Commit,
-            b"tree" => ObjectType::Tree,
-            b"blob" => ObjectType::Blob,
-            b"tag" => ObjectType::Tag,
-            other => {
-                return Err(Refusal::Unparsable {
-                    object: hash20(id),
-                    detail: format!(
-                        "tag target type {:?} unknown",
-                        String::from_utf8_lossy(other)
-                    ),
-                }
-                .into());
-            }
-        };
         let target = self.object(&parsed.object, depth + 1, 0, new_pairs, normalized)?;
-        // The mkit target_type must reflect what the TRANSLATED target
-        // is: a >1MiB git blob became a chunked manifest. And the
-        // DECLARED type must match the actual target — a tag claiming
-        // `type commit` over a blob would sign an inconsistent mkit
-        // tag (git tolerates the lie; mkit's model must not).
-        let actual = self.sink.kind_of(&target);
-        let target_type = match (target_type, actual) {
-            (ObjectType::Blob, Some(ObjectType::ChunkedBlob)) => ObjectType::ChunkedBlob,
-            (declared, Some(actual)) if actual != declared => {
-                return Err(Refusal::Unparsable {
-                    object: hash20(id),
-                    detail: format!(
-                        "tag declares target type {declared:?} but the target is {actual:?}"
-                    ),
-                }
-                .into());
-            }
-            (declared, _) => declared,
-        };
-        let (tagger_identity, timestamp) = match parsed.tagger {
-            Some(p) => {
-                if p.timestamp < 0 {
-                    return Err(Refusal::NegativeTimestamp {
-                        object: hash20(id),
-                        timestamp: p.timestamp,
-                    }
-                    .into());
-                }
-                if p.identity.is_empty() || p.identity.len() > 4096 {
-                    return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
-                }
-                #[allow(clippy::cast_sign_loss)]
-                let ts = p.timestamp as u64;
-                (Identity::opaque(p.identity), ts)
-            }
-            // Historic tagger-less tags: a pinned sentinel identity
-            // and epoch 0 (deterministic; provenance retains truth).
-            None => (Identity::opaque(b"(no tagger)".to_vec()), 0),
-        };
+        let mut tag = unsigned_tag(
+            id,
+            body,
+            self.signer.public,
+            target,
+            self.sink.kind_of(&target),
+        )?;
         let raw = raw_git_bytes(GitObjKind::Tag, body);
         (self.retain_raw)(id, &raw)?;
-        let mut tag = Tag {
-            target,
-            target_type,
-            name: parsed.name,
-            tagger: tagger_identity,
-            signer: self.signer.public,
-            message: parsed.message,
-            timestamp,
-            signature: [0u8; 64],
-        };
         tag.signature = (self.signer.sign_tag)(&tag)?;
         let bytes = ser(id, &Object::Tag(tag))?;
         self.sink.write_object(&bytes)
     }
+}
+
+/// Translate Tree metadata without writing or signing. The resolver supplies
+/// child identities and kinds; callers must authenticate those correspondences.
+/// Returns whether a historic Git mode was normalized.
+///
+/// # Errors
+/// Returns the same typed policy refusals as the importer for invalid trees.
+pub fn translate_tree_metadata(
+    id: &Sha1Id,
+    body: &[u8],
+    fork_mode: bool,
+    mut resolve: impl FnMut(&Sha1Id) -> Result<(Hash, Option<ObjectType>), BridgeError>,
+) -> Result<(Tree, bool), BridgeError> {
+    let parsed = gitparse::parse_tree(body).map_err(|e| {
+        BridgeError::from(Refusal::Unparsable {
+            object: hash20(id),
+            detail: format!("tree: {e}"),
+        })
+    })?;
+    // Mirror the deserializer's entry-count cap (same pattern as
+    // the parents cap on commits): anything larger would store a
+    // signed tree the repo can never read back.
+    if parsed.len() > mkit_core::serialize::MAX_TREE_ENTRIES as usize {
+        return Err(Refusal::TooManyTreeEntries {
+            object: hash20(id),
+            count: parsed.len(),
+        }
+        .into());
+    }
+    let mut normalized = false;
+    let mut entries = Vec::with_capacity(parsed.len());
+    for e in parsed {
+        let mode = match gitparse::map_mode(&e.mode) {
+            ModeMapping::Canonical(m) => m,
+            ModeMapping::Normalized(m) => {
+                if fork_mode {
+                    return Err(Refusal::NormalizedModeInFork {
+                        object: hash20(id),
+                        mode: String::from_utf8_lossy(&e.mode).into_owned(),
+                    }
+                    .into());
+                }
+                normalized = true;
+                m
+            }
+            ModeMapping::Gitlink => {
+                return Err(Refusal::Gitlink {
+                    object: hash20(id),
+                    path: String::from_utf8_lossy(&e.name).into_owned(),
+                }
+                .into());
+            }
+            ModeMapping::Unknown => {
+                return Err(Refusal::UnknownTreeMode {
+                    object: hash20(id),
+                    mode: String::from_utf8_lossy(&e.mode).into_owned(),
+                }
+                .into());
+            }
+        };
+        if !TreeEntry::validate_name(&e.name) {
+            return Err(Refusal::TreeEntryName {
+                object: hash20(id),
+                name: String::from_utf8_lossy(&e.name).into_owned(),
+            }
+            .into());
+        }
+        let (child, actual_kind) = resolve(&e.id)?;
+        // The mode promised one kind; verify the TRANSLATED child
+        // actually is that kind (git tolerates e.g. mode 100644 →
+        // commit; mkit's model cannot). Best effort: a sink that
+        // cannot answer skips the check.
+        if let Some(kind) = actual_kind {
+            let ok = match mode {
+                EntryMode::Tree => kind == ObjectType::Tree,
+                _ => matches!(kind, ObjectType::Blob | ObjectType::ChunkedBlob),
+            };
+            if !ok {
+                return Err(Refusal::TreeEntryKind {
+                    object: hash20(id),
+                    name: String::from_utf8_lossy(&e.name).into_owned(),
+                }
+                .into());
+            }
+        }
+        entries.push(TreeEntry {
+            name: e.name,
+            mode,
+            object_hash: child,
+        });
+    }
+    // git order → mkit byte-lex order. Duplicate names are
+    // git-representable (file `a` + dir `a` sort apart under
+    // git's `name+"/"` key) but undecodable in mkit — the
+    // serializer does NOT check on write, so refuse here or the
+    // store gains a poisoned signed object.
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    if entries.windows(2).any(|w| w[0].name == w[1].name) {
+        return Err(Refusal::DuplicateTreeEntry { object: hash20(id) }.into());
+    }
+    Ok((Tree { entries }, normalized))
+}
+
+/// Derive the import-v1 unsigned commit fields from Git bytes and resolved edges.
+/// No private key, object writes or mapping-cache mutation is required.
+///
+/// # Errors
+/// Rejects malformed or unrepresentable source fields and incorrect parent count.
+pub fn unsigned_commit(
+    id: &Sha1Id,
+    body: &[u8],
+    signer: [u8; 32],
+    tree: Hash,
+    parents: Vec<Hash>,
+) -> Result<Commit, BridgeError> {
+    let parsed =
+        gitparse::parse_commit(body).map_err(|e| BridgeError::Integrity(format!("commit: {e}")))?;
+    if parsed.committer.timestamp < 0 {
+        return Err(Refusal::NegativeTimestamp {
+            object: hash20(id),
+            timestamp: parsed.committer.timestamp,
+        }
+        .into());
+    }
+    if parsed.parents.len() > 1000 {
+        return Err(Refusal::TooManyParents { object: hash20(id) }.into());
+    }
+    if parsed.author.identity.is_empty() || parsed.author.identity.len() > 4096 {
+        return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
+    }
+    if parents.len() != parsed.parents.len() {
+        return Err(BridgeError::Integrity(
+            "incorrect imported parent count".into(),
+        ));
+    }
+    let raw = raw_git_bytes(GitObjKind::Commit, body);
+    #[allow(clippy::cast_sign_loss)] // negative refused above
+    let timestamp = parsed.committer.timestamp as u64;
+    let commit = Commit {
+        tree_hash: tree,
+        parents,
+        author: Identity::opaque(parsed.author.identity),
+        signer,
+        message: parsed.message,
+        timestamp,
+        message_hash: mkit_core::hash::ZERO,
+        content_digest: mkit_core::hash::hash(&raw),
+        signature: [0u8; 64],
+    };
+    Ok(commit)
+}
+
+/// Derive import-v1 unsigned tag fields, including chunked target kinds.
+///
+/// # Errors
+/// Rejects malformed fields, illegal tag names and inconsistent target kinds.
+pub fn unsigned_tag(
+    id: &Sha1Id,
+    body: &[u8],
+    signer: [u8; 32],
+    target: Hash,
+    actual: Option<ObjectType>,
+) -> Result<Tag, BridgeError> {
+    let parsed =
+        gitparse::parse_tag(body).map_err(|e| BridgeError::Integrity(format!("tag: {e}")))?;
+    if crate::refname::check_tag_name(&parsed.name).is_err() {
+        return Err(Refusal::TagName { object: hash20(id) }.into());
+    }
+    let target_type = match parsed.target_type.as_slice() {
+        b"commit" => ObjectType::Commit,
+        b"tree" => ObjectType::Tree,
+        b"blob" => ObjectType::Blob,
+        b"tag" => ObjectType::Tag,
+        other => {
+            return Err(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!(
+                    "tag target type {:?} unknown",
+                    String::from_utf8_lossy(other)
+                ),
+            }
+            .into());
+        }
+    };
+    // The mkit target_type must reflect what the TRANSLATED target
+    // is: a >1MiB git blob became a chunked manifest. And the
+    // DECLARED type must match the actual target — a tag claiming
+    // `type commit` over a blob would sign an inconsistent mkit
+    // tag (git tolerates the lie; mkit's model must not).
+    let target_type = match (target_type, actual) {
+        (ObjectType::Blob, Some(ObjectType::ChunkedBlob)) => ObjectType::ChunkedBlob,
+        (declared, Some(actual)) if actual != declared => {
+            return Err(Refusal::Unparsable {
+                object: hash20(id),
+                detail: format!(
+                    "tag declares target type {declared:?} but the target is {actual:?}"
+                ),
+            }
+            .into());
+        }
+        (declared, _) => declared,
+    };
+    let (tagger_identity, timestamp) = match parsed.tagger {
+        Some(p) => {
+            if p.timestamp < 0 {
+                return Err(Refusal::NegativeTimestamp {
+                    object: hash20(id),
+                    timestamp: p.timestamp,
+                }
+                .into());
+            }
+            if p.identity.is_empty() || p.identity.len() > 4096 {
+                return Err(Refusal::AuthorPayload { object: hash20(id) }.into());
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let ts = p.timestamp as u64;
+            (Identity::opaque(p.identity), ts)
+        }
+        // Historic tagger-less tags: a pinned sentinel identity
+        // and epoch 0 (deterministic; provenance retains truth).
+        None => (Identity::opaque(b"(no tagger)".to_vec()), 0),
+    };
+    let tag = Tag {
+        target,
+        target_type,
+        name: parsed.name,
+        tagger: tagger_identity,
+        signer,
+        message: parsed.message,
+        timestamp,
+        signature: [0u8; 64],
+    };
+    Ok(tag)
 }
 
 /// Serialize, mapping failure to a per-ref refusal: a serialize error

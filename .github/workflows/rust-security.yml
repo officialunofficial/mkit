@@ -72,14 +72,15 @@ jobs:
       # Cargo workspaces (own Cargo.lock, path-dep on rust/crates/mkit-core)
       # that a /rust or /contrib/signers audit never sees. None of them use
       # yubikey/openpgp-card (RUSTSEC-2023-0071 / RUSTSEC-2025-0055 don't
-      # apply), but repo-worker and vcs-worker path-dep on mkit-core, which
-      # pulls commonware-codec -> paste (unmaintained, RUSTSEC-2024-0436) —
-      # the same advisory already ignored for rust/ and contrib/signers/.
-      # keys-worker and mkit-worker-common don't pull mkit-core (keys-worker
-      # deliberately avoids it, see its Cargo.toml) so they stay ignore-free.
+      # apply). All four now use mkit-core for shared write authorization,
+      # which pulls commonware-codec -> paste (unmaintained,
+      # RUSTSEC-2024-0436). Apply only the existing paste exception reviewed
+      # in rust/deny.toml, with its existing re-justification deadline.
+      # The pinned commonware-codec 2026.9.0 still uses paste 1.0.15;
+      # neither has a newer release that removes this advisory.
       - name: cargo audit (apps/keys-worker workspace)
         working-directory: apps/keys-worker
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436
 
       - name: cargo audit (apps/repo-worker workspace)
         working-directory: apps/repo-worker
@@ -91,4 +92,4 @@ jobs:
 
       - name: cargo audit (apps/mkit-worker-common workspace)
         working-directory: apps/mkit-worker-common
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436

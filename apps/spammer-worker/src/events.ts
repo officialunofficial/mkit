@@ -73,7 +73,7 @@ export async function emitChat(
  * factored out below `emitCommit`.
  */
 async function postChat(ctx: EmitContext, room: string, identity: Identity, text: string): Promise<EmitChatResult> {
-  const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PostMessage);
+  const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PostMessage, ctx.baseUrl, room);
   return ctx.wasm.repo.post_message(ctx.baseUrl, room, text, sign);
 }
 
@@ -173,11 +173,11 @@ export async function emitCommit(
     const parentHex = parentHead ?? "";
     const commit = buildSignedCommit(ctx, identity, message, parentHex);
 
-    const signPut = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PutObject);
+    const signPut = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PutObject, ctx.baseUrl, room);
     await ctx.wasm.repo.put_object(ctx.baseUrl, room, commit.hashHex, commit.bytes, signPut);
 
     const expectation: RefExpectation = parentHead ? "MATCH" : "MISSING";
-    const signUpdate = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.UpdateRef);
+    const signUpdate = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.UpdateRef, ctx.baseUrl, room);
     const updateResult = await ctx.wasm.repo.update_ref(
       ctx.baseUrl,
       room,
@@ -314,11 +314,11 @@ export async function emitRemix(
     const parentHex = parentHead ?? "";
     const remix = buildSignedRemix(ctx, room, identity, upstreamCommitHash, message, parentHex);
 
-    const signPut = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PutObject);
+    const signPut = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.PutObject, ctx.baseUrl, room);
     await ctx.wasm.repo.put_object(ctx.baseUrl, room, remix.hashHex, remix.bytes, signPut);
 
     const expectation: RefExpectation = parentHead ? "MATCH" : "MISSING";
-    const signUpdate = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.UpdateRef);
+    const signUpdate = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.UpdateRef, ctx.baseUrl, room);
     const updateResult = await ctx.wasm.repo.update_ref(
       ctx.baseUrl,
       room,
@@ -385,6 +385,6 @@ export async function emitReaction(
   counter: number,
 ): Promise<EmitReactionResult> {
   const emoji = pick(REACTION_EMOJI, counter);
-  const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.React);
+  const sign = makeSignFn(ctx.wasm.mkit, identity.seedHex, procedures.React, ctx.baseUrl, room);
   return ctx.wasm.repo.react(ctx.baseUrl, room, targetIdHex, emoji, sign);
 }

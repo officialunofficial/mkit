@@ -4,9 +4,9 @@
 //! ids as keys, variable-size serialized `Blob`/`Tree`/`Commit` bytes as
 //! values).
 //!
-//! This file is compiled only with `--features history-mmr` (the feature
-//! that already pulls `commonware-storage`, `commonware-runtime`, and
-//! `commonware-utils` into mkit-core).
+//! This opt-in storage experiment runs with `--features history-mmr`. Its
+//! deterministic runtime and utility crates are dev-dependencies; the shipped
+//! ancestry implementation does not depend on that runtime.
 //!
 //! ## What this proves
 //!

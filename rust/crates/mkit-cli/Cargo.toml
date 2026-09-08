@@ -169,6 +169,7 @@ thiserror = "2"
 # chain: serde_json is already in this binary's normal dependency graph
 # via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
 serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
 # `mkit self update` (commands/self_update.rs): release download over
 # rustls (same feature set + version as mkit-transport-http — zero new
 # TLS supply chain), sha256 sidecar check, and single-member tar.gz
@@ -314,7 +315,7 @@ mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "tokio/net", "
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's
 # export-only era.
-git-bridge = ["dep:mkit-git-bridge"]
+git-bridge = ["dep:mkit-git-bridge", "dep:serde"]
 git-export = ["git-bridge"]
 # Verifiable sparse-checkout (issue #158). Pulls the
 # `mkit-core` sparse module and the matching transport-side fetchers
@@ -333,13 +334,8 @@ pack-shards = [
     "mkit-transport-http/pack-shards",
     "mkit-transport-s3/pack-shards",
 ]
-# Issue #157 — record every ref-write in an append-only,
-# branch-scoped Merkle Mountain Range journal under
-# `<mkit_dir>/history/<sanitized_branch>/`. Off by default because
-# the commonware journaled-MMR stack pulls in tokio + commonware-
-# runtime; opt in via `--features history-mmr` on builds that need
-# `mkit-core::history::CommitHistory::open_at` wired into commit /
-# branch / merge / rebase / cherry-pick ref advances.
+# Canonical first-parent ancestry snapshots and contextual proofs. Opt in for
+# commit/branch/merge/rebase/cherry-pick publication and verified reflog output.
 history-mmr = ["mkit-core/history-mmr"]
 
 [package.metadata.docs.rs]

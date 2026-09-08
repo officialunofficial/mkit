@@ -59,7 +59,7 @@ impl WriteAudit {
 #[must_use]
 pub fn audit_for(procedure: &str, bytes: u64, result: &VerifyEnvelope) -> WriteAudit {
     match result {
-        VerifyEnvelope::Ok { public_key } => WriteAudit::accepted(procedure, public_key, bytes),
+        VerifyEnvelope::Ok { public_key, .. } => WriteAudit::accepted(procedure, public_key, bytes),
         VerifyEnvelope::Err { status, error } => WriteAudit::rejected(procedure, *status, error),
     }
 }
@@ -106,6 +106,16 @@ mod tests {
     fn audit_for_ok_builds_accepted() {
         let ok = VerifyEnvelope::Ok {
             public_key: "cd".repeat(32),
+            body_digest: "ab".repeat(32),
+            idempotency_key: "01".repeat(32),
+            authorization: crate::envelope::Authorized {
+                scope: "test".into(),
+                public_key: "cd".repeat(32),
+                nonce: "01".repeat(32),
+                fingerprint: "ef".repeat(32),
+                commitment: format!("body:{}", "ab".repeat(32)),
+                expires_at: 1,
+            },
         };
         let audit = audit_for(PROCEDURE, 17, &ok);
         assert_eq!(

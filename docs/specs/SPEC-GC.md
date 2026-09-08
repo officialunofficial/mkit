@@ -52,7 +52,12 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Rebase in progress | `.mkit/rebase-apply/{orig-head,onto,todo,done}` | `orig_head`, `onto`, every `todo` + `done` commit |
 | Conflict sidecar | `.mkit/mkit-conflicts` and `.mkit/rebase-apply/mkit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
 | Attestations | `.mkit/attestations/<commit-hex>/` | each attested commit (dir name) |
+| Pending history publication | `.mkit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
 | Recovery log | `.mkit/recovery-log` | each superseded commit (until expired) |
+
+A present empty, corrupt, oversized or unsupported staging index MUST abort GC
+before sweeping. An absent index alone means no staging roots. Only the current
+index format is supported (SPEC-INDEX).
 
 The live keep-set is the reachable closure over those roots:
 `ops::gc::live_objects(store, mkit_dir)` = `reachable_closure(store,
@@ -80,11 +85,8 @@ set. In particular:
 
 ## Recovery log (Part 2)
 
-The per-branch history journal (`.mkit/history/…`, the MMR behind
-`reflog`) stores **only opaque digests**; its leaves cannot be decoded
-back to commit hashes. So commits superseded by `commit --amend`,
-`reset`, or `rebase` cannot be recovered from it. The **recovery log**
-(`.mkit/recovery-log`, `ops::recovery`) closes that gap: each rewrite
+Commits superseded by `commit --amend`, `reset`, or `rebase` remain recoverable
+through the **recovery log** (`.mkit/recovery-log`, `ops::recovery`). Each rewrite
 appends the superseded tip (`<unix_ts>\t<op>\t<64-hex>\t<branch>`), every
 logged hash is a GC root (clock-free, strict/fail-closed parse), and
 `recovery::expire(now, policy)` drops entries past the retention policy
@@ -114,6 +116,11 @@ gc's lock set (SPEC-CONCURRENCY §4) it expires the recovery log,
 computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
 prunes all, `--dry-run` previews).
+
+Versioned ancestry snapshots (`history-v1`) are described in SPEC-HISTORY-PROOF.
+Archived generation snapshots are evidence, not additional retention roots.
+Only unfinished publication intents add roots; this lets recovery rebuild the
+complete target ancestry even when its ref had not yet become visible.
 
 ## Invariants
 

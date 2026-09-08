@@ -1,15 +1,14 @@
 ---
 spec: SPEC-INDEX
-version: 1
-status: stable-advisory
-audience: implementers of the staging area; advisory and local-only (not exchanged between peers)
+version: 2
+status: stable-normative
+audience: implementers of durable local staging state
 ---
 
 # SPEC-INDEX &mdash; mkit repo-local index file
 
-Status: **Advisory** for mkit. Local-only; not exchanged between
-peers. See SPEC-CONVENTIONS §2 for the maturity/bindingness status
-vocabulary this frontmatter uses.
+Status: **Stable, normative** for durable local staging state. Local-only;
+not exchanged between peers. See SPEC-CONVENTIONS §2.
 Scope: the on-disk layout of `.mkit/index`, used by the staging area.
 
 ---
@@ -23,9 +22,10 @@ prove a worktree file unchanged in O(stat) instead of O(content).
 It is repo-local; it is never serialized to a transport and never
 signed.
 
-Because it is local-only, its stability requirements are weaker than
-commit/pack/ref formats: an implementation change here never
-affects wire compatibility with any other peer.
+Paths, status/mode selections, staged object hashes and deletion tombstones
+are authoritative user state. They MUST survive supported format upgrades;
+a working file may already contain different bytes from its staged version.
+Only the stat cache is disposable. Local-only does not imply reconstructible.
 
 ---
 
@@ -34,9 +34,10 @@ affects wire compatibility with any other peer.
 ```
 offset  size    field
 0       4       magic            "MKIX" = 0x4D 0x4B 0x49 0x58
-4       1       version          0x02
+4       1       version          0x03
 5       4       entry_count      u32 LE
 9       …       entries          entry_count × entry
+…       32      checksum         BLAKE3 of all preceding file bytes
 ```
 
 Each entry:
@@ -154,21 +155,22 @@ durable across power loss. The `.mkit/` directory is created if absent.
 durability schedule &mdash; it is one of the durable pointers that schedule
 orders itself against; see SPEC-OBJECTS §10.1.)
 
-Readers tolerate:
+Readers MUST enforce:
 
-- File absent → empty index.
-- File zero-length → empty index.
-- File > 64 MiB (`MAX_INDEX_BYTES`) → `IndexError::TooLarge`. This cap
-  is hit only by pathological repos.
+- File absent → empty index. A present zero-length file is corruption.
+- File > 64 MiB (`MAX_INDEX_BYTES`) → `IndexError::TooLarge`.
+  Bounded reads MUST enforce this even if the file grows during reading.
+- Version 3 checksum mismatch or missing checksum → `IndexError::Corrupt`,
+  before interpreting entries. The checksum detects corruption, not malicious
+  replacement by an actor who can rewrite the entire local file.
 
-Version handling: readers MUST accept exactly the current version byte
-`0x02` and MUST reject any other value &mdash; including any byte that was
-ever emitted by an older mkit &mdash; with `IndexError::UnsupportedVersion(byte)`.
-There is no dual-version read compatibility: the index is local-only
-and advisory (§1), so an implementation change here carries no
-cross-peer compatibility obligation, and mkit does not maintain
-migration shims for its own local, unreleased state files (see
-SPEC-CONVENTIONS §2's note on versioning).
+Only version 3 is supported. Readers MUST reject every other version without
+rewriting the index. This is a deliberate pre-release format break: there is no
+legacy reader or migration API. An unsupported index MUST NOT be rebuilt from
+HEAD or working files, because those cannot recover its staged selections.
+
+GC MUST abort before sweeping if any registered worktree index is corrupt or
+unsupported, since its staged hashes might be the only retention roots.
 
 Additionally, readers MUST reject a `count` header that cannot possibly
 fit in the remaining buffer (each entry is at minimum 67 bytes &mdash;
@@ -176,7 +178,7 @@ fit in the remaining buffer (each entry is at minimum 67 bytes &mdash;
 buffer declaring `count = u32::MAX` is rejected as `IndexError::Corrupt`
 before the entry-allocation loop runs.
 
-Readers MUST reject any trailing bytes after the declared entry list.
+Readers MUST reject any trailing bytes after the declared entry list and its checksum.
 Readers MUST also reject duplicate exact paths as `IndexError::DuplicatePath`;
 an index cannot contain two live interpretations for the same repo-relative
 path.
@@ -185,25 +187,12 @@ path.
 
 ## 6. Test vectors
 
-1. **Empty index**: magic + version + `count=0` = 9 bytes. Record
-   BLAKE3 of those bytes (informative &mdash; index is never hashed for
-   protocol purposes).
-2. **Single entry**: path = "hello.txt", status = blob,
-   `mtime_ns = 0x0102030405060708`, `size = 11`, pinned ino/ctime.
-   Total length is **85 bytes** (9 header + 1 status + 32 hash +
-   32 stat cache + 2 path_len + 9 path). Pinned by
-   `single_entry_pinned_bytes`.
-3. **Reject `ZMIX` magic** on read → `IndexError::BadMagic`.
-4. **Reject version `0x01`** (an old, no-longer-supported version byte,
-   rejected the same as any other unrecognized value) →
-   `IndexError::UnsupportedVersion`. Pinned by `rejects_old_version_0x01`.
-5. **Reject version `0x03`** → `IndexError::UnsupportedVersion`.
-6. **Corrupt-path-length** (path_len > remaining bytes) →
-   `IndexError::Corrupt`.
-7. **64 MiB + 1 byte file** → `IndexError::TooLarge`.
-8. **Bogus huge count** (9-byte buffer declaring `count = u32::MAX`)
-   → `IndexError::Corrupt`. Guards against attacker-controlled
-   pre-allocation.
+1. Empty v3 index: 9-byte header + 32-byte checksum = 41 bytes.
+2. Pinned single v3 entry: 85-byte header/entry + 32-byte checksum = 117 bytes.
+3. Obsolete and unknown versions fail without rewriting staging.
+4. A bit flip inside an otherwise valid staged hash fails checksum validation.
+5. Malformed paths/counts, zero-length and oversized files fail.
+6. Corrupt staging aborts GC before any object deletion.
 
 The golden vectors under `rust/tests/golden/refs-index/` pin the
 current format explicitly: `index_empty.bin` / `index_3entries.bin`
@@ -214,7 +203,7 @@ index MUST appear in the order they were added to the in-memory
 byte-identity is a property of a specific fixture's construction, not
 a general "any two logically-equal indexes serialize identically"
 guarantee. The generator `examples/generate_refs_index_goldens.rs`
-re-emits each filename byte-identically and records every BLAKE3 in
+re-emits current filenames byte-identically and records every fixture BLAKE3 in
 `MANIFEST.txt`.
 
 ---
@@ -228,10 +217,6 @@ re-emits each filename byte-identically and records every BLAKE3 in
   regime; if they become common, future work.
 - No reflog or journal embedded in the index; those are separate
   sidecar files (out of scope for this spec).
-- No dual-version read compatibility (see §5). If a future change to
-  this format is ever needed, it ships as a new current version with
-  no obligation to keep reading the old one &mdash; this is a local,
-  advisory file with no installed base to protect.
 
 ---
 
@@ -239,7 +224,7 @@ re-emits each filename byte-identically and records every BLAKE3 in
 
 | Invariant | Enforced by |
 |---|---|
-| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; exactly one accepted version → `IndexError::UnsupportedVersion` (§2, §5) |
+| A file is parsed only under a known layout | `"MKIX"` magic → `IndexError::BadMagic`; explicit supported version matrix → `IndexError::UnsupportedVersion` (§2, §5) |
 | A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
@@ -247,8 +232,8 @@ re-emits each filename byte-identically and records every BLAKE3 in
 | Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
 | The stat cache never changes an observable result | cache is an optimization only &mdash; all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
-| A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); absent or zero-length file reads as empty (§5) |
+| A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); only an absent file reads as empty; present empty/corrupt state fails closed (§5) |
 
-The index is local-only and advisory: never transported, never signed,
-no merkle structure (§1, §7). Nothing above is load-bearing for history
-integrity &mdash; that lives in SPEC-OBJECTS.
+The index is local-only, never transported or signed. Its staged selections
+are durable user state and GC retention roots, even though the stat cache is
+reconstructible.

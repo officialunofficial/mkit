@@ -1,4 +1,4 @@
-// Cloudflare Worker config for keys.mkit.sh — the KV-backed pubkey→handle
+// Cloudflare Worker config for keys.mkit.sh — the SQLite-backed pubkey→handle
 // registry. JSONC to match the org convention (apps/repo-worker). Build with
 // worker-build, which compiles the cdylib to wasm32 and emits the ES-module
 // shim into ./build.
@@ -6,6 +6,9 @@
   "name": "mkit-keys",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
+  "vars": { "AUTH_AUDIENCE": "https://keys.mkit.sh" },
+  "durable_objects": { "bindings": [{ "name": "NAME_STORE", "class_name": "NameStore" }] },
+  "migrations": [{ "tag": "auth-v2-names", "new_sqlite_classes": ["NameStore"] }],
   // The CF Workers Build image has NO Rust toolchain — install rustup (pinned
   // 1.95.0 + wasm32) and worker-build, then compile. Guarded by `command -v` so
   // it's a no-op where they already exist (local `wrangler deploy`).
@@ -29,26 +32,12 @@
   // DNS + cert on the mkit.sh zone.
   "routes": [{ "pattern": "keys.mkit.sh", "custom_domain": true }],
 
-  // KV namespace holding `<lowercase-pubkey-hex> -> NameRecord JSON`.
-  // Namespaces live in the Official Unofficial account (mkit-keys-NAMES /
-  // mkit-keys-NAMES_preview).
-  "kv_namespaces": [
-    {
-      "binding": "NAMES",
-      "id": "8c063de4f5674d24811c5acf3ff82196",
-      "preview_id": "83d3b7622f7041d59fe90145399db55b"
-    }
-  ],
-
-  // Named environments. `wrangler deploy --env staging` deploys an isolated
-  // Worker (`mkit-keys-staging`) with its own route and KV namespace, so
-  // staging writes never land in the production `mkit-keys-NAMES` namespace.
-  // `kv_namespaces` and `routes` are non-inheritable Wrangler keys and must be
-  // fully re-specified per environment — see
-  // https://developers.cloudflare.com/workers/wrangler/configuration/#non-inheritable-keys.
+  // Staging has its own Durable Object namespace, route and audience.
   "env": {
     "staging": {
       "name": "mkit-keys-staging",
+      "vars": { "AUTH_AUDIENCE": "https://staging-keys.mkit.sh" },
+      "durable_objects": { "bindings": [{ "name": "NAME_STORE", "class_name": "NameStore" }] },
 
       // Non-production route so auth/rate-limit changes can be validated
       // against a real Cloudflare deployment before promotion to
@@ -57,22 +46,11 @@
       // needs to target this host for end-to-end checks.
       "routes": [{ "pattern": "staging-keys.mkit.sh", "custom_domain": true }],
 
-      // Dedicated staging namespace (created via `wrangler kv namespace
-      // create mkit-keys-NAMES-staging` [--preview]) — never the production
-      // `mkit-keys-NAMES` namespace referenced above.
-      "kv_namespaces": [
-        {
-          "binding": "NAMES",
-          "id": "9a3c344237924330853b743de2326ceb",
-          "preview_id": "9a6a858c9b104cebb3b09b14941248a1"
-        }
-      ],
-
       // Dedicated staging dataset — `analytics_engine_datasets` is also a
       // non-inheritable key (see link above), so without this the staging
       // deployment's write-path logging would silently drop instead of
       // mirroring it. Analytics Engine datasets need no explicit
-      // pre-creation (unlike KV): the first write_data_point call creates
+      // pre-creation: the first write_data_point call creates
       // them.
       "analytics_engine_datasets": [
         { "binding": "WRITE_EVENTS", "dataset": "mkit_keys_write_events_staging" }

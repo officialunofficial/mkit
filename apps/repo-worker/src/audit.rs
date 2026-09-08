@@ -128,6 +128,14 @@ mod tests {
     #[test]
     fn audit_for_ok_calls_room_and_builds_accepted() {
         let ok = VerifyEnvelope::Ok {
+            authorization: crate::envelope::Authorized {
+                scope: String::new(),
+                public_key: String::new(),
+                nonce: String::new(),
+                fingerprint: String::new(),
+                commitment: String::new(),
+                expires_at: 0,
+            },
             public_key: "cd".repeat(32),
             body_digest: "ef".repeat(32),
             idempotency_key: "idem-1".to_owned(),
@@ -176,6 +184,14 @@ mod tests {
     #[test]
     fn different_procedures_produce_different_records() {
         let ok = VerifyEnvelope::Ok {
+            authorization: crate::envelope::Authorized {
+                scope: String::new(),
+                public_key: String::new(),
+                nonce: String::new(),
+                fingerprint: String::new(),
+                commitment: String::new(),
+                expires_at: 0,
+            },
             public_key: "11".repeat(32),
             body_digest: "22".repeat(32),
             idempotency_key: String::new(),

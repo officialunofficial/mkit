@@ -71,6 +71,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "user.identity",
     "trusted_remote_endpoint",
     "signer",
+    "transport_auth",
     "pull.require_signed",
     "key.backend",
     "key.default_ref",
@@ -140,14 +141,9 @@ pub struct Config {
     /// envelope, reusing the exact SAME signer resolution as commit
     /// signing — [`Self::signer`] / [`Self::signing_key`] /
     /// [`KeyConfig::ed25519_ref`](KeyConfig::ed25519_ref) — see
-    /// `remote_dispatch::envelope_signer_from_config`. Repo-safe: this
-    /// selects a wire-auth MODE, the same class of connection-shape
-    /// metadata as `remote_type`; the actual signer IDENTITY selectors
-    /// (`signer`, `signing_key`, `key.*`) stay user-scoped-only
-    /// ([`REPO_FORBIDDEN_KEYS`], unchanged) so a hostile repo cannot
-    /// redirect which key or backend does the signing — only whether
-    /// the already-user-controlled commit-signing identity is also used
-    /// to authenticate pushes to this remote.
+    /// `remote_dispatch::envelope_signer_from_config`. User-scoped only:
+    /// request authorization is a separate use of the ambient identity.
+    /// Destination trust is checked before loading a signing key.
     pub transport_auth: String,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
@@ -958,7 +954,6 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
-        ("transport_auth", cfg.transport_auth.as_str()),
     ] {
         if !v.is_empty() {
             out.push_str(k);
@@ -1843,6 +1838,15 @@ mod tests {
     /// the `apply_kv` layer so it catches the exact code path the
     /// hostile-clone exploit uses, not just the constant itself.
     #[test]
+    fn repository_cannot_select_ambient_request_signing() {
+        let cfg = layer(Some("transport_auth = envelope\n"), None);
+        assert!(
+            !cfg.transport_auth_envelope(),
+            "repo config selected an ambient signing operation"
+        );
+    }
+
+    #[test]
     fn every_forbidden_key_is_actually_dropped_from_repo_scope() {
         // A sentinel value that is syntactically valid for every key
         // (no control bytes, parseable as path / argv / ref / hex). If
@@ -1860,6 +1864,7 @@ mod tests {
                 "user.identity" => cfg.user_identity.as_str(),
                 "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
                 "signer" => cfg.signer.as_str(),
+                "transport_auth" => cfg.transport_auth.as_str(),
                 "pull.require_signed" => cfg.pull_require_signed.as_str(),
                 "key.backend" => cfg.key.backend.as_str(),
                 "key.default_ref" => cfg.key.default_ref.as_str(),

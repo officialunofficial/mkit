@@ -30,6 +30,12 @@ dedup &mdash; these are complementary layers).
 
 ---
 
+The 1 MiB writer threshold and the boundary rules here govern newly produced
+objects. They do not impose a unique representation on existing file contents:
+a large inline Blob or another valid chunk layout remains readable. File
+comparison follows SPEC-OBJECTS §7 and preserves an existing staged identity
+when bytes are unchanged.
+
 ## 2. Determinism contract
 
 Chunk boundaries, and therefore `chunked_blob` hashes, are **fully

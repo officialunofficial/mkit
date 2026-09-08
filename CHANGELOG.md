@@ -7,11 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Worker writes rejected by quotas or rate limits no longer allocate replay
+  records, including chat posts and reactions. Existing operation retries still
+  reuse their reservation or saved reply without a second quota charge.
+- Native authenticated transport requests send the required envelope-version
+  header. External signing negotiates the advertised raw-byte or opaque-handle
+  key form, including the bundled CTAP signer.
+- Restaging a regular file as a symlink preserves a valid Blob target even when
+  the old file used a chunked representation.
+- Ref lock filenames stay bounded for valid long and nested ref names.
+- HTTP and S3 shard downloads process successful responses while admitting
+  workers, so an available quorum is not blocked by redundant slow requests.
+- Git correspondence audits now derive imported fields and graph edges from
+  retained source bytes, verify pinned signatures and exact provenance claims,
+  and work without the import private key.
+- File comparisons, restaging, merge shortcuts and exact rename detection now
+  recognize equal content across valid Blob and ChunkedBlob representations.
+  Content-comparison and source-aware snapshot APIs propagate malformed or
+  missing chunk errors. Status uses the same content-aware rename detector.
+- Pack and packmap consumers reject bytes or shard manifests that do not match
+  the requested content key before unpacking or publishing effects.
+- All local ref mutations participate in the same per-ref lock, including
+  unconditional writes, deletion, tags and remote refs. File-transport writes
+  serialize every condition through their separate transport lock.
+- External signers receive a signing request only after a separate compatible
+  capabilities response is validated.
+- Signed transport writes use destination-bound auth v2, including the content
+  commitment, repository, validity and stable nonce. Worker effects, quota and
+  replay results commit atomically; immutable uploads can resume without a
+  second quota charge. Repository config cannot enable ambient signing. Only
+  the current auth v2 contract is supported.
+- File-fetch staging now bounds retained pack payload, disk usage and chain
+  counts; shard downloads share process-wide memory and concurrency budgets.
+
+### Changed
+
+- Sparse proofs and caches move to v2 canonical Tree witnesses. Verification
+  requires the independently requested Tree ID and derives the exact selection;
+  recursive witnesses establish completeness. Caches use `.witness` files;
+  verification returns the derived entries directly.
+- The staged index accepts only checksummed v3. Unsupported or corrupt indexes
+  fail safely, including before GC; there is no migration or automatic rebuild.
+- History proofs now describe canonical first-parent ancestry in explicit
+  generations, with locally trusted contextual descriptors and recoverable
+  publication. Bounded complete snapshots use O(chain length) reconstruction;
+  obsolete journal backends and their runtime dependencies are removed.
+- The keys Worker stores authoritative names and replay records in per-key
+  SQLite Durable Objects, with no KV fallback. Repository Workers use the
+  shared transactional replay ledger without obsolete idempotency tables.
+
 ### Performance
 
 - *(core,cli)* parallelize push-plan delta encoding across rayon. `transfer::plan_pack` used to `store.read` + `delta::encode` (disk read + block-hash-table build + greedy scan, all sequential) once per delta candidate while planning a push; `transfer::plan_pack` now delegates that loop to a new `transfer::plan_pack_with(..., encode_deltas)` batch callback, and `mkit-cli`'s push path passes a rayon fan-out (`encode_delta_candidates_batch`, mirroring the existing pack-compression/signature-verification fan-outs) instead of the built-in sequential one. `cargo bench -p mkit-benches --bench delta_plan_fanout` (new suite, isolating `delta::encode` over synthetic 64 KiB near-duplicate chunks, 4-core host): 256 candidates 46.99ms → 14.79ms (3.18x); the crossover is essentially immediate (each candidate already costs ~0.17ms, well above rayon's dispatch overhead), so pushes touching more than a handful of changed blobs benefit. **SemVer:** additive — `mkit-core` gains new public items (`transfer::plan_pack_with`, `transfer::DeltaCandidate`, `transfer::encode_delta_candidate`); `transfer::plan_pack`'s signature and behavior are unchanged. Minor version bump, not breaking.
 
 ### Removed
+
+- Compatibility-only index readers/migration APIs, legacy history APIs, the
+  hash-only rename API, and redundant sparse-selection APIs. Pre-production
+  development supports the current formats without backward-compatibility shims.
 
 - **Windows is no longer a supported build, test, or release target (MKIT-6).** commonware-runtime `2026.9.0`'s non-Linux storage-sync path calls `libc::sync()`, which does not exist on `x86_64-pc-windows-msvc` — the workspace and its test suite (not just the default-feature `mkit` binary) no longer build there. Rather than ship a Windows CI/release leg that cannot actually build or test the workspace, or maintain an untested Windows-only subset, Windows was dropped: the `windows-smoke` CI job, the `x86_64-pc-windows-msvc` release leg (and its `.zip` archive), the `install.ps1` installer, the Scoop packaging manifest and `release-verify.yml`'s Scoop channel check, and the `windows-credential` leg of the `keystore-backends` CI matrix are all gone. `mkit-keystore`'s `backend-windows-credential` feature and its `BackendKind::WindowsCredentialManager` variant were removed — `"windows-credential"` is now an unrecognized backend name (`key backend: ...` / exit `CONFIG_ERROR`) rather than a compiled-in-but-platform-unavailable one (previously exit `UNAVAILABLE`, "requires Windows"). Removing a public enum variant from a published crate is semver-breaking: `mkit-keystore` (and, per the workspace's lockstep versioning, every `mkit-*` crate) needs a `0.5.0` release, not `0.4.3`, to ship this. Windows users should run mkit under WSL, which uses the Linux binary — see `docs/INVARIANTS.md`'s "Windows is not a build, test, or release target" entry.
 

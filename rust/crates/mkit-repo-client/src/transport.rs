@@ -162,6 +162,10 @@ struct Envelope {
     public_key: String,
     signature: String,
     digest: String,
+    audience: String,
+    repository: String,
+    commitment: String,
+    expires_at: String,
     created_at: String,
     idempotency_key: String,
 }
@@ -203,11 +207,12 @@ async fn run_sign(sign: &SignFn, body_digest_hex: &str) -> Result<Envelope, Fetc
         public_key: get("publicKeyHex")?,
         signature: get("signatureHex")?,
         digest: body_digest_hex.to_string(),
+        audience: get("audience")?,
+        repository: get("repository")?,
+        commitment: get("commitment")?,
+        expires_at: get("expiresAt")?,
         created_at: get("createdAt")?,
-        idempotency_key: js_sys::Reflect::get(&obj, &JsValue::from_str("idempotencyKey"))
-            .ok()
-            .and_then(|v| v.as_string())
-            .unwrap_or_default(),
+        idempotency_key: get("idempotencyKey")?,
     })
 }
 
@@ -240,6 +245,11 @@ async fn fetch(
         headers.append(header::PUBLIC_KEY, &env.public_key)?;
         headers.append(header::SIGNATURE, &env.signature)?;
         headers.append(header::DIGEST, &env.digest)?;
+        headers.append("X-Envelope-Version", "2")?;
+        headers.append("X-Audience", &env.audience)?;
+        headers.append("X-Repository", &env.repository)?;
+        headers.append("X-Content-Commitment", &env.commitment)?;
+        headers.append("X-Expires-At", &env.expires_at)?;
         headers.append(header::CREATED_AT, &env.created_at)?;
         if !env.idempotency_key.is_empty() {
             headers.append(header::IDEMPOTENCY_KEY, &env.idempotency_key)?;

@@ -81,7 +81,12 @@ export async function setName(api: MkitApi, seedHex: string, pubkeyHex: string, 
   // The body bytes we hash MUST be the bytes we send — serialize once.
   const bodyStr = JSON.stringify({ name })
   const bodyDigest = api.blake3_hex(TEXT_ENCODER.encode(bodyStr))
-  const env = buildSignedEnvelope(api, seedHex, { procedure: SET_NAME_PROCEDURE, bodyDigest })
+  const env = buildSignedEnvelope(api, seedHex, {
+    audience: new URL(base).origin,
+    repository: 'keys',
+    procedure: SET_NAME_PROCEDURE,
+    bodyDigest,
+  })
 
   const res = await fetch(`${base}/name/${pubkeyHex.toLowerCase()}`, {
     method: 'PUT',

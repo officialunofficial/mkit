@@ -105,6 +105,7 @@ jobs:
       - name: Setup buf
         uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99  # v1.50.0
         with:
+          github_token: ${{ github.token }}
           # Pin the installed buf CLI to match proto.yml's BUF_VERSION, not
           # the buf-setup-action's own stale default (1.50.0) -- the two
           # versions differ in how leading detached file-comments are

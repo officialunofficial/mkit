@@ -432,10 +432,10 @@ In summary, the wire is length-prefixed `SignerFrame` protobuf
 messages (NOT one-line JSON) carrying:
 
 ```
-parent → child:   Hello { protocol = v1, ... }
-                  SignRequest { algorithm, key_form, key_ref, payload }
-child  → parent:  HelloResponse { capabilities, ... }   (optional)
-                  SignResponse { signature, public_key, key_id }
+parent → child:   Hello { protocol = v1, want_capabilities = true, ... }
+child  → parent:  HelloResponse { protocol = v1, capabilities, ... }
+parent → child:   SignRequest { algorithm, key_form, key_ref, payload }
+child  → parent:  SignResponse { signature, public_key, key_id }
                     OR Error { code, message }
 ```
 

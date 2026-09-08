@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Pure per-author write-quota decision for UpdateRef/AdvanceRefs/UploadPack,
-// ported verbatim (same arithmetic, same tests) from
-// apps/repo-worker/src/write_quota.rs — see that module's doc for the full
-// design rationale. Enforcement is wired through `AuthInterceptor`
-// (`worker_impl/auth.rs`) for the two unary RPCs, and through the
-// `upload_pack` handler itself (`worker_impl/service.rs`) for the
-// client-streaming one — both call the RefStore DO's `/quota` op
-// (`worker_impl/refstore.rs`) before doing any storage write, so the DO's
-// serial execution makes the read-evaluate-write atomic.
+// Pure per-author write-quota arithmetic. RefStore evaluates this inside the
+// transaction that reserves a signed nonce and applies mutable effects.
+// Object publication reserves its budget before R2 access; retries reuse the
+// reservation and never charge twice.
 //
 // Unlike apps/repo-worker, this Worker serves a SINGLE global repository (one
 // RefStore DO instance — see wrangler.jsonc and SPEC-TRANSPORT-CONNECT
@@ -44,7 +39,7 @@ pub const WRITE_QUOTA_MAX_OPS: u32 = 300;
 pub const WRITE_QUOTA_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MiB
 
 /// The persisted per-author quota row (mirrors the DO's `write_quota` table:
-/// `refstore::read_quota_state` / `refstore::handle_quota_check`).
+/// `refstore::read_quota_state` / `refstore::charge_quota`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaState {
     /// Epoch-ms the current window started.

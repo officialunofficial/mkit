@@ -4,8 +4,8 @@
 //! sequence produces, and the agreement between `RepoLayout`'s
 //! accessors and the real files the binary writes.
 //!
-//! Later phases (linked worktrees) MUST keep these passing untouched —
-//! a single-worktree repo's on-disk shape is a compatibility surface.
+//! Later phases preserve this baseline; versioned optional state is pinned
+//! separately so feature additions cannot hide relocation of existing files.
 
 mod common;
 
@@ -31,7 +31,7 @@ fn mkit_entries(mkit: &Path) -> BTreeSet<String> {
                 .replace('\\', "/");
             // Content-addressed interiors: presence pinned via the
             // parent dir, contents vary with commit timestamps.
-            let volatile_interior = rel.starts_with("objects/") || rel.starts_with("history/");
+            let volatile_interior = rel.starts_with("objects/") || rel.starts_with("history-v1/");
             if !volatile_interior {
                 out.insert(rel.clone());
             }
@@ -64,7 +64,7 @@ fn scripted_sequence_produces_historical_layout() {
     repo.ok(&["stash", "save", "-m", "wip"]);
 
     let entries = mkit_entries(&repo.mkit_dir());
-    let expected: BTreeSet<String> = [
+    let mut expected: BTreeSet<String> = [
         "HEAD",
         "format",
         "index",
@@ -83,9 +83,41 @@ fn scripted_sequence_produces_historical_layout() {
     .into_iter()
     .map(str::to_owned)
     .collect();
-    // `history/` only materialises when the binary ships history-mmr;
-    // accept both shapes without weakening the rest of the pin.
-    let entries: BTreeSet<String> = entries.into_iter().filter(|e| e != "history").collect();
+    if cfg!(feature = "history-mmr") {
+        expected.insert("history-v1".into());
+    }
+    #[cfg(feature = "history-mmr")]
+    {
+        use mkit_core::{hash, history::AncestrySnapshot};
+        let layout = RepoLayout::single(repo.path());
+        let root = repo.mkit_dir().join("history-v1");
+        let children: BTreeSet<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            children,
+            BTreeSet::from(["branches".into(), "repository-id".into()])
+        );
+        for branch in ["main", "side"] {
+            let snapshot = AncestrySnapshot::load(&layout, branch).unwrap();
+            let descriptor = snapshot.descriptor();
+            assert_eq!(descriptor.full_ref, format!("refs/heads/{branch}"));
+            assert_eq!(descriptor.leaf_count, 1);
+            let branch_dir = root
+                .join("branches")
+                .join(hash::to_hex(&hash::hash(descriptor.full_ref.as_bytes())));
+            assert!(branch_dir.join("current").is_file());
+            assert!(
+                branch_dir
+                    .join("generations")
+                    .join(format!("{}.snapshot", hash::to_hex(&descriptor.generation)))
+                    .is_file()
+            );
+            assert!(!branch_dir.join("transaction").exists());
+            assert!(!branch_dir.join("pending-snapshot").exists());
+        }
+    }
     assert_eq!(
         entries, expected,
         "single-worktree .mkit layout drifted — Phase 0/1 of #493 forbids this"

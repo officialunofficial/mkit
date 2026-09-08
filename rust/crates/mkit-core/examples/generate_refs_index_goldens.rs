@@ -31,15 +31,15 @@ fn main() -> std::io::Result<()> {
     let empty = Index::new();
     let three = three_entry_index();
 
-    // 1. index_empty.bin — empty index header (9 bytes).
+    // 1. index_empty.bin — empty index header + checksum (41 bytes).
     let empty_bytes = empty.serialize();
-    assert_eq!(empty_bytes.len(), 9);
-    assert_eq!(empty_bytes[4], 0x02);
+    assert_eq!(empty_bytes.len(), 41);
+    assert_eq!(empty_bytes[4], 0x03);
     write_vector(&out_dir, "index_empty", &empty_bytes)?;
 
     // 2. index_3entries.bin — blob + tree + executable.
     let three_bytes = three.serialize();
-    assert_eq!(three_bytes[4], 0x02);
+    assert_eq!(three_bytes[4], 0x03);
     write_vector(&out_dir, "index_3entries", &three_bytes)?;
 
     // 3. ref_detached.bin — 65-byte ref wire (lowercase hex + \n).

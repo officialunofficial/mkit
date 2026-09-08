@@ -22,13 +22,9 @@
 // risk in the spec — chunked pack transfer replacing whole-pack buffering is
 // out of scope for this issue (see mkit#699 "Out of Scope").
 //
-// WRITE QUOTA: `update_ref`/`advance_refs` are gated entirely by
-// `AuthInterceptor::intercept_unary` (`worker_impl/auth.rs`) before either
-// handler below ever runs. `upload_pack` is the one exception — its handler
-// runs its OWN quota check (`enforce_write_quota`, also in auth.rs) right
-// after decoding the stream's `header` message, since that's the earliest
-// point the pack's declared size is known; see the call site below and
-// auth.rs's module docs for the full rationale.
+// RefStore couples replay reservations, quota, and ref changes in one
+// transaction. UploadPack reserves its signed size before reading chunks and
+// finalizes after immutable R2 publication.
 
 use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
@@ -118,12 +114,7 @@ async fn put_addressed(env: &Env, key: &str, bytes: Vec<u8>) -> Result<(), Conne
 
 /// Issue a JSON POST to the RefStore DO and decode the response.
 ///
-/// `pub(crate)` so `super::health`'s cheap DO reachability probe
-/// (mkit#796) reuses the exact same DO-call plumbing (retry-free, one
-/// round trip) rather than a second copy — mirrors apps/repo-worker's
-/// identical `pub(crate)` rationale on its own `do_call` — and so
-/// `worker_impl/auth.rs`'s `enforce_write_quota` can drive the `/quota` op
-/// too (see that module's docs).
+/// Shared with the health probe; each call makes one DO round trip.
 pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     env: &Env,
     op: &str,
@@ -151,7 +142,11 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         .map_err(|e| ce_storage(StorageOp::RefstoreFetch, e))?;
 
     if resp.status_code() >= 400 {
+        let status = resp.status_code();
         let msg = resp.text().await.unwrap_or_default();
+        if status == 429 {
+            return Err(ConnectError::resource_exhausted(msg));
+        }
         return Err(ce_invalid(format!("refstore {op}: {msg}")));
     }
     resp.json::<Resp>()
@@ -263,7 +258,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
     async fn update_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, UpdateRefRequest>,
     ) -> ServiceResult<UpdateRefResponse> {
         let msg = request.to_owned_message();
@@ -285,6 +280,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         let env = self.env.clone();
         SendFuture::new(async move {
             let body = UpdateReq {
+                proof: proof(&ctx)?,
                 name,
                 new: hex::encode(&new_id),
                 expectation,
@@ -303,7 +299,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
     async fn advance_refs(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, AdvanceRefsRequest>,
     ) -> ServiceResult<AdvanceRefsResponse> {
         let msg = request.to_owned_message();
@@ -334,6 +330,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         let env = self.env.clone();
         SendFuture::new(async move {
             let body = AdvanceReq {
+                proof: proof(&ctx)?,
                 head_ref,
                 head_expectation,
                 head_expected: expected_hex(&head_expected_id),
@@ -414,20 +411,36 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
             )));
         }
 
-        // 1b) Write-quota check, now that `header` has given us the pack's
-        // declared size — this is the earliest point in the stream a byte
-        // quota CAN be charged (see `worker_impl/auth.rs`'s
-        // `intercept_streaming` doc for why the check can't run there
-        // instead). Still runs before a single chunk is read or any R2 I/O
-        // happens, so a quota-exhausted author never pays for the transfer.
-        let author = ctx
+        let authorization = ctx
             .extensions()
-            .get::<super::auth::AuthorPubkey>()
-            .map(|a| a.0.clone())
-            .unwrap_or_default();
-        if let Some(err) = super::auth::enforce_write_quota(&self.env, &author, total_bytes).await {
-            return Err(err);
+            .get::<mkit_core::write_auth::Authorized>()
+            .cloned()
+            .ok_or_else(|| ConnectError::unauthenticated("missing authorization"))?;
+        if authorization.commitment != format!("pack:{}:{total_bytes}", hex::encode(&pack_id)) {
+            return Err(ConnectError::unauthenticated(
+                "pack header differs from signed commitment",
+            ));
         }
+        let object_proof = mkit_worker_common::replay::Proof::from(&authorization);
+        #[cfg(feature = "test-faults")]
+        let fault = ctx
+            .header("x-mkit-test-fault")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let env = self.env.clone();
+        let reserve = super::wire::ObjectWriteReq {
+            proof: object_proof.clone(),
+            bytes: total_bytes,
+            complete: false,
+        };
+        SendFuture::new(async move {
+            do_call::<_, super::wire::ObjectWriteResp>(&env, "/object", &reserve).await
+        })
+        .await?;
+
+        #[cfg(feature = "test-faults")]
+        test_fault("after-reserve", &fault, &object_proof.scope)?;
 
         // 2) Chunks, in ascending contiguous offset order, ending with `last`.
         let mut received: Vec<u8> = Vec::with_capacity(total_bytes as usize);
@@ -482,6 +495,14 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         let env = self.env.clone();
         SendFuture::new(async move {
             put_addressed(&env, &pack_key(&pack_id), received).await?;
+            #[cfg(feature = "test-faults")]
+            test_fault("after-put", &fault, &object_proof.scope)?;
+            let complete = super::wire::ObjectWriteReq {
+                proof: object_proof,
+                bytes: total_bytes,
+                complete: true,
+            };
+            do_call::<_, super::wire::ObjectWriteResp>(&env, "/object", &complete).await?;
             Ok(Response::new(UploadPackResponse::default()))
         })
         .await
@@ -546,4 +567,22 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         };
         Response::stream_ok(futures::stream::iter([Ok(header), Ok(chunk)]))
     }
+}
+
+fn proof(ctx: &RequestContext) -> Result<mkit_worker_common::replay::Proof, ConnectError> {
+    ctx.extensions()
+        .get::<mkit_core::write_auth::Authorized>()
+        .map(mkit_worker_common::replay::Proof::from)
+        .ok_or_else(|| ConnectError::unauthenticated("missing authorization"))
+}
+
+#[cfg(feature = "test-faults")]
+fn test_fault(stage: &str, requested: &str, scope: &str) -> Result<(), ConnectError> {
+    thread_local! { static FAILED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default(); }
+    if stage == requested
+        && FAILED.with(|failed| failed.borrow_mut().insert(format!("{stage}:{scope}")))
+    {
+        return Err(ConnectError::internal(format!("injected {stage} failure")));
+    }
+    Ok(())
 }
