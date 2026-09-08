@@ -189,13 +189,6 @@ updates:
 
   - package-ecosystem: "npm"
     directory: "/apps/mcp"
-    # The Workers test pool 0.22 requires Vitest 4. Revisit when its peer
-    # dependencies support Vitest 5; keep compatible minor/security updates.
-    ignore:
-      - dependency-name: "vitest"
-        versions: [">=5.0.0 <6.0.0"]
-      - dependency-name: "@vitest/*"
-        versions: [">=5.0.0 <6.0.0"]
     schedule:
       interval: "weekly"
       day: "monday"
@@ -242,7 +235,7 @@ updates:
 
   - package-ecosystem: "bun"
     directory: "/apps/spammer-worker"
-    # The Workers test pool 0.22 requires Vitest 4. Revisit when its peer
+    # The Cloudflare Vitest plugin 1.1 requires Vitest 4. Revisit when its peer
     # dependencies support Vitest 5; keep compatible minor/security updates.
     ignore:
       - dependency-name: "vitest"
