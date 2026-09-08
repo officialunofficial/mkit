@@ -685,6 +685,35 @@ fn verify_fanout_threshold() -> usize {
     crate::fanout::threshold(VERIFY_FANOUT_ENTRIES_PER_THREAD)
 }
 
+/// Chunk size [`verify_new_object_signatures`]'s parallel path processes
+/// `stored` in — deliberately decoupled from [`verify_fanout_threshold`]
+/// (a small, pool-size-scaled crossover picked to amortize rayon's
+/// per-dispatch overhead) rather than reusing it as the chunk size too.
+/// The two constants answer different questions: `verify_fanout_threshold`
+/// asks "is this worth parallelizing at all?"; this asks "how much wasted
+/// verification work should a hostile fetch's first bad signature be
+/// allowed to force?" A large legitimate fetch (thousands of newly-signed
+/// objects) pays one rayon dispatch per chunk, so reusing the tiny
+/// crossover threshold as the chunk size (as few as `2 * num_threads`,
+/// e.g. 16 on an 8-core host) meant a 10,000-object fetch paid roughly
+/// 625 separate dispatches — thread-pool coordination overhead with no
+/// benefit, since the hostile-input bound doesn't need a chunk anywhere
+/// near that small. 512 keeps the bound meaningful (a hostile remote can
+/// force at most 512 extra reads/Ed25519-verifies past the object that
+/// actually fails — a small, fixed amount of wasted CPU regardless of
+/// fetch size) while cutting a 10,000-object fetch to ~20 dispatches.
+const VERIFY_CHUNK_CAP: usize = 512;
+
+/// The chunk size [`verify_new_object_signatures`]'s parallel path uses —
+/// see [`VERIFY_CHUNK_CAP`]. `.max(verify_fanout_threshold())` guards the
+/// (currently unreachable on any real host) case of a thread pool large
+/// enough that the crossover threshold itself would exceed the cap —
+/// a chunk should never be smaller than the count that justified
+/// parallelizing it in the first place.
+fn verify_chunk_size() -> usize {
+    VERIFY_CHUNK_CAP.max(verify_fanout_threshold())
+}
+
 /// Verify the Ed25519 signature on every commit/remix/tag in `stored` —
 /// the digests [`unpack_downloaded_packs`] just wrote, i.e. the objects
 /// this fetch actually introduced (issue #692). Uses the exact same check
@@ -709,20 +738,20 @@ fn verify_fanout_threshold() -> usize {
 /// across cores.
 ///
 /// The parallel path processes `stored` in fixed-size chunks of
-/// [`verify_fanout_threshold`] entries, verifying each chunk in full
-/// before starting the next, rather than fanning the whole slice out in
-/// one `par_iter` — rayon's `try_for_each` only best-effort
-/// short-circuits (already-dispatched work keeps running once an error
-/// is found), so a single flat fan-out over a very large hostile fetch
-/// could still force reading and Ed25519-verifying a large fraction of
-/// the batch past the first invalid signature before the rejection
-/// propagates. Chunking bounds that wasted work to at most one chunk:
-/// a hostile remote can force at most `verify_fanout_threshold()` extra
-/// reads/verifies beyond the object that actually fails, never the rest
-/// of `stored`. Which entry's error surfaces first is not guaranteed to
-/// match `stored`'s order *within* a chunk, but the chunk containing the
-/// first invalid entry (in `stored`'s order) is always the one whose
-/// error is returned, since later chunks are never started.
+/// [`verify_chunk_size`] entries, verifying each chunk in full before
+/// starting the next, rather than fanning the whole slice out in one
+/// `par_iter` — rayon's `try_for_each` only best-effort short-circuits
+/// (already-dispatched work keeps running once an error is found), so a
+/// single flat fan-out over a very large hostile fetch could still force
+/// reading and Ed25519-verifying a large fraction of the batch past the
+/// first invalid signature before the rejection propagates. Chunking
+/// bounds that wasted work to at most one chunk: a hostile remote can
+/// force at most `verify_chunk_size()` extra reads/verifies beyond the
+/// object that actually fails, never the rest of `stored`. Which entry's
+/// error surfaces first is not guaranteed to match `stored`'s order
+/// *within* a chunk, but the chunk containing the first invalid entry
+/// (in `stored`'s order) is always the one whose error is returned,
+/// since later chunks are never started.
 fn verify_new_object_signatures(
     store: &ObjectStore,
     stored: &[Hash],
@@ -746,12 +775,11 @@ fn verify_new_object_signatures(
             reason: e.to_string(),
         })
     };
-    let threshold = verify_fanout_threshold();
-    if stored.len() < threshold {
+    if stored.len() < verify_fanout_threshold() {
         return stored.iter().try_for_each(verify_one);
     }
     stored
-        .chunks(threshold)
+        .chunks(verify_chunk_size())
         .try_for_each(|chunk| chunk.par_iter().try_for_each(verify_one))
 }
 
@@ -1134,7 +1162,7 @@ mod tests {
     {
         // Regression for the chunked fan-out: a hostile remote must not be
         // able to force verification work past the chunk containing the
-        // first invalid signature. The first `threshold` entries are a
+        // first invalid signature. The first `chunk_size` entries are a
         // validly-signed batch with one tampered signature; every entry
         // after that names a digest that was NEVER written to the store.
         // If the implementation ever started a second chunk, reading one
@@ -1146,9 +1174,9 @@ mod tests {
         let layout = mkit_core::layout::RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).unwrap();
         let kp = mkit_core::sign::KeyPair::generate().unwrap();
-        let threshold = verify_fanout_threshold();
+        let chunk_size = verify_chunk_size();
 
-        let mut stored: Vec<Hash> = (0..threshold)
+        let mut stored: Vec<Hash> = (0..chunk_size)
             .map(|i| store.write(&signed_commit_bytes(&kp, i)).unwrap())
             .collect();
         let Object::Commit(mut c) = store.read_object(&stored[0]).unwrap() else {
@@ -1158,7 +1186,7 @@ mod tests {
         let tampered_bytes = mkit_core::serialize::serialize(&Object::Commit(c)).unwrap();
         let tampered_hash = store.write(&tampered_bytes).unwrap();
         stored[0] = tampered_hash;
-        stored.extend((0..threshold * 3).map(|i| h(&format!("never-written-{i}"))));
+        stored.extend((0..chunk_size * 3).map(|i| h(&format!("never-written-{i}"))));
 
         let err = verify_new_object_signatures(&store, &stored, true)
             .expect_err("the tampered signature in the first chunk must reject the fetch");

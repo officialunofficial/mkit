@@ -241,6 +241,7 @@ fn refresh_stat_cache(layout: &RepoLayout, observations: &[mkit_core::worktree::
     ) else {
         return;
     };
+    super::warn_if_served(layout);
     let Ok(mut fresh) = index::read_index(layout) else {
         return;
     };

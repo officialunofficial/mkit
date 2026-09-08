@@ -1606,6 +1606,7 @@ Based on BSD `sysexits(3)`:
 | 65   | `dataerr`        | Malformed input (corrupt object, bad hash)   |
 | 66   | `noinput`        | Missing / unreadable input file              |
 | 69   | `unavailable`    | Transport could not connect                  |
+| 70   | `software`       | Internal consistency error (a bug, not bad input) |
 | 73   | `cantcreat`      | Cannot create output file                    |
 | 75   | `tempfail`       | Temporary failure; retry is safe             |
 | 76   | `protocol_error` | Bad URL scheme or malformed server response  |

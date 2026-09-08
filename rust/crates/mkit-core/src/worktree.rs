@@ -55,6 +55,16 @@ pub enum WorktreeError {
     /// Error returned by the object store.
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+    /// A `hash_chunks` callback passed to
+    /// [`store_large_file_streaming_with`]/[`hash_file_with_metadata_with`]
+    /// returned a different number of hashes than the batch it was given —
+    /// a contract violation by the caller (see those functions' docs),
+    /// never a normal runtime condition. Reported as a typed error rather
+    /// than a panic since the caller here is `mkit-cli`, a
+    /// long(er)-running process where a hard panic is a worse failure mode
+    /// than a clean, exit-coded error.
+    #[error("hash_chunks callback returned {actual} hashes for a {expected}-chunk batch")]
+    ChunkBatchLengthMismatch { expected: usize, actual: usize },
 }
 
 /// Result alias used throughout this module.
@@ -698,6 +708,29 @@ fn sequential_hash_chunks<S: ObjectSink + ?Sized>(
         .collect()
 }
 
+/// Call `hash_chunks(sink, batch)` and enforce its documented contract —
+/// exactly one [`Hash`] per input chunk — before the caller ever sees the
+/// result, returning [`WorktreeError::ChunkBatchLengthMismatch`] instead of
+/// silently letting a short/long result desync the manifest's `chunks`
+/// list from the file's actual chunk sequence. [`store_large_file_streaming_with`]'s
+/// only caller of `hash_chunks`; kept as a thin wrapper so the check lives
+/// in exactly one place rather than being repeated at both call sites.
+fn checked_hash_chunks<S: ObjectSink + ?Sized>(
+    hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+    sink: &S,
+    batch: &[Vec<u8>],
+) -> WorktreeResult<Vec<Hash>> {
+    let hashes = hash_chunks(sink, batch)?;
+    if hashes.len() == batch.len() {
+        Ok(hashes)
+    } else {
+        Err(WorktreeError::ChunkBatchLengthMismatch {
+            expected: batch.len(),
+            actual: hashes.len(),
+        })
+    }
+}
+
 /// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
 /// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
 /// instead of requiring the whole file resident in memory first (issue
@@ -747,12 +780,12 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
-            chunks.extend(hash_chunks(sink, &batch)?);
+            chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        chunks.extend(hash_chunks(sink, &batch)?);
+        chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
     }
 
     let manifest = Object::ChunkedBlob(ChunkedBlob {

@@ -25,6 +25,12 @@ pub const UNAVAILABLE: u8 = 69;
 /// Cannot create an output file.
 pub const CANTCREAT: u8 = 73;
 
+/// Internal consistency error — a contract between internal components
+/// was violated (e.g. a caller-supplied batch callback returned the wrong
+/// number of results). Never user-triggerable through normal CLI usage;
+/// signals a bug rather than bad input, bad config, or a transient failure.
+pub const SOFTWARE: u8 = 70;
+
 /// Temporary failure; retry is safe.
 pub const TEMPFAIL: u8 = 75;
 

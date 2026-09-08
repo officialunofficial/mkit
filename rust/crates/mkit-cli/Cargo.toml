@@ -140,6 +140,19 @@ subtle = { version = "2", optional = true }
 # HeaderMap/header names for the bearer-auth interceptor — already resolved
 # transitively (reqwest pulls it), not a new supply-chain root.
 http = { version = "1", optional = true }
+# `tower_service::Service` — the trait `mkit mcp --http`'s bearer-auth
+# wrapper (`mcp_v2.rs`'s `BearerAuthHttp`) implements around
+# `StreamableHttpService` before handing it to `TowerToHyperService`.
+# Already resolved transitively (rmcp/hyper-util pull it), not a new
+# supply-chain root.
+tower-service = { version = "0.3", optional = true }
+# `BoxBody`/`Bytes` — used to construct the 401 response `BearerAuthHttp`
+# returns without calling into `StreamableHttpService`, matching its
+# `Response = http::Response<BoxBody<Bytes, Infallible>>` type exactly.
+# Already resolved transitively (rmcp pulls both), not a new supply-chain
+# root.
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
 mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
@@ -309,7 +322,7 @@ http-transport = ["mkit-transport-connect/server", "dep:connectrpc", "dep:axum",
 # (see commands/mcp.rs's module doc); the pre-existing hand-rolled stdio
 # server stays the default `mkit mcp` implementation either way. Turn on via
 # `--features mcp-v2`.
-mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "tokio/net", "tokio/signal"]
+mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", "dep:http", "dep:tower-service", "dep:http-body-util", "dep:bytes", "tokio/net", "tokio/signal"]
 # The git bridge (`mkit git ...`, SPEC-GIT-BRIDGE / SPEC-GIT-IMPORT).
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's

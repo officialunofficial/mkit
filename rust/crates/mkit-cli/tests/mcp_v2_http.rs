@@ -23,6 +23,9 @@ fn mkit_bin() -> &'static str {
 struct HttpMcp {
     child: Child,
     base_url: String,
+    /// Extra headers (e.g. `Authorization`) sent on every [`HttpMcp::request`]
+    /// call — empty for the plain [`HttpMcp::spawn`] helper.
+    headers: Vec<(String, String)>,
 }
 
 impl Drop for HttpMcp {
@@ -33,12 +36,24 @@ impl Drop for HttpMcp {
 }
 
 impl HttpMcp {
-    /// Spawn `mkit mcp --repository <repo> --http 127.0.0.1:0` and block
-    /// until its "listening on `http://ADDR`" stderr line reveals the
-    /// OS-assigned port (see `mcp_v2.rs::serve_http`'s `local_addr()` doc
-    /// comment — this test is exactly why that logs the resolved address
-    /// rather than the requested one).
+    /// Spawn `mkit mcp --repository <repo> --http 127.0.0.1:0
+    /// --unsafe-allow-any-http-peer` and block until its "listening on
+    /// `http://ADDR`" stderr line reveals the OS-assigned port (see
+    /// `mcp_v2.rs::serve_http`'s `local_addr()` doc comment — this test is
+    /// exactly why that logs the resolved address rather than the requested
+    /// one). The unsafe flag opts out of the fail-closed bearer-token gate
+    /// (`mcp_v2.rs::resolve_http_auth`) so these tool-catalog tests don't
+    /// have to carry a token — see `mod auth` below for gate coverage.
     fn spawn(repo: &std::path::Path) -> Self {
+        Self::spawn_with_args(repo, &["--unsafe-allow-any-http-peer"], &[])
+    }
+
+    /// [`Self::spawn`], but with `extra_args` appended to the `mkit mcp`
+    /// invocation and `headers` sent on every [`Self::request`] call — the
+    /// hook `mod auth`'s tests use to pass `--http-token`/exercise the
+    /// `Authorization` header without duplicating the spawn/address-parsing
+    /// dance.
+    fn spawn_with_args(repo: &std::path::Path, extra_args: &[&str], headers: &[(&str, &str)]) -> Self {
         let mut child = Command::new(mkit_bin())
             .args([
                 "mcp",
@@ -47,6 +62,7 @@ impl HttpMcp {
                 "--http",
                 "127.0.0.1:0",
             ])
+            .args(extra_args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -73,7 +89,36 @@ impl HttpMcp {
         Self {
             child,
             base_url: format!("http://{addr}/"),
+            headers: headers
+                .iter()
+                .map(|&(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
+    }
+
+    /// Try to spawn `mkit mcp --http` with `extra_args` and NO listening
+    /// address reported within a short grace period — for the fail-closed
+    /// gate tests, where the process is expected to print a config error
+    /// and exit before ever binding. Returns the process's exit status and
+    /// captured stderr.
+    fn spawn_expect_refusal(repo: &std::path::Path, extra_args: &[&str]) -> (std::process::ExitStatus, String) {
+        let output = Command::new(mkit_bin())
+            .args([
+                "mcp",
+                "--repository",
+                repo.to_str().unwrap(),
+                "--http",
+                "127.0.0.1:0",
+            ])
+            .args(extra_args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("spawn mkit mcp --http");
+        (
+            output.status,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
     }
 
     /// Send one modern (2026-07-28) request: the per-request envelope lives
@@ -109,6 +154,9 @@ impl HttpMcp {
             && let Some(name) = params.get("name").and_then(Value::as_str)
         {
             request = request.header("mcp-name", name);
+        }
+        for (k, v) in &self.headers {
+            request = request.header(k, v);
         }
         let response = request.body(body.to_string()).send().expect("http request");
         let status = response.status();
@@ -221,4 +269,125 @@ fn unknown_tool_is_a_protocol_error_over_http() {
         json!({ "name": "mkit_push", "arguments": { "repo_path": "." } }),
     );
     assert!(resp.get("error").is_some(), "{resp}");
+}
+
+/// Coverage for `mcp_v2.rs`'s fail-closed `--http` bearer-token gate
+/// (`resolve_http_auth`/`BearerAuthHttp`) — mirrors `mkit serve --http`'s
+/// own gate tests, adapted to the streamable-HTTP transport's plain
+/// request/response shape instead of connect-rpc.
+mod auth {
+    use super::{HttpMcp, mkit_bin};
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn refuses_to_bind_without_a_token_or_the_unsafe_flag() {
+        let repo = tempfile::tempdir().unwrap();
+        let (status, stderr) = HttpMcp::spawn_expect_refusal(repo.path(), &[]);
+        assert!(!status.success(), "should refuse to bind: {stderr}");
+        assert!(
+            stderr.contains("refusing to bind without a bearer token"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_token() {
+        let repo = tempfile::tempdir().unwrap();
+        let (status, stderr) =
+            HttpMcp::spawn_expect_refusal(repo.path(), &["--http-token", ""]);
+        assert!(!status.success(), "should refuse to bind: {stderr}");
+        assert!(stderr.contains("MUST NOT be empty"), "{stderr}");
+    }
+
+    #[test]
+    fn refuses_token_and_unsafe_flag_together() {
+        let repo = tempfile::tempdir().unwrap();
+        let (status, stderr) = HttpMcp::spawn_expect_refusal(
+            repo.path(),
+            &["--http-token", "s3cr3t", "--unsafe-allow-any-http-peer"],
+        );
+        assert!(!status.success(), "should refuse to bind: {stderr}");
+        assert!(stderr.contains("mutually exclusive"), "{stderr}");
+    }
+
+    #[test]
+    fn rejects_requests_with_no_or_wrong_bearer_token() {
+        let repo = tempfile::tempdir().unwrap();
+        let server = HttpMcp::spawn_with_args(repo.path(), &["--http-token", "right-token"], &[]);
+
+        let no_auth = reqwest::blocking::Client::new()
+            .post(&server.base_url)
+            .header("content-type", "application/json")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#)
+            .send()
+            .expect("http request");
+        assert_eq!(no_auth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let wrong_auth = reqwest::blocking::Client::new()
+            .post(&server.base_url)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer wrong-token")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#)
+            .send()
+            .expect("http request");
+        assert_eq!(wrong_auth.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn accepts_requests_with_the_right_bearer_token() {
+        let repo = tempfile::tempdir().unwrap();
+        let server = HttpMcp::spawn_with_args(
+            repo.path(),
+            &["--http-token", "right-token"],
+            &[("authorization", "Bearer right-token")],
+        );
+
+        let resp = server.request(1, "tools/list", serde_json::json!({}));
+        assert!(
+            resp.pointer("/result/tools").is_some(),
+            "authorized request should reach the tool catalog: {resp}"
+        );
+    }
+
+    #[test]
+    fn mkit_mcp_token_env_var_is_accepted_as_a_fallback() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut child = Command::new(mkit_bin())
+            .args([
+                "mcp",
+                "--repository",
+                repo.path().to_str().unwrap(),
+                "--http",
+                "127.0.0.1:0",
+            ])
+            .env("MKIT_MCP_TOKEN", "env-token")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn mkit mcp --http");
+        let stderr = child.stderr.take().unwrap();
+        use std::io::{BufRead, BufReader};
+        let mut lines = BufReader::new(stderr).lines();
+        let addr = loop {
+            let line = lines
+                .next()
+                .expect("stderr closed before reporting an address")
+                .unwrap();
+            if let Some(addr) = line.strip_prefix("mkit mcp: listening on http://") {
+                break addr.to_string();
+            }
+        };
+        std::thread::spawn(move || for _ in lines {});
+        let server = HttpMcp {
+            child,
+            base_url: format!("http://{addr}/"),
+            headers: vec![("authorization".to_string(), "Bearer env-token".to_string())],
+        };
+
+        let resp = server.request(1, "tools/list", serde_json::json!({}));
+        assert!(
+            resp.pointer("/result/tools").is_some(),
+            "MKIT_MCP_TOKEN should authorize the request: {resp}"
+        );
+    }
 }

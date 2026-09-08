@@ -299,13 +299,27 @@ pub const SERVE_LOCK: &str = "serve.lock";
 /// own lock, so every worktree-mutating command and `gc` gets the
 /// warning "for free."
 ///
+/// `pub(crate)`, not private: a handful of call sites take
+/// [`WORKTREE_LOCK`]/[`WORKTREES_REGISTRY_LOCK`] directly via
+/// `mkit_core::repo_lock::acquire`/`acquire_default` instead of through
+/// [`acquire_worktree_lock`]/[`acquire_worktrees_registry_lock`] — narrowly
+/// scoped locks held across only part of a larger operation, where
+/// threading a `RepoLock` guard back out through this module's `u8`-exit-code
+/// wrapper doesn't fit the caller's own error type (e.g. `remote_dispatch`'s
+/// per-branch pull/fetch locks, which propagate `LockError` via `?` into
+/// `DispatchError`; `status`'s opportunistic, near-zero-timeout cache
+/// refresh). Every such site MUST call this function right after acquiring
+/// either lock, exactly as this module's two wrappers do — grep this
+/// function's callers before adding a new direct `acquire`/`acquire_default`
+/// call against either lock name.
+///
 /// This is detection, not coordination: `FileTransport`'s only lock
 /// (`refs/.lock`) serializes file-transport instances against each
 /// other, not against local worktree mutation or `gc` — see
 /// SPEC-CONCURRENCY §3.1. A probe failure (I/O error) is swallowed:
 /// this is a best-effort diagnostic, never a reason to fail the calling
 /// command.
-fn warn_if_served(layout: &RepoLayout) {
+pub(crate) fn warn_if_served(layout: &RepoLayout) {
     if let Ok(false) = mkit_core::repo_lock::probe_exclusive(layout.common_dir(), SERVE_LOCK) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(

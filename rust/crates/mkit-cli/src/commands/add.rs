@@ -17,7 +17,6 @@ use mkit_core::ops::{HunkLineKind, PatchHunk, apply_hunks_subset, enumerate_hunk
 use mkit_core::serialize;
 use mkit_core::store::{ObjectSink, ObjectStore};
 use mkit_core::worktree;
-use rayon::prelude::*;
 
 use crate::clap_shim;
 use crate::exit;
@@ -187,6 +186,9 @@ fn worktree_err_exit_code(e: &worktree::WorktreeError) -> u8 {
         worktree::WorktreeError::InvalidSymlinkTarget(_) | worktree::WorktreeError::InvalidUtf8 => {
             exit::DATAERR
         }
+        // Contract violation between mkit-core and its `hash_chunks`
+        // caller, never user-triggerable — see the variant's own doc.
+        worktree::WorktreeError::ChunkBatchLengthMismatch { .. } => exit::SOFTWARE,
     }
 }
 
@@ -433,11 +435,16 @@ fn hash_fanout_threshold() -> usize {
 /// — an `AtomicBool` costs nothing extra in the sequential branch's
 /// single-threaded loop, and sharing this closure keeps the two
 /// branches' fail-fast/`Skipped` semantics from drifting apart.
-fn hash_one(sink: &(dyn ObjectSink + Sync), aborted: &AtomicBool, p: &PendingHash) -> HashOutcome {
+fn hash_one(
+    sink: &(dyn ObjectSink + Sync),
+    aborted: &AtomicBool,
+    p: &PendingHash,
+    chunk_fanout: bool,
+) -> HashOutcome {
     if aborted.load(Ordering::Relaxed) {
         return HashOutcome::Skipped;
     }
-    match hash_pending(sink, p) {
+    match hash_pending(sink, p, chunk_fanout) {
         Ok(v) => HashOutcome::Done(v),
         Err(e) => {
             aborted.store(true, Ordering::Relaxed);
@@ -459,18 +466,25 @@ fn hash_one(sink: &(dyn ObjectSink + Sync), aborted: &AtomicBool, p: &PendingHas
 /// concurrent writers sharing one batch don't convoy on each other —
 /// this is the "future parallel ingest" its own doc comment
 /// anticipated.
+///
+/// Passes `chunk_fanout = true` (allow [`hash_pending`]'s own intra-file
+/// chunk fan-out, see that function's doc) only on the sequential
+/// branch. On the `par_iter` branch every file is already hashed by one
+/// of up to `rayon::current_num_threads()` concurrently-busy workers;
+/// letting each of those *also* fan its own large file's chunks out into
+/// the same global pool was measured (via `chunk_hash_fanout`, an idle
+/// pool) to help a single file, not validated under N-workers-already-
+/// busy contention — nested dispatch there is pure overhead with no
+/// idle capacity left to soak up, not the assumed clean scaling. The
+/// sequential branch has no such outer parallelism to nest inside, so
+/// chunk-level fan-out is the only parallelism available to it and stays
+/// on — this is exactly the single-huge-file case
+/// [`hash_pending`]'s doc describes.
 fn hash_pending_batch(pending: &[PendingHash], sink: &(dyn ObjectSink + Sync)) -> Vec<HashOutcome> {
     let aborted = AtomicBool::new(false);
-    if pending.len() < hash_fanout_threshold() {
-        return pending
-            .iter()
-            .map(|p| hash_one(sink, &aborted, p))
-            .collect();
-    }
-    pending
-        .par_iter()
-        .map(|p| hash_one(sink, &aborted, p))
-        .collect()
+    crate::fanout::map_seq_or_par(pending, hash_fanout_threshold(), |p, is_par| {
+        hash_one(sink, &aborted, p, !is_par)
+    })
 }
 
 /// Result of hashing one [`PendingHash`] inside [`hash_pending_batch`].
@@ -666,25 +680,36 @@ fn chunk_fanout_threshold() -> usize {
 ///
 /// For files above `worktree::CHUNK_THRESHOLD`, each batch of cut
 /// chunks is hashed and stored via
-/// [`worktree::hash_file_with_metadata_with`]'s `hash_chunks` callback,
-/// fanned out across rayon once a batch is large enough to amortize its
-/// dispatch cost (see [`chunk_fanout_threshold`]) — this is on top of,
-/// not instead of, [`hash_pending_batch`]'s per-file fan-out, so a
-/// worktree with a single huge file (no other file to fan across) still
-/// parallelizes.
-fn hash_pending(sink: &(dyn ObjectSink + Sync), p: &PendingHash) -> Result<HashedFile, HashError> {
+/// [`worktree::hash_file_with_metadata_with`]'s `hash_chunks` callback.
+/// When `chunk_fanout` is true AND a batch is large enough to amortize
+/// rayon's dispatch cost (see [`chunk_fanout_threshold`]), that callback
+/// itself fans out across rayon — this is on top of, not instead of,
+/// [`hash_pending_batch`]'s per-file fan-out, so a worktree with a
+/// single huge file (no other file to fan across) still parallelizes.
+/// `chunk_fanout` is false when the caller is already one of several
+/// concurrently-busy per-file rayon workers (see
+/// [`hash_pending_batch`]'s doc for why nesting fan-out there is
+/// unvalidated, not assumed-safe scaling) — chunks still hash and store
+/// sequentially in that case, same as any file at or below
+/// `CHUNK_THRESHOLD` always has.
+fn hash_pending(
+    sink: &(dyn ObjectSink + Sync),
+    p: &PendingHash,
+    chunk_fanout: bool,
+) -> Result<HashedFile, HashError> {
+    // `usize::MAX` when `chunk_fanout` is false forces the sequential
+    // branch unconditionally — folds the caller's fan-out-allowed gate
+    // into the same threshold comparison `try_map_seq_or_par` already
+    // makes, rather than a second `if` around it.
+    let threshold = if chunk_fanout {
+        chunk_fanout_threshold()
+    } else {
+        usize::MAX
+    };
     let (h, opened_meta) = worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
-        if batch.len() < chunk_fanout_threshold() {
-            batch
-                .iter()
-                .map(|chunk| worktree::store_chunk_blob(sink, chunk))
-                .collect()
-        } else {
-            batch
-                .par_iter()
-                .map(|chunk| worktree::store_chunk_blob(sink, chunk))
-                .collect()
-        }
+        crate::fanout::try_map_seq_or_par(batch, threshold, |chunk| {
+            worktree::store_chunk_blob(sink, chunk)
+        })
     })
     .map_err(|e| HashError {
         message: format!("{}: {e}", p.abs.display()),
@@ -724,7 +749,12 @@ fn add_one(
     match route_path(root, rel, sink, idx, ignores, force)? {
         Routed::Done(rel_str) => Ok(rel_str),
         Routed::NeedsHash(p) => {
-            let hashed = hash_pending(sink, &p).map_err(|e| emit_err(&e.message, e.code))?;
+            // Single explicit path, never part of a per-file rayon
+            // fan-out (that's `add_whole_worktree`'s `hash_pending_batch`
+            // only) — chunk-level fan-out is the only parallelism
+            // available for a large file here, so keep it on.
+            let hashed =
+                hash_pending(sink, &p, true).map_err(|e| emit_err(&e.message, e.code))?;
             stage_hashed(idx, p.rel_str.clone(), hashed);
             Ok(p.rel_str)
         }

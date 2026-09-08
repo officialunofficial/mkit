@@ -1024,6 +1024,55 @@ mod bootstrap_probe {
     }
 }
 
+/// Test-only override for [`BOOTSTRAP_LOCK_TIMEOUT`] — same per-thread-hook
+/// shape as [`bootstrap_probe`], so a test can shrink the wait from
+/// seconds to milliseconds when deliberately reproducing the cross-call
+/// `.hold`-flock contention [`bootstrap_commonware_context`]'s timeout
+/// guards against, without slowing down every other test in this module.
+#[cfg(test)]
+mod bootstrap_timeout_override {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    thread_local! {
+        static OVERRIDE: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            OVERRIDE.with(|c| c.set(None));
+        }
+    }
+
+    #[must_use]
+    pub(super) fn set(d: Duration) -> impl Drop {
+        OVERRIDE.with(|c| c.set(Some(d)));
+        Clear
+    }
+
+    pub(super) fn current() -> Option<Duration> {
+        OVERRIDE.with(Cell::get)
+    }
+}
+
+/// How long [`bootstrap_commonware_context`] waits for commonware-runtime's
+/// per-`storage_directory` advisory `.hold` flock before giving up —
+/// shares `repo_lock::DEFAULT_TIMEOUT`'s "how long is reasonable to wait
+/// on contended repo state" convention rather than defining a new one.
+/// Without this bound, contention on that flock (this process's own
+/// double-bootstrap bug, or — the case `shared_commonware_context`'s
+/// caching cannot fix — a *different* process already holding it) hangs
+/// the calling thread forever, since commonware's `Storage::new` blocks
+/// on the flock with no timeout of its own.
+fn bootstrap_lock_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(d) = bootstrap_timeout_override::current() {
+        return d;
+    }
+    crate::repo_lock::DEFAULT_TIMEOUT
+}
+
 /// Bootstrap a commonware tokio `Context` whose `storage_directory`
 /// is the supplied path.
 ///
@@ -1047,12 +1096,23 @@ mod bootstrap_probe {
 /// (e.g. [`CommitHistory::reopen`]) MUST NOT call this a second time —
 /// see [`CommitHistory::init_journaled`], which re-derives on-disk
 /// state against an existing Context instead.
+///
+/// Waits at most [`bootstrap_lock_timeout`] for the bootstrap thread —
+/// see that function's doc for why: `shared_commonware_context`'s
+/// process-wide cache prevents THIS process from ever calling here twice
+/// for the same directory, but it cannot stop a *different* process from
+/// holding the same directory's `.hold` flock (e.g. multiple `mkit serve`
+/// processes with `--features history-mmr` against one root — a
+/// deployment SPEC-CONCURRENCY §3.1 otherwise supports). Without a bound
+/// here, that contention hangs the calling thread forever instead of
+/// returning [`HistoryError::RuntimeBootstrap`].
 fn bootstrap_commonware_context(
     storage_directory: &Path,
 ) -> Result<commonware_runtime::tokio::Context, HistoryError> {
     let dir = storage_directory.to_path_buf();
     #[cfg(test)]
     let probe = bootstrap_probe::current();
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         #[cfg(test)]
         if let Some(counter) = &probe {
@@ -1071,11 +1131,29 @@ fn bootstrap_commonware_context(
         // pools, and metrics registry, not a runnable executor. The
         // label is best-effort so any commonware metrics surfaced
         // through this Context are easy to spot in a debugger.
-        runner
-            .start(|ctx| async move { commonware_runtime::Supervisor::child(&ctx, "mkit_history") })
-    })
-    .join()
-    .map_err(|_| HistoryError::RuntimeBootstrap("bootstrap thread panicked".to_string()))
+        let ctx = runner
+            .start(|ctx| async move { commonware_runtime::Supervisor::child(&ctx, "mkit_history") });
+        // Ignoring a send failure is deliberate: it only means the caller
+        // already gave up after `bootstrap_lock_timeout` and dropped its
+        // receiver. This thread (and whatever flock it now holds) is
+        // simply abandoned rather than causing a second error — it was
+        // never joined, so it doesn't block process exit either.
+        let _ = tx.send(ctx);
+    });
+    match rx.recv_timeout(bootstrap_lock_timeout()) {
+        Ok(ctx) => Ok(ctx),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(HistoryError::RuntimeBootstrap(
+            "timed out waiting for the history storage directory's advisory lock \
+             (commonware-runtime's per-directory `.hold` flock) — likely another process \
+             is holding it. Running more than one process with --features history-mmr \
+             against the same root (e.g. multiple `mkit serve` instances) is not yet \
+             supported; see docs/specs/SPEC-HISTORY-PROOF.md §4.1."
+                .to_string(),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(HistoryError::RuntimeBootstrap(
+            "bootstrap thread panicked".to_string(),
+        )),
+    }
 }
 
 /// Process-global cache of bootstrapped commonware `Context`s, keyed by
@@ -1438,6 +1516,51 @@ mod tests {
             1,
             "reopen() must reuse the already-bootstrapped Context rather than \
              spawning a second bootstrap thread"
+        );
+    }
+
+    /// `shared_commonware_context`'s process-wide cache stops THIS
+    /// process from ever calling `bootstrap_commonware_context` twice
+    /// for the same directory — but it can't stop a genuinely different
+    /// process (or, as here, a deliberate direct call that bypasses the
+    /// cache) from already holding the same directory's `.hold` flock.
+    /// Reproduces that contention in-process by calling the raw,
+    /// cache-bypassing `bootstrap_commonware_context` twice against one
+    /// directory: the second call must return
+    /// `HistoryError::RuntimeBootstrap` within `bootstrap_lock_timeout`
+    /// (shrunk here via `bootstrap_timeout_override`), not hang —
+    /// `assert_completes_within` is a second, coarser safety net in case
+    /// this regresses.
+    #[test]
+    fn bootstrap_times_out_instead_of_hanging_when_the_hold_flock_is_already_held() {
+        let (_tmp, mkit_dir) = fresh_mkit_dir();
+        let history_dir = mkit_dir.common_dir().join(HISTORY_DIR);
+        std::fs::create_dir_all(&history_dir).unwrap();
+
+        // Full production timeout for this one — an uncontended
+        // first-ever bootstrap (fresh tokio runtime + storage dir setup)
+        // can legitimately take longer than the short override below,
+        // which is meant to bound only the *contended* second call.
+        let _first_ctx = bootstrap_commonware_context(&history_dir)
+            .expect("first bootstrap against a fresh directory must succeed");
+
+        let err = assert_completes_within(std::time::Duration::from_secs(5), move || {
+            // The override is thread-local, and `assert_completes_within`
+            // runs `f` on its own spawned thread — set it here, inside
+            // `f`, so it's visible on the same thread that calls
+            // `bootstrap_commonware_context` below (setting it on the
+            // outer test thread would never reach this one).
+            let _override = bootstrap_timeout_override::set(std::time::Duration::from_millis(200));
+            // `Context` isn't `Debug`, so `.expect_err`/`.unwrap_err` (which
+            // require it for the Ok-case panic message) don't fit here.
+            match bootstrap_commonware_context(&history_dir) {
+                Err(e) => e,
+                Ok(_) => panic!("a second bootstrap against the same held directory must fail"),
+            }
+        });
+        assert!(
+            matches!(&err, HistoryError::RuntimeBootstrap(msg) if msg.contains("timed out")),
+            "expected a timeout error, got {err:?}"
         );
     }
 

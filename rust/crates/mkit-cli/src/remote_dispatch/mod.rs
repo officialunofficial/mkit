@@ -1000,16 +1000,9 @@ fn prepare_raw_batch(
     store: &ObjectStore,
     chunk: &[Hash],
 ) -> Result<Vec<PreparedRaw>, DispatchError> {
-    if chunk.len() < pack_fanout_threshold() {
-        return chunk
-            .iter()
-            .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
-            .collect();
-    }
-    chunk
-        .par_iter()
-        .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
-        .collect()
+    crate::fanout::try_map_seq_or_par(chunk, pack_fanout_threshold(), |h| {
+        Ok(PackWriter::prepare_raw(*h, store.read(h)?))
+    })
 }
 
 /// The delta-entry counterpart of [`prepare_raw_batch`]. Delta streams
@@ -1070,11 +1063,22 @@ fn delta_plan_fanout_threshold() -> usize {
 /// [`transfer::plan_pack_with`]'s `encode_deltas` callback: diffs every
 /// delta candidate `plan_pack_with` found — sequentially below
 /// [`delta_plan_fanout_threshold`], via rayon's global thread pool at or
-/// above it. Each candidate's `store.read` + `delta::encode` is
-/// independent of every other candidate's (same shape as
-/// `prepare_raw_batch`'s per-object compression fan-out), so a push
-/// touching many changed blobs parallelizes the diffing itself, not just
-/// the downstream zstd pass `prepare_delta_batch` already fans out.
+/// above it. Each candidate's `delta::encode` is independent of every
+/// other candidate's (same shape as `prepare_raw_batch`'s per-object
+/// compression fan-out), so a push touching many changed blobs
+/// parallelizes the diffing itself, not just the downstream zstd pass
+/// `prepare_delta_batch` already fans out.
+///
+/// Reads each *distinct* base object's bytes once, up front, into a
+/// `base_bytes` cache keyed by hash — several candidates commonly share
+/// a base (e.g. multiple chunks of one file all diffed against the same
+/// prior chunk), and without this, fanning candidates out across rayon
+/// turns what used to be redundant-but-serialized `store.read`s into
+/// concurrent redundant reads and concurrent redundant in-memory copies
+/// of the same base bytes (worse than the sequential default paid).
+/// [`transfer::encode_delta_candidate_with_base`] is the per-candidate
+/// unit that takes the already-read bytes instead of reading `base`
+/// itself.
 ///
 /// Order matches `candidates` 1:1 either way, satisfying
 /// `plan_pack_with`'s contract.
@@ -1082,16 +1086,24 @@ fn encode_delta_candidates_batch(
     store: &ObjectStore,
     candidates: &[transfer::DeltaCandidate],
 ) -> Result<Vec<Option<transfer::PlannedDelta>>, StoreError> {
-    if candidates.len() < delta_plan_fanout_threshold() {
-        return candidates
-            .iter()
-            .map(|&c| transfer::encode_delta_candidate(store, c))
-            .collect();
-    }
-    candidates
-        .par_iter()
-        .map(|&c| transfer::encode_delta_candidate(store, c))
-        .collect()
+    let unique_bases: Vec<Hash> = candidates
+        .iter()
+        .map(|c| c.base)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let base_bytes: std::collections::HashMap<Hash, Vec<u8>> = unique_bases
+        .iter()
+        .zip(crate::fanout::try_map_seq_or_par(
+            &unique_bases,
+            delta_plan_fanout_threshold(),
+            |h| store.read(h),
+        )?)
+        .map(|(&h, bytes)| (h, bytes))
+        .collect();
+    crate::fanout::try_map_seq_or_par(candidates, delta_plan_fanout_threshold(), |&c| {
+        transfer::encode_delta_candidate_with_base(store, c, &base_bytes[&c.base])
+    })
 }
 
 /// Would pushing an entry of (conservative, uncompressed) size
@@ -1188,6 +1200,7 @@ pub fn pull_all_with(
         layout.worktree_state_dir(),
         crate::commands::WORKTREE_LOCK,
     )?;
+    crate::commands::warn_if_served(&layout);
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
         Some(Head::Branch(head_branch)) => {
@@ -1448,6 +1461,7 @@ fn fetch_objects_inner(
                 layout.worktree_state_dir(),
                 crate::commands::WORKTREE_LOCK,
             )?;
+            crate::commands::warn_if_served(layout);
             // The tip we publish: normally the listed `h`, but if the chain fails
             // because a concurrent re-baseline moved the branch under us, the
             // freshly re-read tip (see this fn's doc comment). The match also
@@ -1493,6 +1507,7 @@ fn fetch_objects_inner(
                         layout.worktree_state_dir(),
                         crate::commands::WORKTREE_LOCK,
                     )?;
+                    crate::commands::warn_if_served(layout);
                     apply_fetched_chain(
                         store,
                         tx,
