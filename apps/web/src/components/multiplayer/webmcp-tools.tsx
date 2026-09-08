@@ -316,7 +316,7 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
     {
       name: 'mkit_remix_commit',
       description:
-        'Remix a commit: sign a new remix object recording it as the source (attribution carried in the object) and push it onto a fresh "forks/…" branch. Requires an unlocked identity.',
+        'Remix a commit: sign a new remix object recording it as the source and push it onto a fresh "forks/…" branch. Requires an unlocked identity.',
       inputSchema: {
         type: 'object',
         properties: { hash: { type: 'string', description: 'The commit hash to remix.' } },
@@ -344,7 +344,7 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
     {
       name: 'mkit_branch_commit',
       description:
-        'Branch off a commit: create a new "b/…" branch pointing at it, with no attribution recorded (like `git branch`). Requires an unlocked identity.',
+        'Branch off a commit: create a new "b/…" branch pointing at it without creating a remix object. Requires an unlocked identity.',
       inputSchema: {
         type: 'object',
         properties: { hash: { type: 'string', description: 'The commit hash to branch from.' } },

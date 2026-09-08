@@ -28,7 +28,7 @@ export function CopyButton({ text, label = 'Copy command' }: { text: string; lab
       type='button'
       onClick={copy}
       aria-label={state === 'copied' ? 'Copied' : label}
-      className='-m-2 shrink-0 p-2 text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary'
+      className='touch-target -m-2 shrink-0 p-2 text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary'
     >
       {state === 'copied' ? (
         <CheckIcon size={12} aria-hidden style={{ color: 'var(--status-success-fg)' }} />

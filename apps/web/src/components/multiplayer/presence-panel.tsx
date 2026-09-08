@@ -57,7 +57,7 @@ export function PresencePanel({ room }: { room: string }) {
       >
         <span aria-hidden>👥</span>
         {onlineCount > 0 ? (
-          <span className='absolute -top-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-600 px-1 text-[10px] font-semibold text-white'>
+          <span className='absolute -top-1 -right-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-(--action-primary-bg) px-1 text-xs font-semibold text-(--action-primary-fg)'>
             {onlineCount}
           </span>
         ) : null}
@@ -66,7 +66,7 @@ export function PresencePanel({ room }: { room: string }) {
   }
 
   return (
-    <div className='dock-pop-in w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-hairline bg-bg text-sm shadow-xl'>
+    <div className='dock-pop-in w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-(--rounded-md) border border-hairline bg-bg text-sm shadow-xl'>
       <header className='flex items-center gap-2 border-b border-hairline px-3 py-2'>
         <span aria-hidden>👥</span>
         <span className='font-semibold'>Online · repo “{room}”</span>
@@ -83,7 +83,10 @@ export function PresencePanel({ room }: { room: string }) {
       <ul className='max-h-64 divide-y divide-dashed divide-hairline overflow-y-auto'>
         {/* You — a member when unlocked, otherwise a viewer. */}
         <li className='flex items-center gap-2 px-3 py-2'>
-          <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${myPubkey ? 'bg-green-500' : 'bg-muted'}`} />
+          <span
+            aria-hidden
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${myPubkey ? 'bg-(--status-success-fg)' : 'bg-muted'}`}
+          />
           <span className='min-w-0 flex-1 truncate'>
             {myPubkey ? (
               <PlayerLabel pubkey={myPubkey} className='font-medium' />
@@ -91,16 +94,16 @@ export function PresencePanel({ room }: { room: string }) {
               <span className='text-muted'>a viewer</span>
             )}
           </span>
-          <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you{myPubkey ? '' : ' · viewer'}</span>
+          <span className='shrink-0 text-xs text-secondary'>you{myPubkey ? '' : ' · viewer'}</span>
         </li>
 
         {others.map((m) => (
           <li key={m.pubkeyHex} className='flex items-center gap-2 px-3 py-2'>
-            <span aria-hidden className='h-1.5 w-1.5 shrink-0 rounded-full bg-green-500' />
+            <span aria-hidden className='h-1.5 w-1.5 shrink-0 rounded-full bg-(--status-success-fg)' />
             <span className='min-w-0 flex-1 truncate'>
               <PlayerLabel pubkey={m.pubkeyHex} className='font-medium' />
             </span>
-            <span className='shrink-0 font-mono text-[10px] text-muted'>{ago(m.since)}</span>
+            <span className='shrink-0 font-mono text-xs text-muted'>{ago(m.since)}</span>
           </li>
         ))}
 

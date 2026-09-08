@@ -10,21 +10,17 @@ import { ErrorBoundary } from './error-boundary'
  * content as soon as the module resolves. The outer ErrorBoundary catches the wasm _init failure_ `use(mkit())` throws,
  * so a broken wasm load shows a recoverable fallback instead of a blank demo.
  */
-export function DemoBoundary({ children }: { children: ReactNode }) {
+export function DemoBoundary({ children, fallback }: { children: ReactNode; fallback: ReactNode }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => {
     // This hydration gate must keep WASM children out of the server prerender.
     // oxlint-disable-next-line react/set-state-in-effect
     setMounted(true)
   }, [])
-  if (!mounted) return <Fallback />
+  if (!mounted) return fallback
   return (
     <ErrorBoundary>
-      <Suspense fallback={<Fallback />}>{children}</Suspense>
+      <Suspense fallback={fallback}>{children}</Suspense>
     </ErrorBoundary>
   )
-}
-
-function Fallback() {
-  return <p className='text-sm text-muted'>Loading…</p>
 }

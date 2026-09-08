@@ -33,6 +33,6 @@ export function isEmbeddedBrowserUA(ua: string): boolean {
 export function embeddedBrowserWarning(): string | null {
   if (typeof navigator === 'undefined') return null
   return isEmbeddedBrowserUA(navigator.userAgent)
-    ? 'This looks like an in-app browser, which often blocks passkeys. Open this page in Safari or Chrome for the smoothest experience.'
+    ? 'This looks like an in-app browser, which often blocks passkeys. Open this page in Safari or Chrome to use passkeys.'
     : null
 }

@@ -106,7 +106,7 @@ export function Compose({
 
   const pushErr =
     push.error instanceof CasConflictError
-      ? `${CAS_CONFLICT_COPY} The preview already re-parented onto the new head.`
+      ? `${CAS_CONFLICT_COPY} The preview now uses the latest commit as its parent.`
       : push.error instanceof IdentityLockedError
         ? IDENTITY_LOCKED_COPY
         : push.error
@@ -127,8 +127,7 @@ export function Compose({
               <strong className='text-fg'>signed message</strong>.
             </p>
             <p className='mt-2'>
-              Your Ed25519 key vouches that this exact text came from you — the signature proves “same key”, not who you
-              are.
+              The signature verifies which key signed the text. It does not establish the signer’s real-world identity.
             </p>
           </InfoTip>
         </div>
@@ -147,8 +146,8 @@ export function Compose({
           </label>
           <InfoTip label='About branches'>
             <p>
-              A <strong className='text-fg'>branch</strong> is a line of history, as in git. Pushing advances it under a{' '}
-              <strong className='text-fg'>compare-and-set</strong>, so concurrent pushes serialize cleanly.
+              A branch refers to a commit. Each push checks the current branch value before updating it, preventing
+              concurrent pushes from overwriting one another.
             </p>
             <p className='mt-2'>
               Pick an existing branch to add onto it, or start a new one. Remixing a commit makes its own branch under{' '}
@@ -189,7 +188,7 @@ export function Compose({
           onClick={onPush}
           disabled={!built.ok || push.isPending || !unlocked || !targetRef}
         >
-          {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign & push'}
+          {push.isPending ? 'Pushing…' : !unlocked ? 'Locked' : 'Sign and push'}
         </button>
       </div>
 
@@ -223,8 +222,8 @@ export function Compose({
                 Parent
                 <InfoTip label='About the parent'>
                   <p>
-                    The current head of “{targetRef || 'main'}” — the commit this one builds on (none for the first
-                    commit on a branch).
+                    The current commit on “{targetRef || 'main'}”. It becomes the parent of this commit (none for the
+                    first commit on a branch).
                   </p>
                 </InfoTip>
               </dt>
@@ -233,10 +232,10 @@ export function Compose({
           </Collapsible.Content>
         </Collapsible.Root>
       ) : (
-        <p className='text-red-600 dark:text-red-400'>{built.error}</p>
+        <p className='text-(--status-error-fg)'>{built.error}</p>
       )}
 
-      {pushErr ? <p className='text-sm text-amber-700 dark:text-amber-400'>{pushErr}</p> : null}
+      {pushErr ? <p className='text-sm text-(--status-warning-fg)'>{pushErr}</p> : null}
     </section>
   )
 }
@@ -266,7 +265,7 @@ export function ComposeDisabled() {
         </select>
       </div>
       <button type='button' className={PRIMARY_BTN} disabled>
-        Sign & push
+        Sign and push
       </button>
       <p className='text-sm text-muted'>
         Create or unlock an identity above to write commits. You can still browse this repository’s shared history on

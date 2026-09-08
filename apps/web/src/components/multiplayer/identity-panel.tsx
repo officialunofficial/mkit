@@ -118,9 +118,7 @@ export function LockedView({
     <section className='space-y-3'>
       {/* Shown proactively, before either button is tapped — independent of `status`,
           which only appears after an actual create/unlock attempt. */}
-      {embeddedBrowserWarning ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>{embeddedBrowserWarning}</p>
-      ) : null}
+      {embeddedBrowserWarning ? <p className='text-sm text-(--status-warning-fg)'>{embeddedBrowserWarning}</p> : null}
       {hasPasskey ? (
         <>
           <div className='flex flex-wrap items-center justify-between gap-2'>
@@ -145,7 +143,7 @@ export function LockedView({
             </button>
           </div>
           <p className='max-w-prose text-sm text-muted'>
-            One passkey becomes your Ed25519 player. A single prompt, then every push signs without another.
+            Your passkey derives an Ed25519 signing key. Unlock it once to sign pushes during this session.
           </p>
         </>
       )}
@@ -198,7 +196,7 @@ export function UnlockedHeader({
           Stacks on mobile, single row on sm+. */}
       <div className='flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center'>
         <span className='min-w-0' title={ed25519PubkeyHex}>
-          <span className='text-lg'>
+          <span className='text-base'>
             <OwnPlayerName />
           </span>{' '}
           <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
@@ -214,24 +212,18 @@ export function UnlockedHeader({
             {attest.busy ? 'Linking…' : 'Link with a passkey'}
           </button>
           <InfoTip label='About linking'>
-            <p>
-              On its own, your signing key is anonymous. It’s derived from your passkey, but that link is{' '}
-              <strong className='text-fg'>private</strong> — no one else can see it or prove it.
-            </p>
+            <p>Linking creates a signed proof that associates your passkey with your signing key.</p>
             <p className='mt-2'>
-              <strong className='text-fg'>Linking</strong> has your passkey publicly vouch for your signing key, turning
-              that private link into a proof anyone can verify in their browser. It’s the same passkey your signing key
-              is derived from — your passkey vouches for your signing key — and your signing key never leaves your
-              browser.
+              This demo verifies the proof in your browser for this site. Your signing key stays in your browser.
             </p>
-            <p className='mt-2'>It’s optional, and pinned to this site.</p>
+            <p className='mt-2'>Linking is optional.</p>
           </InfoTip>
         </span>
         <button
           type='button'
           className={`${BTN} sm:ml-auto`}
           onClick={onLock}
-          title='Wipes your signing key from memory; unlock re-derives it from your passkey.'
+          title='Remove the signing key from memory. Unlock to derive it again from your passkey.'
         >
           Lock
         </button>
@@ -242,7 +234,7 @@ export function UnlockedHeader({
             {/* A non-null result IS the verified verdict — the WASM verifier
                 throws on rejection (surfaced via `attest.err`), so there's no
                 failure state to render here. */}
-            <span className='text-green-700 dark:text-green-400'>verified ✓ (checked in your browser)</span>
+            <span className='text-(--status-success-fg)'>verified ✓ (checked in your browser)</span>
           </Field>
           {/* `attest.result` is set only AFTER a successful attest, which
               requires `p256PubkeyHex` non-null and it can't go null while
@@ -252,9 +244,9 @@ export function UnlockedHeader({
           </Field>
         </FieldList>
       ) : null}
-      {attest.err ? <p className='text-sm text-amber-700 dark:text-amber-400'>{attest.err}</p> : null}
+      {attest.err ? <p className='text-sm text-(--status-warning-fg)'>{attest.err}</p> : null}
       {id.ephemeral ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>
+        <p className='text-sm text-(--status-warning-fg)'>
           This browser can&rsquo;t save your passkey, so this is a temporary identity that won&rsquo;t be here next
           time.
         </p>

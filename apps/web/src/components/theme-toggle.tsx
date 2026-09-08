@@ -47,7 +47,7 @@ export function ThemeToggle() {
         onClick={toggle}
         aria-label={label}
         suppressHydrationWarning
-        className='inline-flex size-8 items-center justify-center rounded-(--rounded-sm) text-primary transition-colors duration-(--duration-fast) ease-standard hover:bg-(--action-ghost-bg-hover) active:bg-(--action-ghost-bg-active)'
+        className='touch-target inline-flex size-8 items-center justify-center rounded-(--rounded-sm) text-primary transition-colors duration-(--duration-fast) ease-standard hover:bg-(--action-ghost-bg-hover) active:bg-(--action-ghost-bg-active)'
       >
         <span suppressHydrationWarning className='inline-flex'>
           {shown === 'dark' ? <MoonIcon size={16} aria-hidden /> : <SunIcon size={16} aria-hidden />}

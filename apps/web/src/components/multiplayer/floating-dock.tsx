@@ -5,6 +5,7 @@
 // The chosen anchor persists in localStorage.
 
 import { type ReactNode, useRef, useState } from 'react'
+import { TopLayer } from '../top-layer'
 import { useDockExpansion } from '../../lib/dock-expansion'
 import { type DockCorner, useDockPosition } from '../../lib/dock-position'
 
@@ -43,11 +44,11 @@ const ALL_CORNERS = Object.keys(ZONE_CLASS) as DockCorner[]
  */
 function SnapZones({ target }: { target: DockCorner }) {
   return (
-    <div className='fixed inset-0 z-[60] pointer-events-none'>
+    <div className='fixed inset-0 pointer-events-none'>
       {ALL_CORNERS.map((c) => (
         <div
           key={c}
-          className={`absolute h-12 w-12 rounded-xl border-2 border-dashed transition-colors ${ZONE_CLASS[c]} ${
+          className={`absolute h-12 w-12 rounded-(--rounded-md) border-2 border-dashed transition-colors ${ZONE_CLASS[c]} ${
             c === target ? 'border-fg bg-fg/10' : 'border-hairline/70'
           }`}
         />
@@ -133,11 +134,11 @@ export function FloatingDock({ children }: { children: ReactNode }) {
   }
 
   return (
-    <>
+    <TopLayer>
       {drag ? <SnapZones target={nearestCorner(drag.x, drag.y)} /> : null}
       <div
         ref={containerRef}
-        className={`group fixed flex flex-row gap-2 ${drag ? 'z-[70] items-end' : `z-50 ${CORNER_CLASS[corner]}`}`}
+        className={`group fixed flex flex-row gap-2 ${drag ? 'items-end' : CORNER_CLASS[corner]}`}
         style={
           drag ? { left: drag.x - drag.offsetX, top: drag.y - drag.offsetY, right: 'auto', bottom: 'auto' } : undefined
         }
@@ -149,7 +150,7 @@ export function FloatingDock({ children }: { children: ReactNode }) {
             onPointerDown={onDown}
             onPointerMove={onMove}
             onPointerUp={onUp}
-            className={`absolute -top-2.5 -left-2.5 z-10 inline-flex h-6 w-6 touch-none items-center justify-center rounded-full border bg-bg text-muted shadow transition hover:border-fg hover:text-fg ${
+            className={`absolute -top-2.5 -left-2.5 z-1 inline-flex h-6 w-6 touch-none items-center justify-center rounded-full border bg-bg text-muted shadow transition hover:border-fg hover:text-fg ${
               drag
                 ? 'cursor-grabbing border-fg text-fg opacity-100'
                 : 'cursor-grab border-hairline opacity-0 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100'
@@ -160,6 +161,6 @@ export function FloatingDock({ children }: { children: ReactNode }) {
         ) : null}
         {children}
       </div>
-    </>
+    </TopLayer>
   )
 }

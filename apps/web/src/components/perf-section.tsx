@@ -139,16 +139,16 @@ function MeasureGroup({ heading, hint, children }: { heading: string; hint: Reac
  */
 const THEMES: Record<Theme, { title: string; blurb: string }> = {
   'large-files': {
-    title: 'Large Files and Media',
+    title: 'Large files and media',
     blurb:
-      'The workload mkit is built for: big, incompressible files and small edits to them. Content-defined chunking ' +
-      'means a small edit costs the changed chunk, not the whole file — on disk, on the wire, and in wall-clock time.',
+      'Large, incompressible files and small edits. Content-defined chunking lets mkit reuse unchanged chunks ' +
+      'when storing and transferring a new version.',
   },
   everyday: {
-    title: 'Everyday Operations',
+    title: 'Everyday operations',
     blurb:
-      'The routine git operations on ordinary trees, where the honest verdict is roughly even. mkit keeps pace while ' +
-      'signing every commit and flushing every object to disk, neither of which git does by default.',
+      'Common operations on small files and unchanged repositories. mkit signs commits and synchronizes object writes ' +
+      'for durability. Git does not sign commits or fsync loose objects by default in these benchmarks.',
   },
 }
 
@@ -192,7 +192,7 @@ export function PerfSection() {
             </div>
             {timings.length > 0 ? (
               <MeasureGroup
-                heading='Time, End to End'
+                heading='Command duration'
                 hint='Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.'
               >
                 {timings.map((b) => (
@@ -202,7 +202,7 @@ export function PerfSection() {
             ) : null}
             {sizes.length > 0 ? (
               <MeasureGroup
-                heading='Bytes on Disk'
+                heading='Storage size'
                 hint={
                   <>
                     Repository directory size (<code className='font-mono text-xs'>du -k .mkit</code> vs{' '}
@@ -217,7 +217,7 @@ export function PerfSection() {
             ) : null}
             {transfers.length > 0 ? (
               <MeasureGroup
-                heading='Bytes on the Wire'
+                heading='Transfer size'
                 hint={
                   <>
                     What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the
@@ -236,7 +236,7 @@ export function PerfSection() {
       })}
 
       <section className='space-y-3'>
-        <h2 className='ds-h2 rule-square pb-2'>Methodology and Caveats</h2>
+        <h2 className='ds-h2 rule-square pb-2'>Methodology and limitations</h2>
         <dl className='data-frame text-xs leading-4'>
           <MethodologyRow label='Date'>{fmtDate(methodology.date)}</MethodologyRow>
           <MethodologyRow label='Commit'>

@@ -80,7 +80,7 @@ function MultiplayerBody({
       {/* Identity — its own bordered section spanning both columns. The locked
           create/unlock actions and the unlocked player header share this banner
           so "who am I" reads as one distinct concern above the repo workspace. */}
-      <section className='rounded-xl border border-hairline p-4 sm:p-5'>
+      <section className='rounded-(--rounded-md) border border-hairline p-4 sm:p-5'>
         {id.unlocked && id.ed25519PubkeyHex ? (
           <UnlockedHeader api={api} ed25519PubkeyHex={id.ed25519PubkeyHex} />
         ) : (

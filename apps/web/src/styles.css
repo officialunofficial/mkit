@@ -174,6 +174,7 @@
   --touch-target-min: 44px;
   --row-height-text: 24px;
   --row-height-control: 30px;
+  --size-frame-header: 24px;
 
   /* §2.8 icons */
   --icon-default: 16px;
@@ -329,13 +330,37 @@
   --elevation-hairline: var(--border-color-subtle);
 }
 
+/* Pigment §2.3: honor the reader's increased-contrast preference. */
+@media (prefers-contrast: more) {
+  :root {
+    --text-secondary: #5c5c5c;
+    --text-placeholder: #767676;
+    --border-color-subtle: #b8b8b8;
+    --border-color-default: #8f8f8f;
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --text-secondary: #969696;
+    --text-placeholder: #797979;
+    --border-color-subtle: #454545;
+    --border-color-default: #626262;
+  }
+}
+@media (prefers-contrast: more) {
+  :root[data-theme='dark'] {
+    --text-secondary: #969696;
+    --text-placeholder: #797979;
+    --border-color-subtle: #454545;
+    --border-color-default: #626262;
+  }
+}
+
 /* Tailwind color/font mapping. `inline` keeps utilities pointing at the
    var() chain so the data-theme switch repaints them at runtime.
 
-   The first group keeps the site's pre-pigment names alive — the demo
-   components (untouched in this pass) use bg-bg / text-fg / text-muted /
-   text-subtle / border-hairline, and the aliases route them to the nearest
-   pigment token so the whole page stays one palette. */
+   The first group maps the demo utilities to Pigment role tokens. New
+   components should use the explicit role names below. */
 @theme inline {
   --color-bg: var(--surface-page);
   --color-bg-0: transparent;
@@ -373,6 +398,8 @@
   --text-2xs--line-height: 15px;
 
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --default-transition-duration: var(--duration-fast);
+  --default-transition-timing-function: var(--ease-standard);
 }
 
 @layer base {
@@ -525,20 +552,20 @@
     list-style: none;
   }
   .merkle ul {
-    padding-top: 18px;
+    padding-top: var(--space-lg);
   }
   .merkle ul::before {
     content: '';
     position: absolute;
     top: 0;
     left: 50%;
-    height: 18px;
-    border-left: 1px solid var(--border-color-default);
+    height: var(--space-lg);
+    border-left: var(--border-width-light) solid var(--border-color-default);
   }
   .merkle li {
     list-style: none;
     position: relative;
-    padding: 18px 8px 0 8px;
+    padding: var(--space-lg) var(--space-sm) 0;
     text-align: center;
   }
   .merkle li::before,
@@ -546,9 +573,9 @@
     content: '';
     position: absolute;
     top: 0;
-    height: 18px;
+    height: var(--space-lg);
     width: 50%;
-    border-top: 1px solid var(--border-color-default);
+    border-top: var(--border-width-light) solid var(--border-color-default);
   }
   .merkle li::before {
     right: 50%;
@@ -561,7 +588,7 @@
     display: none;
   }
   .merkle li:only-child {
-    padding-top: 18px;
+    padding-top: var(--space-lg);
   }
   .merkle li:first-child::before,
   .merkle li:last-child::after {
@@ -572,8 +599,8 @@
     position: absolute;
     top: 0;
     left: 50%;
-    height: 18px;
-    border-left: 1px solid var(--border-color-default);
+    height: var(--space-lg);
+    border-left: var(--border-width-light) solid var(--border-color-default);
   }
   .merkle > li {
     padding-top: 0;
@@ -590,7 +617,7 @@
   @keyframes dock-pop-in {
     from {
       opacity: 0;
-      transform: scale(0.96) translateY(6px);
+      transform: scale(0.96) translateY(var(--space-xs));
     }
     to {
       opacity: 1;
@@ -598,7 +625,7 @@
     }
   }
   .dock-pop-in {
-    animation: dock-pop-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+    animation: dock-pop-in var(--duration-base) var(--ease-standard);
   }
   @keyframes reaction-pop-in {
     from {
@@ -611,11 +638,33 @@
     }
   }
   .reaction-pop-in {
-    animation: reaction-pop-in 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: reaction-pop-in var(--duration-base) var(--ease-standard);
   }
 }
 
 @layer components {
+  /* Pigment §4.1: isolated icons may extend their hit area. Buttons reserve
+     their touch size in layout so adjacent controls cannot overlap. */
+  .touch-target,
+  .btn {
+    position: relative;
+  }
+  @media (pointer: coarse) {
+    .btn {
+      min-width: var(--touch-target-min);
+      min-height: var(--touch-target-min);
+    }
+    .touch-target::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, var(--touch-target-min));
+      height: max(100%, var(--touch-target-min));
+      transform: translate(-50%, -50%);
+    }
+  }
+
   /* §2.1B type scale. */
   .ds-h1 {
     font-size: var(--t-lg);
@@ -764,4 +813,37 @@
   .btn--ghost:active {
     background: var(--action-ghost-bg-active);
   }
+  .btn:disabled {
+    color: var(--text-disabled);
+    background: var(--surface-disabled);
+    border-color: var(--border-color-disabled);
+  }
+}
+
+/* Native modal and popover surfaces use Pigment elevation in both themes. */
+.modal-layer::backdrop {
+  background: var(--surface-scrim);
+}
+.overlay-panel {
+  background: var(--surface-overlay);
+  border-color: var(--overlay-hairline);
+  box-shadow: var(--overlay-shadow);
+}
+@media (pointer: coarse) {
+  .reaction-picker > button {
+    min-width: var(--touch-target-min);
+    min-height: var(--touch-target-min);
+  }
+}
+
+/* Pigment §4.19: field skeletons keep their loading pulse under reduced motion. */
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+.skeleton {
+  border-radius: var(--rounded-xs);
+  background: var(--surface-skeleton);
+  animation: skeleton-pulse calc(var(--duration-spin) * 2) var(--ease-standard) infinite;
 }

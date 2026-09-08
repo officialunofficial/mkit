@@ -12,7 +12,7 @@ vi.mock('waku', () => ({
 }))
 vi.mock('./grid-logo', () => ({ GridLogo: () => null }))
 vi.mock('./theme-toggle', () => ({ ThemeToggle: () => null }))
-vi.mock('./site-nav', () => ({ NavList: () => <span>Navigation links</span> }))
+vi.mock('./site-nav', () => ({ ExpandedNav: () => <span>Navigation links</span> }))
 
 afterEach(() => {
   cleanup()
