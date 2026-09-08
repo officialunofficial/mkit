@@ -1,5 +1,6 @@
 import { DemoBoundary } from '../components/demo-boundary'
 import { MultiplayerDemo } from '../components/multiplayer-demo'
+import { MultiplayerSkeleton } from '../components/loading'
 import { Seo } from '../components/seo'
 
 export default function MultiplayerPage() {
@@ -7,7 +8,7 @@ export default function MultiplayerPage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — multiplayer'
-        description='Set up a passkey, sign a commit right in your browser, and push it to a shared repo — then watch other players’ commits arrive live. Anonymous, no accounts: your passkey is your identity.'
+        description='Create a passkey, sign a commit in your browser, and push it to a shared repository. View other contributions as they arrive. No account registration required.'
         path='/multiplayer'
         card='Multiplayer mkit'
       />
@@ -18,7 +19,7 @@ export default function MultiplayerPage() {
           one.
         </p>
       </header>
-      <DemoBoundary>
+      <DemoBoundary fallback={<MultiplayerSkeleton />}>
         <MultiplayerDemo />
       </DemoBoundary>
     </div>

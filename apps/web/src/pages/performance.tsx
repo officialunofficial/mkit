@@ -8,15 +8,15 @@ export default function PerformancePage() {
       <div className='space-y-8'>
         <Seo
           title='mkit — performance'
-          description='mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, benchmarked head to head against git.'
+          description='mkit names every object by a BLAKE3 hash and splits large files into content-defined chunks, with benchmarks comparing mkit and Git.'
           path='/performance'
-          card='Measured against git'
+          card='Performance compared with Git'
         />
         <header>
-          <h1 className='ds-h1'>Measured Against Git</h1>
+          <h1 className='ds-h1'>Performance compared with Git</h1>
           <p className='ds-note mt-1'>
-            Real <code>hyperfine</code> runs of both CLIs on one machine — git&rsquo;s wins shown as plainly as
-            mkit&rsquo;s.
+            Command timings, storage use, and transfer sizes measured on one machine with <code>hyperfine</code> and the
+            repository benchmark scripts.
           </p>
         </header>
         <PerfSection />

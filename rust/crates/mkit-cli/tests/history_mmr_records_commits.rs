@@ -1,11 +1,4 @@
-//! Integration test for the history-recording fix in the fault-injection rollup: every CLI
-//! ref-writing path must funnel through `commands::write_ref_recording_history`,
-//! which on `--features history-mmr` builds opens a journaled
-//! `CommitHistory` for the current branch and appends each new tip
-//! to its on-disk MMR.
-//!
-//! This file is compiled only with `--features history-mmr` (a default
-//! build has no history journal to inspect).
+//! CLI ref writes publish canonical snapshots for the complete first-parent chain.
 
 #![cfg(feature = "history-mmr")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
@@ -13,10 +6,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 
 use mkit_core::hash::Hash;
-use mkit_core::history::{CommitHistory, TokioExecutor};
+use mkit_core::history::{AncestrySnapshot, CommitHistory};
 use mkit_core::layout::RepoLayout;
 use mkit_core::refs;
 
@@ -93,7 +85,7 @@ fn branch_commit_chain(root: &Path, branch: &str) -> Vec<Hash> {
 }
 
 #[test]
-fn two_commits_land_in_branch_history_journal() {
+fn two_commits_land_in_branch_history_snapshot() {
     let td = init_repo();
     let root = td.path();
 
@@ -109,20 +101,18 @@ fn two_commits_land_in_branch_history_journal() {
 
     let mkit = mkit_dir(root);
 
-    // The journal blob directory must exist under the documented
-    // sanitized-partition layout (branch "main" → "main__journal-blobs").
-    let journal_dir = mkit.join("history").join("main__journal-blobs");
+    // Canonical snapshots live in the versioned ancestry namespace.
+    let snapshot_dir = mkit.join("history-v1").join("branches");
     assert!(
-        journal_dir.is_dir(),
-        "journal blob dir absent at {} — write_ref_recording_history did not fire",
-        journal_dir.display()
+        snapshot_dir.is_dir(),
+        "ancestry snapshot dir absent at {} — write_ref_recording_history did not fire",
+        snapshot_dir.display()
     );
 
-    // Reopen the on-disk history journal and assert it carries
+    // Reopen the on-disk history snapshot and assert it carries
     // exactly two leaves, in the same order the CLI wrote the commits.
-    let exec = Arc::new(TokioExecutor::new().expect("tokio runtime"));
-    let live = CommitHistory::open_at(exec.clone(), &RepoLayout::single(root), "main")
-        .expect("reopen live history");
+    let live =
+        AncestrySnapshot::load(&RepoLayout::single(root), "main").expect("reopen live history");
     assert_eq!(
         live.len(),
         2,
@@ -131,8 +121,8 @@ fn two_commits_land_in_branch_history_journal() {
 
     // Cross-check: a fresh, in-memory MMR built by replaying the same
     // commit chain (in append order) MUST produce the same root as
-    // the on-disk journal. If `write_ref_recording_history` ever
-    // silently degrades to a `refs::write_ref` call, the journal will
+    // the on-disk snapshot. If `write_ref_recording_history` ever
+    // silently degrades to a `refs::write_ref` call, the snapshot will
     // be empty / desynced and this equality breaks.
     let chain = branch_commit_chain(root, "main");
     assert_eq!(chain.len(), 2, "branch chain length sanity check");
@@ -144,6 +134,32 @@ fn two_commits_land_in_branch_history_journal() {
     assert_eq!(
         live.root(),
         mem.root(),
-        "live journaled MMR root must equal a fresh manual append over the same chain"
+        "live ancestry MMR root must equal a fresh manual append over the same chain"
+    );
+}
+
+#[test]
+fn a_noop_ref_write_keeps_the_same_ancestry_root() {
+    let td = init_repo();
+    let root = td.path();
+    write_file(root, "a", "a\n");
+    ok(root, &["add", "a"]);
+    ok(root, &["commit", "-m", "a"]);
+    let before = ok(root, &["reflog"]);
+    let tip = refs::read_ref(&RepoLayout::single(root), "main")
+        .unwrap()
+        .unwrap();
+    ok(
+        root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &mkit_core::hash::to_hex(&tip),
+        ],
+    );
+    let after = ok(root, &["reflog"]);
+    assert_eq!(
+        before.stdout, after.stdout,
+        "a no-op must not append another ancestry leaf"
     );
 }

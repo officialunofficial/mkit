@@ -57,7 +57,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
 /// Headers we expose for cross-origin browser clients. `x-admin-token` is
 /// listed for completeness (an operator console could call PurgeRoom
 /// cross-origin) even though the shipped web demo never sends it.
-const CORS_ALLOW_HEADERS: &str = "x-public-key, x-signature, x-digest, x-created-at, \
+const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, \
      idempotency-key, x-admin-token, content-type, connect-protocol-version";
 const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
@@ -135,12 +135,8 @@ async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     // PurgeRoom call closed", not "allow any token".
     let admin_token = env.secret("ADMIN_TOKEN").ok().map(|s| s.to_string());
 
-    // Build the service fresh per request — `Env` is Send and cheap to clone;
-    // the service holds no cross-request state. The interceptor needs its own
-    // `Env` clone too: it addresses the room's RefStore DO directly for the
-    // write-quota check (ahead of, and independent of, the handler's own DO
-    // calls), and separately reaches the `WRITE_EVENTS` Analytics Engine
-    // binding for accepted/rejected-write telemetry (see worker_impl/auth.rs).
+    // Build services per request. Auth uses the configured audience and the
+    // WRITE_EVENTS binding; services use storage and health bindings.
     let router: Router = Arc::new(RepoServer::new(env.clone())).register(Router::new());
     let router: Router = Arc::new(HealthServer::new(env.clone())).register(router);
     // Default compression policy (gzip large responses). The wasm client now

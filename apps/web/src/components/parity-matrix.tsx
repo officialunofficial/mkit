@@ -122,9 +122,9 @@ export function ParityMatrix() {
       >
         <section>
           <div className='rule-square pb-2'>
-            <h2 className='ds-h2'>Different and Permanent</h2>
+            <h2 className='ds-h2'>Repository format differences</h2>
             <p className='ds-note mt-1'>
-              These fall out of choosing BLAKE3 over SHA-1. They cannot change without dropping content addressing.
+              mkit uses BLAKE3 object IDs and stores repository state in .mkit/. These differ from Git&rsquo;s formats.
             </p>
           </div>
           <div className='data-frame mt-2'>
@@ -136,10 +136,10 @@ export function ParityMatrix() {
 
         <section>
           <div className='rule-square pb-2'>
-            <h2 className='ds-h2'>Safer Than Git</h2>
+            <h2 className='ds-h2'>Data protection</h2>
             <p className='ds-note mt-1'>
-              Where mkit refuses git&rsquo;s silent-data-loss defaults. These are deliberate choices, not missing git
-              behavior.
+              mkit requires explicit permission before overwriting local changes and records rewritten commits for
+              recovery.
             </p>
           </div>
           <div className='data-frame mt-2'>

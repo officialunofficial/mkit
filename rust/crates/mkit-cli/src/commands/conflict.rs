@@ -442,8 +442,14 @@ pub fn ensure_abort_safe(
         .map_err(|e| format!("check index state: {e}"))?;
     // Pass the seeded index as the tracked set so a tracked file matching an
     // ignore rule isn't dropped from the snapshot and misread as a deletion.
-    let worktree_tree = mkit_core::worktree::build_tree_filtered(&snapshot, root, Some(&idx))
-        .map_err(|e| format!("check worktree: {e}"))?;
+    let worktree_tree = mkit_core::worktree::build_tree_filtered_observed_with_source(
+        &snapshot,
+        &snapshot,
+        root,
+        Some(&idx),
+        &mut Vec::new(),
+    )
+    .map_err(|e| format!("check worktree: {e}"))?;
 
     // Discardable = the operation's OWN work that the user has not touched:
     //   * recorded conflict paths (abort always throws away resolutions);

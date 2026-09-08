@@ -250,7 +250,7 @@ History / commits:
   `--amend` **replaces HEAD** instead of adding a new commit: the new
   commit re-uses HEAD's parent(s) as its own parent(s), takes its tree
   from the index, and is re-signed; the branch is moved to it and the
-  move is recorded in the ref-history journal. Without `-m` the previous
+  canonical ancestry snapshot is updated when history proofs are enabled. Without `-m` the previous
   commit's message is reused (no editor is launched). The superseded
   commit is recorded in the recovery log so it stays recoverable, and is
   reclaimed by `mkit gc` once it falls out of the retention window.
@@ -309,22 +309,14 @@ History / commits:
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
 - `mkit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
-  branch's recorded movement history. Defaults to the branch `HEAD`
-  points at (a detached `HEAD` needs an explicit `<ref>`, since the
-  ref-history journal is keyed per-branch). Walks the branch tip's
-  first-parent chain newest-first, addressing each entry `<ref>@{N}`
-  (`@{0}` is the current tip). The underlying journal (the per-branch
-  commit-history MMR written on every branch advance) stores a count of
-  advances and a tamper-evident root, but its leaf digests cannot be
-  decoded back to commit hashes &mdash; so the listed hashes are reconstructed
-  from the reachable chain. On a build with `--features history-mmr`
-  each entry is additionally cross-checked against the journaled MMR root
-  via an inclusion proof, and the recorded-advance count is printed.
-  `--format=json` emits JSONL with keys `ref`, `selector`, `index`,
-  `hash`, `title`, `journaled` (`true`/`false`/`null`). **This is not a
-  full Git reflog:** `@{N}` indexes the reachable first-parent chain, so
-  commits superseded by `commit --amend` or a reset are not listed; see
-  "Divergences from Git" below.
+  branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
+  detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each
+  entry `<ref>@{N}` (`@{0}` is the current tip). With `--features history-mmr`,
+  inclusion proofs are checked against the current canonical snapshot and its
+  descriptor, which binds repository, branch, generation, tip, count and root.
+  `--format=json` emits JSONL with keys `ref`, `selector`, `index`, `hash`,
+  `title`, `ancestry_verified` (`true`/`false`/`null`). Superseded commits after
+  amend/reset are outside this reachable chain; recovery records are separate.
 - `mkit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
   [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
   [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` &mdash;

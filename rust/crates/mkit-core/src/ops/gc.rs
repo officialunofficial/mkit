@@ -148,6 +148,12 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
         add(h, &mut roots);
     }
 
+    // A crash may leave a history intent before its target ref is published.
+    // Retain both sides even on builds without the history-mmr feature.
+    for h in refs::pending_history_roots(layout)? {
+        add(h, &mut roots);
+    }
+
     // Recovery log — commits superseded by amend/reset/rebase, retained
     // so they stay recoverable. Clock-free here: `recovery::expire` (a
     // gc maintenance step) drops entries past the retention window so
@@ -808,6 +814,22 @@ mod tests {
             collect_roots(&md).unwrap().contains(&superseded),
             "a superseded commit in the recovery log must be a root"
         );
+    }
+
+    #[test]
+    fn corrupt_or_truncated_staging_aborts_gc_before_sweep() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let staged = write_blob(&s, b"only staged copy");
+        for bytes in [
+            Vec::new(),
+            b"MKIX\x03\0\0\0\0".to_vec(),
+            b"MKIX\x04\0\0\0\0".to_vec(),
+        ] {
+            fs::write(md.index_file(), &bytes).unwrap();
+            assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+            assert!(s.contains(&staged));
+        }
     }
 
     #[test]

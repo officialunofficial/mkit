@@ -4,6 +4,7 @@
 // column) and the live commit log + commit/remix detail (`RepoLog`, right column
 // under Compose), plus log rows and the loading skeleton.
 
+import { CommitSkeleton, Skeleton } from '../loading'
 import * as ScrollArea from '@radix-ui/react-scroll-area'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef as useReactRef, useState } from 'react'
@@ -145,7 +146,7 @@ export function RepoLog({
         />
       )}
       {status ? <p className='text-sm text-muted'>{status}</p> : null}
-      {error && !status ? <p className='text-sm text-amber-700 dark:text-amber-400'>{errMsg(error)}</p> : null}
+      {error && !status ? <p className='text-sm text-(--status-warning-fg)'>{errMsg(error)}</p> : null}
     </div>
   )
 }
@@ -157,13 +158,17 @@ export function RepoLog({
  */
 function SkeletonRows({ rows = 5 }: { rows?: number }) {
   return (
-    <ul className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline' aria-hidden='true'>
+    <ul
+      className='divide-y divide-dashed divide-hairline border-y border-dashed border-hairline'
+      role='status'
+      aria-label='Loading repository entries'
+    >
       {Array.from({ length: rows }).map((_, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: static placeholder rows, no identity
         <li key={i} className='flex items-center gap-3 py-2.5'>
-          <span className='h-3.5 w-3.5 shrink-0 animate-pulse rounded-sm bg-fg/10' />
-          <span className='h-3 animate-pulse rounded bg-fg/10' style={{ width: `${8 + ((i * 7) % 9)}rem` }} />
-          <span className='ml-auto h-3 w-16 shrink-0 animate-pulse rounded bg-fg/10' />
+          <Skeleton className='size-3 shrink-0' />
+          <Skeleton className={`h-3 ${i % 2 ? 'w-32' : 'w-40'}`} />
+          <Skeleton className='ml-auto h-3 w-16 shrink-0' />
         </li>
       ))}
     </ul>
@@ -200,13 +205,13 @@ function RefRow({ r, active, onSelect }: { r: RefEntryLike; active: boolean; onS
       <span className={`truncate font-mono text-sm ${active ? 'font-semibold' : 'font-medium'}`}>{r.name}</span>
       {isForkRef(r.name) ? (
         <span
-          className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'
-          title='A remix branch — its head records the commit it derived from (attribution).'
+          className='shrink-0 rounded-(--rounded-xs) border border-(--status-neutral-border) bg-(--status-neutral-bg) px-1.5 text-xs text-(--status-neutral-fg)'
+          title='A remix branch. Its head records the source commit.'
         >
           remix
         </span>
       ) : null}
-      {active ? <span className='shrink-0 text-xs text-blue-600 dark:text-blue-400'>selected</span> : null}
+      {active ? <span className='shrink-0 text-xs text-primary'>selected</span> : null}
       <code className='ml-auto shrink-0 font-mono text-xs text-muted'>{r.objectIdHex.slice(0, 6)}</code>
     </button>
   )
@@ -278,7 +283,7 @@ export function RefsPanel({
           Branches
           {!showSkeleton ? <span className='ml-1.5 font-normal text-muted'>· {total.toLocaleString()}</span> : null}
         </h2>
-        <span className='font-mono text-xs text-muted'>{useMock ? 'mock backend' : 'worker'}</span>
+        <span className='text-xs text-muted'>{useMock ? 'Local demo' : 'Shared repository'}</span>
       </div>
       {showSkeleton ? (
         <SkeletonRows rows={1} />
@@ -377,7 +382,7 @@ function LiveLog({
           {isForkRef(selectedRef) ? 'Remix log' : 'Commit log'} · “{selectedRef}”
           {entries.length > 0 ? <span className='ml-1.5 font-normal text-muted'>{entries.length}</span> : null}
         </h2>
-        <span className='font-mono text-xs text-muted'>
+        <span className='text-xs text-muted'>
           {/* Show "head …" while the head is loading/refetching; only show "none" once
               the query has settled with no head. */}
           head {head.isPending || head.isFetching ? '…' : head.data ? head.data.slice(0, 6) : 'none'}
@@ -441,11 +446,11 @@ function LogRow({
           <div className='flex items-baseline gap-2'>
             <span className='truncate text-sm font-medium'>{entry.message}</span>
             {isRemix ? (
-              <span className='shrink-0 rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'>
+              <span className='shrink-0 rounded-(--rounded-xs) border border-(--status-neutral-border) bg-(--status-neutral-bg) px-1.5 text-xs text-(--status-neutral-fg)'>
                 remix
               </span>
             ) : null}
-            {mine ? <span className='shrink-0 text-xs text-green-700 dark:text-green-400'>you</span> : null}
+            {mine ? <span className='shrink-0 text-xs text-secondary'>you</span> : null}
           </div>
           <div className='text-xs text-muted' title={entry.authorPubkey}>
             <PlayerLabel pubkey={entry.authorPubkey} className='font-medium text-fg' />{' '}
@@ -467,7 +472,7 @@ function LogRow({
             onClick={() => derive.onRemix(entry.hash)}
             disabled={derive.pending}
             className={BTN}
-            title='Sign a remix object that records this commit as its source (attribution carried along).'
+            title='Sign a remix object that records this commit as its source.'
           >
             Remix
           </button>
@@ -476,7 +481,7 @@ function LogRow({
             onClick={() => derive.onBranch(entry.hash)}
             disabled={derive.pending}
             className={BTN}
-            title='Start a new branch pointing at this commit — no attribution (like git branch).'
+            title='Create a branch at this commit without creating a remix object.'
           >
             Branch
           </button>
@@ -548,7 +553,7 @@ function CommitDetail({
           <HashChip hash={hash} size={14} />
           {isRemix ? 'Remix detail' : 'Commit detail'}
           {isRemix ? (
-            <span className='rounded bg-purple-100 px-1.5 text-xs text-purple-700 dark:bg-purple-950 dark:text-purple-300'>
+            <span className='rounded-(--rounded-xs) border border-(--status-neutral-border) bg-(--status-neutral-bg) px-1.5 text-xs text-(--status-neutral-fg)'>
               remix
             </span>
           ) : null}
@@ -562,7 +567,7 @@ function CommitDetail({
                 className={BTN}
                 onClick={() => derive.onRemix(hash)}
                 disabled={derive.pending}
-                title='Sign a remix object that records this commit as its source (attribution).'
+                title='Sign a remix object that records this commit as its source.'
               >
                 Remix
               </button>
@@ -571,7 +576,7 @@ function CommitDetail({
                 className={BTN}
                 onClick={() => derive.onBranch(hash)}
                 disabled={derive.pending}
-                title='Start a new branch pointing at this commit — no attribution (like git branch).'
+                title='Create a branch at this commit without creating a remix object.'
               >
                 Branch
               </button>
@@ -584,11 +589,11 @@ function CommitDetail({
       </div>
 
       {obj.isLoading ? (
-        <p className='text-sm text-muted'>Loading…</p>
+        <CommitSkeleton />
       ) : !obj.data ? (
-        <p className='text-sm text-amber-700 dark:text-amber-400'>We couldn't find this commit.</p>
+        <p className='text-sm text-(--status-warning-fg)'>Commit not found. Select another commit.</p>
       ) : !decoded?.ok ? (
-        <p className='text-red-600 dark:text-red-400'>We couldn't open this commit. Try again.</p>
+        <p className='text-(--status-error-fg)'>Could not open this commit. Try again.</p>
       ) : (
         <FieldList>
           <Field label='Hash'>
@@ -607,7 +612,7 @@ function CommitDetail({
                         <button
                           type='button'
                           onClick={() => onSelectCommit(s.commitHashHex)}
-                          className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
+                          className='min-w-0 truncate text-left font-mono text-xs break-all ds-link'
                         >
                           {s.commitHashHex}
                         </button>
@@ -624,7 +629,7 @@ function CommitDetail({
           <Field label='Author / signer'>
             <div title={decoded.signerHex}>
               <PlayerLabel pubkey={decoded.signerHex} className='text-sm font-medium' />{' '}
-              <code className='font-mono text-xs text-muted'>{decoded.signerHex.slice(0, 10)}…</code>
+              <code className='text-xs text-muted'>{decoded.signerHex.slice(0, 10)}…</code>
             </div>
             <code className='mt-1 block font-mono text-xs break-all text-muted'>{decoded.signerHex}</code>
           </Field>
@@ -648,7 +653,7 @@ function CommitDetail({
                     <button
                       type='button'
                       onClick={() => onSelectCommit(p)}
-                      className='min-w-0 truncate text-left font-mono text-xs break-all text-blue-600 hover:underline dark:text-blue-400'
+                      className='min-w-0 truncate text-left font-mono text-xs break-all ds-link'
                     >
                       {p}
                     </button>

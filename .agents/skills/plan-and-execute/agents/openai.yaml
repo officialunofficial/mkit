@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan and Execute"
+  short_description: "Research, evaluate, implement, and verify mkit work"
+  default_prompt: "Use $plan-and-execute to research, plan, execute, and verify the requested work in this repository."

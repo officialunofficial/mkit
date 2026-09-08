@@ -6,17 +6,19 @@ import { Link, useRouter } from 'waku'
 
 // Primary navigation (DESIGN.md §4.27): one entry per route, each an icon and
 // a label. Reordering the site nav is editing this list — nothing else.
+type NavGroup = 'Learn' | 'Reference'
+
 type NavRoute = '/' | '/concepts' | '/performance' | '/parity' | '/specs' | '/multiplayer'
 
 type IconComponent = ComponentType<{ size?: number; weight?: 'regular' | 'fill'; 'aria-hidden'?: boolean }>
 
-const NAV_LINKS: ReadonlyArray<{ to: NavRoute; label: string; Icon: IconComponent }> = [
-  { to: '/', label: 'Overview', Icon: HouseIcon },
-  { to: '/concepts', label: 'Concepts', Icon: FlaskIcon },
-  { to: '/performance', label: 'Performance', Icon: GaugeIcon },
-  { to: '/parity', label: 'Parity', Icon: GitDiffIcon },
-  { to: '/specs', label: 'Specs', Icon: ScrollIcon },
-  { to: '/multiplayer', label: 'Multiplayer', Icon: UsersThreeIcon },
+const NAV_LINKS: ReadonlyArray<{ to: NavRoute; label: string; Icon: IconComponent; group: NavGroup }> = [
+  { to: '/', label: 'Overview', group: 'Learn', Icon: HouseIcon },
+  { to: '/concepts', label: 'Concepts', group: 'Learn', Icon: FlaskIcon },
+  { to: '/performance', label: 'Performance', group: 'Reference', Icon: GaugeIcon },
+  { to: '/parity', label: 'Parity', group: 'Reference', Icon: GitDiffIcon },
+  { to: '/specs', label: 'Specs', group: 'Reference', Icon: ScrollIcon },
+  { to: '/multiplayer', label: 'Multiplayer', group: 'Learn', Icon: UsersThreeIcon },
 ]
 
 /**
@@ -24,14 +26,22 @@ const NAV_LINKS: ReadonlyArray<{ to: NavRoute; label: string; Icon: IconComponen
  * weight-medium, text-primary, a filled icon, and a medium left border in border-color-selected — never a fill — and
  * per rule 5 it is not a link.
  */
-export function NavList({ onNavigate, dense = false }: { onNavigate?: () => void; dense?: boolean }) {
+export function NavList({
+  onNavigate,
+  dense = false,
+  group,
+}: {
+  onNavigate?: () => void
+  dense?: boolean
+  group?: NavGroup
+}) {
   const router = useRouter()
   const current = router.path
-  const rowClass = dense ? 'py-0.5' : 'min-h-11'
+  const rowClass = dense ? 'py-0.5 pointer-coarse:min-h-11' : 'min-h-11'
 
   return (
     <ul className='space-y-0.5'>
-      {NAV_LINKS.map(({ to, label, Icon }) => {
+      {NAV_LINKS.filter((item) => !group || item.group === group).map(({ to, label, Icon }) => {
         const active = current === to
         const inner = (
           <>
@@ -80,5 +90,19 @@ export function SiteRail() {
     >
       <NavList dense />
     </nav>
+  )
+}
+
+/** Two short lists keep expanded navigation compact on phones and tablets. */
+export function ExpandedNav({ onNavigate }: { onNavigate: () => void }) {
+  return (
+    <div className='grid grid-cols-2 gap-3 py-2'>
+      {(['Learn', 'Reference'] as const).map((group) => (
+        <div key={group}>
+          <h2 className='px-2 pb-1 text-xs text-secondary'>{group}</h2>
+          <NavList group={group} onNavigate={onNavigate} />
+        </div>
+      ))}
+    </div>
   )
 }

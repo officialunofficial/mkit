@@ -1,15 +1,15 @@
-//! On-disk bitmap cache for verified sparse-checkout deliveries.
+//! On-disk witness cache for verified sparse-checkout deliveries.
 //!
 //! Spec: `docs/specs/SPEC-SPARSE-CHECKOUT.md` §6. Cache layout:
 //!
 //! ```text
-//! <repo-root>/.mkit/sparse/<tree-hex>.bitmap
+//! <repo-root>/.mkit/sparse/<tree-hex>.witness
 //! ```
 //!
 //! One file per (`tree_hash`) — the per-filter binding lives inside the
 //! file body. A cache hit means "we have *some* verified sparse
 //! delivery for this tree"; the caller still has to cross-check the
-//! filter hash before trusting the bitmap. The file format is defined
+//! filter hash before using the witness. The file format is defined
 //! by [`mkit_core::sparse::encode_sparse_cache`] /
 //! [`mkit_core::sparse::decode_sparse_cache`].
 //!
@@ -20,7 +20,7 @@
 
 use mkit_core::layout::RepoLayout;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 use mkit_core::hash::{Hash, to_hex};
@@ -47,14 +47,14 @@ pub enum CacheError {
     FilterMismatch,
 }
 
-/// Compute `<common dir>/sparse/<tree-hex>.bitmap`. The directory may
+/// Compute `<common dir>/sparse/<tree-hex>.witness`. The directory may
 /// not exist yet; [`store`] creates it on demand. Common-dir state:
 /// the cache is keyed by tree hash, so it is shared across worktrees.
 #[must_use]
 pub fn cache_path(layout: &RepoLayout, tree_hash: &Hash) -> PathBuf {
     layout
         .sparse_cache_dir()
-        .join(format!("{}.bitmap", to_hex(tree_hash)))
+        .join(format!("{}.witness", to_hex(tree_hash)))
 }
 
 /// Persist a verified manifest + proof to the cache. Idempotent:
@@ -76,7 +76,7 @@ pub fn store(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = encode_sparse_cache(manifest, proof);
+    let bytes = encode_sparse_cache(manifest, proof)?;
     // Write-rename is overkill for a best-effort cache — a torn write
     // surfaces as a wire-decode failure on the next read, which the
     // caller treats as a cache miss. Plain `fs::write` is fine.
@@ -84,45 +84,30 @@ pub fn store(
     Ok(())
 }
 
-/// Load a cached delivery for `(tree_hash, filter_hash)`. Returns
-/// `Ok(None)` for a fresh repo / cache miss; `Err(_)` only for I/O or
-/// wire failures.
-///
-/// The function does *not* re-verify the bitmap-root against the
-/// bytes — that's the verifier's job. It only enforces that the
-/// cached filter hash matches the caller's expected hash, so a stale
-/// cache for a different filter doesn't get silently returned.
+/// Read and authenticate a bounded v2 cache witness against the requested
+/// tree and filter identities. Unsupported versions, malformed and substituted entries fail.
 ///
 /// # Errors
-///
-/// - [`CacheError::Io`] — I/O failure other than "not found".
-/// - [`CacheError::Wire`] — the cache file exists but is malformed.
-/// - [`CacheError::FilterMismatch`] — cache exists for the tree but
-///   for a different filter.
+/// Returns filesystem, wire or identity errors; callers may rebuild on a miss.
 pub fn load(
     layout: &RepoLayout,
     tree_hash: &Hash,
     expected_filter_hash: &Hash,
 ) -> Result<Option<(SparseManifest, SparseProof)>, CacheError> {
     let path = cache_path(layout, tree_hash);
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let (bitmap_root, filter_hash, leaf_count, bitmap_bytes) = decode_sparse_cache(&bytes)?;
-    if filter_hash != *expected_filter_hash {
+    let mut bytes = Vec::new();
+    file.take((mkit_core::sparse::SPARSE_WIRE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let (manifest, proof) = decode_sparse_cache(&bytes)?;
+    if manifest.filter_hash != *expected_filter_hash || manifest.tree_hash != *tree_hash {
         return Err(CacheError::FilterMismatch);
     }
-    Ok(Some((
-        SparseManifest {
-            tree_hash: *tree_hash,
-            bitmap_root,
-            filter_hash,
-            leaf_count,
-        },
-        SparseProof { bitmap_bytes },
-    )))
+    Ok(Some((manifest, proof)))
 }
 
 /// Errors from [`load_or_build`]'s fresh-build path. A cache-read
@@ -141,9 +126,11 @@ pub enum SparseBuildError {
 #[derive(Debug)]
 pub enum SparseOutcome {
     /// `(tree_hash, filter_hash)` was already cached — the expensive
-    /// `build_sparse` + `verify_sparse` Merkle-bitmap reconstruction
+    /// `build_sparse` + `verify_sparse` witness construction
     /// was skipped entirely.
     CacheHit,
+    /// Full authenticated metadata is already local; sparse grammar/size is unsupported.
+    FullMetadata,
     /// No usable cache entry existed (miss, filter mismatch, or a
     /// corrupt/undecodable entry); a fresh manifest was built and
     /// self-verified. `store_error` is `Some` if persisting it back to
@@ -152,44 +139,34 @@ pub enum SparseOutcome {
     Built { store_error: Option<CacheError> },
 }
 
-/// Cache-aware front end for the `build_sparse` → `verify_sparse` →
-/// `store` pipeline shared by `mkit checkout --sparse` and `mkit clone
-/// --sparse` (SPEC-SPARSE-CHECKOUT §8).
-///
-/// Looks up `(tree_hash(tree), hash_filter(filter))` in the on-disk
-/// cache first. A hit means this exact tree/filter pair was already
-/// built and self-verified by a previous invocation — the cache file
-/// is keyed by `tree_hash`, which is content-addressed, so a hit is
-/// trustworthy without redoing the Merkle-bitmap reconstruction that
-/// `build_sparse`/`verify_sparse` perform.
-///
-/// A cache-read failure is treated exactly like a plain miss and never
-/// propagated: [`CacheError::FilterMismatch`] (stale entry for a
-/// different filter), a wire-decode failure (corrupt entry), and any
-/// I/O error all fall through to a fresh build, which then overwrites
-/// the bad entry. The cache is a best-effort optimisation — see
-/// [`CacheError`] — so a failure to read it must never block sparse
-/// checkout.
+/// Revalidate a cache witness or build it from authenticated local metadata.
+/// Unsupported filters and oversized witnesses retain the existing full-metadata
+/// restoration path. Cache failures are disposable misses.
 ///
 /// # Errors
-///
-/// [`SparseBuildError`] only from the fresh-build path: a malformed
-/// tree/filter (`SparseBuildError::Build`) or a self-verification
-/// failure (`SparseBuildError::VerifyFailed`). Never returned on a
-/// cache hit.
+/// Invalid local trees or a failed self-verification return a build error.
 pub fn load_or_build(
     layout: &RepoLayout,
     tree: &Tree,
     filter: &[PathBuf],
 ) -> Result<SparseOutcome, SparseBuildError> {
+    if mkit_core::sparse::validate_filter(filter).is_err() {
+        return Ok(SparseOutcome::FullMetadata);
+    }
     let th = compute_tree_hash(tree);
     let fh = hash_filter(filter);
     if let Ok(Some(_)) = load(layout, &th, &fh) {
         return Ok(SparseOutcome::CacheHit);
     }
 
-    let (delivered, manifest, proof) = build_sparse(tree, filter)?;
-    if !verify_sparse(&manifest, &delivered, filter, &proof) {
+    let response = match build_sparse(tree, filter) {
+        Ok(value) => value,
+        Err(SparseError::TooLarge | SparseError::UnsupportedFilter) => {
+            return Ok(SparseOutcome::FullMetadata);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if verify_sparse(&th, filter, &response).is_err() {
         return Err(SparseBuildError::VerifyFailed);
     }
     // Best-effort: a write failure here doesn't invalidate the build
@@ -197,7 +174,7 @@ pub fn load_or_build(
     // ability to skip re-deriving it — surfaced to the caller as
     // `store_error` rather than swallowed, so it can warn on stderr as
     // before.
-    let store_error = store(layout, &manifest.tree_hash, &manifest, &proof).err();
+    let store_error = store(layout, &th, &response.manifest, &response.proof).err();
     Ok(SparseOutcome::Built { store_error })
 }
 
@@ -205,6 +182,25 @@ pub fn load_or_build(
 mod tests {
     use super::*;
     use mkit_core::object::{EntryMode, TreeEntry};
+
+    #[test]
+    fn cache_rejects_valid_witness_under_wrong_tree_filename() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let tree = Tree {
+            entries: vec![entry(b"a")],
+        };
+        let filter = [PathBuf::from("a")];
+        let mkit_core::sparse::SparseResponse { manifest, proof } =
+            build_sparse(&tree, &filter).unwrap();
+        let wrong = [7; 32];
+        store(&layout, &wrong, &manifest, &proof).unwrap();
+        assert!(load(&layout, &wrong, &hash_filter(&filter)).is_err());
+        let mut corrupt = encode_sparse_cache(&manifest, &proof).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(cache_path(&layout, &manifest.tree_hash), corrupt).unwrap();
+        assert!(load(&layout, &manifest.tree_hash, &hash_filter(&filter)).is_err());
+    }
 
     fn entry(name: &[u8]) -> TreeEntry {
         TreeEntry {
@@ -225,17 +221,17 @@ mod tests {
             entries: vec![entry(b"aa"), entry(b"ab"), entry(b"ac")],
         };
         let filter = vec![PathBuf::from("aa")];
-        let (_, manifest, proof) = build_sparse(&tree, &filter).unwrap();
+        let mkit_core::sparse::SparseResponse { manifest, proof } =
+            build_sparse(&tree, &filter).unwrap();
 
         store(&layout, &manifest.tree_hash, &manifest, &proof).unwrap();
 
         let loaded = load(&layout, &manifest.tree_hash, &manifest.filter_hash)
             .unwrap()
             .expect("just stored");
-        assert_eq!(loaded.0.bitmap_root, manifest.bitmap_root);
+        assert_eq!(loaded.0.tree_hash, manifest.tree_hash);
         assert_eq!(loaded.0.filter_hash, manifest.filter_hash);
-        assert_eq!(loaded.0.leaf_count, manifest.leaf_count);
-        assert_eq!(loaded.1.bitmap_bytes, proof.bitmap_bytes);
+        assert_eq!(loaded.1.tree_bytes, proof.tree_bytes);
     }
 
     #[test]
@@ -255,7 +251,8 @@ mod tests {
         let tree = Tree {
             entries: vec![entry(b"aa"), entry(b"ab")],
         };
-        let (_, manifest, proof) = build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
+        let mkit_core::sparse::SparseResponse { manifest, proof } =
+            build_sparse(&tree, &[PathBuf::from("aa")]).unwrap();
         store(&layout, &manifest.tree_hash, &manifest, &proof).unwrap();
 
         // Lookup with a *different* filter hash → should fail loudly.

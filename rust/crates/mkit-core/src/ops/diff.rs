@@ -31,9 +31,8 @@ pub enum DiffKind {
     /// Same path, same content hash, different [`EntryMode`].
     ModeChanged,
     /// Content moved from [`DiffEntry::old_path`] to [`DiffEntry::path`].
-    /// Only produced by [`detect_exact_renames`]; an exact rename pairs a
-    /// removed object id with an identical added object id, so the content
-    /// is byte-identical (git's `similarity index 100%`).
+    /// Produced by [`detect_content_renames`] when removed and added content
+    /// is byte-identical, including different valid chunk layouts.
     Renamed,
 }
 
@@ -73,37 +72,61 @@ impl DiffResult {
     }
 }
 
-/// Collapse exact (identical-content) delete+add pairs in `entries` into
-/// single [`DiffKind::Renamed`] entries, in place.
+/// Detect exact renames by verified file content, including different chunk
+/// layouts. Fingerprints are memoized per object for this diff only. Duplicate
+/// content pairs in sorted-path order; unpaired paths stay as adds/removes.
+/// Callers scope detection to one diff or staging leg.
 ///
-/// mkit is content-addressed, so two paths that share an object id hold
-/// byte-identical content. A [`DiffKind::Removed`] entry and a
-/// [`DiffKind::Added`] entry with equal object ids are therefore an exact
-/// rename — git's `similarity index 100%`, but with no heuristic, no
-/// threshold, and no false positives. When identical content is
-/// duplicated across several removed/added paths, pairs are formed in
-/// sorted-path order so the outcome is deterministic; any unpaired
-/// remainder stays as a plain add/remove. The result is left sorted by
-/// destination `path`, matching the rest of the diff pipeline.
-///
-/// Callers scope this to a single diff (git detects renames within one
-/// diff): for `status`, that means applying it per staging leg so a
-/// staged delete never pairs with an unstaged add.
-pub fn detect_exact_renames(entries: &mut Vec<DiffEntry>) {
+/// # Errors
+/// A missing or invalid content object aborts detection without changing entries.
+pub fn detect_content_renames<S: ObjectSource + ?Sized>(
+    store: &S,
+    entries: &mut Vec<DiffEntry>,
+) -> Result<(), StoreError> {
+    let mut memo = std::collections::HashMap::new();
+    for e in entries.iter() {
+        let hash = match e.kind {
+            DiffKind::Removed => e.old_hash,
+            DiffKind::Added => e.new_hash,
+            _ => None,
+        };
+        if let Some(h) = hash
+            && let std::collections::hash_map::Entry::Vacant(slot) = memo.entry(h)
+        {
+            slot.insert(worktree::content_fingerprint(store, &h)?);
+        }
+    }
+    let mut candidate = entries.clone();
+    pair_renames(&mut candidate, |h| memo[&h]);
+    for entry in &candidate {
+        if entry.kind == DiffKind::Renamed
+            && let (Some(a), Some(b)) = (entry.old_hash, entry.new_hash)
+            && !worktree::content_eq(store, &a, &b)?
+        {
+            return Err(StoreError::Io(std::io::Error::other(
+                "content fingerprint collision",
+            )));
+        }
+    }
+    *entries = candidate;
+    Ok(())
+}
+
+fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl Fn(Hash) -> K) {
     use std::collections::HashMap;
 
-    let mut removed: HashMap<Hash, Vec<usize>> = HashMap::new();
-    let mut added: HashMap<Hash, Vec<usize>> = HashMap::new();
+    let mut removed: HashMap<K, Vec<usize>> = HashMap::new();
+    let mut added: HashMap<K, Vec<usize>> = HashMap::new();
     for (i, e) in entries.iter().enumerate() {
         match e.kind {
             DiffKind::Removed => {
                 if let Some(h) = e.old_hash {
-                    removed.entry(h).or_default().push(i);
+                    removed.entry(key(h)).or_default().push(i);
                 }
             }
             DiffKind::Added => {
                 if let Some(h) = e.new_hash {
-                    added.entry(h).or_default().push(i);
+                    added.entry(key(h)).or_default().push(i);
                 }
             }
             _ => {}
@@ -124,8 +147,8 @@ pub fn detect_exact_renames(entries: &mut Vec<DiffEntry>) {
             renames.push(DiffEntry {
                 path: entries[ai].path.clone(),
                 kind: DiffKind::Renamed,
-                old_hash: Some(*h),
-                new_hash: Some(*h),
+                old_hash: entries[ri].old_hash,
+                new_hash: entries[ai].new_hash,
                 old_mode: entries[ri].old_mode,
                 new_mode: entries[ai].new_mode,
                 old_path: Some(entries[ri].path.clone()),
@@ -252,7 +275,12 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                     // renderer.
                     add_removed_entries(store, o, prefix, out, depth)?;
                     add_added_entries(store, n, prefix, out, depth)?;
-                } else if o.mode != n.mode && o.object_hash == n.object_hash {
+                } else if worktree::content_eq(store, &o.object_hash, &n.object_hash)? {
+                    if o.mode == n.mode {
+                        i += 1;
+                        j += 1;
+                        continue;
+                    }
                     if !ignore_regular_executable_mode || !regular_executable_pair(o.mode, n.mode) {
                         out.push(DiffEntry {
                             path: join_path(prefix, &o.name),
@@ -1331,7 +1359,8 @@ pub fn status_diff_observed(
     // Reads fall through to the store for committed objects.
     let snapshot = crate::store::EphemeralSink::new(store);
     let mut observations = Vec::new();
-    let work_tree_hash = worktree::build_tree_filtered_observed(
+    let work_tree_hash = worktree::build_tree_filtered_observed_with_source(
+        &snapshot,
         &snapshot,
         worktree_root,
         tracked,
@@ -1471,7 +1500,7 @@ mod tests {
     #[test]
     fn detect_pairs_identical_content_into_one_rename() {
         let mut es = vec![removed("old.txt", b"hello"), added("new.txt", b"hello")];
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].kind, DiffKind::Renamed);
         assert_eq!(es[0].path, "new.txt");
@@ -1484,7 +1513,7 @@ mod tests {
     fn detect_leaves_unrelated_delete_add_alone() {
         let mut es = vec![removed("a", b"one"), added("b", b"two")];
         let before = es.clone();
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es, before);
     }
 
@@ -1500,7 +1529,7 @@ mod tests {
             old_path: None,
         }];
         let before = es.clone();
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es, before);
     }
 
@@ -1515,7 +1544,7 @@ mod tests {
             added("new_a", b"dup"),
             removed("old_a", b"dup"),
         ];
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es.len(), 2);
         assert_eq!(
             (es[0].old_path.as_deref(), es[0].path.as_str()),
@@ -1536,7 +1565,7 @@ mod tests {
             removed("old_b", b"c"),
             added("new", b"c"),
         ];
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es.len(), 2);
         let r = es.iter().find(|e| e.kind == DiffKind::Renamed).unwrap();
         assert_eq!(r.old_path.as_deref(), Some("old_a"));
@@ -1552,7 +1581,7 @@ mod tests {
         let mut a = added("new", b"same");
         a.new_mode = Some(EntryMode::Executable);
         let mut es = vec![r, a];
-        detect_exact_renames(&mut es);
+        pair_renames(&mut es, |h| h);
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].kind, DiffKind::Renamed);
         assert_eq!(es[0].old_mode, Some(EntryMode::Blob));
@@ -1585,6 +1614,45 @@ mod tests {
             mode,
             object_hash: h,
         }
+    }
+
+    #[test]
+    fn equal_content_different_chunk_layout_is_clean() {
+        let (_d, s) = fresh_store();
+        let inline = put_blob(&s, b"abcdef");
+        let a = put_blob(&s, b"ab");
+        let b = put_blob(&s, b"cdef");
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 6,
+            chunk_size: 0,
+            chunks: vec![a, b],
+        });
+        let chunked = s.write(&serialize::serialize(&manifest).unwrap()).unwrap();
+        assert_ne!(inline, chunked);
+        let old = put_tree(&s, vec![entry(b"a", EntryMode::Blob, chunked)]);
+        let new = put_tree(&s, vec![entry(b"a", EntryMode::Blob, inline)]);
+        assert!(diff_trees(&s, Some(old), Some(new)).unwrap().is_empty());
+        let moved = put_tree(&s, vec![entry(b"b", EntryMode::Blob, inline)]);
+        let mut renamed = diff_trees(&s, Some(old), Some(moved)).unwrap();
+        detect_content_renames(&s, &mut renamed.entries).unwrap();
+        assert_eq!(renamed.entries.len(), 1);
+        assert_eq!(renamed.entries[0].kind, DiffKind::Renamed);
+        assert_eq!(renamed.entries[0].old_hash, Some(chunked));
+        assert_eq!(renamed.entries[0].new_hash, Some(inline));
+        let executable = put_tree(&s, vec![entry(b"a", EntryMode::Executable, inline)]);
+        assert_eq!(
+            diff_trees(&s, Some(old), Some(executable)).unwrap().entries[0].kind,
+            DiffKind::ModeChanged
+        );
+        let merge = crate::ops::merge_trees(&s, None, Some(old), Some(new)).unwrap();
+        assert!(!merge.has_conflicts());
+        let work = fresh_workdir();
+        std::fs::write(work.path().join("a"), b"abcdef").unwrap();
+        let idx = crate::index::from_tree(&s, old).unwrap();
+        let (status, observations) =
+            status_diff_observed(&s, Some(&old), work.path(), Some(&idx)).unwrap();
+        assert!(status.is_empty());
+        assert_eq!(observations[0].object_hash, chunked);
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub const MAX_MESSAGE_CHARS: usize = 280;
 pub const MIN_POST_INTERVAL_MS: i64 = 2_000;
 
 /// Domain prefix for the canonical chat-message bytes. Distinct from the
-/// `mkit-write:v1` envelope prefix and from any mkit object prologue, so a
+/// `mkit-write:v2` envelope prefix and from any mkit object prologue, so a
 /// chat id can never collide with a commit/remix/envelope digest.
 pub const CHAT_CANONICAL_PREFIX: &str = "mkit-chat:v1";
 

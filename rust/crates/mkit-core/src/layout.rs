@@ -51,12 +51,11 @@
 //! | `shallow`                | common   | [`crate::refs`]         |
 //! | `config`                 | common   | CLI config              |
 //! | `keys/`                  | common   | CLI config              |
-//! | `history/`               | common   | [`crate::history`] (feature-gated) |
 //! | `recovery-log`           | common   | [`crate::ops::recovery`] |
 //! | `attestations/`          | common   | `mkit-attest`           |
 //! | `applied-packs/`         | common   | CLI remote dispatch (redownload cache, never a gc root) |
 //! | `git/`                   | common   | `mkit-git-bridge`       |
-//! | `sparse/`                | common   | CLI sparse bitmap cache |
+//! | `sparse/`                | common   | CLI sparse witness cache |
 //! | `pack-shards/`           | common   | CLI pack-shard output   |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
 //! | `index`                  | worktree | [`crate::index`]        |
@@ -100,11 +99,6 @@ use crate::ops::recovery::RECOVERY_LOG;
 use crate::refs::{HEAD_FILE, HEADS_DIR, REFS_DIR, REMOTES_DIR, SHALLOW_FILE, TAGS_DIR};
 use crate::store::{FORMAT_FILE, MKIT_DIR, OBJECTS_DIR};
 
-/// Commit-history MMR directory name under the common dir. Canonical
-/// here (rather than in [`crate::history`]) because that module is
-/// feature-gated while the layout is not; `history::HISTORY_DIR`
-/// re-points at this constant.
-pub const HISTORY_DIR_NAME: &str = "history";
 /// Config file name under the common dir (written by the CLI).
 pub const CONFIG_FILE_NAME: &str = "config";
 /// Repository signing-key directory name under the common dir.
@@ -122,7 +116,7 @@ pub const ATTESTATIONS_DIR_NAME: &str = "attestations";
 pub const APPLIED_PACKS_DIR_NAME: &str = "applied-packs";
 /// Git-bridge per-remote state directory name under the common dir.
 pub const GIT_STATE_DIR_NAME: &str = "git";
-/// Sparse bitmap-cache directory name under the common dir.
+/// Sparse witness-cache directory name under the common dir.
 pub const SPARSE_CACHE_DIR_NAME: &str = "sparse";
 /// Default pack-shard output directory name under the common dir.
 pub const PACK_SHARDS_DIR_NAME: &str = "pack-shards";
@@ -300,12 +294,6 @@ impl RepoLayout {
         self.common_dir.join(KEYS_DIR_NAME)
     }
 
-    /// `history/` — the append-only commit-history MMR.
-    #[must_use]
-    pub fn history_dir(&self) -> PathBuf {
-        self.common_dir.join(HISTORY_DIR_NAME)
-    }
-
     /// `recovery-log` — the append-only superseded-commit log.
     #[must_use]
     pub fn recovery_log_file(&self) -> PathBuf {
@@ -332,7 +320,7 @@ impl RepoLayout {
         self.common_dir.join(GIT_STATE_DIR_NAME)
     }
 
-    /// `sparse/` — the verifiable sparse-checkout bitmap cache
+    /// `sparse/` — the verifiable sparse-checkout witness cache
     /// (keyed by tree hash, so shared).
     #[must_use]
     pub fn sparse_cache_dir(&self) -> PathBuf {
@@ -778,7 +766,6 @@ mod tests {
             ("shallow_file", l.shallow_file(), "shallow", Common),
             ("config_file", l.config_file(), "config", Common),
             ("keys_dir", l.keys_dir(), "keys", Common),
-            ("history_dir", l.history_dir(), "history", Common),
             (
                 "recovery_log_file",
                 l.recovery_log_file(),

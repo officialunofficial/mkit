@@ -3,7 +3,7 @@
 //! On-disk layout per `docs/specs/SPEC-INDEX.md`:
 //!
 //! ```text
-//! [4B magic "MKIX"][1B version][4B LE entry_count][entries...]
+//! [4B magic "MKIX"][1B version=3][4B LE entry_count][entries...][32B BLAKE3 checksum]
 //! entry := [1B status][32B object_hash][8B LE mtime_ns][8B LE size]
 //!          [8B LE ino][8B LE ctime_ns][2B LE path_len][path_len UTF-8 bytes]
 //! ```
@@ -25,7 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 use crate::atomic::write_atomic;
@@ -36,8 +36,8 @@ use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 
 /// Magic bytes — ASCII `"MKIX"`.
 pub const MAGIC: [u8; 4] = *b"MKIX";
-/// The current (and only supported) format version.
-pub const FORMAT_VERSION: u8 = 0x02;
+/// Checksummed index format. Other versions are rejected without rewriting.
+pub const FORMAT_VERSION: u8 = 0x03;
 /// Hard cap on a serialised index file (64 MiB), per SPEC-INDEX §4.
 pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 /// Hard cap on a single entry's path length (SPEC-INDEX §2).
@@ -351,7 +351,7 @@ impl Index {
             .iter()
             .map(|e| 1 + HASH_LEN + 8 + 8 + 8 + 8 + 2 + e.path.len())
             .sum();
-        let mut out = Vec::with_capacity(9 + body);
+        let mut out = Vec::with_capacity(9 + body + HASH_LEN);
         out.extend_from_slice(&MAGIC);
         out.push(FORMAT_VERSION);
         let count = u32::try_from(self.entries.len()).expect("index entry count fits in u32");
@@ -368,6 +368,7 @@ impl Index {
             out.extend_from_slice(&path_len.to_le_bytes());
             out.extend_from_slice(entry.path.as_bytes());
         }
+        out.extend_from_slice(&hash::hash(&out));
         out
     }
 }
@@ -449,6 +450,9 @@ pub type IndexResult<T> = Result<T, IndexError>;
 /// Panics only if internal fixed-width slicing is wrong, which is
 /// impossible by construction (lengths are bounds-checked first).
 pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
+    if data.len() as u64 > MAX_INDEX_BYTES {
+        return Err(IndexError::TooLarge);
+    }
     if data.len() < 9 {
         return Err(IndexError::Corrupt);
     }
@@ -459,11 +463,15 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     if version != FORMAT_VERSION {
         return Err(IndexError::UnsupportedVersion(version));
     }
-    // Entries carry mtime_ns(8) + size(8) + ino(8) + ctime_ns(8) before
-    // path_len.
-    let stat_cache_len: usize = 32;
-    // Fixed bytes per entry: status(1) + hash(32) + stat cache + path_len(2).
-    let min_entry_len = 1 + HASH_LEN + stat_cache_len + 2;
+    if data.len() < 9 + HASH_LEN {
+        return Err(IndexError::Corrupt);
+    }
+    let (data, checksum) = data.split_at(data.len() - HASH_LEN);
+    if hash::hash(data).as_slice() != checksum {
+        return Err(IndexError::Corrupt);
+    }
+    // status + object hash + four stat-cache fields + path length.
+    let min_entry_len = 1 + HASH_LEN + 32 + 2;
     let count = u32::from_le_bytes([data[5], data[6], data[7], data[8]]) as usize;
     // Reject an attacker-supplied `count` that is impossible given the
     // remaining bytes. The minimum wire-length of an entry is 67 bytes
@@ -487,14 +495,12 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         let mut object_hash = [0u8; HASH_LEN];
         object_hash.copy_from_slice(&data[offset..offset + HASH_LEN]);
         offset += HASH_LEN;
-        let (mtime_ns, size, ino, ctime_ns) = {
-            let mut next_u64 = || {
-                let v = u64::from_le_bytes(data[offset..offset + 8].try_into().expect("8 bytes"));
-                offset += 8;
-                v
-            };
-            (next_u64(), next_u64(), next_u64(), next_u64())
+        let mut next_u64 = || {
+            let v = u64::from_le_bytes(data[offset..offset + 8].try_into().expect("8 bytes"));
+            offset += 8;
+            v
         };
+        let (mtime_ns, size, ino, ctime_ns) = (next_u64(), next_u64(), next_u64(), next_u64());
         let path_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
         offset += 2;
         if path_len > MAX_PATH_LEN {
@@ -534,22 +540,27 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
 }
 
 /// Read this worktree's staging index. Returns an empty index if the
-/// file is absent or zero-length. The index is per-worktree state —
+/// file is absent. An existing zero-length file is corruption. The index is per-worktree state —
 /// see [`crate::layout`].
 pub fn read_index(layout: &RepoLayout) -> IndexResult<Index> {
     let path = layout.index_file();
-    let meta = match fs::metadata(&path) {
-        Ok(m) => m,
+    let file = match fs::File::open(&path) {
+        Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Index::new()),
         Err(e) => return Err(IndexError::Io(e)),
     };
+    let meta = file.metadata()?;
     if meta.len() == 0 {
-        return Ok(Index::new());
+        return Err(IndexError::Corrupt);
     }
     if meta.len() > MAX_INDEX_BYTES {
         return Err(IndexError::TooLarge);
     }
-    let bytes = fs::read(&path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
+        return Err(IndexError::TooLarge);
+    }
     let mut idx = deserialize(&bytes)?;
     // git's racy-clean rule, applied at read time: an entry whose
     // cached mtime is not safely OLDER than the index file itself may
@@ -607,7 +618,11 @@ const RACY_WINDOW_NS: u64 = 1_000_000_000;
 /// path; only the racy window's worth of entries is affected.
 pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
     let path = layout.index_file();
-    write_atomic(&path, &idx.serialize(), true)?;
+    let bytes = idx.serialize();
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
+        return Err(IndexError::TooLarge);
+    }
+    write_atomic(&path, &bytes, true)?;
     Ok(())
 }
 
@@ -734,7 +749,7 @@ mod tests {
         let idx = Index::new();
         let bytes = idx.serialize();
         // 4 magic + 1 version + 4 count = 9 bytes.
-        assert_eq!(bytes.len(), 9);
+        assert_eq!(bytes.len(), 41);
         assert_eq!(&bytes[0..4], &MAGIC);
         assert_eq!(bytes[4], FORMAT_VERSION);
         assert_eq!(&bytes[5..9], &0u32.to_le_bytes());
@@ -760,10 +775,10 @@ mod tests {
             ctime_ns: 0x1112_1314_1516_1718,
         }]);
         let bytes = idx.serialize();
-        assert_eq!(bytes.len(), 85);
+        assert_eq!(bytes.len(), 117);
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MKIX");
-        expected.push(0x02); // version
+        expected.push(0x03); // version
         expected.extend_from_slice(&1u32.to_le_bytes());
         expected.push(0x01); // Blob
         expected.extend_from_slice(&h);
@@ -773,6 +788,7 @@ mod tests {
         expected.extend_from_slice(&0x1112_1314_1516_1718u64.to_le_bytes());
         expected.extend_from_slice(&9u16.to_le_bytes());
         expected.extend_from_slice(b"hello.txt");
+        expected.extend_from_slice(&hash::hash(&expected));
         assert_eq!(bytes, expected, "byte layout is pinned");
         assert_eq!(deserialize(&bytes).unwrap(), idx);
     }
@@ -783,44 +799,46 @@ mod tests {
         // 67 bytes, so this must fail fast, before looping.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"MKIX");
-        bytes.push(0x02);
+        bytes.push(FORMAT_VERSION);
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&hash::hash(&bytes));
         assert!(matches!(deserialize(&bytes), Err(IndexError::Corrupt)));
         // One entry declared, only 60 bytes of body: still corrupt.
         let mut short = Vec::new();
         short.extend_from_slice(b"MKIX");
-        short.push(0x02);
+        short.push(FORMAT_VERSION);
         short.extend_from_slice(&1u32.to_le_bytes());
         short.extend_from_slice(&[0u8; 60]);
+        short.extend_from_slice(&hash::hash(&short));
         assert!(matches!(deserialize(&short), Err(IndexError::Corrupt)));
     }
 
     #[test]
-    fn rejects_unknown_version_0x03() {
+    fn rejects_unknown_version_0x04() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"MKIX");
-        bytes.push(0x03);
+        bytes.push(0x04);
         bytes.extend_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
             deserialize(&bytes),
-            Err(IndexError::UnsupportedVersion(0x03))
+            Err(IndexError::UnsupportedVersion(0x04))
         ));
     }
 
-    /// The old pre-stat-cache format (version `0x01`) is rejected like any
-    /// other unsupported version — mkit does not carry dual-version
-    /// read-compat for its local, advisory index file (SPEC-CONVENTIONS
-    /// §4: no version-suffixed compatibility eras).
     #[test]
-    fn rejects_old_version_0x01() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"MKIX");
-        bytes.push(0x01);
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        assert!(matches!(
-            deserialize(&bytes),
-            Err(IndexError::UnsupportedVersion(0x01))
-        ));
+    fn rejects_obsolete_versions_without_rewriting_staging() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+        for version in [1, 2] {
+            let mut bytes = Index::new().serialize();
+            bytes[4] = version;
+            fs::write(layout.index_file(), &bytes).unwrap();
+            assert!(
+                matches!(read_index(&layout), Err(IndexError::UnsupportedVersion(v)) if v == version)
+            );
+            assert_eq!(fs::read(layout.index_file()).unwrap(), bytes);
+        }
     }
 
     /// git's racy-clean rule: an entry whose mtime is within the
@@ -1071,6 +1089,22 @@ mod tests {
     }
 
     #[test]
+    fn checksum_rejects_a_bit_flip_in_an_otherwise_valid_staged_hash() {
+        let idx = Index::from_entries(vec![IndexEntry {
+            path: "staged".into(),
+            status: EntryStatus::Blob,
+            object_hash: seed_hash("A"),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        }]);
+        let mut bytes = idx.serialize();
+        bytes[10] ^= 1;
+        assert!(matches!(deserialize(&bytes), Err(IndexError::Corrupt)));
+    }
+
+    #[test]
     fn rejects_bad_magic() {
         let mut bytes = Index::new().serialize();
         bytes[0] = b'X';
@@ -1161,6 +1195,7 @@ mod tests {
         let path_len = u16::try_from(path.len()).unwrap();
         bytes.extend_from_slice(&path_len.to_le_bytes());
         bytes.extend_from_slice(path);
+        bytes.extend_from_slice(&hash::hash(&bytes));
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::InvalidPath(path) if path == "../escape"));
     }
@@ -1215,6 +1250,7 @@ mod tests {
         bytes.extend_from_slice(&[0u8; HASH_LEN]);
         bytes.extend_from_slice(&[0u8; 32]); // stat cache
         bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&hash::hash(&bytes));
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::BadStatus(0x77)));
     }
@@ -1233,6 +1269,7 @@ mod tests {
         let path = b"removed.txt";
         bytes.extend_from_slice(&11u16.to_le_bytes());
         bytes.extend_from_slice(path);
+        bytes.extend_from_slice(&hash::hash(&bytes));
         let err = deserialize(&bytes).unwrap_err();
         assert!(matches!(err, IndexError::RemovedHasHash(p) if p == "removed.txt"));
     }
@@ -1282,12 +1319,14 @@ mod tests {
     }
 
     #[test]
-    fn read_zero_length_file_returns_empty_index() {
+    fn read_zero_length_file_rejects_corruption() {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join(".mkit")).unwrap();
         fs::write(dir.path().join(INDEX_FILE), b"").unwrap();
-        let idx = read_index(&RepoLayout::single(dir.path())).unwrap();
-        assert!(idx.entries.is_empty());
+        assert!(matches!(
+            read_index(&RepoLayout::single(dir.path())),
+            Err(IndexError::Corrupt)
+        ));
     }
 
     #[test]

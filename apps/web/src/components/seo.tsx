@@ -26,7 +26,7 @@ type SeoProps = {
  * platforms (Slack, X, Discord) cache unfurl images by exact URL with no re-scrape control, so shipping a visual
  * redesign of the card requires minting new URLs. Bump on redesign.
  */
-const OG_CARD_VERSION = '2'
+const OG_CARD_VERSION = '3'
 
 export function Seo({ title, description, path, card }: SeoProps) {
   const url = `${SITE_URL}${path}`

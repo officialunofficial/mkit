@@ -52,13 +52,17 @@ function Category({ cat }: { cat: SpecCategory }) {
 export function SpecIndex() {
   return (
     <div className='space-y-8'>
-      <p className='max-w-prose'>
-        Each status token comes verbatim from the document&rsquo;s front matter and combines two axes (defined in
-        SPEC-CONVENTIONS): maturity &mdash; <code className='text-primary'>draft</code> behavior is still changing or
-        has a called-out gap, <code className='text-primary'>stable</code> behavior changes only with a version bump
-        &mdash; and bindingness &mdash; <code className='text-primary'>normative</code> means interop depends on
-        conforming, <code className='text-primary'>advisory</code> means local-only guidance.
-      </p>
+      <div className='space-y-2 max-w-prose'>
+        <p>
+          Each document declares its status in front matter. SPEC-CONVENTIONS defines two maturity terms:{' '}
+          <code>draft</code> content may change or have documented gaps; <code>stable</code> behavior changes only with
+          a version change.
+        </p>
+        <p>
+          The requirement level is separate. <code>normative</code> content defines requirements for compatible
+          implementations. <code>advisory</code> content provides local guidance.
+        </p>
+      </div>
       <div className='gap-x-10 lg:columns-2'>
         {categories.map((cat) => (
           <Category key={cat.name} cat={cat} />

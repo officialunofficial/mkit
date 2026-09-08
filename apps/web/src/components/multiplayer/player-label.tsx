@@ -142,9 +142,7 @@ export function OwnPlayerName() {
         <button type='button' className={BTN} onClick={() => setEditing(false)} disabled={rename.isPending}>
           Cancel
         </button>
-        {rename.isError ? (
-          <span className='text-xs text-amber-700 dark:text-amber-400'>{errMsg(rename.error)}</span>
-        ) : null}
+        {rename.isError ? <span className='text-xs text-(--status-warning-fg)'>{errMsg(rename.error)}</span> : null}
       </span>
     )
   }

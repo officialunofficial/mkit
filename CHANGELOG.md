@@ -15,7 +15,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(core)* `worktree::store_large_file_streaming_with`'s and `transfer::plan_pack_with`'s `hash_chunks`/`encode_deltas` batch-callback contracts (exactly one result per input item, same order) are now enforced with a typed error (`WorktreeError::ChunkBatchLengthMismatch`, `StoreError::DeltaBatchLengthMismatch`) instead of, respectively, silently trusting the result (`store_large_file_streaming_with` had no check at all) or panicking (`plan_pack_with`'s prior `assert_eq!`) — a buggy or third-party batch callback now fails the operation cleanly rather than either corrupting a `ChunkedBlob` manifest or crashing the process mid-push. New `exit::SOFTWARE` (70, sysexits `EX_SOFTWARE`) exit code for this class of internal-contract error. **SemVer:** additive — new `WorktreeError`/`StoreError` variants, new `exit::SOFTWARE` constant; both functions' happy-path behavior is unchanged.
 - *(cli)* Closed a gap where `mkit pull`/`mkit fetch` (via `remote_dispatch`'s per-branch fast-forward and unpack/publish locks) and `mkit status`'s opportunistic stat-cache refresh took the worktree lock directly instead of through `commands::acquire_worktree_lock`, silently skipping the "this root is being served by `mkit serve`" warning that `commit`/`checkout`/`gc` already print in the same situation (SPEC-CONCURRENCY §3.1). `commands::warn_if_served` is now called at all four sites; new `serve_guard.rs` regression test (`pull_warns_when_root_is_being_served`).
-- *(core)* `history::bootstrap_commonware_context` (the `history-mmr`-feature commit-history MMR backend) now times out and returns `HistoryError::RuntimeBootstrap` instead of blocking forever when commonware-runtime's per-storage-directory `.hold` advisory flock is already held by a different process. `shared_commonware_context`'s process-wide cache already prevents this process from ever double-bootstrapping the same directory, but cannot stop a genuinely different process from holding the same lock — e.g. more than one `mkit serve --features history-mmr` process against one root, a deployment SPEC-CONCURRENCY §3.1 otherwise documents as supported. New regression test reproduces the cross-call contention in-process (bypassing the cache deliberately) and asserts the bounded timeout fires instead of hanging.
+- Clarified docs-site copy, aligned controls and overlays with Pigment, added layout-matched loading placeholders and grouped navigation, and stabilized virtualized lobby scrolling across tab resume and row resizing. Removed the development Agentation integration. No public API or format changes.
+- Worker writes rejected by quotas or rate limits no longer allocate replay
+  records, including chat posts and reactions. Existing operation retries still
+  reuse their reservation or saved reply without a second quota charge.
+- Native authenticated transport requests send the required envelope-version
+  header. External signing negotiates the advertised raw-byte or opaque-handle
+  key form, including the bundled CTAP signer.
+- Restaging a regular file as a symlink preserves a valid Blob target even when
+  the old file used a chunked representation.
+- Ref lock filenames stay bounded for valid long and nested ref names.
+- HTTP and S3 shard downloads process successful responses while admitting
+  workers, so an available quorum is not blocked by redundant slow requests.
+- Git correspondence audits now derive imported fields and graph edges from
+  retained source bytes, verify pinned signatures and exact provenance claims,
+  and work without the import private key.
+- File comparisons, restaging, merge shortcuts and exact rename detection now
+  recognize equal content across valid Blob and ChunkedBlob representations.
+  Content-comparison and source-aware snapshot APIs propagate malformed or
+  missing chunk errors. Status uses the same content-aware rename detector.
+- Pack and packmap consumers reject bytes or shard manifests that do not match
+  the requested content key before unpacking or publishing effects.
+- All local ref mutations participate in the same per-ref lock, including
+  unconditional writes, deletion, tags and remote refs. File-transport writes
+  serialize every condition through their separate transport lock.
+- External signers receive a signing request only after a separate compatible
+  capabilities response is validated.
+- Signed transport writes use destination-bound auth v2, including the content
+  commitment, repository, validity and stable nonce. Worker effects, quota and
+  replay results commit atomically; immutable uploads can resume without a
+  second quota charge. Repository config cannot enable ambient signing. Only
+  the current auth v2 contract is supported.
+- File-fetch staging now bounds retained pack payload, disk usage and chain
+  counts; shard downloads share process-wide memory and concurrency budgets.
 
 ### Performance
 
@@ -26,9 +58,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Sparse proofs and caches move to v2 canonical Tree witnesses. Verification
+  requires the independently requested Tree ID and derives the exact selection;
+  recursive witnesses establish completeness. Caches use `.witness` files;
+  verification returns the derived entries directly.
+- The staged index accepts only checksummed v3. Unsupported or corrupt indexes
+  fail safely, including before GC; there is no migration or automatic rebuild.
+- History proofs now describe canonical first-parent ancestry in explicit
+  generations, with locally trusted contextual descriptors and recoverable
+  publication. Bounded complete snapshots use O(chain length) reconstruction;
+  obsolete journal backends and their runtime dependencies are removed.
+- The keys Worker stores authoritative names and replay records in per-key
+  SQLite Durable Objects, with no KV fallback. Repository Workers use the
+  shared transactional replay ledger without obsolete idempotency tables.
 - *(cli, internal)* `mkit-cli`'s six "sequential below a per-thread threshold, rayon `par_iter` at or above it" fan-outs (`commands::add`'s per-file and per-chunk hashing, `remote_dispatch`'s pack-compression and delta-encoding, `remote_dispatch::packmap`'s signature verification) each hand-duplicated the branch-and-collect boilerplate around the shared `fanout::threshold` formula. New `fanout::map_seq_or_par`/`fanout::try_map_seq_or_par` factor that shape out for the four call sites it fits exactly (by-reference, in-order, infallible or `Result`-collecting); `prepare_delta_batch` (consumes by value) and `verify_new_object_signatures` (deliberately chunks its parallel path — see the entry above) keep their own loops since forcing either into the shared shape would need extra generic machinery to claw back what a bespoke loop gets for free. No behavior change. **SemVer:** none — `pub(crate)`-only, no public API surface.
 
 ### Removed
+
+- Compatibility-only index readers/migration APIs, legacy history APIs, the
+  hash-only rename API, and redundant sparse-selection APIs. Pre-production
+  development supports the current formats without backward-compatibility shims.
 
 - **Windows is no longer a supported build, test, or release target (MKIT-6).** commonware-runtime `2026.9.0`'s non-Linux storage-sync path calls `libc::sync()`, which does not exist on `x86_64-pc-windows-msvc` — the workspace and its test suite (not just the default-feature `mkit` binary) no longer build there. Rather than ship a Windows CI/release leg that cannot actually build or test the workspace, or maintain an untested Windows-only subset, Windows was dropped: the `windows-smoke` CI job, the `x86_64-pc-windows-msvc` release leg (and its `.zip` archive), the `install.ps1` installer, the Scoop packaging manifest and `release-verify.yml`'s Scoop channel check, and the `windows-credential` leg of the `keystore-backends` CI matrix are all gone. `mkit-keystore`'s `backend-windows-credential` feature and its `BackendKind::WindowsCredentialManager` variant were removed — `"windows-credential"` is now an unrecognized backend name (`key backend: ...` / exit `CONFIG_ERROR`) rather than a compiled-in-but-platform-unavailable one (previously exit `UNAVAILABLE`, "requires Windows"). Removing a public enum variant from a published crate is semver-breaking: `mkit-keystore` (and, per the workspace's lockstep versioning, every `mkit-*` crate) needs a `0.5.0` release, not `0.4.3`, to ship this. Windows users should run mkit under WSL, which uses the Linux binary — see `docs/INVARIANTS.md`'s "Windows is not a build, test, or release target" entry.
 

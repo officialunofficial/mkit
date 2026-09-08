@@ -1060,7 +1060,7 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async putObject(room: string, objectIdHex: string, bytes: Uint8Array): Promise<void> {
-    const sign = makeSignFn(this.api, this.requireSeed(), procedures.PutObject)
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.PutObject, this.baseUrl, room)
     await this.wasm.put_object(this.baseUrl, room, objectIdHex, bytes, sign)
   }
 
@@ -1094,7 +1094,7 @@ export class WasmRepoBackend implements RepoBackend {
     expectation: RefExpectation,
     expectedIdHex?: string,
   ): Promise<void> {
-    const sign = makeSignFn(this.api, this.requireSeed(), procedures.UpdateRef)
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.UpdateRef, this.baseUrl, room)
     const res = await this.wasm.update_ref(this.baseUrl, room, name, newIdHex, expectation, expectedIdHex, sign)
     if (res.conflict) throw new CasConflictError(res.currentIdHex)
   }
@@ -1114,7 +1114,7 @@ export class WasmRepoBackend implements RepoBackend {
   ): Promise<{ messageIdHex: string; accepted: boolean; rateLimited: boolean }> {
     // Sign over the EXACT serialized PostMessage body (the transport hashes it
     // and the server re-hashes); the verified pubkey becomes the author.
-    const sign = makeSignFn(this.api, this.requireSeed(), procedures.PostMessage)
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.PostMessage, this.baseUrl, room)
     return await this.wasm.post_message(this.baseUrl, room, text, sign)
   }
 
@@ -1123,7 +1123,7 @@ export class WasmRepoBackend implements RepoBackend {
   }
 
   async react(room: string, targetIdHex: string, emoji: string): Promise<{ active: boolean; count: number }> {
-    const sign = makeSignFn(this.api, this.requireSeed(), procedures.React)
+    const sign = makeSignFn(this.api, this.requireSeed(), procedures.React, this.baseUrl, room)
     return await this.wasm.react(this.baseUrl, room, targetIdHex, emoji, sign)
   }
 

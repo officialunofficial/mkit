@@ -130,6 +130,20 @@ impl PackKey {
     pub const fn into_hash(self) -> Hash {
         self.0
     }
+
+    /// Verify downloaded bytes against this independently requested address.
+    /// Covers the entire byte sequence, including a pack's internal trailer.
+    /// Also applies to auxiliary blobs: a lookup URL or a self-consistent
+    /// manifest cannot authenticate the returned bytes on its own.
+    ///
+    /// # Errors
+    /// Returns [`TransportError::InvalidResponse`] on a digest mismatch.
+    pub fn verify_bytes(self, bytes: &[u8]) -> TransportResult<()> {
+        if crate::hash::hash(bytes) != self.0 {
+            return Err(TransportError::InvalidResponse);
+        }
+        Ok(())
+    }
 }
 
 impl From<Hash> for PackKey {

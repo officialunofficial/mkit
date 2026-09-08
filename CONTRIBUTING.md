@@ -82,6 +82,15 @@ stays `workflow_dispatch`-only on GitHub Actions by design; see
 `docs/RELEASE.md`'s pre-release checklist. Windows is not a supported
 target (MKIT-6; see `docs/INVARIANTS.md`).
 
+## Pre-production compatibility policy
+
+mkit is not live in production. Changes may replace unshipped APIs and formats
+without maintaining older readers, aliases, migration helpers, or fallback state.
+Support the current contract directly; add compatibility machinery only when
+explicitly requested. Keep format identifiers, strict validation, corruption
+checks, and tests for current behavior. Document breaking changes in the changelog,
+but do not add rollout or downgrade obligations for nonexistent production users.
+
 ## Test-first discipline
 
 Every bug fix PR MUST include a regression test that fails on the
@@ -282,7 +291,7 @@ Every PR is held to:
 6. **Crypto / key-handling changes** require a second reviewer and an
    explicit threat-model note in the PR description.
 7. **Public API changes** require a CHANGELOG entry under the
-   "Unreleased" heading and a SemVer impact note.
+   "Unreleased" heading. Backwards compatibility is not a pre-production gate.
 
 ## What this project will not merge
 

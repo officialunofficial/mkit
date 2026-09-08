@@ -292,7 +292,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
           width={snapshot.ppm.width}
           height={snapshot.ppm.height}
           role='img'
-          aria-label='Verified download preview — the image fills in as chunks verify'
+          aria-label='Verified download preview. The image appears as chunks verify.'
           className='size-40 rounded-sm bg-white'
           style={{ boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.1)' }}
         />
@@ -308,38 +308,25 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
         />
       ) : null}
       {dl.failing ? (
-        <p role='status' className='text-xs text-red-700 dark:text-red-400'>
-          Chunk {dl.cursor} keeps arriving corrupted — rejected every attempt (hash mismatch). The stream is stalled;
-          nothing unverified reaches the image. Fix the connection to resume.
+        <p role='status' className='text-xs text-(--status-error-fg)'>
+          The demo rejected chunk {dl.cursor} because its hash does not match. Turn off “Corrupt the connection” to let
+          the next retry succeed.
         </p>
       ) : null}
       {snapshot ? (
         <>
           <CorruptSwitch checked={corrupt} onToggle={toggleCorrupt} />
           <div className='flex flex-wrap items-center gap-3'>
-            <button
-              type='button'
-              onClick={start}
-              disabled={dl.phase === 'streaming'}
-              className='inline-flex h-10 items-center justify-center rounded-lg border border-hairline px-3 text-sm font-medium transition-colors hover:border-blue-500/50 active:translate-y-px disabled:opacity-40 sm:h-9'
-            >
+            <button type='button' onClick={start} disabled={dl.phase === 'streaming'} className='btn btn--outlined'>
               {startLabel}
             </button>
-            <button
-              type='button'
-              onClick={reset}
-              className='inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm text-muted transition-opacity hover:opacity-70 active:translate-y-px sm:h-9'
-            >
+            <button type='button' onClick={reset} className='btn btn--ghost'>
               Reset
             </button>
           </div>
         </>
       ) : (
-        <button
-          type='button'
-          onClick={start}
-          className='inline-flex h-11 items-center justify-center rounded-lg border border-fg bg-fg px-6 text-base font-medium text-bg transition-opacity hover:opacity-90 active:translate-y-px'
-        >
+        <button type='button' onClick={start} className='btn btn--solid'>
           Start download
         </button>
       )}
@@ -350,7 +337,7 @@ function StreamingVerifiedDownload({ file }: { file: FileAsset }) {
         </p>
       ) : null}
       {dl.phase === 'done' ? (
-        <p className='text-xs text-muted'>Complete — every byte verified before it was shown.</p>
+        <p className='text-xs text-muted'>Complete. Every byte was verified before display.</p>
       ) : null}
     </Section>
   )
@@ -395,12 +382,12 @@ function CorruptSwitch({ checked, onToggle }: { checked: boolean; onToggle: () =
     >
       <span
         className={`inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${
-          checked ? 'bg-red-600' : 'bg-hairline'
+          checked ? 'bg-(--status-error-fg)' : 'bg-hairline'
         }`}
       >
         <span
           aria-hidden
-          className={`size-4 rounded-full bg-white transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`}
+          className={`size-4 rounded-full bg-(--surface-raised) transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`}
         />
       </span>
       <span className='text-sm transition-opacity group-hover:opacity-80'>Corrupt the connection</span>

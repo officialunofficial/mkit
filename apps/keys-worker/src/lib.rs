@@ -1,4 +1,4 @@
-// keys.mkit.sh — a KV-backed registry mapping an Ed25519 pubkey to a chosen
+// keys.mkit.sh — a per-key SQLite Durable Object registry mapping an Ed25519 pubkey to a chosen
 // display handle (e.g. "slate-badger"). Reads are open; writes are signed with
 // the SAME envelope the web app builds for repo writes, and may only set the
 // name for the pubkey that signed (owner-only). Non-unique handles: the pubkey
@@ -13,14 +13,14 @@ use worker::*;
 
 mod audit;
 mod envelope;
+mod name_store;
 mod names;
+use mkit_worker_common::replay::{Ledger, Proof, Reply};
+pub use name_store::NameStore;
 
-use audit::{audit_for, WriteAudit};
-use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
-use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
-
-/// KV namespace binding (declared in wrangler.jsonc).
-const KV_BINDING: &str = "NAMES";
+use audit::{WriteAudit, audit_for};
+use envelope::{EnvelopeHeaders, VerifyEnvelope, blake3_hex, verify_envelope};
+use names::{NameRecord, ResolveBody, SetNameBody, is_pubkey_hex, normalize_name};
 
 /// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
 /// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
@@ -31,11 +31,10 @@ const WRITE_EVENTS_BINDING: &str = "WRITE_EVENTS";
 /// constant, so changing it here is a breaking protocol change.
 const SET_NAME_PROCEDURE: &str = "/mkit.keys.v1.Keys/SetName";
 
-const CORS_ALLOW_HEADERS: &str =
-    "x-public-key, x-signature, x-digest, x-created-at, idempotency-key, content-type";
+const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, idempotency-key, content-type";
 const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
 
-/// Cap on `/resolve` batch size (KV has no multi-get; we loop sequentially).
+/// Cap on `/resolve` batch size; each key is read from its own Durable Object.
 const MAX_RESOLVE: usize = 256;
 
 /// Reject any request body larger than this. Both write bodies (`set_name`'s
@@ -60,10 +59,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // (`set_name`, `resolve`) get the pre-buffer rejection for free. Reject by
     // Content-Length BEFORE buffering (O(1)); the post-buffer check inside
     // `read_capped_body` is the backstop for chunked/unknown-length requests.
-    if let Ok(Some(len)) = req.headers().get("content-length") {
-        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
-            return Ok(with_cors(body_too_large()?));
-        }
+    if let Ok(Some(len)) = req.headers().get("content-length")
+        && len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES)
+    {
+        return Ok(with_cors(body_too_large()?));
     }
 
     let out = if method == Method::Get && (path == "/" || path == "/health") {
@@ -72,7 +71,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let pubkey = pubkey.to_ascii_lowercase();
         match method {
             Method::Get => get_name(&env, &pubkey).await,
-            Method::Put => set_name(&mut req, &env, &pubkey).await,
+            Method::Put => name_stub(&env, &pubkey)?.fetch_with_request(req).await,
             _ => Response::error("method not allowed", 405),
         }
     } else if method == Method::Post && path == "/resolve" {
@@ -177,6 +176,11 @@ fn log_write(env: &Env, audit: &WriteAudit) {
 fn read_envelope_headers(req: &Request) -> EnvelopeHeaders {
     let h = req.headers();
     EnvelopeHeaders {
+        version: h.get("X-Envelope-Version").ok().flatten(),
+        audience: h.get("X-Audience").ok().flatten(),
+        repository: h.get("X-Repository").ok().flatten(),
+        commitment: h.get("X-Content-Commitment").ok().flatten(),
+        expires_at: h.get("X-Expires-At").ok().flatten(),
         public_key: h.get("X-Public-Key").ok().flatten(),
         signature: h.get("X-Signature").ok().flatten(),
         digest: h.get("X-Digest").ok().flatten(),
@@ -190,15 +194,13 @@ async fn get_name(env: &Env, pubkey: &str) -> Result<Response> {
     if !is_pubkey_hex(pubkey) {
         return Response::error("invalid pubkey", 400);
     }
-    let kv = env.kv(KV_BINDING)?;
-    match kv.get(pubkey).text().await? {
-        Some(json) => json_response(json),
-        None => Response::error("not found", 404),
-    }
+    name_stub(env, pubkey)?
+        .fetch_with_str(&format!("https://names/name/{pubkey}"))
+        .await
 }
 
 /// PUT /name/<pubkey> — signed, owner-only set/rename of the handle.
-async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response> {
+async fn set_name(req: &mut Request, env: &Env, pubkey: &str, ledger: &Ledger) -> Result<Response> {
     if !is_pubkey_hex(pubkey) {
         return Response::error("invalid pubkey", 400);
     }
@@ -215,14 +217,28 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
     // rejected write (bad signature, stale timestamp, …) is observable too —
     // see #695. `audit_for` is pure and unit-tested in `audit.rs`; only the
     // Analytics Engine write below is untested worker glue.
-    let verify_result = verify_envelope(SET_NAME_PROCEDURE, &actual_digest, now, &headers);
+    let audience = env.var("AUTH_AUDIENCE")?.to_string();
+    let verify_result = verify_envelope(
+        envelope::Context {
+            audience: &audience,
+            repository: "keys",
+        },
+        SET_NAME_PROCEDURE,
+        &actual_digest,
+        now,
+        &headers,
+    );
     log_write(
         env,
         &audit_for(SET_NAME_PROCEDURE, body.len() as u64, &verify_result),
     );
 
-    let signer = match verify_result {
-        VerifyEnvelope::Ok { public_key } => public_key.to_ascii_lowercase(),
+    let (signer, proof) = match verify_result {
+        VerifyEnvelope::Ok {
+            public_key,
+            authorization,
+            ..
+        } => (public_key.to_ascii_lowercase(), Proof::from(&authorization)),
         VerifyEnvelope::Err { status, error } => return Response::error(error, status),
     };
     // Owner-only: the signer must be the very key it is naming.
@@ -243,9 +259,36 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str) -> Result<Response
         updated_at: now,
     };
     let json = serde_json::to_string(&record).map_err(|e| Error::RustError(e.to_string()))?;
-    let kv = env.kv(KV_BINDING)?;
-    kv.put(pubkey, &json)?.execute().await?;
-    json_response(json)
+    #[cfg(feature = "test-faults")]
+    let fault = req.headers().get("x-mkit-test-fault")?;
+    let owned = ledger.clone();
+    ledger
+        .transaction(move || {
+            if let Some(saved) = owned.reserve(&proof, now, || Ok(None))? {
+                return saved.ok_or_else(|| Error::RustError("incomplete name transaction".into()));
+            }
+            owned.state.storage().sql().exec(
+                "INSERT OR REPLACE INTO current_name (id, record) VALUES (1, ?)",
+                vec![json.clone().into()],
+            )?;
+            #[cfg(feature = "test-faults")]
+            if fault.as_deref() == Some("after-name") {
+                return Err(Error::RustError("injected failure after name write".into()));
+            }
+            let reply = Reply {
+                status: 200,
+                body: json,
+            };
+            owned.finish(&proof, &reply)?;
+            #[cfg(feature = "test-faults")]
+            if fault.as_deref() == Some("after-result") {
+                return Err(Error::RustError(
+                    "injected failure after result write".into(),
+                ));
+            }
+            Ok(reply)
+        })?
+        .response()
 }
 
 /// POST /resolve — batch-read names for a list of pubkeys (for the commit log).
@@ -258,18 +301,24 @@ async fn resolve(req: &mut Request, env: &Env) -> Result<Response> {
         return Response::error("invalid body", 400);
     };
 
-    let kv = env.kv(KV_BINDING)?;
     let mut names = serde_json::Map::new();
     for pk in parsed.pubkeys.into_iter().take(MAX_RESOLVE) {
         let pk = pk.to_ascii_lowercase();
         if !is_pubkey_hex(&pk) {
             continue;
         }
-        if let Some(json) = kv.get(&pk).text().await? {
-            if let Ok(rec) = serde_json::from_str::<NameRecord>(&json) {
-                names.insert(pk, serde_json::Value::String(rec.name));
-            }
+        let mut response = get_name(env, &pk).await?;
+        if response.status_code() == 200
+            && let Ok(rec) = response.json::<NameRecord>().await
+        {
+            names.insert(pk, serde_json::Value::String(rec.name));
         }
     }
     Response::from_json(&serde_json::json!({ "names": names }))
+}
+
+fn name_stub(env: &Env, pubkey: &str) -> Result<worker::Stub> {
+    env.durable_object("NAME_STORE")?
+        .id_from_name(pubkey)?
+        .get_stub()
 }

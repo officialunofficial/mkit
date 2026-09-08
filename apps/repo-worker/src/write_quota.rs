@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Pure per-key write-quota decision for PutObject/UpdateRef. Enforcement is
-// wired through the `AuthInterceptor` (`worker_impl/auth.rs`), which calls
-// the room's RefStore DO's `/quota` op (`worker_impl/refstore.rs`) BEFORE the
-// handler runs — the DO's serial per-room execution makes the
-// read-evaluate-write here atomic, the same requirement that makes
-// `refs::evaluate_cas` and `chat::is_rate_limited` pure functions consulted
-// from inside the DO rather than a stateless Worker-global counter (which
-// would race across isolates and could be dodged by hitting a different
-// edge PoP).
+// Pure per-author write-quota arithmetic. RefStore evaluates this inside the
+// transaction that reserves a signed nonce and applies mutable effects.
+// Object publication reserves its budget before R2 access; retries reuse the
+// reservation and never charge twice.
 //
 // This module owns only the pure budget arithmetic — mirroring `chat.rs`'s
 // `is_rate_limited` — so it runs under `cargo test` on the host even though
@@ -35,7 +30,7 @@ pub const WRITE_QUOTA_MAX_OPS: u32 = 300;
 pub const WRITE_QUOTA_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MiB
 
 /// The persisted per-author quota row (mirrors the DO's `write_quota` table:
-/// `refstore::read_quota_state` / `refstore::handle_quota_check`).
+/// `refstore::read_quota_state` / `refstore::charge_quota`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaState {
     /// Epoch-ms the current window started.

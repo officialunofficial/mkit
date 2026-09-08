@@ -355,7 +355,9 @@ export function TreeDemo() {
                       expand per the VS Code pattern. */}
                   <span aria-hidden className='flex size-4 shrink-0 items-center justify-center text-subtle'>
                     {row.node.kind === 'tree' ? (
-                      <ChevronIcon className={`transition-transform duration-150 ${isExpanded ? 'rotate-90' : ''}`} />
+                      <ChevronIcon
+                        className={`transition-transform duration-(--duration-fast) ease-standard ${isExpanded ? 'rotate-90' : ''}`}
+                      />
                     ) : null}
                   </span>
                   <span aria-hidden className='mx-1.5 flex size-4 shrink-0 items-center text-subtle'>
@@ -389,7 +391,7 @@ export function TreeDemo() {
               aria-label='Choose a file to edit'
               value={selectedPath}
               onChange={(e) => setSelectedPath(e.target.value)}
-              className='min-w-0 max-w-full truncate rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 font-mono text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+              className='min-w-0 max-w-full truncate rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 font-mono text-sm text-fg outline-none transition-colors hover:border-(--border-color-strong) focus:border-(--border-color-focus) focus:ring-2 focus:ring-(--focus-ring)'
             >
               {blobPaths.map((p) => (
                 <option key={p} value={p}>
@@ -405,16 +407,14 @@ export function TreeDemo() {
             onChange={(e) => onContentChange(e.target.value)}
             aria-label={`Contents of ${selectedPath}`}
           />
-          <p className='text-xs text-muted'>Edit the contents — every hash and the Merkle tree below update live.</p>
+          <p className='text-xs text-muted'>The affected hashes and Merkle tree update as you edit.</p>
         </div>
 
         {'error' in encoded ? (
-          <p className='text-red-600 dark:text-red-400'>
-            Couldn't build this tree. Check your file contents and try again.
-          </p>
+          <p className='text-(--status-error-fg)'>Couldn't build this tree. Check your file contents and try again.</p>
         ) : merkle ? (
           <div className='border-t-2 border-hairline'>
-            <Section title='Merkle tree' description='Each square is the BLAKE3 of everything beneath it.'>
+            <Section title='Merkle tree' description='Each square shows an object’s BLAKE3 hash.'>
               <MerkleTree root={merkle} />
             </Section>
           </div>

@@ -1,10 +1,12 @@
 // Local-dev config: no-op build (wasm prebuilt) to avoid the worker-build
-// rebuild loop, and a local KV namespace (Miniflare provides one in-memory).
+// rebuild loop. NameStore uses local SQLite Durable Objects.
 //   wrangler dev -c wrangler.dev.jsonc --local
 {
   "name": "mkit-keys",
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2024-09-23",
-  "build": { "command": "true" },
-  "kv_namespaces": [{ "binding": "NAMES", "id": "names-dev" }]
+  "vars": { "AUTH_AUDIENCE": "http://localhost:8789" },
+  "durable_objects": { "bindings": [{ "name": "NAME_STORE", "class_name": "NameStore" }] },
+  "migrations": [{ "tag": "auth-v2-names", "new_sqlite_classes": ["NameStore"] }],
+  "build": { "command": "true" }
 }

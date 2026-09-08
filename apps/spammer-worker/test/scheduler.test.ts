@@ -73,6 +73,8 @@ describe("envelope.ts — signature verification", () => {
     const seedHex = seedForIndex(api, 0);
     const bodyDigest = api.blake3_hex(TEXT_ENCODER.encode("test post_message body"));
     const env = buildSignedEnvelope(api, seedHex, {
+      audience: "https://repo.example",
+      repository: "room",
       procedure: procedures.PostMessage,
       bodyDigest,
     });
@@ -84,14 +86,17 @@ describe("envelope.ts — signature verification", () => {
     // out explicitly here, not just `env`.
     expect(env.canonical).toBe(
       canonicalString({
-        procedure: procedures.PostMessage,
+        audience: "https://repo.example",
+      repository: "room",
+      procedure: procedures.PostMessage,
         bodyDigest,
         createdAt: env.createdAt,
+        expiresAt: env.expiresAt,
         idempotencyKey: env.idempotencyKey,
       }),
     );
     expect(env.canonical).toBe(
-      ["mkit-write:v1", procedures.PostMessage, bodyDigest, env.createdAt, env.idempotencyKey].join("\n"),
+      ["mkit-write:v2", "https://repo.example", "room", procedures.PostMessage, `body:${bodyDigest}`, env.createdAt, env.expiresAt, env.idempotencyKey].join("\n"),
     );
 
     // The server's `AuthInterceptor` verifies
@@ -117,6 +122,8 @@ describe("envelope.ts — signature verification", () => {
   it("rejects a tampered signature", () => {
     const seedHex = seedForIndex(api, 1);
     const env = buildSignedEnvelope(api, seedHex, {
+      audience: "https://repo.example",
+      repository: "room",
       procedure: procedures.PutObject,
       bodyDigest: api.blake3_hex(TEXT_ENCODER.encode("other body")),
     });
@@ -128,6 +135,8 @@ describe("envelope.ts — signature verification", () => {
 
   it("rejects verification against the wrong pubkey", () => {
     const envA = buildSignedEnvelope(api, seedForIndex(api, 2), {
+      audience: "https://repo.example",
+      repository: "room",
       procedure: procedures.React,
       bodyDigest: api.blake3_hex(TEXT_ENCODER.encode("body-a")),
     });

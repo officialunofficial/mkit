@@ -46,12 +46,12 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'add',
         status: 'divergent',
-        note: "Pathspecs, -A, -u, and -p interactive hunk staging. -n/--dry-run isn't implemented yet — a no-op flag would incorrectly stage, so it's deferred rather than faked.",
+        note: 'Pathspecs, -A, -u, and -p interactive hunk staging. -n/--dry-run is not implemented.',
       },
       {
         cmd: 'status',
         status: 'parity',
-        note: '--porcelain v1 and v2, -s, -z. Git-shaped output, adding T for a mode change.',
+        note: '--porcelain v1 and v2, -s, -z. Git-compatible output, adding T for a mode change.',
       },
       {
         cmd: 'diff',
@@ -74,7 +74,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Branches, Tags, and Merging',
+    name: 'Branches, tags, and merging',
     blurb: 'Create branches and tags, then merge history back together.',
     items: [
       {
@@ -96,7 +96,7 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'History and Inspection',
+    name: 'History and inspection',
     blurb: 'Read what happened, and find when it changed.',
     items: [
       {
@@ -117,18 +117,18 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'blame',
         status: 'divergent',
-        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection (inline -M<num>/-C<num> thresholds and git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and git-shaped --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed) with git's ancestor tie-break, pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). Two differences keep it divergent: --format=json and --porcelain carry an mkit Identity, not Name <email> (the same, accepted difference as log); and blame follows a fixed path, so it does not trace lines across a whole-file rename the way git does (use -C to credit copied blocks).",
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection (inline -M<num>/-C<num> thresholds and git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and Git-compatible --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed) with git's ancestor tie-break, pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). Two differences keep it divergent: --format=json and --porcelain carry an mkit Identity, not Name <email> (the same, accepted difference as log); and blame follows a fixed path, so it does not trace lines across a whole-file rename the way git does (use -C to credit copied blocks).",
       },
       {
         cmd: 'bisect',
         status: 'divergent',
-        note: 'start, good, bad, skip, reset, and run <cmd> (auto-bisect with git’s 0/125/1-127 exit-code contract). Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); run checks out each candidate transiently but still prints the first bad commit rather than parking there.',
+        note: 'start, good, bad, skip, reset, and run <cmd> (auto-bisect with git’s 0/125/1-127 exit-code contract). Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); run checks out each candidate transiently but still prints the first bad commit rather than leaving that commit checked out.',
       },
     ],
   },
   {
     name: 'Workspace',
-    blurb: 'Manage the working copy itself — extra trees, partial checkouts, and shelved changes.',
+    blurb: 'Manage linked worktrees, partial checkouts, and stashed changes.',
     items: [
       {
         cmd: 'worktree',
@@ -148,8 +148,8 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Cleanup and Maintenance',
-    blurb: 'Clear out untracked junk and reclaim object storage.',
+    name: 'Cleanup and maintenance',
+    blurb: 'Remove untracked files and reclaim object storage.',
     items: [
       { cmd: 'clean', status: 'parity', note: '-n, -f, -d, -x, -X. Refuses without -f, matching clean.requireForce.' },
       {
@@ -189,18 +189,18 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Remotes and Git Interop',
+    name: 'Remotes and Git interop',
     blurb: "Sync over mkit's own transports, with one-way bridges to and from git.",
     items: [
       {
         cmd: 'remote',
         status: 'parity',
-        note: "List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes. With prefix-nested names (a and a/b both configured), rename preserves the sibling's tracking refs — git's own rename silently drags them to the new name.",
+        note: "List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes. With prefix-nested names (a and a/b both configured), rename preserves the sibling's tracking refs — Git renames those refs too.",
       },
       {
         cmd: 'push / pull / fetch / clone',
         status: 'parity',
-        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>. They speak mkit's protocol, not git's wire protocol.",
+        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>. They use mkit's protocol, not git's wire protocol.",
       },
       {
         cmd: 'git import',
@@ -220,13 +220,13 @@ export const categories: ParityCategory[] = [
     ],
   },
   {
-    name: 'Config and Conventions',
-    blurb: 'Git-shaped settings and ignore rules that never set your signed identity.',
+    name: 'Config and conventions',
+    blurb: 'Git-compatible settings and ignore rules. These do not determine your signing identity.',
     items: [
       {
         cmd: 'config user.name / user.email',
         status: 'parity',
-        note: 'Accepted and round-tripped, but non-authoritative: they never feed the signed identity.',
+        note: 'Accepted and round-tripped, but non-authoritative: they do not determine the signing identity.',
       },
       {
         cmd: 'config --unset / --local / --global',
@@ -252,7 +252,7 @@ export const categories: ParityCategory[] = [
 export const inherentDivergences: ParityNote[] = [
   {
     label: 'Hash length',
-    body: "mkit object IDs are 64-hex BLAKE3; git's are 40-hex SHA-1. A git SHA pasted into mkit will never resolve. mkit matches the UX shape (short prefixes, abbreviated display) but not the length.",
+    body: "mkit object IDs are 64-hex BLAKE3; git's are 40-hex SHA-1. A git SHA pasted into mkit will never resolve. mkit supports short hash prefixes and abbreviated display, with a different hash length.",
   },
   {
     label: 'Repo marker',
@@ -267,7 +267,7 @@ export const safetyDivergences: ParityNote[] = [
     body: 'rm, restore, reset --hard, clean, stash pop, mv, checkout, and worktree remove refuse to destroy modified or untracked content without an explicit -f / --force.',
   },
   {
-    label: "A hostile clone can't spoof you",
+    label: 'Repository-local identity settings are rejected',
     body: 'user.identity and other security-sensitive keys are forbidden in repo-local config, so a checked-out repo cannot redirect signing or transport trust.',
   },
   {

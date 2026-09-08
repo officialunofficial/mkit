@@ -578,23 +578,17 @@ points at; a detached
 .Cm HEAD
 needs an explicit
 .Ar ref
-because the ref-history journal is keyed per-branch.
+because ancestry snapshots are keyed per-branch.
 .Pp
-The underlying journal is the per-branch, append-only commit-history MMR
-written by every branch advance. It stores a count of advances and a
-tamper-evident root, but its leaf digests cannot be decoded back to
-commit hashes, so the listed hashes are reconstructed from the
-first-parent chain. On a build with
+With
 .Cm --features history-mmr
-each listed entry is additionally cross-checked against the journaled
-MMR root via an inclusion proof. This is
-.Em not
-a full Git reflog:
+inclusion proofs are checked against the canonical ancestry snapshot and its
+descriptor, binding repository, branch, generation, tip, count and root.
 .Cm @{ Ns Ar N Ns Cm }
-indexes the reachable chain, so commits superseded by
+indexes the reachable first-parent chain, so commits superseded by
 .Cm commit --amend
-or a reset are no longer listed. This command never mutates refs, the
-journal, or any object.
+or a reset are no longer listed. Recovery records are separate. This command
+never mutates refs, ancestry snapshots, or objects.
 .It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.

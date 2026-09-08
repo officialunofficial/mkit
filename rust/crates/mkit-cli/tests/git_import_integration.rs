@@ -118,6 +118,91 @@ impl Fixture {
 }
 
 #[test]
+fn audit_rejects_swapped_intermediate_import_mappings() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let up = f.upstream();
+    std::fs::write(up.join("third.txt"), "third\n").unwrap();
+    git_ok(&up, &["add", "third.txt"]);
+    git_ok(&up, &["commit", "--quiet", "-m", "upstream third"]);
+    let fork = f.import();
+    let args = ["git", "verify", "--fork-audit", "--ref", "refs/heads/main"];
+    f.mkit_ok(&fork, &args);
+
+    let order = git_in(&up, &["rev-list", "--reverse", "HEAD"]);
+    let order = String::from_utf8(order.stdout).unwrap();
+    let ids: Vec<_> = order.lines().collect();
+    assert_eq!(ids.len(), 3);
+    let path = fork.join(".mkit/git/upstream/map");
+    let map = std::fs::read_to_string(&path).unwrap();
+    let mut rows: Vec<Vec<String>> = map
+        .lines()
+        .map(|line| line.split_whitespace().map(str::to_owned).collect())
+        .collect();
+    let first = rows.iter().position(|row| row[1] == ids[0]).unwrap();
+    let second = rows.iter().position(|row| row[1] == ids[1]).unwrap();
+    let hash = rows[first][0].clone();
+    rows[first][0] = rows[second][0].clone();
+    rows[second][0] = hash;
+    std::fs::write(
+        path,
+        rows.iter()
+            .map(|row| row.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let out = f.mkit(&fork, &args);
+    assert!(
+        !out.status.success(),
+        "swapping valid signed twins must fail correspondence verification: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn audit_rejects_unrelated_head_attestation() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let args = ["git", "verify", "--fork-audit", "--ref", "refs/heads/main"];
+    f.mkit_ok(&fork, &args);
+    let layout = RepoLayout::single(&fork);
+    let head = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();
+    let unrelated = mkit_attest::store::list(&layout, &tag).unwrap();
+    assert!(!unrelated.is_empty());
+    let head_dir = layout.attestations_dir().join(mkit_core::to_hex(&head));
+    std::fs::remove_dir_all(&head_dir).unwrap();
+    std::fs::create_dir(&head_dir).unwrap();
+    for entry in unrelated {
+        std::fs::copy(&entry, head_dir.join(entry.file_name().unwrap())).unwrap();
+    }
+    let out = f.mkit(&fork, &args);
+    assert!(
+        !out.status.success(),
+        "a valid attestation about another subject must not satisfy import provenance: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn audit_succeeds_without_import_private_key() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    std::fs::remove_file(fork.join(".mkit/keys/git-import.key")).unwrap();
+    f.mkit_ok(&fork, &["git", "verify", "--fork-audit"]);
+}
+
+#[test]
 fn fresh_clone_imports_checks_out_and_verifies() {
     if !git_available() {
         return;

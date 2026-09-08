@@ -109,11 +109,11 @@ commands:
                     not in A; <A>...<B> the symmetric difference (empty
                     side = HEAD)
   reflog [<ref>] [--format=json] [-n N]
-                    Show a branch's recorded movement history (read-only).
+                    Show a branch's first-parent ancestry (read-only).
                     Lists the branch's first-parent chain (newest first,
                     addressed <ref>@{N}); defaults to HEAD's branch. With
                     --features history-mmr, cross-checks each entry against
-                    the journaled ref-history MMR. Not a full Git reflog:
+                    the canonical ancestry snapshot. Not a full Git reflog:
                     @{N} indexes the reachable chain, so superseded commits
                     (after amend/reset) are not listed.
   status [--porcelain[=v1|v2]] [-s|--short] [-z]

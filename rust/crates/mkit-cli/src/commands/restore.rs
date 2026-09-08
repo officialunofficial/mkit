@@ -358,7 +358,7 @@ fn entry_matches(idx: &Index, rel: &str) -> Vec<IndexEntry> {
 /// Return `Some(reason)` when the worktree file for `path` exists but
 /// diverges from its staged (index) blob — the un-staged edit a worktree
 /// restore would silently discard. Mirrors `rm`'s dirty check.
-fn dirty_reason(root: &Path, _store: &ObjectStore, idx: &Index, path: &str) -> Option<String> {
+fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Option<String> {
     let staged = idx
         .entries
         .iter()
@@ -370,14 +370,27 @@ fn dirty_reason(root: &Path, _store: &ObjectStore, idx: &Index, path: &str) -> O
         let target_str = target.to_str()?;
         symlink_blob_hash(target_str)?
     } else if meta.file_type().is_file() {
-        worktree::read_regular_file_bounded(&abs)
+        let clean = worktree::read_regular_file_bounded(&abs)
             .ok()
-            .and_then(|(_, data)| worktree::hash_file_object(&data).ok())?
+            .and_then(|(opened, data)| {
+                if super::file_exec_status(&opened) != staged.status {
+                    return Some(false);
+                }
+                worktree::content_eq_bytes(store, &staged.object_hash, &data).ok()
+            })
+            .unwrap_or(false);
+        return if clean {
+            None
+        } else {
+            Some(format!(
+                "'{path}' has unstaged changes or unreadable staged content; use --force to discard them"
+            ))
+        };
     } else {
         // No worktree file (or a non-file): nothing to clobber.
         return None;
     };
-    if work_hash == staged.object_hash {
+    if staged.status == EntryStatus::Symlink && work_hash == staged.object_hash {
         None
     } else {
         Some(format!(

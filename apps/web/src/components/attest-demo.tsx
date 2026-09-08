@@ -8,9 +8,9 @@ import { DEMO_SEED, TEXT_ENCODER, useMkit } from './use-mkit'
 type Algo = 'ed25519' | 'secp256k1' | 'p256'
 
 const ALGOS: ReadonlyArray<{ value: Algo; label: string; note: string }> = [
-  { value: 'ed25519', label: 'Ed25519', note: 'Fast, the mkit default.' },
-  { value: 'secp256k1', label: 'Secp256k1', note: 'What crypto wallets use.' },
-  { value: 'p256', label: 'P-256', note: 'What hardware keys, passkeys, and Secure Enclave use.' },
+  { value: 'ed25519', label: 'Ed25519', note: 'The mkit default.' },
+  { value: 'secp256k1', label: 'Secp256k1', note: 'Used by Bitcoin and Ethereum.' },
+  { value: 'p256', label: 'P-256', note: 'Supported by passkeys and Apple Secure Enclave.' },
 ]
 
 const PREDICATE_TYPE = 'https://mkit.sh/attestation/Review/v1'
@@ -96,7 +96,7 @@ export function AttestDemo() {
         : null
 
   const fieldCls =
-    'w-full rounded-md border border-hairline bg-bg py-1 text-sm outline-none transition-colors focus:border-blue-500'
+    'w-full rounded-md border border-hairline bg-bg py-1 text-sm outline-none transition-colors focus:border-(--border-color-focus)'
 
   return (
     <div className='space-y-6'>
@@ -137,7 +137,7 @@ export function AttestDemo() {
           </Row>
         </dl>
 
-        <p className={`text-sm ${reason ? 'text-red-600 dark:text-red-400' : 'text-muted'}`}>
+        <p className={`text-sm ${reason ? 'text-(--status-error-fg)' : 'text-muted'}`}>
           {reason ??
             'The signature covers this exact claim, this commit, and alice’s key. Change any one and it fails.'}
         </p>
@@ -162,7 +162,7 @@ export function AttestDemo() {
               {ALGOS.map((a) => (
                 <label
                   key={a.value}
-                  className='flex cursor-pointer items-start gap-3 rounded-md border border-hairline p-3 transition-colors hover:border-blue-500/50'
+                  className='flex cursor-pointer items-start gap-3 rounded-md border border-hairline p-3 transition-colors hover:border-(--border-color-strong)'
                 >
                   {/* Custom radio: unselected fill is the page bg (not the border colour). */}
                   <input
@@ -171,7 +171,7 @@ export function AttestDemo() {
                     value={a.value}
                     checked={algo === a.value}
                     onChange={() => setAlgo(a.value)}
-                    className='mt-0.5 size-4 shrink-0 appearance-none rounded-full border border-hairline bg-bg transition-colors checked:border-fg checked:bg-[radial-gradient(circle,var(--color-fg)_0_3.5px,transparent_4px)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40'
+                    className='mt-0.5 size-4 shrink-0 appearance-none rounded-full border border-hairline bg-bg transition-colors checked:border-fg checked:bg-[radial-gradient(circle,var(--color-fg)_0_3.5px,transparent_4px)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--focus-ring)'
                   />
                   <span className='flex-1 space-y-0.5 text-sm'>
                     <span className='block font-medium'>{a.label}</span>
@@ -194,7 +194,7 @@ export function AttestDemo() {
               </Field>
             </FieldList>
           ) : (
-            <p className='text-sm text-red-600 dark:text-red-400'>
+            <p className='text-sm text-(--status-error-fg)'>
               {(!signed.ok && signed.error) || 'Couldn’t derive the key. Reload the page and try again.'}
             </p>
           )}
@@ -225,8 +225,8 @@ function Badge({ ok, children }: { ok: boolean; children: ReactNode }) {
     <span
       className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${
         ok
-          ? 'border-green-600/40 bg-green-500/10 text-green-700 dark:text-green-400'
-          : 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400'
+          ? 'border-(--status-success-border) bg-(--status-success-bg) text-(--status-success-fg)'
+          : 'border-(--status-error-border) bg-(--status-error-bg) text-(--status-error-fg)'
       }`}
     >
       {children}

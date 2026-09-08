@@ -8,17 +8,17 @@ export default function SpecsPage() {
       <div className='space-y-8'>
         <Seo
           title='mkit — specs'
-          description='The specifications behind mkit: on-disk object formats, packfile and transport wire protocols, and signing and attestation contracts, each carrying its own maturity and bindingness status.'
+          description='Specifications for mkit object formats, packfiles, transport protocols, signatures, and attestations. Each document states its status.'
           path='/specs'
-          card='Specified down to the byte'
+          card='Format and protocol specifications'
         />
         <header>
-          <h1 className='ds-h1'>Specified Down to the Byte</h1>
-          <p className='ds-note mt-1'>Every format mkit writes to disk or the wire has a specification.</p>
+          <h1 className='ds-h1'>Format and protocol specifications</h1>
+          <p className='ds-note mt-1'>Object formats, repository state, and communication protocols.</p>
           <p className='mt-2 max-w-prose'>
-            This page indexes all of them. The documents are the contract: you can build a compatible implementation
-            from them alone, without reading the Rust source. Each entry links to the full text under{' '}
-            <code>docs/specs/</code> in the repository.
+            Use these documents to understand format and protocol requirements. Check each document’s status and
+            implementation notes before relying on it. Each entry links to the full text under <code>docs/specs/</code>{' '}
+            in the repository.
           </p>
         </header>
         <SpecIndex />

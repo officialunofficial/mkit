@@ -9,7 +9,8 @@
 // the pointer can travel into the panel without it snapping shut.
 
 import * as Popover from '@radix-ui/react-popover'
-import { type ReactNode, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { TopLayer, useOverlayContainer } from '../top-layer'
 
 export function InfoTip({
   label,
@@ -20,8 +21,16 @@ export function InfoTip({
   /** Popover content. */
   children: ReactNode
 }) {
+  const overlayContainer = useOverlayContainer()
   const [open, setOpen] = useState(false)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(
+    () => () => {
+      if (closeTimer.current) clearTimeout(closeTimer.current)
+    },
+    [],
+  )
 
   const cancelClose = () => {
     if (closeTimer.current) {
@@ -54,26 +63,29 @@ export function InfoTip({
           onPointerLeave={(e) => {
             if (e.pointerType !== 'touch') closeSoon()
           }}
-          className='inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-hairline align-middle font-mono text-[10px] leading-none text-muted transition-colors hover:border-fg hover:text-fg data-[state=open]:border-fg data-[state=open]:text-fg'
+          className='inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-hairline align-middle font-mono text-xs leading-none text-muted transition-colors hover:border-fg hover:text-fg data-[state=open]:border-fg data-[state=open]:text-fg'
         >
           i
         </button>
       </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          side='bottom'
-          align='start'
-          sideOffset={6}
-          collisionPadding={8}
-          // Hovering INTO the content keeps it open; leaving closes it. Don't
-          // pull focus on hover-open, so the page doesn't scroll to it.
-          onPointerEnter={openNow}
-          onPointerLeave={closeSoon}
-          onOpenAutoFocus={(e) => e.preventDefault()}
-          className='z-[80] w-[min(20rem,calc(100vw-1rem))] rounded-lg border border-hairline bg-bg p-3 text-xs leading-relaxed font-normal text-muted shadow-xl'
-        >
-          {children}
-        </Popover.Content>
+      <Popover.Portal container={overlayContainer}>
+        <TopLayer>
+          <Popover.Content
+            side='bottom'
+            align='start'
+            sideOffset={6}
+            collisionPadding={8}
+            // Hovering INTO the content keeps it open; leaving closes it. Don't
+            // pull focus on hover-open, so the page doesn't scroll to it.
+            onPointerEnter={openNow}
+            onPointerLeave={closeSoon}
+            onOpenAutoFocus={(e) => e.preventDefault()}
+            className='w-[min(20rem,calc(100vw-1rem))] rounded-(--rounded-md) border border-hairline bg-bg p-3 text-xs leading-relaxed font-normal text-muted'
+            style={{ boxShadow: 'var(--overlay-shadow)' }}
+          >
+            {children}
+          </Popover.Content>
+        </TopLayer>
       </Popover.Portal>
     </Popover.Root>
   )

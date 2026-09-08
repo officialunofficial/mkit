@@ -128,13 +128,16 @@ signer -> mkit:    SignResponse { signature, public_key, algorithm, key_id, ... 
                    Error { code, message, details }
 ```
 
-The host writes `Hello` and `SignRequest` together so a pipelining
-signer can respond to both without an intermediate round trip, but it
-still requires `HelloResponse` as the first frame it reads back: a
-signer that skips straight to `SignResponse` or `Error` never
-completed the version handshake and is rejected outright (fail
-closed), matching SPEC-RPC §4's general conformance rule that the
-handshake precedes any other request.
+The host sends `Hello { want_capabilities = true }` alone and MUST wait
+for a `HelloResponse` selecting protocol v1 with compatible capabilities
+before sending `SignRequest`. Missing or unsupported protocol, missing
+capabilities, and incompatible algorithm/key form are fatal errors. A
+`SignResponse` before negotiation is rejected. A terminal `Error` may abort
+negotiation at any time; it never authorizes a signing operation.
+
+Both request writes and the handshake response remain under §2.1's single
+whole-conversation deadline, with concurrent stderr draining. A signing request
+MUST NOT be sent before successful capability negotiation.
 
 Optional PIN round-trip mid-sign:
 
@@ -164,7 +167,11 @@ signer MUST process them in order.
 | `requires_user_presence` | True if a touch/PIN/biometric is required. Advisory; mkit-cli MAY surface a "touch your YubiKey" hint. |
 
 mkit MUST verify the requested algorithm + key form against
-advertised capabilities before sending a `SignRequest`.
+advertised capabilities before sending a `SignRequest`. Empty algorithm or
+key-form lists reject every request. The payload MUST fit the advertised cap
+(`0` selects the framing default), and the entire encoded `SignerFrame` MUST
+also fit `MAX_FRAME_BYTES`; protobuf overhead counts toward the frame cap.
+Oversized requests MUST be rejected before any request bytes are written.
 
 ---
 
@@ -324,9 +331,7 @@ the `PinPrompt`/`PinResponse` round trip (§4) instead. On the host
 side, `mkit-attest`'s `ExternalSigner` answers a `PinPrompt` via its
 configured `PinProvider`, which defaults to an interactive terminal
 prompt and never sources a PIN from argv or an environment variable.
-`--pin` still works during the migration window (mkit-sign-ctap prints
-a deprecation warning to stderr when it is passed) but will be removed
-in a future release.
+The reference signer prints a deprecation warning when `--pin` is passed.
 
 For compatibility with mkit's current external-signer host path, the
 reference CTAP signer accepts `KEY_FORM_RAW_BYTES` only when `key_ref` is
@@ -423,5 +428,5 @@ compromised signer can still do; nothing below claims otherwise.
 | Missing credential metadata fails closed | CTAP signers MUST error rather than return an empty `public_key` (§6, §8.2) |
 | A setup failure cannot desync the framing | non-zero exit with no stdout frame (§7) |
 | Oversized frames cannot exhaust the reader | `MAX_FRAME_BYTES = 1 MiB`, connection-fatal (§3) |
-| A `SignResponse`/`Error` is never accepted without a completed handshake | the host requires `HelloResponse` as the first frame read back; a signer that pipelines straight to a response is rejected (§4) |
+| No signing request precedes compatible negotiation | protocol, capabilities and payload capacity checked before `SignRequest`; a terminal handshake Error aborts without signing (§4–§5) |
 | Fixed `(payload, key)` gives fixed signature bytes for non-WebAuthn algorithms | RFC 6979 (ECDSA)/RFC 8032 (Ed25519) determinism, pinned by golden vectors (§9) |
