@@ -1,7 +1,7 @@
 ---
 spec: SPEC-SPARSE-CHECKOUT
 version: 3
-status: implemented
+status: stable-normative
 audience: sparse-checkout transport and cache implementers
 ---
 
