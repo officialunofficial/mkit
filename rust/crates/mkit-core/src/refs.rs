@@ -186,39 +186,14 @@ pub fn validate_ref_name(name: &str) -> bool {
     true
 }
 
-/// Hex-escape an arbitrary ref-like name (branch, tag, remote ref, or
-/// a `refs.rs`-relative path) into a filename-safe token:
-/// `[A-Za-z0-9-_]`-only input, injective, self-delimiting.
-///
-/// Every non-`[A-Za-z0-9-]` byte is encoded as `_xx` where `xx` is the
-/// lowercase-hex byte value; `_` itself encodes as `_5f`, so every `_`
-/// in the output is unambiguously the lead-in of a two-hex-digit
-/// escape, never a literal.
-///
-/// Examples:
-///   `main`        → `main`
-///   `feat/v1.0`   → `feat_2fv1_2e0`
-///   `feat_v1_0`   → `feat_5fv1_5f0`
-///
-/// Per-ref lock naming uses this encoding in every build.
-pub(crate) fn sanitize_ref_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for &b in name.as_bytes() {
-        let allowed = b.is_ascii_alphanumeric() || b == b'-';
-        if allowed {
-            out.push(b as char);
-        } else {
-            use core::fmt::Write as _;
-            let _ = write!(&mut out, "_{b:02x}");
-        }
-    }
-    out
-}
-
 /// Canonical per-branch lock name for ancestry publication and recovery.
 #[cfg(feature = "history-mmr")]
 pub(crate) fn history_lock_name(branch: &str) -> String {
-    format!("refs-history-{}.lock", sanitize_ref_name(branch))
+    let full_ref = format!("refs/heads/{branch}");
+    format!(
+        "refs-history-{}.lock",
+        to_hex(&crate::hash::hash(full_ref.as_bytes()))
+    )
 }
 
 pub(crate) mod ancestry_state;
@@ -236,11 +211,17 @@ pub fn pending_history_roots(layout: &RepoLayout) -> RefResult<BTreeSet<Hash>> {
 /// [`history_lock_name`]: a test that independently recomputes this
 /// formula would stop catching a regression the moment production's
 /// formula changed without the test's copy changing too.
+/// Hash the complete identity so nested or punctuation-heavy names cannot
+/// overflow a single lock filename. Namespace prefixes remain in the digest;
+/// history and mutation guards also have distinct filename prefixes.
 pub(crate) fn cas_lock_name(common_dir: &Path, path: &Path) -> String {
     let ref_key = path
         .strip_prefix(common_dir)
         .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy());
-    format!("refs-{}.lock", sanitize_ref_name(&ref_key))
+    format!(
+        "refs-{}.lock",
+        to_hex(&crate::hash::hash(ref_key.as_bytes()))
+    )
 }
 
 /// Validate a prefix passed to `list_refs`. An empty prefix is allowed.
@@ -1583,6 +1564,89 @@ mod tests {
              {double_success_iteration:?} — an update was silently lost \
              (INV-15/INV-6 violation)"
         );
+    }
+
+    #[test]
+    fn valid_long_ref_names_support_every_mutation() {
+        let (_dir, layout) = fresh_repo();
+        for name in [
+            "_".repeat(80),
+            format!("{}/{}", "a".repeat(130), "b".repeat(130)),
+        ] {
+            assert!(validate_ref_name(&name));
+            update_ref(&layout, &name, RefWriteCondition::Missing, &h("base")).unwrap();
+            assert!(matches!(
+                update_ref(&layout, &name, RefWriteCondition::Missing, &h("other")),
+                Err(RefError::Conflict(_))
+            ));
+            update_ref(
+                &layout,
+                &name,
+                RefWriteCondition::Match(h("base")),
+                &h("next"),
+            )
+            .unwrap();
+            assert!(matches!(
+                delete_ref_if_matches(&layout, &name, h("base")),
+                Err(RefError::Conflict(_))
+            ));
+            assert_eq!(read_ref(&layout, &name).unwrap(), Some(h("next")));
+            delete_ref_if_matches(&layout, &name, h("next")).unwrap();
+            write_ref(&layout, &name, &h("base")).unwrap();
+            delete_ref(&layout, &name).unwrap();
+
+            update_tag(&layout, &name, RefWriteCondition::Missing, &h("base")).unwrap();
+            update_tag(
+                &layout,
+                &name,
+                RefWriteCondition::Match(h("base")),
+                &h("next"),
+            )
+            .unwrap();
+            write_tag(&layout, &name, &h("base")).unwrap();
+            delete_tag(&layout, &name).unwrap();
+
+            write_remote_ref(&layout, "default", &name, &h("base")).unwrap();
+            let mut batch = RemoteRefBatch::new(&layout, "default").unwrap();
+            batch.write(&name, &h("next")).unwrap();
+            batch.commit().unwrap();
+            assert_eq!(
+                read_remote_ref(&layout, "default", &name).unwrap(),
+                Some(h("next"))
+            );
+            delete_remote_ref(&layout, "default", &name).unwrap();
+
+            #[cfg(feature = "history-mmr")]
+            let _guards = acquire_history_mutation(&layout, &name).unwrap();
+        }
+    }
+
+    #[test]
+    fn ref_lock_keys_preserve_full_identity_without_filename_overflow() {
+        let (_dir, layout) = fresh_repo();
+        let names = ["_".repeat(80), "_".repeat(79), "a/b".into(), "a_2fb".into()];
+        let mut keys = BTreeSet::new();
+        for namespace in [HEADS_DIR, TAGS_DIR, "refs/remotes/default"] {
+            for name in &names {
+                let path = ref_path(layout.common_dir(), namespace, name);
+                let key = cas_lock_name(layout.common_dir(), &path);
+                assert!(key.len() <= 255);
+                assert_eq!(key, cas_lock_name(layout.common_dir(), &path));
+                assert!(
+                    keys.insert(key),
+                    "different full refs must have different keys"
+                );
+            }
+        }
+        #[cfg(feature = "history-mmr")]
+        for name in &names {
+            let key = history_lock_name(name);
+            assert!(key.len() <= 255);
+            assert!(
+                keys.insert(key),
+                "history and mutation guards must be distinct"
+            );
+        }
     }
 
     /// All mutations must join the CAS critical section, including calls

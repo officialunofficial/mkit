@@ -226,8 +226,13 @@ impl DurableObject for RefStore {
                 let body: UpdateReq = req.json().await?;
                 let proof = body.proof.clone();
                 let owned = self.clone();
-                self.mutate(proof, Some(0), true, move || owned.handle_update(body))?
-                    .response()
+                self.mutate(
+                    proof,
+                    true,
+                    |store, proof| store.charge_quota(&proof.author, 0),
+                    move || owned.handle_update(body),
+                )?
+                .response()
             }
             "/list" => {
                 let body: ListReq = req.json().await?;
@@ -244,8 +249,13 @@ impl DurableObject for RefStore {
                 let body: PostReq = req.json().await?;
                 let proof = body.proof.clone();
                 let owned = self.clone();
-                self.mutate(proof, None, true, move || owned.handle_post(body))?
-                    .response()
+                self.mutate(
+                    proof,
+                    true,
+                    |store, proof| store.admit_post(&proof.author),
+                    move || owned.handle_post(body),
+                )?
+                .response()
             }
             "/messages" => {
                 let body: MessagesReq = req.json().await?;
@@ -256,8 +266,15 @@ impl DurableObject for RefStore {
                 let body: ReactReq = req.json().await?;
                 let proof = body.proof.clone();
                 let owned = self.clone();
-                self.mutate(proof, None, true, move || owned.handle_react(body))?
-                    .response()
+                let target = body.target.clone();
+                let emoji = body.emoji.clone();
+                self.mutate(
+                    proof,
+                    true,
+                    move |store, proof| store.admit_react(&proof.author, &target, &emoji),
+                    move || owned.handle_react(body),
+                )?
+                .response()
             }
             "/reactions" => {
                 let reactions = self.list_reactions();
@@ -274,11 +291,16 @@ impl DurableObject for RefStore {
             "/object" => {
                 let body: super::wire::ObjectWriteReq = req.json().await?;
                 let complete = body.result.is_some();
-                self.mutate(body.proof, Some(body.bytes), complete, move || {
-                    Reply::json(&super::wire::ObjectWriteResp {
-                        result: body.result,
-                    })
-                })?
+                self.mutate(
+                    body.proof,
+                    complete,
+                    move |store, proof| store.charge_quota(&proof.author, body.bytes),
+                    move || {
+                        Reply::json(&super::wire::ObjectWriteResp {
+                            result: body.result,
+                        })
+                    },
+                )?
                 .response()
             }
             "/purge" => self.handle_purge(),
@@ -682,8 +704,8 @@ impl RefStore {
     fn mutate(
         &self,
         proof: Proof,
-        bytes: Option<u64>,
         complete: bool,
+        admit: impl FnOnce(&Self, &Proof) -> Result<Option<Reply>> + 'static,
         action: impl FnOnce() -> Result<Reply> + 'static,
     ) -> Result<Reply> {
         let owned = self.clone();
@@ -691,15 +713,10 @@ impl RefStore {
         let result = self.ledger.transaction(move || {
             let prior = owned
                 .ledger
-                .reserve(&proof, Date::now().as_millis() as i64)?;
+                .reserve(&proof, Date::now().as_millis() as i64, || {
+                    admit(&owned, &proof)
+                })?;
             if let Some(Some(reply)) = prior {
-                return Ok(reply);
-            }
-            if prior.is_none()
-                && let Some(bytes) = bytes
-                && let Some(reply) = owned.charge_quota(&proof.author, bytes)?
-            {
-                owned.ledger.finish(&proof, &reply)?;
                 return Ok(reply);
             }
             let reply = action()?;
@@ -766,25 +783,28 @@ impl RefStore {
         Ok(())
     }
 
-    /// Append a chat message under the per-author rate limit, serially (the DO's
-    /// single-threaded execution makes the read-then-insert atomic, so two posts
-    /// from one author can't both slip past the floor). On accept, stamp the
-    /// server clock + the new `seq`, then broadcast a `"chat"` frame to every
-    /// `/watch` subscriber. The worker has already content-addressed + stored
-    /// the message bytes in R2 and verified the author envelope.
-    fn handle_post(&self, req: PostReq) -> Result<Reply> {
+    /// Check the post interval before reserving a new nonce. Admission and the
+    /// subsequent message insert share one transaction, so concurrent posts
+    /// from one author cannot both slip past the floor.
+    fn admit_post(&self, author: &str) -> Result<Option<Reply>> {
         let now = Date::now().as_millis() as i64;
-
-        let last = self.last_post_ms(&req.author)?;
+        let last = self.last_post_ms(author)?;
         if is_rate_limited(last, now) {
             return Reply::json(&PostResp {
                 accepted: false,
                 rate_limited: true,
                 seq: 0,
                 created_at: 0,
-            });
+            })
+            .map(Some);
         }
+        Ok(None)
+    }
 
+    /// Append an admitted message, stamp its server time and sequence, and queue
+    /// a broadcast for after commit. The Worker has already stored its R2 bytes.
+    fn handle_post(&self, req: PostReq) -> Result<Reply> {
+        let now = Date::now().as_millis() as i64;
         let sql = self.state.storage().sql();
         sql.exec(
             "INSERT INTO messages (id, author, text, created_at) VALUES (?, ?, ?, ?);",
@@ -871,25 +891,28 @@ impl RefStore {
         Ok(())
     }
 
-    /// Toggle a reaction serially, with the same guards the chat write path has:
-    /// replay dedupe (a re-submitted signed toggle returns its original result),
-    /// a per-author anti-flood rate limit, and a bound on the reactions table.
+    /// Check the reaction interval before reserving a new nonce. Existing
+    /// operations return their saved result before this check runs.
+    fn admit_react(&self, author: &str, target: &str, emoji: &str) -> Result<Option<Reply>> {
+        let now = Date::now().as_millis() as i64;
+        // Per-author anti-flood floor. On refusal, return the CURRENT state
+        // unchanged (no toggle, no broadcast); the optimistic client reconciles
+        // on its settle refetch.
+        let last = self.last_react_ms(author)?;
+        if last.is_some_and(|l| now - l < REACT_MIN_INTERVAL_MS) {
+            let active = self.reaction_exists(target, emoji, author)?;
+            let count = self.reaction_count(target, emoji)?;
+            return Reply::json(&ReactResp { active, count }).map(Some);
+        }
+        Ok(None)
+    }
+
     fn handle_react(&self, req: ReactReq) -> Result<Reply> {
         let sql = self.state.storage().sql();
         let now = Date::now().as_millis() as i64;
-
         let had = self.reaction_exists(&req.target, &req.emoji, &req.author)?;
 
-        // 2) Per-author anti-flood floor. On refusal, return the CURRENT state
-        // unchanged (no toggle, no broadcast); the optimistic client reconciles
-        // on its settle refetch.
-        let last = self.last_react_ms(&req.author)?;
-        if last.is_some_and(|l| now - l < REACT_MIN_INTERVAL_MS) {
-            let count = self.reaction_count(&req.target, &req.emoji)?;
-            return Reply::json(&ReactResp { active: had, count });
-        }
-
-        // 3) Toggle.
+        // Toggle after admission, within the same transaction.
         if had {
             sql.exec(
                 "DELETE FROM reactions WHERE target = ? AND emoji = ? AND author = ?;",

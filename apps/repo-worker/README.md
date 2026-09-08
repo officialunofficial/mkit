@@ -492,3 +492,10 @@ After `worker-build --dev`, run a local Worker with
 `node tests/auth_v2.mjs http://localhost:8790`. It exercises actual SQLite/R2
 adapters for ref, object, chat and reaction replay, concurrent duplicates,
 nonce conflicts, destination separation, expiry and legacy rejection.
+
+For quota and rate admission, start Wrangler with an explicit local
+`--persist-to` directory. Run `node ../mkit-worker-common/tests/quota_ledger.mjs
+repo http://localhost:8790 /tmp/PERSIST_DIRECTORY`, then repeat with `repo-rate`
+in place of `repo`. These check that rejected writes, posts and reactions do
+not grow the SQLite replay ledger while accepted retries retain their results.
+The database inspection requires Python 3.

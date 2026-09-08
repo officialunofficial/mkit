@@ -340,6 +340,10 @@ fn retain_content_identities(
         }
         if let Some(before) = old.get(entry.path.as_str())
             && before.status != EntryStatus::Removed
+            // Symlink targets require a single Blob. A regular file with the
+            // same bytes may use a ChunkedBlob, so keep the newly staged target
+            // when changing a regular file into a symlink.
+            && (entry.status != EntryStatus::Symlink || before.status == EntryStatus::Symlink)
             && worktree::content_eq(store, &before.object_hash, &entry.object_hash)
                 .map_err(|e| format!("compare staged {}: {e}", entry.path))?
         {

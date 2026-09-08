@@ -94,6 +94,24 @@ fn status_diff_and_restage_preserve_chunked_identity() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn restaging_chunked_file_as_symlink_keeps_a_blob_target() {
+    for args in [&["add", "a"][..], &["add", "-u"], &["add", "-A"]] {
+        let (dir, _) = fixture();
+        let root = dir.path();
+        fs::remove_file(root.join("a")).unwrap();
+        std::os::unix::fs::symlink("abcdef", root.join("a")).unwrap();
+        ok(root, args);
+        ok(root, &["commit", "-m", "replace file with symlink"]);
+        assert!(ok(root, &["status", "--porcelain"]).stdout.is_empty());
+        // Materializing the committed entry must preserve the symlink target.
+        fs::remove_file(root.join("a")).unwrap();
+        ok(root, &["restore", "a"]);
+        assert_eq!(fs::read_link(root.join("a")).unwrap(), Path::new("abcdef"));
+    }
+}
+
 #[test]
 fn clean_alternative_representation_does_not_block_rm_or_restore() {
     let (dir, _) = fixture();

@@ -368,14 +368,10 @@ impl RefStore {
         self.ledger.transaction(move || {
             let prior = owned
                 .ledger
-                .reserve(&proof, Date::now().as_millis() as i64)?;
+                .reserve(&proof, Date::now().as_millis() as i64, || {
+                    owned.charge_quota(&proof.author, bytes)
+                })?;
             if let Some(Some(reply)) = prior {
-                return Ok(reply);
-            }
-            if prior.is_none()
-                && let Some(reply) = owned.charge_quota(&proof.author, bytes)?
-            {
-                owned.ledger.finish(&proof, &reply)?;
                 return Ok(reply);
             }
             let reply = action()?;

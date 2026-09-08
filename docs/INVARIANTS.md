@@ -23,14 +23,16 @@ swap, unrelated attestation and private-key removal regressions; the full
 ## File equality survives valid representation changes
 
 **Always:** different file object IDs compare by verified byte streams; modes
-remain separate. Restaging identical content keeps the staged ID. Chunk failures
-remain errors, including after the first differing byte.
+remain separate. Restaging identical content keeps the staged ID only when its
+representation is valid for the new entry type; symlink targets use a single
+Blob. Chunk failures remain errors, including after the first differing byte.
 
 **Because:** an inline Blob, fixed-size manifest and CDC manifest may describe
 the same bytes with different immutable object identities.
 
 **If violated:** clean worktrees appear modified, restaging changes identity,
-and merge or overwrite decisions depend on chunk boundaries.
+and merge or overwrite decisions depend on chunk boundaries. Retaining a chunked
+file object for a symlink produces an index that cannot be committed.
 
 **Enforced by:** core `worktree::blob::equality_tests`,
 `ops::diff::tests::equal_content_different_chunk_layout_is_clean`, and
@@ -51,12 +53,29 @@ derived from canonical Tree witnesses verified against independently known IDs.
 **Enforced by:** packmap substitution tests, HTTP/S3 shard suites, core sparse
 v2 mutation/completeness tests and `rust/tests/golden/sparse/response_v2.bin`.
 
+## Shard worker bounds do not delay an available quorum
+
+**Always:** HTTP and S3 shard downloads collect completed responses while
+admitting workers under the shared process-wide limit. Reaching quorum or the
+failure threshold cancels outstanding work without waiting for redundant shards.
+
+**Because:** bounded worker admission can otherwise block the collector even
+after enough shard responses have arrived to reconstruct the pack.
+
+**If violated:** slow redundant requests delay successful downloads until their
+network timeouts expire.
+
+**Enforced by:** HTTP and S3 `shard_quorum_does_not_wait_for_extra_worker_slots`
+regressions, which gate redundant responses until after the quorum returns.
+
 ## Every ref mutation participates in its lock protocol
 
 **Always:** local Any, Missing, Match and deletion take the same full-ref guard.
 The order is registry, worktrees, history, then ref mutation locks; peers within
 a class use canonical order. File transport serializes all condition variants
 within its separate transport lock domain.
+Ref lock filenames use a fixed-length digest of the complete ref identity,
+including its namespace, so valid long ref names remain writable.
 
 **Because:** an unconditional writer can invalidate a conditional writer's
 observation just as another CAS writer can.
@@ -65,7 +84,8 @@ observation just as another CAS writer can.
 history publication states.
 
 **Enforced by:** core refs and file-transport contention regressions, CLI
-history lifecycle and publication retry tests.
+history lifecycle and publication retry tests, and core long-ref mutation and
+lock-identity regressions.
 
 ## History evidence binds ancestry, generation and context
 
@@ -105,15 +125,21 @@ rejection tests, current golden fixtures, and GC no-sweep-on-corruption coverage
 content commitment, times and nonce before effects. Retries keep their operation
 identity. SQLite adapters commit mutable effects, quota and replay response in
 one transaction; immutable publication records a recoverable reservation first.
+New quota- or rate-limited operations pass admission before allocating a replay
+record; rejection leaves replay storage unchanged. Existing reservations and
+saved results remain retryable without another quota charge.
 
 **Because:** signature validity alone cannot prevent cross-service replay or
 repeating an effect after a crash.
 
 **If violated:** a captured request can move a ref back, toggle a reaction twice,
 restore an old name or charge duplicate upload quota.
+Reserving rejected operations also lets throttled authors keep growing replay
+storage after exhausting their write budget.
 
 **Enforced by:** shared core canonical/context tests; Connect retry tests;
 actual local Workers regressions in `apps/{repo-worker,vcs-worker,keys-worker}/tests/`;
+quota and rate admission in `apps/mkit-worker-common/tests/quota_ledger.mjs`;
 web/spammer envelope tests. Keys failure injection after name and result writes
 rolls back both; saved results survive a full Worker restart. Production builds
 omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
@@ -122,6 +148,8 @@ omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
 
 **Always:** the external signer returns compatible protocol, algorithm,
 message-size and interaction capabilities before receiving SignRequest bytes.
+The request uses a supported key form selected from that response, including
+opaque handles for hardware signers with a configured default key.
 All subprocess I/O retains frame and wall-clock bounds.
 
 **Because:** advertising capabilities after signing cannot enforce them.
@@ -129,7 +157,8 @@ All subprocess I/O retains frame and wall-clock bounds.
 **If violated:** an incompatible signer can perform a request before rejection.
 
 **Enforced by:** external signer no-sign-on-incompatible-handshake regressions,
-PIN/timeout subprocess tests and the bundled file signer's end-to-end test.
+opaque-handle request-frame and unsupported-key-form regressions, PIN/timeout
+subprocess tests and the bundled file signer's end-to-end test.
 
 ## Dependabot ecosystem matches the lockfile format
 

@@ -77,6 +77,67 @@ fn key_for(pack: &[u8]) -> PackKey {
 }
 
 #[test]
+fn shard_quorum_does_not_wait_for_extra_worker_slots() {
+    use std::num::NonZeroU16;
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+    let mut server = mockito::Server::new();
+    let pack = synthetic_pack(64 * 1024);
+    let key = key_for(&pack);
+    let config = mkit_core::pack_shard::Config {
+        minimum_shards: NonZeroU16::new(16).unwrap(),
+        extra_shards: NonZeroU16::new(48).unwrap(),
+    };
+    let (shards, manifest) = encode_pack_to_shards(&pack, config).unwrap();
+    let _manifest = server
+        .mock(
+            "GET",
+            format!("/bucket/packs/{}/shards.manifest", key.to_hex()).as_str(),
+        )
+        .with_status(200)
+        .with_body(encode_manifest(&manifest).unwrap())
+        .create();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut mocks = Vec::new();
+    for shard in shards {
+        let mock = server
+            .mock(
+                "GET",
+                format!("/bucket/packs/{}/shards/{}", key.to_hex(), shard.index).as_str(),
+            )
+            .with_status(200);
+        mocks.push(if shard.index < 16 {
+            mock.with_body(shard.bytes).create()
+        } else {
+            let release = Arc::clone(&release);
+            mock.with_chunked_body(move |writer| {
+                let (lock, ready) = &*release;
+                let guard = lock.lock().unwrap();
+                let _guard = ready.wait_while(guard, |released| !*released).unwrap();
+                writer.write_all(&shard.bytes)
+            })
+            .create()
+        });
+    }
+    let transport = build_transport(&server.url());
+    let (done, result) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        done.send(transport.download_pack(&key)).unwrap();
+    });
+    let before_extras = result.recv_timeout(Duration::from_secs(5));
+    // Release even on failure, so no test/server worker remains blocked.
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    worker.join().unwrap();
+    assert_eq!(
+        before_extras
+            .expect("quorum must finish while extra shards are blocked")
+            .unwrap(),
+        pack
+    );
+}
+
+#[test]
 fn requested_pack_identity_rejects_foreign_manifest_before_shards() {
     let mut server = mockito::Server::new();
     let key = key_for(b"requested pack A");

@@ -18,9 +18,9 @@ mod names;
 use mkit_worker_common::replay::{Ledger, Proof, Reply};
 pub use name_store::NameStore;
 
-use audit::{audit_for, WriteAudit};
-use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
-use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
+use audit::{WriteAudit, audit_for};
+use envelope::{EnvelopeHeaders, VerifyEnvelope, blake3_hex, verify_envelope};
+use names::{NameRecord, ResolveBody, SetNameBody, is_pubkey_hex, normalize_name};
 
 /// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
 /// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
@@ -31,8 +31,7 @@ const WRITE_EVENTS_BINDING: &str = "WRITE_EVENTS";
 /// constant, so changing it here is a breaking protocol change.
 const SET_NAME_PROCEDURE: &str = "/mkit.keys.v1.Keys/SetName";
 
-const CORS_ALLOW_HEADERS: &str =
-    "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, idempotency-key, content-type";
+const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, idempotency-key, content-type";
 const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
 
 /// Cap on `/resolve` batch size; each key is read from its own Durable Object.
@@ -265,7 +264,7 @@ async fn set_name(req: &mut Request, env: &Env, pubkey: &str, ledger: &Ledger) -
     let owned = ledger.clone();
     ledger
         .transaction(move || {
-            if let Some(saved) = owned.reserve(&proof, now)? {
+            if let Some(saved) = owned.reserve(&proof, now, || Ok(None))? {
                 return saved.ok_or_else(|| Error::RustError("incomplete name transaction".into()));
             }
             owned.state.storage().sql().exec(

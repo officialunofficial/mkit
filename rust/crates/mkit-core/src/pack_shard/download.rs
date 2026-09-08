@@ -194,6 +194,88 @@ pub fn decode_downloaded_pack(
     Ok(pack)
 }
 
+/// Fetch a quorum without waiting to schedule redundant shards. Admission is
+/// nonblocking so a full process-wide worker pool never prevents collection of
+/// this request's completed results. Detached workers keep their reservations
+/// until their reads/retries finish; every return cancels remaining work.
+///
+/// # Errors
+/// Returns `PackNotFound` when too many shards fail, or `ConnectionFailed` if
+/// a worker cannot be spawned. Invalid shard counts return `InvalidResponse`.
+pub fn download_shards(
+    config: super::Config,
+    fetch: impl Fn(u16, &Cancellation) -> TransportResult<DownloadedShard> + Send + Sync + 'static,
+) -> TransportResult<Vec<DownloadedShard>> {
+    use std::sync::mpsc::{self, TryRecvError};
+    use std::time::Duration;
+
+    let total = config.total_shards();
+    if total > 256 {
+        return Err(TransportError::InvalidResponse);
+    }
+    let minimum = usize::from(config.minimum_shards.get());
+    let group = DownloadGroup::default();
+    let fetch = Arc::new(fetch);
+    let (tx, rx) = mpsc::channel();
+    let mut sender = Some(tx);
+    let mut next = 0u16;
+    let mut shards = Vec::with_capacity(minimum);
+    let mut failures = 0u16;
+    loop {
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Disconnected) => return Err(TransportError::ConnectionFailed),
+            Err(TryRecvError::Empty) => {
+                if u32::from(next) < total
+                    && let Some(slot) = WorkerSlot::try_acquire()?
+                {
+                    let index = next;
+                    let fetch = Arc::clone(&fetch);
+                    let tx = sender
+                        .as_ref()
+                        .ok_or(TransportError::ConnectionFailed)?
+                        .clone();
+                    let cancel = group.token();
+                    std::thread::Builder::new()
+                        .spawn(move || {
+                            let _slot = slot;
+                            let result = fetch(index, &cancel);
+                            let _ = tx.send(result);
+                        })
+                        .map_err(|_| TransportError::ConnectionFailed)?;
+                    next += 1;
+                    if u32::from(next) == total {
+                        // Let worker termination disconnect the receiver even
+                        // when a worker exits without reporting a result.
+                        drop(sender.take());
+                    }
+                    continue;
+                }
+                // A slot may belong to another request, whose completion does
+                // not wake our receiver. Retry admission on a short timeout.
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(result) => result,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(TransportError::ConnectionFailed);
+                    }
+                }
+            }
+        };
+        if let Ok(shard) = result {
+            shards.push(shard);
+            if shards.len() == minimum {
+                return Ok(shards);
+            }
+        } else {
+            failures += 1;
+            if failures > config.extra_shards.get() {
+                return Err(TransportError::PackNotFound);
+            }
+        }
+    }
+}
+
 fn workers() -> &'static (Mutex<usize>, Condvar) {
     static WORKERS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
     WORKERS.get_or_init(|| (Mutex::new(0), Condvar::new()))
@@ -204,6 +286,20 @@ fn workers() -> &'static (Mutex<usize>, Condvar) {
 pub struct WorkerSlot;
 
 impl WorkerSlot {
+    /// Reserve an available worker slot without blocking result collection.
+    ///
+    /// # Errors
+    /// A poisoned worker-state lock is a `ConnectionFailed` error.
+    pub fn try_acquire() -> TransportResult<Option<Self>> {
+        let (lock, _) = workers();
+        let mut active = lock.lock().map_err(|_| TransportError::ConnectionFailed)?;
+        if *active >= MAX_SHARD_WORKERS {
+            return Ok(None);
+        }
+        *active += 1;
+        Ok(Some(Self))
+    }
+
     /// Wait for a bounded worker slot before spawning an OS thread.
     ///
     /// # Errors
@@ -235,6 +331,29 @@ impl Drop for WorkerSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exited_shard_workers_report_failure() {
+        use std::num::NonZeroU16;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let config = super::super::Config {
+            minimum_shards: NonZeroU16::new(1).unwrap(),
+            extra_shards: NonZeroU16::new(1).unwrap(),
+        };
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = download_shards(config, |_, _| panic!("worker exited without a result"));
+            let _ = done.send(result);
+        });
+        assert!(matches!(
+            result
+                .recv_timeout(Duration::from_secs(2))
+                .expect("closed workers must not hang collection"),
+            Err(TransportError::ConnectionFailed)
+        ));
+    }
 
     #[test]
     fn aggregate_budget_follows_live_buffers_and_releases_on_drop() {

@@ -278,7 +278,7 @@ fn sign_headers(
     };
     let signature = signer.sign_hex(&operation.digest().map_err(|e| e.to_string())?)?;
     for (name, value) in [
-        ("x-mkit-auth-version", "2"),
+        ("x-envelope-version", "2"),
         ("x-audience", audience),
         ("x-repository", repository),
         ("x-content-commitment", commitment),
@@ -367,7 +367,7 @@ mod tests {
             let expires = get("x-expires-at");
             if audience != "https://example.invalid"
                 || repository != "default"
-                || get("x-mkit-auth-version") != "2"
+                || get("x-envelope-version") != "2"
             {
                 return false;
             }
@@ -408,7 +408,7 @@ mod tests {
             let commitment = get("x-content-commitment");
             if audience != "https://example.invalid"
                 || repository != "default"
-                || get("x-mkit-auth-version") != "2"
+                || get("x-envelope-version") != "2"
             {
                 return false;
             }

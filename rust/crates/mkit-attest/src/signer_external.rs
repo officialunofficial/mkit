@@ -262,18 +262,6 @@ impl ExternalSigner {
             ))),
             ..Default::default()
         };
-        let sign_req = SignerFrame {
-            body: Some(signer_frame::Body::SignRequest(Box::new(
-                SignRequest::default()
-                    .with_algorithm(rpc_algorithm_for(self.algorithm))
-                    .with_key_form(rpc_key_form_for(self.algorithm))
-                    .with_key_ref(Vec::new())
-                    .with_payload(pae.to_vec())
-                    .with_context(Vec::new()),
-            ))),
-            ..Default::default()
-        };
-
         let Some(stdin) = conv.child.stdin.take() else {
             return Err(conv.fail(Error::ExternalSignerSpawn("stdin not piped".into())));
         };
@@ -300,9 +288,22 @@ impl ExternalSigner {
             }
             Err(FrameTimeout::Frame(e)) => return Err(conv.fail(e)),
         };
-        if let Err(e) = validate_hello_capabilities(&hello_resp, self.algorithm, pae.len()) {
-            return Err(conv.fail(e));
-        }
+        let key_form = match validate_hello_capabilities(&hello_resp, self.algorithm, pae.len()) {
+            Ok(key_form) => key_form,
+            Err(e) => return Err(conv.fail(e)),
+        };
+        let sign_req = SignerFrame {
+            body: Some(signer_frame::Body::SignRequest(Box::new(
+                SignRequest::default()
+                    .with_algorithm(rpc_algorithm_for(self.algorithm))
+                    .with_key_form(key_form)
+                    .with_key_ref(Vec::new())
+                    .with_payload(pae.to_vec())
+                    .with_context(Vec::new()),
+            ))),
+            ..Default::default()
+        };
+
         // write_frame checks the encoded frame cap before writing any bytes.
         let write_rx = spawn_request_writer(stdin, sign_req);
         stdin = match recv_until_deadline(&write_rx, deadline) {
@@ -695,13 +696,6 @@ fn rpc_algorithm_for(a: Algorithm) -> RpcAlgorithm {
     }
 }
 
-fn rpc_key_form_for(_a: Algorithm) -> KeyForm {
-    // Default to RAW_BYTES — the file signer reads from disk; hardware
-    // signers will populate `key_ref` with their own opaque handle and
-    // ignore the form anyway.
-    KeyForm::RawBytes
-}
-
 #[cfg(feature = "algo-p256")]
 fn extract_signature(
     frame: SignerFrame,
@@ -1092,7 +1086,7 @@ fn validate_hello_capabilities(
     frame: &SignerFrame,
     algorithm: Algorithm,
     payload_len: usize,
-) -> Result<(), Error> {
+) -> Result<KeyForm, Error> {
     if let Some(signer_frame::Body::Error(error)) = &frame.body {
         return Err(Error::ExternalSignerFailed(
             error.message.clone().unwrap_or_default(),
@@ -1114,14 +1108,21 @@ fn validate_hello_capabilities(
     if !capabilities
         .algorithms
         .contains(&rpc_algorithm_for(algorithm).into())
-        || !capabilities
-            .key_forms
-            .contains(&rpc_key_form_for(algorithm).into())
     {
         return Err(Error::ExternalSignerBadResponse(
-            "signer capabilities do not support requested algorithm and key form".into(),
+            "signer capabilities do not support requested algorithm".into(),
         ));
     }
+    // Both forms use the signer's configured key when key_ref is empty.
+    // Prefer raw bytes for file signers; CTAP/TPM advertise opaque handles.
+    let key_form = [KeyForm::RawBytes, KeyForm::OpaqueHandle]
+        .into_iter()
+        .find(|form| capabilities.key_forms.contains(&(*form).into()))
+        .ok_or_else(|| {
+            Error::ExternalSignerBadResponse(
+                "signer capabilities do not support a configured key form".into(),
+            )
+        })?;
     let advertised = capabilities.max_payload_bytes.unwrap_or(0);
     let limit = if advertised == 0 {
         mkit_rpc::MAX_FRAME_BYTES
@@ -1133,7 +1134,7 @@ fn validate_hello_capabilities(
             "payload exceeds signer capabilities limit".into(),
         ));
     }
-    Ok(())
+    Ok(key_form)
 }
 
 /// Require that `frame` is a `HelloResponse` — the version handshake
@@ -1259,6 +1260,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn handshake_rejects_unspecified_and_unsupported_key_forms() {
+        for forms in [
+            vec![],
+            vec![KeyForm::Unspecified.into()],
+            vec![KeyForm::Pkcs8Der.into()],
+            vec![999.into()],
+        ] {
+            let mut hello = compatible_hello();
+            hello.capabilities.as_option_mut().unwrap().key_forms = forms;
+            let frame = SignerFrame {
+                body: Some(signer_frame::Body::HelloResponse(Box::new(hello))),
+                ..Default::default()
+            };
+            assert!(validate_hello_capabilities(&frame, Algorithm::Ed25519, PAE.len()).is_err());
+        }
     }
 
     #[test]
@@ -1816,6 +1835,75 @@ mod tests {
             assert!(
                 matches!(err, Error::ExternalSignerTimeout(_)),
                 "expected a bounded timeout, got {err:?}"
+            );
+        }
+
+        #[test]
+        fn opaque_handle_capabilities_select_the_sign_request_key_form() {
+            // Match the bundled CTAP signer's P-256 / opaque-handle Hello.
+            // Its credential is configured on argv, so key_ref stays empty.
+            let dir = tempfile::tempdir().unwrap();
+            let mut hello = compatible_hello();
+            let capabilities = hello.capabilities.as_option_mut().unwrap();
+            capabilities.algorithms = vec![RpcAlgorithm::P256.into()];
+            capabilities.key_forms = vec![KeyForm::OpaqueHandle.into()];
+            let mut hello_bytes = Vec::new();
+            write_frame(
+                &mut hello_bytes,
+                &SignerFrame {
+                    body: Some(signer_frame::Body::HelloResponse(Box::new(hello))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let hello_path = dir.path().join("hello.bin");
+            std::fs::write(&hello_path, hello_bytes).unwrap();
+            let mut expected = Vec::new();
+            write_frame(
+                &mut expected,
+                &SignerFrame {
+                    body: Some(signer_frame::Body::SignRequest(Box::new(
+                        SignRequest::default()
+                            .with_algorithm(RpcAlgorithm::P256)
+                            .with_key_form(KeyForm::OpaqueHandle)
+                            .with_key_ref(Vec::new())
+                            .with_payload(PAE.to_vec())
+                            .with_context(Vec::new()),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let expected_path = dir.path().join("expected.bin");
+            std::fs::write(&expected_path, &expected).unwrap();
+            let mut terminal = Vec::new();
+            write_frame(
+                &mut terminal,
+                &SignerFrame {
+                    body: Some(signer_frame::Body::Error(Box::new(
+                        mkit_rpc::mkit::rpc::v1::Error::default()
+                            .with_message("opaque request accepted"),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let terminal_path = dir.path().join("terminal.bin");
+            std::fs::write(&terminal_path, terminal).unwrap();
+            let script = format!(
+                "#!/bin/sh\n{}cat '{}'\ndd bs=1 count={} 2>/dev/null | cmp -s - '{}' || exit 1\ncat '{}'\ncat >/dev/null\n",
+                drain_initial_request(),
+                hello_path.display(),
+                expected.len(),
+                expected_path.display(),
+                terminal_path.display(),
+            );
+            let (_script_dir, binary) = write_script(&script);
+            let mut signer = ExternalSigner::with_algorithm(&binary, Algorithm::P256).unwrap();
+            let error = signer.sign(PAE).unwrap_err();
+            assert!(
+                matches!(&error, Error::ExternalSignerFailed(message) if message == "opaque request accepted"),
+                "signer must receive the negotiated opaque-handle request: {error}"
             );
         }
 

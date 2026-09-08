@@ -1,6 +1,6 @@
 ---
 spec: SPEC-CONCURRENCY
-version: 1
+version: 2
 status: draft-normative
 audience: implementers of any lock-taking mkit-core/mkit-cli code path; reviewers of concurrency-sensitive changes
 ---
@@ -44,6 +44,14 @@ document points here.
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
+
+In the schematic names above, `<ref>` MUST be the lowercase hexadecimal BLAKE3
+digest of the full UTF-8 ref path relative to the common directory, such as
+`refs/heads/main`. `<branch>` MUST be the same digest for `refs/heads/` followed
+by the branch name. This bounds each filename independently of ref length and
+keeps namespaces distinct. History and mutation locks retain separate prefixes.
+Version 2 deliberately replaces escaped ref names with these digest names;
+only the current lock naming contract is supported.
 
 ## 3. Cross-subsystem interactions
 

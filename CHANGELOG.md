@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Worker writes rejected by quotas or rate limits no longer allocate replay
+  records, including chat posts and reactions. Existing operation retries still
+  reuse their reservation or saved reply without a second quota charge.
+- Native authenticated transport requests send the required envelope-version
+  header. External signing negotiates the advertised raw-byte or opaque-handle
+  key form, including the bundled CTAP signer.
+- Restaging a regular file as a symlink preserves a valid Blob target even when
+  the old file used a chunked representation.
+- Ref lock filenames stay bounded for valid long and nested ref names.
+- HTTP and S3 shard downloads process successful responses while admitting
+  workers, so an available quorum is not blocked by redundant slow requests.
 - Git correspondence audits now derive imported fields and graph edges from
   retained source bytes, verify pinned signatures and exact provenance claims,
   and work without the import private key.

@@ -266,3 +266,9 @@ Build with `worker-build --dev --features test-faults`, run a local Worker with
 concurrent replay, quota preservation, atomic two-ref rollback and retry,
 stream content binding, and interrupted immutable publication. The test fault
 hooks are absent unless the explicit `test-faults` feature is enabled.
+
+For quota admission, start Wrangler with an explicit local `--persist-to`
+directory and run `node ../mkit-worker-common/tests/quota_ledger.mjs vcs
+http://localhost:8791 /tmp/PERSIST_DIRECTORY`. This fills the write budget,
+checks rejected nonces do not grow the SQLite replay ledger, and retries
+accepted operations after exhaustion. The database inspection requires Python 3.

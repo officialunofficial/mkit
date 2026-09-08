@@ -108,8 +108,16 @@ impl Ledger {
         }
     }
     /// None: new reservation; Some(None): interrupted immutable publication;
-    /// Some(Some(reply)): completed operation. Must run within transaction().
-    pub fn reserve(&self, proof: &Proof, now: i64) -> Result<Option<Option<Reply>>> {
+    /// Some(Some(reply)): completed operation or admission rejection.
+    /// Must run within transaction(). Admission runs only for new operations,
+    /// before any ledger writes; it may charge quota in the same transaction.
+    /// Returning a rejection reply must leave admission state unchanged.
+    pub fn reserve(
+        &self,
+        proof: &Proof,
+        now: i64,
+        admit: impl FnOnce() -> Result<Option<Reply>>,
+    ) -> Result<Option<Option<Reply>>> {
         if now > proof.expires_at {
             return Err(Error::RustError("signed operation expired".into()));
         }
@@ -140,6 +148,9 @@ impl Ledger {
                 })
                 .transpose()?;
             return Ok(Some(reply));
+        }
+        if let Some(reply) = admit()? {
+            return Ok(Some(Some(reply)));
         }
         self.state.storage().sql().exec(
             "DELETE FROM authenticated_operations WHERE expires < ?",

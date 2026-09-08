@@ -864,11 +864,8 @@ impl HttpTransport {
     /// Shard-mode download: fetch the manifest, then fetch shards in
     /// parallel via std threads. Returns the reconstructed pack.
     fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        use mkit_core::pack_shard::download::{
-            DownloadGroup, DownloadedShard, WorkerSlot, decode_downloaded_pack,
-        };
+        use mkit_core::pack_shard::download::{decode_downloaded_pack, download_shards};
         use mkit_core::pack_shard::{MANIFEST_MAX_BYTES, decode_manifest};
-        use std::sync::mpsc;
 
         let manifest_url = self.manifest_url(key)?;
         let resp = self.retrying(|| self.apply_auth(self.client.get(manifest_url.clone())))?;
@@ -892,74 +889,29 @@ impl HttpTransport {
             return Err(TransportError::InvalidResponse);
         }
 
-        let total = manifest.config.total_shards();
-        let minimum = manifest.config.minimum_shards.get();
-
-        // Anti-DoS: cap the parallel fan-out at the v0 ceiling.
-        if total > 256 {
+        if manifest.config.total_shards() > 256 {
             return Err(TransportError::InvalidResponse);
         }
-
-        let (tx, rx) = mpsc::channel::<(u16, TransportResult<DownloadedShard>)>();
-        let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
-        // Workers are intentionally *detached* (we never join them).
-        // Once quorum or the failure threshold is reached the collection
-        // loop below stops waiting; a slow straggler must not be able to
-        // block the download by holding a join. The per-request
-        // SHARD_REQUEST_TIMEOUT guarantees each detached worker
-        // terminates on its own instead of leaking.
+        let total = u16::try_from(manifest.config.total_shards())
+            .map_err(|_| TransportError::InvalidResponse)?;
+        let urls = (0..total)
+            .map(|index| self.shard_url(key, index))
+            .collect::<TransportResult<Vec<_>>>()?;
+        let client = self.client.clone();
+        let token = self.token.clone();
         let backoff = self.backoff;
         let sleep = self.sleep;
-        let group = DownloadGroup::default();
-        for i in 0..total_u16 {
-            let tx = tx.clone();
-            let url = self.shard_url(key, i)?;
-            let client = self.client.clone();
-            let token = self.token.clone();
-            let cancel = group.token();
-            let slot = WorkerSlot::acquire()?;
-            std::thread::Builder::new()
-                .spawn(move || {
-                    let _slot = slot;
-                    let result = fetch_shard_with_retry(
-                        &client,
-                        &url,
-                        token.as_deref(),
-                        backoff,
-                        sleep,
-                        i,
-                        &cancel,
-                    );
-                    let _ = tx.send((i, result));
-                })
-                .map_err(|_| TransportError::ConnectionFailed)?;
-        }
-        drop(tx);
-
-        let mut shards: Vec<DownloadedShard> = Vec::with_capacity(minimum as usize);
-        let mut failures: u16 = 0;
-        let max_failures = manifest.config.extra_shards.get();
-        for (_index, res) in &rx {
-            if let Ok(shard) = res {
-                shards.push(shard);
-                if shards.len() >= minimum as usize {
-                    break;
-                }
-            } else {
-                failures += 1;
-                if failures > max_failures {
-                    break;
-                }
-            }
-        }
-        // Deliberately do not join the spawned workers: stragglers are
-        // dropped, not awaited. They are bounded by SHARD_REQUEST_TIMEOUT.
-
-        group.cancel();
-        drop(rx);
-        if shards.len() < minimum as usize {
-            return Err(TransportError::PackNotFound);
-        }
+        let shards = download_shards(manifest.config, move |index, cancel| {
+            fetch_shard_with_retry(
+                &client,
+                &urls[usize::from(index)],
+                token.as_deref(),
+                backoff,
+                sleep,
+                index,
+                cancel,
+            )
+        })?;
 
         decode_downloaded_pack(&shards, &manifest, key)
     }
@@ -1533,6 +1485,72 @@ mod tests {
 
         fn key_for(pack: &[u8]) -> PackKey {
             PackKey::new(mkit_core::hash::hash(pack))
+        }
+
+        #[test]
+        fn shard_quorum_does_not_wait_for_extra_worker_slots() {
+            use std::num::NonZeroU16;
+            use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+            let mut server = mockito::Server::new();
+            let pack = synthetic_pack(64 * 1024);
+            let key = key_for(&pack);
+            let config = mkit_core::pack_shard::Config {
+                minimum_shards: NonZeroU16::new(16).unwrap(),
+                extra_shards: NonZeroU16::new(48).unwrap(),
+            };
+            let (shards, manifest) = encode_pack_to_shards(&pack, config).unwrap();
+            let _pack = server
+                .mock("GET", format!("/myproj/packs/{}", key.to_hex()).as_str())
+                .with_status(200)
+                .with_header(X_PACK_SHARDS_HEADER, "16+48")
+                .create();
+            let _manifest = server
+                .mock(
+                    "GET",
+                    format!("/myproj/packs/{}/shards.manifest", key.to_hex()).as_str(),
+                )
+                .with_status(200)
+                .with_body(encode_manifest(&manifest).unwrap())
+                .create();
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            let mut mocks = Vec::new();
+            for shard in shards {
+                let mock = server
+                    .mock(
+                        "GET",
+                        format!("/myproj/packs/{}/shards/{}", key.to_hex(), shard.index).as_str(),
+                    )
+                    .with_status(200);
+                mocks.push(if shard.index < 16 {
+                    mock.with_body(shard.bytes).create()
+                } else {
+                    let release = Arc::clone(&release);
+                    mock.with_chunked_body(move |writer| {
+                        let (lock, ready) = &*release;
+                        let guard = lock.lock().unwrap();
+                        let _guard = ready.wait_while(guard, |released| !*released).unwrap();
+                        writer.write_all(&shard.bytes)
+                    })
+                    .create()
+                });
+            }
+            let transport = make_transport(&server, None);
+            let (done, result) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                done.send(transport.download_pack(&key)).unwrap();
+            });
+            let before_extras = result.recv_timeout(Duration::from_secs(5));
+            // Release even on failure, so no test/server worker remains blocked.
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            worker.join().unwrap();
+            assert_eq!(
+                before_extras
+                    .expect("quorum must finish while extra shards are blocked")
+                    .unwrap(),
+                pack
+            );
         }
 
         #[test]

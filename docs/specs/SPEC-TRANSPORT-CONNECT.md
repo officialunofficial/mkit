@@ -438,14 +438,20 @@ including requests whose results remain cached. Missing or unsupported auth
 versions MUST fail closed.
 
 A valid signature alone is insufficient replay protection. Each service MUST
-persist a nonce reservation scoped to audience/repository/signer, together
-with the full authenticated operation fingerprint. Reusing a nonce for a
+persist an admitted operation's nonce reservation scoped to
+audience/repository/signer, together with the full authenticated operation
+fingerprint. Reusing a nonce for a
 different operation MUST fail. Same-operation retries MUST return the saved
 result and MUST NOT repeat mutable effects or charge quota again. Nonce,
 quota, reference changes (including both AdvanceRefs writes), chat sequence,
 and reaction toggles MUST commit in one explicit SQLite transaction. A
 transaction failure rolls them all back; broadcasts occur only after commit.
 Replay records MUST remain until the signed expiry has passed.
+
+For new operations, quota and rate-limit admission MUST precede replay-record
+insertion within that transaction. Rejection MUST NOT allocate a replay record.
+Existing reservations and saved replies MUST be checked before admission, so
+retries remain available after the caller exhausts its budget.
 
 Immutable object publication uses a durable pending reservation that charges
 quota once, followed by a conditional content-addressed R2 put and a durable

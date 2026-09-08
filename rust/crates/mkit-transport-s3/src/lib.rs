@@ -1306,11 +1306,8 @@ fn fetch_one_shard(
 #[cfg(feature = "pack-shards")]
 impl S3Transport {
     fn download_pack_via_shards(&self, key: &PackKey) -> TransportResult<Option<Vec<u8>>> {
-        use mkit_core::pack_shard::download::{
-            DownloadGroup, DownloadedShard, WorkerSlot, decode_downloaded_pack,
-        };
+        use mkit_core::pack_shard::download::{decode_downloaded_pack, download_shards};
         use mkit_core::pack_shard::{MANIFEST_MAX_BYTES, decode_manifest};
-        use std::sync::mpsc;
 
         let manifest_key = Self::shard_manifest_object_key(key.as_bytes());
         let manifest_resp = self.http_request(
@@ -1340,79 +1337,30 @@ impl S3Transport {
             return Err(TransportError::InvalidResponse);
         }
 
-        let total = manifest.config.total_shards();
-        let minimum = manifest.config.minimum_shards.get();
-        let max_failures = manifest.config.extra_shards.get();
-
-        if total > 256 {
-            return Err(TransportError::InvalidResponse);
-        }
-        let total_u16: u16 = u16::try_from(total).unwrap_or(u16::MAX);
-
-        let (tx, rx) = mpsc::channel::<(u16, TransportResult<DownloadedShard>)>();
-        let digest: Hash = *key.as_bytes();
-        // Workers are *detached* (never joined): once quorum or the
-        // failure threshold is reached the collection loop stops waiting
-        // so a slow straggler cannot block the download. Each shard GET
-        // carries SHARD_REQUEST_TIMEOUT so detached workers terminate.
+        let digest = *key.as_bytes();
+        let endpoint = self.endpoint.clone();
+        let bucket = self.bucket.clone();
+        let prefix = self.prefix.clone();
+        let creds = self.creds.clone();
+        let client = self.client.clone();
         let clock = self.clock;
         let backoff = self.backoff;
         let sleeper = self.sleeper;
-        let group = DownloadGroup::default();
-        for i in 0..total_u16 {
-            let tx = tx.clone();
-            let endpoint = self.endpoint.clone();
-            let bucket = self.bucket.clone();
-            let prefix = self.prefix.clone();
-            let creds = self.creds.clone();
-            let client = self.client.clone();
-            let cancel = group.token();
-            let slot = WorkerSlot::acquire()?;
-            std::thread::Builder::new()
-                .spawn(move || {
-                    let _slot = slot;
-                    let result = fetch_one_shard_with_retry(
-                        &client,
-                        &endpoint,
-                        &bucket,
-                        prefix.as_deref(),
-                        &creds,
-                        &digest,
-                        i,
-                        clock,
-                        backoff,
-                        sleeper,
-                        &cancel,
-                    );
-                    let _ = tx.send((i, result));
-                })
-                .map_err(|_| TransportError::ConnectionFailed)?;
-        }
-        drop(tx);
-
-        let mut shards: Vec<DownloadedShard> = Vec::with_capacity(minimum as usize);
-        let mut failures: u16 = 0;
-        for (_index, res) in &rx {
-            if let Ok(shard) = res {
-                shards.push(shard);
-                if shards.len() >= minimum as usize {
-                    break;
-                }
-            } else {
-                failures += 1;
-                if failures > max_failures {
-                    break;
-                }
-            }
-        }
-        // Detached workers are not joined; stragglers are bounded by
-        // SHARD_REQUEST_TIMEOUT.
-
-        group.cancel();
-        drop(rx);
-        if shards.len() < minimum as usize {
-            return Err(TransportError::PackNotFound);
-        }
+        let shards = download_shards(manifest.config, move |index, cancel| {
+            fetch_one_shard_with_retry(
+                &client,
+                &endpoint,
+                &bucket,
+                prefix.as_deref(),
+                &creds,
+                &digest,
+                index,
+                clock,
+                backoff,
+                sleeper,
+                cancel,
+            )
+        })?;
 
         decode_downloaded_pack(&shards, &manifest, key).map(Some)
     }
