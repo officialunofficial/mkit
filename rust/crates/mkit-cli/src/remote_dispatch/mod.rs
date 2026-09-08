@@ -741,7 +741,7 @@ pub fn push_branch_with_limits(
     // (the remote already holds this closure) yields an empty plan and takes
     // the cheap head-only path below WITHOUT walking the packmap chain. Only
     // a push that actually has objects to send pays the O(depth) chain probe.
-    let mut plan = transfer::plan_pack(store, tip, remote_tip)?;
+    let mut plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
 
     if plan.is_empty() {
         // Nothing to send — the remote already holds the closure; just move
@@ -795,7 +795,7 @@ pub fn push_branch_with_limits(
     if rebaseline {
         // Force a full-closure plan: no external bases, so the pack is
         // self-contained and safe to reset the chain onto.
-        plan = transfer::plan_pack(store, tip, None)?;
+        plan = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
     }
 
     // Build the plan into one or more payload-bounded packs (splitting
@@ -1033,6 +1033,69 @@ fn prepare_delta_batch(chunk: Vec<transfer::PlannedDelta>) -> Vec<PreparedDelta>
     chunk
         .into_par_iter()
         .map(|d| PackWriter::prepare_delta(d.base, d.stream))
+        .collect()
+}
+
+/// Entries-per-thread budget below which [`encode_delta_candidates_batch`]
+/// diffs candidates sequentially instead of fanning out across rayon's
+/// thread pool, for a pool of a given size. Same crossover shape as
+/// [`PACK_FANOUT_ENTRIES_PER_THREAD`] but tuned separately, and lower:
+/// each entry here pays two disk reads (target + base) plus
+/// `delta::encode`'s block-hash-table build and greedy scan over the
+/// target's full length — a heavier per-item cost than the
+/// zstd-compression fan-out `PACK_FANOUT_ENTRIES_PER_THREAD` guards, so
+/// fewer entries per thread are enough to amortize dispatch.
+///
+/// `cargo bench -p mkit-benches --bench delta_plan_fanout` on a 4-core
+/// host, isolating `delta::encode` over synthetic 64 KiB
+/// (FastCDC-average-sized) near-duplicate chunks:
+///
+///   n=256: sequential 46.99ms -> rayon 14.79ms (3.18x)
+///   n=128: sequential 22.85ms -> rayon  7.57ms (3.02x)
+///   n=64:  sequential 11.65ms -> rayon  3.67ms (3.18x)
+///   n=32:  sequential  5.52ms -> rayon  1.74ms (3.18x)
+///   n=16:  sequential  3.28ms -> rayon  1.22ms (2.69x)
+///   n=8:   sequential  1.38ms -> rayon  0.70ms (1.97x)
+///   n=4:   sequential  0.68ms -> rayon  0.42ms (1.63x)
+///   n=2:   sequential  0.34ms -> rayon  0.33ms (roughly flat)
+///   n=1:   sequential  0.17ms -> rayon  0.17ms (roughly flat)
+///
+/// Each candidate already costs ~0.17ms, comfortably above rayon's
+/// microsecond-scale dispatch overhead, so the crossover falls at the
+/// smallest candidate count worth fanning out at all rather than at a
+/// larger multiple of the pool size the other fan-outs need.
+const DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD: usize = 1;
+
+/// The candidate count [`encode_delta_candidates_batch`] fans out across
+/// rayon at — see [`DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD`].
+fn delta_plan_fanout_threshold() -> usize {
+    crate::fanout::threshold(DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD)
+}
+
+/// [`transfer::plan_pack_with`]'s `encode_deltas` callback: diffs every
+/// delta candidate `plan_pack_with` found — sequentially below
+/// [`delta_plan_fanout_threshold`], via rayon's global thread pool at or
+/// above it. Each candidate's `store.read` + `delta::encode` is
+/// independent of every other candidate's (same shape as
+/// `prepare_raw_batch`'s per-object compression fan-out), so a push
+/// touching many changed blobs parallelizes the diffing itself, not just
+/// the downstream zstd pass `prepare_delta_batch` already fans out.
+///
+/// Order matches `candidates` 1:1 either way, satisfying
+/// `plan_pack_with`'s contract.
+fn encode_delta_candidates_batch(
+    store: &ObjectStore,
+    candidates: &[transfer::DeltaCandidate],
+) -> Result<Vec<Option<transfer::PlannedDelta>>, StoreError> {
+    if candidates.len() < delta_plan_fanout_threshold() {
+        return candidates
+            .iter()
+            .map(|&c| transfer::encode_delta_candidate(store, c))
+            .collect();
+    }
+    candidates
+        .par_iter()
+        .map(|&c| transfer::encode_delta_candidate(store, c))
         .collect()
 }
 
@@ -1525,6 +1588,7 @@ mod tests {
     use mkit_core::layout::RepoLayout;
     use mkit_core::pack::{PreparedDelta, PreparedRaw};
     use mkit_core::store::ObjectStore;
+    use mkit_core::transfer;
 
     // =================================================================
     // `size_capped_batch_lens` — the batch-boundary arithmetic
@@ -1685,6 +1749,92 @@ mod tests {
                 expected_bases,
                 "prepare_delta_batch must preserve input order at n={n}"
             );
+        }
+    }
+
+    #[test]
+    fn encode_delta_candidates_batch_preserves_order_sequential_and_parallel() {
+        let (_dir, store) = store();
+        for &n in &[1usize, super::delta_plan_fanout_threshold()] {
+            // Each candidate's base/target pair is a small, localized edit
+            // of distinct-per-index content — a real delta candidate (the
+            // encoded stream is smaller than the raw target), and distinct
+            // across candidates so no candidate's result could accidentally
+            // match another's and mask an ordering bug.
+            let candidates: Vec<transfer::DeltaCandidate> = (0..n)
+                .map(|i| {
+                    let mut base_bytes =
+                        format!("encode-delta-candidates-batch fixture #{i}\n").into_bytes();
+                    base_bytes.extend_from_slice(
+                        b"the quick brown fox jumps over the lazy dog\n"
+                            .repeat(4)
+                            .as_slice(),
+                    );
+                    let base = store.write(&base_bytes).unwrap();
+                    let mut target_bytes = base_bytes.clone();
+                    target_bytes.extend_from_slice(b"-- edited --\n");
+                    let target = store.write(&target_bytes).unwrap();
+                    transfer::DeltaCandidate { target, base }
+                })
+                .collect();
+
+            // Ground truth: encode each candidate one at a time, in order.
+            let expected: Vec<Option<Vec<u8>>> = candidates
+                .iter()
+                .map(|&c| {
+                    transfer::encode_delta_candidate(&store, c)
+                        .expect("encode delta candidate")
+                        .map(|p| p.stream)
+                })
+                .collect();
+            assert!(
+                expected.iter().all(Option::is_some),
+                "every fixture candidate must actually delta-encode smaller than raw"
+            );
+
+            let actual: Vec<Option<Vec<u8>>> =
+                super::encode_delta_candidates_batch(&store, &candidates)
+                    .expect("encode delta candidates batch")
+                    .into_iter()
+                    .map(|r| r.map(|p| p.stream))
+                    .collect();
+            assert_eq!(
+                actual, expected,
+                "encode_delta_candidates_batch must preserve input order at n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_delta_candidates_batch_propagates_a_missing_object_error_sequential_and_parallel() {
+        let (_dir, store) = store();
+        for &n in &[1usize, super::delta_plan_fanout_threshold()] {
+            let mut candidates: Vec<transfer::DeltaCandidate> = (0..n.saturating_sub(1))
+                .map(|i| {
+                    let base = store
+                        .write(format!("present base #{i}").as_bytes())
+                        .unwrap();
+                    let target = store
+                        .write(format!("present target #{i}").as_bytes())
+                        .unwrap();
+                    transfer::DeltaCandidate { target, base }
+                })
+                .collect();
+            // A target hash never written to the store — `store.read` must
+            // fail with `ObjectNotFound`, surfaced through
+            // `encode_delta_candidates_batch` rather than dropped or
+            // panicking, on either branch.
+            candidates.push(transfer::DeltaCandidate {
+                target: mkit_core::hash::hash(b"never written target"),
+                base: mkit_core::hash::hash(b"never written base"),
+            });
+            let err = super::encode_delta_candidates_batch(&store, &candidates).expect_err(
+                "a missing object must fail encode_delta_candidates_batch instead of being dropped",
+            );
+            assert!(matches!(
+                err,
+                mkit_core::store::StoreError::ObjectNotFound(_)
+            ));
         }
     }
 

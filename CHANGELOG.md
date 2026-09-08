@@ -58,6 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SQLite Durable Objects, with no KV fallback. Repository Workers use the
   shared transactional replay ledger without obsolete idempotency tables.
 
+### Performance
+
+- *(core,cli)* parallelize push-plan delta encoding across rayon. `transfer::plan_pack` used to `store.read` + `delta::encode` (disk read + block-hash-table build + greedy scan, all sequential) once per delta candidate while planning a push; `transfer::plan_pack` now delegates that loop to a new `transfer::plan_pack_with(..., encode_deltas)` batch callback, and `mkit-cli`'s push path passes a rayon fan-out (`encode_delta_candidates_batch`, mirroring the existing pack-compression/signature-verification fan-outs) instead of the built-in sequential one. `cargo bench -p mkit-benches --bench delta_plan_fanout` (new suite, isolating `delta::encode` over synthetic 64 KiB near-duplicate chunks, 4-core host): 256 candidates 46.99ms → 14.79ms (3.18x); the crossover is essentially immediate (each candidate already costs ~0.17ms, well above rayon's dispatch overhead), so pushes touching more than a handful of changed blobs benefit. **SemVer:** additive — `mkit-core` gains new public items (`transfer::plan_pack_with`, `transfer::DeltaCandidate`, `transfer::encode_delta_candidate`); `transfer::plan_pack`'s signature and behavior are unchanged. Minor version bump, not breaking.
+
 ### Removed
 
 - Compatibility-only index readers/migration APIs, legacy history APIs, the
