@@ -423,6 +423,8 @@ export function WebMcpTools({
   // Built once (stable identity for the component's lifetime): every `execute` reads `latest.current`, so the tool
   // objects themselves never need to change and registration never churns.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally stable — see the module doc comment.
+  // buildTools only captures the ref; execute callbacks read it after render.
+  // oxlint-disable-next-line react/refs
   const tools = useMemo(() => buildTools(latest), [])
   useWebMcpTools(tools)
 

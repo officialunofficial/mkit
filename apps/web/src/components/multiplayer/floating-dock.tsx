@@ -107,8 +107,7 @@ export function FloatingDock({ children }: { children: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null)
   // While dragging: the live pointer position + the grab offset within the dock
   // (so it tracks under the cursor instead of jumping its corner to the pointer).
-  const [drag, setDrag] = useState<{ x: number; y: number } | null>(null)
-  const offset = useRef({ x: 0, y: 0 })
+  const [drag, setDrag] = useState<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null)
   // The move handle is only for the collapsed circles — hide it once a panel's
   // card is open (nothing to reposition mid-read, and it'd crowd the card).
   const collapsed = useDockExpansion((s) => s.expanded === null)
@@ -117,11 +116,15 @@ export function FloatingDock({ children }: { children: ReactNode }) {
     e.preventDefault()
     e.currentTarget.setPointerCapture(e.pointerId)
     const rect = containerRef.current?.getBoundingClientRect()
-    offset.current = rect ? { x: e.clientX - rect.left, y: e.clientY - rect.top } : { x: 0, y: 0 }
-    setDrag({ x: e.clientX, y: e.clientY })
+    setDrag({
+      x: e.clientX,
+      y: e.clientY,
+      offsetX: rect ? e.clientX - rect.left : 0,
+      offsetY: rect ? e.clientY - rect.top : 0,
+    })
   }
   const onMove = (e: React.PointerEvent) => {
-    if (drag) setDrag({ x: e.clientX, y: e.clientY })
+    if (drag) setDrag({ ...drag, x: e.clientX, y: e.clientY })
   }
   const onUp = (e: React.PointerEvent) => {
     if (!drag) return
@@ -136,9 +139,7 @@ export function FloatingDock({ children }: { children: ReactNode }) {
         ref={containerRef}
         className={`group fixed flex flex-row gap-2 ${drag ? 'z-[70] items-end' : `z-50 ${CORNER_CLASS[corner]}`}`}
         style={
-          drag
-            ? { left: drag.x - offset.current.x, top: drag.y - offset.current.y, right: 'auto', bottom: 'auto' }
-            : undefined
+          drag ? { left: drag.x - drag.offsetX, top: drag.y - drag.offsetY, right: 'auto', bottom: 'auto' } : undefined
         }
       >
         {collapsed || drag ? (

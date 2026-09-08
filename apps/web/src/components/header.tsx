@@ -1,7 +1,7 @@
 'use client'
 
 import { ListIcon, XIcon } from '@phosphor-icons/react/ssr'
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link, useRouter } from 'waku'
 import { GridLogo } from './grid-logo'
 import { NavList } from './site-nav'
@@ -20,10 +20,12 @@ export const Header = () => {
   const triggerRef = useRef<HTMLButtonElement>(null)
   const router = useRouter()
 
-  // Route changes close the expanded nav (§4.27 rule 9).
-  useEffect(() => {
+  // Reset before rendering the new route, without an extra effect render.
+  const [navPath, setNavPath] = useState(router.path)
+  if (navPath !== router.path) {
+    setNavPath(router.path)
     setNavOpen(false)
-  }, [router.path])
+  }
 
   const closeNav = () => {
     setNavOpen(false)

@@ -243,6 +243,8 @@ export function RefsPanel({
   // Server keyset order, `main` filtered out (it's rendered pinned, above).
   const entries = useMemo(() => refsQuery.refs.filter((r) => r.name !== 'main'), [refsQuery.refs])
 
+  // TanStack Virtual is intentionally managed outside React Compiler memoization.
+  // oxlint-disable-next-line react/incompatible-library
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => scrollRef.current,

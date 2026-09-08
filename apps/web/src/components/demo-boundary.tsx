@@ -13,6 +13,8 @@ import { ErrorBoundary } from './error-boundary'
 export function DemoBoundary({ children }: { children: ReactNode }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => {
+    // This hydration gate must keep WASM children out of the server prerender.
+    // oxlint-disable-next-line react/set-state-in-effect
     setMounted(true)
   }, [])
   if (!mounted) return <Fallback />

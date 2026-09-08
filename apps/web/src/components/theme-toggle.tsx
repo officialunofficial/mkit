@@ -25,6 +25,8 @@ export function ThemeToggle() {
         : document.documentElement.dataset.theme === 'dark'
           ? 'dark'
           : 'light'
+    // Adopt the browser theme only after hydration; SSR cannot read localStorage.
+    // oxlint-disable-next-line react/set-state-in-effect
     setTheme(initial)
     setMounted(true)
   }, [])

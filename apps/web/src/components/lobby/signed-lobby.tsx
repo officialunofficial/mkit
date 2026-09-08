@@ -129,7 +129,9 @@ function usePresenceNotices(room: string): SystemNoticeItem[] {
 
   // Latest roster for the timers to read when they fire.
   const presenceRef = useReactRef(presence)
-  presenceRef.current = presence
+  useEffect(() => {
+    presenceRef.current = presence
+  }, [presence, presenceRef])
   const prevMembersRef = useReactRef<Set<string> | null>(null)
   const timersRef = useReactRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
@@ -211,6 +213,8 @@ function Feed({
   const toggle = useToggleReaction(room, myPubkey ?? undefined)
   const onNeedIdentity = () => void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())
 
+  // TanStack Virtual is intentionally managed outside React Compiler memoization.
+  // oxlint-disable-next-line react/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
