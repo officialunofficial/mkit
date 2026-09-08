@@ -18,9 +18,9 @@ mod names;
 use mkit_worker_common::replay::{Ledger, Proof, Reply};
 pub use name_store::NameStore;
 
-use audit::{WriteAudit, audit_for};
-use envelope::{EnvelopeHeaders, VerifyEnvelope, blake3_hex, verify_envelope};
-use names::{NameRecord, ResolveBody, SetNameBody, is_pubkey_hex, normalize_name};
+use audit::{audit_for, WriteAudit};
+use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
+use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
 
 /// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
 /// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
