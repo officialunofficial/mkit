@@ -1,7 +1,6 @@
 import '../styles.css'
 
 import type { ReactNode } from 'react'
-import { AgentationToolbar } from '../components/agentation-toolbar'
 import { Footer } from '../components/footer'
 import { Header } from '../components/header'
 import { MkitPreloader } from '../components/mkit-preloader'
@@ -19,7 +18,6 @@ export default async function RootLayout({ children }: RootLayoutProps) {
           <Seo> in each page (components/seo.tsx). */}
       <link rel='icon' type='image/svg+xml' href={data.icon} />
       <MkitPreloader />
-      <AgentationToolbar />
       <Header />
       {/* Polychrome's PageChrome shape: one central content column
           (`--page-column`), with the primary nav hanging as a fixed rail in

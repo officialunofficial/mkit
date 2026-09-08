@@ -7,9 +7,11 @@
 // reactions) in mkit's white/Geist palette. Reading is open; posting +
 // reacting require an unlocked identity (shared with the multiplayer demo).
 
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { VirtualFeed } from './virtual-feed'
+import { CommitSkeleton, LobbyRowsSkeleton } from '../loading'
 import * as Popover from '@radix-ui/react-popover'
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef as useReactRef, useState } from 'react'
+import { ModalLayer, TopLayer, useOverlayContainer } from '../top-layer'
+import { type ReactNode, useEffect, useMemo, useRef as useReactRef, useState } from 'react'
 import { DEFAULT_ROOM, useIdentityStore } from '../../lib/identity-store'
 import { usePresence } from '../../lib/presence-store'
 import {
@@ -55,13 +57,6 @@ const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '🚀', '👀', '✅',
 /** Group a row under the previous one if same author within this window. */
 const GROUP_WINDOW_MS = 5 * 60_000
 
-/**
- * `useLayoutEffect` on the client, `useEffect` (a no-op-during-SSR-safe stand-in) on the server — avoids React's
- * "useLayoutEffect does nothing on the server" warning. Used for the initial bottom-pin below, which MUST run
- * synchronously before the browser's first paint (see {@link Feed}).
- */
-const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
-
 export function SignedLobby() {
   const api = useMkit()
   // One shared room — the lobby is a single channel.
@@ -100,12 +95,11 @@ function LobbyBody({ room }: { room: string }) {
       <div className='relative overflow-hidden rounded-md border border-hairline'>
         <div className='flex items-center gap-2 border-b border-hairline px-4 py-3'>
           <span className='relative flex h-2 w-2' aria-hidden>
-            <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500/60' />
-            <span className='relative inline-flex h-2 w-2 rounded-full bg-green-500' />
+            <span className='relative inline-flex h-2 w-2 rounded-full bg-(--status-success-fg)' />
           </span>
-          <h2 className='text-lg font-medium tracking-tight'>Live lobby</h2>
+          <h2 className='ds-h2'>Live lobby</h2>
         </div>
-        <Feed room={room} items={rendered} isLoading={isLoading} onOpenCommit={setOpenCommit} />
+        <Feed key={room} room={room} items={rendered} isLoading={isLoading} onOpenCommit={setOpenCommit} />
         <Composer room={room} />
         {openCommit ? <CommitDrawer room={room} item={openCommit} onClose={() => setOpenCommit(null)} /> : null}
       </div>
@@ -196,13 +190,6 @@ function Feed({
   isLoading: boolean
   onOpenCommit: (item: CommitItem) => void
 }) {
-  const scrollRef = useReactRef<HTMLDivElement>(null)
-  const [atBottom, setAtBottom] = useState(true)
-  const atBottomRef = useReactRef(true)
-  const lastTopRef = useReactRef(0)
-  const didInitRef = useReactRef(false)
-  const prevLenRef = useReactRef(0)
-
   // Identity + reactions wiring (live signed reactions on any feed item).
   const myPubkey = useIdentityStore((s) => s.ed25519PubkeyHex)
   const unlocked = useIdentityStore((s) => s.unlocked)
@@ -211,153 +198,58 @@ function Feed({
   const toggle = useToggleReaction(room, myPubkey ?? undefined)
   const onNeedIdentity = () => void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())
 
-  const virtualizer = useVirtualizer({
-    count: items.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 56,
-    overscan: 6,
-    getItemKey: (index) => items[index]?.key ?? index,
-  })
-
-  const setBottom = (v: boolean) => {
-    atBottomRef.current = v
-    setAtBottom(v)
-  }
-
-  const onScroll = () => {
-    const el = scrollRef.current
-    if (!el) return
-    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-    const scrolledUp = el.scrollTop < lastTopRef.current - 2
-    lastTopRef.current = el.scrollTop
-    if (dist < 24) setBottom(true)
-    else if (scrolledUp) setBottom(false)
-  }
-
-  // START pinned to the newest row. The FIRST time the feed has rows, pin
-  // SYNCHRONOUSLY in a layout effect — before the browser paints — so the very
-  // first frame the user sees already sits at the bottom; nothing renders top-
-  // first and then visibly scrolls down. Re-assert across the next few frames
-  // too, because that initial jump runs against ESTIMATED row sizes and
-  // `measureElement` corrects them a frame or two later (without the
-  // re-assert the feed lands short of the true bottom). After init, follow
-  // ONLY when a new row actually arrives and you're already at the bottom —
-  // keyed on `items.length`, NOT the virtualizer's total size, so pure
-  // measurement churn (async avatar/name loads, a reaction resizing a row)
-  // can never re-pin and fight a manual scroll-up.
-  useIsomorphicLayoutEffect(() => {
-    if (items.length === 0) return
-    const last = items.length - 1
-    const grew = items.length > prevLenRef.current
-    prevLenRef.current = items.length
-
-    if (!didInitRef.current) {
-      didInitRef.current = true
-      virtualizer.scrollToIndex(last, { align: 'end' })
-      let n = 0
-      let raf = requestAnimationFrame(function pin() {
-        virtualizer.scrollToIndex(last, { align: 'end' })
-        if (++n < 3) raf = requestAnimationFrame(pin)
-      })
-      return () => cancelAnimationFrame(raf)
-    }
-    if (grew && atBottomRef.current) {
-      virtualizer.scrollToIndex(last, { align: 'end', behavior: 'smooth' })
-    }
-  }, [items.length, virtualizer, atBottomRef, didInitRef, prevLenRef])
-
-  const jumpToLatest = () => {
-    setBottom(true)
-    if (items.length > 0) virtualizer.scrollToIndex(items.length - 1, { align: 'end', behavior: 'smooth' })
-  }
-
-  const empty = items.length === 0
   return (
-    <div className='relative'>
-      {/* FIXED height (not max-h): the virtualizer needs a definite viewport, and a
-          fixed box means the list scrolls internally instead of growing the page
-          as messages arrive. */}
-      <div ref={scrollRef} onScroll={onScroll} className='h-96 overflow-y-auto py-1'>
-        {empty ? (
-          <p className='p-4 text-sm text-muted text-pretty'>
-            {isLoading ? 'Loading the lobby…' : 'No activity yet — say hi or push a commit in multiplayer.'}
-          </p>
+    <VirtualFeed
+      items={items}
+      emptyContent={
+        isLoading ? (
+          <LobbyRowsSkeleton />
         ) : (
-          <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
-            {virtualizer.getVirtualItems().map((vrow) => {
-              const item = items[vrow.index]
-              if (!item) return null
-              const prev = vrow.index > 0 ? items[vrow.index - 1] : undefined
-              return (
-                <div
-                  key={vrow.key}
-                  data-index={vrow.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${vrow.start}px)`,
-                  }}
-                >
-                  {item.kind === 'system' ? (
-                    <SystemNotice notice={item} />
-                  ) : item.kind === 'commit' ? (
-                    <CommitNotice
-                      room={room}
-                      item={item}
-                      onOpen={() => onOpenCommit(item)}
-                      // Reactions key on the commit hash — the same id the
-                      // detail drawer (and the spammer's responder) targets,
-                      // so bot reaction bundles on a real push show up right
-                      // on the activity row.
-                      reactions={reactionsFor(item.entry.hash)}
-                      canReact={unlocked}
-                      onToggle={(emoji) =>
-                        unlocked ? toggle.mutate({ targetId: item.entry.hash, emoji }) : onNeedIdentity()
-                      }
-                    />
-                  ) : (
-                    <Row
-                      item={item}
-                      // Group only consecutive chat messages from the same author within the window —
-                      // commits and presence notices break a run.
-                      grouped={
-                        !!prev &&
-                        prev.kind === 'chat' &&
-                        prev.message.authorPubkeyHex === item.message.authorPubkeyHex &&
-                        item.ts >= prev.ts &&
-                        item.ts - prev.ts < GROUP_WINDOW_MS
-                      }
-                      // Reactions key on the message id, which is unique per post (the server folds the
-                      // signed idempotency nonce into it), so identical text re-posted gets distinct ids
-                      // and a reaction can't leak across the two.
-                      reactions={reactionsFor(item.message.messageIdHex)}
-                      canReact={unlocked}
-                      onToggle={(emoji) =>
-                        unlocked ? toggle.mutate({ targetId: item.message.messageIdHex, emoji }) : onNeedIdentity()
-                      }
-                    />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
-      <button
-        type='button'
-        onClick={jumpToLatest}
-        aria-hidden={atBottom || empty}
-        tabIndex={atBottom || empty ? -1 : 0}
-        className={`absolute right-3 bottom-3 inline-flex h-8 items-center rounded-full border border-hairline bg-bg/90 px-3 text-xs shadow-sm backdrop-blur transition-[opacity,scale,border-color] duration-200 ease-[cubic-bezier(0.2,0,0,1)] before:absolute before:inset-x-0 before:-inset-y-1 before:content-[""] ${HOVER_BORDER} active:scale-[0.96] ${
-          atBottom || empty ? 'pointer-events-none scale-95 opacity-0' : 'opacity-100'
-        }`}
-      >
-        ↓ Latest
-      </button>
-    </div>
+          <p className='p-4 text-sm text-muted text-pretty'>
+            No activity yet. Send a message or push a commit in multiplayer.
+          </p>
+        )
+      }
+      renderItem={(item, prev) =>
+        item.kind === 'system' ? (
+          <SystemNotice notice={item} />
+        ) : item.kind === 'commit' ? (
+          <CommitNotice
+            room={room}
+            item={item}
+            onOpen={() => onOpenCommit(item)}
+            // Reactions key on the commit hash — the same id the
+            // detail drawer (and the spammer's responder) targets,
+            // so bot reaction bundles on a real push show up right
+            // on the activity row.
+            reactions={reactionsFor(item.entry.hash)}
+            canReact={unlocked}
+            onToggle={(emoji) => (unlocked ? toggle.mutate({ targetId: item.entry.hash, emoji }) : onNeedIdentity())}
+          />
+        ) : (
+          <Row
+            item={item}
+            // Group only consecutive chat messages from the same author within the window —
+            // commits and presence notices break a run.
+            grouped={
+              !!prev &&
+              prev.kind === 'chat' &&
+              prev.message.authorPubkeyHex === item.message.authorPubkeyHex &&
+              item.ts >= prev.ts &&
+              item.ts - prev.ts < GROUP_WINDOW_MS
+            }
+            // Reactions key on the message id, which is unique per post (the server folds the
+            // signed idempotency nonce into it), so identical text re-posted gets distinct ids
+            // and a reaction can't leak across the two.
+            reactions={reactionsFor(item.message.messageIdHex)}
+            canReact={unlocked}
+            onToggle={(emoji) =>
+              unlocked ? toggle.mutate({ targetId: item.message.messageIdHex, emoji }) : onNeedIdentity()
+            }
+          />
+        )
+      }
+    />
   )
 }
 
@@ -389,7 +281,7 @@ function Row({
     >
       {grouped ? (
         // Continuation: reserve the avatar gutter; reveal the time on hover.
-        <span className='w-[26px] shrink-0 pt-0.5 text-right text-[10px] text-muted opacity-0 transition-opacity tabular-nums group-hover/row:opacity-100'>
+        <span className='w-[26px] shrink-0 pt-0.5 text-right text-xs text-muted opacity-0 transition-opacity tabular-nums group-hover/row:opacity-100'>
           {time.label}
         </span>
       ) : (
@@ -507,7 +399,7 @@ function CommitNotice({
         type='button'
         onClick={onOpen}
         title='View commit details'
-        className='group/sys flex w-full min-w-0 items-center gap-2.5 rounded-md py-1 text-left text-[11px] leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
+        className='group/sys flex w-full min-w-0 items-center gap-2.5 rounded-md py-1 text-left text-2xs leading-snug text-muted transition-colors hover:bg-muted/10 hover:text-fg'
       >
         <span className='flex w-[26px] shrink-0 items-center justify-end'>
           <CommitKindIcon kind={iconKind} />
@@ -567,7 +459,7 @@ function CommitNotice({
 function SystemNotice({ notice }: { notice: SystemNoticeItem }) {
   return (
     <div className='px-4 py-1'>
-      <p className='mx-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 text-center text-[11px] text-muted'>
+      <p className='mx-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 text-center text-2xs text-muted'>
         <PlayerLabel pubkey={notice.pubkey} className='font-medium' />
         {notice.sysKind === 'left' ? 'left the chat' : 'is now viewing only'}
       </p>
@@ -601,7 +493,7 @@ function ReactionPills({
           }
           className={`reaction-pop-in inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
-              ? 'border-blue-500/60 bg-blue-500/10 text-fg'
+              ? 'border-(--border-color-selected) bg-(--surface-selected) text-fg'
               : `border-hairline bg-muted/5 text-muted ${HOVER_BORDER} hover:text-fg`
           }`}
         >
@@ -653,28 +545,29 @@ function AddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
           and follows the anchor through the feed's own scroller — no manual rect
           math. Dismiss on outside-click / Escape is built in. */}
       <Popover.Portal>
-        <Popover.Content
-          side='top'
-          align='start'
-          sideOffset={6}
-          collisionPadding={8}
-          onCloseAutoFocus={(e) => e.preventDefault()}
-          className='z-50 flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
-        >
-          {REACTION_EMOJI.map((e) => (
-            <button
-              key={e}
-              type='button'
-              onClick={() => {
-                onToggle(e)
-                setOpen(false)
-              }}
-              className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
-            >
-              {e}
-            </button>
-          ))}
-        </Popover.Content>
+        <TopLayer>
+          <Popover.Content
+            side='top'
+            align='start'
+            sideOffset={6}
+            collisionPadding={8}
+            className='overlay-panel reaction-picker flex max-w-[calc(100vw-2rem)] flex-wrap gap-0.5 rounded-(--rounded-md) border p-1'
+          >
+            {REACTION_EMOJI.map((e) => (
+              <button
+                key={e}
+                type='button'
+                onClick={() => {
+                  onToggle(e)
+                  setOpen(false)
+                }}
+                className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+              >
+                {e}
+              </button>
+            ))}
+          </Popover.Content>
+        </TopLayer>
       </Popover.Portal>
     </Popover.Root>
   )
@@ -690,10 +583,7 @@ function Composer({ room }: { room: string }) {
   if (!unlocked) {
     // Priority: a live result from an actual attempt, then the proactive in-app-browser
     // notice (shown before any tap), then the default first-time hint.
-    const hint =
-      actions.status ??
-      actions.embeddedBrowserWarning ??
-      (actions.hasPasskey ? null : 'Set up a passkey. No email, no passwords.')
+    const hint = actions.status ?? actions.embeddedBrowserWarning
     return (
       <div className='flex flex-wrap items-center gap-3 border-t border-hairline px-4 py-3'>
         <button
@@ -729,12 +619,12 @@ function Composer({ room }: { room: string }) {
                 <path d='M21.8 16c.2-2 .131-5.354 0-6' />
                 <path d='M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2' />
               </svg>
-              {actions.hasPasskey ? 'Unlock to chat' : 'Join to chat'}
+              {actions.hasPasskey ? 'Unlock to chat' : 'Create passkey to chat'}
             </span>
           )}
         </button>
         {/* The "set up a passkey" prompt only makes sense for a first-time
-            visitor (button reads "Join to chat"). When they already have a
+            visitor (button reads "Create passkey to chat"). When they already have a
             passkey (button reads "Unlock to chat"), drop the static copy and
             show only a live status message, if any. */}
         {hint ? <span className='text-xs text-muted'>{hint}</span> : null}
@@ -764,7 +654,7 @@ function Composer({ room }: { room: string }) {
           // emoji early, disagreeing with the code-point `over` check + counter
           // below (and the server's scalar-value cap). The over-check governs.
           // `text-base` on mobile stops iOS auto-zoom; `sm:text-sm` on desktop.
-          className={`h-10 w-full rounded-lg border border-hairline bg-transparent px-3 text-base ${FOCUS_RING} sm:h-9 sm:text-sm`}
+          className={`h-10 w-full rounded-(--rounded-md) border border-hairline bg-transparent px-3 text-base ${FOCUS_RING} sm:h-9 sm:text-sm`}
           value={text}
           placeholder='Message the lobby…'
           onChange={(e) => setText(e.target.value)}
@@ -779,11 +669,11 @@ function Composer({ room }: { room: string }) {
       {/* Only surface a line when there's something worth saying — a warning, or
           the character counter as you near the cap. (No idle "Return to send".) */}
       {over ? (
-        <p className='text-xs text-amber-700 dark:text-amber-400'>Message is over {MAX_CHARS} characters.</p>
+        <p className='text-xs text-(--status-warning-fg)'>Message is over {MAX_CHARS} characters.</p>
       ) : post.isError ? (
-        <p className='text-xs text-amber-700 dark:text-amber-400'>{errMsg(post.error)}</p>
+        <p className='text-xs text-(--status-warning-fg)'>{errMsg(post.error)}</p>
       ) : post.data?.rateLimited ? (
-        <p className='text-xs text-amber-700 dark:text-amber-400'>You’re posting too fast — wait a moment.</p>
+        <p className='text-xs text-(--status-warning-fg)'>Message limit reached. Wait a moment before sending again.</p>
       ) : [...trimmed].length > MAX_CHARS - 40 ? (
         <p className='text-xs text-muted tabular-nums'>
           {[...trimmed].length}/{MAX_CHARS}
@@ -816,57 +706,18 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
       ? toggle.mutate({ targetId: e.hash, emoji })
       : void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())
 
-  // `open` drives the slide. Mount → flip to true next tick (slide IN). Closing
-  // flips it false (slide OUT); the panel's transform `transitionend` then calls
-  // onClose to actually unmount — so the exit animates instead of vanishing.
-  const [open, setOpen] = useState(false)
-  useEffect(() => {
-    const raf = requestAnimationFrame(() => setOpen(true))
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      cancelAnimationFrame(raf)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [])
-
   const fork = isForkRef(e.ref)
   const timestamp = decoded ? decoded.timestampMs : Date.parse(e.createdAt)
 
-  // Rendered INSIDE the lobby card (absolute, not a body portal): the backdrop
-  // and panel are confined to the card, so it overlays the lobby only — never
-  // the page — and being absolutely positioned it can't change the card's size.
   return (
-    <div className='absolute inset-0 z-20'>
-      <button
-        type='button'
-        aria-label='Close commit details'
-        onClick={() => setOpen(false)}
-        className={`absolute inset-0 bg-black/30 transition-opacity duration-300 ${open ? 'opacity-100' : 'opacity-0'}`}
-      />
-      <aside
-        role='dialog'
-        aria-label='Commit details'
-        // Unmount only after the SLIDE-OUT finishes — the panel's OWN translate
-        // transition ending while closing (ignore bubbled transitions from
-        // children). Tailwind's `translate-x-*` utilities animate the CSS
-        // `translate` property, NOT `transform` — matching on `'transform'`
-        // here meant this NEVER fired, so the drawer (and its full-card
-        // backdrop) never unmounted on close, leaving it stuck over the feed
-        // blocking scroll and any further clicks.
-        onTransitionEnd={(ev) => {
-          if (ev.target === ev.currentTarget && ev.propertyName === 'translate' && !open) onClose()
-        }}
-        className={`absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col rounded-l-md border-l border-hairline bg-bg shadow-xl transition-transform duration-300 ease-[cubic-bezier(0.2,0,0,1)] ${open ? 'translate-x-0' : 'translate-x-full'}`}
-      >
+    <ModalLayer label='Commit details' onClose={onClose}>
+      <aside className='overlay-panel absolute inset-y-0 right-0 flex w-[92%] max-w-sm flex-col border-l'>
         <header className='flex items-center justify-between gap-3 border-b border-hairline px-4 py-3'>
           <h2 className='text-sm font-semibold'>{e.kind === 'remix' ? 'Remix' : 'Commit'} details</h2>
           <button
             type='button'
-            onClick={() => setOpen(false)}
-            aria-label='Close'
+            onClick={onClose}
+            aria-label='Close commit details'
             className='-m-1.5 inline-flex size-7 items-center justify-center rounded-md text-muted transition-colors hover:bg-muted/10 hover:text-fg'
           >
             <svg
@@ -902,7 +753,7 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
           <DrawerField label='Branch'>
             <span className='inline-flex items-center gap-2'>
               <code className='font-mono text-fg'>{e.ref}</code>
-              <span className='rounded-sm border border-hairline px-1 text-[10px] uppercase tracking-wide text-muted'>
+              <span className='rounded-sm border border-hairline px-1 text-xs text-muted'>
                 {fork ? 'fork' : e.kind === 'remix' ? 'remix' : 'commit'}
               </span>
             </span>
@@ -951,10 +802,10 @@ function CommitDrawer({ room, item, onClose }: { room: string; item: CommitItem;
             </div>
           </DrawerField>
 
-          {!decoded && obj.isLoading ? <p className='text-xs text-muted'>Loading commit object…</p> : null}
+          {!decoded && obj.isLoading ? <CommitSkeleton /> : null}
         </div>
       </aside>
-    </div>
+    </ModalLayer>
   )
 }
 
@@ -975,7 +826,7 @@ function DrawerHash({ label, value }: { label: string; value: string }) {
       <div className='text-xs text-muted'>{label}</div>
       <div className='flex items-start gap-2'>
         <code className='min-w-0 flex-1 break-all font-mono text-xs text-fg'>{value}</code>
-        <CopyButton text={value} />
+        <CopyButton text={value} label={`Copy ${label.toLowerCase()}`} />
       </div>
     </div>
   )
@@ -983,6 +834,7 @@ function DrawerHash({ label, value }: { label: string; value: string }) {
 
 /** Always-visible add-reaction control for the drawer (the feed's hover-only one would be invisible here). */
 function DrawerAddReaction({ onToggle }: { onToggle: (emoji: string) => void }) {
+  const overlayContainer = useOverlayContainer()
   const [open, setOpen] = useState(false)
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -994,30 +846,30 @@ function DrawerAddReaction({ onToggle }: { onToggle: (emoji: string) => void }) 
           + React
         </button>
       </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          side='top'
-          align='start'
-          sideOffset={6}
-          collisionPadding={8}
-          onCloseAutoFocus={(ev) => ev.preventDefault()}
-          // Above the drawer (z-60).
-          className='z-[70] flex gap-0.5 rounded-lg border border-hairline bg-bg p-1 shadow-md'
-        >
-          {REACTION_EMOJI.map((em) => (
-            <button
-              key={em}
-              type='button'
-              onClick={() => {
-                onToggle(em)
-                setOpen(false)
-              }}
-              className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
-            >
-              {em}
-            </button>
-          ))}
-        </Popover.Content>
+      <Popover.Portal container={overlayContainer}>
+        <TopLayer>
+          <Popover.Content
+            side='top'
+            align='start'
+            sideOffset={6}
+            collisionPadding={8}
+            className='overlay-panel reaction-picker flex max-w-[calc(100vw-2rem)] flex-wrap gap-0.5 rounded-(--rounded-md) border p-1'
+          >
+            {REACTION_EMOJI.map((em) => (
+              <button
+                key={em}
+                type='button'
+                onClick={() => {
+                  onToggle(em)
+                  setOpen(false)
+                }}
+                className='flex h-7 w-7 items-center justify-center rounded-md text-base transition-colors hover:bg-muted/20 active:scale-[0.96]'
+              >
+                {em}
+              </button>
+            ))}
+          </Popover.Content>
+        </TopLayer>
       </Popover.Portal>
     </Popover.Root>
   )

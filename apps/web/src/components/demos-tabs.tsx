@@ -3,6 +3,7 @@
 import * as Tabs from '@radix-ui/react-tabs'
 import type { ComponentType, ReactNode } from 'react'
 import { useEffect, useState } from 'react'
+import { ConceptSkeleton, type ConceptKind } from './loading'
 import { NavCardButton } from './nav-card'
 import { AttestDemo } from './attest-demo'
 import { DemoBoundary } from './demo-boundary'
@@ -16,7 +17,7 @@ import { TreeDemo } from './tree-demo'
 // strip at the bottom. `footer` renders below the demo (push uses it for its
 // trailing explanation); most tabs omit it.
 type Tab = {
-  id: string
+  id: ConceptKind
   label: string
   title: string
   blurb: string
@@ -29,12 +30,11 @@ const TABS: Tab[] = [
   {
     id: 'hash',
     label: 'Hash',
-    title: 'What’s in a Hash?',
-    blurb: 'A hash is the name of some bytes — change one byte and the name changes completely.',
+    title: 'Content hashes',
+    blurb: 'BLAKE3 computes an object ID from its contents. Changing the contents changes the ID.',
     body: (
       <>
-        A hash is a name for bytes: mkit names every object by the BLAKE3 of its contents. Change a single byte and the
-        name changes completely.
+        mkit computes each object’s ID from its contents using BLAKE3. Edit the input to compare the resulting hashes.
       </>
     ),
     Demo: HashDemo,
@@ -42,12 +42,12 @@ const TABS: Tab[] = [
   {
     id: 'tree',
     label: 'Tree',
-    title: 'Folders, All the Way Down',
-    blurb: 'Each folder’s hash is built from its children’s hashes, forming one Merkle root: file → folder → commit.',
+    title: 'Merkle trees',
+    blurb: 'Each folder references its children by hash. A file change changes the hashes of its ancestors.',
     body: (
       <>
-        A folder lists its entries by their BLAKE3 hashes and each parent’s hash is built from its children’s, so the
-        whole repo is one Merkle tree where editing a file ripples up: file → folder → commit.
+        Each folder lists its entries by their BLAKE3 hashes. Editing a file changes its hash, its parent folders’
+        hashes, and the commit that references the root folder.
       </>
     ),
     Demo: TreeDemo,
@@ -55,13 +55,12 @@ const TABS: Tab[] = [
   {
     id: 'sign',
     label: 'Sign',
-    title: 'Who Signed This?',
+    title: 'Signature verification',
     blurb: 'Sign a message with an Ed25519 key; change a byte or the key and verification fails.',
     body: (
       <>
         A private key signs a message; the matching public key verifies it. mkit signs every commit this way, with an
-        Ed25519 key. Sign a message, then edit what the verifier received — or check it against the wrong key — and
-        watch verification fail.
+        Ed25519 key. Sign a message, then change the message or public key to see verification fail.
       </>
     ),
     Demo: SignDemo,
@@ -69,13 +68,12 @@ const TABS: Tab[] = [
   {
     id: 'streaming',
     label: 'Streaming',
-    title: 'Verify Gigabytes, One Chunk at a Time',
-    blurb: 'Content-defined chunking ships and verifies only the parts of a file that changed.',
+    title: 'Chunk verification',
+    blurb: 'Split a file into chunks and verify them during transfer.',
     body: (
       <>
-        mkit cuts big files into content-defined chunks (FastCDC) and verifies each one against a Bao root as it arrives
-        — corruption is caught mid-stream and re-fetched, not discovered after the download. Watch the file stream in
-        verified, or corrupt the connection and see the verifier catch it.
+        mkit splits large files into content-defined chunks with FastCDC. This demo verifies incoming chunks against a
+        Bao root. Simulate corruption to see verification fail and the affected chunk retry.
       </>
     ),
     Demo: StreamingDemo,
@@ -83,20 +81,20 @@ const TABS: Tab[] = [
   {
     id: 'push',
     label: 'Push',
-    title: 'Push a File, Any File',
+    title: 'Incremental file transfers',
     blurb: 'Split a file into hash-named chunks on push and send only the ones that changed.',
-    body: <>When you push a file, mkit sends only what changed — not the whole file.</>,
+    body: <>When you push a file, mkit reuses chunks the remote already has and transfers missing content.</>,
     Demo: PushDemo,
   },
   {
     id: 'attest',
     label: 'Attest',
-    title: 'Statements, Signed',
-    blurb: 'A signed, first-class statement about a commit — reviewed, tested, deployed.',
+    title: 'Signed attestations',
+    blurb: 'Sign a statement about a commit, such as a review or test result.',
     body: (
       <>
-        An attestation is a signed statement about a commit — reviewed, tested, deployed. Verifying it proves who said
-        what about which commit. Standard formats (in-toto + DSSE), so cosign can verify it too.
+        An attestation is a signed statement about a commit, such as a review or test result. Verification checks the
+        statement’s signature against a public key. mkit uses in-toto statements and DSSE envelopes.
       </>
     ),
     Demo: AttestDemo,
@@ -104,7 +102,7 @@ const TABS: Tab[] = [
 ]
 
 export function DemosTabs() {
-  const [active, setActive] = useState(TABS[0]!.id)
+  const [active, setActive] = useState<string>(TABS[0]!.id)
 
   // Honour a `#hash | #tree | #sign | #streaming | #push | #attest` deep link —
   // on first load (keeps the old per-page URLs meaningful as anchors into the
@@ -152,7 +150,7 @@ export function DemosTabs() {
             <Tabs.Trigger
               key={t.id}
               value={t.id}
-              className='-mb-px shrink-0 border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary data-[state=active]:border-(--border-color-selected) data-[state=active]:font-medium data-[state=active]:text-primary'
+              className='pointer-coarse:min-h-11 -mb-px shrink-0 border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-secondary transition-colors duration-(--duration-fast) ease-standard hover:text-primary data-[state=active]:border-(--border-color-selected) data-[state=active]:font-medium data-[state=active]:text-primary'
             >
               {t.label}
             </Tabs.Trigger>
@@ -169,7 +167,7 @@ export function DemosTabs() {
                 <h1 className='ds-h1'>{t.title}</h1>
                 <p className='mt-2 max-w-prose'>{t.body}</p>
               </header>
-              <DemoBoundary>
+              <DemoBoundary fallback={<ConceptSkeleton kind={t.id} />}>
                 <Demo />
               </DemoBoundary>
               {t.footer}
@@ -182,7 +180,7 @@ export function DemosTabs() {
           the active tab (wrapping around). Switches tabs in place rather than
           navigating away. */}
       <section>
-        <h2 className='ds-h2 rule-square pb-2'>More Concepts to Explore</h2>
+        <h2 className='ds-h2 rule-square pb-2'>More concepts</h2>
         <ul className='mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3'>
           {upNext.map((t) => (
             <NavCardButton key={t.id} onClick={() => goToTab(t.id)} title={t.label} body={t.blurb} />

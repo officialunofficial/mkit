@@ -4,7 +4,7 @@ import { ListIcon, XIcon } from '@phosphor-icons/react/ssr'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useRouter } from 'waku'
 import { GridLogo } from './grid-logo'
-import { NavList } from './site-nav'
+import { ExpandedNav } from './site-nav'
 import { ThemeToggle } from './theme-toggle'
 
 /**
@@ -47,7 +47,7 @@ export const Header = () => {
               aria-controls='site-nav-panel'
               aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
               onClick={() => setNavOpen((v) => !v)}
-              className='inline-flex size-8 items-center justify-center rounded-(--rounded-sm) text-primary transition-colors duration-(--duration-fast) ease-standard hover:bg-(--action-ghost-bg-hover) active:bg-(--action-ghost-bg-active) min-[1440px]:hidden'
+              className='touch-target inline-flex size-8 items-center justify-center rounded-(--rounded-sm) text-primary transition-colors duration-(--duration-fast) ease-standard hover:bg-(--action-ghost-bg-hover) active:bg-(--action-ghost-bg-active) min-[1440px]:hidden'
             >
               {navOpen ? <XIcon size={16} aria-hidden /> : <ListIcon size={16} aria-hidden />}
             </button>
@@ -55,7 +55,7 @@ export const Header = () => {
         </div>
         {navOpen ? (
           <nav id='site-nav-panel' aria-label='Primary' className='mt-2 min-[1440px]:hidden'>
-            <NavList onNavigate={closeNav} />
+            <ExpandedNav onNavigate={closeNav} />
           </nav>
         ) : null}
         {/* The divider is a normal child of the padded column container, so it

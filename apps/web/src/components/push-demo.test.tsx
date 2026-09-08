@@ -28,8 +28,8 @@ describe('PushDemo', () => {
 
     await user.click(screen.getByRole('button', { name: /Push it/ }))
     expect(await screen.findByText('Push only what changed')).toBeInTheDocument()
-    // The comparison bars — git sends the whole file, mkit sends a delta.
-    expect(screen.getByText(/git resends the whole file/)).toBeInTheDocument()
-    expect(screen.getByText(/mkit sends only a delta of the changed chunk/)).toBeInTheDocument()
+    // The comparison uses the demo sample and states what the sizes exclude.
+    expect(screen.getByText(/Compare resending the whole file/)).toBeInTheDocument()
+    expect(screen.getByText(/A complete push also includes object and protocol/)).toBeInTheDocument()
   })
 })

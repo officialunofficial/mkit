@@ -91,7 +91,7 @@ export function OnThisPage() {
 
   return (
     <nav aria-label='On this page' className='text-xs leading-4'>
-      <p className='mb-2 font-medium text-primary'>On This Page</p>
+      <p className='mb-2 font-medium text-primary'>On this page</p>
       <ul className='border-l' style={{ borderColor: 'var(--border-color-subtle)' }}>
         {items.map((item) => {
           const active = activeId === item.id

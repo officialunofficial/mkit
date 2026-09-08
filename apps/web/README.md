@@ -1,12 +1,11 @@
 # mkit web
 
 Waku and Cloudflare Workers demo site that runs `mkit-wasm` directly in the
-browser. Each page exercises one slice of the mkit data model &mdash; hashing,
-signing, tree snapshots, and attestation &mdash; so visitors can see the
-content-addressed pipeline end-to-end without installing the CLI.
+browser. The site demonstrates hashing, signing, tree snapshots, and attestations
+without requiring visitors to install the CLI.
 
-Not part of the published `mkit` toolkit; lives here to keep the deploy
-config close to the spec and the WASM crate it consumes.
+The site is separate from the published `mkit` toolkit. This directory contains
+its source, build scripts, and deployment configuration.
 
 ## Local build
 
@@ -74,7 +73,7 @@ or extension hasn't implemented the API, registration is a documented no-op
 
 Registered tools (`src/components/multiplayer/webmcp-tools.tsx`): `mkit_get_identity`,
 `mkit_list_branches`, `mkit_get_commit_log`, `mkit_get_commit`, and
-`mkit_select_branch` read the room; `mkit_push_commit`, `mkit_remix_commit`, and
+`mkit_select_branch` read repository and identity state; `mkit_push_commit`, `mkit_remix_commit`, and
 `mkit_branch_commit` sign and push through the same `usePushCommit` / `useDerive`
 hooks the Compose/RepoLog UI uses &mdash; an agent's commit and a visitor's click
 are indistinguishable on the wire, and both require an unlocked identity (the
@@ -88,3 +87,8 @@ agent can fetch it directly. The canonical file is the **repo-root
 `SKILL.md`**; `bun run stage` (run automatically by `dev`/`build` via
 `scripts/stage-public.mjs`) copies it into the gitignored `public/SKILL.md` as a
 static asset. Edit the repo-root file, never the copy.
+
+## Content and design review
+
+Follow [Site content and design](CONTENT_AND_DESIGN.md) for the review workflow,
+writing rules, Pigment references, and rendering exceptions.

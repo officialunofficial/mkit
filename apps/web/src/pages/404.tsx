@@ -14,8 +14,8 @@ export default function NotFoundPage() {
         card='Not found'
       />
       <header>
-        <h1 className='ds-h1'>Not Found</h1>
-        <p className='ds-note mt-1'>This page doesn&rsquo;t exist — it may have moved, or the link may be wrong.</p>
+        <h1 className='ds-h1'>Page not found</h1>
+        <p className='ds-note mt-1'>This page does not exist. Check the URL or return to the overview.</p>
       </header>
       <p>
         <Link to='/' className='ds-link'>

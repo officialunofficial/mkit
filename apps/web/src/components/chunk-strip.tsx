@@ -57,7 +57,7 @@ const ChunkButton = memo(
         {showFailedOverlay ? (
           <span
             aria-hidden
-            className='absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white'
+            className='absolute inset-0 flex items-center justify-center text-xs font-semibold text-white'
             style={{ backgroundColor: 'rgba(220, 38, 38, 0.7)' }}
           >
             ×
