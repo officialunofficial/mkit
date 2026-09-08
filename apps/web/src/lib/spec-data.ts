@@ -35,7 +35,7 @@ export function specUrl(name: string): string {
 
 export const categories: SpecCategory[] = [
   {
-    name: 'Objects and Hashing',
+    name: 'Objects and hashing',
     blurb: 'How bytes become content-addressed objects: layouts, Merkle identity, chunking, and deltas.',
     items: [
       {
@@ -65,8 +65,8 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Repository State',
-    blurb: 'What lives inside .mkit/: refs, the staging index, linked worktrees, lock order, and garbage collection.',
+    name: 'Repository state',
+    blurb: 'State stored in .mkit/: refs, the staging index, linked worktrees, lock order, and garbage collection.',
     items: [
       {
         name: 'SPEC-REFS',
@@ -78,7 +78,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-INDEX',
         status: 'stable-advisory',
         description:
-          'The on-disk layout of the staging area: paths staged for the next commit, plus a stat cache that proves a worktree file unchanged without rereading it. Local-only, never exchanged between peers.',
+          'The on-disk layout of the staging area: paths staged for the next commit, plus a stat cache that checks file metadata without rereading the contents. Local-only, never exchanged between peers.',
       },
       {
         name: 'SPEC-WORKTREE',
@@ -89,8 +89,7 @@ export const categories: SpecCategory[] = [
       {
         name: 'SPEC-CONCURRENCY',
         status: 'draft-normative',
-        description:
-          'The one total acquisition order across every lock an mkit process takes, so two processes can never grab the same two locks in opposite order.',
+        description: 'The order in which all mkit processes must acquire locks to prevent deadlocks.',
       },
       {
         name: 'SPEC-GC',
@@ -101,7 +100,7 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Packs and Transport',
+    name: 'Packs and transport',
     blurb:
       'How objects move between repositories: the packfile container, erasure-coded delivery, and the transport protocols.',
     items: [
@@ -109,7 +108,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-PACKFILE',
         status: 'stable',
         description:
-          'The packfile container for object exchange (v1 and v2): header framing, entry types, per-entry zstd compression, and a BLAKE3 trailer as defense against bit rot.',
+          'The packfile container for object exchange (v1 and v2): header framing, entry types, per-entry zstd compression, and a BLAKE3 trailer to detect corruption.',
       },
       {
         name: 'SPEC-PACK-SHARDS',
@@ -139,14 +138,13 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-SPARSE-CHECKOUT',
         status: 'draft',
         description:
-          'Verifiable server-side sparse checkout over HTTP and S3: the server ships only the requested subtree, and proofs let the client tell "filtered as asked" from "withheld".',
+          'Verifiable sparse checkout over HTTP and S3: the server sends the requested subtree, and the client verifies its completeness with proofs.',
       },
     ],
   },
   {
-    name: 'Security and Signing',
-    blurb:
-      'The signature and attestation machinery: signing bytes, key storage, config trust boundaries, and verifiable history.',
+    name: 'Security and signing',
+    blurb: 'Signatures and attestations: signing bytes, key storage, config trust boundaries, and verifiable history.',
     items: [
       {
         name: 'SPEC-SIGNING',
@@ -158,13 +156,13 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-KEYSTORE',
         status: 'stable-normative',
         description:
-          'The signing-key vault behind mkit key: software, OS-native, and hardware-backed storage under one interface, with honest capability reporting throughout.',
+          'Signing-key storage for mkit key: software, OS-native, and hardware-backed implementations, with supported capabilities reported through one interface.',
       },
       {
         name: 'SPEC-CONFIG-SECURITY',
         status: 'normative',
         description:
-          'The repo-vs-user config trust split: which keys a cloned repository may set and which stay user-only, so a hostile repo never reaches your signing identity or credentials.',
+          'The repo-vs-user config trust split: which keys a cloned repository may set and which stay user-only, so a cloned repository cannot change your signing identity or access your credentials.',
       },
       {
         name: 'SPEC-ATTESTATIONS',
@@ -187,9 +185,8 @@ export const categories: SpecCategory[] = [
     ],
   },
   {
-    name: 'Interop and Subprocess Protocols',
-    blurb:
-      'The wire contracts mkit speaks with other systems: git bridges in both directions, external signers, and the shared RPC framing.',
+    name: 'Interop and subprocess protocols',
+    blurb: 'Protocols for Git import and export, external signers, and subprocess RPC.',
     items: [
       {
         name: 'SPEC-GIT-BRIDGE',
@@ -213,19 +210,19 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-RPC',
         status: 'stable-normative',
         description:
-          'The length-prefixed protobuf framing shared by every mkit subprocess protocol; external signers and the SSH transport speak the same wire.',
+          'The length-prefixed protobuf framing shared by every mkit subprocess protocol; external signers and the SSH transport use the same framing.',
       },
     ],
   },
   {
-    name: 'Spec Conventions',
-    blurb: 'How the corpus itself is written and read.',
+    name: 'Spec conventions',
+    blurb: 'How to write and read the specifications.',
     items: [
       {
         name: 'SPEC-CONVENTIONS',
         status: 'stable-normative',
         description:
-          'Shared vocabulary for the corpus: RFC 2119 keywords, the status tokens shown on this page, wire-encoding notation, and golden-vector citation rules.',
+          'Shared vocabulary for the specifications: RFC 2119 keywords, the status tokens shown on this page, wire-encoding notation, and golden-vector citation rules.',
       },
     ],
   },

@@ -33,6 +33,6 @@ describe('SignDemo', () => {
     await user.clear(received)
     await user.type(received, 'a completely different message')
 
-    expect(await screen.findByText(/Tampered/)).toBeInTheDocument()
+    expect(await screen.findByText(/Verification failed. The message differs/)).toBeInTheDocument()
   })
 })

@@ -99,7 +99,7 @@ export function SignDemo() {
                     start editing, when the live verdict takes over. */}
                 {!tampered ? (
                   <span className='block text-xs text-muted'>
-                    Try changing a character — does the signature still verify?
+                    Change a character to test whether the signature still verifies.
                   </span>
                 ) : null}
               </div>
@@ -108,7 +108,7 @@ export function SignDemo() {
                 <select
                   value={verifyAs}
                   onChange={(e) => setVerifyAs(e.target.value as typeof ALICE | typeof MALLORY)}
-                  className='rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 text-sm text-fg outline-none transition-colors hover:border-blue-500/50 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/25'
+                  className='rounded-md border border-hairline bg-bg py-1 pl-2 pr-7 text-sm text-fg outline-none transition-colors hover:border-(--border-color-strong) focus:border-(--border-color-focus) focus:ring-2 focus:ring-(--focus-ring)'
                 >
                   <option value={ALICE}>{ALICE}’s key</option>
                   <option value={MALLORY}>{MALLORY}’s key</option>
@@ -123,27 +123,29 @@ export function SignDemo() {
             />
 
             {verdict ? (
-              <p className='flex items-center gap-2 text-sm text-green-700 dark:text-green-400'>
+              <p className='flex items-center gap-2 text-sm text-(--status-success-fg)'>
                 <span aria-hidden>✓</span>
-                Verified — the signature matches this message and {ALICE}’s key.
+                Verified. The signature matches this message and {ALICE}’s key.
               </p>
             ) : (
               <div className='space-y-2'>
-                <p className='flex items-center gap-2 text-sm text-red-600 dark:text-red-400'>
+                <p className='flex items-center gap-2 text-sm text-(--status-error-fg)'>
                   <span aria-hidden>✗</span>
                   {tampered
-                    ? 'Tampered — this is not what was signed.'
-                    : `Wrong signer — this signature is not ${MALLORY}’s. It’s ${ALICE}’s.`}
+                    ? 'Verification failed. The message differs from the signed text.'
+                    : `Verification failed. This signature matches ${ALICE}’s key, not ${MALLORY}’s.`}
                 </p>
                 {tampered && diff ? (
                   <p className='rounded-md border border-hairline px-3 py-2 font-mono text-sm break-all'>
                     {diff.before}
                     {diff.removed ? (
-                      <del className='bg-red-500/15 text-red-600 line-through decoration-red-500 dark:text-red-400'>
+                      <del className='bg-(--delta-decrease-bg) text-(--delta-decrease-fg) line-through'>
                         {diff.removed}
                       </del>
                     ) : null}
-                    {diff.added ? <mark className='rounded-sm bg-red-500/20 text-fg'>{diff.added}</mark> : null}
+                    {diff.added ? (
+                      <mark className='rounded-sm bg-(--delta-increase-bg) text-fg'>{diff.added}</mark>
+                    ) : null}
                     {diff.after}
                     <span className='mt-1 block text-xs text-muted not-italic'>
                       highlighted text differs from what was signed
@@ -205,12 +207,7 @@ function Button({
   disabled?: boolean
 }) {
   return (
-    <button
-      type='button'
-      onClick={onClick}
-      disabled={disabled}
-      className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-blue-500/50 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 sm:h-9'
-    >
+    <button type='button' onClick={onClick} disabled={disabled} className='btn btn--outlined shrink-0'>
       {children}
     </button>
   )

@@ -47,12 +47,12 @@ function DefaultFallback({ reset }: { reset: () => void }) {
     <div role='alert' className='space-y-3 rounded-md border border-hairline p-4'>
       <p className='text-sm font-medium text-fg'>This demo couldn&rsquo;t load.</p>
       <p className='max-w-prose text-sm text-muted'>
-        Reloading usually fixes it; if it keeps happening, your browser may be blocking part of this page.
+        Try again. If the demo still does not load, reload the page and check your connection.
       </p>
       <button
         type='button'
         onClick={reset}
-        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-300 hover:opacity-70'
+        className='-mx-2 inline-block px-2 py-2 text-sm underline underline-offset-4 transition-opacity duration-(--duration-fast) ease-standard hover:opacity-70'
       >
         Try again
       </button>

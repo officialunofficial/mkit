@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clarified docs-site copy, aligned controls and overlays with Pigment, added layout-matched loading placeholders and grouped navigation, and stabilized virtualized lobby scrolling across tab resume and row resizing. Removed the development Agentation integration. No public API or format changes.
 - Worker writes rejected by quotas or rate limits no longer allocate replay
   records, including chat posts and reactions. Existing operation retries still
   reuse their reservation or saved reply without a second quota charge.

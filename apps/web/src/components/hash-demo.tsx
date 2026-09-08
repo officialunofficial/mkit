@@ -59,7 +59,7 @@ export function HashDemo() {
     }
   }, [api, text, image])
 
-  if ('error' in hashes) return <p className='text-red-600 dark:text-red-400'>{hashes.error}</p>
+  if ('error' in hashes) return <p className='text-(--status-error-fg)'>{hashes.error}</p>
 
   const handleFile = async (file: File) => {
     const name = file.name || 'image'
@@ -96,7 +96,7 @@ export function HashDemo() {
           onChange={(e) => setText(e.target.value)}
           aria-label='README.md contents'
         />
-        <p className='text-xs text-muted'>Edit the text — the name above changes.</p>
+        <p className='text-xs text-muted'>Edit the text to change its hash.</p>
       </div>
 
       {/* The image — any bytes get a name, not just text. */}
@@ -117,32 +117,22 @@ export function HashDemo() {
           </div>
           <div className='space-y-2'>
             <div className='flex items-center gap-2'>
-              <button
-                type='button'
-                onClick={() => fileRef.current?.click()}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg border border-hairline bg-transparent px-3 text-sm font-medium transition-all duration-200 hover:border-blue-500/50 active:translate-y-px sm:h-9'
-              >
+              <button type='button' onClick={() => fileRef.current?.click()} className='btn btn--outlined shrink-0'>
                 Replace image
               </button>
-              <button
-                type='button'
-                onClick={resetImage}
-                disabled={!customised}
-                className='inline-flex h-10 shrink-0 items-center justify-center rounded-lg px-2 text-sm text-muted transition-opacity duration-200 hover:opacity-70 active:translate-y-px disabled:pointer-events-none disabled:opacity-30 sm:h-9'
-              >
+              <button type='button' onClick={resetImage} disabled={!customised} className='btn btn--ghost shrink-0'>
                 Reset
               </button>
             </div>
             <p className='text-xs text-muted'>
-              Swap the image — the name above changes. Demo cap {formatBytes(MAX_IMAGE_BYTES)}.
+              Replace the image to change its hash. Maximum size: {formatBytes(MAX_IMAGE_BYTES)}.
             </p>
           </div>
         </div>
         {tooLarge ? (
-          <p className='rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400'>
-            <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. This demo previews
-            files as data URLs and rejects anything over {formatBytes(MAX_IMAGE_BYTES)} before reading it. The streaming
-            tab handles larger files.
+          <p className='rounded-(--rounded-md) border border-(--status-error-border) bg-(--status-error-bg) p-3 text-xs text-(--status-error-fg)'>
+            <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. The maximum size is{' '}
+            {formatBytes(MAX_IMAGE_BYTES)}. Use the streaming demo for larger files.
           </p>
         ) : null}
         <input

@@ -4,6 +4,7 @@ import { CopyButton } from '../components/copy-button'
 import { NavCardLink } from '../components/nav-card'
 import { DemoBoundary } from '../components/demo-boundary'
 import { SignedLobby } from '../components/lobby/signed-lobby'
+import { LobbySkeleton } from '../components/loading'
 import { Seo } from '../components/seo'
 
 export default function HomePage() {
@@ -11,7 +12,7 @@ export default function HomePage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — version control that signs every commit'
-        description='Version control that signs every commit. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations are first-class objects. Written in Rust.'
+        description='Version control that signs every commit. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations record signed statements about commits. Written in Rust.'
         path='/'
         card='Version control that signs every commit.'
       />
@@ -21,19 +22,17 @@ export default function HomePage() {
           reader meets the thesis before the demo. */}
       <div className='grid grid-cols-1 gap-x-3 gap-y-8 lg:grid-cols-2 lg:items-start'>
         <section>
-          <h1 className='ds-h1'>Sign Every Commit. Know Every Contributor.</h1>
+          <h1 className='ds-h1'>Version control with signed commits</h1>
           <p className='ds-note mt-1'>A content-addressed version control toolkit, written in Rust.</p>
           <p className='mt-2 max-w-prose'>
-            Every commit is cryptographically signed, so anyone can contribute and everyone can verify who did what.
-            mkit is git-like{' '}
+            Every commit has an Ed25519 signature that you can verify against the signing key. mkit supports{' '}
             <Link to='/parity' className='ds-link'>
-              where it can be
+              familiar Git commands
             </Link>
-            , and different where it counts: one hash algorithm, signatures on every commit, and attestations as
-            first-class objects.
+            . It uses BLAKE3 object IDs and stores signed attestations about commits.
           </p>
 
-          <h2 className='ds-h2 rule-square mt-8 pb-2'>Get Started</h2>
+          <h2 className='ds-h2 rule-square mt-8 pb-2'>Get started</h2>
           <div className='mt-2 space-y-6'>
             <div>
               <h3 className='ds-h3'>Install the CLI</h3>
@@ -41,30 +40,28 @@ export default function HomePage() {
                   installer (see src/install-route.ts). */}
               <InstallCommand command='curl mkit.sh | sh' label='Copy CLI install command' />
               <p className='mt-2 max-w-prose text-xs leading-4'>
-                Detects your platform, verifies the cosign signature, and drops <code>mkit</code> into{' '}
+                Detects your platform, verifies the cosign signature, and installs <code>mkit</code> into{' '}
                 <code>~/.local/bin</code>.
               </p>
             </div>
             <div>
-              <h3 className='ds-h3'>Add the Agent Skill</h3>
+              <h3 className='ds-h3'>Add the agent skill</h3>
               <InstallCommand command='npx skills add officialunofficial/mkit' label='Copy skill install command' />
               <p className='mt-2 max-w-prose text-xs leading-4'>
-                Teaches Claude Code, Cursor, and other coding agents to drive mkit.
+                Teaches Claude Code, Cursor, and other coding agents to use mkit.
               </p>
             </div>
             <p className='ds-note'>
-              Open source (alpha):{' '}
               <a
                 href='https://github.com/officialunofficial/mkit'
                 target='_blank'
                 rel='noreferrer'
                 className='ds-link inline-flex items-center gap-0.5'
               >
-                officialunofficial/mkit
+                View source on GitHub
                 <ArrowUpRightIcon size={12} aria-hidden />
                 <span className='sr-only'>(opens in a new tab)</span>
-              </a>{' '}
-              on GitHub.
+              </a>
             </p>
           </div>
         </section>
@@ -74,7 +71,7 @@ export default function HomePage() {
             passkey identity. DemoBoundary lets the static prerender emit a
             fallback and hydrate the wasm-backed client. */}
         <section>
-          <DemoBoundary>
+          <DemoBoundary fallback={<LobbySkeleton />}>
             <SignedLobby />
           </DemoBoundary>
         </section>
@@ -87,25 +84,25 @@ export default function HomePage() {
             to='/concepts'
             title='Concepts'
             icon={<FlaskIcon size={12} aria-hidden />}
-            body='Six playgrounds in one: hashing, the Merkle tree, signatures, chunked streaming, pushes, and attestations — each one live, right in your browser.'
+            body='Try hashing, Merkle trees, signatures, chunked streaming, pushes, and attestations in your browser.'
           />
           <NavCardLink
             to='/performance'
             title='Performance'
             icon={<GaugeIcon size={12} aria-hidden />}
-            body='Hashing, committing, packing — mkit measured against git on real operations.'
+            body='Compare mkit and Git command timings, storage use, and transfer sizes.'
           />
           <NavCardLink
             to='/parity'
             title='Parity'
             icon={<GitDiffIcon size={12} aria-hidden />}
-            body='Which git commands mkit matches, where it diverges on purpose, and why it will never share bytes with a .git repo.'
+            body='Compare supported Git commands and flags, documented differences, and repository formats.'
           />
           <NavCardLink
             to='/multiplayer'
             title='Multiplayer'
             icon={<UsersThreeIcon size={12} aria-hidden />}
-            body='Set up a passkey, sign a commit in your browser, and push to a shared repo — then watch everyone else’s commits arrive live.'
+            body='Create a passkey, sign a commit, and push to a shared repository. See other contributions as they arrive.'
           />
         </ul>
       </section>

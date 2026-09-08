@@ -4,21 +4,11 @@ import { useCallback, useMemo, useState } from 'react'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { formatBytes, useMkit } from './use-mkit'
 
-// The interactive strip runs on a real 2 MiB sample (FastCDC, ~64 KiB chunks) so
-// the chunking + delta are genuine. But the walkthrough PRESENTS a large file —
-// FAKE_FILE_* below — because that's where mkit's edge over git is dramatic:
-// above git's 512 MiB delta threshold (or under git-LFS) git resends the whole
-// file, while mkit still ships only a delta of the changed chunk. Real
-// end-to-end numbers live on the performance page. Deterministic so it reads the
-// same every time; the "edit" flips one byte so exactly the chunk covering it
-// changes.
+// Compute chunk and delta sizes from the same deterministic 2 MiB sample.
+// The comparison shows payload bytes only; it excludes protocol metadata.
 const FILE_SIZE = 2 * 1024 * 1024
 const FILE_SEED = 0x6b697421
-
-// Faked headline size for the comparison (see note above). 512 MiB is git's
-// default core.bigFileThreshold — where git stops deltifying and sends whole.
-const FAKE_FILE_BYTES = 512 * 1024 * 1024
-const FAKE_FILE_LABEL = '512 MiB'
+const FILE_LABEL = '2 MiB'
 
 function makeRng(seed: number): () => number {
   let a = seed >>> 0
@@ -60,7 +50,7 @@ const STEPS = [
   { title: 'Push only what changed', next: 'Start over' },
 ] as const
 
-const BTN = 'rounded-md border border-hairline px-3 py-1.5 text-sm transition-opacity duration-300 hover:opacity-70'
+const BTN = 'btn btn--outlined'
 
 export function PushDemo() {
   const api = useMkit()
@@ -114,8 +104,8 @@ export function PushDemo() {
       return tgt.len
     }
   }, [api, base, edited, before, after])
-  // Savings vs the faked large-file size — that's the regime the comparison shows.
-  const savedPct = 100 - (deltaBytes / FAKE_FILE_BYTES) * 100
+  // Compare the encoded delta payload with resending the complete sample.
+  const savedPct = 100 - (deltaBytes / FILE_SIZE) * 100
   const savedLabel = savedPct >= 99.99 ? '>99.99% smaller' : `${savedPct.toFixed(1)}% smaller`
 
   const back = () => setStep((s) => Math.max(0, s - 1))
@@ -124,7 +114,7 @@ export function PushDemo() {
   return (
     <div className='space-y-5 rounded-md border border-hairline p-5'>
       <div className='flex items-center justify-between gap-3'>
-        <h3 className='text-lg font-semibold tracking-tight'>{STEPS[step]?.title}</h3>
+        <h2 className='ds-h2'>{STEPS[step]?.title}</h2>
         <div className='flex gap-1.5'>
           {STEPS.map((s, i) => (
             <span
@@ -146,7 +136,7 @@ export function PushDemo() {
                   only appears once it's split into chunks (each chunk is coloured by
                   its hash). Same height as the chunk strip so the next step doesn't jump. */}
               <div className='h-6 w-full rounded-sm border border-hairline bg-muted/25' />
-              <p className='max-w-prose text-sm text-muted'>A {FAKE_FILE_LABEL} file, named by its hash.</p>
+              <p className='max-w-prose text-sm text-muted'>A {FILE_LABEL} file, named by its hash.</p>
             </>
           ) : null}
 
@@ -199,10 +189,10 @@ export function PushDemo() {
                   chunking); mkit = the chunk strip, deduped to the one changed chunk. */}
               <div className='space-y-2'>
                 <CompareBar
-                  name='git'
-                  detail={`${FAKE_FILE_LABEL} · whole file`}
+                  name='Whole file'
+                  detail={`${FILE_LABEL} · whole file`}
                   solid
-                  ariaLabel='git resends the whole file'
+                  ariaLabel='Resending the whole file'
                 />
                 <CompareBar
                   name='mkit'
@@ -215,15 +205,15 @@ export function PushDemo() {
                 />
               </div>
               <p className='max-w-prose text-sm text-muted'>
-                git resends the whole file. mkit sends only a delta of the changed chunk.
+                Compare resending the whole file with the delta of the changed chunk.
               </p>
               <p className='max-w-prose text-xs text-subtle'>
-                git resends whole files above its 512 MiB threshold (
-                <code className='font-mono'>core.bigFileThreshold</code>) or under git-LFS. Sizes are illustrative —{' '}
-                <a href='/performance' className='underline underline-offset-4 transition-opacity hover:opacity-70'>
-                  see the benchmarks
+                These payload sizes come from the 2 MiB sample above. A complete push also includes object and protocol
+                metadata. See the{' '}
+                <a href='/performance' className='ds-link'>
+                  performance benchmarks
                 </a>{' '}
-                for real numbers.
+                for measured command timings and transfer sizes.
               </p>
             </>
           ) : null}
@@ -243,8 +233,7 @@ export function PushDemo() {
 }
 
 // One labelled comparison bar with a name + size detail above it. `solid` draws
-// the file as a single filled bar (git, which doesn't chunk — the whole file
-// ships); otherwise it's the chunk strip, dimmed to the one changed chunk (mkit).
+// the complete sample as a filled bar; otherwise it shows the changed chunk.
 function CompareBar({
   name,
   detail,
