@@ -617,6 +617,21 @@ pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
     sink: &S,
     path: &Path,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
+    hash_file_with_metadata_with(sink, path, sequential_hash_chunks)
+}
+
+/// [`hash_file_with_metadata`], but with an explicit `hash_chunks` batch
+/// callback in place of the built-in sequential loop over
+/// [`store_chunk_blob`] — see [`store_large_file_streaming_with`], which
+/// this delegates to for files above [`CHUNK_THRESHOLD`].
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn hash_file_with_metadata_with<S: ObjectSink + ?Sized>(
+    sink: &S,
+    path: &Path,
+    hash_chunks: impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<(Hash, fs::Metadata)> {
     let mut file = open_regular_file(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() {
@@ -643,8 +658,44 @@ pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
         return Ok((hash, meta));
     }
 
-    let hash = store_large_file_streaming(sink, file.take(MAX_FILE_BYTES + 1), path)?;
+    let hash =
+        store_large_file_streaming_with(sink, file.take(MAX_FILE_BYTES + 1), path, hash_chunks)?;
     Ok((hash, meta))
+}
+
+/// Number of chunks [`store_large_file_streaming_with`] buffers before
+/// handing a batch to its `hash_chunks` callback. Bounds the extra
+/// memory a fan-out `hash_chunks` needs to hold resident to at most
+/// `STREAM_HASH_BATCH * chunker::MAX_SIZE` (16 MiB at the current 256
+/// KiB `MAX_SIZE`) regardless of the file's total size — the same
+/// "independent of file size" bound issue #828 gave the streaming
+/// reader itself, just sized for a batch instead of one chunk.
+const STREAM_HASH_BATCH: usize = 64;
+
+/// Store one already-cut chunk as a canonical Blob object, returning its
+/// content address. The per-chunk unit [`store_large_file_streaming_with`]
+/// fans out over — hashing (BLAKE3, via `put_parts`) and staging a temp
+/// file are both independent of every other chunk once boundaries are
+/// known.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> WorktreeResult<Hash> {
+    let prologue = serialize::blob_prologue(chunk.len())?;
+    Ok(sink.put_parts(&[&prologue, chunk])?)
+}
+
+/// The built-in sequential `hash_chunks` callback: [`store_chunk_blob`]
+/// each chunk in the batch, in order. What [`hash_file_with_metadata`]
+/// passes to [`hash_file_with_metadata_with`].
+fn sequential_hash_chunks<S: ObjectSink + ?Sized>(
+    sink: &S,
+    batch: &[Vec<u8>],
+) -> WorktreeResult<Vec<Hash>> {
+    batch
+        .iter()
+        .map(|chunk| store_chunk_blob(sink, chunk))
+        .collect()
 }
 
 /// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
@@ -657,23 +708,51 @@ pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
 /// error if `reader` yields more than [`MAX_FILE_BYTES`].
 ///
+/// Takes an explicit `hash_chunks` batch callback in place of a built-in
+/// sequential loop over [`store_chunk_blob`] — `mkit-core` has no
+/// thread-pool dependency of its own — it stays usable from wasm
+/// targets, which have no OS threads — so the fan-out decision lives
+/// with the caller instead of living in this function, the same shape
+/// as [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback.
+/// Cutting chunk boundaries from `reader` is inherently sequential (each
+/// cut's start is the previous cut's end), but once a batch of up to
+/// [`STREAM_HASH_BATCH`] chunks is in hand, hashing and storing each one
+/// is independent of every other chunk in the batch — `mkit-cli`'s
+/// native, rayon-backed `add` path passes a parallel `hash_chunks`
+/// (mirroring the pack-compression/signature-verification/delta-encoding
+/// fan-outs already in `mkit-cli`); [`hash_file_with_metadata`] passes
+/// [`sequential_hash_chunks`].
+///
+/// `hash_chunks` receives each batch in file order and MUST return
+/// exactly one [`Hash`] per input chunk, in the same order — the
+/// manifest's chunk list, and therefore the file's content address,
+/// depends on that order.
+///
 /// # Errors
 /// See [`WorktreeError`].
-fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
+pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
     sink: &S,
     reader: R,
     path: &Path,
+    mut hash_chunks: impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
     let mut total_size: u64 = 0;
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
     while let Some(chunk) = chunker.next_chunk()? {
         total_size = total_size
             .checked_add(chunk.len() as u64)
             .filter(|&t| t <= MAX_FILE_BYTES)
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
-        let prologue = serialize::blob_prologue(chunk.len())?;
-        chunks.push(sink.put_parts(&[&prologue, &chunk])?);
+        batch.push(chunk);
+        if batch.len() == STREAM_HASH_BATCH {
+            chunks.extend(hash_chunks(sink, &batch)?);
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        chunks.extend(hash_chunks(sink, &batch)?);
     }
 
     let manifest = Object::ChunkedBlob(ChunkedBlob {
@@ -1203,6 +1282,55 @@ mod tests {
             reassembled.extend_from_slice(&b.data);
         }
         assert_eq!(reassembled, big);
+    }
+
+    #[test]
+    fn hash_file_with_metadata_with_batch_fanout_matches_sequential() {
+        // A `hash_chunks` callback that reorders its own work internally
+        // (simulating a rayon fan-out that hashes a batch out of order)
+        // must still produce the same content-address as the sequential
+        // default, as long as it returns results in input order — this
+        // pins the `_with` contract `hash_pending` (mkit-cli) relies on.
+        // Large enough for several `STREAM_HASH_BATCH`-sized (64-chunk)
+        // batches at the ~64 KiB average chunk size.
+        let n = usize::try_from(CHUNK_THRESHOLD).unwrap() + 6 * 1024 * 1024;
+        let mut big = Vec::with_capacity(n);
+        let mut state: u64 = 0xABCD_EF01;
+        for _ in 0..n {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            big.push((z & 0xFF) as u8);
+        }
+        let work = TempDir::new().unwrap();
+        let path = work.path().join("big.bin");
+        fs::write(&path, &big).unwrap();
+
+        let (_sd1, sequential_store) = fresh_store();
+        let (sequential_hash, _) = hash_file_with_metadata(&sequential_store, &path).unwrap();
+
+        let (_sd2, fanout_store) = fresh_store();
+        let (fanout_hash, _) = hash_file_with_metadata_with(&fanout_store, &path, |sink, batch| {
+            // Hash in reverse, then un-reverse before returning — proves
+            // the contract cares about the *returned* order, not the
+            // order chunks are actually processed in.
+            let mut out: Vec<Hash> = batch
+                .iter()
+                .rev()
+                .map(|chunk| store_chunk_blob(sink, chunk))
+                .collect::<WorktreeResult<_>>()?;
+            out.reverse();
+            Ok(out)
+        })
+        .unwrap();
+
+        assert_eq!(
+            sequential_hash, fanout_hash,
+            "an out-of-order-processing hash_chunks callback must still match \
+             the sequential default when it returns results in input order"
+        );
     }
 
     // ---- build_tree_from_index — the staging-area path -------------

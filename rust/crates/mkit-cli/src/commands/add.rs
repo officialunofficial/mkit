@@ -433,7 +433,7 @@ fn hash_fanout_threshold() -> usize {
 /// — an `AtomicBool` costs nothing extra in the sequential branch's
 /// single-threaded loop, and sharing this closure keeps the two
 /// branches' fail-fast/`Skipped` semantics from drifting apart.
-fn hash_one(sink: &dyn ObjectSink, aborted: &AtomicBool, p: &PendingHash) -> HashOutcome {
+fn hash_one(sink: &(dyn ObjectSink + Sync), aborted: &AtomicBool, p: &PendingHash) -> HashOutcome {
     if aborted.load(Ordering::Relaxed) {
         return HashOutcome::Skipped;
     }
@@ -626,6 +626,36 @@ struct HashError {
     code: u8,
 }
 
+/// Chunks-per-thread budget below which [`hash_pending`]'s per-chunk
+/// `hash_chunks` callback hashes a large file's chunk batch sequentially
+/// instead of fanning it out across rayon, for a pool of a given size —
+/// same crossover shape as [`hash_fanout_threshold`], sized separately
+/// because a chunk's cost (one BLAKE3 pass over up to `chunker::MAX_SIZE`
+/// bytes plus a temp-file write) differs from a whole small file's.
+///
+/// Measured with `cargo bench -p mkit-benches --bench chunk_hash_fanout`
+/// on a 4-core host (`batch/N_chunks`, sequential vs rayon): 8 chunks is
+/// a wash (0.641 ms vs 0.646 ms — rayon's dispatch cost roughly cancels
+/// its parallelism there), 16 chunks already wins clearly (1.477 ms vs
+/// 1.256 ms, ~15%), and the win widens through a full 64-chunk batch
+/// (this module's `STREAM_HASH_BATCH`-equivalent — see
+/// `worktree::store_large_file_streaming_with`) at 9.774 ms vs 8.164 ms
+/// (~16%), with 32 chunks the best-observed ratio (3.756 ms vs 2.581 ms,
+/// ~31%). 4 chunks/thread puts the crossover at 16 chunks on a 4-core
+/// pool — past the 8-chunk wash, at the first batch size the data shows
+/// a clean win. End-to-end (`file/N_mib`, real FastCDC-cut files
+/// streamed through `hash_file_with_metadata`/`_with`, same host): 8
+/// MiB 107.2 ms → 48.4 ms, 32 MiB 390.1 ms → 230.6 ms, 128 MiB 2095.7 ms
+/// → 1106.9 ms — roughly 1.7-2.2x across the range.
+const CHUNK_FANOUT_CHUNKS_PER_THREAD: usize = 4;
+
+/// The chunk-batch-size threshold below which [`hash_pending`]'s
+/// `hash_chunks` callback stays sequential — see
+/// [`CHUNK_FANOUT_CHUNKS_PER_THREAD`].
+fn chunk_fanout_threshold() -> usize {
+    crate::fanout::threshold(CHUNK_FANOUT_CHUNKS_PER_THREAD)
+}
+
 /// Hash a [`PendingHash`]'s file content. Pure function of `sink` and
 /// `p` (no index access, no printing), so it is safe to call
 /// concurrently across a batch's `PendingHash` list — `sink` (a
@@ -633,12 +663,33 @@ struct HashError {
 /// I/O outside that lock. Callers report the error themselves via
 /// `emit_err` at the one point it's known to be *the* reported error
 /// (see [`add_one`] and [`add_whole_worktree`]).
-fn hash_pending(sink: &dyn ObjectSink, p: &PendingHash) -> Result<HashedFile, HashError> {
-    let (h, opened_meta) =
-        worktree::hash_file_with_metadata(sink, &p.abs).map_err(|e| HashError {
-            message: format!("{}: {e}", p.abs.display()),
-            code: worktree_err_exit_code(&e),
-        })?;
+///
+/// For files above `worktree::CHUNK_THRESHOLD`, each batch of cut
+/// chunks is hashed and stored via
+/// [`worktree::hash_file_with_metadata_with`]'s `hash_chunks` callback,
+/// fanned out across rayon once a batch is large enough to amortize its
+/// dispatch cost (see [`chunk_fanout_threshold`]) — this is on top of,
+/// not instead of, [`hash_pending_batch`]'s per-file fan-out, so a
+/// worktree with a single huge file (no other file to fan across) still
+/// parallelizes.
+fn hash_pending(sink: &(dyn ObjectSink + Sync), p: &PendingHash) -> Result<HashedFile, HashError> {
+    let (h, opened_meta) = worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
+        if batch.len() < chunk_fanout_threshold() {
+            batch
+                .iter()
+                .map(|chunk| worktree::store_chunk_blob(sink, chunk))
+                .collect()
+        } else {
+            batch
+                .par_iter()
+                .map(|chunk| worktree::store_chunk_blob(sink, chunk))
+                .collect()
+        }
+    })
+    .map_err(|e| HashError {
+        message: format!("{}: {e}", p.abs.display()),
+        code: worktree_err_exit_code(&e),
+    })?;
     let stat = worktree::stat_cache_fields(&opened_meta);
     let status = file_status_from_meta(&opened_meta, p.previous_status);
     Ok((status, h, stat))
@@ -665,7 +716,7 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
 fn add_one(
     root: &Path,
     rel: &Path,
-    sink: &dyn ObjectSink,
+    sink: &(dyn ObjectSink + Sync),
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
