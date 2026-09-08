@@ -2,7 +2,7 @@
 use mkit_worker_common::replay::Ledger;
 use serde::Deserialize;
 use worker::{
-    durable_object, wasm_bindgen, DurableObject, Env, Method, Request, Response, Result, State,
+    DurableObject, Env, Method, Request, Response, Result, State, durable_object, wasm_bindgen,
 };
 
 #[durable_object]

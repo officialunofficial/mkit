@@ -18,9 +18,9 @@ mod names;
 use mkit_worker_common::replay::{Ledger, Proof, Reply};
 pub use name_store::NameStore;
 
-use audit::{audit_for, WriteAudit};
-use envelope::{blake3_hex, verify_envelope, EnvelopeHeaders, VerifyEnvelope};
-use names::{is_pubkey_hex, normalize_name, NameRecord, ResolveBody, SetNameBody};
+use audit::{WriteAudit, audit_for};
+use envelope::{EnvelopeHeaders, VerifyEnvelope, blake3_hex, verify_envelope};
+use names::{NameRecord, ResolveBody, SetNameBody, is_pubkey_hex, normalize_name};
 
 /// Analytics Engine binding (declared in wrangler.jsonc) for accepted/
 /// rejected-write telemetry on `PUT /name/<pubkey>`. Mirrors repo-worker's
@@ -59,10 +59,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // (`set_name`, `resolve`) get the pre-buffer rejection for free. Reject by
     // Content-Length BEFORE buffering (O(1)); the post-buffer check inside
     // `read_capped_body` is the backstop for chunked/unknown-length requests.
-    if let Ok(Some(len)) = req.headers().get("content-length") {
-        if len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES) {
-            return Ok(with_cors(body_too_large()?));
-        }
+    if let Ok(Some(len)) = req.headers().get("content-length")
+        && len.parse::<usize>().is_ok_and(|n| n > MAX_BODY_BYTES)
+    {
+        return Ok(with_cors(body_too_large()?));
     }
 
     let out = if method == Method::Get && (path == "/" || path == "/health") {
@@ -308,10 +308,10 @@ async fn resolve(req: &mut Request, env: &Env) -> Result<Response> {
             continue;
         }
         let mut response = get_name(env, &pk).await?;
-        if response.status_code() == 200 {
-            if let Ok(rec) = response.json::<NameRecord>().await {
-                names.insert(pk, serde_json::Value::String(rec.name));
-            }
+        if response.status_code() == 200
+            && let Ok(rec) = response.json::<NameRecord>().await
+        {
+            names.insert(pk, serde_json::Value::String(rec.name));
         }
     }
     Response::from_json(&serde_json::json!({ "names": names }))
