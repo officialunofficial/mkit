@@ -3220,6 +3220,7 @@ dependencies = [
  "assert_fs",
  "axum",
  "buffa",
+ "bytes",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -3229,6 +3230,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "insta",
@@ -3265,6 +3267,7 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.20",
  "tokio",
+ "tower-service",
  "trycmd",
  "zeroize",
 ]
