@@ -61,7 +61,7 @@ zeroize = { version = "1", features = ["derive"] }
 # via the commonware dependency stack (same version pinned here), so
 # this is not a new supply-chain root — just an explicit direct dep on
 # a crate already present in the tree.
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14", optional = true }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
