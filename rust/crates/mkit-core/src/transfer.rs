@@ -638,7 +638,7 @@ enum BlobSlot {
 ///
 /// `encode_deltas` receives every delta candidate for this plan in one
 /// batch, in the order they were discovered (BLAKE3/send-set order), and
-/// MUST return exactly one `Result` per input candidate, in the same
+/// MUST return exactly one `Option<PlannedDelta>` per input candidate, in the same
 /// order — a `None` for a given candidate falls back to sending that
 /// blob raw, matching [`encode_delta_candidate`]'s own "smaller or raw"
 /// rule.

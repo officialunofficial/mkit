@@ -672,7 +672,7 @@ pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
     sink: &S,
     path: &Path,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
-    hash_file_with_metadata_with(sink, path, sequential_hash_chunks)
+    hash_file_with_metadata_using(sink, path, store_large_file_streaming)
 }
 
 /// [`hash_file_with_metadata`], but with an explicit `hash_chunks` batch
@@ -686,6 +686,18 @@ pub fn hash_file_with_metadata_with<S: ObjectSink + ?Sized>(
     sink: &S,
     path: &Path,
     hash_chunks: impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<(Hash, fs::Metadata)> {
+    hash_file_with_metadata_using(sink, path, |sink, reader, path| {
+        store_large_file_streaming_with(sink, reader, path, hash_chunks)
+    })
+}
+
+/// Share file opening, size checks, and metadata capture between sequential
+/// and batched ingest. Only the large-file streaming strategy differs.
+fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
+    sink: &S,
+    path: &Path,
+    stream: impl FnOnce(&S, io::Take<fs::File>, &Path) -> WorktreeResult<Hash>,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
     let mut file = open_regular_file(path)?;
     let meta = file.metadata()?;
@@ -713,8 +725,7 @@ pub fn hash_file_with_metadata_with<S: ObjectSink + ?Sized>(
         return Ok((hash, meta));
     }
 
-    let hash =
-        store_large_file_streaming_with(sink, file.take(MAX_FILE_BYTES + 1), path, hash_chunks)?;
+    let hash = stream(sink, file.take(MAX_FILE_BYTES + 1), path)?;
     Ok((hash, meta))
 }
 
@@ -740,17 +751,39 @@ pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> Workt
     Ok(sink.put_parts(&[&prologue, chunk])?)
 }
 
-/// The built-in sequential `hash_chunks` callback: [`store_chunk_blob`]
-/// each chunk in the batch, in order. What [`hash_file_with_metadata`]
-/// passes to [`hash_file_with_metadata_with`].
-fn sequential_hash_chunks<S: ObjectSink + ?Sized>(
+/// Sequential ingest borrows each chunk directly from the reader window.
+/// It does not allocate owned chunks or retain a batch between writes.
+fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
     sink: &S,
-    batch: &[Vec<u8>],
-) -> WorktreeResult<Vec<Hash>> {
-    batch
-        .iter()
-        .map(|chunk| store_chunk_blob(sink, chunk))
-        .collect()
+    reader: R,
+    path: &Path,
+) -> WorktreeResult<Hash> {
+    let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+    let mut chunks = Vec::new();
+    let mut total_size: u64 = 0;
+    while let Some(chunk) = chunker.next_chunk_ref()? {
+        total_size = total_size
+            .checked_add(chunk.len() as u64)
+            .filter(|&t| t <= MAX_FILE_BYTES)
+            .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+        chunks.push(store_chunk_blob(sink, chunk)?);
+    }
+    store_chunk_manifest(sink, total_size, chunks)
+}
+
+/// Both streaming strategies use the same canonical manifest encoding.
+fn store_chunk_manifest<S: ObjectSink + ?Sized>(
+    sink: &S,
+    total_size: u64,
+    chunks: Vec<Hash>,
+) -> WorktreeResult<Hash> {
+    let manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size,
+        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
+        chunks,
+    });
+    let manifest_bytes = serialize::serialize(&manifest)?;
+    Ok(sink.put(&manifest_bytes)?)
 }
 
 /// Call `hash_chunks(sink, batch)` and enforce its documented contract —
@@ -779,9 +812,10 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
 /// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
 /// instead of requiring the whole file resident in memory first (issue
-/// #828). Bounds ingest memory to one `FastCdc::v1` window
-/// (`chunker::MAX_SIZE`, 256 KiB) plus the growing chunk-hash list (32
-/// bytes/chunk), regardless of the file's total size.
+/// #828). Bounds ingest memory to one fixed `ChunkReader` window
+/// (1 MiB), an owned batch of at most 64 chunks (16 MiB), and the
+/// growing chunk-hash list (32 bytes/chunk). The reader and batch stay
+/// bounded independently of total file size.
 ///
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
 /// error if `reader` yields more than [`MAX_FILE_BYTES`].
@@ -798,8 +832,8 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// is independent of every other chunk in the batch — `mkit-cli`'s
 /// native, rayon-backed `add` path passes a parallel `hash_chunks`
 /// (mirroring the pack-compression/signature-verification/delta-encoding
-/// fan-outs already in `mkit-cli`); [`hash_file_with_metadata`] passes
-/// its own built-in sequential callback.
+/// fan-outs already in `mkit-cli`). [`hash_file_with_metadata`] uses a
+/// separate sequential path that borrows chunks without batching.
 ///
 /// `hash_chunks` receives each batch in file order and MUST return
 /// exactly one [`Hash`](tyalias@Hash) per input chunk, in the same order — the
@@ -833,13 +867,7 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
         chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
     }
 
-    let manifest = Object::ChunkedBlob(ChunkedBlob {
-        total_size,
-        chunk_size: 0, // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
-        chunks,
-    });
-    let manifest_bytes = serialize::serialize(&manifest)?;
-    Ok(sink.put(&manifest_bytes)?)
+    store_chunk_manifest(sink, total_size, chunks)
 }
 
 /// Store a regular file's bytes as the canonical object and return its
@@ -1360,6 +1388,32 @@ mod tests {
             reassembled.extend_from_slice(&b.data);
         }
         assert_eq!(reassembled, big);
+    }
+
+    #[test]
+    fn streaming_rejects_miscounted_hashes_in_full_and_partial_batches() {
+        for size in [
+            crate::chunker::MAX_SIZE,
+            STREAM_HASH_BATCH * crate::chunker::MAX_SIZE + 1,
+        ] {
+            let (_dir, sink) = fresh_store();
+            let data = vec![0u8; size];
+            let mut expected = 0;
+            let err = store_large_file_streaming_with(
+                &sink,
+                io::Cursor::new(data),
+                Path::new("batch.bin"),
+                |_sink, batch| {
+                    expected = batch.len();
+                    Ok(Vec::new())
+                },
+            )
+            .unwrap_err();
+            assert!(expected > 0);
+            assert!(matches!(err, WorktreeError::ChunkBatchLengthMismatch {
+                expected: n, actual: 0
+            } if n == expected));
+        }
     }
 
     #[test]

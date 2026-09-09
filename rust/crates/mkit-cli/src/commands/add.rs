@@ -737,21 +737,18 @@ fn hash_pending(
     p: &PendingHash,
     chunk_fanout: bool,
 ) -> Result<HashedFile, HashError> {
-    // `usize::MAX` when `chunk_fanout` is false forces the sequential
-    // branch unconditionally — folds the caller's fan-out-allowed gate
-    // into the same threshold comparison `try_map_seq_or_par` already
-    // makes, rather than a second `if` around it.
-    let threshold = if chunk_fanout {
-        chunk_fanout_threshold()
-    } else {
-        usize::MAX
-    };
-    let (h, opened_meta) = worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
-        crate::fanout::try_map_seq_or_par(batch, threshold, |chunk| {
-            worktree::store_chunk_blob(sink, chunk)
+    let result = if chunk_fanout {
+        worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
+            crate::fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                worktree::store_chunk_blob(sink, chunk)
+            })
         })
-    })
-    .map_err(|e| HashError {
+    } else {
+        // Per-file parallelism already occupies the pool. Borrow each
+        // chunk from the reader instead of allocating sequential batches.
+        worktree::hash_file_with_metadata(sink, &p.abs)
+    };
+    let (h, opened_meta) = result.map_err(|e| HashError {
         message: format!("{}: {e}", p.abs.display()),
         code: worktree_err_exit_code(&e),
     })?;

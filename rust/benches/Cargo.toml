@@ -131,6 +131,15 @@ harness = false
 name = "delta_plan_fanout"
 harness = false
 
+# Streaming `ChunkReader` (FastCDC over a `Read`, the only chunker used
+# for files above `worktree::CHUNK_THRESHOLD`) windowing overhead vs. the
+# in-memory `ChunkIterator` floor — regression guard for the
+# allocate-and-copy-per-chunk window management fixed alongside this
+# suite. No feature gate: the chunker is always compiled.
+[[bench]]
+name = "chunker_streaming"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
