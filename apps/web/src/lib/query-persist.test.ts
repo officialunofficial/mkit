@@ -21,3 +21,10 @@ describe('shouldPersistQuery', () => {
     expect(shouldPersistQuery(['something-else'])).toBe(false)
   })
 })
+
+it('excludes sessions, workspace data, and unrelated keys queries', () => {
+  expect(shouldPersistQuery(['auth', 'session'])).toBe(false)
+  expect(shouldPersistQuery(['workspaces', 'private'])).toBe(false)
+  expect(shouldPersistQuery(['keys', 'secret'])).toBe(false)
+  expect(shouldPersistQuery(['keys', 'name', 'pub', 'extra'])).toBe(false)
+})

@@ -98,7 +98,8 @@ export function Compose({
       return // a build failure is already surfaced via `built.error`
     }
     try {
-      await push.mutateAsync({ api, seedHex, room, ref: targetRef, commitBytes, commitHash, message, parentHash })
+      const authorPubkey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(seedHex)))
+      await push.mutateAsync({ api, authorPubkey, room, ref: targetRef, commitBytes, commitHash, message, parentHash })
     } catch {
       // A rejected push (e.g. a CAS conflict) already surfaces via `push.error` below and the optimistic entry rolled back.
     }
@@ -255,7 +256,7 @@ export function ComposeDisabled() {
           rows={3}
           disabled
           value=''
-          placeholder='Create or unlock an identity to write commits.'
+          placeholder='Unlock signing in Account to write commits.'
         />
       </div>
       <div className='space-y-1.5'>
@@ -268,8 +269,7 @@ export function ComposeDisabled() {
         Sign and push
       </button>
       <p className='text-sm text-muted'>
-        Create or unlock an identity above to write commits. You can still browse this repository’s shared history on
-        the right.
+        Sign in and unlock signing in Account to write commits. You can still browse this repository’s shared history.
       </p>
     </section>
   )
@@ -317,7 +317,7 @@ export function useDerive(api: ReturnType<typeof useMkit>, room: string, seedHex
     )
     await push.mutateAsync({
       api,
-      seedHex,
+      authorPubkey: forkerPubkey(),
       room,
       ref,
       commitBytes: obj.bytes,

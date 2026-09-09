@@ -33,6 +33,7 @@ import {
   type SignedEnvelope,
   WasmRepoBackend,
   buildSignedEnvelope,
+  buildPushLogEntry,
   canonicalString,
   decodeLogObject,
   envelopeHeaders,
@@ -924,7 +925,7 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
     const commit = api.commit_encode_and_sign(TREE, '', message, 7n, SEED2)
     return {
       api,
-      seedHex: SEED2,
+      authorPubkey: bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(SEED2))),
       room: ROOM,
       ref: REF,
       commitBytes: commit.bytes,
@@ -967,6 +968,15 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
     await p // let it settle
   })
 
+  it('uses the public author for opaque object fallbacks without needing a signing seed', async () => {
+    const args = await makePushArgs('opaque fixture')
+    const entry = buildPushLogEntry({ ...args, commitBytes: new Uint8Array() })
+    expect(entry.authorPubkey).toBe(args.authorPubkey)
+    expect(entry.message).toBe(args.message)
+    expect(entry.kind).toBe('commit')
+    expect(Number.isNaN(Date.parse(entry.createdAt))).toBe(false)
+  })
+
   it('rolls the optimistic entry back when the push is rejected', async () => {
     const backend = makeControllableBackend({ failUpdate: true })
     const qc = new QueryClient()
@@ -999,6 +1009,10 @@ describe('usePushCommit optimistic prepend (TanStack Query)', () => {
     expect(putObject).toHaveBeenCalledWith(ROOM, args.commitHash, args.commitBytes)
     // First object on the ref (parentHash '') → MISSING expectation.
     expect(updateRef).toHaveBeenCalledWith(ROOM, REF, args.commitHash, 'MISSING', undefined)
+    const mutations = qc.getMutationCache().getAll()
+    expect(mutations).toHaveLength(1)
+    expect(mutations[0]!.state.variables).not.toHaveProperty('seedHex')
+    expect(JSON.stringify(mutations[0]!.state)).not.toContain(SEED2)
   })
 })
 

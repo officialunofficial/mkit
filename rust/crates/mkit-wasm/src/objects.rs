@@ -17,6 +17,86 @@ use crate::common::{
     parse_json_triples, parse_parent_list, parse_remix_sources,
 };
 
+// Edge/browser workspace admission limit, not an on-disk format limit.
+const MAX_WORKSPACE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+
+fn decode_workspace_object(bytes: &[u8]) -> Result<Object, String> {
+    if bytes.len() > MAX_WORKSPACE_OBJECT_BYTES {
+        return Err("workspace object exceeds 16 MiB".into());
+    }
+    mkit_core::deserialize(bytes).map_err(|e| format!("deserialize: {e}"))
+}
+
+/// Return a canonical object's 64-hex content id, including Merkle ids.
+///
+/// This checks the encoding, not signatures or referenced child objects.
+/// Callers must compare the result with the independently requested id.
+///
+/// # Errors
+/// Invalid object encoding or input larger than 16 MiB.
+#[wasm_bindgen]
+pub fn object_id(bytes: &[u8]) -> Result<String, JsValue> {
+    let object = decode_workspace_object(bytes).map_err(js_err)?;
+    Ok(to_hex(&mkit_core::object::id_from_object(&object, bytes)))
+}
+
+/// Decode a canonical blob into its uninterpreted file bytes.
+///
+/// # Errors
+/// Invalid encoding, a non-blob object, or input larger than 16 MiB.
+#[wasm_bindgen]
+pub fn blob_decode(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    decode_blob(bytes).map_err(js_err)
+}
+
+fn decode_blob(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let Object::Blob(blob) = decode_workspace_object(bytes)? else {
+        return Err("object is not a blob".into());
+    };
+    Ok(blob.data)
+}
+
+/// Decode a canonical tree into JSON `[name, mode, hash_hex]` triples.
+/// Modes match [`tree_encode`]: `blob`, `tree`, `symlink`, and `exec`.
+///
+/// # Errors
+/// Invalid encoding, a non-tree object, input larger than 16 MiB, or a
+/// non-UTF-8 entry name (which cannot round-trip through the JSON API).
+#[wasm_bindgen]
+pub fn tree_decode(bytes: &[u8]) -> Result<String, JsValue> {
+    decode_tree(bytes).map_err(js_err)
+}
+
+fn decode_tree(bytes: &[u8]) -> Result<String, String> {
+    let Object::Tree(tree) = decode_workspace_object(bytes)? else {
+        return Err("object is not a tree".into());
+    };
+    let mut entries = Vec::with_capacity(tree.entries.len());
+    for entry in tree.entries {
+        let name = String::from_utf8(entry.name)
+            .map_err(|_| "tree entry name is not UTF-8".to_string())?;
+        let mode = match entry.mode {
+            EntryMode::Blob => "blob",
+            EntryMode::Tree => "tree",
+            EntryMode::Symlink => "symlink",
+            EntryMode::Executable => "exec",
+        };
+        entries.push((name, mode, to_hex(&entry.object_hash)));
+    }
+    serde_json::to_string(&entries).map_err(|e| format!("entries JSON: {e}"))
+}
+
+/// Verify a canonical remix's signature. Returns false for invalid encoding,
+/// wrong object kind, signature failure, or input larger than 16 MiB.
+#[wasm_bindgen]
+#[must_use]
+pub fn remix_verify(bytes: &[u8]) -> bool {
+    let Ok(Object::Remix(remix)) = decode_workspace_object(bytes) else {
+        return false;
+    };
+    mkit_core::sign::verify_remix(&remix).is_ok()
+}
+
 /// Serialize a blob object and return `{ bytes, hash_hex }`.
 ///
 /// The returned `bytes` are the canonical on-disk v1 object bytes
@@ -535,6 +615,95 @@ mod tests {
     use super::*;
     use mkit_core::hash::hash;
     use mkit_core::serialize::serialize;
+
+    #[test]
+    fn workspace_blob_roundtrip_preserves_binary_bytes_and_id() {
+        for data in [b"".as_slice(), &[0, 255, 128, 10, 13]] {
+            let encoded = blob_encode(data).unwrap();
+            assert_eq!(blob_decode(&encoded.bytes).unwrap(), data);
+            assert_eq!(object_id(&encoded.bytes).unwrap(), encoded.hash_hex);
+            assert_eq!(encoded.hash_hex, to_hex(&hash(&encoded.bytes)));
+        }
+    }
+
+    #[test]
+    fn workspace_tree_roundtrip_preserves_modes_names_order_and_merkle_id() {
+        let entries = serde_json::json!([
+            ["a\"quoted", "blob", to_hex(&[1; 32])],
+            ["dir", "tree", to_hex(&[2; 32])],
+            ["link", "symlink", to_hex(&[3; 32])],
+            ["éxec", "exec", to_hex(&[4; 32])]
+        ]);
+        let encoded = tree_encode(&entries.to_string()).unwrap();
+        let decoded = tree_decode(&encoded.bytes).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decoded).unwrap(),
+            entries
+        );
+        assert_eq!(tree_encode(&decoded).unwrap().bytes, encoded.bytes);
+        assert_eq!(object_id(&encoded.bytes).unwrap(), encoded.hash_hex);
+        assert_ne!(encoded.hash_hex, to_hex(&hash(&encoded.bytes)));
+    }
+
+    // Exercise the fallible Rust paths directly: JsError construction requires
+    // a JS runtime, but these are the same paths used by the exported wrappers.
+    #[test]
+    fn workspace_decoders_reject_wrong_kind_corruption_and_oversize() {
+        let blob = blob_encode(b"data").unwrap();
+        let tree = tree_encode("[]").unwrap();
+        assert!(decode_tree(&blob.bytes).is_err());
+        assert!(decode_blob(&tree.bytes).is_err());
+        for mut bytes in [blob.bytes, tree.bytes] {
+            bytes.pop();
+            assert!(decode_workspace_object(&bytes).is_err());
+            assert!(decode_blob(&bytes).is_err());
+            assert!(decode_tree(&bytes).is_err());
+        }
+        let oversized = vec![0; MAX_WORKSPACE_OBJECT_BYTES + 1];
+        assert_eq!(
+            decode_workspace_object(&oversized).unwrap_err(),
+            "workspace object exceeds 16 MiB"
+        );
+    }
+
+    #[test]
+    fn workspace_tree_rejects_non_utf8_names_without_substitution() {
+        let tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: vec![255],
+                mode: EntryMode::Blob,
+                object_hash: [1; 32],
+            }],
+        });
+        assert_eq!(
+            decode_tree(&serialize(&tree).unwrap()).unwrap_err(),
+            "tree entry name is not UTF-8"
+        );
+    }
+
+    #[test]
+    fn remix_verification_rejects_changed_signature_and_wrong_kind() {
+        let encoded = remix_encode_and_sign(
+            &to_hex(&[1; 32]),
+            "",
+            &serde_json::json!([{
+                "upstream_id_hex": to_hex(&[2; 32]),
+                "commit_hash_hex": to_hex(&[3; 32])
+            }])
+            .to_string(),
+            "remix",
+            42,
+            &to_hex(&[4; 32]),
+        )
+        .unwrap();
+        assert!(remix_verify(&encoded.bytes));
+        assert_eq!(object_id(&encoded.bytes).unwrap(), encoded.hash_hex);
+        let mut corrupt = encoded.bytes;
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(!remix_verify(&corrupt));
+        assert!(!remix_verify(&blob_encode(b"data").unwrap().bytes));
+        assert!(!remix_verify(b"invalid"));
+    }
 
     /// `tree_encode` must key a tree by its **BMT root**
     /// (`merkle::compute_tree_id`), matching the id the native store uses — and

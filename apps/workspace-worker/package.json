@@ -1,0 +1,35 @@
+{
+  "name": "mkit-workspace-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "wasm:build": "cd ../../rust/crates/mkit-wasm && wasm-pack build --target web --out-dir ../../../apps/workspace-worker/vendor/mkit-wasm --release",
+    "runtime:stage": "node -e \"const fs=require('node:fs');fs.mkdirSync('vendor',{recursive:true});fs.copyFileSync('node_modules/nanocodex/pkg-web/nanocodex_bg.wasm','vendor/nanocodex.wasm')\"",
+    "prebuild": "npm run runtime:stage",
+    "predev": "npm run runtime:stage",
+    "predeploy": "npm run runtime:stage",
+    "pretest": "npm run runtime:stage"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.12.9",
+    "nanocodex": "0.5.0",
+    "tiktoken": "1.0.22"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260908.1",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260908.0-alpha",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.130.0"
+  }
+}

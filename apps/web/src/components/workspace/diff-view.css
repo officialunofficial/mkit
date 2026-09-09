@@ -1,0 +1,183 @@
+.diff-view {
+  min-width: 0;
+}
+.diff-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+  font-size: var(--t-sm);
+}
+.diff-toolbar code {
+  overflow-wrap: anywhere;
+}
+.diff-counts {
+  display: flex;
+  gap: var(--space-md);
+  font-family: 'DM Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+.diff-added-count {
+  color: var(--diff-added-marker, var(--delta-increase-fg));
+}
+.diff-removed-count {
+  color: var(--diff-removed-marker, var(--delta-decrease-fg));
+}
+.diff-lines {
+  overflow: auto;
+  max-height: 60vh;
+  background: var(--surface-code);
+}
+.diff-lines:focus-visible {
+  outline: var(--border-width-medium) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--border-width-medium));
+}
+.diff-line {
+  display: grid;
+  grid-template-columns: 3rem 3rem 1.5rem minmax(max-content, 1fr);
+  min-width: max-content;
+  font-family: 'DM Mono', monospace;
+  font-size: var(--t-sm);
+  line-height: var(--t-base-leading);
+}
+.diff-line code {
+  white-space: pre;
+  padding-right: var(--space-md);
+}
+.diff-number {
+  color: var(--text-secondary);
+  text-align: right;
+  padding-right: var(--space-sm);
+  user-select: none;
+}
+.diff-marker {
+  text-align: center;
+  user-select: none;
+}
+.diff-line--added {
+  background: var(--diff-added-bg, var(--delta-increase-bg));
+}
+.diff-line--removed {
+  background: var(--diff-removed-bg, var(--delta-decrease-bg));
+}
+.diff-line--added .diff-marker {
+  color: var(--diff-added-marker, var(--delta-increase-fg));
+}
+.diff-line--removed .diff-marker {
+  color: var(--diff-removed-marker, var(--delta-decrease-fg));
+}
+.diff-no-newline {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.diff-expand {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  font-size: var(--t-xs);
+  border-block: var(--border-width-light) solid var(--border-color-subtle);
+}
+.diff-expand:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+.diff-expand:focus-visible,
+.diff-change-list button:focus-visible {
+  outline: var(--border-width-medium) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--border-width-medium));
+}
+.diff-empty {
+  padding: var(--space-md);
+  font-size: var(--t-sm);
+  color: var(--text-secondary);
+}
+.diff-changes {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  border-block: var(--border-width-light) solid var(--border-color-subtle);
+  min-height: 20rem;
+}
+.diff-change-list {
+  border-right: var(--border-width-light) solid var(--border-color-subtle);
+  max-height: 65vh;
+  overflow: auto;
+}
+.diff-change-list button {
+  width: 100%;
+  min-height: 2.5rem;
+  display: grid;
+  gap: var(--space-xs);
+  border-left: var(--border-width-medium) solid transparent;
+  padding: var(--space-sm) var(--space-md);
+  text-align: left;
+  font-size: var(--t-sm);
+}
+.diff-change-list button code {
+  overflow-wrap: anywhere;
+}
+.diff-change-list button span {
+  font-size: var(--t-xs);
+  color: var(--text-secondary);
+}
+.diff-change-list button:hover {
+  background: var(--surface-hover);
+}
+.diff-change-list button[aria-current='true'] {
+  border-left-color: var(--border-color-selected);
+}
+.diff-change-detail {
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .diff-changes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .diff-change-list {
+    max-height: 9rem;
+    border-right: none;
+    border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+  }
+  .diff-line {
+    grid-template-columns: 2.5rem 2.5rem 1.25rem minmax(max-content, 1fr);
+  }
+}
+@media (pointer: coarse) {
+  .diff-expand,
+  .diff-change-list button {
+    min-height: var(--touch-target-min);
+  }
+}
+
+.diff-conflict {
+  border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+}
+.diff-conflict-actions {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  font-size: var(--t-sm);
+}
+.diff-conflict-actions label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.diff-conflict-actions input {
+  accent-color: var(--text-primary);
+}
+.diff-conflict-actions p {
+  color: var(--text-secondary);
+}
+
+@media (pointer: coarse) {
+  .diff-conflict-actions label {
+    min-height: var(--touch-target-min);
+  }
+}

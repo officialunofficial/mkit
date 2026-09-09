@@ -32,7 +32,7 @@ import { CopyButton } from '../copy-button'
 import { useIdentityActions } from '../use-identity-actions'
 import { useMkit } from '../use-mkit'
 import { PlayerAvatar, PlayerLabel } from '../multiplayer/player-label'
-import { BTN, FOCUS_RING, HOVER_BORDER, PRIMARY_BTN, errMsg } from '../multiplayer/shared'
+import { BTN, FOCUS_RING, HOVER_BORDER, errMsg } from '../multiplayer/shared'
 
 /** A live, client-only presence notice spliced into the feed (not a server object). */
 type SystemNoticeItem = { kind: 'system'; sysKind: 'left' | 'viewer'; pubkey: string; ts: number; key: string }
@@ -491,7 +491,11 @@ function ReactionPills({
           type='button'
           onClick={() => onToggle(r.emoji)}
           title={
-            canReact ? (r.mine ? 'Remove your reaction' : 'Add your reaction') : 'Sign in with your passkey to react'
+            canReact
+              ? r.mine
+                ? 'Remove your reaction'
+                : 'Add your reaction'
+              : 'Unlock signing with your passkey to react'
           }
           className={`reaction-pop-in inline-flex h-6 items-center gap-1 rounded-full border px-2 text-xs leading-none tabular-nums transition-colors active:scale-[0.96] ${
             r.mine
@@ -579,58 +583,13 @@ function Composer({ room }: { room: string }) {
   const unlocked = useIdentityStore((s) => s.unlocked)
   const myPubkey = useIdentityStore((s) => s.ed25519PubkeyHex)
   const post = usePostMessage(room, myPubkey ?? undefined)
-  const actions = useIdentityActions()
   const [text, setText] = useState('')
 
   if (!unlocked) {
-    // Priority: a live result from an actual attempt, then the proactive in-app-browser
-    // notice (shown before any tap), then the default first-time hint.
-    const hint = actions.status ?? actions.embeddedBrowserWarning
     return (
-      <div className='flex flex-wrap items-center gap-3 border-t border-hairline px-4 py-3'>
-        <button
-          type='button'
-          className={PRIMARY_BTN}
-          disabled={actions.busy}
-          onClick={() => void (actions.hasPasskey ? actions.onUnlock() : actions.onCreate())}
-        >
-          {actions.busy ? (
-            'Waiting for your passkey…'
-          ) : (
-            <span className='inline-flex items-center gap-1.5'>
-              {/* Fingerprint — the passkey/biometric this action unlocks with
-                  (reads as "passkey" better than a generic padlock). */}
-              <svg
-                width='14'
-                height='14'
-                viewBox='0 0 24 24'
-                fill='none'
-                stroke='currentColor'
-                strokeWidth='2'
-                strokeLinecap='round'
-                strokeLinejoin='round'
-                aria-hidden
-              >
-                <path d='M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4' />
-                <path d='M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2' />
-                <path d='M17.29 21.02c.12-.6.43-2.3.5-3.02' />
-                <path d='M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4' />
-                <path d='M8.65 22c.21-.66.45-1.32.57-2' />
-                <path d='M14 13.12c0 2.38 0 6.38-1 8.88' />
-                <path d='M2 16h.01' />
-                <path d='M21.8 16c.2-2 .131-5.354 0-6' />
-                <path d='M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2' />
-              </svg>
-              {actions.hasPasskey ? 'Unlock to chat' : 'Create passkey to chat'}
-            </span>
-          )}
-        </button>
-        {/* The "set up a passkey" prompt only makes sense for a first-time
-            visitor (button reads "Create passkey to chat"). When they already have a
-            passkey (button reads "Unlock to chat"), drop the static copy and
-            show only a live status message, if any. */}
-        {hint ? <span className='text-xs text-muted'>{hint}</span> : null}
-      </div>
+      <p className='border-t border-hairline px-4 py-3 text-sm text-muted'>
+        Unlock signing in Account to chat. You can read the lobby while signed out.
+      </p>
     )
   }
 

@@ -48,7 +48,7 @@ pub use crypto::{
     keypair_from_seed, keypair_generate, sign_bytes_commit_domain, verify_bytes_commit_domain,
 };
 pub use objects::{
-    CommitInfoJs, EncodedCommit, EncodedObject, RemixInfoJs, RemixSourceJs, blob_encode,
-    commit_decode, commit_encode_and_sign, commit_verify, object_kind, remix_decode,
-    remix_encode_and_sign, tree_encode,
+    CommitInfoJs, EncodedCommit, EncodedObject, RemixInfoJs, RemixSourceJs, blob_decode,
+    blob_encode, commit_decode, commit_encode_and_sign, commit_verify, object_id, object_kind,
+    remix_decode, remix_encode_and_sign, remix_verify, tree_decode, tree_encode,
 };

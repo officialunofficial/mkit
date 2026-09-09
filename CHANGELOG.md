@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Redesigned the workspace around Files, Changes, and History with grouped version
+  saves, attributed diffs, explicit conflict recovery, session-scoped drafts, and
+  progressive terminal and project controls.
+
+- Hosted public workspaces at `/create`: passkey-authorized demo remixes, a file
+  editor, a real terminal, and a server-hosted nanocodex agent that saves signed
+  versions and continues when the browser closes.
+
+- WASM exports `object_id`, `tree_decode`, `blob_decode`, and `remix_verify`
+  expose canonical object IDs, tree entries, binary file contents, and remix
+  signature verification for browser and edge workspaces. These readers bound
+  input size and reject invalid encodings; tree IDs retain their native Merkle
+  semantics. No on-disk or wire format changes.
+
 ### Fixed
+
+- Shared browser login across all seven web pages, with a seven-day HttpOnly session, separate in-memory signing unlock, session-scoped workspace queries, and a repeatable navigation/refresh/sign-out verification workflow.
 
 - Clarified docs-site copy, aligned controls and overlays with Pigment, added layout-matched loading placeholders and grouped navigation, and stabilized virtualized lobby scrolling across tab resume and row resizing. Removed the development Agentation integration. No public API or format changes.
 - Worker writes rejected by quotas or rate limits no longer allocate replay

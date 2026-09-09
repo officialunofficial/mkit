@@ -14,8 +14,8 @@ import { avatarMesh, usernameColor } from '../../lib/identity-avatar'
 import { playerName } from '../../lib/identity-name'
 import { useIdentityStore } from '../../lib/identity-store'
 import { getName, keysEnabled, setName } from '../../lib/keys-client'
+import { mkit } from '../../lib/mkit'
 import { PERSIST_MAX_AGE } from '../../lib/query-persist'
-import { useMkit } from '../use-mkit'
 import { BTN, FOCUS_RING, errMsg } from './shared'
 
 /** React Query key for a single player's registry handle. */
@@ -41,7 +41,9 @@ export function useDisplayName(pubkeyHex: string | null): string {
   // For the signed-in user's OWN key, the locally-stored petname (the one written
   // to the passkey) is a better fallback than the pubkey-derived `playerName` — it
   // matches what the OS passkey manager shows. The registry value still wins.
-  const ownName = useIdentityStore((s) => (pubkeyHex && s.ed25519PubkeyHex === pubkeyHex ? s.name : null))
+  const ownName = useIdentityStore((s) =>
+    pubkeyHex && (s.knownPublicKey === pubkeyHex || s.ed25519PubkeyHex === pubkeyHex) ? s.name : null,
+  )
   if (!pubkeyHex) return 'anonymous'
   return q.data ?? ownName ?? playerName(pubkeyHex)
 }
@@ -88,10 +90,23 @@ export function PlayerAvatar({ pubkey, size = 24, className }: { pubkey: string;
 /** Mutation: set/rename the signed-in player's own handle (signed write). */
 export function useSetName() {
   const qc = useQueryClient()
-  const api = useMkit()
   return useMutation({
-    mutationFn: (a: { pubkeyHex: string; seedHex: string; name: string }) =>
-      setName(api, a.seedHex, a.pubkeyHex, a.name),
+    mutationFn: async (a: { pubkeyHex: string; name: string }) => {
+      const api = await mkit()
+      // Mutation variables outlive a request in Query's cache. Resolve signing
+      // material only at execution time, after any pause or retry.
+      const identity = useIdentityStore.getState()
+      if (
+        !identity.unlocked ||
+        !identity.seedHex ||
+        !identity.credentialId ||
+        identity.ephemeral ||
+        identity.ed25519PubkeyHex !== a.pubkeyHex
+      ) {
+        throw new Error('Unlock the matching passkey identity to update its name.')
+      }
+      return setName(api, identity.seedHex, a.pubkeyHex, a.name)
+    },
     onSuccess: (name, a) => {
       // Reflect the new handle instantly, then reconcile with the registry.
       if (name) qc.setQueryData(nameKey(a.pubkeyHex), name)
@@ -117,7 +132,7 @@ export function OwnPlayerName() {
   const submit = () => {
     const name = value.trim()
     if (!name || !id.seedHex) return
-    rename.mutate({ pubkeyHex: pubkey, seedHex: id.seedHex, name }, { onSuccess: () => setEditing(false) })
+    rename.mutate({ pubkeyHex: pubkey, name }, { onSuccess: () => setEditing(false) })
   }
 
   if (editing) {

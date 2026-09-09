@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/web.yml'
       - 'apps/web/**'
+      - 'apps/workspace-worker/src/contracts.ts'
       - 'rust/Cargo.lock'
       - 'rust/Cargo.toml'
       - 'rust/rust-toolchain.toml'
@@ -54,6 +55,7 @@ jobs:
             web:
               - '.github/workflows/web.yml'
               - 'apps/web/**'
+              - 'apps/workspace-worker/src/contracts.ts'
               - 'rust/Cargo.lock'
               - 'rust/Cargo.toml'
               - 'rust/rust-toolchain.toml'
