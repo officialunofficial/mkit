@@ -434,9 +434,9 @@ export type PostMessageResult = { messageIdHex: string; accepted: boolean; rateL
 /**
  * Mutation options for {@link usePostMessage}, factored out (like {@link pushCommitMutationOptions}) so the optimistic
  * lifecycle is testable against a real QueryClient without React. The optimistic echo appends the pending message to
- * the messages cache so it shows instantly; `onSettled` invalidates so the authoritative server list (with the real id
- * + seq + the server `created_at`) replaces it. `myPubkeyHex` attributes the optimistic row to the sender; the temp id
- * keeps it distinct + rollback-able.
+ * the messages cache so it shows instantly; `onSettled` invalidates so the authoritative server list, with the real id,
+ * sequence, and server `created_at`, replaces it. `myPubkeyHex` attributes the optimistic row to the sender; the
+ * temporary id keeps it distinct and allows rollback.
  */
 export function postMessageMutationOptions(
   qc: ReturnType<typeof useQueryClient>,

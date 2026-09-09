@@ -1,6 +1,13 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, callTool, connectMcpClient, resetCorpus, toolText } from "./harness.ts";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  stopWorker,
+  startWorker,
+  callTool,
+  connectMcpClient,
+  resetCorpus,
+  toolText,
+} from "./harness.ts";
 
 // Integration-level proof of the guardTool/EmptyCorpusError resilience fix:
 // with a migrated-but-empty corpus (no versions indexed), every version-
@@ -11,8 +18,9 @@ describe("MCP resilience: empty corpus", () => {
   let client: Client;
 
   beforeAll(async () => {
-    await applyMigrations();
+    await startWorker();
   });
+  afterAll(stopWorker);
   beforeEach(async () => {
     await resetCorpus();
     client = await connectMcpClient();

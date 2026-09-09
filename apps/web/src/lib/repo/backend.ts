@@ -295,10 +295,12 @@ export function branchRefName(upstreamCommitHash: string, brancherPubkeyHex: str
 // ---------------------------------------------------------------------------
 
 /**
- * Options for {@link RepoBackend.commitLog}. A cold walk fetches each commit object over its own network round-trip, so:
+ * Options for {@link RepoBackend.commitLog}. A cold walk fetches each commit object over its own network round-trip,
+ * so:
+ *
  * - `limit` caps how many commits to walk (the front-page lobby only needs recent activity, not the full history); and
  * - `onProgress` streams the entries gathered so far (newest-first) after each object resolves, so a consumer can paint
- * commits incrementally instead of waiting for the whole chain.
+ *   commits incrementally instead of waiting for the whole chain.
  */
 export interface CommitLogOpts {
   limit?: number

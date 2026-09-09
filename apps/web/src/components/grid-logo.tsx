@@ -20,6 +20,8 @@ export function GridLogo({ className }: { className?: string }) {
   useEffect(() => {
     // Visual variation only; not security-sensitive, Math.random is fine.
     const href = toDataUrl(renderGridSvg(Math.random, 8, 12))
+    // The random logo is generated only after hydration so server and client markup agree.
+    // oxlint-disable-next-line react/set-state-in-effect
     setSrc(href)
     // The layout always ships a <link rel='icon'> in <head>, so the query can't miss on any
     // statically-prerendered page; skip quietly if a future layout drops it.
