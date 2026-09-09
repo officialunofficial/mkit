@@ -40,7 +40,7 @@ mkit-attest = { path = "../../../rust/crates/mkit-attest" }
 mkit-rpc = { path = "../../../rust/crates/mkit-rpc" }
 buffa = "0.9.1"
 # CTAP-HID driver, optional behind the `ctap-hw` feature.
-ctap-hid-fido2 = { version = "=3.5.13", optional = true }
+ctap-hid-fido2 = { version = "=3.6.0", optional = true }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,7 +48,7 @@ thiserror = "2"
 # Key store for the enrolled credential_id + pubkey mapping. Plain JSON
 # under $HOME/.mkit-sign-ctap/credentials.json; no keyring dep — the
 # authenticator holds the private key, the store is just metadata.
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 mkit-attest = { path = "../../../rust/crates/mkit-attest" }

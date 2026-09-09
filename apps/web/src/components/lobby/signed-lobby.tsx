@@ -123,7 +123,9 @@ function usePresenceNotices(room: string): SystemNoticeItem[] {
 
   // Latest roster for the timers to read when they fire.
   const presenceRef = useReactRef(presence)
-  presenceRef.current = presence
+  useEffect(() => {
+    presenceRef.current = presence
+  }, [presence, presenceRef])
   const prevMembersRef = useReactRef<Set<string> | null>(null)
   const timersRef = useReactRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 

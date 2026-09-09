@@ -178,6 +178,10 @@ updates:
     commit-message:
       prefix: "deps(web)"
     groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       npm-minor:
         update-types:
           - "minor"
@@ -197,6 +201,10 @@ updates:
     commit-message:
       prefix: "deps(mcp)"
     groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       npm-minor:
         update-types:
           - "minor"
@@ -216,6 +224,10 @@ updates:
     commit-message:
       prefix: "deps(og)"
     groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       npm-minor:
         update-types:
           - "minor"
@@ -223,6 +235,13 @@ updates:
 
   - package-ecosystem: "bun"
     directory: "/apps/spammer-worker"
+    # The Cloudflare Vitest plugin 1.1 requires Vitest 4. Revisit when its peer
+    # dependencies support Vitest 5; keep compatible minor/security updates.
+    ignore:
+      - dependency-name: "vitest"
+        versions: [">=5.0.0 <6.0.0"]
+      - dependency-name: "@vitest/*"
+        versions: [">=5.0.0 <6.0.0"]
     schedule:
       interval: "weekly"
       day: "monday"
@@ -234,6 +253,10 @@ updates:
     commit-message:
       prefix: "deps(spammer-worker)"
     groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       npm-minor:
         update-types:
           - "minor"

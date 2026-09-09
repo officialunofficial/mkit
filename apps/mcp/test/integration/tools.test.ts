@@ -1,13 +1,22 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, callTool, connectMcpClient, resetCorpus, seedCorpus, toolText } from "./harness.ts";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  stopWorker,
+  startWorker,
+  callTool,
+  connectMcpClient,
+  resetCorpus,
+  seedCorpus,
+  toolText,
+} from "./harness.ts";
 
 describe("MCP tools (integration)", () => {
   let client: Client;
 
   beforeAll(async () => {
-    await applyMigrations();
+    await startWorker();
   });
+  afterAll(stopWorker);
   beforeEach(async () => {
     await resetCorpus();
     await seedCorpus();
@@ -91,7 +100,9 @@ describe("MCP tools (integration)", () => {
 
   it("get_spec resolves a bare spec name and its docs/specs/SPEC- path form identically", async () => {
     const bare = toolText(await callTool(client, "get_spec", { name: "OBJECTS" }));
-    const full = toolText(await callTool(client, "get_spec", { name: "docs/specs/SPEC-OBJECTS.md" }));
+    const full = toolText(
+      await callTool(client, "get_spec", { name: "docs/specs/SPEC-OBJECTS.md" }),
+    );
 
     expect(bare).toContain("# Objects");
     expect(bare).toContain("on-disk object formats");

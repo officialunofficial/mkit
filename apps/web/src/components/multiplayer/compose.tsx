@@ -71,6 +71,8 @@ export function Compose({
       const tree = api.tree_encode('[]')
       // mkit commit timestamps are unix *seconds*; stamp the wall clock so the
       // preview shows a real time instead of epoch 0.
+      // This preview intentionally samples time; onPush signs again at click time.
+      // oxlint-disable-next-line react/purity
       const nowSecs = BigInt(Math.floor(Date.now() / 1000))
       const commit = api.commit_encode_and_sign(tree.hash_hex, parentHash, message, nowSecs, seedHex)
       return { ok: true as const, commit }

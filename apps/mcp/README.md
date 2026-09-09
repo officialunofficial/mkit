@@ -72,6 +72,10 @@ credentials**. The corpus is version-pinned to the workspace version
 
 ## Development
 
+Use npm and commit `package-lock.json` as this app's only dependency lockfile.
+GitHub CI and Cloudflare Workers Builds must install the same dependency tree;
+a `bun.lock` makes Cloudflare select Bun instead of npm.
+
 Prereqs: Node 18+, Wrangler, a Cloudflare account.
 
 ```bash
