@@ -28,7 +28,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
 
   const [persister] = useState(() =>
     createSyncStoragePersister({
-      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+      storage: safeStorage(),
       key: PERSIST_STORAGE_KEY,
     }),
   )
@@ -42,7 +42,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
         // Invalidate the whole persisted cache when the policy/schema changes.
         buster: PERSIST_BUSTER,
         dehydrateOptions: {
-          shouldDehydrateQuery: (q) => shouldPersistQuery(q.queryKey),
+          shouldDehydrateQuery: (q) => q.state.status === 'success' && shouldPersistQuery(q.queryKey),
           // Never persist mutations: the Ed25519 signing seed lives only in
           // memory, so a persisted write could never be resumed after reload.
           shouldDehydrateMutation: () => false,
@@ -52,4 +52,12 @@ export function QueryProvider({ children }: { children: ReactNode }) {
       {children}
     </PersistQueryClientProvider>
   )
+}
+
+function safeStorage(): Storage | undefined {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage : undefined
+  } catch {
+    return undefined
+  }
 }

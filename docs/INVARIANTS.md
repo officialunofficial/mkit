@@ -342,3 +342,61 @@ crate manifests, `install.sh`, or the web app's installer-staging scripts.
 `mkit-keystore`'s `windows_credential_backend_name_is_not_recognized` test
 (`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
 unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
+
+## Hosted workspaces separate public projects from owner execution
+
+**Always:** workspace files and signed versions are public; conversation messages,
+current task details, and PTY access require the owner's session. Writes require
+an exact, unexpired auth-v2 signature. The browser uses a saved PRF passkey identity;
+its signing seed never leaves the browser. The server holds a separate agent key
+whose owner-signed grant must remain valid for new execution and version publication.
+
+**Because:** public remixing must not disclose private prompts or give visitors
+shell access under another person's delegated identity.
+
+**If violated:** a public link can leak conversations or execute commands without
+owner authorization; replaying a request can affect an unrelated later task.
+
+**Enforced by:** `apps/workspace-worker/src/auth.test.ts`,
+`apps/workspace-worker/src/workspace.integration.test.ts`, and the workspace client
+identity tests under `apps/web/src/components/workspace/`.
+
+## Hosted task completion publishes a recoverable signed version
+
+**Always:** only a completed, currently authorized agent task publishes its new
+signed version with its completed status and saved conversation snapshot. Failed
+or cancelled tasks retain captured draft files without claiming completion.
+Captures cannot overwrite another workspace generation. A worker restart does
+not replay shell commands whose outcome is uncertain.
+
+**Because:** the browser can close while the agent works, and container lifetime
+is independent of the project's durable files and versions.
+
+**If violated:** users lose completed work, see a completed task with no version,
+or execute a command twice during recovery.
+
+**Enforced by:** `apps/workspace-worker/src/workspace-state.test.ts`,
+`apps/workspace-worker/src/workspace-runner.test.ts`, and
+`apps/workspace-worker/src/sandbox-files.test.ts`.
+
+## Browser login and signing authority have separate lifetimes
+
+**Always:** one shared session query and Account region represent login on every page. A refresh can preserve the HttpOnly login cookie, but cannot recover or persist a signing seed. Locking signing preserves the login; sign-out revokes the server session and clears private query and mutation caches. Workspace reads remain disabled during logout, and late responses cannot replace another identity's state. Workspace activation never issues a login cookie.
+
+**Because:** page navigation and cache reuse must not change identity or revive access after sign-out. Public recovery metadata is safe to persist; signing keys and private workspace state are not.
+
+**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, workspace query/editor tests, `apps/workspace-worker/src/browser-session.test.ts`, workspace integration tests, and `bun run verify:auth` in `apps/web`.
+
+## A workspace version saves one coherent project state
+
+**Always:** a batch save checks every draft's expected file hash before publishing any edit or version. A conflict preserves browser edits and requires explicit review against current content. Terminal working changes and accepted drafts become one named version. Restore appends a new version and retains saved history.
+
+**Because:** a project version must not silently combine stale edits or leave half a batch applied.
+
+**Enforced by:** workspace worker version-edit integration tests, file-editor conflict tests, and workspace save orchestration tests.
+
+## Browser drafts belong to the authenticated session
+
+**Always:** drafts stay in memory, survive route remounts and signing locks, and clear on logout or session replacement. Explicit logout asks before discarding drafts. Current file query keys include content hashes so terminal captures cannot leave cached contents stale.
+
+**Enforced by:** workspace draft-store, Account, auth-provider, and workspace query tests.

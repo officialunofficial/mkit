@@ -1,5 +1,7 @@
 'use client'
 
+import { Link } from 'waku'
+
 import { useCallback, useMemo, useState } from 'react'
 import { ChunkStrip, type StripChunk } from './chunk-strip'
 import { formatBytes, useMkit } from './use-mkit'
@@ -210,9 +212,9 @@ export function PushDemo() {
               <p className='max-w-prose text-xs text-subtle'>
                 These payload sizes come from the 2 MiB sample above. A complete push also includes object and protocol
                 metadata. See the{' '}
-                <a href='/performance' className='ds-link'>
+                <Link to='/performance' className='ds-link'>
                   performance benchmarks
-                </a>{' '}
+                </Link>{' '}
                 for measured command timings and transfer sizes.
               </p>
             </>

@@ -131,6 +131,13 @@
   --delta-decrease-bg: #fdf0ef;
   --delta-unchanged-fg: #8a8a8a;
 
+  /* §2.3G diff: square recorded content, with textual +/- markers. */
+  --diff-added-bg: #f2f9f5;
+  --diff-added-marker: #1a7f4b;
+  --diff-removed-bg: #fdf6f5;
+  --diff-removed-marker: #b42318;
+  --diff-context-fg: #8a8a8a;
+
   /* §2.3H focus and selection */
   --focus-ring: #0a0a0a;
   --focus-ring-offset: #ffffff;
@@ -247,6 +254,11 @@
     --status-neutral-fg: #676767;
     --status-neutral-bg: #141414;
     --status-neutral-border: #1f1f1f;
+    --diff-added-bg: #0b1410;
+    --diff-added-marker: #4fa97a;
+    --diff-removed-bg: #17100f;
+    --diff-removed-marker: #e5675c;
+    --diff-context-fg: #676767;
     --delta-increase-fg: #4fa97a;
     --delta-increase-bg: #0e1a14;
     --delta-decrease-fg: #e5675c;
@@ -316,6 +328,11 @@
   --status-neutral-fg: #676767;
   --status-neutral-bg: #141414;
   --status-neutral-border: #1f1f1f;
+  --diff-added-bg: #0b1410;
+  --diff-added-marker: #4fa97a;
+  --diff-removed-bg: #17100f;
+  --diff-removed-marker: #e5675c;
+  --diff-context-fg: #676767;
   --delta-increase-fg: #4fa97a;
   --delta-increase-bg: #0e1a14;
   --delta-decrease-fg: #e5675c;

@@ -29,7 +29,7 @@ import {
   type RepoBackend,
 } from '../../lib/repo-api'
 import { webMcpError, webMcpText, type WebMcpTool } from '../../lib/webmcp'
-import { useMkit } from '../use-mkit'
+import { bytesToHex, hexToBytes, useMkit } from '../use-mkit'
 import { useWebMcpTools } from '../use-web-mcp-tools'
 import { useDerive } from './compose'
 import { CAS_CONFLICT_COPY, IDENTITY_LOCKED_COPY, errMsg } from './shared'
@@ -299,7 +299,7 @@ function buildTools(latest: { current: Latest }): WebMcpTool[] {
           const commit = l.api.commit_encode_and_sign(tree.hash_hex, parentHash, args.message, nowSecs, l.seedHex)
           await l.push.mutateAsync({
             api: l.api,
-            seedHex: l.seedHex,
+            authorPubkey: bytesToHex(l.api.ed25519_pubkey_from_seed(hexToBytes(l.seedHex))),
             room: l.room,
             ref: targetRef,
             commitBytes: commit.bytes,

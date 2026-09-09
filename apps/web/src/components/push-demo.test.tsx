@@ -1,10 +1,19 @@
 // @vitest-environment jsdom
 import { cleanup, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import type { ReactNode } from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkit } from '../lib/mkit'
 import { PushDemo } from './push-demo'
 import { renderSuspended } from './test-support'
+
+vi.mock('waku', () => ({
+  Link: ({ to, children, ...props }: { to: string; children: ReactNode }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
+}))
 
 describe('PushDemo', () => {
   afterEach(cleanup)

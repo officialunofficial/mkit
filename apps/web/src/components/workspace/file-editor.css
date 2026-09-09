@@ -1,0 +1,191 @@
+.editor-layout {
+  display: grid;
+  grid-template-columns: 10rem minmax(0, 1fr);
+  min-height: 28rem;
+  border-block: var(--border-width-light) solid var(--border-color-subtle);
+}
+.editor-explorer {
+  min-width: 0;
+  border-right: var(--border-width-light) solid var(--border-color-subtle);
+}
+.editor-explorer-heading,
+.editor-toolbar,
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  min-height: 2.5rem;
+}
+.editor-explorer-heading {
+  font-size: var(--t-sm);
+  font-weight: var(--weight-medium);
+}
+.editor-muted,
+.editor-file-size,
+.editor-footer {
+  color: var(--text-secondary);
+  font-size: var(--t-xs);
+}
+.editor-search,
+.editor-new-file {
+  padding: 0 var(--space-md) var(--space-sm);
+}
+.editor-search input,
+.editor-new-file input {
+  width: 100%;
+  min-width: 0;
+  background: var(--surface-page);
+  border: var(--border-width-light) solid var(--border-color-default);
+  border-radius: var(--rounded-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--t-sm);
+  color: var(--text-primary);
+}
+.editor-new-file {
+  display: grid;
+  gap: var(--space-sm);
+}
+.editor-file-list {
+  overflow: auto;
+  max-height: 65vh;
+}
+.editor-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 2rem;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  border-left: var(--border-width-medium) solid transparent;
+  text-align: left;
+  background: transparent;
+  font-size: var(--t-sm);
+}
+.editor-file-row:hover {
+  background: var(--surface-hover);
+}
+.editor-file-row[aria-current='true'] {
+  border-left-color: var(--border-color-selected);
+}
+.editor-file-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: 'DM Mono', monospace;
+}
+.editor-file-size {
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-normal);
+}
+.editor-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.editor-toolbar {
+  border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+  flex-wrap: wrap;
+}
+.editor-path {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  font-size: var(--t-sm);
+}
+.editor-path code {
+  overflow-wrap: anywhere;
+}
+.editor-code {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  flex: 1;
+  min-height: 24rem;
+  height: 55vh;
+  background: var(--surface-code);
+}
+.editor-code textarea,
+.editor-line-numbers {
+  white-space: pre;
+  font-family: 'DM Mono', monospace;
+  font-size: var(--t-sm);
+  line-height: var(--t-base-leading);
+  tab-size: 2;
+  padding-block: var(--space-md);
+}
+.editor-line-numbers {
+  min-width: 3rem;
+  padding-inline: var(--space-md);
+  text-align: right;
+  color: var(--text-secondary);
+  overflow: hidden;
+  user-select: none;
+}
+.editor-line-numbers span {
+  display: block;
+}
+.editor-code textarea {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-primary);
+  background: transparent;
+  padding-right: var(--space-md);
+  white-space: pre;
+  overflow: auto;
+}
+.editor-code textarea:focus-visible {
+  outline: var(--border-width-medium) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--border-width-medium));
+}
+.editor-footer {
+  border-top: var(--border-width-light) solid var(--border-color-subtle);
+}
+.editor-notice,
+.editor-empty {
+  padding: var(--space-md);
+  font-size: var(--t-sm);
+  color: var(--text-secondary);
+}
+.editor-notice {
+  border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+}
+.editor-file-row:focus-visible,
+.editor-search input:focus-visible,
+.editor-new-file input:focus-visible {
+  outline: var(--border-width-medium) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--border-width-medium));
+}
+@media (max-width: 640px) {
+  .editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .editor-explorer {
+    border-right: none;
+    border-bottom: var(--border-width-light) solid var(--border-color-subtle);
+  }
+  .editor-file-list {
+    max-height: 9rem;
+  }
+  .editor-code {
+    height: 50vh;
+    min-height: 18rem;
+  }
+}
+@media (pointer: coarse) {
+  .editor-file-row,
+  .editor-search input,
+  .editor-new-file input {
+    min-height: var(--touch-target-min);
+  }
+}

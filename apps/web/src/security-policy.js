@@ -54,7 +54,7 @@ export const CSP_DIRECTIVES = [
   // and apps/keys-worker/wrangler.jsonc) — allowed here so the web app can be
   // pointed at staging for end-to-end checks by setting `VITE_REPO_BACKEND_URL`
   // / `VITE_KEYS_URL` to the staging hosts; they are never the default.
-  "connect-src 'self' https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://staging-api.mkit.sh wss://staging-api.mkit.sh http://localhost:8788 https://keys.mkit.sh https://staging-keys.mkit.sh",
+  "connect-src 'self' wss://mkit.sh https://cloudflareinsights.com http://localhost:8787 ws://localhost:8787 https://api.mkit.sh wss://api.mkit.sh https://mkit-repo-worker.officialunofficial.workers.dev wss://mkit-repo-worker.officialunofficial.workers.dev https://staging-api.mkit.sh wss://staging-api.mkit.sh http://localhost:8788 https://keys.mkit.sh https://staging-keys.mkit.sh",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
 ]

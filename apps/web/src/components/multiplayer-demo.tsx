@@ -3,9 +3,7 @@
 import { useState } from 'react'
 import { DEFAULT_ROOM, type IdentityState, useIdentityStore } from '../lib/identity-store'
 import { RepoBackendProvider, useRepoEvents, useResolvedRepoBackend } from '../lib/repo-api'
-import { useIdentityActions } from './use-identity-actions'
 import { useMkit } from './use-mkit'
-import { LockedView, UnlockedHeader } from './multiplayer/identity-panel'
 import { Compose, ComposeDisabled } from './multiplayer/compose'
 import { FloatingDock } from './multiplayer/floating-dock'
 import { PresencePanel } from './multiplayer/presence-panel'
@@ -54,10 +52,6 @@ function MultiplayerBody({
 }) {
   useRepoEvents(room)
 
-  // The passkey create/unlock ceremony — shared with the front-page lobby via
-  // `useIdentityActions` so the ceremony + keys.mkit.sh registration live once.
-  const { onCreate, onUnlock, busy, status, embeddedBrowserWarning } = useIdentityActions()
-
   // Repo-browser navigation state (no router change needed): which ref the
   // log/detail view follows, and which commit's detail is open (null = none).
   const [selectedRef, setSelectedRef] = useState('main')
@@ -77,27 +71,9 @@ function MultiplayerBody({
         onSelectCommit={setSelectedCommit}
       />
 
-      {/* Identity — its own bordered section spanning both columns. The locked
-          create/unlock actions and the unlocked player header share this banner
-          so "who am I" reads as one distinct concern above the repo workspace. */}
-      <section className='rounded-(--rounded-md) border border-hairline p-4 sm:p-5'>
-        {id.unlocked && id.ed25519PubkeyHex ? (
-          <UnlockedHeader api={api} ed25519PubkeyHex={id.ed25519PubkeyHex} />
-        ) : (
-          <LockedView
-            onCreate={onCreate}
-            onUnlock={onUnlock}
-            busy={busy}
-            status={status}
-            hasPasskey={id.credentialId != null}
-            embeddedBrowserWarning={embeddedBrowserWarning}
-          />
-        )}
-      </section>
-
       {/* Left: the repository's branches. Right: compose, then the selected
           branch's commit log. The log is ALWAYS visible — watch others contribute
-          even before you unlock an identity ("signed out" mode). */}
+          while signing is locked or you are signed out. */}
       <div className='grid grid-cols-1 gap-8 lg:grid-cols-2 lg:items-start'>
         <div className='space-y-6'>
           <RefsPanel

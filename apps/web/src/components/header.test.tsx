@@ -13,6 +13,7 @@ vi.mock('waku', () => ({
 vi.mock('./grid-logo', () => ({ GridLogo: () => null }))
 vi.mock('./theme-toggle', () => ({ ThemeToggle: () => null }))
 vi.mock('./site-nav', () => ({ ExpandedNav: () => <span>Navigation links</span> }))
+vi.mock('./account', () => ({ Account: () => <section aria-label='Account'>Account controls</section> }))
 
 afterEach(() => {
   cleanup()
@@ -22,6 +23,7 @@ afterEach(() => {
 it('closes expanded navigation on a route change and allows reopening', async () => {
   const user = userEvent.setup()
   const view = render(<Header />)
+  expect(screen.getAllByRole('region', { name: 'Account' })).toHaveLength(1)
   await user.click(screen.getByRole('button', { name: 'Open navigation' }))
   expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument()
 

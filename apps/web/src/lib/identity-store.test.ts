@@ -3,6 +3,7 @@ import {
   DEFAULT_ROOM,
   RETIRED_DEFAULT_ROOM,
   migrateIdentity,
+  mergeIdentity,
   partializeIdentity,
   useIdentityStore,
 } from './identity-store'
@@ -129,12 +130,19 @@ describe('identity store', () => {
       s.unlock({ seedHex: 'aa'.repeat(32), ed25519PubkeyHex: 'bb'.repeat(32) })
       const persisted = partializeIdentity(useIdentityStore.getState())
       expect(persisted).toEqual({
+        knownPublicKey: 'bb'.repeat(32),
         credentialId: 'cred-1',
         p256PubkeyHex: 'ab'.repeat(65),
         room: 'arena',
         name: 'amber-wren',
       })
-      expect(Object.keys(persisted).toSorted()).toEqual(['credentialId', 'name', 'p256PubkeyHex', 'room'])
+      expect(Object.keys(persisted).toSorted()).toEqual([
+        'credentialId',
+        'knownPublicKey',
+        'name',
+        'p256PubkeyHex',
+        'room',
+      ])
     })
 
     // A public key is safe to cache (unlike the seed/derived Ed25519 material):
@@ -168,4 +176,16 @@ describe('identity store', () => {
     s.reset()
     expect(useIdentityStore.getState().p256PubkeyHex).toBeNull()
   })
+})
+
+it('hydration never accepts a persisted signing seed or unlocked flag', () => {
+  useIdentityStore.getState().reset()
+  const state = mergeIdentity(
+    { seedHex: 'aa'.repeat(32), unlocked: true, credentialId: 'saved', knownPublicKey: 'bb'.repeat(32) },
+    useIdentityStore.getState(),
+  )
+  expect(state.seedHex).toBeNull()
+  expect(state.unlocked).toBe(false)
+  expect(state.credentialId).toBe('saved')
+  expect(state.knownPublicKey).toBe('bb'.repeat(32))
 })

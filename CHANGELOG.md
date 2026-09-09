@@ -7,11 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Redesigned the workspace around Files, Changes, and History with grouped version
+  saves, attributed diffs, explicit conflict recovery, session-scoped drafts, and
+  progressive terminal and project controls.
+
+- Hosted public workspaces at `/create`: passkey-authorized demo remixes, a file
+  editor, a real terminal, and a server-hosted nanocodex agent that saves signed
+  versions and continues when the browser closes.
+
+- WASM exports `object_id`, `tree_decode`, `blob_decode`, and `remix_verify`
+  expose canonical object IDs, tree entries, binary file contents, and remix
+  signature verification for browser and edge workspaces. These readers bound
+  input size and reject invalid encodings; tree IDs retain their native Merkle
+  semantics. No on-disk or wire format changes.
+
 ### Security
 
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
+
+- Shared browser login across all seven web pages, with a seven-day HttpOnly session, separate in-memory signing unlock, session-scoped workspace queries, and a repeatable navigation/refresh/sign-out verification workflow.
 
 - *(core)* `worktree::store_large_file_streaming_with`'s and `transfer::plan_pack_with`'s `hash_chunks`/`encode_deltas` batch-callback cardinality contracts (exactly one result per input item) are now enforced with a typed error (`WorktreeError::ChunkBatchLengthMismatch`, `StoreError::DeltaBatchLengthMismatch`) instead of, respectively, silently trusting the result (`store_large_file_streaming_with` had no check at all) or panicking (`plan_pack_with`'s prior `assert_eq!`) — a buggy or third-party batch callback now fails the operation cleanly rather than either corrupting a `ChunkedBlob` manifest or crashing the process mid-push. Chunk hashing contract failures return `exit::SOFTWARE` (70, sysexits `EX_SOFTWARE`); push retains its existing general-error exit code for delta callback failures. Callbacks remain responsible for preserving result order. **SemVer:** new variants in public exhaustive error enums can require downstream match updates; both functions' happy-path behavior is unchanged.
 - *(cli)* Closed a gap where `mkit pull`/`mkit fetch` (via `remote_dispatch`'s per-branch fast-forward and unpack/publish locks) and `mkit status`'s opportunistic stat-cache refresh took the worktree lock directly instead of through `commands::acquire_worktree_lock`, silently skipping the "this root is being served by `mkit serve`" warning that `commit`/`checkout`/`gc` already print in the same situation (SPEC-CONCURRENCY §3.1). `commands::warn_if_served` is now called at all four sites; new `serve_guard.rs` regression test (`pull_warns_when_root_is_being_served`).
