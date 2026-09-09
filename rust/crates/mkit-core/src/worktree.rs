@@ -754,7 +754,7 @@ fn sequential_hash_chunks<S: ObjectSink + ?Sized>(
 }
 
 /// Call `hash_chunks(sink, batch)` and enforce its documented contract —
-/// exactly one [`Hash`] per input chunk — before the caller ever sees the
+/// exactly one [`Hash`](tyalias@Hash) per input chunk — before the caller ever sees the
 /// result, returning [`WorktreeError::ChunkBatchLengthMismatch`] instead of
 /// silently letting a short/long result desync the manifest's `chunks`
 /// list from the file's actual chunk sequence. [`store_large_file_streaming_with`]'s
@@ -794,15 +794,15 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// as [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback.
 /// Cutting chunk boundaries from `reader` is inherently sequential (each
 /// cut's start is the previous cut's end), but once a batch of up to
-/// [`STREAM_HASH_BATCH`] chunks is in hand, hashing and storing each one
+/// `STREAM_HASH_BATCH` chunks is in hand, hashing and storing each one
 /// is independent of every other chunk in the batch — `mkit-cli`'s
 /// native, rayon-backed `add` path passes a parallel `hash_chunks`
 /// (mirroring the pack-compression/signature-verification/delta-encoding
 /// fan-outs already in `mkit-cli`); [`hash_file_with_metadata`] passes
-/// [`sequential_hash_chunks`].
+/// its own built-in sequential callback.
 ///
 /// `hash_chunks` receives each batch in file order and MUST return
-/// exactly one [`Hash`] per input chunk, in the same order — the
+/// exactly one [`Hash`](tyalias@Hash) per input chunk, in the same order — the
 /// manifest's chunk list, and therefore the file's content address,
 /// depends on that order.
 ///
