@@ -58,9 +58,8 @@ zeroize = { version = "1", features = ["derive"] }
 # `pack-zstd` feature below, so `mkit-wasm` (which needs `pack.rs` to
 # compile but never calls into pack compression) can opt out via
 # `default-features = false`. 0.13.3 is already resolved transitively
-# via the commonware dependency stack (same version pinned here), so
-# this is not a new supply-chain root — just an explicit direct dep on
-# a crate already present in the tree.
+# via the commonware dependency stack. This direct dependency uses the
+# newer safe wrapper while sharing the same underlying zstd C library.
 zstd = { version = "0.14", optional = true }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
