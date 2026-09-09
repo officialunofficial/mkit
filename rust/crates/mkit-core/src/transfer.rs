@@ -425,8 +425,10 @@ fn chunk_features(bytes: &[u8]) -> Vec<u64> {
     best
 }
 
-/// FNV-1a 64-bit over a fixed window — same primitive the delta writer uses
-/// for block matching, so a shared block surfaces as a shared feature.
+/// FNV-1a 64-bit over a fixed window — this module's own min-hash feature
+/// key; unrelated to (and independent of) `delta::block_hash`'s algorithm,
+/// which only needs to agree with itself between the base-index build and
+/// the scan, not with any hash used here.
 fn fnv1a(block: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in block {

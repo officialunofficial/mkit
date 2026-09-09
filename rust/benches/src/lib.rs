@@ -4,6 +4,44 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Minimal deterministic xorshift64 PRNG, shared by every bench that needs
+/// reproducible pseudo-random bytes without pulling in the `rand` crate
+/// (`pack_shard_transfer.rs`'s jitter model, `delta_encode_scan.rs`'s
+/// low-similarity fixtures, and any future bench with the same need).
+#[derive(Debug, Clone, Copy)]
+pub struct Xorshift(u64);
+
+impl Xorshift {
+    /// Seed the generator. Xorshift's state must never be zero (zero is a
+    /// fixed point), so the low bit is forced on — every `seed` produces a
+    /// valid, deterministic stream.
+    #[must_use]
+    pub fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+
+    /// Advance the state and return the next pseudo-random `u64`.
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    /// `len` pseudo-random bytes.
+    #[must_use]
+    pub fn bytes(&mut self, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            out.extend_from_slice(&self.next_u64().to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+}
+
 /// Time a single invocation of `f` in seconds-per-call.
 ///
 /// Runs `warmup` un-timed iterations to settle caches/branch

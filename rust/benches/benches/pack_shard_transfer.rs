@@ -28,6 +28,7 @@ use std::thread;
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use mkit_benches::Xorshift;
 use mkit_core::pack_shard::{
     ParallelStrategy, SequentialStrategy, Shard, ShardSet, decode_pack_from_shards,
     decode_pack_from_shards_with_strategy, default_config, encode_pack_to_shards,
@@ -52,35 +53,21 @@ fn synthetic_pack(size: usize) -> Vec<u8> {
     out
 }
 
-/// Cheap deterministic xorshift PRNG, used to simulate per-shard
-/// network jitter without pulling in `rand`.
-struct Xorshift(u64);
-
-impl Xorshift {
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    /// A jitter sleep in the `[low, high]` microsecond range.
-    fn jitter(&mut self, low_us: u64, high_us: u64) -> Duration {
-        let span = high_us.saturating_sub(low_us).max(1);
-        Duration::from_micros(low_us + (self.next_u64() % span))
-    }
+/// A jitter sleep in the `[low, high]` microsecond range, used to
+/// simulate per-shard network jitter.
+fn jitter(rng: &mut Xorshift, low_us: u64, high_us: u64) -> Duration {
+    let span = high_us.saturating_sub(low_us).max(1);
+    Duration::from_micros(low_us + (rng.next_u64() % span))
 }
 
 fn bench_monolithic(c: &mut Criterion, pack: &[u8]) {
-    let mut rng = Xorshift(0xA110_C8ED);
+    let mut rng = Xorshift::new(0xA110_C8ED);
     c.bench_function("pack-shards/100MiB/monolithic", |b| {
         b.iter(|| {
             // Simulate one network round-trip carrying the whole pack.
             // 10–50 ms is the typical "modem hop + buffer" sleep we
             // use across mkit's transport benches.
-            thread::sleep(rng.jitter(10_000, 50_000));
+            thread::sleep(jitter(&mut rng, 10_000, 50_000));
             // Touch the bytes so the compiler can't optimise out the
             // load.
             let mut acc: u64 = 0;
@@ -107,9 +94,9 @@ fn bench_sharded_best_case(
             for shard in shards {
                 let tx = tx.clone();
                 let s = shard.clone();
-                let mut rng = Xorshift(0xC0DE ^ (shard.index as u64));
+                let mut rng = Xorshift::new(0xC0DE ^ (shard.index as u64));
                 thread::spawn(move || {
-                    thread::sleep(rng.jitter(10_000, 50_000));
+                    thread::sleep(jitter(&mut rng, 10_000, 50_000));
                     let _ = tx.send(s);
                 });
             }
@@ -139,11 +126,11 @@ fn bench_sharded_worst_case(
 ) {
     c.bench_function("pack-shards/100MiB/sharded-sequential", |b| {
         b.iter(|| {
-            let mut rng = Xorshift(0x000B_00B5_C0DE);
+            let mut rng = Xorshift::new(0x000B_00B5_C0DE);
             let minimum = manifest.config.minimum_shards.get() as usize;
             let mut got: Vec<Shard> = Vec::with_capacity(minimum);
             for shard in shards.iter().take(minimum) {
-                thread::sleep(rng.jitter(10_000, 50_000));
+                thread::sleep(jitter(&mut rng, 10_000, 50_000));
                 got.push(shard.clone());
             }
             let pack = decode_pack_from_shards(&got, manifest).unwrap();

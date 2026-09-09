@@ -118,8 +118,9 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
 
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
-/// The writer is an FNV-1a-on-16-byte-blocks scan. Any conformant
-/// writer is acceptable; this one is greedy. Output is always at least
+/// The writer is a rolling-polynomial-hash-on-16-byte-blocks scan (see
+/// [`block_hash`]/[`roll_forward`]). Any conformant writer is
+/// acceptable; this one is greedy. Output is always at least
 /// [`HEADER_LEN`] bytes.
 ///
 /// # Errors
@@ -396,13 +397,14 @@ fn flush_insert(out: &mut Vec<u8>, buf: &mut Vec<u8>) {
     buf.clear();
 }
 
-/// Odd multiplier for `block_hash`'s polynomial hash. Oddness is what
-/// makes it a unit of the ring `Z/2^64Z` (every odd `u64` is invertible
-/// mod `2^64`), which is what lets [`roll_forward`] undo one step's
-/// multiplication to slide the window — see its doc comment. `encode`
-/// only ever trusts a `block_hash` hit after re-checking the actual
-/// bytes (`base[..] == target_block`), so the multiplier's only real job
-/// is spreading distinct blocks across buckets well; this is the
+/// Multiplier for `block_hash`'s polynomial hash. [`roll_forward`] slides
+/// the window by algebraic cancellation (subtracting the outgoing byte's
+/// `ROLL_M_POW_BLOCK`-scaled contribution back out), an identity that
+/// holds for any `ROLL_M` value under wrapping `u64` arithmetic — no
+/// modular inverse of `ROLL_M` is needed. `encode` only ever trusts a
+/// `block_hash` hit after re-checking the actual bytes (`base[..] ==
+/// target_block`), so this constant's only real job is spreading
+/// distinct blocks across hash-table buckets well; this is the
 /// fractional part of the golden ratio scaled to 64 bits, a standard
 /// avalanche-friendly constant (as used in e.g. Fibonacci hashing).
 const ROLL_M: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -456,9 +458,9 @@ fn block_hash(block: &[u8]) -> u64 {
 ///           = h * ROLL_M - old * ROLL_M_POW_BLOCK + new
 /// ```
 ///
-/// All arithmetic wraps, matching `block_hash`; `ROLL_M`'s oddness (see
-/// its doc comment) is what makes this subtraction exactly cancel
-/// `old`'s contribution rather than leaving a residue.
+/// All arithmetic wraps, matching `block_hash`; the derivation above is
+/// exact algebraic cancellation, not a modular inverse, so it holds for
+/// any `ROLL_M` (see its doc comment) under wrapping `u64` arithmetic.
 fn roll_forward(h: u64, old: u8, new: u8) -> u64 {
     h.wrapping_mul(ROLL_M)
         .wrapping_sub(u64::from(old).wrapping_mul(ROLL_M_POW_BLOCK))
