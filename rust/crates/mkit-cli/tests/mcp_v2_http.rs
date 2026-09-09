@@ -357,6 +357,7 @@ mod auth {
 
     #[test]
     fn mkit_mcp_token_env_var_is_accepted_as_a_fallback() {
+        use std::io::{BufRead, BufReader};
         let repo = tempfile::tempdir().unwrap();
         let mut child = Command::new(mkit_bin())
             .args([
@@ -372,7 +373,6 @@ mod auth {
             .spawn()
             .expect("spawn mkit mcp --http");
         let stderr = child.stderr.take().unwrap();
-        use std::io::{BufRead, BufReader};
         let mut lines = BufReader::new(stderr).lines();
         let addr = loop {
             let line = lines
