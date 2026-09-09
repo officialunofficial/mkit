@@ -19,6 +19,8 @@ export function VirtualFeed<T extends { key: string }>({
   const [atBottom, setAtBottom] = useState(true)
   const didInitRef = useReactRef(false)
   const getItemKey = useCallback((index: number) => items[index]!.key, [items])
+  // TanStack Virtual is intentionally managed outside React Compiler memoization.
+  // oxlint-disable-next-line react/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,

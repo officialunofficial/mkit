@@ -8,26 +8,20 @@
  * traffic, not just that the legacy fallback still works.
  */
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { SELF } from "cloudflare:test";
-import { applyMigrations, resetCorpus, seedCorpus } from "./harness.ts";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { workerUrl, stopWorker, startWorker, resetCorpus, seedCorpus } from "./harness.ts";
 
 describe("MCP tools (modern 2026-07-28 protocol)", () => {
   let client: Client;
 
   beforeAll(async () => {
-    await applyMigrations();
+    await startWorker();
   });
+  afterAll(stopWorker);
   beforeEach(async () => {
     await resetCorpus();
     await seedCorpus();
-    const transport = new StreamableHTTPClientTransport(new URL("https://mcp.test/"), {
-      fetch: (input: string | URL, init?: RequestInit) =>
-        SELF.fetch(
-          input as Parameters<typeof SELF.fetch>[0],
-          init as Parameters<typeof SELF.fetch>[1],
-        ),
-    });
+    const transport = new StreamableHTTPClientTransport(workerUrl());
     client = new Client({ name: "mkit-mcp-modern-tests", version: "0" });
     await client.connect(transport);
   });
