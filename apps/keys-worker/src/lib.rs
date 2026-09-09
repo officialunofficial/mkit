@@ -71,7 +71,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         let pubkey = pubkey.to_ascii_lowercase();
         match method {
             Method::Get => get_name(&env, &pubkey).await,
-            Method::Put => name_stub(&env, &pubkey)?.fetch_with_request(req).await,
+            Method::Put => {
+                let resp = name_stub(&env, &pubkey)?.fetch_with_request(req).await?;
+                detach(resp).await
+            }
             _ => Response::error("method not allowed", 405),
         }
     } else if method == Method::Post && path == "/resolve" {
@@ -99,6 +102,25 @@ fn preflight() -> Result<Response> {
 fn with_cors(mut resp: Response) -> Response {
     let _ = resp.headers_mut().set("Access-Control-Allow-Origin", "*");
     resp
+}
+
+/// Rebuild `resp` into a fresh `Response` with the same status, `Content-
+/// Type`, and body. A `Response` returned from a Durable Object stub's
+/// `.fetch()` (as `get_name` and the `PUT /name/<pubkey>` route both
+/// produce) carries the Fetch API's immutable-headers guard, so
+/// `with_cors`'s `headers_mut().set(...)` silently no-ops on it and every
+/// cross-origin name lookup/write loses its CORS header. Detach the body
+/// into a locally-constructed `Response` first so `with_cors` can mutate
+/// it.
+async fn detach(mut resp: Response) -> Result<Response> {
+    let status = resp.status_code();
+    let content_type = resp.headers().get("Content-Type")?;
+    let body = resp.bytes().await?;
+    let mut out = Response::from_bytes(body)?.with_status(status);
+    if let Some(ct) = content_type {
+        out.headers_mut().set("Content-Type", &ct)?;
+    }
+    Ok(out)
 }
 
 fn json_response(body: String) -> Result<Response> {
@@ -194,9 +216,10 @@ async fn get_name(env: &Env, pubkey: &str) -> Result<Response> {
     if !is_pubkey_hex(pubkey) {
         return Response::error("invalid pubkey", 400);
     }
-    name_stub(env, pubkey)?
+    let resp = name_stub(env, pubkey)?
         .fetch_with_str(&format!("https://names/name/{pubkey}"))
-        .await
+        .await?;
+    detach(resp).await
 }
 
 /// PUT /name/<pubkey> — signed, owner-only set/rename of the handle.
