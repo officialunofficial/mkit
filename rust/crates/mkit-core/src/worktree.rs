@@ -695,9 +695,10 @@ pub fn hash_file_with_metadata<S: ObjectSink + ?Sized>(
 /// Store a large (> [`CHUNK_THRESHOLD`]) file's content as a
 /// [`ChunkedBlob`] manifest, streaming chunks directly from `reader`
 /// instead of requiring the whole file resident in memory first (issue
-/// #828). Bounds ingest memory to one `FastCdc::v1` window
-/// (`chunker::MAX_SIZE`, 256 KiB) plus the growing chunk-hash list (32
-/// bytes/chunk), regardless of the file's total size.
+/// #828). Bounds ingest memory to one fixed `ChunkReader` window
+/// (`chunker::WINDOW_MULTIPLE * chunker::MAX_SIZE`, 1 MiB) plus the
+/// growing chunk-hash list (32 bytes/chunk), regardless of the file's
+/// total size.
 ///
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
 /// error if `reader` yields more than [`MAX_FILE_BYTES`].
@@ -712,13 +713,13 @@ fn store_large_file_streaming<S: ObjectSink + ?Sized, R: Read>(
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
     let mut total_size: u64 = 0;
-    while let Some(chunk) = chunker.next_chunk()? {
+    while let Some(chunk) = chunker.next_chunk_ref()? {
         total_size = total_size
             .checked_add(chunk.len() as u64)
             .filter(|&t| t <= MAX_FILE_BYTES)
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
         let prologue = serialize::blob_prologue(chunk.len())?;
-        chunks.push(sink.put_parts(&[&prologue, &chunk])?);
+        chunks.push(sink.put_parts(&[&prologue, chunk])?);
     }
 
     let manifest = Object::ChunkedBlob(ChunkedBlob {
