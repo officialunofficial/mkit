@@ -176,3 +176,58 @@ fn commit_does_not_warn_when_not_served() {
         "no serve is alive; must not warn, got: {stderr}"
     );
 }
+
+/// Regression coverage for the serve-guard bypass a review found in
+/// `remote_dispatch/mod.rs`'s `pull_all_with` (fast-forward-phase lock)
+/// and `fetch_objects_inner` (per-branch unpack/publish lock): both take
+/// `WORKTREE_LOCK` directly via `mkit_core::repo_lock::acquire_default`
+/// rather than through `commands::acquire_worktree_lock`, so they used
+/// to skip `warn_if_served` entirely — `pull`/`fetch` mutated refs/HEAD/
+/// worktree with no warning while `commit`/`gc` (same lock, same root)
+/// did warn. A plain `mkit pull` exercises both fixed call sites in one
+/// shot: `fetch_objects_inner`'s lock during the fetch phase, then
+/// `pull_all_with`'s own lock during the fast-forward phase.
+#[test]
+fn pull_warns_when_root_is_being_served() {
+    let upstream = tempfile::tempdir().unwrap();
+    init_repo(upstream.path());
+    make_commit(upstream.path(), "a.txt", b"hello\n", "c1");
+    let bare = tempfile::tempdir().unwrap();
+    let url = format!("mkit+file://{}", bare.path().display());
+    assert!(
+        run_in(upstream.path(), &["remote", "add", &url])
+            .status
+            .success()
+    );
+    assert!(run_in(upstream.path(), &["push"]).status.success());
+
+    let sink = tempfile::tempdir().unwrap();
+    assert!(run_in(sink.path(), &["init"]).status.success());
+    assert!(
+        run_in(sink.path(), &["remote", "add", &url])
+            .status
+            .success()
+    );
+    let mkit_dir = sink.path().join(".mkit");
+
+    // No subprocess needed: hold the shared lock directly, exactly as a
+    // live `mkit serve` would (mirrors `gc_warns_when_root_is_being_served`).
+    let serve_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(mkit_dir.join("serve.lock"))
+        .unwrap();
+    serve_lock.lock_shared().unwrap();
+
+    let out = run_in(sink.path(), &["pull"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "pull failed: {out:?}");
+    assert!(
+        stderr.contains(SERVE_MARKER),
+        "expected the serve-guard warning on stderr, got: {stderr}"
+    );
+
+    drop(serve_lock);
+}

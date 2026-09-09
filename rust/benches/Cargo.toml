@@ -110,6 +110,17 @@ harness = false
 name = "verify_fanout"
 harness = false
 
+# Intra-file chunk-hashing fan-out for a single large file's `add`
+# (`worktree::store_large_file_streaming_with`'s `hash_chunks` batch
+# callback, wired to rayon by `mkit-cli`'s `commands::add::hash_pending`)
+# — same sequential-vs-rayon crossover shape as the other fan-outs
+# above, but across chunks of one file rather than across files, so it
+# helps a worktree with a single huge file (no other file to fan out
+# across). No feature gate: worktree chunking is always compiled.
+[[bench]]
+name = "chunk_hash_fanout"
+harness = false
+
 # Push planning's per-candidate delta encoding
 # (`transfer::encode_delta_candidate`, fanned out via `mkit-cli`'s
 # `remote_dispatch::encode_delta_candidates_batch`) — per-candidate

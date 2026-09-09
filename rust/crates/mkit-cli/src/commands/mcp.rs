@@ -48,11 +48,36 @@ struct McpOpts {
     /// Serve over streamable HTTP at this address (e.g. 127.0.0.1:8899)
     /// instead of stdio. Requires `--features mcp-v2`: rmcp's stdio
     /// transport is what the default build speaks, and HTTP needs a real
-    /// listener besides. Binds to localhost-family addresses only by
-    /// default (rmcp's own DNS-rebinding guard — see `mcp_v2.rs`).
+    /// listener besides. `addr` is bound exactly as given — nothing here
+    /// restricts it to loopback — so pass a loopback address unless the
+    /// tool surface (which includes mutating tools like `mkit_checkout`)
+    /// is meant to be reachable from elsewhere.
+    ///
+    /// FAIL-CLOSED, mirroring `mkit serve --http`: refuses to bind unless
+    /// either a bearer token is configured (`--http-token` or the
+    /// `MKIT_MCP_TOKEN` env var) or `--unsafe-allow-any-http-peer` is
+    /// passed. See `mcp_v2.rs`.
     #[cfg(feature = "mcp-v2")]
     #[arg(long, value_name = "ADDR")]
     http: Option<String>,
+    /// Bearer token required on every request's `Authorization: Bearer
+    /// <token>` header when `--http` is used. Falls back to the
+    /// `MKIT_MCP_TOKEN` environment variable when omitted. CLI-only/
+    /// env-only — never read from repo-local `.mkit/config`, matching
+    /// `mkit serve --http`'s `--http-token` sourcing. A dedicated env var
+    /// (not `serve --http`'s `MKIT_API_TOKEN`) since the two surfaces
+    /// have different threat models — this one is a high-privilege,
+    /// agent-facing tool catalog, not a Git transport.
+    #[cfg(feature = "mcp-v2")]
+    #[arg(long, value_name = "TOKEN")]
+    http_token: Option<String>,
+    /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
+    /// check (fail-open). Prints a loud warning. Intended only for local
+    /// development — NEVER for production, since every tool call
+    /// (including mutating ones like `mkit_checkout`) is unauthenticated.
+    #[cfg(feature = "mcp-v2")]
+    #[arg(long, default_value_t = false)]
+    unsafe_allow_any_http_peer: bool,
 }
 
 /// Entry point for `mkit mcp`.
@@ -85,7 +110,12 @@ pub fn run(args: &[String]) -> u8 {
 /// path confinement, and injection defenses below are shared unconditionally.
 #[cfg(feature = "mcp-v2")]
 fn dispatch(allowed: Option<&Path>, opts: &McpOpts) -> u8 {
-    super::mcp_v2::serve(allowed, opts.http.as_deref())
+    super::mcp_v2::serve(
+        allowed,
+        opts.http.as_deref(),
+        opts.http_token.as_deref(),
+        opts.unsafe_allow_any_http_peer,
+    )
 }
 
 #[cfg(not(feature = "mcp-v2"))]

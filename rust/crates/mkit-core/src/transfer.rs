@@ -559,12 +559,17 @@ pub struct DeltaCandidate {
 /// delta stream would not actually shrink the payload — [`plan_pack`] and
 /// [`plan_pack_with`] both fall back to sending `target` raw in that case.
 ///
-/// Reads `target`'s bytes (`base`'s are read inside this module's private
-/// delta-vs-raw comparison helper) and
-/// runs [`delta::encode`]'s block-hash-table build plus greedy scan —
-/// both CPU-bound and independent of every other candidate, which is why
-/// this is exposed as its own function: it's the unit [`plan_pack_with`]
-/// callers fan out per candidate rather than per whole batch.
+/// Reads both `target`'s and `base`'s bytes and runs [`delta::encode`]'s
+/// block-hash-table build plus greedy scan — both CPU-bound and
+/// independent of every other candidate, which is why this is exposed as
+/// its own function: it's the unit [`plan_pack_with`] callers fan out per
+/// candidate rather than per whole batch.
+///
+/// Multiple candidates commonly share the same `base` (e.g. several
+/// chunks of one file all diffed against the same prior chunk) — each
+/// call here re-reads it independently. [`encode_delta_candidate_with_base`]
+/// is the same unit for a caller that has already deduplicated those
+/// reads across a batch.
 ///
 /// # Errors
 ///
@@ -573,8 +578,41 @@ pub fn encode_delta_candidate(
     store: &ObjectStore,
     candidate: DeltaCandidate,
 ) -> Result<Option<PlannedDelta>, StoreError> {
-    let bytes = store.read(&candidate.target)?;
-    try_delta(store, candidate.target, candidate.base, &bytes)
+    let target_bytes = store.read(&candidate.target)?;
+    let base_bytes = store.read(&candidate.base)?;
+    Ok(try_delta(
+        candidate.target,
+        candidate.base,
+        &target_bytes,
+        &base_bytes,
+    ))
+}
+
+/// [`encode_delta_candidate`], but for a caller that has already read
+/// `candidate.base`'s bytes — e.g. `mkit-cli`'s rayon fan-out, which
+/// reads each *distinct* base in `plan_pack_with`'s candidate batch once
+/// up front (a `HashMap<Hash, Vec<u8>>` keyed by base hash) instead of
+/// leaving `N` candidates sharing a base to each independently
+/// `store.read` it — redundant I/O that a parallel fan-out turns into
+/// concurrent redundant I/O and concurrent redundant in-memory copies of
+/// the same bytes, not just serialized-and-short-lived like the
+/// sequential default pays.
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] from reading `target`'s bytes.
+pub fn encode_delta_candidate_with_base(
+    store: &ObjectStore,
+    candidate: DeltaCandidate,
+    base_bytes: &[u8],
+) -> Result<Option<PlannedDelta>, StoreError> {
+    let target_bytes = store.read(&candidate.target)?;
+    Ok(try_delta(
+        candidate.target,
+        candidate.base,
+        &target_bytes,
+        base_bytes,
+    ))
 }
 
 /// A blob's slot in [`plan_pack_with`]'s final (BLAKE3-ordered)
@@ -600,7 +638,7 @@ enum BlobSlot {
 ///
 /// `encode_deltas` receives every delta candidate for this plan in one
 /// batch, in the order they were discovered (BLAKE3/send-set order), and
-/// MUST return exactly one `Result` per input candidate, in the same
+/// MUST return exactly one `Option<PlannedDelta>` per input candidate, in the same
 /// order — a `None` for a given candidate falls back to sending that
 /// blob raw, matching [`encode_delta_candidate`]'s own "smaller or raw"
 /// rule.
@@ -608,13 +646,12 @@ enum BlobSlot {
 /// # Errors
 ///
 /// Propagates [`StoreError`] from the local closure walk or from
-/// `encode_deltas`.
-///
-/// # Panics
-///
-/// Panics if `encode_deltas` returns a `Vec` of a different length than
-/// the candidate slice it was given — a contract violation by the
-/// caller, not a normal runtime condition.
+/// `encode_deltas`. Also returns [`StoreError::DeltaBatchLengthMismatch`]
+/// if `encode_deltas` returns a `Vec` of a different length than the
+/// candidate slice it was given — a contract violation by the caller, not
+/// a normal runtime condition, but reported as a typed error rather than
+/// a panic since a push is a network-facing operation where a clean error
+/// is a better failure mode than crashing the process.
 pub fn plan_pack_with(
     store: &ObjectStore,
     new_tip: Hash,
@@ -678,11 +715,12 @@ pub fn plan_pack_with(
     }
 
     let mut delta_results = encode_deltas(store, &candidates)?;
-    assert_eq!(
-        delta_results.len(),
-        candidates.len(),
-        "encode_deltas must return exactly one result per candidate"
-    );
+    if delta_results.len() != candidates.len() {
+        return Err(StoreError::DeltaBatchLengthMismatch {
+            expected: candidates.len(),
+            actual: delta_results.len(),
+        });
+    }
 
     let mut blob_raw = Vec::with_capacity(blob_slots.len());
     let mut deltas = Vec::with_capacity(candidates.len());
@@ -711,26 +749,30 @@ pub fn plan_pack_with(
 /// frame (SPEC-PACKFILE §2) is identical for raw and delta, so only the
 /// payloads differ: a delta payload is `base_hash (HASH_LEN) + stream`
 /// (SPEC-PACKFILE §3.2) versus the raw object bytes. Compare those.
+///
+/// Takes `base_bytes` already read — both callers ([`encode_delta_candidate`]
+/// and [`encode_delta_candidate_with_base`]) read `base` themselves,
+/// from different sourcing strategies, so this pure comparison step
+/// doesn't need to know which.
 fn try_delta(
-    store: &ObjectStore,
     target: Hash,
     base: Hash,
     target_bytes: &[u8],
-) -> Result<Option<PlannedDelta>, StoreError> {
-    let base_bytes = store.read(&base)?;
-    let Ok(stream) = delta::encode(&base_bytes, target_bytes) else {
+    base_bytes: &[u8],
+) -> Option<PlannedDelta> {
+    let Ok(stream) = delta::encode(base_bytes, target_bytes) else {
         // Over-u32 inputs can't happen here (object cap < 4 GiB), but treat
         // any encode failure as "send raw" rather than propagating.
-        return Ok(None);
+        return None;
     };
     if hash::HASH_LEN + stream.len() < target_bytes.len() {
-        Ok(Some(PlannedDelta {
+        Some(PlannedDelta {
             target,
             base,
             stream,
-        }))
+        })
     } else {
-        Ok(None)
+        None
     }
 }
 
@@ -1307,6 +1349,61 @@ mod tests {
         );
 
         assert_pack_reconstructs(&s, &plan, c1, c2);
+    }
+
+    #[test]
+    fn plan_pack_with_reports_a_typed_error_when_encode_deltas_miscounts() {
+        // Same fixture as `small_blob_edit_is_delta_paired_against_same_path_prior_version`
+        // — one delta candidate — but with a broken `encode_deltas` that
+        // drops it instead of returning one result per candidate. Pins
+        // `plan_pack_with`'s length-check contract: a caller bug here must
+        // surface as `StoreError::DeltaBatchLengthMismatch`, not a panic.
+        let (_d, s) = store();
+        let mut v1 = Vec::new();
+        for i in 0..40 {
+            v1.extend_from_slice(format!("unchanged line number {i:02}\n").as_bytes());
+        }
+        let mut v2 = v1.clone();
+        let needle = b"unchanged line number 20\n".to_vec();
+        let pos = v2
+            .windows(needle.len())
+            .position(|w| w == needle.as_slice())
+            .unwrap();
+        v2.splice(
+            pos..pos + needle.len(),
+            b"THIS LINE WAS EDITED\n".iter().copied(),
+        );
+        let blob1 = put_blob(&s, v1);
+        let blob2 = put_blob(&s, v2);
+        let c1 = commit_with_named_file(&s, b"small.txt", blob1, vec![], "v1");
+        let c2 = commit_with_named_file(&s, b"small.txt", blob2, vec![c1], "v2");
+
+        let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
+        assert_eq!(
+            bases.get(&blob2),
+            Some(&blob1),
+            "sanity: expects a delta candidate"
+        );
+
+        let err = plan_pack_with(&s, c2, Some(c1), |_store, candidates| {
+            assert_eq!(
+                candidates.len(),
+                1,
+                "sanity: exactly one candidate expected"
+            );
+            Ok(Vec::new()) // drops the one candidate's result — the bug under test
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StoreError::DeltaBatchLengthMismatch {
+                    expected: 1,
+                    actual: 0
+                }
+            ),
+            "expected DeltaBatchLengthMismatch, got {err:?}"
+        );
     }
 
     #[test]

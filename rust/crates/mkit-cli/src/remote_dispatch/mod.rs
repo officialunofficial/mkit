@@ -1005,16 +1005,9 @@ fn prepare_raw_batch(
     store: &ObjectStore,
     chunk: &[Hash],
 ) -> Result<Vec<PreparedRaw>, DispatchError> {
-    if chunk.len() < pack_fanout_threshold() {
-        return chunk
-            .iter()
-            .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
-            .collect();
-    }
-    chunk
-        .par_iter()
-        .map(|h| Ok(PackWriter::prepare_raw(*h, store.read(h)?)))
-        .collect()
+    crate::fanout::try_map_seq_or_par(chunk, pack_fanout_threshold(), |h| {
+        Ok(PackWriter::prepare_raw(*h, store.read(h)?))
+    })
 }
 
 /// The delta-entry counterpart of [`prepare_raw_batch`]. Delta streams
@@ -1075,28 +1068,74 @@ fn delta_plan_fanout_threshold() -> usize {
 /// [`transfer::plan_pack_with`]'s `encode_deltas` callback: diffs every
 /// delta candidate `plan_pack_with` found — sequentially below
 /// [`delta_plan_fanout_threshold`], via rayon's global thread pool at or
-/// above it. Each candidate's `store.read` + `delta::encode` is
-/// independent of every other candidate's (same shape as
-/// `prepare_raw_batch`'s per-object compression fan-out), so a push
-/// touching many changed blobs parallelizes the diffing itself, not just
-/// the downstream zstd pass `prepare_delta_batch` already fans out.
+/// above it. Each candidate's `delta::encode` is independent of every
+/// other candidate's (same shape as `prepare_raw_batch`'s per-object
+/// compression fan-out), so a push touching many changed blobs
+/// parallelizes the diffing itself, not just the downstream zstd pass
+/// `prepare_delta_batch` already fans out.
 ///
-/// Order matches `candidates` 1:1 either way, satisfying
-/// `plan_pack_with`'s contract.
+/// Processes at most [`DELTA_CANDIDATE_BATCH_CAP`] candidates at a time.
+/// Repeated bases share a cache capped at [`DELTA_BASE_CACHE_BYTES`];
+/// one-use bases and bases that do not fit are read by each encoder as
+/// before. Metadata checks avoid reading nonfitting bases twice. The
+/// cache is dropped before the next batch. Active encoders' target/base
+/// buffers and the accumulated encoded output are additional allocations;
+/// imported blobs can reach the store's 1 GiB object limit.
+///
+/// Order matches `candidates` 1:1, including across batch boundaries,
+/// satisfying `plan_pack_with`'s contract.
 fn encode_delta_candidates_batch(
     store: &ObjectStore,
     candidates: &[transfer::DeltaCandidate],
 ) -> Result<Vec<Option<transfer::PlannedDelta>>, StoreError> {
-    if candidates.len() < delta_plan_fanout_threshold() {
-        return candidates
-            .iter()
-            .map(|&c| transfer::encode_delta_candidate(store, c))
-            .collect();
+    let mut results = Vec::with_capacity(candidates.len());
+    for batch in candidates.chunks(DELTA_CANDIDATE_BATCH_CAP) {
+        let base_bytes = cache_delta_bases(store, batch, DELTA_BASE_CACHE_BYTES)?;
+        results.extend(crate::fanout::try_map_seq_or_par(
+            batch,
+            delta_plan_fanout_threshold(),
+            |&c| match base_bytes.get(&c.base) {
+                Some(bytes) => transfer::encode_delta_candidate_with_base(store, c, bytes),
+                None => transfer::encode_delta_candidate(store, c),
+            },
+        )?);
     }
-    candidates
-        .par_iter()
-        .map(|&c| transfer::encode_delta_candidate(store, c))
-        .collect()
+    Ok(results)
+}
+
+/// Maximum number of candidates whose base objects are cached together.
+const DELTA_CANDIDATE_BATCH_CAP: usize = 64;
+
+/// Maximum retained payload bytes for reused bases, independent of blob sizes.
+const DELTA_BASE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn cache_delta_bases(
+    store: &ObjectStore,
+    candidates: &[transfer::DeltaCandidate],
+    byte_budget: usize,
+) -> Result<std::collections::HashMap<Hash, Vec<u8>>, StoreError> {
+    let mut counts = std::collections::BTreeMap::<Hash, usize>::new();
+    for candidate in candidates {
+        *counts.entry(candidate.base).or_default() += 1;
+    }
+    let mut cache = std::collections::HashMap::new();
+    let mut remaining = byte_budget;
+    for (base, count) in counts {
+        if count < 2 || remaining == 0 {
+            continue;
+        }
+        if store.object_metadata(&base)?.len() > remaining as u64 {
+            continue;
+        }
+        let bytes = store.read(&base)?;
+        // Recheck after reading: metadata is only an optimization, never
+        // authority for the retained byte bound if a file changes meanwhile.
+        if bytes.len() <= remaining {
+            remaining -= bytes.len();
+            cache.insert(base, bytes);
+        }
+    }
+    Ok(cache)
 }
 
 /// Would pushing an entry of (conservative, uncompressed) size
@@ -1193,6 +1232,7 @@ pub fn pull_all_with(
         layout.worktree_state_dir(),
         crate::commands::WORKTREE_LOCK,
     )?;
+    crate::commands::warn_if_served(&layout);
     let original_head = refs::read_head(&layout).ok();
     let (branch, local_tip, remote_tip) = match &original_head {
         Some(Head::Branch(head_branch)) => {
@@ -1453,6 +1493,7 @@ fn fetch_objects_inner(
                 layout.worktree_state_dir(),
                 crate::commands::WORKTREE_LOCK,
             )?;
+            crate::commands::warn_if_served(layout);
             // The tip we publish: normally the listed `h`, but if the chain fails
             // because a concurrent re-baseline moved the branch under us, the
             // freshly re-read tip (see this fn's doc comment). The match also
@@ -1498,6 +1539,7 @@ fn fetch_objects_inner(
                         layout.worktree_state_dir(),
                         crate::commands::WORKTREE_LOCK,
                     )?;
+                    crate::commands::warn_if_served(layout);
                     apply_fetched_chain(
                         store,
                         tx,
@@ -1755,7 +1797,11 @@ mod tests {
     #[test]
     fn encode_delta_candidates_batch_preserves_order_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::delta_plan_fanout_threshold()] {
+        for &n in &[
+            1usize,
+            super::delta_plan_fanout_threshold(),
+            super::DELTA_CANDIDATE_BATCH_CAP * 2 + 1,
+        ] {
             // Each candidate's base/target pair is a small, localized edit
             // of distinct-per-index content — a real delta candidate (the
             // encoded stream is smaller than the raw target), and distinct
@@ -1808,7 +1854,11 @@ mod tests {
     #[test]
     fn encode_delta_candidates_batch_propagates_a_missing_object_error_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::delta_plan_fanout_threshold()] {
+        for &n in &[
+            1usize,
+            super::delta_plan_fanout_threshold(),
+            super::DELTA_CANDIDATE_BATCH_CAP * 2 + 1,
+        ] {
             let mut candidates: Vec<transfer::DeltaCandidate> = (0..n.saturating_sub(1))
                 .map(|i| {
                     let base = store
@@ -1836,6 +1886,61 @@ mod tests {
                 mkit_core::store::StoreError::ObjectNotFound(_)
             ));
         }
+    }
+
+    #[test]
+    fn delta_base_cache_respects_bytes_and_skips_single_use_bases() {
+        let (_dir, store) = store();
+        let mut candidates = Vec::new();
+        for (value, size, uses) in [
+            (b'a', 128usize, 2usize),
+            (b'b', 128, 2),
+            (b'c', 1024, 2),
+            (b'd', 64, 1),
+        ] {
+            let base_bytes = vec![value; size];
+            let base = store.write(&base_bytes).unwrap();
+            let mut target_bytes = base_bytes;
+            target_bytes.extend_from_slice(b"edited");
+            let target = store.write(&target_bytes).unwrap();
+            candidates.extend(std::iter::repeat_n(
+                transfer::DeltaCandidate { target, base },
+                uses,
+            ));
+        }
+        // Only one of the two repeated 128-byte bases fits. The 1 KiB
+        // base exceeds the budget and the 64-byte base is used only once.
+        let cache = super::cache_delta_bases(&store, &candidates, 192).unwrap();
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+    }
+
+    #[test]
+    fn delta_base_cache_does_not_read_past_a_failed_batch() {
+        let (_dir, store) = store();
+        let base = store.write(b"present base").unwrap();
+        let missing_target = mkit_core::hash::hash(b"missing first-batch target");
+        let mut candidates = vec![
+            transfer::DeltaCandidate {
+                target: missing_target,
+                base,
+            };
+            super::DELTA_CANDIDATE_BATCH_CAP
+        ];
+        // If all bases are prefetched for the whole push, this missing base
+        // fails first. Bounded processing must encounter the first batch's
+        // missing target before it even tries to read the later base.
+        candidates.extend(
+            [transfer::DeltaCandidate {
+                target: missing_target,
+                base: mkit_core::hash::hash(b"missing later-batch base"),
+            }; 2],
+        );
+        let err = super::encode_delta_candidates_batch(&store, &candidates).unwrap_err();
+        assert!(matches!(
+            err,
+            mkit_core::store::StoreError::ObjectNotFound(h) if h == mkit_core::hash::to_hex(&missing_target)
+        ));
     }
 
     /// The three `ssh.*` trust-pinning keys, when set in `Config`, must
