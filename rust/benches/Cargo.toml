@@ -120,6 +120,15 @@ harness = false
 name = "delta_plan_fanout"
 harness = false
 
+# delta::encode's byte-by-byte miss-scan cost across a similarity
+# spectrum (near-duplicate through fully-random no-match content) —
+# isolates the per-byte block_hash recompute delta_plan_fanout.rs's
+# near-duplicate-only fixture doesn't stress. No feature gate: delta
+# encoding is always compiled.
+[[bench]]
+name = "delta_encode_scan"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is

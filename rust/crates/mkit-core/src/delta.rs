@@ -162,11 +162,18 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
 
     let mut insert_buf: Vec<u8> = Vec::with_capacity(MAX_INSERT_LEN);
     let mut ti = 0usize;
+    // Rolling hash of `result[ti..ti + BLOCK_SIZE]`, `None` when it needs a
+    // fresh (non-incremental) `block_hash` — after a COPY jumps `ti`
+    // forward, or once fewer than `BLOCK_SIZE` bytes remain. Kept `Some`
+    // across consecutive miss steps so each one-byte advance rolls the
+    // hash in O(1) instead of recomputing it from scratch (see
+    // `roll_forward`'s doc comment for why this is safe).
+    let mut window_hash: Option<u64> = None;
     while ti < result.len() {
         let mut matched = false;
         if ti + BLOCK_SIZE <= result.len() {
             let target_block = &result[ti..ti + BLOCK_SIZE];
-            let h = block_hash(target_block);
+            let h = *window_hash.get_or_insert_with(|| block_hash(target_block));
             if let Some(&base_pos) = index.get(&h) {
                 let base_pos_usize = base_pos as usize;
                 if &base[base_pos_usize..base_pos_usize + BLOCK_SIZE] == target_block {
@@ -188,12 +195,27 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
                         u16::try_from(match_len).expect("<= u16::MAX"),
                     );
                     ti += match_len;
+                    // The window jumped past wherever it was rolled to —
+                    // recompute from scratch next time it's needed.
+                    window_hash = None;
                     matched = true;
                 }
             }
+        } else {
+            window_hash = None;
         }
         if !matched {
             insert_buf.push(result[ti]);
+            // Roll the window forward by the one byte we just consumed,
+            // as long as a full window still fits ahead of the new `ti`
+            // and we had a hash to roll (the branch above already
+            // reset `window_hash` after a COPY's byte-comparison
+            // extension, so this only fires for a genuine byte-by-byte
+            // miss scan).
+            window_hash = window_hash.and_then(|h| {
+                (ti + BLOCK_SIZE < result.len())
+                    .then(|| roll_forward(h, result[ti], result[ti + BLOCK_SIZE]))
+            });
             ti += 1;
             if insert_buf.len() == MAX_INSERT_LEN {
                 flush_insert(&mut out, &mut insert_buf);
@@ -374,14 +396,73 @@ fn flush_insert(out: &mut Vec<u8>, buf: &mut Vec<u8>) {
     buf.clear();
 }
 
+/// Odd multiplier for `block_hash`'s polynomial hash. Oddness is what
+/// makes it a unit of the ring `Z/2^64Z` (every odd `u64` is invertible
+/// mod `2^64`), which is what lets [`roll_forward`] undo one step's
+/// multiplication to slide the window — see its doc comment. `encode`
+/// only ever trusts a `block_hash` hit after re-checking the actual
+/// bytes (`base[..] == target_block`), so the multiplier's only real job
+/// is spreading distinct blocks across buckets well; this is the
+/// fractional part of the golden ratio scaled to 64 bits, a standard
+/// avalanche-friendly constant (as used in e.g. Fibonacci hashing).
+const ROLL_M: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// `ROLL_M` raised to `BLOCK_SIZE`, precomputed at compile time. This is
+/// the coefficient [`roll_forward`] needs to cancel out a window's
+/// outgoing byte (see its derivation there).
+const ROLL_M_POW_BLOCK: u64 = {
+    let mut r: u64 = 1;
+    let mut i = 0;
+    while i < BLOCK_SIZE {
+        r = r.wrapping_mul(ROLL_M);
+        i += 1;
+    }
+    r
+};
+
+/// Polynomial hash of a `BLOCK_SIZE`-byte window: `block[0] *
+/// ROLL_M^(BLOCK_SIZE-1) + block[1] * ROLL_M^(BLOCK_SIZE-2) + ... +
+/// block[BLOCK_SIZE-1] * ROLL_M^0`, wrapping in `u64`. `encode` calls
+/// this directly (O(`BLOCK_SIZE`)) once per non-overlapping block while
+/// building the base index, and once per COPY match/resync while
+/// scanning `result` — everywhere else in that scan, [`roll_forward`]
+/// slides an already-computed hash forward in O(1) instead.
 fn block_hash(block: &[u8]) -> u64 {
-    // FNV-1a 64-bit.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h: u64 = 0;
     for &b in block {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0001_0000_01b3);
+        h = h.wrapping_mul(ROLL_M).wrapping_add(u64::from(b));
     }
     h
+}
+
+/// Slide a `block_hash` window forward by one byte: given the hash of
+/// `result[ti..ti+BLOCK_SIZE]`, `old = result[ti]` (leaving the window)
+/// and `new = result[ti+BLOCK_SIZE]` (entering it), returns the hash of
+/// `result[ti+1..ti+1+BLOCK_SIZE]` — without rescanning the other
+/// `BLOCK_SIZE-1` bytes. This is what turns `encode`'s byte-by-byte miss
+/// scan from O(n * `BLOCK_SIZE`) into O(n): a plain rescan recomputes the
+/// full window on every failed match, but a full window's hash only
+/// needs to change by the one byte that left and the one that arrived.
+///
+/// Derivation: writing `h = Σ block[i] * ROLL_M^(BLOCK_SIZE-1-i)`,
+/// multiplying by `ROLL_M` shifts every term's exponent up by one and
+/// introduces `old`'s contribution at the new top exponent
+/// (`ROLL_M^BLOCK_SIZE`, i.e. `ROLL_M_POW_BLOCK`) while leaving a
+/// dangling zero-exponent slot for `new`:
+///
+/// ```text
+/// h * ROLL_M = old * ROLL_M_POW_BLOCK + Σ_{i=1..BLOCK_SIZE-1} block[i] * ROLL_M^(BLOCK_SIZE-i)
+/// h'         =                          Σ_{i=1..BLOCK_SIZE-1} block[i] * ROLL_M^(BLOCK_SIZE-i)  + new
+///           = h * ROLL_M - old * ROLL_M_POW_BLOCK + new
+/// ```
+///
+/// All arithmetic wraps, matching `block_hash`; `ROLL_M`'s oddness (see
+/// its doc comment) is what makes this subtraction exactly cancel
+/// `old`'s contribution rather than leaving a residue.
+fn roll_forward(h: u64, old: u8, new: u8) -> u64 {
+    h.wrapping_mul(ROLL_M)
+        .wrapping_sub(u64::from(old).wrapping_mul(ROLL_M_POW_BLOCK))
+        .wrapping_add(u64::from(new))
 }
 
 // =========================================================================
@@ -406,6 +487,30 @@ mod tests {
         let stream = encode(&data, &data).unwrap();
         let restored = decode(&data, &stream).unwrap();
         assert_eq!(restored, data);
+    }
+
+    /// `roll_forward` must agree with a fresh `block_hash` of the slid
+    /// window at every step, for every starting offset — this is the
+    /// correctness property `encode`'s miss-scan optimization depends
+    /// on. Covers pseudo-random bytes (no accidental periodicity that
+    /// could mask a rolling-hash bug) sliding across a buffer several
+    /// times `BLOCK_SIZE` long.
+    #[test]
+    fn roll_forward_matches_direct_block_hash() {
+        let data: Vec<u8> = (0..256u32)
+            .map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[0])
+            .collect();
+        assert!(data.len() > BLOCK_SIZE * 4);
+
+        let mut h = block_hash(&data[0..BLOCK_SIZE]);
+        for start in 0..data.len() - BLOCK_SIZE - 1 {
+            let direct = block_hash(&data[start + 1..start + 1 + BLOCK_SIZE]);
+            h = roll_forward(h, data[start], data[start + BLOCK_SIZE]);
+            assert_eq!(
+                h, direct,
+                "rolled hash diverged from direct block_hash at start={start}"
+            );
+        }
     }
 
     #[test]
@@ -691,5 +796,44 @@ mod tests {
         assert!(check_length_bounds(u32::MAX as usize, u32::MAX as usize).is_ok());
         // Small is fine.
         assert!(check_length_bounds(1, 1).is_ok());
+    }
+
+    // `encode`'s miss-scan now rolls its window hash forward instead of
+    // recomputing it from scratch (see `roll_forward`) — a change that
+    // only ever *should* affect performance, never which bytes come out
+    // the other end of `decode`. Property-test the round trip across
+    // arbitrary `(base, result)` pairs, including base/result lengths
+    // that straddle `BLOCK_SIZE`'s alignment, to catch any off-by-one
+    // in the rolled window's bookkeeping that the hand-picked examples
+    // above might miss.
+    proptest::proptest! {
+        #[test]
+        fn proptest_encode_decode_roundtrip(
+            base in proptest::collection::vec(proptest::num::u8::ANY, 0..4096),
+            result in proptest::collection::vec(proptest::num::u8::ANY, 0..4096),
+        ) {
+            let stream = encode(&base, &result).unwrap();
+            let restored = decode(&base, &stream).unwrap();
+            proptest::prop_assert_eq!(restored, result);
+        }
+
+        /// A `result` that is a near-duplicate of `base` (base plus one
+        /// small edit) is the realistic push-diff shape and the one most
+        /// likely to exercise a rolled-vs-fresh hash mismatch at a COPY
+        /// match's resync boundary.
+        #[test]
+        fn proptest_encode_decode_roundtrip_near_duplicate(
+            base in proptest::collection::vec(proptest::num::u8::ANY, 1..4096),
+            edit_pos_permille in 0u64..1000,
+            patch in proptest::collection::vec(proptest::num::u8::ANY, 0..64),
+        ) {
+            let mut result = base.clone();
+            let edit_pos = (base.len() as u64 * edit_pos_permille / 1000) as usize;
+            result.splice(edit_pos..edit_pos, patch);
+
+            let stream = encode(&base, &result).unwrap();
+            let restored = decode(&base, &stream).unwrap();
+            proptest::prop_assert_eq!(restored, result);
+        }
     }
 }
