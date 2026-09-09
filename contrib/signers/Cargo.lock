@@ -686,9 +686,9 @@ dependencies = [
 
 [[package]]
 name = "ctap-hid-fido2"
-version = "3.5.13"
+version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d681c4d37be26821f2f1c67a843410605072c84cedb9c1b40f90605f554779"
+checksum = "73e2cee48715b2a8fae3739aeb8433817051a6772562ba67f9b631fc833eb793"
 dependencies = [
  "aes",
  "anyhow",
