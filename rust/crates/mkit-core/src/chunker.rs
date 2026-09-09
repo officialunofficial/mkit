@@ -210,13 +210,20 @@ impl Iterator for ChunkIterator<'_> {
 /// instead of requiring the whole input as an in-memory slice.
 ///
 /// [`FastCdc::cut`] only ever looks at most `max_size` bytes ahead of the
-/// current chunk's start (see its doc comment), so this reader keeps at
-/// most one `max_size`-sized window resident at a time — memory use is
-/// bounded by the chunker's `max_size` parameter, independent of the
-/// total input length. It produces byte-identical chunk boundaries and
-/// content to [`ChunkIterator`] run over the same bytes, since both call
-/// the same [`FastCdc::cut`] on the same window (pinned by the
-/// `streaming_matches_in_memory_*` tests below).
+/// current chunk's start (see its doc comment), so a *correct* reader
+/// only strictly needs one `max_size`-sized window resident — but memory
+/// use is bounded, independent of the total input length, either way.
+/// This reader keeps `WINDOW_MULTIPLE * max_size` resident instead of the
+/// bare minimum: buffering further ahead means `fill`'s `read` calls can
+/// pull in more than `max_size` bytes at once when the source allows it
+/// (a `File` or `Cursor` read is not obligated to stop at `max_size`),
+/// amortizing the compaction below across several `max_size` windows
+/// instead of paying it once per chunk. It produces byte-identical chunk
+/// boundaries and content to [`ChunkIterator`] run over the same bytes
+/// regardless of how far ahead it buffers, since [`FastCdc::cut`] itself
+/// clamps its scan to `max_size` no matter how much of the slice handed
+/// to it is valid (pinned by the `streaming_matches_in_memory_*` tests
+/// below).
 ///
 /// The window lives in one `WINDOW_MULTIPLE * max_size` buffer allocated
 /// once at construction. `[start, end)` marks the currently valid bytes;
@@ -226,6 +233,17 @@ impl Iterator for ChunkIterator<'_> {
 /// unused tail instead of through a separate scratch buffer, so a chunk
 /// costs at most one compacting `copy_within` amortized over several
 /// `max_size` windows rather than two copies per chunk.
+///
+/// `WINDOW_MULTIPLE`'s only correctness requirement is `>= 2` (`fill`'s
+/// compaction condition needs at least one full `max_size` of spare tail
+/// room to guarantee progress without compacting on every read); `4` was
+/// chosen so compaction amortizes over 3 windows' worth of consumption
+/// (`(WINDOW_MULTIPLE - 1) * max_size`) — see the `chunker_streaming`
+/// bench for the throughput this buys. For `FastCdc::v1()` this makes the
+/// buffer exactly 1 MiB, the same number as (but not derived from, and
+/// not required to track) `worktree::CHUNK_THRESHOLD` — that constant is
+/// an unrelated policy choice (which files stream through this reader at
+/// all), not a bound this reader depends on.
 const WINDOW_MULTIPLE: usize = 4;
 
 #[derive(Debug)]
@@ -261,6 +279,7 @@ impl<R: std::io::Read> ChunkReader<R> {
     /// requested length without signalling EOF, so this loops until either
     /// the target is met or a `0`-byte read confirms EOF.
     fn fill(&mut self) -> std::io::Result<()> {
+        debug_assert!(self.start <= self.end && self.end <= self.buf.len());
         let target = self.cdc.max_size();
         while !self.eof && self.end - self.start < target {
             if self.buf.len() - self.end < target {
@@ -275,6 +294,7 @@ impl<R: std::io::Read> ChunkReader<R> {
                 self.end += n;
             }
         }
+        debug_assert!(self.start <= self.end && self.end <= self.buf.len());
         Ok(())
     }
 
@@ -291,6 +311,7 @@ impl<R: std::io::Read> ChunkReader<R> {
             return Ok(None);
         }
         let length = self.cdc.cut(&self.buf[self.start..self.end]);
+        debug_assert!(length <= self.end - self.start);
         let chunk_start = self.start;
         self.start += length;
         Ok(Some(&self.buf[chunk_start..chunk_start + length]))
@@ -522,6 +543,53 @@ mod tests {
         }
 
         assert_eq!(in_memory, streamed);
+    }
+
+    #[test]
+    fn streaming_matches_in_memory_iterator_across_multiple_compactions() {
+        // `streaming_matches_in_memory_iterator` above only pushes 500 KiB
+        // through the reader — under the `WINDOW_MULTIPLE * MAX_SIZE`
+        // (1 MiB) window, so `fill`'s `copy_within` compaction path never
+        // actually runs there. Push several MiB through instead, so `fill`
+        // is forced to compact more than once, and check *content*
+        // (both the owned `next_chunk` and the borrowed `next_chunk_ref`
+        // paths) against `ChunkIterator`, not just that the window stays
+        // bounded (`streaming_reader_buffer_stays_bounded_...` below only
+        // checks buffer size, not chunk correctness). `Cursor` — unlike
+        // `StingyReader` below — happily satisfies a `read` request in one
+        // large memcpy, so this also exercises `fill` buffering far past
+        // `max_size` in a single read before the next `cut`.
+        let mut data = vec![0u8; 6 * 1024 * 1024];
+        Prng::new(0xC0FF_EE01).fill(&mut data);
+
+        let in_memory: Vec<Vec<u8>> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| data[b.offset..b.offset + b.length].to_vec())
+            .collect();
+        assert!(
+            in_memory.len() > 50,
+            "fixture must be large enough to force several compactions, got {} chunks",
+            in_memory.len()
+        );
+
+        let mut owned_reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
+        let mut owned = Vec::new();
+        while let Some(chunk) = owned_reader.next_chunk().unwrap() {
+            owned.push(chunk);
+        }
+        assert_eq!(
+            in_memory, owned,
+            "owned next_chunk() diverged from ChunkIterator"
+        );
+
+        let mut ref_reader = ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(&data));
+        let mut borrowed = Vec::new();
+        while let Some(chunk) = ref_reader.next_chunk_ref().unwrap() {
+            borrowed.push(chunk.to_vec());
+        }
+        assert_eq!(
+            in_memory, borrowed,
+            "borrowed next_chunk_ref() diverged from ChunkIterator"
+        );
     }
 
     #[test]
