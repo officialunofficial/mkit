@@ -465,8 +465,8 @@ fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     // Rebase abort rolls the branch tip back to `orig_head`. Route
-    // through the history-MMR-coupled helper so the rollback append
-    // is recorded under the repo lock; the MMR is append-only, so
+    // through the history-MMB-coupled helper so the rollback append
+    // is recorded under the repo lock; the MMB is append-only, so
     // "rollback" surfaces as another leaf, not a rewind.
     if let Err(e) = super::write_ref_recording_history(
         layout,

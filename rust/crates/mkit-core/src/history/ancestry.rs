@@ -17,7 +17,7 @@ const MAGIC: &[u8; 5] = b"MKHA\x01";
 pub(crate) const MAX_ANCESTRY_LEAVES: usize = 1_000_000;
 const MAX_SNAPSHOT_BYTES: u64 = (MAX_ANCESTRY_LEAVES as u64) * 32 + 8192;
 
-/// Context bound by a v1 ancestry descriptor. The MMR digest excludes context:
+/// Context bound by a v1 ancestry descriptor. The MMB digest excludes context:
 /// identical first-parent chains have identical roots across update schedules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AncestryDescriptor {
@@ -47,7 +47,7 @@ impl TrustedAncestryDescriptor {
 pub struct AncestrySnapshot {
     descriptor: AncestryDescriptor,
     chain: Vec<Hash>,
-    mmr: CommitHistory,
+    mmb: CommitHistory,
 }
 
 impl AncestrySnapshot {
@@ -105,7 +105,7 @@ impl AncestrySnapshot {
         self.descriptor.root
     }
     pub fn prove(&self, position: Position) -> Result<InclusionProof, HistoryError> {
-        self.mmr.prove(position)
+        self.mmb.prove(position)
     }
     #[must_use]
     pub fn position_of(&self, commit: &Hash) -> Option<Position> {
@@ -126,20 +126,20 @@ impl AncestrySnapshot {
                 "invalid ancestry leaf count".into(),
             ));
         }
-        let mut mmr = CommitHistory::open();
-        mmr.extend(&chain)?;
+        let mut mmb = CommitHistory::open();
+        mmb.extend(&chain)?;
         let descriptor = AncestryDescriptor {
             repository,
             full_ref,
             generation,
             tip: *chain.last().expect("nonempty chain"),
             leaf_count: chain.len() as u64,
-            root: mmr.root(),
+            root: mmb.root(),
         };
         Ok(Self {
             descriptor,
             chain,
-            mmr,
+            mmb,
         })
     }
 
@@ -180,11 +180,11 @@ impl AncestrySnapshot {
 }
 
 /// Parse a snapshot's wire bytes into its claimed descriptor and chain,
-/// without building an MMR from the chain. The payload checksum (covering
+/// without building an MMB from the chain. The payload checksum (covering
 /// the encoded `root` along with everything else) is still verified, so
 /// accidental corruption or a torn/partial write is still caught here; what
 /// this skips is [`AncestrySnapshot::decode`]'s extra step of rebuilding
-/// the whole MMR from `chain` to independently recompute `root` and check
+/// the whole MMB from `chain` to independently recompute `root` and check
 /// it against the value read from the wire.
 ///
 /// That's a real, if narrow, difference: the checksum is a plain
@@ -209,9 +209,9 @@ impl AncestrySnapshot {
 ///
 /// Used by [`read_current_chain`], which backs `advance`'s
 /// compatibility/no-op/generation-reuse checks: those only ever read
-/// `descriptor`/`chain`, never the MMR, so building one there was pure
+/// `descriptor`/`chain`, never the MMB, so building one there was pure
 /// waste — see `advance`'s call site. [`AncestrySnapshot::decode`] (via
-/// [`AncestrySnapshot::load`], which does need a working MMR for
+/// [`AncestrySnapshot::load`], which does need a working MMB for
 /// [`AncestrySnapshot::prove`]) keeps the full rebuild-and-cross-check.
 fn decode_descriptor_and_chain(
     bytes: &[u8],
@@ -378,14 +378,14 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
     Ok(Some(snapshot))
 }
 
-/// The previous publish's descriptor and chain, without its MMR — what
+/// The previous publish's descriptor and chain, without its MMB — what
 /// `advance`'s compatibility/no-op/generation-reuse checks actually read.
 struct PriorChain {
     descriptor: AncestryDescriptor,
     chain: Vec<Hash>,
 }
 
-/// Like [`read_current`], but skips building an MMR nobody reads on this
+/// Like [`read_current`], but skips building an MMB nobody reads on this
 /// path — see [`decode_descriptor_and_chain`]'s docs for exactly what's
 /// (and isn't) re-verified as a result. Used only by `advance`.
 fn read_current_chain(dir: &Path) -> Result<Option<PriorChain>, HistoryError> {
@@ -411,7 +411,7 @@ fn read_current_chain(dir: &Path) -> Result<Option<PriorChain>, HistoryError> {
 ///
 /// `prebuilt` lets a caller that just built (and validated) the matching
 /// snapshot in memory — `advance`'s own non-crash path — hand it over
-/// instead of paying a second full `first_parent_chain` walk and MMR
+/// instead of paying a second full `first_parent_chain` walk and MMB
 /// build for the identical chain here. It is only trusted when its
 /// descriptor's `repository`/`full_ref`/`generation`/`tip` exactly match `tx`;
 /// any mismatch (or `None`, as `recover` always passes — it only has a
@@ -542,7 +542,7 @@ pub(crate) fn advance(
     };
     // Validate the target before persisting intent, and keep the built
     // snapshot: `finish` below (the common, non-crash-recovery path) reuses
-    // it instead of re-walking `store` and rebuilding the MMR a second time
+    // it instead of re-walking `store` and rebuilding the MMB a second time
     // for the exact same chain. Readers withhold proofs for the entire
     // intent window. GC pins previous+target from the metadata.
     let snapshot = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;

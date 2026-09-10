@@ -22,7 +22,7 @@ Most are off by default to keep the baseline build lean:
 | `git-bridge` (alias `git-export`) | `mkit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout (issue #158). |
 | `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads (issue #159). |
-| `history-mmr` | Append-only Merkle Mountain Range ref-write journal (issue #157). |
+| `history-mmr` | Append-only Merkle Mountain Belt ref-write journal (issue #157). |
 | `bls-threshold` | BLS12-381 threshold-signing exhaustiveness (compile-time only today). |
 
 See the top-level README and `docs/CLI.md` for the full command reference

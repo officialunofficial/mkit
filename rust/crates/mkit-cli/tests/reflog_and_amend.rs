@@ -327,7 +327,7 @@ fn parents_of(line: &str) -> Vec<String> {
 
 /// On a history-mmr build, reflog prints the first-parent summary
 /// and marks every reachable entry `[ancestry verified]` (verified against the
-/// MMR root), and amend records its move in the ancestry.
+/// MMB root), and amend records its move in the ancestry.
 #[cfg(feature = "history-mmr")]
 #[test]
 fn reflog_ancestry_cross_check_marks_entries_ancestry_verified() {
@@ -346,7 +346,7 @@ fn reflog_ancestry_cross_check_marks_entries_ancestry_verified() {
         text.contains("first-parent commit(s) on 'main'"),
         "summary must name the branch:\n{text}"
     );
-    // Both reachable entries verify against the ancestry_verified MMR root.
+    // Both reachable entries verify against the ancestry_verified MMB root.
     let marked = text
         .lines()
         .filter(|l| l.contains("[ancestry verified]"))

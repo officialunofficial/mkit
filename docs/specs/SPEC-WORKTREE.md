@@ -127,7 +127,7 @@ stale entry). `worktree list` reports prunable entries; only
 ### 4.1 Sharing
 
 Linked trees share the object store and every common-dir source of
-truth: refs, config, keys, history MMR, recovery log, attestations,
+truth: refs, config, keys, history MMB, recovery log, attestations,
 transport caches. An object written from any tree is immediately
 visible to all; a ref moved from any tree moves for all.
 
@@ -137,7 +137,7 @@ A branch may be checked out in **at most one** worktree. `worktree
 add`, `checkout`/`switch` (including `-b`/`-B`), `branch -d`/`-D`, and
 `branch -m` MUST refuse (naming the holding tree) when the branch is
 checked out in another tree. Rationale: branch moves flow through the
-history-MMR ref-write path (SPEC-HISTORY-PROOF), which assumes one
+history-MMB ref-write path (SPEC-HISTORY-PROOF), which assumes one
 writer per branch. Detached HEADs are unconstrained.
 
 The guard reads sibling HEADs via the registry and MUST fail closed if

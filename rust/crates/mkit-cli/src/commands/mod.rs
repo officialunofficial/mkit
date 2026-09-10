@@ -200,7 +200,7 @@ pub(crate) fn load_tree_hash(store: &ObjectStore, commit_hash: Hash) -> Result<H
 }
 
 /// Point the current branch (or detached HEAD) at `new_head`, routing a
-/// branch advance through the history-MMR helper.
+/// branch advance through the history-MMB helper.
 ///
 /// Shared by `cherry-pick`/`revert`/`merge`. Unlike the historical
 /// per-command copies, a failure to read HEAD is propagated as an error
@@ -396,7 +396,7 @@ pub(crate) fn all_worktree_layouts(
 
 /// The tree (other than the invoking one) that has `branch` checked
 /// out, if any. Branch moves are single-writer-per-branch (the
-/// history-MMR journal assumes it), so `checkout`/`switch`/`worktree
+/// history-MMB journal assumes it), so `checkout`/`switch`/`worktree
 /// add` refuse to put one branch on two trees, and `branch -d`/`-m`
 /// refuse to pull a branch out from under a sibling tree.
 ///
@@ -639,7 +639,7 @@ pub(crate) fn index_path_descends_from(path: &str, base: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// History-MMR ref-write helper (feature: history-mmr)
+// History-MMB ref-write helper (feature: history-mmr)
 // ---------------------------------------------------------------------------
 //
 // CLI branch writes publish versioned first-parent ancestry when enabled.

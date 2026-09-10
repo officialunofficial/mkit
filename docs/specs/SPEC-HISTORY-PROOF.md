@@ -7,9 +7,12 @@ audience: implementers of first-parent ancestry proofs and local history recover
 
 # SPEC-HISTORY-PROOF — first-parent ancestry snapshots
 
-Normative for the opt-in `history-mmr` feature. Existing object IDs, commit
-signatures, and the frozen MMR hashing parameters are unchanged. v1 introduces
-an auxiliary namespace and context descriptor for verified first-parent ancestry.
+Normative for the opt-in `history-mmr` feature (the feature and directory
+names predate this document's move to a Merkle Mountain **Belt**; they are
+identifiers, not a claim about the tree shape below). Existing object IDs,
+commit signatures, and the frozen digest/bagging parameters are unchanged.
+v1 introduces an auxiliary namespace and context descriptor for verified
+first-parent ancestry.
 
 ## 1. Membership and generations
 
@@ -20,19 +23,33 @@ its first parent and the merge commit; commits reachable only through another
 parent do not belong to this sequence.
 
 Sequential updates, one multi-commit first-parent fast-forward, and backfill of
-the same tip MUST yield identical MMR roots, leaf counts, and positions.
+the same tip MUST yield identical MMB roots, leaf counts, and positions.
 A no-op write appends nothing. First-parent fast-forwards retain the generation
 and include every missing commit. Reset/other rewrites, delete/recreate, rename,
 and first ancestry publication create a fresh random 32-byte generation. A raw ref write
 that changes a tip invalidates its active snapshot, including in builds without
 `history-mmr`; writing away and back cannot revive an old generation.
 
-Generation and repository identities are outside the MMR digest. Two branch
-incarnations with the same ancestry may therefore share an MMR root; their
+Generation and repository identities are outside the MMB digest. Two branch
+incarnations with the same ancestry may therefore share an MMB root; their
 context descriptors distinguish them.
 
-The primitive is the existing `CommitHistory` in-memory MMR using the pinned
-commonware train (`rust/Cargo.toml`) and `Bagging::ForwardFold`.
+The primitive is the existing `CommitHistory` in-memory Merkle Mountain Belt
+(MMB) using the pinned commonware train (`rust/Cargo.toml`) and
+`Bagging::ForwardFold`. An MMB is an append-only forest of perfect binary
+trees, like the older Merkle Mountain Range (MMR) it replaced in this spec,
+but without the MMR's constraint that peak heights strictly decrease: an MMB
+allows up to two consecutive peaks of the same height, so appending a leaf
+merges at most one pair of peaks and creates at most one new internal node.
+An MMR append can cascade up to `O(log N)` merges (whenever a run of
+same-height peaks all collapse at once, e.g. crossing a power-of-two leaf
+count) — MMB bounds that worst case to a constant, which matters for
+`mkit commit`'s one-append-per-publish pattern. See
+`commonware-storage::merkle::mmb`'s module documentation and
+<https://arxiv.org/abs/2511.13582> for the full construction; mkit uses only
+the base MMB structure with forward-fold bagging (what that paper calls
+F-MMB), not its "Pyramid" P-MMB bagging variant, which is not yet
+implemented in the pinned commonware release.
 
 ## 2. Wire format
 
@@ -41,12 +58,12 @@ commonware train (`rust/Cargo.toml`) and `Bagging::ForwardFold`.
 All node digests are 32-byte **BLAKE3** outputs, identical in length
 and primitive to mkit's existing [`hash::Hash`](../../rust/crates/mkit-core/src/hash.rs).
 
-The MMR's hashing schedule is *not* the same as `hash::hash()`:
-commonware's `Hasher` trait injects each node's MMR position into the
+The MMB's hashing schedule is *not* the same as `hash::hash()`:
+commonware's `Hasher` trait injects each node's MMB position into the
 parent/leaf digest input (see commonware's `merkle::hasher` module).
 That domain separation is what binds a leaf digest to its position in
 the tree, and removing it would break inclusion proofs. Treat the
-MMR's internal hash schedule as opaque &mdash; consumers should only ever
+MMB's internal hash schedule as opaque &mdash; consumers should only ever
 compare 32-byte digests, never reconstruct them.
 
 ### 2.2 `InclusionProof`
@@ -55,28 +72,43 @@ compare 32-byte digests, never reconstruct them.
 
 ```rust
 pub type InclusionProof =
-    commonware_storage::merkle::mmr::Proof<commonware_cryptography::blake3::Digest>;
+    commonware_storage::merkle::mmb::Proof<commonware_cryptography::blake3::Digest>;
 ```
+
+This is `commonware_storage::merkle::proof::Proof<Family, Digest>` with
+`Family = mmb::Family` &mdash; the same generic proof type, wire shape, and
+codec the crate's MMR (`merkle::mmr::Proof`) used with `Family = mmr::Family`
+before this spec switched structures, so everything below besides the
+concrete `Family` (and therefore the peak/digest *content*, since MMB's
+forest topology differs from MMR's) is unchanged.
 
 Its public fields, normatively:
 
 | Field     | Type                | Meaning                                   |
 | --------- | ------------------- | ----------------------------------------- |
-| `leaves`  | `Location` (u64)    | Total leaf count of the MMR at proof time |
+| `leaves`  | `Location` (u64)    | Total leaf count of the MMB at proof time |
 | `digests` | `Vec<Blake3Digest>` | Authentication path, fold-prefix layout   |
 
 The `digests` layout is the **fold-based** layout documented in
 commonware-storage `merkle::proof`:
 
-1. If there are MMR peaks entirely *before* the proven range, the
+1. If there are MMB peaks entirely *before* the proven range, the
    first entry of `digests` is a single accumulator digest produced
    by left-folding those peaks with `Hash(acc || peak)`. If no such
    peaks exist (the proven leaf is in the tallest mountain), this
    entry is **absent** &mdash; the list starts directly at step 2.
 2. The digests of peaks entirely *after* the proven range, in peak
-   iteration order (descending height).
+   iteration order (oldest-to-newest, i.e. non-increasing height &mdash;
+   ties are possible on an MMB, unlike the strictly-decreasing peak
+   heights an MMR guarantees).
 3. The sibling digests required to reconstruct the proven range's
    own peak, in depth-first/forward-consumption order.
+
+One practical consequence of MMB's forest shape: the most recently
+appended leaf's proof is at most 2 digests regardless of how large the
+history grows (commonware-storage's own
+`mmb::proof::test_last_element_proof_size_is_two` pins this), versus an
+MMR proof for the newest leaf, which grows with `O(log N)`.
 
 The codec used to serialize `InclusionProof` over the wire is
 commonware-codec's `Write` / `Read` impls for `Proof`. In summary:
@@ -94,17 +126,18 @@ version.
 
 ### 2.3 Root
 
-The MMR root is a 32-byte BLAKE3 digest computed as
+The MMB root is a 32-byte BLAKE3 digest computed as
 
 ```text
 root = Blake3(leaf_count_be_u64 || fold(peak_digests))
 ```
 
 with `fold(p0, p1, …, pk) = Blake3(Blake3(… Blake3(p0 || p1) … ) || pk)`,
-peaks taken in descending-height order. For an **empty** MMR (no
-commits appended yet) the iteration is empty and the root degenerates
-to `Blake3(u64::to_be_bytes(0))`. This value is deterministic and
-well-defined; `mkit-core::history::CommitHistory::open().root()`
+peaks taken in oldest-to-newest (non-increasing height) order &mdash; the
+same fold formula an MMR root used, just over an MMB's peaks. For an
+**empty** MMB (no commits appended yet) the iteration is empty and the
+root degenerates to `Blake3(u64::to_be_bytes(0))`. This value is
+deterministic and well-defined; `mkit-core::history::CommitHistory::open().root()`
 returns it.
 
 mkit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
@@ -114,7 +147,7 @@ verifiers (`verify_inclusion`). This policy defines the specified peak order.
 ### 2.4 Position semantics
 
 A commit's `Position(n)` is its **0-based leaf index** &mdash; the value
-returned by `CommitHistory::append`. It is NOT the MMR's internal node
+returned by `CommitHistory::append`. It is NOT the MMB's internal node
 position (commonware calls that `Position`; mkit hides the distinction at
 the mkit boundary by exposing only leaf indices). The first append on
 an empty history returns `Position(0)`; the *n*-th append returns
@@ -132,7 +165,7 @@ only extends. A rewrite establishes a different generation.
 - generation (32 random bytes);
 - exact tip hash;
 - leaf count;
-- MMR root.
+- MMB root.
 
 `AncestrySnapshot::load` is the supported trust-anchor path. Under the history
 and ref-mutation locks it reads the active snapshot, rejects an unfinished
@@ -148,7 +181,7 @@ Wrong repository, ref, generation, tip, leaf count, root, leaf or proof MUST fai
 An untrusted remote descriptor has no constructor for the trusted wrapper. A
 remote root cannot authenticate itself; remote authenticated descriptors and
 freshness policy require a separately specified trust mechanism and are not
-implemented by v1. The low-level `verify_inclusion` API only establishes an MMR
+implemented by v1. The low-level `verify_inclusion` API only establishes an MMB
 mathematical relation and MUST NOT itself be called verified branch membership.
 
 `mkit reflog` remains a first-parent-chain view, not a Git event reflog. With the
@@ -193,7 +226,7 @@ BLAKE3(all preceding bytes)[32]
 ```
 
 Readers MUST check the checksum, exact length/no trailing bytes, valid branch
-ref name, nonzero count, last leaf equals tip, and the recomputed MMR root.
+ref name, nonzero count, last leaf equals tip, and the recomputed MMB root.
 Traversal and allocation are capped at 1,000,000 leaves; persisted input is
 bounded at `32 * 1,000,000 + 8192` bytes. Cycles, missing ancestors, non-commit/
 non-remix nodes and excessive depth fail before publication. No existing
@@ -264,7 +297,7 @@ not a trusted descriptor for a different incarnation.
 The auxiliary namespace and descriptor are version 1. This is a deliberate
 pre-release replacement of ref-event history; no native journal reader,
 executor bridge, or compatibility API is supported. `CommitHistory` is an
-in-memory MMR used to construct canonical snapshots. Its `ForwardFold` bagging
+in-memory MMB used to construct canonical snapshots. Its `ForwardFold` bagging
 policy is a cryptographic format parameter shared by producers and verifiers.
 
 No change to SPEC-OBJECTS, signing bytes, object IDs or frozen RPC messages is

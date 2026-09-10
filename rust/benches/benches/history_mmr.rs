@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use mkit_benches::{Sample, Unit, time_one};
 use mkit_core::{
     hash::Hash,
-    history::AncestrySnapshot,
+    history::{AncestrySnapshot, CommitHistory},
     layout::RepoLayout,
     object::{Commit, Identity, Object, Tree},
     refs::{self, RefWriteCondition},
@@ -48,10 +48,10 @@ fn fixture(count: u64) -> (tempfile::TempDir, RepoLayout, ObjectStore, Hash) {
 /// an intentional integrity check, see the CHANGELOG entry for the
 /// chain-splicing fast path that was prototyped and reverted here rather
 /// than weaken it — so publishing N commits one at a time still costs O(N)
-/// *store reads* per publish, O(N^2) total. `read_current`'s MMR rebuild of
+/// *store reads* per publish, O(N^2) total. `read_current`'s MMB rebuild of
 /// the *previous* snapshot no longer contributes to that: it's skipped
 /// entirely for `advance`'s comparison-only need (`read_current_chain`),
-/// and the new snapshot's own MMR is now built as one batch instead of N
+/// and the new snapshot's own MMB is now built as one batch instead of N
 /// single-leaf ones — real, correctness-tested reductions in redundant
 /// hashing/allocation with no change to what gets verified, but too small
 /// next to this bench's fsync-dominated wall-clock cost to show up over the
@@ -182,5 +182,53 @@ fn bench_history_mmr(c: &mut Criterion) {
     }
     mkit_benches::write_summary("history_mmr", &samples);
 }
-criterion_group!(name = benches; config = Criterion::default().sample_size(10); targets = bench_history_mmr, bench_sequential_publish);
+
+/// In-memory `CommitHistory` tree construction only (one batched `extend`
+/// over the whole chain, matching `AncestrySnapshot::build`'s call shape)
+/// — no `ObjectStore`, no filesystem, no fsync. `bench_history_mmr`'s
+/// `publish`/`load` series go through the full durable-publish pipeline
+/// (~10 fsync/`sync_dir` calls), which dominates their wall-clock cost and
+/// hides this. A regression guard for that specific cost; NOT where the
+/// MMR-to-MMB switch's claimed benefit (bounded *per-append* worst case,
+/// see SPEC-HISTORY-PROOF §1) would show up — total node/hash count across
+/// a whole chain differs from MMR by well under 1% at realistic history
+/// sizes (see CHANGELOG), and a single batched `extend` does all the
+/// merging in one pass regardless of structure, so a single append's
+/// worst-case boundary case is invisible here by construction.
+fn bench_in_memory_build(c: &mut Criterion) {
+    let mut samples: Vec<Sample> = Vec::new();
+
+    for count in [50u64, 250, 1000, 5000] {
+        let hashes: Vec<Hash> = (0..count)
+            .map(|i| mkit_core::hash::hash(&i.to_be_bytes()))
+            .collect();
+        let axis = format!("{count} commits");
+
+        c.bench_function(&format!("history_mmr/in_memory_build/{count}"), |b| {
+            b.iter(|| {
+                let mut h = CommitHistory::open();
+                h.extend(&hashes).unwrap();
+                std::hint::black_box(h.root())
+            });
+        });
+        let mut result = None;
+        let elapsed = time_one(0, 1, || {
+            let mut h = CommitHistory::open();
+            h.extend(&hashes).unwrap();
+            result = Some(h.root());
+        });
+        std::hint::black_box(result.unwrap());
+        samples.push(Sample {
+            category: "history_mmr".into(),
+            axis,
+            library: "in_memory_build".into(),
+            value: elapsed * 1000.0,
+            unit: Unit::Millis,
+        });
+    }
+
+    mkit_benches::write_summary("history_mmr_in_memory_build", &samples);
+}
+
+criterion_group!(name = benches; config = Criterion::default().sample_size(10); targets = bench_history_mmr, bench_sequential_publish, bench_in_memory_build);
 criterion_main!(benches);

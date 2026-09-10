@@ -563,7 +563,7 @@ fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
 }
 
 /// Restore worktree + index + HEAD/ref to `target` (the pre-op HEAD).
-/// Routes the branch advance through the history-MMR helper.
+/// Routes the branch advance through the history-MMB helper.
 fn restore_to(
     layout: &RepoLayout,
     store: &ObjectStore,

@@ -1,10 +1,22 @@
-//! In-memory Merkle Mountain Range for canonical first-parent ancestry.
+//! In-memory Merkle Mountain Belt (MMB) for canonical first-parent ancestry.
 //! Durable snapshots and their trusted context live in [`AncestrySnapshot`].
+//!
+//! An MMB is chosen over the older Merkle Mountain Range (MMR) for the same
+//! reason `commonware-storage` added it (<https://arxiv.org/abs/2511.13582>):
+//! appending a leaf to an MMR can create up to `O(log N)` new internal nodes
+//! (whenever a run of same-height peaks all merge at once), while an MMB
+//! creates at most one, every time — a real property for `mkit commit`'s
+//! one-append-per-publish pattern, since it bounds the worst case instead of
+//! only the amortized average. The two share the same generic node-storage,
+//! pruning, root, and proof machinery in `commonware-storage`'s `merkle`
+//! module (only the peak/position topology differs), so this is the same
+//! `Bagging::ForwardFold`-bagged, BLAKE3-digest tree SPEC-HISTORY-PROOF
+//! already specified, over a different (more efficient) forest shape.
 use crate::hash::{HASH_LEN, Hash};
 use commonware_cryptography::{Blake3, Hasher as CHasher};
 use commonware_storage::merkle::Bagging;
-use commonware_storage::merkle::mmr::{
-    Location as MmrLocation, Proof as MmrProof, StandardHasher, mem::Mmr as MemMmr,
+use commonware_storage::merkle::mmb::{
+    Location as MmbLocation, Proof as MmbProof, StandardHasher, mem::Mmb as MemMmb,
 };
 pub(crate) mod ancestry;
 pub use ancestry::{
@@ -27,7 +39,7 @@ impl Position {
     }
 }
 /// Inclusion proof with the wire shape specified by SPEC-HISTORY-PROOF.
-pub type InclusionProof = MmrProof<<Blake3 as CHasher>::Digest>;
+pub type InclusionProof = MmbProof<<Blake3 as CHasher>::Digest>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
@@ -35,8 +47,8 @@ pub enum HistoryError {
     Ref(#[from] crate::refs::RefError),
     #[error("history object: {0}")]
     Store(#[from] crate::store::StoreError),
-    #[error("mmr error: {0}")]
-    Mmr(String),
+    #[error("mmb error: {0}")]
+    Mmb(String),
     #[error("invalid branch name for ancestry: {0:?}")]
     InvalidBranch(String),
     #[error("history snapshot is corrupt: {0}")]
@@ -47,7 +59,7 @@ pub enum HistoryError {
 
 /// In-memory accumulator over a verified first-parent chain.
 pub struct CommitHistory {
-    mmr: MemMmr<<Blake3 as CHasher>::Digest>,
+    mmb: MemMmb<<Blake3 as CHasher>::Digest>,
     hasher: StandardHasher<Blake3>,
 }
 impl std::fmt::Debug for CommitHistory {
@@ -66,13 +78,13 @@ impl CommitHistory {
     #[must_use]
     pub fn open() -> Self {
         Self {
-            mmr: MemMmr::new(),
+            mmb: MemMmb::new(),
             hasher: history_hasher(),
         }
     }
     /// Append one hash and return its leaf position.
     pub fn append(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
-        let leaf_loc = self.mmr.leaves();
+        let leaf_loc = self.mmb.leaves();
         self.extend(std::iter::once(commit_hash))?;
         Ok(Position(u64::from(leaf_loc)))
     }
@@ -80,25 +92,25 @@ impl CommitHistory {
     /// Append many hashes in one batch: a single `new_batch`/`merkleize`/
     /// `apply_batch` cycle instead of one per hash. Leaf positions and the
     /// resulting root are identical to calling [`Self::append`] once per
-    /// hash in the same order — the underlying MMR batch API is explicitly
+    /// hash in the same order — the underlying MMB batch API is explicitly
     /// designed to merkleize many leaves at once, so batching only changes
     /// how many allocations it performs, not the tree it builds. Used by
     /// [`AncestrySnapshot::build`](crate::history::ancestry::AncestrySnapshot)
-    /// to build a chain's MMR without one allocation-heavy batch cycle per
+    /// to build a chain's MMB without one allocation-heavy batch cycle per
     /// commit.
     pub fn extend<'a>(
         &mut self,
         commit_hashes: impl IntoIterator<Item = &'a Hash>,
     ) -> Result<(), HistoryError> {
-        let mut batch = self.mmr.new_batch();
+        let mut batch = self.mmb.new_batch();
         for h in commit_hashes {
             let leaf = digest_from_hash(h);
             batch = batch.add(&self.hasher, &leaf);
         }
-        let batch = batch.merkleize(&self.mmr, &self.hasher);
-        self.mmr
+        let batch = batch.merkleize(&self.mmb, &self.hasher);
+        self.mmb
             .apply_batch(&batch)
-            .map_err(|e| HistoryError::Mmr(e.to_string()))?;
+            .map_err(|e| HistoryError::Mmb(e.to_string()))?;
         Ok(())
     }
     /// Return the root over every current leaf.
@@ -108,7 +120,7 @@ impl CommitHistory {
     #[must_use]
     pub fn root(&self) -> Hash {
         let digest = self
-            .mmr
+            .mmb
             .root(&self.hasher, 0)
             .expect("zero inactive peaks is valid");
         let mut out = [0; HASH_LEN];
@@ -117,19 +129,19 @@ impl CommitHistory {
     }
     #[must_use]
     pub fn len(&self) -> u64 {
-        u64::from(self.mmr.leaves())
+        u64::from(self.mmb.leaves())
     }
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     pub fn prove(&self, position: Position) -> Result<InclusionProof, HistoryError> {
-        self.mmr
-            .proof(&self.hasher, MmrLocation::new(position.0), 0)
-            .map_err(|e| HistoryError::Mmr(e.to_string()))
+        self.mmb
+            .proof(&self.hasher, MmbLocation::new(position.0), 0)
+            .map_err(|e| HistoryError::Mmb(e.to_string()))
     }
 }
-/// Verify raw MMR inclusion. Use [`verify_ancestry`] for branch-context trust.
+/// Verify raw MMB inclusion. Use [`verify_ancestry`] for branch-context trust.
 #[must_use]
 pub fn verify_inclusion(
     commit_hash: &Hash,
@@ -139,7 +151,7 @@ pub fn verify_inclusion(
 ) -> bool {
     let leaf = digest_from_hash(commit_hash);
     let root_digest = digest_from_hash(root);
-    let loc = MmrLocation::new(position.0);
+    let loc = MmbLocation::new(position.0);
 
     // Same bagging policy as the producer — see [`HISTORY_BAGGING`].
     let hasher = history_hasher();
@@ -178,7 +190,7 @@ mod tests {
     /// root, same leaf count — to the same hashes fed through `append` one
     /// at a time. Covers both a from-empty build (`AncestrySnapshot::build`'s
     /// use) and extending a non-empty history, and a few sizes that land on
-    /// either side of MMR peak-merge boundaries (1, 2, 3, 16, 17, 100).
+    /// either side of MMB peak-merge boundaries (1, 2, 3, 16, 17, 100).
     #[test]
     fn mem_extend_matches_sequential_append_from_empty() {
         for count in [0u64, 1, 2, 3, 16, 17, 100] {
@@ -307,11 +319,11 @@ mod tests {
         let root = h.root();
         assert!(verify_inclusion(&commits[42], target, &proof, &root));
 
-        // `proof.leaves` claims how many leaves the MMR had when the
+        // `proof.leaves` claims how many leaves the MMB had when the
         // proof was built. Disagreeing with the actual count (64) must
         // fail — this is the prover asserting a different-length
         // history than the root it's paired with actually commits to.
-        proof.leaves = MmrLocation::new(63);
+        proof.leaves = MmbLocation::new(63);
         assert!(!verify_inclusion(&commits[42], target, &proof, &root));
     }
 

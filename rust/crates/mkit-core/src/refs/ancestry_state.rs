@@ -1,5 +1,5 @@
 //! Small history-publication metadata shared with feature-disabled GC/writers.
-//! The MMR implementation is optional; pending roots and invalidation are not.
+//! The MMB implementation is optional; pending roots and invalidation are not.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -37,7 +37,7 @@ pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Option<Vec<u8>
     Ok(Some(bytes))
 }
 
-/// A durable intent, independent of MMR storage or the history feature flag.
+/// A durable intent, independent of MMB storage or the history feature flag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Transaction {
     pub repository: Hash,
