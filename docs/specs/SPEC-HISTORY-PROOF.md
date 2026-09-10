@@ -236,9 +236,11 @@ The first implementation persists a complete bounded ancestry snapshot and
 reconstructs its in-memory proof index on load. Publication and verified loads
 therefore cost O(chain length) work and snapshot I/O, including a fast-forward;
 this is a deliberate recovery-first implementation, not an incremental-journal
-performance claim. It retains one latest snapshot per generation. A future
-incremental storage representation must preserve this descriptor/proof contract
-and independently version any changed auxiliary bytes.
+performance claim. It retains one latest snapshot per generation. §4.5's scrub
+state is the one deliberate exception, bounding a fast-forward's *store-read*
+cost without changing this encoding or what gets persisted; any other future
+incremental storage representation must preserve this descriptor/proof
+contract and independently version any changed auxiliary bytes.
 
 ### 4.3 Transaction encoding and roots
 
@@ -269,9 +271,15 @@ history lock and the full-ref mutation lock (SPEC-CONCURRENCY §4). Both remain
 held throughout validation, publication and recovery.
 
 1. Finish any recorded transaction, then check the new CAS condition.
-2. Read and verify the target's complete first-parent ancestry. Select the
-   retained generation for an extension, otherwise a fresh generation. A true
-   no-op leaves the descriptor untouched.
+2. Determine the target's first-parent chain and select the retained
+   generation for an extension, otherwise a fresh generation. A true no-op
+   (target already the live, already-published tip) leaves the descriptor
+   untouched and performs no store read. Otherwise: when the target is a
+   fast-forward of the live, already-published tip, verify only the new
+   suffix in full plus a bounded, scheduled window of the reused prefix
+   (§4.5) — not the whole prefix, unless the schedule requires it. Any other
+   case (a new branch, or a target that is not a fast-forward of the live
+   tip) verifies the complete first-parent ancestry from scratch, as before.
 3. Atomically persist and sync the transaction, including previous/target ref
    and generation. This is the durable intent to finish that exact target.
 4. Write and sync `pending-snapshot` built from verified authoritative objects.
@@ -291,6 +299,50 @@ removes/syncs the ref under the same mutation guard. Recreating that name starts
 a new generation; archived snapshots are retained. A crash
 between invalidation and ref deletion leaves a ref needing an ancestry rebuild,
 not a trusted descriptor for a different incarnation.
+
+### 4.5 Scrub state
+
+A fast-forward publish still verifies its new suffix in full, every time, by
+reading and content-hash-checking every new commit/remix object from the
+store. What it does not do on every publish is re-read and re-hash the
+*entire* reused prefix — that cost is bounded and scheduled instead, tracked
+per branch in an advisory auxiliary file, `scrub`, alongside `current`:
+
+```text
+"MKSC" || u8(1)
+u64(cursor) || u64(verified_through) || u64(last_full_verify_unix)
+BLAKE3(all preceding bytes)[32]
+```
+
+`cursor` is the next scrub window's start index into the prefix.
+`verified_through` is the prefix length as of the last full verification —
+the range `cursor` rotates through; leaves published after that were each
+freshly verified when first appended and are not re-scrubbed until the next
+full verification folds them in. `last_full_verify_unix` is Unix seconds.
+
+On a fast-forward, when the on-disk `scrub` file parses and its checksum
+matches, and fewer than 604800 seconds (7 days) have elapsed since
+`last_full_verify_unix`: verify `prefix[cursor .. min(cursor + window,
+verified_through)]` from the store, where `window` is
+`max(512, verified_through / 64)`, and persist the advanced cursor once the
+publish durably succeeds. When that window would reach `verified_through`
+(a completed rotation), or the file is missing, fails to parse, fails its
+checksum, or the 7-day bound has elapsed, verify the complete first-parent
+ancestry instead, exactly as a non-fast-forward publish does, and persist a
+reset `scrub` reflecting that fresh full verification (`cursor` 0,
+`verified_through` the new chain length, `last_full_verify_unix` now). Either
+way the *persisted* chain and root are unaffected: this file changes only how
+much of an already-published prefix gets re-verified against the live store
+on a given publish, never what gets published. A missing, corrupt, or stale
+`scrub` file MUST always be treated as "no prior full verification on
+record" — implementations MUST fail closed toward more verification, never
+less. This bounds the maximum interval before any given leaf is re-verified
+at 64 fast-forward publishes or 7 days of wall-clock time, whichever comes
+first; it does not, and is not intended to, defend against deliberate
+same-process tampering (out of scope per the threat model) — only against
+accidental local corruption (bit rot, a bad GC, a torn write) between two
+publications, which content addressing guarantees is always detectable,
+never silently wrong, whenever it is eventually re-read.
 
 ## 5. Format and scope
 

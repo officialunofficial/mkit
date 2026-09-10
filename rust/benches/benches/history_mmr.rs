@@ -41,23 +41,37 @@ fn fixture(count: u64) -> (tempfile::TempDir, RepoLayout, ObjectStore, Hash) {
 
 /// Repeated single-commit publishes to the same branch — the steady state
 /// of real `mkit commit` usage, as opposed to `bench_history_mmr`'s single
-/// bulk publish of a `count`-deep history built entirely out-of-band. Each
-/// `update_ref_with_ancestry` call still re-walks and re-verifies the
-/// *entire* first-parent chain from `store` on every publish
-/// (`history::ancestry::advance`'s `first_parent_chain(store, target)`) —
-/// an intentional integrity check, see the CHANGELOG entry for the
-/// chain-splicing fast path that was prototyped and reverted here rather
-/// than weaken it — so publishing N commits one at a time still costs O(N)
-/// *store reads* per publish, O(N^2) total. `read_current`'s MMB rebuild of
-/// the *previous* snapshot no longer contributes to that: it's skipped
-/// entirely for `advance`'s comparison-only need (`read_current_chain`),
-/// and the new snapshot's own MMB is now built as one batch instead of N
-/// single-leaf ones — real, correctness-tested reductions in redundant
-/// hashing/allocation with no change to what gets verified, but too small
-/// next to this bench's fsync-dominated wall-clock cost to show up over the
-/// I/O noise here (see CHANGELOG). This bench remains the regression guard
-/// for the remaining O(N) store-read cost and a target for a future fix
-/// that doesn't weaken that check.
+/// bulk publish of a `count`-deep history built entirely out-of-band.
+///
+/// `history::ancestry::advance` used to re-walk and re-verify the *entire*
+/// first-parent chain from `store` on every fast-forward publish, an
+/// intentional integrity check (see the CHANGELOG entry for the
+/// chain-splicing fast path that was prototyped and reverted rather than
+/// weaken it) that made publishing N commits one at a time cost O(N) store
+/// reads per publish, O(N^2) total. That's since been bounded: a
+/// fast-forward now verifies its new suffix in full plus a rotating,
+/// scheduled window of the reused prefix (`history::ancestry::decide_chain`,
+/// `ScrubState` — see the CHANGELOG entry and SPEC-HISTORY-PROOF §4.5 for
+/// the full design and the prior-art research behind it), not the whole
+/// prefix every time, while still re-verifying every leaf from the store at
+/// least once every 64 fast-forwards or 7 days, whichever comes first — the
+/// integrity check is bounded and scheduled, not weakened or dropped.
+/// `read_current`'s MMB rebuild of the *previous* snapshot no longer
+/// contributes to any of this either: it's skipped entirely for `advance`'s
+/// comparison-only need (`read_current_descriptor`), and the new snapshot's
+/// own MMB is now built as one batch instead of N single-leaf ones.
+///
+/// None of this shows up in *this* bench's numbers: at 100-300 commits, the
+/// scrub window (minimum 512 leaves) covers the entire prefix in one pass
+/// every time, so every publish here still does a full walk exactly like
+/// before — and even where the window does kick in, this bench's
+/// fsync-dominated wall-clock cost swamps a store-read difference this
+/// small (see CHANGELOG for the earlier MMB-rebuild reductions, hidden the
+/// same way). `history::ancestry::tests::profile_scrub_window_vs_full_walk_every_publish`
+/// (manual, `--ignored`) isolates the effect at a chain length long enough
+/// to show it. This bench remains the regression guard for the per-publish
+/// fsync/durability-pipeline cost, which the scrub window does not and
+/// should not change.
 fn bench_sequential_publish(c: &mut Criterion) {
     let mut samples: Vec<Sample> = Vec::new();
 
