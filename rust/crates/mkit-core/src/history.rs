@@ -72,17 +72,34 @@ impl CommitHistory {
     }
     /// Append one hash and return its leaf position.
     pub fn append(&mut self, commit_hash: &Hash) -> Result<Position, HistoryError> {
-        let leaf = digest_from_hash(commit_hash);
         let leaf_loc = self.mmr.leaves();
-        let batch = self
-            .mmr
-            .new_batch()
-            .add(&self.hasher, &leaf)
-            .merkleize(&self.mmr, &self.hasher);
+        self.extend(std::iter::once(commit_hash))?;
+        Ok(Position(u64::from(leaf_loc)))
+    }
+
+    /// Append many hashes in one batch: a single `new_batch`/`merkleize`/
+    /// `apply_batch` cycle instead of one per hash. Leaf positions and the
+    /// resulting root are identical to calling [`Self::append`] once per
+    /// hash in the same order — the underlying MMR batch API is explicitly
+    /// designed to merkleize many leaves at once, so batching only changes
+    /// how many allocations it performs, not the tree it builds. Used by
+    /// [`AncestrySnapshot::build`](crate::history::ancestry::AncestrySnapshot)
+    /// to build a chain's MMR without one allocation-heavy batch cycle per
+    /// commit.
+    pub fn extend<'a>(
+        &mut self,
+        commit_hashes: impl IntoIterator<Item = &'a Hash>,
+    ) -> Result<(), HistoryError> {
+        let mut batch = self.mmr.new_batch();
+        for h in commit_hashes {
+            let leaf = digest_from_hash(h);
+            batch = batch.add(&self.hasher, &leaf);
+        }
+        let batch = batch.merkleize(&self.mmr, &self.hasher);
         self.mmr
             .apply_batch(&batch)
             .map_err(|e| HistoryError::Mmr(e.to_string()))?;
-        Ok(Position(u64::from(leaf_loc)))
+        Ok(())
     }
     /// Return the root over every current leaf.
     ///
@@ -155,6 +172,54 @@ mod tests {
             assert_eq!(pos, Position(i), "positions must be dense and 0-based");
         }
         assert_eq!(h.len(), 16);
+    }
+
+    /// `extend`'s single-batch construction must be bit-identical — same
+    /// root, same leaf count — to the same hashes fed through `append` one
+    /// at a time. Covers both a from-empty build (`AncestrySnapshot::build`'s
+    /// use) and extending a non-empty history, and a few sizes that land on
+    /// either side of MMR peak-merge boundaries (1, 2, 3, 16, 17, 100).
+    #[test]
+    fn mem_extend_matches_sequential_append_from_empty() {
+        for count in [0u64, 1, 2, 3, 16, 17, 100] {
+            let hashes: Vec<Hash> = (0..count).map(synth).collect();
+
+            let mut sequential = CommitHistory::open();
+            for h in &hashes {
+                sequential.append(h).unwrap();
+            }
+
+            let mut batched = CommitHistory::open();
+            batched.extend(&hashes).unwrap();
+
+            assert_eq!(
+                sequential.root(),
+                batched.root(),
+                "extend({count}) root must match {count} sequential appends"
+            );
+            assert_eq!(sequential.len(), batched.len());
+            assert_eq!(sequential.len(), count);
+        }
+    }
+
+    #[test]
+    fn mem_extend_matches_sequential_append_onto_existing_history() {
+        let prefix: Vec<Hash> = (0..12u64).map(synth).collect();
+        let suffix: Vec<Hash> = (12..12 + 9u64).map(synth).collect();
+
+        let mut sequential = CommitHistory::open();
+        for h in prefix.iter().chain(suffix.iter()) {
+            sequential.append(h).unwrap();
+        }
+
+        let mut batched = CommitHistory::open();
+        for h in &prefix {
+            batched.append(h).unwrap();
+        }
+        batched.extend(&suffix).unwrap();
+
+        assert_eq!(sequential.root(), batched.root());
+        assert_eq!(sequential.len(), batched.len());
     }
 
     #[test]

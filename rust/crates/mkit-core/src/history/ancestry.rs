@@ -127,9 +127,7 @@ impl AncestrySnapshot {
             ));
         }
         let mut mmr = CommitHistory::open();
-        for h in &chain {
-            mmr.append(h)?;
-        }
+        mmr.extend(&chain)?;
         let descriptor = AncestryDescriptor {
             repository,
             full_ref,
@@ -166,66 +164,121 @@ impl AncestrySnapshot {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, HistoryError> {
-        fn take<'a>(input: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
-            if input.len() < n {
-                return None;
-            }
-            let (head, tail) = input.split_at(n);
-            *input = tail;
-            Some(head)
-        }
-        fn digest(input: &mut &[u8]) -> Option<Hash> {
-            take(input, 32)?.try_into().ok()
-        }
+        let (claimed, chain) = decode_descriptor_and_chain(bytes)?;
         let invalid = || HistoryError::Corrupted("malformed ancestry snapshot".into());
-        if bytes.len() < 175 || bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
-            return Err(invalid());
-        }
-        let (payload, checksum) = bytes.split_at(bytes.len() - 32);
-        if hash::hash(payload).as_slice() != checksum {
-            return Err(invalid());
-        }
-        let mut input = payload;
-        if take(&mut input, 5) != Some(MAGIC.as_slice()) {
-            return Err(invalid());
-        }
-        let repository = digest(&mut input).ok_or_else(invalid)?;
-        let generation = digest(&mut input).ok_or_else(invalid)?;
-        let tip = digest(&mut input).ok_or_else(invalid)?;
-        let count = u64::from_le_bytes(
-            take(&mut input, 8)
-                .ok_or_else(invalid)?
-                .try_into()
-                .map_err(|_| invalid())?,
-        );
-        let root = digest(&mut input).ok_or_else(invalid)?;
-        let name_len = u16::from_le_bytes(
-            take(&mut input, 2)
-                .ok_or_else(invalid)?
-                .try_into()
-                .map_err(|_| invalid())?,
-        ) as usize;
-        let full_ref = std::str::from_utf8(take(&mut input, name_len).ok_or_else(invalid)?)
-            .map_err(|_| invalid())?
-            .to_owned();
-        if !full_ref.starts_with("refs/heads/")
-            || !refs::validate_ref_name(&full_ref)
-            || count == 0
-            || count > MAX_ANCESTRY_LEAVES as u64
-            || input.len() as u64 != count * 32
-        {
-            return Err(invalid());
-        }
-        let chain: Vec<Hash> = input
-            .chunks_exact(32)
-            .map(|c| c.try_into().expect("32-byte chunk"))
-            .collect();
-        let snapshot = Self::build(repository, full_ref, generation, chain)?;
-        if snapshot.descriptor.tip != tip || snapshot.descriptor.root != root {
+        let snapshot = Self::build(
+            claimed.repository,
+            claimed.full_ref.clone(),
+            claimed.generation,
+            chain,
+        )?;
+        if snapshot.descriptor.tip != claimed.tip || snapshot.descriptor.root != claimed.root {
             return Err(invalid());
         }
         Ok(snapshot)
     }
+}
+
+/// Parse a snapshot's wire bytes into its claimed descriptor and chain,
+/// without building an MMR from the chain. The payload checksum (covering
+/// the encoded `root` along with everything else) is still verified, so
+/// accidental corruption or a torn/partial write is still caught here; what
+/// this skips is [`AncestrySnapshot::decode`]'s extra step of rebuilding
+/// the whole MMR from `chain` to independently recompute `root` and check
+/// it against the value read from the wire.
+///
+/// That's a real, if narrow, difference: the checksum is a plain
+/// self-computed `hash::hash(payload)`, not a MAC or signature bound to a
+/// secret — anyone with local write access to the snapshot file can
+/// construct an internally-inconsistent `(chain, root)` pair and simply
+/// recompute the checksum to match, same as they could edit any other
+/// locally-writable mkit state. `decode`'s rebuild-and-compare catches
+/// exactly that case (or an `encode`/`decode` bug producing the same
+/// effect) by failing closed; skipping it here means such a file, on
+/// `advance`'s path only (via [`read_current_chain`]), fails open instead:
+/// `advance` proceeds using the parsed `chain` as-is. That's still safe
+/// because `advance` never *persists* `old`'s data — every use compares it
+/// against `first_parent_chain(store, target)`, a fresh walk re-verified
+/// against the live object store, and only that freshly-verified chain
+/// ever gets written into the new snapshot (see `advance`'s call site). A
+/// self-inconsistent `old` can therefore at worst cause a spurious
+/// cache-miss (fall back to a fresh generation and full rebuild), never a
+/// bad chain getting published. [`AncestrySnapshot::load`] and `finish`'s
+/// own from-scratch rebuild both still run the full checked `decode`, so
+/// this narrower guarantee is scoped to `advance`'s comparison-only read.
+///
+/// Used by [`read_current_chain`], which backs `advance`'s
+/// compatibility/no-op/generation-reuse checks: those only ever read
+/// `descriptor`/`chain`, never the MMR, so building one there was pure
+/// waste — see `advance`'s call site. [`AncestrySnapshot::decode`] (via
+/// [`AncestrySnapshot::load`], which does need a working MMR for
+/// [`AncestrySnapshot::prove`]) keeps the full rebuild-and-cross-check.
+fn decode_descriptor_and_chain(
+    bytes: &[u8],
+) -> Result<(AncestryDescriptor, Vec<Hash>), HistoryError> {
+    fn take<'a>(input: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if input.len() < n {
+            return None;
+        }
+        let (head, tail) = input.split_at(n);
+        *input = tail;
+        Some(head)
+    }
+    fn digest(input: &mut &[u8]) -> Option<Hash> {
+        take(input, 32)?.try_into().ok()
+    }
+    let invalid = || HistoryError::Corrupted("malformed ancestry snapshot".into());
+    if bytes.len() < 175 || bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err(invalid());
+    }
+    let (payload, checksum) = bytes.split_at(bytes.len() - 32);
+    if hash::hash(payload).as_slice() != checksum {
+        return Err(invalid());
+    }
+    let mut input = payload;
+    if take(&mut input, 5) != Some(MAGIC.as_slice()) {
+        return Err(invalid());
+    }
+    let repository = digest(&mut input).ok_or_else(invalid)?;
+    let generation = digest(&mut input).ok_or_else(invalid)?;
+    let tip = digest(&mut input).ok_or_else(invalid)?;
+    let count = u64::from_le_bytes(
+        take(&mut input, 8)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    let root = digest(&mut input).ok_or_else(invalid)?;
+    let name_len = u16::from_le_bytes(
+        take(&mut input, 2)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    ) as usize;
+    let full_ref = std::str::from_utf8(take(&mut input, name_len).ok_or_else(invalid)?)
+        .map_err(|_| invalid())?
+        .to_owned();
+    if !full_ref.starts_with("refs/heads/")
+        || !refs::validate_ref_name(&full_ref)
+        || count == 0
+        || count > MAX_ANCESTRY_LEAVES as u64
+        || input.len() as u64 != count * 32
+    {
+        return Err(invalid());
+    }
+    let chain: Vec<Hash> = input
+        .chunks_exact(32)
+        .map(|c| c.try_into().expect("32-byte chunk"))
+        .collect();
+    let descriptor = AncestryDescriptor {
+        repository,
+        full_ref,
+        generation,
+        tip,
+        leaf_count: count,
+        root,
+    };
+    Ok((descriptor, chain))
 }
 
 /// Verify first-parent inclusion against an independently trusted local
@@ -323,6 +376,33 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
         ));
     }
     Ok(Some(snapshot))
+}
+
+/// The previous publish's descriptor and chain, without its MMR — what
+/// `advance`'s compatibility/no-op/generation-reuse checks actually read.
+struct PriorChain {
+    descriptor: AncestryDescriptor,
+    chain: Vec<Hash>,
+}
+
+/// Like [`read_current`], but skips building an MMR nobody reads on this
+/// path — see [`decode_descriptor_and_chain`]'s docs for exactly what's
+/// (and isn't) re-verified as a result. Used only by `advance`.
+fn read_current_chain(dir: &Path) -> Result<Option<PriorChain>, HistoryError> {
+    let Some(bytes) = ancestry_state::read_bounded(&dir.join("current"), 65)? else {
+        return Ok(None);
+    };
+    let generation = refs::decode_ref_wire(&bytes)
+        .ok_or_else(|| HistoryError::Corrupted("malformed history generation pointer".into()))?;
+    let raw = ancestry_state::read_bounded(&snapshot_path(dir, generation), MAX_SNAPSHOT_BYTES)?
+        .ok_or_else(|| HistoryError::Corrupted("missing ancestry generation snapshot".into()))?;
+    let (descriptor, chain) = decode_descriptor_and_chain(&raw)?;
+    if descriptor.generation != generation {
+        return Err(HistoryError::Corrupted(
+            "ancestry generation mismatch".into(),
+        ));
+    }
+    Ok(Some(PriorChain { descriptor, chain }))
 }
 
 /// Finish a durable intent under BOTH history and ref mutation guards. The
@@ -436,7 +516,7 @@ pub(crate) fn advance(
     mutation.check(condition)?;
     let previous = mutation.current()?;
     let repository = repository_id(layout.common_dir())?;
-    let old = read_current(&dir)?;
+    let old = read_current_chain(&dir)?;
     let compatible = old.as_ref().filter(|s| {
         s.descriptor.repository == repository
             && s.descriptor.full_ref == full_ref

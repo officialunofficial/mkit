@@ -42,17 +42,22 @@ fn fixture(count: u64) -> (tempfile::TempDir, RepoLayout, ObjectStore, Hash) {
 /// Repeated single-commit publishes to the same branch — the steady state
 /// of real `mkit commit` usage, as opposed to `bench_history_mmr`'s single
 /// bulk publish of a `count`-deep history built entirely out-of-band. Each
-/// `update_ref_with_ancestry` call re-walks and re-verifies the *entire*
-/// first-parent chain from `store` (`history::ancestry::advance`'s
-/// `first_parent_chain(store, target)`) and reloads+rebuilds the *previous*
-/// publish's whole MMR from its persisted snapshot (`read_current`), so
-/// publishing N commits one at a time still costs O(N) per publish, O(N^2)
-/// total — a chain-splicing fast path that avoided the first re-walk was
-/// prototyped and measured here, but was reverted (see CHANGELOG) because
-/// it skipped re-verifying the reused prefix against `store`, silently
-/// widening the window before local object-store corruption would be
-/// caught. This bench remains as the regression guard for that O(N) cost
-/// and a target for a future fix that does not weaken that check.
+/// `update_ref_with_ancestry` call still re-walks and re-verifies the
+/// *entire* first-parent chain from `store` on every publish
+/// (`history::ancestry::advance`'s `first_parent_chain(store, target)`) —
+/// an intentional integrity check, see the CHANGELOG entry for the
+/// chain-splicing fast path that was prototyped and reverted here rather
+/// than weaken it — so publishing N commits one at a time still costs O(N)
+/// *store reads* per publish, O(N^2) total. `read_current`'s MMR rebuild of
+/// the *previous* snapshot no longer contributes to that: it's skipped
+/// entirely for `advance`'s comparison-only need (`read_current_chain`),
+/// and the new snapshot's own MMR is now built as one batch instead of N
+/// single-leaf ones — real, correctness-tested reductions in redundant
+/// hashing/allocation with no change to what gets verified, but too small
+/// next to this bench's fsync-dominated wall-clock cost to show up over the
+/// I/O noise here (see CHANGELOG). This bench remains the regression guard
+/// for the remaining O(N) store-read cost and a target for a future fix
+/// that doesn't weaken that check.
 fn bench_sequential_publish(c: &mut Criterion) {
     let mut samples: Vec<Sample> = Vec::new();
 
