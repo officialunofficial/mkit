@@ -61,7 +61,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let mut rows: Vec<RefRow> = Vec::new();
-    let heads = match refs::list_refs(&layout) {
+    let heads = match super::list_refs_parallel(&layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };

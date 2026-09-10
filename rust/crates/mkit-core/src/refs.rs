@@ -90,6 +90,12 @@ pub enum RefError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A [`list_refs_with`]-style batch callback returned a different
+    /// number of outcomes than candidates it was given — the caller's
+    /// contract violation, not a clean exit-coded error, but caught here
+    /// rather than silently desyncing names from hashes.
+    #[error("read_batch callback returned {actual} outcomes for a {expected}-candidate batch")]
+    RefBatchLengthMismatch { expected: usize, actual: usize },
 }
 
 /// Result alias used throughout this module.
@@ -1031,12 +1037,91 @@ fn cas_write(
 }
 
 fn list_refs_under(common_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
+    list_refs_under_with(common_dir, sub_dir, sequential_read_batch)
+}
+
+/// The default, sequential `read_batch`: reads and decodes each candidate
+/// one at a time, exactly [`collect_refs`]'s old inline behavior. What
+/// [`list_refs_under`] (and therefore [`list_refs`]/[`list_remote_refs`]/
+/// tag listing) still uses.
+fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
+    candidates
+        .iter()
+        .map(|c| match fs::read(&c.path) {
+            Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
+            Err(_) => RefReadOutcome::Unreadable,
+        })
+        .collect()
+}
+
+/// One ref file discovered by [`list_refs_under_with`]'s directory walk:
+/// its logical name (relative to the listed namespace, e.g. a branch or
+/// tag name) and the on-disk path to read its wire content from.
+#[derive(Debug, Clone)]
+pub struct RefCandidate {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// The outcome of reading and decoding one [`RefCandidate`]'s wire
+/// content — matching [`collect_refs`]'s old per-entry handling exactly:
+/// an I/O failure drops the entry from the listing entirely (the same
+/// silently-skip posture the sequential path already had for a transient
+/// read failure or a race with concurrent deletion); malformed-but-
+/// readable content keeps the entry with [`Ref::hash`] `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefReadOutcome {
+    Unreadable,
+    Decoded(Option<Hash>),
+}
+
+/// Like [`list_refs`], but hands the *whole* batch of discovered ref
+/// files to a caller-supplied `read_batch` instead of reading and
+/// decoding each one sequentially inside the same call that walks the
+/// directory tree — e.g. a rayon fan-out, the same parallel-batch shape
+/// already used for pack-entry compression, delta encoding, and
+/// post-fetch signature verification (`mkit-cli`'s `remote_dispatch`).
+/// The directory walk itself (`fs::read_dir`, cheap metadata-only calls)
+/// stays sequential; only the per-file read-and-decode step, one syscall
+/// each and independent of every other entry, is worth fanning out.
+/// `read_batch` must return exactly one [`RefReadOutcome`] per candidate,
+/// in the same order — a mismatched length is
+/// [`RefError::RefBatchLengthMismatch`], not a silently desynced listing.
+pub fn list_refs_with(
+    layout: &RepoLayout,
+    read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
+) -> RefResult<Vec<Ref>> {
+    list_refs_under_with(layout.common_dir(), HEADS_DIR, read_batch)
+}
+
+fn list_refs_under_with(
+    common_dir: &Path,
+    sub_dir: &str,
+    read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
+) -> RefResult<Vec<Ref>> {
     let root = common_dir.join(sub_dir);
-    let mut out = Vec::new();
+    let mut candidates = Vec::new();
     if !root.is_dir() {
-        return Ok(out);
+        return Ok(Vec::new());
     }
-    collect_refs(&root, "", &mut out, 0)?;
+    collect_ref_candidates(&root, "", &mut candidates, 0)?;
+    let outcomes = read_batch(&candidates);
+    if outcomes.len() != candidates.len() {
+        return Err(RefError::RefBatchLengthMismatch {
+            expected: candidates.len(),
+            actual: outcomes.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(candidates.len());
+    for (candidate, outcome) in candidates.into_iter().zip(outcomes) {
+        match outcome {
+            RefReadOutcome::Unreadable => {}
+            RefReadOutcome::Decoded(hash) => out.push(Ref {
+                name: candidate.name,
+                hash,
+            }),
+        }
+    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -1048,7 +1133,12 @@ fn list_refs_under(common_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
 /// grammar) could ever require.
 const MAX_REF_DEPTH: usize = 32;
 
-fn collect_refs(root: &Path, prefix: &str, out: &mut Vec<Ref>, depth: usize) -> RefResult<()> {
+fn collect_ref_candidates(
+    root: &Path,
+    prefix: &str,
+    out: &mut Vec<RefCandidate>,
+    depth: usize,
+) -> RefResult<()> {
     if depth > MAX_REF_DEPTH {
         // Silently stop — same "skip malformed" posture as below for
         // individual files. Callers get a partial result rather than a
@@ -1078,7 +1168,7 @@ fn collect_refs(root: &Path, prefix: &str, out: &mut Vec<Ref>, depth: usize) -> 
         };
         let ft = entry.file_type()?;
         if ft.is_dir() {
-            collect_refs(root, &child_name, out, depth + 1)?;
+            collect_ref_candidates(root, &child_name, out, depth + 1)?;
             continue;
         }
         if !ft.is_file() {
@@ -1087,14 +1177,9 @@ fn collect_refs(root: &Path, prefix: &str, out: &mut Vec<Ref>, depth: usize) -> 
         if !validate_ref_name(&child_name) {
             continue;
         }
-        // Read & decode; silently skip malformed files.
-        let Ok(bytes) = fs::read(entry.path()) else {
-            continue;
-        };
-        let hash = decode_ref_wire(&bytes);
-        out.push(Ref {
+        out.push(RefCandidate {
             name: child_name,
-            hash,
+            path: entry.path(),
         });
     }
     Ok(())
@@ -1412,6 +1497,91 @@ mod tests {
             !names.contains(&deep_name.as_str()),
             "a ref nested beyond MAX_REF_DEPTH must be silently skipped, got {names:?}"
         );
+    }
+
+    /// A `read_batch` that behaves exactly like the sequential default
+    /// (the same read-and-decode each candidate gets in `list_refs`) must
+    /// produce byte-for-byte the same listing — this is `list_refs_with`'s
+    /// core contract: the caller's batching/parallelism strategy is not
+    /// supposed to be observable in the result, only in how it's computed.
+    #[test]
+    fn list_refs_with_sequential_batch_matches_list_refs() {
+        let (_dir, mkit) = fresh_repo();
+        write_ref(&mkit, "main", &h("m")).unwrap();
+        write_ref(&mkit, "dev", &h("d")).unwrap();
+        write_ref(&mkit, "feature/deep/topic", &h("nested")).unwrap();
+
+        let via_list_refs = list_refs(&mkit).unwrap();
+        let via_with = list_refs_with(&mkit, sequential_read_batch).unwrap();
+        assert_eq!(via_list_refs, via_with);
+    }
+
+    /// `list_refs_with`'s two outcome kinds must be handled distinctly:
+    /// `Unreadable` drops the candidate from the listing entirely (as the
+    /// old inline `fs::read` failure did), while `Decoded(None)` keeps it
+    /// with `Ref::hash == None` (malformed-but-readable content) — the two
+    /// are not interchangeable, so a `read_batch` that collapsed one into
+    /// the other would be a real, if narrow, behavior change from the
+    /// sequential path it replaced.
+    #[test]
+    fn list_refs_with_distinguishes_unreadable_from_malformed() {
+        let (_dir, mkit) = fresh_repo();
+        write_ref(&mkit, "ok", &h("ok")).unwrap();
+        write_ref(&mkit, "will-be-dropped", &h("d")).unwrap();
+        write_ref(&mkit, "will-be-malformed", &h("m")).unwrap();
+
+        let refs = list_refs_with(&mkit, |candidates| {
+            candidates
+                .iter()
+                .map(|c| {
+                    if c.name == "will-be-dropped" {
+                        RefReadOutcome::Unreadable
+                    } else if c.name == "will-be-malformed" {
+                        RefReadOutcome::Decoded(None)
+                    } else {
+                        sequential_read_batch(std::slice::from_ref(c))
+                            .into_iter()
+                            .next()
+                            .unwrap()
+                    }
+                })
+                .collect()
+        })
+        .unwrap();
+
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert!(
+            !names.contains(&"will-be-dropped"),
+            "Unreadable must drop the entry entirely, got {names:?}"
+        );
+        let malformed = refs
+            .iter()
+            .find(|r| r.name == "will-be-malformed")
+            .expect("Decoded(None) must still be listed");
+        assert_eq!(malformed.hash, None);
+        let ok = refs.iter().find(|r| r.name == "ok").unwrap();
+        assert_eq!(ok.hash, Some(h("ok")));
+    }
+
+    /// A `read_batch` that violates the "exactly one outcome per
+    /// candidate" contract must fail closed with
+    /// [`RefError::RefBatchLengthMismatch`], not silently zip a short or
+    /// long outcome list against the wrong candidates.
+    #[test]
+    fn list_refs_with_rejects_mismatched_batch_length() {
+        let (_dir, mkit) = fresh_repo();
+        write_ref(&mkit, "main", &h("m")).unwrap();
+        write_ref(&mkit, "dev", &h("d")).unwrap();
+
+        let err =
+            list_refs_with(&mkit, |_candidates| vec![RefReadOutcome::Decoded(None)]).unwrap_err();
+        assert!(matches!(
+            err,
+            RefError::RefBatchLengthMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
     }
 
     #[test]

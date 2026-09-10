@@ -481,7 +481,7 @@ pub fn push_all_with(
 ) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
-    let refs_list = refs::list_refs(&layout)?;
+    let refs_list = crate::commands::list_refs_parallel(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
     // Batch every pushed branch's remote-tracking-ref write (#645):

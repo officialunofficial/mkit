@@ -44,7 +44,7 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut lines: Vec<(String, String)> = Vec::new(); // (full refname, hash hex)
     if want_heads {
-        match refs::list_refs(&layout) {
+        match super::list_refs_parallel(&layout) {
             Ok(rs) => collect(&mut lines, &rs, "refs/heads/"),
             Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
         }

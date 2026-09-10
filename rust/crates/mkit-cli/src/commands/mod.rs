@@ -91,6 +91,35 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+/// Ref-read fan-out per thread. Ref files are tiny (65 bytes) and the
+/// per-entry cost is dominated by syscall overhead, not compute
+/// (`cargo bench -p mkit-benches --bench refs_ops -- list_refs_fanout`:
+/// ~4-6us/ref either way at 100-10k refs) — the same shape as
+/// `remote_dispatch::packmap`'s signature-verification fan-out, which
+/// uses the same low per-thread count for the same reason.
+const LIST_REFS_FANOUT_ENTRIES_PER_THREAD: usize = 2;
+
+/// [`refs::list_refs`], with the per-ref read-and-decode step fanned out
+/// across rayon's global thread pool once there's enough work to amortize
+/// dispatch — the directory walk itself stays sequential either way (see
+/// [`refs::list_refs_with`]'s docs). Same sequential-vs-rayon crossover
+/// shape as `commands::add`'s hashing fan-outs and `remote_dispatch`'s
+/// pack/delta/signature fan-outs (`crate::fanout`). Measured ~2x faster at
+/// 1k-10k refs and still faster, not a wash, even at 100 (`cargo bench -p
+/// mkit-benches --bench refs_ops -- list_refs_fanout`).
+pub(crate) fn list_refs_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_refs_with(layout, |candidates| {
+        crate::fanout::map_seq_or_par(
+            candidates,
+            crate::fanout::threshold(LIST_REFS_FANOUT_ENTRIES_PER_THREAD),
+            |c, _| match fs::read(&c.path) {
+                Ok(bytes) => refs::RefReadOutcome::Decoded(refs::decode_ref_wire(&bytes)),
+                Err(_) => refs::RefReadOutcome::Unreadable,
+            },
+        )
+    })
+}
+
 /// Open the object store for a mutating command, honoring the repo's
 /// configured durability schedule (`durability.objects`, see
 /// [`crate::config::Config::object_sync_policy`]). Falls back to the

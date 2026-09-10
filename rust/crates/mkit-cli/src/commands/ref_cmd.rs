@@ -94,7 +94,7 @@ struct Row {
 
 fn run_list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
     let mut rows: Vec<Row> = Vec::new();
-    match refs::list_refs(layout) {
+    match super::list_refs_parallel(layout) {
         Ok(rs) => push_rows(&mut rows, &rs, "refs/heads/"),
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     }

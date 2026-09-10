@@ -685,7 +685,7 @@ fn collect_refs(layout: &RepoLayout, explicit: &[String]) -> CmdResult<Vec<(Stri
         return Ok(out);
     }
     let mut out = Vec::new();
-    let branches = refs::list_refs(layout)
+    let branches = super::list_refs_parallel(layout)
         .map_err(|e| (format!("list branches: {e}"), exit::GENERAL_ERROR))?;
     for r in branches {
         if let Some(h) = r.hash {

@@ -583,7 +583,7 @@ fn list(
         Ok(Head::Branch(n)) => Some(n),
         _ => None,
     };
-    let mut refs = match refs::list_refs(layout) {
+    let mut refs = match super::list_refs_parallel(layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
