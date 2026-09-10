@@ -171,7 +171,7 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 fn list(layout: &RepoLayout, pattern: Option<&str>, json: bool) -> u8 {
-    let mut tags = match refs::list_tags(layout) {
+    let mut tags = match super::list_tags_parallel(layout) {
         Ok(t) => t,
         Err(e) => return emit_err_json(&format!("list tags: {e}"), exit::GENERAL_ERROR, json),
     };

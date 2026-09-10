@@ -211,22 +211,17 @@ fn bench_list_refs_fanout(c: &mut Criterion) {
             .unwrap();
         }
 
-        let read_one = |c: &refs::RefCandidate| match std::fs::read(&c.path) {
-            Ok(bytes) => refs::RefReadOutcome::Decoded(mkit_core::refs::decode_ref_wire(&bytes)),
-            Err(_) => refs::RefReadOutcome::Unreadable,
-        };
-
         c.bench_function(&format!("list_refs_fanout/sequential/{axis}"), |b| {
             b.iter(|| {
                 refs::list_refs_with(&layout, |candidates| {
-                    candidates.iter().map(read_one).collect()
+                    candidates.iter().map(refs::read_ref_candidate).collect()
                 })
                 .unwrap()
             });
         });
         let seq_ms = time_ms(|| {
             let _ = refs::list_refs_with(&layout, |candidates| {
-                candidates.iter().map(read_one).collect()
+                candidates.iter().map(refs::read_ref_candidate).collect()
             })
             .unwrap();
         });
@@ -241,14 +236,20 @@ fn bench_list_refs_fanout(c: &mut Criterion) {
         c.bench_function(&format!("list_refs_fanout/rayon/{axis}"), |b| {
             b.iter(|| {
                 refs::list_refs_with(&layout, |candidates| {
-                    candidates.par_iter().map(read_one).collect()
+                    candidates
+                        .par_iter()
+                        .map(refs::read_ref_candidate)
+                        .collect()
                 })
                 .unwrap()
             });
         });
         let par_ms = time_ms(|| {
             let _ = refs::list_refs_with(&layout, |candidates| {
-                candidates.par_iter().map(read_one).collect()
+                candidates
+                    .par_iter()
+                    .map(refs::read_ref_candidate)
+                    .collect()
             })
             .unwrap();
         });

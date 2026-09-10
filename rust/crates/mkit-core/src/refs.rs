@@ -739,6 +739,20 @@ pub fn list_remote_refs(layout: &RepoLayout, remote: &str) -> RefResult<Vec<Ref>
     list_refs_under(layout.common_dir(), &remote_ref_dir(remote))
 }
 
+/// Like [`list_remote_refs`], but hands the batch of discovered ref files
+/// to a caller-supplied `read_batch` — see [`list_refs_with`]'s docs for
+/// the shape and the `RefBatchLengthMismatch` contract.
+pub fn list_remote_refs_with(
+    layout: &RepoLayout,
+    remote: &str,
+    read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
+) -> RefResult<Vec<Ref>> {
+    if !validate_ref_name(remote) {
+        return Err(RefError::InvalidRefName(remote.to_string()));
+    }
+    list_refs_under_with(layout.common_dir(), &remote_ref_dir(remote), read_batch)
+}
+
 /// List the remote names that have at least one tracking ref on disk
 /// (the immediate subdirectories of `refs/remotes/`), sorted. A
 /// missing `refs/remotes/` yields an empty list. Entries whose names
@@ -812,6 +826,16 @@ pub fn delete_tag(layout: &RepoLayout, name: &str) -> RefResult<()> {
 /// List all tag refs, sorted lexicographically by name.
 pub fn list_tags(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
     list_refs_under(layout.common_dir(), TAGS_DIR)
+}
+
+/// Like [`list_tags`], but hands the batch of discovered ref files to a
+/// caller-supplied `read_batch` — see [`list_refs_with`]'s docs for the
+/// shape and the `RefBatchLengthMismatch` contract.
+pub fn list_tags_with(
+    layout: &RepoLayout,
+    read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
+) -> RefResult<Vec<Ref>> {
+    list_refs_under_with(layout.common_dir(), TAGS_DIR, read_batch)
 }
 
 // -----------------------------------------------------------------------------
@@ -1045,13 +1069,22 @@ fn list_refs_under(common_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
 /// [`list_refs_under`] (and therefore [`list_refs`]/[`list_remote_refs`]/
 /// tag listing) still uses.
 fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
-    candidates
-        .iter()
-        .map(|c| match fs::read(&c.path) {
-            Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
-            Err(_) => RefReadOutcome::Unreadable,
-        })
-        .collect()
+    candidates.iter().map(read_ref_candidate).collect()
+}
+
+/// Read and decode one [`RefCandidate`]'s wire content. The single
+/// definition of "how to turn a candidate into a [`RefReadOutcome`]",
+/// shared by [`sequential_read_batch`] and every caller-supplied
+/// `read_batch` in mkit-cli's rayon fan-out and its bench — so the
+/// `Unreadable`-vs-`Decoded(None)` policy (an I/O failure drops the
+/// entry; malformed-but-readable content keeps it with `hash: None`)
+/// can't drift between a sequential and a parallel caller.
+#[must_use]
+pub fn read_ref_candidate(candidate: &RefCandidate) -> RefReadOutcome {
+    match fs::read(&candidate.path) {
+        Ok(bytes) => RefReadOutcome::Decoded(decode_ref_wire(&bytes)),
+        Err(_) => RefReadOutcome::Unreadable,
+    }
 }
 
 /// One ref file discovered by [`list_refs_under_with`]'s directory walk:

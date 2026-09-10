@@ -692,8 +692,8 @@ fn collect_refs(layout: &RepoLayout, explicit: &[String]) -> CmdResult<Vec<(Stri
             out.push((format!("refs/heads/{}", r.name), h));
         }
     }
-    let tags =
-        refs::list_tags(layout).map_err(|e| (format!("list tags: {e}"), exit::GENERAL_ERROR))?;
+    let tags = super::list_tags_parallel(layout)
+        .map_err(|e| (format!("list tags: {e}"), exit::GENERAL_ERROR))?;
     for r in tags {
         if let Some(h) = r.hash {
             out.push((format!("refs/tags/{}", r.name), h));

@@ -99,6 +99,19 @@ use std::path::Path;
 /// uses the same low per-thread count for the same reason.
 const LIST_REFS_FANOUT_ENTRIES_PER_THREAD: usize = 2;
 
+/// The `read_batch` shared by every parallel ref-listing wrapper below:
+/// fans [`refs::read_ref_candidate`] out across rayon's global thread
+/// pool once there's enough work to amortize dispatch. One definition so
+/// the fan-out shape (and the sequential-below-threshold crossover) can't
+/// drift between the heads/tags/remote-refs variants.
+fn fanout_read_batch(candidates: &[refs::RefCandidate]) -> Vec<refs::RefReadOutcome> {
+    crate::fanout::map_seq_or_par(
+        candidates,
+        crate::fanout::threshold(LIST_REFS_FANOUT_ENTRIES_PER_THREAD),
+        |c, _| refs::read_ref_candidate(c),
+    )
+}
+
 /// [`refs::list_refs`], with the per-ref read-and-decode step fanned out
 /// across rayon's global thread pool once there's enough work to amortize
 /// dispatch — the directory walk itself stays sequential either way (see
@@ -108,16 +121,24 @@ const LIST_REFS_FANOUT_ENTRIES_PER_THREAD: usize = 2;
 /// 1k-10k refs and still faster, not a wash, even at 100 (`cargo bench -p
 /// mkit-benches --bench refs_ops -- list_refs_fanout`).
 pub(crate) fn list_refs_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {
-    refs::list_refs_with(layout, |candidates| {
-        crate::fanout::map_seq_or_par(
-            candidates,
-            crate::fanout::threshold(LIST_REFS_FANOUT_ENTRIES_PER_THREAD),
-            |c, _| match fs::read(&c.path) {
-                Ok(bytes) => refs::RefReadOutcome::Decoded(refs::decode_ref_wire(&bytes)),
-                Err(_) => refs::RefReadOutcome::Unreadable,
-            },
-        )
-    })
+    refs::list_refs_with(layout, fanout_read_batch)
+}
+
+/// [`refs::list_tags`], fanned out the same way as [`list_refs_parallel`]
+/// — a command that lists heads and tags together (e.g. `for-each-ref`,
+/// `show-ref`, `ref list`) gets the parallel win on both namespaces, not
+/// just the one that happened to be wired up first.
+pub(crate) fn list_tags_parallel(layout: &RepoLayout) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_tags_with(layout, fanout_read_batch)
+}
+
+/// [`refs::list_remote_refs`], fanned out the same way as
+/// [`list_refs_parallel`].
+pub(crate) fn list_remote_refs_parallel(
+    layout: &RepoLayout,
+    remote: &str,
+) -> Result<Vec<refs::Ref>, RefError> {
+    refs::list_remote_refs_with(layout, remote, fanout_read_batch)
 }
 
 /// Open the object store for a mutating command, honoring the repo's
