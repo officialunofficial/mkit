@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::{CommitHistory, HistoryError, InclusionProof, Position, verify_inclusion};
@@ -179,55 +180,85 @@ impl AncestrySnapshot {
     }
 }
 
-/// Parse a snapshot's wire bytes into its claimed descriptor and chain,
-/// without building an MMB from the chain. The payload checksum (covering
-/// the encoded `root` along with everything else) is still verified, so
-/// accidental corruption or a torn/partial write is still caught here; what
-/// this skips is [`AncestrySnapshot::decode`]'s extra step of rebuilding
-/// the whole MMB from `chain` to independently recompute `root` and check
-/// it against the value read from the wire.
-///
-/// That's a real, if narrow, difference: the checksum is a plain
-/// self-computed `hash::hash(payload)`, not a MAC or signature bound to a
-/// secret — anyone with local write access to the snapshot file can
-/// construct an internally-inconsistent `(chain, root)` pair and simply
-/// recompute the checksum to match, same as they could edit any other
-/// locally-writable mkit state. `decode`'s rebuild-and-compare catches
-/// exactly that case (or an `encode`/`decode` bug producing the same
-/// effect) by failing closed; skipping it here means such a file, on
-/// `advance`'s path only (via [`read_current_chain`]), fails open instead:
-/// `advance` proceeds using the parsed `chain` as-is. That's still safe
-/// because `advance` never *persists* `old`'s data — every use compares it
-/// against `first_parent_chain(store, target)`, a fresh walk re-verified
-/// against the live object store, and only that freshly-verified chain
-/// ever gets written into the new snapshot (see `advance`'s call site). A
-/// self-inconsistent `old` can therefore at worst cause a spurious
-/// cache-miss (fall back to a fresh generation and full rebuild), never a
-/// bad chain getting published. [`AncestrySnapshot::load`] and `finish`'s
-/// own from-scratch rebuild both still run the full checked `decode`, so
-/// this narrower guarantee is scoped to `advance`'s comparison-only read.
-///
-/// Used by [`read_current_chain`], which backs `advance`'s
-/// compatibility/no-op/generation-reuse checks: those only ever read
-/// `descriptor`/`chain`, never the MMB, so building one there was pure
-/// waste — see `advance`'s call site. [`AncestrySnapshot::decode`] (via
-/// [`AncestrySnapshot::load`], which does need a working MMB for
-/// [`AncestrySnapshot::prove`]) keeps the full rebuild-and-cross-check.
-fn decode_descriptor_and_chain(
-    bytes: &[u8],
-) -> Result<(AncestryDescriptor, Vec<Hash>), HistoryError> {
-    fn take<'a>(input: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
-        if input.len() < n {
-            return None;
-        }
-        let (head, tail) = input.split_at(n);
-        *input = tail;
-        Some(head)
+fn take<'a>(input: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    if input.len() < n {
+        return None;
     }
+    let (head, tail) = input.split_at(n);
+    *input = tail;
+    Some(head)
+}
+
+fn descriptor_header_invalid() -> HistoryError {
+    HistoryError::Corrupted("malformed ancestry snapshot".into())
+}
+
+/// Parse the fixed-size descriptor header and ref name from the front of
+/// a snapshot's payload — everything up to, but not including, the
+/// leaf-hash chain. Consumes `input` through the ref name; whatever
+/// remains (the chain, for a full payload, or nothing, for a header-only
+/// prefix read) is left for the caller. Shared by [`decode_descriptor_and_chain`]
+/// (which continues on to parse and checksum-verify the chain) and
+/// [`read_current_descriptor`] (which reads only this prefix from disk).
+fn parse_descriptor_header(input: &mut &[u8]) -> Result<AncestryDescriptor, HistoryError> {
     fn digest(input: &mut &[u8]) -> Option<Hash> {
         take(input, 32)?.try_into().ok()
     }
-    let invalid = || HistoryError::Corrupted("malformed ancestry snapshot".into());
+    let invalid = descriptor_header_invalid;
+    if take(input, 5) != Some(MAGIC.as_slice()) {
+        return Err(invalid());
+    }
+    let repository = digest(input).ok_or_else(invalid)?;
+    let generation = digest(input).ok_or_else(invalid)?;
+    let tip = digest(input).ok_or_else(invalid)?;
+    let count = u64::from_le_bytes(
+        take(input, 8)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    let root = digest(input).ok_or_else(invalid)?;
+    let name_len = u16::from_le_bytes(
+        take(input, 2)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?,
+    ) as usize;
+    let full_ref = std::str::from_utf8(take(input, name_len).ok_or_else(invalid)?)
+        .map_err(|_| invalid())?
+        .to_owned();
+    if !full_ref.starts_with("refs/heads/")
+        || !refs::validate_ref_name(&full_ref)
+        || count == 0
+        || count > MAX_ANCESTRY_LEAVES as u64
+    {
+        return Err(invalid());
+    }
+    Ok(AncestryDescriptor {
+        repository,
+        full_ref,
+        generation,
+        tip,
+        leaf_count: count,
+        root,
+    })
+}
+
+/// Parse a snapshot's wire bytes into its claimed descriptor and full
+/// chain. The payload checksum (covering the encoded `root` along with
+/// everything else) is verified against the whole payload before any
+/// field is trusted, so accidental corruption or a torn/partial write is
+/// caught here. Used by [`AncestrySnapshot::decode`] (via
+/// [`AncestrySnapshot::load`] and `finish`'s from-scratch rebuild, both of
+/// which need the actual chain and a working MMB for
+/// [`AncestrySnapshot::prove`]) — [`read_current_descriptor`] is the
+/// lighter, checksum-free sibling for `advance`'s comparison-only need,
+/// which never touches `chain` or the MMB at all; see its own docs for
+/// why skipping the checksum is safe there.
+fn decode_descriptor_and_chain(
+    bytes: &[u8],
+) -> Result<(AncestryDescriptor, Vec<Hash>), HistoryError> {
+    let invalid = descriptor_header_invalid;
     if bytes.len() < 175 || bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
         return Err(invalid());
     }
@@ -236,49 +267,41 @@ fn decode_descriptor_and_chain(
         return Err(invalid());
     }
     let mut input = payload;
-    if take(&mut input, 5) != Some(MAGIC.as_slice()) {
-        return Err(invalid());
-    }
-    let repository = digest(&mut input).ok_or_else(invalid)?;
-    let generation = digest(&mut input).ok_or_else(invalid)?;
-    let tip = digest(&mut input).ok_or_else(invalid)?;
-    let count = u64::from_le_bytes(
-        take(&mut input, 8)
-            .ok_or_else(invalid)?
-            .try_into()
-            .map_err(|_| invalid())?,
-    );
-    let root = digest(&mut input).ok_or_else(invalid)?;
-    let name_len = u16::from_le_bytes(
-        take(&mut input, 2)
-            .ok_or_else(invalid)?
-            .try_into()
-            .map_err(|_| invalid())?,
-    ) as usize;
-    let full_ref = std::str::from_utf8(take(&mut input, name_len).ok_or_else(invalid)?)
-        .map_err(|_| invalid())?
-        .to_owned();
-    if !full_ref.starts_with("refs/heads/")
-        || !refs::validate_ref_name(&full_ref)
-        || count == 0
-        || count > MAX_ANCESTRY_LEAVES as u64
-        || input.len() as u64 != count * 32
-    {
+    let descriptor = parse_descriptor_header(&mut input)?;
+    if input.len() as u64 != descriptor.leaf_count * 32 {
         return Err(invalid());
     }
     let chain: Vec<Hash> = input
         .chunks_exact(32)
         .map(|c| c.try_into().expect("32-byte chunk"))
         .collect();
-    let descriptor = AncestryDescriptor {
-        repository,
-        full_ref,
-        generation,
-        tip,
-        leaf_count: count,
-        root,
-    };
     Ok((descriptor, chain))
+}
+
+/// Prefix length generous enough for any ref name a snapshot could
+/// actually contain: the fixed header (5+32+32+32+8+32+2 = 143 bytes)
+/// plus the largest possible `name_len` (a `u16`). Reading this many
+/// bytes up front — one bounded read via [`read_prefix`] — means
+/// [`read_current_descriptor`] never needs a second read regardless of
+/// ref name length, while still stopping far short of the up-to-32 MiB
+/// leaf-hash chain that follows for any history of meaningful size.
+const DESCRIPTOR_HEADER_MAX_LEN: u64 = 143 + u16::MAX as u64;
+
+/// Read up to `max_bytes` from `path`, without erroring if the file is
+/// larger — the caller wants only a prefix, not an exact-length read.
+/// `Ok(None)` if the file does not exist, matching
+/// [`ancestry_state::read_bounded`]'s convention.
+fn read_prefix(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, HistoryError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(HistoryError::Io(e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(HistoryError::Io)?;
+    Ok(Some(bytes))
 }
 
 /// Verify first-parent inclusion against an independently trusted local
@@ -378,31 +401,74 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
     Ok(Some(snapshot))
 }
 
-/// The previous publish's descriptor and chain, without its MMB — what
-/// `advance`'s compatibility/no-op/generation-reuse checks actually read.
-struct PriorChain {
-    descriptor: AncestryDescriptor,
-    chain: Vec<Hash>,
-}
-
-/// Like [`read_current`], but skips building an MMB nobody reads on this
-/// path — see [`decode_descriptor_and_chain`]'s docs for exactly what's
-/// (and isn't) re-verified as a result. Used only by `advance`.
-fn read_current_chain(dir: &Path) -> Result<Option<PriorChain>, HistoryError> {
+/// The previous publish's descriptor, without its chain or MMB — the only
+/// thing `advance`'s compatibility/no-op/generation-reuse checks actually
+/// need. `advance` never uses `old.chain` bytes directly: every check
+/// compares against `chain = first_parent_chain(store, target)`, a fresh,
+/// store-verified walk it computes unconditionally anyway. Content
+/// addressing makes that walk deterministic in the hash it produces at
+/// each position for a given tip and store contents, so:
+///
+/// - `target == old.tip` implies `chain` is byte-for-byte `old.chain`
+///   (both are `first_parent_chain(store, old.tip)`, computed at
+///   different times against the same immutable objects) — the no-op
+///   check needs no more than that one hash comparison.
+/// - `chain[old.leaf_count - 1] == old.tip` implies
+///   `chain[..old.leaf_count] == old.chain`, by the same argument applied
+///   to the sub-walk ending at that position — the fast-forward/
+///   generation-reuse check needs the same single comparison, using
+///   `chain[old.leaf_count - 1]`, which is already in memory (no extra
+///   cost: `chain` is fully materialized either way).
+///
+/// So loading `old.chain` at all — up to 32 MiB of leaf hashes, and the
+/// linear checksum hash over the full payload that validates it — was
+/// pure waste on this path. [`read_current_descriptor`] reads only the
+/// small fixed-size header (via [`read_prefix`], not the whole file) and
+/// skips checksum verification entirely, which is a real, if narrow,
+/// difference, a layer past the one [`decode_descriptor_and_chain`]'s docs
+/// already accept for `advance`'s comparison-only use of `old`: there, a
+/// corrupted-but-self-consistent payload could still fail via the root
+/// rebuild-and-compare; here, there is no rebuild to catch it, so a
+/// corrupted header field that still parses structurally (a bit-flipped
+/// byte inside `tip`/`generation`/`root`, as opposed to e.g. invalid UTF-8
+/// or a bad magic, both still caught) goes undetected by this function.
+/// That stays safe for the same reason as before — `advance` never
+/// *persists* `old`'s fields, it only compares them — traced field by
+/// field: a corrupted `tip` fails the `compatible` filter against the
+/// independently-read live ref value (`mutation.current()`) or the
+/// fast-forward comparison against `chain`, either way just missing a
+/// legitimate fast-forward and falling back to a fresh generation and full
+/// rebuild, never accepting a wrong one (the astronomically unlikely case
+/// of a corrupted `tip` coincidentally colliding with a real hash is the
+/// same order of risk this whole checksum design already accepts
+/// elsewhere). A corrupted `generation` is independently caught by the
+/// `descriptor.generation != generation` check below, against the
+/// separately-read `current` pointer file. A corrupted `leaf_count` either
+/// fails the `chain.len() >= leaf_count` bound or indexes `chain` at the
+/// wrong position, which then very likely fails the `tip` comparison for
+/// the same collision-improbability reason. No field's corruption can
+/// cause a bad chain to reach the new, freshly-persisted snapshot, since
+/// that snapshot is always built from `chain` itself, never from `old`.
+fn read_current_descriptor(dir: &Path) -> Result<Option<AncestryDescriptor>, HistoryError> {
     let Some(bytes) = ancestry_state::read_bounded(&dir.join("current"), 65)? else {
         return Ok(None);
     };
     let generation = refs::decode_ref_wire(&bytes)
         .ok_or_else(|| HistoryError::Corrupted("malformed history generation pointer".into()))?;
-    let raw = ancestry_state::read_bounded(&snapshot_path(dir, generation), MAX_SNAPSHOT_BYTES)?
-        .ok_or_else(|| HistoryError::Corrupted("missing ancestry generation snapshot".into()))?;
-    let (descriptor, chain) = decode_descriptor_and_chain(&raw)?;
+    let Some(prefix) = read_prefix(&snapshot_path(dir, generation), DESCRIPTOR_HEADER_MAX_LEN)?
+    else {
+        return Err(HistoryError::Corrupted(
+            "missing ancestry generation snapshot".into(),
+        ));
+    };
+    let mut input = prefix.as_slice();
+    let descriptor = parse_descriptor_header(&mut input)?;
     if descriptor.generation != generation {
         return Err(HistoryError::Corrupted(
             "ancestry generation mismatch".into(),
         ));
     }
-    Ok(Some(PriorChain { descriptor, chain }))
+    Ok(Some(descriptor))
 }
 
 /// Finish a durable intent under BOTH history and ref mutation guards. The
@@ -516,20 +582,26 @@ pub(crate) fn advance(
     mutation.check(condition)?;
     let previous = mutation.current()?;
     let repository = repository_id(layout.common_dir())?;
-    let old = read_current_chain(&dir)?;
-    let compatible = old.as_ref().filter(|s| {
-        s.descriptor.repository == repository
-            && s.descriptor.full_ref == full_ref
-            && Some(s.descriptor.tip) == previous
+    let old = read_current_descriptor(&dir)?;
+    let compatible = old.as_ref().filter(|d| {
+        d.repository == repository && d.full_ref == full_ref && Some(d.tip) == previous
     });
     let chain = first_parent_chain(store, target)?;
-    if let Some(old) = compatible
-        && old.chain == chain
-    {
+    // See `read_current_descriptor`'s docs for why these single-hash
+    // comparisons against `chain` (already fully walked above) are exactly
+    // equivalent to the old.chain == chain / chain.starts_with(&old.chain)
+    // checks this replaced, without ever needing to load `old.chain`.
+    if compatible.is_some_and(|d| d.tip == target) {
         return Ok(());
     }
     let generation = match compatible {
-        Some(old) if chain.starts_with(&old.chain) => old.descriptor.generation,
+        Some(d)
+            if d.leaf_count > 0
+                && usize::try_from(d.leaf_count - 1)
+                    .is_ok_and(|idx| chain.get(idx) == Some(&d.tip)) =>
+        {
+            d.generation
+        }
         _ => fresh_id()?,
     };
     let tx = Transaction {
@@ -538,7 +610,7 @@ pub(crate) fn advance(
         previous,
         target,
         generation,
-        previous_generation: compatible.map(|s| s.descriptor.generation),
+        previous_generation: compatible.map(|d| d.generation),
     };
     // Validate the target before persisting intent, and keep the built
     // snapshot: `finish` below (the common, non-crash-recovery path) reuses
@@ -850,5 +922,202 @@ mod tests {
         fs::write(dir.join("transaction"), b"broken").unwrap();
         assert!(refs::pending_history_roots(&layout).is_err());
         assert!(crate::ops::gc::live_objects(&store, &layout).is_err());
+    }
+
+    /// `read_current_descriptor` is a new, narrower read path introduced
+    /// specifically so `advance` doesn't have to load `old.chain` — pin
+    /// that its fields agree exactly with the full `read_current`/`decode`
+    /// path for the same on-disk snapshot, across a few chain lengths
+    /// (including a single-leaf history, where `leaf_count - 1 == 0`).
+    #[test]
+    fn read_current_descriptor_matches_full_snapshot_fields() {
+        for count in [1u64, 2, 50] {
+            let (_dir, layout, store) = repo();
+            let mut parents = vec![];
+            let mut tip = [0; 32];
+            for i in 0..count {
+                tip = commit(&store, parents, i.to_be_bytes().as_slice());
+                parents = vec![tip];
+            }
+            update(&layout, &store, "main", tip);
+
+            let branch_dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+            let full = read_current(&branch_dir).unwrap().unwrap();
+            let lite = read_current_descriptor(&branch_dir).unwrap().unwrap();
+
+            assert_eq!(lite, full.descriptor, "count={count}");
+            assert_eq!(lite.leaf_count, count);
+            assert_eq!(lite.tip, tip);
+        }
+    }
+
+    /// The new header-only read path (`read_prefix` bounded by
+    /// `DESCRIPTOR_HEADER_MAX_LEN`) must still correctly parse a ref name
+    /// long enough to stress the "read enough of the file up front"
+    /// assumption, not just the short names every other test uses.
+    #[test]
+    fn read_current_descriptor_handles_a_long_branch_name() {
+        let (_dir, layout, store) = repo();
+        // A single path component near ext4's 255-byte NAME_MAX, not
+        // `u16::MAX` — the ref name becomes a real filename on disk.
+        let long_branch = "b".repeat(200);
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, &long_branch, a);
+
+        let branch_dir =
+            ancestry_state::branch_dir(layout.common_dir(), &format!("refs/heads/{long_branch}"));
+        let lite = read_current_descriptor(&branch_dir).unwrap().unwrap();
+        assert_eq!(lite.full_ref, format!("refs/heads/{long_branch}"));
+        assert_eq!(lite.tip, a);
+        assert_eq!(lite.leaf_count, 1);
+    }
+
+    /// Sequential single-commit publishes never load `old.chain` anymore
+    /// (see `read_current_descriptor`'s docs for the equivalence argument):
+    /// pin that the generation is still correctly carried forward across
+    /// many such publishes at every index — not just checked once at the
+    /// end — and still correctly resets on a rewrite, at a chain length
+    /// long enough that a bug indexing `chain` at the wrong position
+    /// (off-by-one on `leaf_count - 1`, say) would show up as a spurious
+    /// fresh generation somewhere in the middle of the run. A weaker
+    /// version of this test that only compared the generation after all 40
+    /// publishes against the generation after the rewrite would NOT catch
+    /// that class of bug: two independently-minted random generations are
+    /// virtually certain to differ regardless of whether the 40
+    /// fast-forwards in between were each handled correctly, so the
+    /// meaningful assertion is same-generation-every-step, not
+    /// different-generation-at-the-end.
+    #[test]
+    fn many_sequential_publishes_keep_one_generation_until_a_real_rewrite() {
+        let (_dir, layout, store) = repo();
+        let mut parents = vec![];
+        let mut tips = Vec::new();
+        for i in 0..40u64 {
+            let h = commit(&store, parents, i.to_be_bytes().as_slice());
+            parents = vec![h];
+            tips.push(h);
+        }
+
+        update(&layout, &store, "main", tips[0]);
+        let first_generation = AncestrySnapshot::load(&layout, "main")
+            .unwrap()
+            .descriptor()
+            .generation;
+        for (i, &h) in tips.iter().enumerate().skip(1) {
+            update(&layout, &store, "main", h);
+            let generation = AncestrySnapshot::load(&layout, "main")
+                .unwrap()
+                .descriptor()
+                .generation;
+            assert_eq!(
+                generation, first_generation,
+                "fast-forward to tips[{i}] must keep the same generation as the first publish"
+            );
+        }
+        let final_generation = first_generation;
+
+        // A rewrite back to an earlier tip must start a new generation,
+        // proving the run above wasn't just accepting every publish as
+        // compatible regardless of the leaf-count/tip check.
+        update(&layout, &store, "main", tips[10]);
+        let reset_generation = AncestrySnapshot::load(&layout, "main")
+            .unwrap()
+            .descriptor()
+            .generation;
+        assert_ne!(reset_generation, final_generation);
+    }
+
+    /// Not a correctness test — a manual profiling comparison, isolating
+    /// exactly the mechanism `read_current_descriptor` optimizes, free of
+    /// the fsync noise that swamps it in the full publish pipeline (see
+    /// CHANGELOG for why `cargo bench`'s `sequential_publish` couldn't show
+    /// this at reasonable N: fsync dominates every publish, and reaching an
+    /// N where the O(N) old-chain read would compete with that fixed cost
+    /// takes far too long to benchmark end-to-end). Builds one large
+    /// snapshot on disk (a single write, fsync'd once — not per iteration),
+    /// then times many repeated *reads* of it — reads need no fsync, so
+    /// this can iterate enough to average out scheduler/allocator noise —
+    /// comparing `read_current_descriptor` (prefix read, header-only parse)
+    /// against the pre-optimization equivalent reconstructed inline from
+    /// still-present pieces (`read_bounded` the whole file, then
+    /// `decode_descriptor_and_chain`, exactly what the removed
+    /// `read_current_chain` did). Run with:
+    /// `cargo test -p mkit-core --features history-mmr --lib \
+    ///   history::ancestry::tests::profile_read_current_descriptor_vs_full_chain_read \
+    ///   -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual profiling tool, not a correctness assertion"]
+    fn profile_read_current_descriptor_vs_full_chain_read() {
+        const LEAVES: u64 = 50_000;
+        const ITERS: u32 = 200;
+
+        let (_dir, layout, store) = repo();
+        let tree = store
+            .write(&crate::serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap())
+            .unwrap();
+        let mut parents = vec![];
+        let mut tip = [0; 32];
+        for i in 0..LEAVES {
+            let c = Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::opaque(b"profile".to_vec()),
+                [0; 32],
+                i.to_be_bytes().to_vec(),
+                0,
+                [0; 64],
+            );
+            tip = store
+                .write(&crate::serialize::serialize(&Object::Commit(c)).unwrap())
+                .unwrap();
+            parents = vec![tip];
+        }
+        update(&layout, &store, "main", tip);
+        let branch_dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+
+        // Warm the OS page cache for both paths equally before timing.
+        for _ in 0..5 {
+            std::hint::black_box(read_current_descriptor(&branch_dir).unwrap());
+            std::hint::black_box(read_current(&branch_dir).unwrap());
+        }
+
+        let old_style_read = || {
+            let bytes = ancestry_state::read_bounded(&branch_dir.join("current"), 65)
+                .unwrap()
+                .unwrap();
+            let generation = refs::decode_ref_wire(&bytes).unwrap();
+            let raw = ancestry_state::read_bounded(
+                &snapshot_path(&branch_dir, generation),
+                MAX_SNAPSHOT_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+            decode_descriptor_and_chain(&raw).unwrap()
+        };
+
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(old_style_read());
+        }
+        let old_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(read_current_descriptor(&branch_dir).unwrap());
+        }
+        let new_elapsed = start.elapsed();
+
+        eprintln!(
+            "read_current (old, full chain + checksum): {:?}/iter over {ITERS} iters, {LEAVES} leaves",
+            old_elapsed / ITERS
+        );
+        eprintln!(
+            "read_current_descriptor (new, header only): {:?}/iter over {ITERS} iters, {LEAVES} leaves",
+            new_elapsed / ITERS
+        );
+        eprintln!(
+            "speedup: {:.1}x",
+            old_elapsed.as_secs_f64() / new_elapsed.as_secs_f64()
+        );
     }
 }
