@@ -272,6 +272,67 @@ fn first_parent_chain(store: &ObjectStore, tip: Hash) -> Result<Vec<Hash>, Histo
     Ok(chain)
 }
 
+/// Like [`first_parent_chain`], but reuses a previously-validated chain
+/// instead of re-walking it from `store` every time.
+///
+/// `advance` used to call `first_parent_chain(store, target)` on every
+/// publish, unconditionally re-reading and re-validating every commit
+/// object from `target` back to the repository's very first commit —
+/// even when `target` is simply `prefix_tip`'s child, i.e. exactly the
+/// `mkit commit` steady state (one new leaf on top of the branch's
+/// existing, already-verified ancestry). That makes N sequential
+/// single-commit publishes cost O(N) reads each, O(N^2) total.
+///
+/// This walks backward from `target` only until it reaches `prefix_tip`
+/// (`prefix`'s own tip), then splices the short new suffix onto `prefix`
+/// — so a plain fast-forward costs O(new commits), not O(total depth).
+/// It falls back to a full [`first_parent_chain`] walk — with
+/// byte-for-byte identical results and error behavior — whenever
+/// `target`'s ancestry does not pass through `prefix_tip` before
+/// exhausting the parent chain or the leaf bound (a rewrite, reset, or
+/// unrelated branch, where `prefix` cannot be reused), so unrelated
+/// histories are exactly as correct and exactly as bounded as before.
+fn first_parent_chain_from(
+    store: &ObjectStore,
+    target: Hash,
+    prefix: &[Hash],
+    prefix_tip: Hash,
+) -> Result<Vec<Hash>, HistoryError> {
+    let mut suffix = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut next = Some(target);
+    while let Some(h) = next {
+        if h == prefix_tip {
+            suffix.reverse();
+            let mut chain = Vec::with_capacity(prefix.len() + suffix.len());
+            chain.extend_from_slice(prefix);
+            chain.extend(suffix);
+            return Ok(chain);
+        }
+        if suffix.len() + prefix.len() >= MAX_ANCESTRY_LEAVES || !seen.insert(h) {
+            // Same bound `first_parent_chain` enforces on a from-scratch
+            // walk; let it recompute (and report) from `target` directly
+            // rather than duplicating the cycle/limit error here.
+            return first_parent_chain(store, target);
+        }
+        suffix.push(h);
+        next = match store.read_object(&h)? {
+            Object::Commit(c) => c.parents.first().copied(),
+            Object::Remix(r) => r.parents.first().copied(),
+            _ => {
+                return Err(HistoryError::Corrupted(
+                    "ancestry node is not a commit/remix".into(),
+                ));
+            }
+        };
+    }
+    // Walked to genesis without passing through `prefix_tip`: `target`'s
+    // history does not build on `prefix` (an amend, reset, or unrelated
+    // branch). Recompute independently for a result identical to what
+    // `first_parent_chain` gives directly.
+    first_parent_chain(store, target)
+}
+
 fn fresh_id() -> Result<Hash, HistoryError> {
     let mut id = [0; 32];
     getrandom::fill(&mut id).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -326,13 +387,24 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
 }
 
 /// Finish a durable intent under BOTH history and ref mutation guards. The
-/// target is rebuilt from verified objects, not guessed from a single old leaf.
+/// target is rebuilt from verified objects, not guessed from a single old leaf
+/// — unless `prebuilt` already is that exact rebuild.
+///
+/// `prebuilt` lets a caller that just built (and validated) the matching
+/// snapshot in memory — `advance`'s own non-crash path — hand it over
+/// instead of paying a second full `first_parent_chain` walk and MMR
+/// build for the identical chain here. It is only trusted when its
+/// descriptor's `repository`/`full_ref`/`generation`/`tip` exactly match `tx`;
+/// any mismatch (or `None`, as `recover` always passes — it only has a
+/// `Transaction` read back from disk, never a live snapshot) falls back
+/// to the original from-scratch rebuild.
 fn finish(
     layout: &RepoLayout,
     dir: &Path,
     tx: &Transaction,
     mutation: &RefMutation,
     store: &ObjectStore,
+    prebuilt: Option<AncestrySnapshot>,
 ) -> Result<AncestrySnapshot, HistoryError> {
     if tx.repository != repository_id(layout.common_dir())?
         || ancestry_state::branch_dir(layout.common_dir(), &tx.full_ref) != dir
@@ -347,12 +419,22 @@ fn finish(
             "ref diverged from pending history transaction".into(),
         ));
     }
-    let snapshot = AncestrySnapshot::build(
-        tx.repository,
-        tx.full_ref.clone(),
-        tx.generation,
-        first_parent_chain(store, tx.target)?,
-    )?;
+    let snapshot = match prebuilt {
+        Some(snapshot)
+            if snapshot.descriptor.repository == tx.repository
+                && snapshot.descriptor.full_ref == tx.full_ref
+                && snapshot.descriptor.generation == tx.generation
+                && snapshot.descriptor.tip == tx.target =>
+        {
+            snapshot
+        }
+        _ => AncestrySnapshot::build(
+            tx.repository,
+            tx.full_ref.clone(),
+            tx.generation,
+            first_parent_chain(store, tx.target)?,
+        )?,
+    };
     let encoded = snapshot.encode()?;
     crate::atomic::write_atomic(&dir.join("pending-snapshot"), &encoded, true)?;
     checkpoint(2)?;
@@ -384,7 +466,7 @@ pub(crate) fn recover(
 ) -> Result<(), HistoryError> {
     let dir = ancestry_state::branch_dir(layout.common_dir(), &format!("refs/heads/{branch}"));
     if let Some(tx) = Transaction::read(&dir)? {
-        finish(layout, &dir, &tx, mutation, store)?;
+        finish(layout, &dir, &tx, mutation, store, None)?;
     }
     Ok(())
 }
@@ -401,7 +483,7 @@ pub(crate) fn advance(
     let full_ref = format!("refs/heads/{branch}");
     let dir = ancestry_state::branch_dir(layout.common_dir(), &full_ref);
     if let Some(tx) = Transaction::read(&dir)? {
-        finish(layout, &dir, &tx, mutation, store)?;
+        finish(layout, &dir, &tx, mutation, store, None)?;
         let retry_of_intent = target == tx.target
             && match condition {
                 RefWriteCondition::Any => true,
@@ -416,12 +498,20 @@ pub(crate) fn advance(
     let previous = mutation.current()?;
     let repository = repository_id(layout.common_dir())?;
     let old = read_current(&dir)?;
-    let chain = first_parent_chain(store, target)?;
     let compatible = old.as_ref().filter(|s| {
         s.descriptor.repository == repository
             && s.descriptor.full_ref == full_ref
             && Some(s.descriptor.tip) == previous
     });
+    // The common `mkit commit` steady state is a plain fast-forward: `old`
+    // is the immediately preceding publish and `target` is its child. Reuse
+    // `old`'s already-verified chain instead of re-reading and re-verifying
+    // every ancestor back to the repository's first commit on every publish
+    // (see `first_parent_chain_from`'s docs).
+    let chain = match compatible {
+        Some(old) => first_parent_chain_from(store, target, &old.chain, old.descriptor.tip)?,
+        None => first_parent_chain(store, target)?,
+    };
     if let Some(old) = compatible
         && old.chain == chain
     {
@@ -439,9 +529,12 @@ pub(crate) fn advance(
         generation,
         previous_generation: compatible.map(|s| s.descriptor.generation),
     };
-    // Validate the target before persisting intent. Readers withhold proofs for
-    // the entire intent window. GC pins previous+target from the metadata.
-    let _ = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;
+    // Validate the target before persisting intent, and keep the built
+    // snapshot: `finish` below (the common, non-crash-recovery path) reuses
+    // it instead of re-walking `store` and rebuilding the MMR a second time
+    // for the exact same chain. Readers withhold proofs for the entire
+    // intent window. GC pins previous+target from the metadata.
+    let snapshot = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;
     crate::atomic::write_atomic(&dir.join("transaction"), &tx.encode(), true)?;
     // Newly created directory entries must themselves be durable.
     for parent in [
@@ -455,7 +548,7 @@ pub(crate) fn advance(
         crate::atomic::sync_dir(parent)?;
     }
     checkpoint(1)?;
-    finish(layout, &dir, &tx, mutation, store)?;
+    finish(layout, &dir, &tx, mutation, store, Some(snapshot))?;
     Ok(())
 }
 
