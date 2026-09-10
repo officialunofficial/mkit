@@ -42,13 +42,17 @@ fn fixture(count: u64) -> (tempfile::TempDir, RepoLayout, ObjectStore, Hash) {
 /// Repeated single-commit publishes to the same branch — the steady state
 /// of real `mkit commit` usage, as opposed to `bench_history_mmr`'s single
 /// bulk publish of a `count`-deep history built entirely out-of-band. Each
-/// `update_ref_with_ancestry` call used to re-walk and re-verify the
-/// *entire* first-parent chain from scratch (`history::ancestry::advance`'s
-/// `first_parent_chain(store, target)`), so publishing N commits one at a
-/// time cost O(N) per publish, O(N^2) total; it also built the same
-/// in-memory MMR twice per publish (once to validate before persisting the
-/// intent, again in `finish` to actually write it) regardless of chain
-/// length. This isolates that pattern.
+/// `update_ref_with_ancestry` call re-walks and re-verifies the *entire*
+/// first-parent chain from `store` (`history::ancestry::advance`'s
+/// `first_parent_chain(store, target)`) and reloads+rebuilds the *previous*
+/// publish's whole MMR from its persisted snapshot (`read_current`), so
+/// publishing N commits one at a time still costs O(N) per publish, O(N^2)
+/// total — a chain-splicing fast path that avoided the first re-walk was
+/// prototyped and measured here, but was reverted (see CHANGELOG) because
+/// it skipped re-verifying the reused prefix against `store`, silently
+/// widening the window before local object-store corruption would be
+/// caught. This bench remains as the regression guard for that O(N) cost
+/// and a target for a future fix that does not weaken that check.
 fn bench_sequential_publish(c: &mut Criterion) {
     let mut samples: Vec<Sample> = Vec::new();
 

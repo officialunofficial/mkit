@@ -272,67 +272,6 @@ fn first_parent_chain(store: &ObjectStore, tip: Hash) -> Result<Vec<Hash>, Histo
     Ok(chain)
 }
 
-/// Like [`first_parent_chain`], but reuses a previously-validated chain
-/// instead of re-walking it from `store` every time.
-///
-/// `advance` used to call `first_parent_chain(store, target)` on every
-/// publish, unconditionally re-reading and re-validating every commit
-/// object from `target` back to the repository's very first commit —
-/// even when `target` is simply `prefix_tip`'s child, i.e. exactly the
-/// `mkit commit` steady state (one new leaf on top of the branch's
-/// existing, already-verified ancestry). That makes N sequential
-/// single-commit publishes cost O(N) reads each, O(N^2) total.
-///
-/// This walks backward from `target` only until it reaches `prefix_tip`
-/// (`prefix`'s own tip), then splices the short new suffix onto `prefix`
-/// — so a plain fast-forward costs O(new commits), not O(total depth).
-/// It falls back to a full [`first_parent_chain`] walk — with
-/// byte-for-byte identical results and error behavior — whenever
-/// `target`'s ancestry does not pass through `prefix_tip` before
-/// exhausting the parent chain or the leaf bound (a rewrite, reset, or
-/// unrelated branch, where `prefix` cannot be reused), so unrelated
-/// histories are exactly as correct and exactly as bounded as before.
-fn first_parent_chain_from(
-    store: &ObjectStore,
-    target: Hash,
-    prefix: &[Hash],
-    prefix_tip: Hash,
-) -> Result<Vec<Hash>, HistoryError> {
-    let mut suffix = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut next = Some(target);
-    while let Some(h) = next {
-        if h == prefix_tip {
-            suffix.reverse();
-            let mut chain = Vec::with_capacity(prefix.len() + suffix.len());
-            chain.extend_from_slice(prefix);
-            chain.extend(suffix);
-            return Ok(chain);
-        }
-        if suffix.len() + prefix.len() >= MAX_ANCESTRY_LEAVES || !seen.insert(h) {
-            // Same bound `first_parent_chain` enforces on a from-scratch
-            // walk; let it recompute (and report) from `target` directly
-            // rather than duplicating the cycle/limit error here.
-            return first_parent_chain(store, target);
-        }
-        suffix.push(h);
-        next = match store.read_object(&h)? {
-            Object::Commit(c) => c.parents.first().copied(),
-            Object::Remix(r) => r.parents.first().copied(),
-            _ => {
-                return Err(HistoryError::Corrupted(
-                    "ancestry node is not a commit/remix".into(),
-                ));
-            }
-        };
-    }
-    // Walked to genesis without passing through `prefix_tip`: `target`'s
-    // history does not build on `prefix` (an amend, reset, or unrelated
-    // branch). Recompute independently for a result identical to what
-    // `first_parent_chain` gives directly.
-    first_parent_chain(store, target)
-}
-
 fn fresh_id() -> Result<Hash, HistoryError> {
     let mut id = [0; 32];
     getrandom::fill(&mut id).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -503,15 +442,7 @@ pub(crate) fn advance(
             && s.descriptor.full_ref == full_ref
             && Some(s.descriptor.tip) == previous
     });
-    // The common `mkit commit` steady state is a plain fast-forward: `old`
-    // is the immediately preceding publish and `target` is its child. Reuse
-    // `old`'s already-verified chain instead of re-reading and re-verifying
-    // every ancestor back to the repository's first commit on every publish
-    // (see `first_parent_chain_from`'s docs).
-    let chain = match compatible {
-        Some(old) => first_parent_chain_from(store, target, &old.chain, old.descriptor.tip)?,
-        None => first_parent_chain(store, target)?,
-    };
+    let chain = first_parent_chain(store, target)?;
     if let Some(old) = compatible
         && old.chain == chain
     {
