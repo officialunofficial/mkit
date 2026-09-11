@@ -127,9 +127,7 @@ impl AncestrySnapshot {
             ));
         }
         let mut mmr = CommitHistory::open();
-        for h in &chain {
-            mmr.append(h)?;
-        }
+        mmr.extend(&chain)?;
         let descriptor = AncestryDescriptor {
             repository,
             full_ref,
@@ -326,13 +324,15 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
 }
 
 /// Finish a durable intent under BOTH history and ref mutation guards. The
-/// target is rebuilt from verified objects, not guessed from a single old leaf.
+/// target is rebuilt from verified objects, not guessed from a single old leaf,
+/// unless `prebuilt` already is that exact rebuild (see [`advance`]).
 fn finish(
     layout: &RepoLayout,
     dir: &Path,
     tx: &Transaction,
     mutation: &RefMutation,
     store: &ObjectStore,
+    prebuilt: Option<AncestrySnapshot>,
 ) -> Result<AncestrySnapshot, HistoryError> {
     if tx.repository != repository_id(layout.common_dir())?
         || ancestry_state::branch_dir(layout.common_dir(), &tx.full_ref) != dir
@@ -347,12 +347,40 @@ fn finish(
             "ref diverged from pending history transaction".into(),
         ));
     }
-    let snapshot = AncestrySnapshot::build(
-        tx.repository,
-        tx.full_ref.clone(),
-        tx.generation,
-        first_parent_chain(store, tx.target)?,
-    )?;
+    let snapshot = match prebuilt {
+        // Only trust a caller-supplied build when it is provably the same
+        // rebuild this function would otherwise perform itself.
+        Some(snapshot)
+            if snapshot.descriptor.repository == tx.repository
+                && snapshot.descriptor.full_ref == tx.full_ref
+                && snapshot.descriptor.generation == tx.generation
+                && snapshot.descriptor.tip == tx.target =>
+        {
+            snapshot
+        }
+        // A `Some` that reaches here is a caller bug (advance() only ever
+        // offers a snapshot it just built for this exact tx): rebuilding is
+        // still correct, but silently eating the mismatch would hide a
+        // future regression that quietly pays the O(N) rebuild cost again.
+        Some(_) => {
+            debug_assert!(
+                false,
+                "prebuilt ancestry snapshot did not match transaction context"
+            );
+            AncestrySnapshot::build(
+                tx.repository,
+                tx.full_ref.clone(),
+                tx.generation,
+                first_parent_chain(store, tx.target)?,
+            )?
+        }
+        None => AncestrySnapshot::build(
+            tx.repository,
+            tx.full_ref.clone(),
+            tx.generation,
+            first_parent_chain(store, tx.target)?,
+        )?,
+    };
     let encoded = snapshot.encode()?;
     crate::atomic::write_atomic(&dir.join("pending-snapshot"), &encoded, true)?;
     checkpoint(2)?;
@@ -384,7 +412,7 @@ pub(crate) fn recover(
 ) -> Result<(), HistoryError> {
     let dir = ancestry_state::branch_dir(layout.common_dir(), &format!("refs/heads/{branch}"));
     if let Some(tx) = Transaction::read(&dir)? {
-        finish(layout, &dir, &tx, mutation, store)?;
+        finish(layout, &dir, &tx, mutation, store, None)?;
     }
     Ok(())
 }
@@ -401,7 +429,7 @@ pub(crate) fn advance(
     let full_ref = format!("refs/heads/{branch}");
     let dir = ancestry_state::branch_dir(layout.common_dir(), &full_ref);
     if let Some(tx) = Transaction::read(&dir)? {
-        finish(layout, &dir, &tx, mutation, store)?;
+        finish(layout, &dir, &tx, mutation, store, None)?;
         let retry_of_intent = target == tx.target
             && match condition {
                 RefWriteCondition::Any => true,
@@ -439,9 +467,12 @@ pub(crate) fn advance(
         generation,
         previous_generation: compatible.map(|s| s.descriptor.generation),
     };
-    // Validate the target before persisting intent. Readers withhold proofs for
-    // the entire intent window. GC pins previous+target from the metadata.
-    let _ = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;
+    // Validate the target before persisting intent, and keep the result: the
+    // store cannot change under the history+ref locks held across this call,
+    // so `finish` below reuses this exact rebuild instead of redoing it.
+    // Readers withhold proofs for the entire intent window. GC pins
+    // previous+target from the metadata.
+    let snapshot = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;
     crate::atomic::write_atomic(&dir.join("transaction"), &tx.encode(), true)?;
     // Newly created directory entries must themselves be durable.
     for parent in [
@@ -455,7 +486,7 @@ pub(crate) fn advance(
         crate::atomic::sync_dir(parent)?;
     }
     checkpoint(1)?;
-    finish(layout, &dir, &tx, mutation, store)?;
+    finish(layout, &dir, &tx, mutation, store, Some(snapshot))?;
     Ok(())
 }
 

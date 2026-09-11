@@ -84,6 +84,28 @@ impl CommitHistory {
             .map_err(|e| HistoryError::Mmr(e.to_string()))?;
         Ok(Position(u64::from(leaf_loc)))
     }
+    /// Append every hash in `commit_hashes`, in order, as a single MMR batch.
+    /// Produces the same root and leaf positions as calling [`Self::append`]
+    /// once per hash, but merkleizes and applies the whole run in one pass.
+    pub fn extend<'a>(
+        &mut self,
+        commit_hashes: impl IntoIterator<Item = &'a Hash>,
+    ) -> Result<(), HistoryError> {
+        let mut batch = self.mmr.new_batch();
+        let mut any = false;
+        for commit_hash in commit_hashes {
+            let leaf = digest_from_hash(commit_hash);
+            batch = batch.add(&self.hasher, &leaf);
+            any = true;
+        }
+        if !any {
+            return Ok(());
+        }
+        let batch = batch.merkleize(&self.mmr, &self.hasher);
+        self.mmr
+            .apply_batch(&batch)
+            .map_err(|e| HistoryError::Mmr(e.to_string()))
+    }
     /// Return the root over every current leaf.
     ///
     /// # Panics
@@ -155,6 +177,35 @@ mod tests {
             assert_eq!(pos, Position(i), "positions must be dense and 0-based");
         }
         assert_eq!(h.len(), 16);
+    }
+
+    #[test]
+    fn extend_matches_sequential_append_root_and_positions() {
+        // `extend` merkleizes a whole run in one batch; `append` does one leaf
+        // per batch. Both must agree on root and leaf count for every length,
+        // including power-of-two MMR boundaries.
+        for len in [0u64, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 33, 64, 100] {
+            let commits: Vec<Hash> = (0..len).map(synth).collect();
+
+            let mut sequential = CommitHistory::open();
+            for c in &commits {
+                sequential.append(c).unwrap();
+            }
+
+            let mut batched = CommitHistory::open();
+            batched.extend(&commits).unwrap();
+
+            assert_eq!(
+                sequential.len(),
+                batched.len(),
+                "leaf count must match at len={len}"
+            );
+            assert_eq!(
+                sequential.root(),
+                batched.root(),
+                "root must match at len={len}"
+            );
+        }
     }
 
     #[test]
