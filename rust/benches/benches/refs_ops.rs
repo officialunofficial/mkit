@@ -15,6 +15,7 @@ use mkit_benches::{Sample, Unit, time_one};
 use mkit_core::hash::{Hash, hash};
 use mkit_core::layout::RepoLayout;
 use mkit_core::refs::{self, RefWriteCondition};
+use rayon::prelude::*;
 
 const BRANCH: &str = "main";
 const LIST_REFS_COUNTS: &[(usize, &str)] =
@@ -41,6 +42,7 @@ fn bench_refs_update(c: &mut Criterion) {
             || {
                 let dir = tempfile::tempdir().unwrap();
                 let layout = RepoLayout::single(dir.path());
+                refs::init(&layout).unwrap();
                 (dir, layout)
             },
             |(_dir, layout)| {
@@ -51,6 +53,7 @@ fn bench_refs_update(c: &mut Criterion) {
     {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
         let ms = time_ms(|| {
             refs::update_ref(&layout, BRANCH, RefWriteCondition::Any, &synth(0)).unwrap();
         });
@@ -70,6 +73,7 @@ fn bench_refs_update(c: &mut Criterion) {
             || {
                 let dir = tempfile::tempdir().unwrap();
                 let layout = RepoLayout::single(dir.path());
+                refs::init(&layout).unwrap();
                 (dir, layout)
             },
             |(_dir, layout)| {
@@ -80,6 +84,7 @@ fn bench_refs_update(c: &mut Criterion) {
     {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
         let ms = time_ms(|| {
             refs::update_ref(&layout, BRANCH, RefWriteCondition::Missing, &synth(0)).unwrap();
         });
@@ -99,6 +104,7 @@ fn bench_refs_update(c: &mut Criterion) {
             || {
                 let dir = tempfile::tempdir().unwrap();
                 let layout = RepoLayout::single(dir.path());
+                refs::init(&layout).unwrap();
                 let current = synth(0);
                 refs::update_ref(&layout, BRANCH, RefWriteCondition::Any, &current).unwrap();
                 (dir, layout, current)
@@ -117,6 +123,7 @@ fn bench_refs_update(c: &mut Criterion) {
     {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
         let current = synth(0);
         refs::update_ref(&layout, BRANCH, RefWriteCondition::Any, &current).unwrap();
         let ms = time_ms(|| {
@@ -151,6 +158,7 @@ fn bench_list_refs(c: &mut Criterion) {
     for &(n, axis) in LIST_REFS_COUNTS {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
         for i in 0..n as u64 {
             refs::update_ref(
                 &layout,
@@ -180,5 +188,89 @@ fn bench_list_refs(c: &mut Criterion) {
     mkit_benches::write_summary("list_refs", &samples);
 }
 
-criterion_group!(benches, bench_refs_update, bench_list_refs);
+/// Sequential-vs-rayon crossover for `list_refs_with`'s per-ref
+/// read-and-decode step — the fan-out `mkit-cli` wires a rayon `par_iter`
+/// into (mirroring `add_hash_fanout`/`chunk_hash_fanout`/etc.'s shape).
+/// `list_refs`'s directory walk (`fs::read_dir`) stays sequential either
+/// way; only the independent per-file `fs::read` + `decode_ref_wire` is
+/// fanned out here.
+fn bench_list_refs_fanout(c: &mut Criterion) {
+    let mut samples: Vec<Sample> = Vec::new();
+
+    for &(n, axis) in LIST_REFS_COUNTS {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
+        for i in 0..n as u64 {
+            refs::update_ref(
+                &layout,
+                &format!("bench/{i}"),
+                RefWriteCondition::Any,
+                &synth(i),
+            )
+            .unwrap();
+        }
+
+        c.bench_function(&format!("list_refs_fanout/sequential/{axis}"), |b| {
+            b.iter(|| {
+                refs::list_refs_with(&layout, |candidates| {
+                    candidates.iter().map(refs::read_ref_candidate).collect()
+                })
+                .unwrap()
+            });
+        });
+        let seq_ms = time_ms(|| {
+            let _ = refs::list_refs_with(&layout, |candidates| {
+                candidates.iter().map(refs::read_ref_candidate).collect()
+            })
+            .unwrap();
+        });
+        samples.push(Sample {
+            category: "list_refs_fanout".into(),
+            axis: axis.into(),
+            library: "sequential".into(),
+            value: seq_ms,
+            unit: Unit::Millis,
+        });
+
+        c.bench_function(&format!("list_refs_fanout/rayon/{axis}"), |b| {
+            b.iter(|| {
+                refs::list_refs_with(&layout, |candidates| {
+                    candidates
+                        .par_iter()
+                        .map(refs::read_ref_candidate)
+                        .collect()
+                })
+                .unwrap()
+            });
+        });
+        let par_ms = time_ms(|| {
+            let _ = refs::list_refs_with(&layout, |candidates| {
+                candidates
+                    .par_iter()
+                    .map(refs::read_ref_candidate)
+                    .collect()
+            })
+            .unwrap();
+        });
+        samples.push(Sample {
+            category: "list_refs_fanout".into(),
+            axis: axis.into(),
+            library: "rayon".into(),
+            value: par_ms,
+            unit: Unit::Millis,
+        });
+
+        eprintln!("list_refs_fanout/{axis}: sequential {seq_ms:.4} ms, rayon {par_ms:.4} ms");
+    }
+
+    mkit_benches::write_summary("list_refs_fanout", &samples);
+}
+
+criterion_group!(
+    benches,
+    bench_refs_update,
+    bench_list_refs,
+    bench_list_refs_fanout
+);
 criterion_main!(benches);

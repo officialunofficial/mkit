@@ -94,18 +94,18 @@ struct Row {
 
 fn run_list(layout: &RepoLayout, pattern: Option<&str>) -> u8 {
     let mut rows: Vec<Row> = Vec::new();
-    match refs::list_refs(layout) {
+    match super::list_refs_parallel(layout) {
         Ok(rs) => push_rows(&mut rows, &rs, "refs/heads/"),
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     }
-    match refs::list_tags(layout) {
+    match super::list_tags_parallel(layout) {
         Ok(rs) => push_rows(&mut rows, &rs, "refs/tags/"),
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     }
     match refs::list_remote_names(layout) {
         Ok(remotes) => {
             for remote in remotes {
-                match refs::list_remote_refs(layout, &remote) {
+                match super::list_remote_refs_parallel(layout, &remote) {
                     Ok(rs) => push_rows(&mut rows, &rs, &format!("refs/remotes/{remote}/")),
                     Err(e) => {
                         return emit_err(&format!("list remote refs: {e}"), exit::GENERAL_ERROR);

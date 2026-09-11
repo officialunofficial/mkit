@@ -273,7 +273,7 @@ fn plan_head(
     };
 
     // Single-writer-per-branch: a branch may be checked out in at most
-    // one tree (the history-MMR ref-write path assumes it).
+    // one tree (the history-MMB ref-write path assumes it).
     if let HeadPlan::ExistingBranch { branch, .. } | HeadPlan::NewBranch { branch, .. } = &plan {
         match super::branch_checked_out_elsewhere(layout, branch) {
             Ok(Some(at)) => {

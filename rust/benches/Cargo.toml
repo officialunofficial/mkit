@@ -154,7 +154,7 @@ name = "pack_shard_transfer"
 harness = false
 required-features = ["pack-shards"]
 
-# Issue #157 / #644 — journaled commit-history MMR: open_at (cold +
+# Issue #157 / #644 — journaled commit-history MMB: open_at (cold +
 # warm), a warm single append, and a backfill series. Default-off (the
 # `history-mmr` feature on mkit-core pulls in the same heavy
 # commonware-storage/-runtime + tokio stack as `pack-shards`). Run

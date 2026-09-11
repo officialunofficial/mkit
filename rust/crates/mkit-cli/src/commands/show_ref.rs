@@ -44,13 +44,13 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut lines: Vec<(String, String)> = Vec::new(); // (full refname, hash hex)
     if want_heads {
-        match refs::list_refs(&layout) {
+        match super::list_refs_parallel(&layout) {
             Ok(rs) => collect(&mut lines, &rs, "refs/heads/"),
             Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
         }
     }
     if want_tags {
-        match refs::list_tags(&layout) {
+        match super::list_tags_parallel(&layout) {
             Ok(rs) => collect(&mut lines, &rs, "refs/tags/"),
             Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
         }
@@ -61,7 +61,7 @@ pub fn run(args: &[String]) -> u8 {
         match refs::list_remote_names(&layout) {
             Ok(remotes) => {
                 for remote in remotes {
-                    match refs::list_remote_refs(&layout, &remote) {
+                    match super::list_remote_refs_parallel(&layout, &remote) {
                         Ok(rs) => {
                             collect(&mut lines, &rs, &format!("refs/remotes/{remote}/"));
                         }

@@ -180,7 +180,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-HISTORY-PROOF',
         status: 'draft-normative',
         description:
-          'An append-only Merkle Mountain Range over each branch, with inclusion proofs so a light client verifies that a commit belongs to a branch without walking its history.',
+          'An append-only Merkle Mountain Belt over each branch, with inclusion proofs so a light client verifies that a commit belongs to a branch without walking its history.',
       },
     ],
   },

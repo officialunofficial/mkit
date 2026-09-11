@@ -84,7 +84,7 @@ default = ["pack-zstd"]
 # means this build's `PackWriter` never emits them and this build's
 # `PackReader` can't decompress ones it receives.
 pack-zstd = ["dep:zstd"]
-# Canonical first-parent snapshots use the synchronous in-memory MMR primitive.
+# Canonical first-parent snapshots use the synchronous in-memory MMB primitive.
 history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 # Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.
 sparse-checkout = []
