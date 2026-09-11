@@ -1065,7 +1065,7 @@ fn list_refs_under(common_dir: &Path, sub_dir: &str) -> RefResult<Vec<Ref>> {
 }
 
 /// The default, sequential `read_batch`: reads and decodes each candidate
-/// one at a time, exactly [`collect_refs`]'s old inline behavior. What
+/// one at a time, exactly `collect_refs`'s old inline behavior. What
 /// [`list_refs_under`] (and therefore [`list_refs`]/[`list_remote_refs`]/
 /// tag listing) still uses.
 fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
@@ -1074,7 +1074,7 @@ fn sequential_read_batch(candidates: &[RefCandidate]) -> Vec<RefReadOutcome> {
 
 /// Read and decode one [`RefCandidate`]'s wire content. The single
 /// definition of "how to turn a candidate into a [`RefReadOutcome`]",
-/// shared by [`sequential_read_batch`] and every caller-supplied
+/// shared by `sequential_read_batch` and every caller-supplied
 /// `read_batch` in mkit-cli's rayon fan-out and its bench — so the
 /// `Unreadable`-vs-`Decoded(None)` policy (an I/O failure drops the
 /// entry; malformed-but-readable content keeps it with `hash: None`)
@@ -1087,7 +1087,7 @@ pub fn read_ref_candidate(candidate: &RefCandidate) -> RefReadOutcome {
     }
 }
 
-/// One ref file discovered by [`list_refs_under_with`]'s directory walk:
+/// One ref file discovered by `list_refs_under_with`'s directory walk:
 /// its logical name (relative to the listed namespace, e.g. a branch or
 /// tag name) and the on-disk path to read its wire content from.
 #[derive(Debug, Clone)]
@@ -1097,7 +1097,7 @@ pub struct RefCandidate {
 }
 
 /// The outcome of reading and decoding one [`RefCandidate`]'s wire
-/// content — matching [`collect_refs`]'s old per-entry handling exactly:
+/// content — matching `collect_refs`'s old per-entry handling exactly:
 /// an I/O failure drops the entry from the listing entirely (the same
 /// silently-skip posture the sequential path already had for a transient
 /// read failure or a race with concurrent deletion); malformed-but-
