@@ -273,26 +273,63 @@ pub fn verify(
 /// back to calling [`verify`] (or [`verify_commit`]/[`verify_remix`]/
 /// [`verify_tag`]) per entry on `Err`.
 ///
-/// `verify_batch` itself does not reject *weak* (small-order) public
-/// keys the way `verify_strict` does — by the batch equation's own
-/// design (see `ed25519-dalek`'s README §"Malleability"), folding that
-/// check into the batch multiplication would defeat the point of a
-/// high-throughput check, so the crate deliberately leaves it out and
-/// documents `VerifyingKey::is_weak` as the caller's responsibility.
-/// This function performs that check itself, per entry, before running
-/// the batch equation — restoring the exact guarantee [`verify`]'s
-/// `verify_strict` gives against that one forgery class, so a caller
-/// cannot get a laxer accept/reject outcome by switching from `verify`
-/// to `verify_batch`.
+/// `verify_batch` itself performs neither of `verify_strict`'s two extra
+/// malleability checks on its own — by the batch equation's own design
+/// (see `ed25519-dalek`'s README §"Malleability"), folding per-entry
+/// checks into the batch multiscalar multiplication would defeat the
+/// point of a high-throughput check, so the crate deliberately leaves
+/// them out and documents `VerifyingKey::is_weak` as the caller's
+/// responsibility (its README covers only the public-key half; the
+/// signature-`R` half is the same class of check, just undocumented as
+/// a batch caveat). This function performs both itself, per entry,
+/// before running the batch equation:
+///
+/// - `VerifyingKey::is_weak` — a weak (small-order) *public key* can
+///   produce a signature valid for nearly any message, so a batch
+///   containing one could accept a forgery `verify_strict` would reject.
+/// - a small-order *signature `R`* — checked directly here via
+///   `curve25519-dalek` (`CompressedEdwardsY::decompress` +
+///   `EdwardsPoint::is_small_order`, the same check `verify_strict`
+///   performs internally), matching `verify_strict`'s stated defense
+///   against "torsion-component malleability" for `R` (see [`verify`]'s
+///   doc comment) rather than leaving that half unchecked.
+///
+/// Confirmed by direct experiment against `ed25519-dalek` (not just
+/// from its docs) that this second check is real, not redundant: taking
+/// a genuine signature from a normal (non-weak) key and replacing its
+/// `R` with `R + T` for a nonzero 8-torsion point `T` is rejected by
+/// `ed25519-dalek`'s own loose `verify` too — its cofactorless
+/// recompute-and-compare of `R` can't be fooled by adding a torsion
+/// component this way, so that specific construction isn't a live
+/// forgery path against `verify_batch` either. What the added check
+/// closes is the one small-order value *within* the base subgroup —
+/// `R = identity` — which uniquely can satisfy the equation without
+/// tripping the "doesn't decompress to the base subgroup" failure the
+/// experiment hit (at the cost of the signer's own private key to
+/// compute a matching `s`; the resulting signature is an alternate
+/// valid *encoding* for a message that key already authorized, not an
+/// unauthorized forgery). Kept regardless: it costs one cheap
+/// decompress-and-check per entry, and it makes this function's accept
+/// set a true subset of `verify`'s rather than a documented
+/// approximation of one — the kind of gap this codebase does not leave
+/// open once it's identified (see the CHANGELOG's own history of this
+/// exact "close the residual gap even when the win is small" call).
 #[cfg(feature = "batch-verify")]
 pub fn verify_batch(entries: &[(PublicKey, Hash, Signature)]) -> Result<(), MkitError> {
     if entries.is_empty() {
         return Ok(());
     }
     let mut verifying_keys = Vec::with_capacity(entries.len());
-    for (public, _, _) in entries {
+    for (public, _, sig) in entries {
         let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| MkitError::InvalidPublicKey)?;
         if vk.is_weak() {
+            return Err(MkitError::SignatureInvalid);
+        }
+        let dalek_sig = DalekSignature::from_bytes(&sig.0);
+        let r_is_small_order = curve25519_dalek::edwards::CompressedEdwardsY(*dalek_sig.r_bytes())
+            .decompress()
+            .is_none_or(|r| r.is_small_order());
+        if r_is_small_order {
             return Err(MkitError::SignatureInvalid);
         }
         verifying_keys.push(vk);
@@ -1058,6 +1095,69 @@ mod tests {
 
         let entries = vec![(identity_pk, digest, forged_sig)];
         let err = verify_batch(&entries).expect_err("a weak-key forgery must be rejected");
+        assert!(matches!(err, MkitError::SignatureInvalid));
+    }
+
+    /// Isolates the small-order-`R` check from the weak-public-key check
+    /// above: a genuinely *normal* (non-weak) key's real secret scalar
+    /// is used to solve `[s]B = R + [k]A` for `R = identity` — the one
+    /// small-order point that also lies in the base subgroup, so it's
+    /// the only one this equation can be solved for at all (every other
+    /// small-order `R` can't, per `verify_batch`'s doc comment; that's
+    /// also why this construction needs the real secret key, unlike an
+    /// outside forger who doesn't have it — see the same doc comment).
+    ///
+    /// Confirms the construction is load-bearing, not just malformed
+    /// input: loose `verify` (no `R`/weak-key check) accepts it — so the
+    /// batch equation, which performs the identical check, would too —
+    /// while `verify_strict` and this module's `verify_batch` both
+    /// reject it via their small-order checks.
+    #[cfg(feature = "batch-verify")]
+    #[test]
+    fn verify_batch_rejects_a_small_order_r_forgery_from_a_normal_key() {
+        use curve25519_dalek::scalar::Scalar;
+        use ed25519_dalek::Verifier as _;
+        use ed25519_dalek::hazmat::ExpandedSecretKey;
+        use sha2::{Digest as _, Sha512};
+
+        let kp = fixed_kp();
+        let vk = VerifyingKey::from_bytes(&kp.public.0).unwrap();
+        assert!(!vk.is_weak(), "sanity: this key must not be weak");
+
+        // Expand the secret scalar exactly as real signing does (RFC
+        // 8032 §5.1.5): a = clamp(SHA-512(seed))[0..32].
+        let expanded_hash: [u8; 64] = Sha512::digest(kp.secret.0).into();
+        let esk = ExpandedSecretKey::from_bytes(&expanded_hash);
+
+        let mut r_bytes = [0u8; 32];
+        r_bytes[0] = 1; // R = compressed identity
+
+        let digest = domain_digest(COMMIT_DOMAIN, b"small-order-R forgery probe");
+        // k = H(R || A || digest) mod L — the same hash-to-scalar step
+        // `verify`/`verify_batch` both perform internally.
+        let mut h = Sha512::new();
+        h.update(r_bytes);
+        h.update(kp.public.0);
+        h.update(digest);
+        let k_bytes: [u8; 64] = h.finalize().into();
+        let k = Scalar::from_bytes_mod_order_wide(&k_bytes);
+
+        // s = k*a solves [s]B = [k]A = R + [k]A, since R = identity = [0]B.
+        let s = k * esk.scalar;
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&r_bytes);
+        sig_bytes[32..].copy_from_slice(s.as_bytes());
+        let forged_sig = DalekSignature::from_bytes(&sig_bytes);
+
+        vk.verify(&digest, &forged_sig)
+            .expect("forged signature must satisfy the loose verification equation");
+        assert!(
+            vk.verify_strict(&digest, &forged_sig).is_err(),
+            "verify_strict must reject the small-order R"
+        );
+
+        let entries = vec![(kp.public, digest, Signature(sig_bytes))];
+        let err = verify_batch(&entries).expect_err("a small-order-R forgery must be rejected");
         assert!(matches!(err, MkitError::SignatureInvalid));
     }
 

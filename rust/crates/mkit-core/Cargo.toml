@@ -43,6 +43,11 @@ commonware-cryptography = { workspace = true, features = ["std"], optional = tru
 commonware-coding = { workspace = true, optional = true }
 commonware-parallel = { workspace = true, optional = true, features = ["std"] }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+# Direct dependency (already pulled in transitively by ed25519-dalek
+# regardless of features) needed only under `batch-verify`, to check a
+# signature's `R` component for small-order encoding — see that
+# feature's doc below and `sign::verify_batch`.
+curve25519-dalek = { version = "5", optional = true }
 getrandom = "0.4"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
 # `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
@@ -102,8 +107,11 @@ pack-shards = [
 # mkit-cli's post-fetch signature-verification fan-out
 # (`verify_new_object_signatures`) as a fast path ahead of the
 # existing per-object `verify_strict` loop. Pulls in ed25519-dalek's
-# `batch` feature (`keccak` + `strobe-rs` for the Merlin transcript;
-# both pure Rust, no C deps). NOT a default feature — unlike
+# `batch` feature (`keccak` + `strobe-rs` for the Merlin transcript)
+# and `curve25519-dalek` directly (used to check a signature's `R` for
+# small-order encoding, matching `verify_strict`'s guarantee against
+# that malleability class — see `sign::verify_batch`'s doc comment);
+# all pure Rust, no C deps. NOT a default feature — unlike
 # `pack-zstd`, nothing about mkit-core's own API needs it, so making it
 # default would cost every native consumer these extra dependencies
 # for no benefit, including ones with no reason to opt out the way
@@ -111,9 +119,19 @@ pack-shards = [
 # depend on `mkit-core` with default features and never call
 # `verify_batch`). `mkit-cli`, the one consumer that uses it, enables
 # it explicitly on its `mkit-core` dependency instead.
-batch-verify = ["ed25519-dalek/batch"]
+batch-verify = ["ed25519-dalek/batch", "dep:curve25519-dalek"]
 
 [dev-dependencies]
+# `hazmat::ExpandedSecretKey` (test-only): constructs a genuine
+# small-order-`R` signature forgery to prove `sign::verify_batch`'s `R`
+# small-order check is load-bearing, not redundant with the batch
+# equation itself. Additive on top of the plain `[dependencies]` entry
+# above; never enabled outside test builds.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "hazmat"] }
+# Test-only: computing the same SHA-512 hashes the forgery above needs
+# (secret-key expansion input, and H(R||A||M)) directly, matching the
+# version already resolved transitively via ed25519-dalek/curve25519-dalek.
+sha2 = "0.11"
 # Storage experiments need the deterministic runtime, not the shipped history API.
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true, features = ["std"] }

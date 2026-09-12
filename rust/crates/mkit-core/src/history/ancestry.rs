@@ -497,11 +497,19 @@ fn read_current(dir: &Path) -> Result<Option<AncestrySnapshot>, HistoryError> {
 /// same order of risk this whole checksum design already accepts
 /// elsewhere). A corrupted `generation` is independently caught by the
 /// `descriptor.generation != generation` check below, against the
-/// separately-read `current` pointer file. A corrupted `leaf_count` either
-/// fails the `chain.len() >= leaf_count` bound or indexes `chain` at the
-/// wrong position, which then very likely fails the `tip` comparison for
-/// the same collision-improbability reason. No field's corruption can
-/// cause a bad chain to reach the new, freshly-persisted snapshot, since
+/// separately-read `current` pointer file. A corrupted `leaf_count`'s only
+/// remaining use (`decide_chain`'s `prefix_len`) is as the starting count
+/// [`first_parent_suffix_to`] adds its own freshly-walked suffix onto for
+/// the shared `MAX_ANCESTRY_LEAVES` traversal cap — a value corrupted
+/// *upward* only makes that walk reject sooner (fails closed, same as
+/// every other field here); corrupted *downward*, it lets that walk go
+/// further than it would have against the true prefix length before
+/// hitting the cap, so the total chain a fast-forward can reach in one
+/// publish is bounded a bit more loosely than `MAX_ANCESTRY_LEAVES`
+/// intends — never unboundedly, and never by more than the size of the
+/// corruption itself, but not a hard guarantee either. No field's
+/// corruption can cause a bad chain to reach the new, freshly-persisted
+/// snapshot, since
 /// that snapshot is always built from `chain` itself, never from `old`.
 fn read_current_descriptor(dir: &Path) -> Result<Option<AncestryDescriptor>, HistoryError> {
     let Some(bytes) = ancestry_state::read_bounded(&dir.join("current"), 65)? else {
@@ -611,8 +619,24 @@ fn now_unix() -> u64 {
 /// verification, never less: [`decide_chain`] treats it exactly like "no
 /// prior full verification on record" and falls back to a full
 /// from-scratch walk, [`first_parent_chain`]'s pre-existing behavior.
+///
+/// `generation` binds this state to the specific generation it was
+/// computed against, and [`decide_chain`] discards a mismatch exactly
+/// like a missing file (see its read-side check). Without this, a
+/// generation change (a rewrite/reset — [`ChainDecision::NewGeneration`])
+/// that crashes *after* [`finish`] durably commits the new, possibly much
+/// shorter, chain but *before* [`advance`]'s own advisory
+/// [`write_scrub_state`] call runs leaves this file holding the old
+/// generation's `verified_through`/`cursor`, now paired on disk with a
+/// shorter chain it was never computed against. The next fast-forward
+/// would otherwise trust that stale window against the new chain and
+/// slice past its end — `generation` turns that mismatch into "no prior
+/// scrub state" instead of an out-of-bounds read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScrubState {
+    /// The generation this state was computed against — see the
+    /// struct-level doc for why this binding exists.
+    generation: Hash,
     /// Index into the prefix where the next scrub window starts.
     cursor: u64,
     /// The prefix length as of the last full verification — the range
@@ -627,33 +651,48 @@ struct ScrubState {
     last_full_verify_unix: u64,
 }
 
-const SCRUB_MAGIC: &[u8; 5] = b"MKSC\x01";
+/// `\x02`: the wire format grew a `generation` field (see [`ScrubState`]'s
+/// docs) — bumped so a pre-upgrade `\x01` file, which is also the wrong
+/// length now, can never be misread as the new layout; either mismatch
+/// alone already makes [`ScrubState::decode`] return `None`, the same
+/// safe "no prior scrub state" fallback either way.
+const SCRUB_MAGIC: &[u8; 5] = b"MKSC\x02";
 
 impl ScrubState {
+    /// Builds a fresh state for a just-completed full verification.
+    /// `generation` is a placeholder here — [`decide_chain`]'s two
+    /// [`ChainDecision::NewGeneration`] call sites don't yet know the
+    /// real one (only [`advance`] mints it, after `decide_chain`
+    /// returns) — [`advance`] always overwrites this field with the
+    /// actual published generation immediately before
+    /// [`write_scrub_state`], so the placeholder here is never what
+    /// reaches disk.
     fn fresh(chain_len: u64, now: u64) -> Self {
         Self {
+            generation: [0; 32],
             cursor: 0,
             verified_through: chain_len,
             last_full_verify_unix: now,
         }
     }
 
-    fn encode(self) -> [u8; 61] {
-        let mut bytes = [0u8; 61];
+    fn encode(self) -> [u8; 93] {
+        let mut bytes = [0u8; 93];
         bytes[..5].copy_from_slice(SCRUB_MAGIC);
-        bytes[5..13].copy_from_slice(&self.cursor.to_le_bytes());
-        bytes[13..21].copy_from_slice(&self.verified_through.to_le_bytes());
-        bytes[21..29].copy_from_slice(&self.last_full_verify_unix.to_le_bytes());
-        let checksum = hash::hash(&bytes[..29]);
-        bytes[29..61].copy_from_slice(&checksum);
+        bytes[5..37].copy_from_slice(&self.generation);
+        bytes[37..45].copy_from_slice(&self.cursor.to_le_bytes());
+        bytes[45..53].copy_from_slice(&self.verified_through.to_le_bytes());
+        bytes[53..61].copy_from_slice(&self.last_full_verify_unix.to_le_bytes());
+        let checksum = hash::hash(&bytes[..61]);
+        bytes[61..93].copy_from_slice(&checksum);
         bytes
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != 61 || bytes[..5] != *SCRUB_MAGIC {
+        if bytes.len() != 93 || bytes[..5] != *SCRUB_MAGIC {
             return None;
         }
-        let (payload, checksum) = bytes.split_at(29);
+        let (payload, checksum) = bytes.split_at(61);
         if hash::hash(payload).as_slice() != checksum {
             return None;
         }
@@ -661,9 +700,10 @@ impl ScrubState {
             Some(u64::from_le_bytes(payload[r].try_into().ok()?))
         };
         Some(Self {
-            cursor: field(5..13)?,
-            verified_through: field(13..21)?,
-            last_full_verify_unix: field(21..29)?,
+            generation: payload[5..37].try_into().ok()?,
+            cursor: field(37..45)?,
+            verified_through: field(45..53)?,
+            last_full_verify_unix: field(53..61)?,
         })
     }
 }
@@ -676,7 +716,7 @@ fn scrub_path(dir: &Path) -> PathBuf {
 /// docs on why the caller treats `None` as "no prior full verification on
 /// record" and falls back to a full walk.
 fn read_scrub_state(dir: &Path) -> Result<Option<ScrubState>, HistoryError> {
-    let Some(bytes) = ancestry_state::read_bounded(&scrub_path(dir), 61)? else {
+    let Some(bytes) = ancestry_state::read_bounded(&scrub_path(dir), 93)? else {
         return Ok(None);
     };
     Ok(ScrubState::decode(&bytes))
@@ -744,7 +784,13 @@ fn decide_chain(
     };
     // A genuine fast-forward from here on — the generation is reused no
     // matter which branch below actually verifies the reused prefix.
-    let scrub = read_scrub_state(dir)?;
+    //
+    // A scrub state left over from a *different* generation (see
+    // `ScrubState`'s docs) is discarded here exactly like a missing
+    // file — `d.generation` is the generation being fast-forwarded from,
+    // so anything else on disk was computed against a chain this
+    // publish isn't extending.
+    let scrub = read_scrub_state(dir)?.filter(|s| s.generation == d.generation);
     let stale =
         scrub.is_none_or(|s| now.saturating_sub(s.last_full_verify_unix) > SCRUB_MAX_AGE_SECS);
     if !stale {
@@ -771,7 +817,22 @@ fn decide_chain(
         // re-verifies everything, including the window this lap didn't
         // reach yet.
     }
-    let chain = first_parent_chain(store, target)?;
+    // A full walk of the *prefix* (up through `d.tip`) is exactly what's
+    // needed to freshly re-verify everything a completed lap or a stale
+    // schedule requires — but `suffix` (verified moments ago, above) is
+    // already the freshly-read continuation from `d.tip` to `target`, so
+    // re-deriving it again via a full `first_parent_chain(store, target)`
+    // walk would re-read and re-verify those same new leaves a second
+    // time. `first_parent_chain(store, target) ==
+    // first_parent_chain(store, d.tip) ++ suffix` always holds here: both
+    // sides are deterministic functions of the same immutable,
+    // content-addressed store, and `d.tip` is `suffix`'s own starting
+    // point by construction (`first_parent_suffix_to` only returns
+    // `Reached` when it walked backward from `target` to exactly
+    // `d.tip`). Splicing is therefore not an approximation of the full
+    // walk's result, just a cheaper way to compute the identical chain.
+    let mut chain = first_parent_chain(store, d.tip)?;
+    chain.extend(suffix);
     let scrub = ScrubState::fresh(chain.len() as u64, now);
     Ok(ChainDecision::SameGeneration { chain, scrub })
 }
@@ -952,8 +1013,27 @@ pub(crate) fn advance(
     // Only recorded once the publish above durably succeeded; advisory,
     // so a failure here or a crash before it runs just costs the next
     // publish a bit more re-verification than strictly necessary, never
-    // less (see `ScrubState`'s docs).
-    write_scrub_state(&dir, scrub)?;
+    // less (see `ScrubState`'s docs) — `generation` is the just-published
+    // one (`decide_chain`'s own `scrub.generation` is a placeholder for
+    // the `NewGeneration` case, since it doesn't know this value; always
+    // overwriting it here, unconditionally, is what makes `decide_chain`'s
+    // generation-binding check on the next publish actually correct).
+    //
+    // Deliberately not `?`: `finish` above already durably committed this
+    // publish (the ref moved, the snapshot is on disk) — a caller must
+    // never see that succeeded operation reported as a failure just
+    // because this purely advisory bookkeeping write didn't land. The
+    // generation-binding check in `decide_chain` already treats a
+    // missing/mismatched file exactly like "no prior scrub state", so
+    // losing this write costs only extra re-verification next publish,
+    // never correctness.
+    let _ = write_scrub_state(
+        &dir,
+        ScrubState {
+            generation,
+            ..scrub
+        },
+    );
     Ok(())
 }
 
@@ -1246,6 +1326,31 @@ mod tests {
         assert!(crate::ops::gc::live_objects(&store, &layout).is_err());
     }
 
+    /// `advance`'s `write_scrub_state` call is documented as purely
+    /// advisory: `finish` (called just before it) has already durably
+    /// committed the publish, so a failure writing the scrub bookkeeping
+    /// afterward must not be reported as a failure of that publish.
+    #[test]
+    fn a_write_scrub_state_failure_does_not_fail_the_publish() {
+        let (_dir, layout, store) = repo();
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        // Force `write_atomic`'s rename onto "scrub" to fail: a directory
+        // occupies the path the scrub *file* needs to land on.
+        fs::create_dir_all(dir.join("scrub")).unwrap();
+
+        let a = commit(&store, vec![], b"a");
+        refs::update_ref_with_ancestry(&layout, "main", RefWriteCondition::Any, &a, &store)
+            .expect("the publish itself must still succeed despite the scrub-state write failing");
+
+        // The publish's own durable effects (ref move, snapshot) landed.
+        let snapshot = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(snapshot.descriptor().tip, a);
+        // The scrub write really did fail (still a directory, not a
+        // file), confirming this test exercises the failure path it
+        // claims to rather than accidentally passing as a no-op.
+        assert!(dir.join("scrub").is_dir());
+    }
+
     /// `read_current_descriptor` is a new, narrower read path introduced
     /// specifically so `advance` doesn't have to load `old.chain` — pin
     /// that its fields agree exactly with the full `read_current`/`decode`
@@ -1488,10 +1593,15 @@ mod tests {
         update(&layout, &store, "main", tips[599]);
 
         let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        let generation = AncestrySnapshot::load(&layout, "main")
+            .unwrap()
+            .descriptor()
+            .generation;
         let scrub = read_scrub_state(&dir).unwrap().unwrap();
         assert_eq!(
             scrub,
             ScrubState {
+                generation,
                 cursor: 0,
                 verified_through: 600,
                 last_full_verify_unix: scrub.last_full_verify_unix,
@@ -1557,6 +1667,38 @@ mod tests {
             first_generation,
             "still a fast-forward on the same branch history — generation must not change"
         );
+    }
+
+    /// `decide_chain`'s full-walk fallback splices a freshly-walked
+    /// prefix (`first_parent_chain(store, d.tip)`) onto the suffix
+    /// already verified above it, instead of re-walking `target` from
+    /// scratch — see that function's doc comment on why the two chains
+    /// are provably identical. This proves the optimization didn't
+    /// quietly drop real verification along with the redundant re-read:
+    /// corruption planted deep in the prefix, at an index the bounded
+    /// window from a single prior fast-forward would not have reached,
+    /// must still be caught once a forced full walk (here, via
+    /// `SCRUB_MAX_AGE_SECS`) runs.
+    #[test]
+    fn full_walk_fallback_still_verifies_the_spliced_prefix() {
+        let (_dir, layout, store) = repo();
+        let tips = build_chain(&store, 1500);
+        set_now(1_000_000);
+        update(&layout, &store, "main", tips[1499]);
+
+        // Deep in the prefix — well past the single bounded window
+        // (512 of 1500) a first ordinary fast-forward would scrub.
+        corrupt_object(&store, &tips[900]);
+
+        set_now(1_000_000 + SCRUB_MAX_AGE_SECS + 1);
+        let step = commit(&store, vec![tips[1499]], b"1500");
+        let result =
+            refs::update_ref_with_ancestry(&layout, "main", RefWriteCondition::Any, &step, &store);
+        assert!(
+            result.is_err(),
+            "the spliced full-walk fallback must still verify the whole prefix, not just the suffix"
+        );
+        clear_now();
     }
 
     /// The whole point of a bounded window: corruption planted inside a
@@ -1637,6 +1779,76 @@ mod tests {
             result.is_err(),
             "missing scrub state must force a full walk, not skip verification"
         );
+    }
+
+    /// A scrub file left over from a *different, since-superseded*
+    /// generation must never be trusted against the current one — see
+    /// `ScrubState`'s doc comment on why `advance`'s advisory
+    /// `write_scrub_state` call can, on a crash, leave this file holding
+    /// an old generation's `verified_through` paired with a new, shorter
+    /// chain on disk.
+    ///
+    /// Reproduces that exact state without needing to inject a crash mid
+    /// `advance`: publish a long chain (`verified_through=600`, window
+    /// `end=512` on the very next fast-forward), capture that scrub file's
+    /// bytes, reset to an unrelated 5-leaf chain (a real generation
+    /// change, correctly re-verified and re-scrubbed on its own), then
+    /// restore the captured *old* bytes over the new generation's own
+    /// scrub file — reproducing "the crash happened before this
+    /// generation's own `write_scrub_state` call ever ran" byte-for-byte,
+    /// regardless of which write ordering or fault-injection point
+    /// produces it. Before the generation-binding fix, the next
+    /// fast-forward's `verify_scrub_window(store, &prefix, 0, 512)` would
+    /// slice `prefix[0..512]` on a 5-leaf `prefix` and panic; the fix
+    /// discards the mismatched-generation state and falls back to a full
+    /// walk instead, exactly like a missing file.
+    #[test]
+    fn scrub_state_from_a_superseded_generation_is_discarded_not_misapplied() {
+        let (_dir, layout, store) = repo();
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+
+        let long_tips = build_chain(&store, 600);
+        update(&layout, &store, "main", long_tips[599]);
+        let stale_scrub_bytes = fs::read(scrub_path(&dir)).unwrap();
+        assert_eq!(
+            ScrubState::decode(&stale_scrub_bytes)
+                .unwrap()
+                .verified_through,
+            600
+        );
+
+        // A real generation change to a short, unrelated 5-leaf chain —
+        // this legitimately re-verifies and writes its own correct
+        // (short) scrub state.
+        let short_tips = build_chain(&store, 5);
+        update(&layout, &store, "main", short_tips[4]);
+        let new_generation = AncestrySnapshot::load(&layout, "main")
+            .unwrap()
+            .descriptor()
+            .generation;
+        assert_ne!(
+            ScrubState::decode(&stale_scrub_bytes).unwrap().generation,
+            new_generation,
+            "sanity: the two generations must actually differ"
+        );
+
+        // Simulate the crash window: the new generation's own
+        // write_scrub_state call never ran, so the file on disk is still
+        // the long generation's stale bytes.
+        fs::write(scrub_path(&dir), &stale_scrub_bytes).unwrap();
+
+        // An ordinary fast-forward on the new (short) generation must
+        // still succeed — not panic — and must end up with its own,
+        // correctly-bound scrub state afterward.
+        let next = commit(&store, vec![short_tips[4]], b"5");
+        update(&layout, &store, "main", next);
+
+        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        assert_eq!(
+            scrub.generation, new_generation,
+            "the discarded stale state must be replaced with one bound to the current generation"
+        );
+        assert_eq!(scrub.verified_through, 6);
     }
 
     /// Not a correctness test — a manual profiling comparison, in the
