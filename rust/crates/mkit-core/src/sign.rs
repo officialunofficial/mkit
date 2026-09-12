@@ -253,6 +253,62 @@ pub fn verify(
         .map_err(|_| MkitError::SignatureInvalid)
 }
 
+/// Batch-verify many Ed25519 signatures over pre-computed digests in one
+/// pass. Each entry is `(public_key, digest, sig)`, where `digest` is
+/// exactly what [`verify`] computes internally — `BLAKE3(len_le16(domain)
+/// || domain || signing_bytes)` — so callers typically supply
+/// [`commit_signing_hash`]/[`remix_signing_hash`]/[`tag_signing_hash`]'s
+/// output directly. Returns `Ok(())` only if every signature is valid.
+///
+/// Uses [`ed25519_dalek::verify_batch`]'s randomized-coefficient
+/// multiscalar-multiplication equation: verifying `n` signatures this way
+/// costs roughly one multiscalar multiplication over `2n + 1` points
+/// instead of `n` independent double-scalar multiplications, which is
+/// strictly less total work than calling [`verify`] `n` times — the
+/// speedup [`ed25519_dalek`]'s own benchmarks put at 20-30%+ over
+/// individually-verified batches of 4 and up. The trade-off: on failure
+/// this only proves *at least one* entry is invalid, never which one —
+/// callers that need to attribute the failure to a specific entry (mkit
+/// does, to report which fetched object was unsigned/forged) must fall
+/// back to calling [`verify`] (or [`verify_commit`]/[`verify_remix`]/
+/// [`verify_tag`]) per entry on `Err`.
+///
+/// `verify_batch` itself does not reject *weak* (small-order) public
+/// keys the way `verify_strict` does — by the batch equation's own
+/// design (see `ed25519-dalek`'s README §"Malleability"), folding that
+/// check into the batch multiplication would defeat the point of a
+/// high-throughput check, so the crate deliberately leaves it out and
+/// documents `VerifyingKey::is_weak` as the caller's responsibility.
+/// This function performs that check itself, per entry, before running
+/// the batch equation — restoring the exact guarantee [`verify`]'s
+/// `verify_strict` gives against that one forgery class, so a caller
+/// cannot get a laxer accept/reject outcome by switching from `verify`
+/// to `verify_batch`.
+#[cfg(feature = "batch-verify")]
+pub fn verify_batch(entries: &[(PublicKey, Hash, Signature)]) -> Result<(), MkitError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut verifying_keys = Vec::with_capacity(entries.len());
+    for (public, _, _) in entries {
+        let vk = VerifyingKey::from_bytes(&public.0).map_err(|_| MkitError::InvalidPublicKey)?;
+        if vk.is_weak() {
+            return Err(MkitError::SignatureInvalid);
+        }
+        verifying_keys.push(vk);
+    }
+    let messages: Vec<&[u8]> = entries
+        .iter()
+        .map(|(_, digest, _)| digest.as_slice())
+        .collect();
+    let signatures: Vec<DalekSignature> = entries
+        .iter()
+        .map(|(_, _, sig)| DalekSignature::from_bytes(&sig.0))
+        .collect();
+    ed25519_dalek::verify_batch(&messages, &signatures, &verifying_keys)
+        .map_err(|_| MkitError::SignatureInvalid)
+}
+
 // -------------------------------------------------------------------
 // Signing-bytes builders
 // -------------------------------------------------------------------
@@ -916,6 +972,93 @@ mod tests {
             verify(&kp.public, COMMIT_DOMAIN, bytes, &bad_sig),
             Err(MkitError::SignatureInvalid)
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // Batch verification (`verify_batch`)
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "batch-verify")]
+    #[test]
+    fn verify_batch_accepts_many_valid_signatures_under_distinct_keys() {
+        let entries: Vec<(PublicKey, Hash, Signature)> = (0..40u8)
+            .map(|i| {
+                let kp = KeyPair::from_seed([i; 32]);
+                let msg = format!("batch entry #{i}");
+                let digest = domain_digest(COMMIT_DOMAIN, msg.as_bytes());
+                let sig = kp.sign(COMMIT_DOMAIN, msg.as_bytes());
+                (kp.public, digest, sig)
+            })
+            .collect();
+        verify_batch(&entries).expect("every entry is validly signed");
+    }
+
+    #[cfg(feature = "batch-verify")]
+    #[test]
+    fn verify_batch_empty_is_ok() {
+        verify_batch(&[]).expect("an empty batch trivially verifies");
+    }
+
+    #[cfg(feature = "batch-verify")]
+    #[test]
+    fn verify_batch_rejects_one_tampered_signature_among_many_valid() {
+        let mut entries: Vec<(PublicKey, Hash, Signature)> = (0..16u8)
+            .map(|i| {
+                let kp = KeyPair::from_seed([i; 32]);
+                let msg = format!("batch entry #{i}");
+                let digest = domain_digest(COMMIT_DOMAIN, msg.as_bytes());
+                let sig = kp.sign(COMMIT_DOMAIN, msg.as_bytes());
+                (kp.public, digest, sig)
+            })
+            .collect();
+        // Every entry individually verifies (against its digest,
+        // matching what `verify` checks internally) before tampering.
+        for (pk, digest, sig) in &entries {
+            let vk = VerifyingKey::from_bytes(&pk.0).unwrap();
+            let dalek_sig = DalekSignature::from_bytes(&sig.0);
+            vk.verify_strict(digest, &dalek_sig)
+                .expect("fixture entry must verify before tampering");
+        }
+        entries[8].2.0[0] ^= 0xff;
+        let err = verify_batch(&entries).expect_err("a tampered entry must fail the batch");
+        assert!(matches!(err, MkitError::SignatureInvalid));
+    }
+
+    /// A genuine weak-key forgery, not just a mismatched signature: with
+    /// `A` (the public key) equal to the curve's neutral element, the
+    /// verification equation `[s]B == R + [k]A'` degenerates to `[s]B ==
+    /// R` for every `k` (since `[k]A' = [k]·0 = 0` regardless of `k`), so
+    /// `R = identity, s = 0` satisfies it for *any* message — no secret
+    /// key involved. `VerifyingKey::verify` (loose) accepts this for
+    /// arbitrary messages; only the weak-key check `verify_strict` (and
+    /// this module's `verify_batch`) adds is what rejects it. Confirmed
+    /// against `ed25519_dalek::VerifyingKey` directly (loose `verify`
+    /// accepts, `verify_strict` rejects) before relying on it here, so
+    /// this test is exercising `verify_batch`'s own weak-key guard
+    /// specifically — not incidentally failing for an unrelated reason
+    /// the way pairing the identity key with an arbitrary *valid*
+    /// signature (from a different key) would.
+    #[cfg(feature = "batch-verify")]
+    #[test]
+    fn verify_batch_rejects_a_weak_public_key_forgery() {
+        let mut pk_bytes = [0u8; 32];
+        pk_bytes[0] = 1; // compressed identity point (the neutral element)
+        let identity_pk = PublicKey(pk_bytes);
+        assert!(
+            VerifyingKey::from_bytes(&identity_pk.0)
+                .expect("identity point decodes")
+                .is_weak(),
+            "the compressed identity point must be flagged weak"
+        );
+
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[0] = 1; // R = identity; s = 0 (remaining bytes already zero)
+        let forged_sig = Signature(sig_bytes);
+        let digest = domain_digest(COMMIT_DOMAIN, b"any message at all, no key needed");
+
+        let entries = vec![(identity_pk, digest, forged_sig)];
+        let err = verify_batch(&entries).expect_err("a weak-key forgery must be rejected");
+        assert!(matches!(err, MkitError::SignatureInvalid));
     }
 
     // ------------------------------------------------------------------
