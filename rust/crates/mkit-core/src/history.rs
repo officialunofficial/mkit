@@ -41,7 +41,15 @@ impl Position {
 /// Inclusion proof with the wire shape specified by SPEC-HISTORY-PROOF.
 pub type InclusionProof = MmbProof<<Blake3 as CHasher>::Digest>;
 
+/// `#[non_exhaustive]`: which `commonware-storage` structure backs the
+/// proof (MMR, MMB, or a future replacement — see the module doc) is an
+/// internal implementation detail, not part of the contract this error
+/// type documents; the `Mmb` variant's name is itself already the result
+/// of one such internal swap (from `Mmr`) and had no other reason to be
+/// a breaking rename. Same rationale [`crate::ops::gc::GcRootsError`]
+/// documents for its own `#[non_exhaustive]`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum HistoryError {
     #[error("history ref: {0}")]
     Ref(#[from] crate::refs::RefError),

@@ -52,7 +52,9 @@ path = "src/main.rs"
 # Inter-workspace deps need explicit `version = ...` alongside the
 # path so `cargo publish` accepts them; path-only deps are rejected by
 # the registry. Track workspace.package.version.
-mkit-core = { version = "0.4", path = "../mkit-core" }
+# `batch-verify` (not a default feature — see mkit-core's Cargo.toml)
+# is required by `verify_new_object_signatures`'s batch fast path.
+mkit-core = { version = "0.4", path = "../mkit-core", features = ["batch-verify"] }
 mkit-attest = { version = "0.4", path = "../mkit-attest" }
 mkit-git-bridge = { version = "0.4", path = "../mkit-git-bridge", optional = true }
 mkit-keystore = { version = "0.4", path = "../mkit-keystore" }

@@ -219,7 +219,7 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
 /// Map of `refs/remotes/<remote>/<branch>` → tip, used to diff the
 /// tracking-ref state across a fetch.
 fn tracking_snapshot(layout: &RepoLayout, remote: &str) -> HashMap<String, Hash> {
-    mkit_core::refs::list_remote_refs(layout, remote)
+    super::list_remote_refs_parallel(layout, remote)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|r| r.hash.map(|h| (r.name, h)))
