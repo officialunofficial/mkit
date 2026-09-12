@@ -87,6 +87,58 @@ pub const HEADER_LEN: usize = 1 + 4 + 4;
 /// alignment math. Not part of the wire format — readers don't care.
 const BLOCK_SIZE: usize = 16;
 
+/// A fast, non-cryptographic [`Hasher`](std::hash::Hasher) for
+/// `encode`'s block-hash index, whose keys are already the output of
+/// [`block_hash`] (FNV-1a over 16 bytes). `std::collections::HashMap`'s
+/// default hasher (`SipHash`-1-3) is deliberately expensive per byte to
+/// resist hash-flooding `DoS` from attacker-chosen keys — a cost with no
+/// payoff here: an attacker who controls `base`'s bytes already
+/// controls `block_hash`'s output directly, so re-hashing it with a
+/// slower, keyed algorithm buys no additional collision resistance.
+/// This is the same class of hasher as the `rustc-hash`/`fxhash`
+/// crates (the mix step is `FxHash`'s, originally from Firefox);
+/// reimplemented here rather than taken as a dependency since the
+/// whole algorithm is a handful of lines and this module is its only
+/// user. `write_u64` is the only method `encode`'s `u64` keys exercise
+/// (see [`u64`]'s stdlib `Hash` impl), but `write` is implemented too
+/// so this stays correct — if slower — for any other key type.
+#[derive(Default)]
+struct FxHasher(u64);
+
+/// `FxHash`'s odd, large mixing constant (`0x9E3779B97F4A7C15`'s
+/// low 64 bits rotated into the shape `FxHash` actually uses).
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl std::hash::Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            self.write_u64(u64::from_ne_bytes(
+                chunk.try_into().expect("exactly 8 bytes"),
+            ));
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..rem.len()].copy_from_slice(rem);
+            self.write_u64(u64::from_ne_bytes(buf));
+        }
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// [`std::collections::HashMap`] pre-configured with [`FxHasher`] —
+/// used only for `encode`'s block-hash index (see [`FxHasher`]'s docs
+/// for why the default `SipHash` is the wrong tool there).
+type FxIndexMap = std::collections::HashMap<u64, u32, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// Multiplier applied to `stream.len()` when bounding the decoder's
 /// initial `Vec::with_capacity`. The worst-case expansion of a COPY op
 /// is 7 bytes of stream → `u16::MAX` output bytes (≈ 9363×), but in
@@ -137,8 +189,6 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
 /// (insert-buffer length > 127, match length > `u16::MAX`); both are
 /// guarded above and unreachable for any valid input.
 pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
-    use std::collections::HashMap;
-
     check_length_bounds(base.len(), result.len())?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + result.len());
@@ -148,7 +198,8 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
     // `base.len()` at `u32::MAX` for COPY offsets — bases over 4 GiB
     // are out of scope for v1 (SPEC-PACKFILE caps individual payloads).
     let num_blocks = base.len() / BLOCK_SIZE;
-    let mut index: HashMap<u64, u32> = HashMap::with_capacity(num_blocks);
+    let mut index: FxIndexMap =
+        FxIndexMap::with_capacity_and_hasher(num_blocks, std::hash::BuildHasherDefault::default());
     for i in 0..num_blocks {
         let pos = i * BLOCK_SIZE;
         if let Ok(pos_u32) = u32::try_from(pos) {
@@ -398,6 +449,43 @@ mod tests {
         h[1..5].copy_from_slice(&base_len.to_le_bytes());
         h[5..9].copy_from_slice(&result_len.to_le_bytes());
         h
+    }
+
+    #[test]
+    fn fx_hasher_is_deterministic_and_avalanches() {
+        use std::hash::{Hash, Hasher};
+
+        fn hash_u64(i: u64) -> u64 {
+            let mut h = FxHasher::default();
+            i.hash(&mut h);
+            h.finish()
+        }
+
+        // Same input, same output — a `HashMap` built on this hasher would
+        // otherwise not find keys it just inserted.
+        assert_eq!(hash_u64(42), hash_u64(42));
+
+        // Nearby inputs must not collide, or (much worse) land in nearby
+        // buckets: `encode`'s index is keyed by consecutive-ish FNV-1a
+        // outputs across a sliding 16-byte window, so a hasher that
+        // preserved input adjacency would defeat the point of hashing at
+        // all. Flipping the low bit should flip roughly half of the
+        // 64 output bits (a coarse avalanche check, not a full statistical
+        // test suite).
+        let a = hash_u64(0);
+        let b = hash_u64(1);
+        assert_ne!(a, b);
+        assert!(
+            (a ^ b).count_ones() >= 16,
+            "low-bit flip barely changed the hash: {a:#x} vs {b:#x}"
+        );
+
+        // `write` (the generic byte-slice path, exercised only if this
+        // hasher is ever reused for a non-`u64` key) must also produce a
+        // hash — not panic on a non-multiple-of-8 length.
+        let mut h = FxHasher::default();
+        b"not a multiple of eight".hash(&mut h);
+        let _ = h.finish();
     }
 
     #[test]
