@@ -776,35 +776,33 @@ impl PackReader {
         // no behavior moves, just where it's written.
         let (version, split, count) = validate_pack_header(pack_bytes)?;
 
-        let mut report = UnpackReport::default();
-        // Track entries resolved in *this* pack so subsequent delta
-        // entries can resolve their base from memory before falling
-        // back to the on-disk store: `WriteBatch::write_prehashed`
-        // stages bytes durably-pending but NOT visible until
-        // `commit()`, so a not-yet-committed entry can only be found
-        // here, never via `store`. Raw entries borrow straight out of
-        // `pack_bytes` — it's already resident for the whole call, so
-        // keeping a second owned copy alongside it would just double
-        // the memory a large pack needs (issue #647). Only
-        // delta-resolved entries need an owned buffer, since
-        // `delta::decode` produces bytes that don't alias `pack_bytes`.
+        // Track entries resolved in *this* pack so delta entries can
+        // resolve their base from memory before falling back to the
+        // on-disk store: `WriteBatch::write_prehashed` stages bytes
+        // durably-pending but NOT visible until `commit()`, so a
+        // not-yet-committed entry can only be found here, never via
+        // `store`. Raw entries borrow straight out of `pack_bytes` —
+        // it's already resident for the whole call, so keeping a second
+        // owned copy alongside it would just double the memory a large
+        // pack needs (issue #647). Only delta-resolved entries need an
+        // owned buffer, since `delta::decode` produces bytes that don't
+        // alias `pack_bytes`.
         let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
             std::collections::HashMap::new();
         let mut total_payload: u64 = 0;
         let mut pos = HEADER_LEN;
 
-        // Stage each entry into the batch as soon as it's parsed and
-        // validated, rather than collecting every entry's bytes into a
-        // second list first and writing them all out after the loop.
-        // `commit()` still runs exactly once, after the loop below, so
-        // the "durable and visible together" contract (see the
-        // `WriteBatch` module docs) is unaffected — only the point at
-        // which each entry's bytes are handed to the batch moves
-        // earlier, from "after every entry is parsed" to "as each
-        // entry is parsed".
         let batch = store.batch();
 
-        for _ in 0..count {
+        // Phase 1 (sequential, cheap): parse every frame's header —
+        // type, length, cap/EOF checks — and classify it as raw
+        // (0x00/0x03) or delta (0x02/0x04), recording its position in
+        // the pack. No decompression, hashing, validation, or I/O
+        // happens yet, so this is a single pass over `pack_bytes` with
+        // no allocation beyond the two small index vectors below.
+        let mut raw_frames: Vec<(usize, u8, &[u8])> = Vec::new();
+        let mut delta_frames: Vec<(usize, u8, &[u8])> = Vec::new();
+        for idx in 0..count as usize {
             // Frame: [type][payload_len].
             if pos + ENTRY_FRAME_LEN > split {
                 return Err(PackError::UnexpectedEof);
@@ -826,66 +824,10 @@ impl PackReader {
             pos += payload_len;
 
             match etype {
-                0x00 => {
-                    // raw — validate, then stage into the batch immediately.
-                    stage_raw_object(
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        Cow::Borrowed(payload),
-                    )?;
-                }
-                0x02 => {
-                    // delta — payload is [32B base_hash][stream].
-                    if payload.len() < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
-                    }
-                    let mut base_hash = [0u8; hash::HASH_LEN];
-                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
-                    let stream = &payload[hash::HASH_LEN..];
-                    stage_delta_target(
-                        store,
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        base_hash,
-                        stream,
-                    )?;
-                }
-                0x03 if version == VERSION_V2 => {
-                    // zstd-raw — payload is [4B uncompressed_len][zstd frame]
-                    // (SPEC-PACKFILE §3.3). Decompress, then treat exactly
-                    // like a 0x00 raw entry.
-                    let obj_bytes = decompress_zstd_entry(payload)?;
-                    stage_raw_object(
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        Cow::Owned(obj_bytes),
-                    )?;
-                }
-                0x04 if version == VERSION_V2 => {
-                    // zstd-delta — payload is [32B base_hash (uncompressed)]
-                    // [4B uncompressed_len][zstd frame] (SPEC-PACKFILE §3.4).
-                    if payload.len() < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
-                    }
-                    let mut base_hash = [0u8; hash::HASH_LEN];
-                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
-                    let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
-                    stage_delta_target(
-                        store,
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        base_hash,
-                        &stream,
-                    )?;
-                }
+                0x00 => raw_frames.push((idx, etype, payload)),
+                0x02 => delta_frames.push((idx, etype, payload)),
+                0x03 if version == VERSION_V2 => raw_frames.push((idx, etype, payload)),
+                0x04 if version == VERSION_V2 => delta_frames.push((idx, etype, payload)),
                 0x01 => return Err(PackError::InvalidEntryType(0x01)),
                 other => return Err(PackError::InvalidEntryType(other)),
             }
@@ -895,6 +837,63 @@ impl PackReader {
             return Err(PackError::TrailingData);
         }
 
+        // Phase 2: raw entries. Decompress (0x03 only), validate, hash,
+        // and stage each one into `batch` — independent per entry, so
+        // on a native build with enough of them this fans out across a
+        // scoped thread pool instead of running one at a time on the
+        // calling thread (see `stage_raw_entries`). This is the
+        // read-side counterpart of `PackWriter::prepare_raw` /
+        // `push_prepared_raw` on the write side.
+        let raw_results = stage_raw_entries(&batch, version, &raw_frames)?;
+        let mut ordered: Vec<Option<(Hash, bool)>> = vec![None; count as usize];
+        for (idx, stored_hash, payload) in raw_results {
+            if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
+                c.fetch_add(payload.len() as u64, Ordering::Relaxed);
+            }
+            in_pack.insert(stored_hash, payload);
+            ordered[idx] = Some((stored_hash, false));
+        }
+
+        // Phase 3 (sequential, in original pack order): delta entries.
+        // Each resolves its base from `in_pack` — now fully populated
+        // with every raw entry from this pack — or the store; the
+        // SPEC-PACKFILE §4 base-before-delta ordering rule guarantees
+        // any in-pack base was a raw entry, so phase 2 above already
+        // staged it before this loop starts.
+        for (idx, etype, payload) in delta_frames {
+            if payload.len() < hash::HASH_LEN {
+                return Err(PackError::DeltaEntryTruncated);
+            }
+            let mut base_hash = [0u8; hash::HASH_LEN];
+            base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
+            let stored_hash = if etype == 0x02 {
+                // delta — payload is [32B base_hash][stream].
+                let stream = &payload[hash::HASH_LEN..];
+                stage_delta_target(store, &batch, &mut in_pack, owned_bytes, base_hash, stream)?
+            } else {
+                // zstd-delta — payload is [32B base_hash (uncompressed)]
+                // [4B uncompressed_len][zstd frame] (SPEC-PACKFILE §3.4).
+                let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
+                stage_delta_target(store, &batch, &mut in_pack, owned_bytes, base_hash, &stream)?
+            };
+            ordered[idx] = Some((stored_hash, true));
+        }
+
+        // Replay in original pack order so `UnpackReport::stored` keeps
+        // its documented "in pack order" contract regardless of how
+        // phase 2's raw entries were actually scheduled.
+        let mut report = UnpackReport::default();
+        for slot in ordered {
+            let (stored_hash, is_delta) =
+                slot.expect("every pack position classified in phase 1");
+            if is_delta {
+                report.delta_count += 1;
+            } else {
+                report.raw_count += 1;
+            }
+            report.stored.push(stored_hash);
+        }
+
         // Batched durability: one full flush for the whole pack instead
         // of one per object. The caller's ref update happens after
         // `read` returns, so the commit-before-reference ordering holds.
@@ -902,6 +901,125 @@ impl PackReader {
 
         Ok(report)
     }
+}
+
+/// `(original pack position, stored hash, payload)` triples returned by
+/// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in arbitrary
+/// order — [`PackReader::read_inner`] re-sorts by position before
+/// building [`UnpackReport`].
+type RawStageResults<'p> = Vec<(usize, Hash, Cow<'p, [u8]>)>;
+
+/// Prepare+stage every raw (`0x00`/`0x03`) entry in `frames`. Decompression,
+/// validation, hashing, and the store write are all independent per
+/// entry (`WriteBatch::write_prehashed` is documented safe to call
+/// concurrently — see its doc comment, which was written anticipating
+/// exactly this), so below a small-pack threshold this runs a plain
+/// sequential loop, and at or above it (native builds only — wasm32 has
+/// no threads) fans the work out across a scoped thread pool sized to
+/// the machine. This is the read-side counterpart of the write path's
+/// `PackWriter::prepare_raw`/`push_prepared_raw` split.
+fn stage_raw_entries<'p>(
+    batch: &crate::batch::WriteBatch<'_>,
+    version: u32,
+    frames: &[(usize, u8, &'p [u8])],
+) -> Result<RawStageResults<'p>, PackError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Below this many entries per available thread, thread-spawn
+        // overhead isn't worth it — the same sequential/parallel
+        // crossover shape `mkit-cli`'s own fan-outs use (see
+        // `fanout::threshold` there), tuned here by the
+        // `pack_unpack_fanout` bench.
+        const ENTRIES_PER_THREAD: usize = 8;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return stage_raw_entries_parallel(batch, version, frames, threads);
+        }
+    }
+    frames
+        .iter()
+        .map(|&(idx, etype, payload)| {
+            prepare_and_stage_raw(batch, version, etype, payload).map(|(h, p)| (idx, h, p))
+        })
+        .collect()
+}
+
+/// Parallel branch of [`stage_raw_entries`]: split `frames` into
+/// `threads` contiguous chunks and process each chunk sequentially on
+/// its own scoped thread. `std::thread::scope` (not a persistent pool)
+/// is deliberate — `mkit-core` stays dependency-neutral and wasm-clean
+/// (unlike `mkit-cli`, which already carries `rayon` for its own
+/// fan-outs — see that crate's `Cargo.toml`), and this call is already
+/// gated by [`stage_raw_entries`]'s threshold so the per-call spawn
+/// cost is only paid when there is enough work to amortize it.
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_raw_entries_parallel<'p>(
+    batch: &crate::batch::WriteBatch<'_>,
+    version: u32,
+    frames: &[(usize, u8, &'p [u8])],
+    threads: usize,
+) -> Result<RawStageResults<'p>, PackError> {
+    let chunk_size = frames.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(frames.len());
+    let mut first_err: Option<PackError> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = frames
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&(idx, etype, payload)| {
+                            prepare_and_stage_raw(batch, version, etype, payload)
+                                .map(|(h, p)| (idx, h, p))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle.join().expect("pack unpack worker thread panicked") {
+                match result {
+                    Ok(v) => out.push(v),
+                    Err(e) if first_err.is_none() => first_err = Some(e),
+                    Err(_) => {}
+                }
+            }
+        }
+    });
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+/// Pure per-entry step shared by both branches of [`stage_raw_entries`]:
+/// decompress a `0x03` payload (a `0x00` payload is already the object,
+/// borrowed zero-copy straight out of `pack_bytes` — issue #647),
+/// validate it as a canonical storable object, compute its dispatched
+/// id, and stage it into `batch`. Touches no state shared across
+/// entries — `batch` is the one exception, and it is `&self`-based with
+/// its own internal locking specifically so this is safe to call from
+/// many threads at once.
+fn prepare_and_stage_raw<'p>(
+    batch: &crate::batch::WriteBatch<'_>,
+    version: u32,
+    etype: u8,
+    payload: &'p [u8],
+) -> Result<(Hash, Cow<'p, [u8]>), PackError> {
+    let payload: Cow<'p, [u8]> = match etype {
+        0x03 if version == VERSION_V2 => Cow::Owned(decompress_zstd_entry(payload)?),
+        _ => Cow::Borrowed(payload),
+    };
+    let obj = validate_storable_object(&payload)?;
+    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
+    // BLAKE3 otherwise) from the object we just decoded, so the
+    // unpacked object lands under the same key every sink uses without
+    // a second decode.
+    let stored_hash = crate::object::id_from_object(&obj, &payload);
+    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    Ok((stored_hash, payload))
 }
 
 /// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
@@ -961,51 +1079,23 @@ fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackErro
 }
 
 /// Validate `payload` as a canonical storable object and stage it into
-/// `batch`/`in_pack`/`report`. Shared by the `0x00` and `0x03` branches
-/// of [`PackReader::read_inner`] — they differ only in whether
-/// `payload` is a zero-copy borrow straight out of `pack_bytes` (`0x00`)
-/// or an owned buffer produced by decompression (`0x03`); `owned_bytes`
-/// is credited only for the latter (`Cow::Owned`), preserving the
-/// zero-copy accounting issue #647 established for raw entries.
-fn stage_raw_object<'p>(
-    batch: &crate::batch::WriteBatch<'_>,
-    in_pack: &mut std::collections::HashMap<Hash, Cow<'p, [u8]>>,
-    report: &mut UnpackReport,
-    owned_bytes: Option<&AtomicU64>,
-    payload: Cow<'p, [u8]>,
-) -> Result<(), PackError> {
-    let obj = validate_storable_object(&payload)?;
-    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
-    // BLAKE3 otherwise) from the object we just decoded, so the
-    // unpacked object lands under the same key every sink uses without
-    // a second decode.
-    let stored_hash = crate::object::id_from_object(&obj, &payload);
-    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
-    if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
-        c.fetch_add(payload.len() as u64, Ordering::Relaxed);
-    }
-    in_pack.insert(stored_hash, payload);
-    report.raw_count += 1;
-    report.stored.push(stored_hash);
-    Ok(())
-}
-
 /// Resolve a delta's base, decode `stream` against it, and stage the
-/// reconstructed target into `batch`/`in_pack`/`report`. Shared by the
-/// `0x02` and `0x04` branches of [`PackReader::read_inner`] — `0x04`
-/// differs only in how `stream` was sourced (decompressed vs. borrowed
-/// straight from `pack_bytes`), not in how base resolution, delta
-/// decoding, or staging work.
-#[allow(clippy::too_many_arguments)]
+/// reconstructed target into `batch`/`in_pack`. Shared by the `0x02`
+/// and `0x04` branches of [`PackReader::read_inner`] — `0x04` differs
+/// only in how `stream` was sourced (decompressed vs. borrowed straight
+/// from `pack_bytes`), not in how base resolution, delta decoding, or
+/// staging work. Returns the stored hash; `read_inner` builds
+/// [`UnpackReport`] itself from the positions of every phase so it can
+/// replay pack order regardless of how phase 2's raw entries — see
+/// [`stage_raw_entries`] — were actually scheduled.
 fn stage_delta_target(
     store: &ObjectStore,
     batch: &crate::batch::WriteBatch<'_>,
     in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
-    report: &mut UnpackReport,
     owned_bytes: Option<&AtomicU64>,
     base_hash: Hash,
     stream: &[u8],
-) -> Result<(), PackError> {
+) -> Result<Hash, PackError> {
     let resolved = resolve_delta_target(store, in_pack, base_hash, stream)?;
     let obj = validate_storable_object(&resolved)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved);
@@ -1014,9 +1104,7 @@ fn stage_delta_target(
         c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
     }
     in_pack.insert(stored_hash, Cow::Owned(resolved));
-    report.delta_count += 1;
-    report.stored.push(stored_hash);
-    Ok(())
+    Ok(stored_hash)
 }
 
 /// Resolve a delta's base (in-pack first, then on-disk store) and decode

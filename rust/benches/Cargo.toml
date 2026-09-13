@@ -38,6 +38,14 @@ harness = false
 name = "pack_create"
 harness = false
 
+# Read-side counterpart of `pack_build_fanout` (below): wallclock of
+# `PackReader::read` (unpack) across entry counts, spanning the
+# raw-entry parallel-fan-out threshold in `mkit-core`'s
+# `stage_raw_entries`.
+[[bench]]
+name = "pack_unpack_fanout"
+harness = false
+
 # Issue #646 — SPEC-PACKFILE v2 zstd compression: pack-byte comparison
 # ({v1 uncompressed, v2 compressed}) for a small multi-commit text-file
 # corpus. Not gated on any feature — `pack-zstd` is a default feature
