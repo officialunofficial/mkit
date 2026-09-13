@@ -884,8 +884,7 @@ impl PackReader {
         // phase 2's raw entries were actually scheduled.
         let mut report = UnpackReport::default();
         for slot in ordered {
-            let (stored_hash, is_delta) =
-                slot.expect("every pack position classified in phase 1");
+            let (stored_hash, is_delta) = slot.expect("every pack position classified in phase 1");
             if is_delta {
                 report.delta_count += 1;
             } else {
@@ -931,8 +930,7 @@ fn stage_raw_entries<'p>(
         // `fanout::threshold` there), tuned here by the
         // `pack_unpack_fanout` bench.
         const ENTRIES_PER_THREAD: usize = 8;
-        let threads = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get);
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
             return stage_raw_entries_parallel(batch, version, frames, threads);
         }

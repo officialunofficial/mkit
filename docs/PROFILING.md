@@ -88,8 +88,9 @@ Profiler in your browser with the recorded profile loaded.
 ## Profile a benchmark
 
 To drill into one of the criterion suites (`hashing`, `sign_verify`,
-`object_commit`, `pack_create`, `store_write`, and the feature-gated
-`pack_shard_transfer` &mdash; see `rust/benches/Cargo.toml` for the full list):
+`object_commit`, `pack_create`, `pack_unpack_fanout`, `store_write`, and
+the feature-gated `pack_shard_transfer` &mdash; see
+`rust/benches/Cargo.toml` for the full list):
 
 ```sh
 scripts/profile.sh --bench pack_create
