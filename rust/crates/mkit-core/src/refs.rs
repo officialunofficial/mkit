@@ -63,6 +63,7 @@ const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RefError {
     /// `name` failed [`validate_ref_name`].
     #[error("invalid ref name '{0}'")]

@@ -871,7 +871,10 @@ fn verify_batch_parallel(batch: &[(sign::PublicKey, Hash, sign::Signature)]) -> 
 
 /// Read every object in `hashes` (in parallel iff `parallel`, matching
 /// [`verify_new_object_signatures`]'s existing sequential/rayon split),
-/// then verify their signatures.
+/// then verify their signatures. Every hash is read (there's no cheaper
+/// way to learn an object's type), but only Commit/Remix/Tag entries are
+/// retained afterward — see the read step's own comment for why that
+/// matters for a chunk dominated by large blobs.
 ///
 /// Tries [`mkit_core::sign::verify_batch`] first over every commit/
 /// remix/tag found — via [`verify_batch_parallel`] when `parallel` is
@@ -891,12 +894,36 @@ fn verify_batch_parallel(batch: &[(sign::PublicKey, Hash, sign::Signature)]) -> 
 /// past the object that actually fails); a well-behaved remote pays for
 /// the batch attempt only.
 fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), DispatchError> {
-    let read_one =
-        |h: &Hash| -> Result<(Hash, Object), DispatchError> { Ok((*h, store.read_object(h)?)) };
+    // Every hash in `hashes` still has to be *read* to learn its type —
+    // the pack format doesn't index that separately — but only
+    // Commit/Remix/Tag objects are ever inspected below, by both
+    // `collect_batch_entries` and `verify_one_object`. Dropping a
+    // Blob/Tree/ChunkedBlob/Delta right after the type check, instead of
+    // keeping it in `entries` for the rest of this call, matters
+    // concretely: a single `Blob` can be up to `worktree::CHUNK_THRESHOLD`
+    // (1 MiB — larger files are chunked, per this crate's whole design),
+    // so a `verify_chunk_size()`-sized chunk (up to 512 entries)
+    // dominated by such blobs previously held up to ~512 MiB of fully
+    // decoded, never-inspected object bytes resident at once. This way,
+    // at most one blob per rayon worker (or one at all, sequentially) is
+    // ever live simultaneously.
+    let read_signed_one = |h: &Hash| -> Result<Option<(Hash, Object)>, DispatchError> {
+        let obj = store.read_object(h)?;
+        Ok(match obj {
+            Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => Some((*h, obj)),
+            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => None,
+        })
+    };
     let entries: Vec<(Hash, Object)> = if parallel {
-        hashes.par_iter().map(read_one).collect::<Result<_, _>>()?
+        hashes
+            .par_iter()
+            .filter_map(|h| read_signed_one(h).transpose())
+            .collect::<Result<_, _>>()?
     } else {
-        hashes.iter().map(read_one).collect::<Result<_, _>>()?
+        hashes
+            .iter()
+            .filter_map(|h| read_signed_one(h).transpose())
+            .collect::<Result<_, _>>()?
     };
 
     if let Some(batch) = collect_batch_entries(&entries) {
@@ -1490,6 +1517,62 @@ mod tests {
 
         verify_new_object_signatures(&store, &stored, true)
             .expect("every commit in the batch is validly signed");
+    }
+
+    /// Regression for `verify_slice`'s read step: a chunk mixing unsigned
+    /// object kinds (Blob/Tree — neither carries a signature) with signed
+    /// commits must still verify correctly. `verify_slice` reads every
+    /// hash to learn its type but only *retains* Commit/Remix/Tag entries
+    /// afterward (dropping Blob/Tree/ChunkedBlob/Delta immediately) — this
+    /// pins that the filtering doesn't drop a commit it should have kept,
+    /// doesn't get confused by interleaving, and both a validly-signed and
+    /// a tampered commit are still correctly accepted/rejected when
+    /// surrounded by unsigned entries on both sides.
+    #[test]
+    fn verify_new_object_signatures_mixed_with_unsigned_object_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = mkit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let kp = mkit_core::sign::KeyPair::generate().unwrap();
+
+        let blob = |seed: usize| -> Hash {
+            store
+                .write(
+                    &mkit_core::serialize::serialize(&Object::Blob(mkit_core::object::Blob {
+                        data: format!("unsigned blob fixture #{seed}").into_bytes(),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+
+        // Blob, commit, blob, commit, ... — unsigned entries on both
+        // sides of every signed one, so a filtering bug that drops or
+        // misattributes a neighbor would show up either direction.
+        let mut stored: Vec<Hash> = Vec::with_capacity(2 * LARGE_BATCH);
+        for i in 0..LARGE_BATCH {
+            stored.push(blob(i));
+            stored.push(store.write(&signed_commit_bytes(&kp, i)).unwrap());
+        }
+        assert!(stored.len() >= verify_fanout_threshold());
+
+        verify_new_object_signatures(&store, &stored, true)
+            .expect("unsigned entries must not affect verifying the signed ones");
+
+        // Tamper one of the commits — must still be caught even though
+        // it's surrounded by unsigned entries the batch/fallback paths
+        // both skip.
+        let commit_index = 2 * (LARGE_BATCH / 2) + 1;
+        let Object::Commit(mut c) = store.read_object(&stored[commit_index]).unwrap() else {
+            panic!("expected commit");
+        };
+        c.signature[0] ^= 0xff;
+        let tampered_bytes = mkit_core::serialize::serialize(&Object::Commit(c)).unwrap();
+        stored[commit_index] = store.write(&tampered_bytes).unwrap();
+
+        let err = verify_new_object_signatures(&store, &stored, true)
+            .expect_err("a tampered commit must still be caught alongside unsigned entries");
+        assert!(matches!(err, DispatchError::UnsignedOrInvalidObject { .. }));
     }
 
     #[test]
