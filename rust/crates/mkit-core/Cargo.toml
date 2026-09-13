@@ -49,6 +49,16 @@ ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] 
 # feature's doc below and `sign::verify_batch`.
 curve25519-dalek = { version = "5", optional = true }
 getrandom = "0.4"
+# `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an
+# already well-distributed hash, not attacker-facing key material) uses
+# `FxHasher`/`FxSeededState` instead of the default `SipHash` — see
+# `delta.rs`'s module docs. Already resolved transitively (via
+# `mkit-cli`'s `reqwest` → `quinn` chain) at the pinned `2.1` line; this
+# direct dependency makes that explicit rather than relying on it.
+# `no_std`-by-default (this crate enables its default `std` feature) and
+# pure arithmetic, so it stays wasm32-clean like the rest of this
+# dependency list.
+rustc-hash = "2.1"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
 # `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
 # it directly so the constant-time guarantee is explicit at this crate
