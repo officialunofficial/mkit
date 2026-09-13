@@ -116,10 +116,10 @@ fn two_commits_land_in_branch_history_snapshot() {
     assert_eq!(
         live.len(),
         2,
-        "two commits must produce exactly two leaves in main's MMR"
+        "two commits must produce exactly two leaves in main's MMB"
     );
 
-    // Cross-check: a fresh, in-memory MMR built by replaying the same
+    // Cross-check: a fresh, in-memory MMB built by replaying the same
     // commit chain (in append order) MUST produce the same root as
     // the on-disk snapshot. If `write_ref_recording_history` ever
     // silently degrades to a `refs::write_ref` call, the snapshot will
@@ -129,12 +129,12 @@ fn two_commits_land_in_branch_history_snapshot() {
 
     let mut mem = CommitHistory::open();
     for h in &chain {
-        mem.append(h).expect("append to mem MMR");
+        mem.append(h).expect("append to mem MMB");
     }
     assert_eq!(
         live.root(),
         mem.root(),
-        "live ancestry MMR root must equal a fresh manual append over the same chain"
+        "live ancestry MMB root must equal a fresh manual append over the same chain"
     );
 }
 

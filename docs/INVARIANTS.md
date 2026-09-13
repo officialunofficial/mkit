@@ -263,7 +263,7 @@ range), AND every `Cargo.lock` in those same trees that contains a
 **Because:** the commonware crates (`-storage`, `-cryptography`,
 `-runtime`, `-coding`, `-codec`, `-parallel`, `-utils`, `-stream`,
 `-invariants`) ship as one coordinated release; mkit's on-disk formats
-(the ancestry MMR, the BLS threshold derivation) and wire
+(the ancestry MMB, the BLS threshold derivation) and wire
 compatibility depend on the exact same version being linked everywhere a
 crate touches them. A manifest bump without a matching `cargo update` in
 every workspace leaves the *text* aligned while the *lockfile* — what

@@ -6,7 +6,7 @@
 //!
 //! - the **common dir** — state shared by every working tree of the
 //!   repository: the object store, refs, config, signing keys, the
-//!   history MMR, the recovery log, attestations, transport caches;
+//!   history MMB, the recovery log, attestations, transport caches;
 //! - the **worktree state dir** — state private to one working tree:
 //!   `HEAD`, the staging index, in-progress-operation files
 //!   (`MERGE_HEAD`, `rebase-apply/`, …), the stash, and the worktree

@@ -71,11 +71,11 @@ pub mod worktree;
 // Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-// Issue #157 — append-only MMR over the commit chain for
-// O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
-// dep tree only materialises for downstream callers that opt in.
-// Persisted (journaled) MMR is in this build; commit-field integration
-// is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
+// Issue #157 — append-only MMB (Merkle Mountain Belt) over the commit
+// chain for O(log n) inclusion proofs. Feature-gated so the
+// `commonware-storage` dep tree only materialises for downstream callers
+// that opt in. Persisted (journaled) MMB is in this build; commit-field
+// integration is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
 #[cfg(feature = "history-mmr")]
 pub mod history;
 

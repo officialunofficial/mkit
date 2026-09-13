@@ -14,7 +14,7 @@ front matter.
 - [SPEC-GC](SPEC-GC.md) &mdash; garbage collection, object pruning, and recovery.
 - [SPEC-GIT-BRIDGE](SPEC-GIT-BRIDGE.md) &mdash; mkit→git export bridge (fork mode) and its verifiers.
 - [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md) &mdash; git→mkit import bridge (one-way fork) and its verifiers.
-- [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMR-based history proofs for light-client verification.
+- [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMB-based history proofs for light-client verification.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `mkit key` CLI surface.
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.

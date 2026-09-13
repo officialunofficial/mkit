@@ -153,7 +153,7 @@ pub fn run(args: &[String]) -> u8 {
     // Single-writer-per-branch across worktrees (#493): if this
     // checkout would END on a branch (existing or being created),
     // refuse when a sibling tree already has it checked out — branch
-    // moves flow through the history-MMR ref path, which assumes one
+    // moves flow through the history-MMB ref path, which assumes one
     // writer per branch. Applies to `--force` too, like git.
     let ends_on_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
     if ends_on_branch {

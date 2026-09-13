@@ -154,7 +154,7 @@ name = "pack_shard_transfer"
 harness = false
 required-features = ["pack-shards"]
 
-# Issue #157 / #644 — journaled commit-history MMR: open_at (cold +
+# Issue #157 / #644 — journaled commit-history MMB: open_at (cold +
 # warm), a warm single append, and a backfill series. Default-off (the
 # `history-mmr` feature on mkit-core pulls in the same heavy
 # commonware-storage/-runtime + tokio stack as `pack-shards`). Run
@@ -187,7 +187,9 @@ serde_json = "1"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
-mkit-core = { path = "../crates/mkit-core" }
+# `batch-verify` (not a default feature) is required by
+# `verify_fanout.rs`'s `sign::verify_batch` series.
+mkit-core = { path = "../crates/mkit-core", features = ["batch-verify"] }
 # add_staging.rs drives the real `mkit add -A` CLI path in-process (issue
 # #708) — mkit-cli's library surface is unstable/internal-only (see its
 # Cargo.toml header), which is fine for a dev-dependency exercising it as

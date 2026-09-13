@@ -481,7 +481,7 @@ pub fn push_all_with(
 ) -> Result<usize, DispatchError> {
     let layout = mkit_core::layout::discover(cwd)?;
     let store = crate::commands::open_store_configured(&layout)?;
-    let refs_list = refs::list_refs(&layout)?;
+    let refs_list = crate::commands::list_refs_parallel(&layout)?;
     let remote = remote.unwrap_or(DEFAULT_REMOTE);
     let mut n = 0;
     // Batch every pushed branch's remote-tracking-ref write (#645):
@@ -1212,7 +1212,7 @@ pub fn pull_all_with(
     // (#642 — see `packmap::apply_fetched_chain`). No lock is held here
     // across the network transfer.
     let n = fetch_objects(&store, &layout, tx, remote, require_signed)?;
-    let remote_refs = refs::list_remote_refs(&layout, remote)?
+    let remote_refs = crate::commands::list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();

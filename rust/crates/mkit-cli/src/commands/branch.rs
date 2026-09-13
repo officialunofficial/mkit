@@ -169,7 +169,7 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
     // `MustNotExist` (issue #206) refuses to silently clobber an
     // existing branch of the same name. Route through
     // `write_ref_recording_history` so the new branch picks up a
-    // fresh history-MMR journal (the empty pre-leaf root + this
+    // fresh history-MMB journal (the empty pre-leaf root + this
     // first append) on builds with `--features history-mmr`.
     match super::write_ref_recording_history(layout, name, refs::RefWriteCondition::Missing, &h) {
         Ok(()) => exit::OK,
@@ -192,7 +192,7 @@ fn create(layout: &RepoLayout, name: &str) -> u8 {
 /// rather than swallowed.
 ///
 /// On `--features history-mmr` builds, `delete_ref_recording_history`
-/// additionally destroys the branch's history-MMR journal partition
+/// additionally destroys the branch's history-MMB journal partition
 /// (issue #648): without that, recreating a branch under the same name
 /// would reopen the deleted incarnation's non-empty journal and resume
 /// appending on top of its old leaves.
@@ -254,7 +254,7 @@ fn delete(layout: &RepoLayout, names: &[String], force: bool) -> u8 {
 /// by deletion of the source, then a HEAD update when the source was the
 /// checked-out branch. The create routes through
 /// `write_ref_recording_history` so the renamed branch seeds a fresh
-/// history-MMR journal on `--features history-mmr` builds, exactly as a
+/// history-MMB journal on `--features history-mmr` builds, exactly as a
 /// freshly created branch would. The source deletion routes through
 /// `delete_ref_dropping_history`, which on the same builds destroys the
 /// OLD name's journal partition (issue #648) — a rename always starts
@@ -583,7 +583,7 @@ fn list(
         Ok(Head::Branch(n)) => Some(n),
         _ => None,
     };
-    let mut refs = match refs::list_refs(layout) {
+    let mut refs = match super::list_refs_parallel(layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
