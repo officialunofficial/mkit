@@ -837,30 +837,54 @@ impl PackReader {
             return Err(PackError::TrailingData);
         }
 
-        // Phase 2: raw entries. Decompress (0x03 only), validate, hash,
-        // and stage each one into `batch` — independent per entry, so
-        // on a native build with enough of them this fans out across a
-        // scoped thread pool instead of running one at a time on the
-        // calling thread (see `stage_raw_entries`). This is the
-        // read-side counterpart of `PackWriter::prepare_raw` /
-        // `push_prepared_raw` on the write side.
+        // Phase 2: raw entries. Decompress (0x03 only), validate, and
+        // hash each one — independent per entry, so on a native build
+        // with enough of them this fans out across a scoped thread pool
+        // instead of running one at a time on the calling thread (see
+        // `stage_raw_entries`). This is the read-side counterpart of
+        // `PackWriter::prepare_raw`/`push_prepared_raw` on the write
+        // side. Staging into `batch` also happens here (concurrently —
+        // `write_prehashed` is safe for that), but staging into
+        // `in_pack` is deferred to phase 3 below: SPEC-PACKFILE §4
+        // requires a delta's base to appear *earlier in the pack*, so a
+        // raw entry must only become visible to delta resolution once
+        // phase 3's scan actually reaches its pack position, not the
+        // instant phase 2 happens to finish computing it.
         let raw_results = stage_raw_entries(&batch, version, &raw_frames)?;
-        let mut ordered: Vec<Option<(Hash, bool)>> = vec![None; count as usize];
+        let mut raw_by_pos: Vec<Option<(Hash, Cow<'_, [u8]>)>> = vec![None; count as usize];
         for (idx, stored_hash, payload) in raw_results {
-            if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
-                c.fetch_add(payload.len() as u64, Ordering::Relaxed);
-            }
-            in_pack.insert(stored_hash, payload);
-            ordered[idx] = Some((stored_hash, false));
+            raw_by_pos[idx] = Some((stored_hash, payload));
         }
 
-        // Phase 3 (sequential, in original pack order): delta entries.
-        // Each resolves its base from `in_pack` — now fully populated
-        // with every raw entry from this pack — or the store; the
-        // SPEC-PACKFILE §4 base-before-delta ordering rule guarantees
-        // any in-pack base was a raw entry, so phase 2 above already
-        // staged it before this loop starts.
-        for (idx, etype, payload) in delta_frames {
+        // Phase 3 (sequential, single pass over 0..count in original
+        // pack order): replay every position exactly as the old
+        // single-loop reader did. A raw position stages its
+        // phase-2-computed result into `in_pack` (the CPU-heavy work is
+        // already done; this is just bookkeeping); a delta position
+        // resolves its base from `in_pack`/`store` and stages the
+        // decoded target — identical to the pre-parallelization code,
+        // so a delta can only ever see raw entries at strictly earlier
+        // positions, preserving the base-before-delta ordering rule.
+        let mut delta_frames = delta_frames.into_iter();
+        let mut report = UnpackReport::default();
+        for (idx, slot) in raw_by_pos.into_iter().enumerate() {
+            if let Some((stored_hash, payload)) = slot {
+                if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
+                    c.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                }
+                in_pack.insert(stored_hash, payload);
+                report.raw_count += 1;
+                report.stored.push(stored_hash);
+                continue;
+            }
+            // Not a raw position — phase 1 classified every position as
+            // raw or delta, so this one must be the next delta entry in
+            // `delta_frames` (built there in ascending pack-position
+            // order too).
+            let (didx, etype, payload) = delta_frames
+                .next()
+                .expect("every non-raw position has a matching delta frame");
+            debug_assert_eq!(didx, idx, "delta_frames must stay in pack-position order");
             if payload.len() < hash::HASH_LEN {
                 return Err(PackError::DeltaEntryTruncated);
             }
@@ -876,20 +900,7 @@ impl PackReader {
                 let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
                 stage_delta_target(store, &batch, &mut in_pack, owned_bytes, base_hash, &stream)?
             };
-            ordered[idx] = Some((stored_hash, true));
-        }
-
-        // Replay in original pack order so `UnpackReport::stored` keeps
-        // its documented "in pack order" contract regardless of how
-        // phase 2's raw entries were actually scheduled.
-        let mut report = UnpackReport::default();
-        for slot in ordered {
-            let (stored_hash, is_delta) = slot.expect("every pack position classified in phase 1");
-            if is_delta {
-                report.delta_count += 1;
-            } else {
-                report.raw_count += 1;
-            }
+            report.delta_count += 1;
             report.stored.push(stored_hash);
         }
 
@@ -1452,6 +1463,45 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.stored, vec![base_hash, target_hash]);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn delta_before_its_base_in_pack_order_is_rejected() {
+        // SPEC-PACKFILE §4: a delta's base MUST appear earlier in the
+        // pack as a raw entry (or already exist in the destination
+        // store) — never later. Same fixture as
+        // `raw_then_delta_resolves_in_pack`, but with the delta and its
+        // raw base swapped so the base comes *after* the delta that
+        // references it. The base is genuinely absent from both the
+        // pack-so-far and the (empty) store at the point the delta is
+        // read, so this must fail exactly like a base that's missing
+        // outright — never silently succeed by resolving against a
+        // same-pack entry the reader hasn't reached yet.
+        let mut content_base = vec![0u8; 1024];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let mut content_target = content_base.clone();
+        content_target[500] = 0xFF;
+        content_target[501] = 0xFE;
+
+        let base_obj = write_blob_via_serialize(&content_base);
+        let target_obj = write_blob_via_serialize(&content_target);
+        let base_hash = hash::hash(&base_obj);
+
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::DeltaBaseMissing(_)), "got {err:?}");
+        // Nothing from this rejected pack should be visible — not even
+        // the raw base entry that appeared after the bad delta.
+        assert!(!store.contains(&base_hash));
     }
 
     #[test]
