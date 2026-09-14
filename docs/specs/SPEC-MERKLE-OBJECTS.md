@@ -152,9 +152,10 @@ sibling digests happened to coincide.
 proof_bytes = be32(leaf_count) ‖ varint(len(siblings)) ‖ siblings[0] ‖ siblings[1] ‖ … ‖ siblings[n-1]
 ```
 
-- `leaf_count` is a **big-endian** `u32` — the one exception to
-  SPEC-CONVENTIONS §3's little-endian default, called out here per that
-  section.
+- `leaf_count` is a **big-endian** `u32` — an exception, matching the
+  big-endian integers §1.1 already feeds the hasher (SPEC-CONVENTIONS
+  §3's little-endian default governs *this* wire encoding, not the
+  hash-input bytes §1.1 specifies separately).
 - The sibling count is an unsigned LEB128 variable-length integer
   (`varint`), the same length-prefix convention used elsewhere in this
   corpus for a variable-length list.
@@ -220,6 +221,16 @@ level-by-level together, consuming exactly the siblings §5.3 selected —
 reusing an already-computed digest from elsewhere in the same proof
 wherever §5.3 omitted it as already-proven, rather than expecting it on
 the wire.
+
+**A proof over zero positions MUST be rejected**, regardless of
+`leaf_count` — including against the empty `Tree`'s id (§4) with the
+all-default proof (`leaf_count: 0, siblings: []`). Nothing about a
+zero-length entries/chunks slice constitutes a proof of anything, so a
+verifier MUST NOT special-case it into a vacuous success; a builder
+given zero positions MUST likewise refuse to construct a proof rather
+than emit one. `merkle::tests::verify_rejects_empty_element_set` pins
+this (no golden vector: every vector under `rust/tests/golden/proofs/`
+proves at least one position by construction).
 
 **Normative — verify against the object id, never the bare root.**
 Every verification in this document is stated against the object's

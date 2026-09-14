@@ -436,7 +436,7 @@ pub struct Proof {
     pub leaf_count: u32,
     /// The deduplicated sibling digests, level-major bottom-up then
     /// index-ascending, with self-duplicate and already-proven siblings
-    /// omitted (see [`siblings_required_for_multi_proof`]).
+    /// omitted (see `docs/specs/SPEC-MERKLE-OBJECTS.md` §5.3).
     pub siblings: Vec<Hash>,
 }
 
@@ -541,10 +541,19 @@ impl Proof {
     /// for the non-contiguous `elements` (leaf, position pairs). Elements
     /// may be given in any order; duplicate positions are rejected.
     fn reconstruct_multi_root(&self, elements: &[(Hash, u32)]) -> Result<Hash, MerkleError> {
+        // A proof over zero positions is rejected unconditionally, even
+        // when `leaf_count == 0` and `siblings` is empty (upstream's
+        // `Default` proof, which would otherwise trivially "reconstruct"
+        // the empty tree's root). Accepting it here would let a caller
+        // verify zero proven entries/chunks against any id whose inner
+        // root happens to equal the empty tree's — most notably the
+        // real `TREE_EMPTY_ID` — without ever having proven anything.
+        // Builders already refuse to construct such a proof
+        // (`BmtTree::multi_proof`'s `NoPositions` on an empty position
+        // iterator); this is the matching verification-side rule (see
+        // `tests::verify_rejects_empty_element_set` and
+        // SPEC-MERKLE-OBJECTS §5.4).
         if elements.is_empty() {
-            if self.leaf_count == 0 && self.siblings.is_empty() {
-                return Ok(h2(&0u32.to_be_bytes(), &hash(b"")));
-            }
             return Err(MerkleError::NoPositions);
         }
         for (_, position) in elements {
@@ -1145,6 +1154,42 @@ mod tests {
             "single-leaf tree proof must have zero siblings"
         );
         verify_tree_entry(&id, &t.entries[0], 0, &proof).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_empty_element_set() {
+        // A "proof" over zero positions must never verify — not even
+        // against the real empty tree id with the trivial
+        // `Proof::default()` (`leaf_count: 0, siblings: []`). Upstream's
+        // own `verify_multi_inclusion` treats exactly this input as a
+        // valid proof that a tree is empty; mkit's id-based verifiers
+        // reject it unconditionally instead, so a caller can never
+        // "verify" zero proven entries/chunks against an id merely
+        // because that id's inner root happens to fold the same way
+        // (SPEC-MERKLE-OBJECTS §5.4).
+        assert_eq!(
+            verify_tree_entries_range(&TREE_EMPTY_ID, 0, &[], &Proof::default()),
+            Err(MerkleError::NoPositions)
+        );
+        assert_eq!(
+            verify_tree_entries_multi(&TREE_EMPTY_ID, &[], &Proof::default()),
+            Err(MerkleError::NoPositions)
+        );
+
+        // The rule holds regardless of `leaf_count`: an empty
+        // entries/positions slice is rejected even against a genuinely
+        // non-empty tree with an otherwise-valid proof.
+        let t = tree(vec![entry(b"a", EntryMode::Blob, 1)]);
+        let id = compute_tree_id(&t);
+        let real_proof = build_tree_entry_proof(&t, 0).unwrap();
+        assert_eq!(
+            verify_tree_entries_range(&id, 0, &[], &real_proof),
+            Err(MerkleError::NoPositions)
+        );
+        assert_eq!(
+            verify_tree_entries_multi(&id, &[], &real_proof),
+            Err(MerkleError::NoPositions)
+        );
     }
 
     #[test]
