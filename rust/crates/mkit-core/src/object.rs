@@ -544,14 +544,29 @@ pub fn id_from_object(obj: &Object, bytes: &[u8]) -> Hash {
 /// resulting id mismatch surfaces as `HashMismatch` rather than being masked.
 #[must_use]
 pub(crate) fn object_id_from_bytes(bytes: &[u8]) -> Hash {
+    verified_id_and_object(bytes).0
+}
+
+/// [`object_id_from_bytes`], but also hands back the decoded [`Object`]
+/// when `bytes` turned out to be a merkelized type — sparing a caller
+/// that needs both the verified id AND the decoded object (namely
+/// [`crate::store::ObjectStore::read_object`]) a second `deserialize`
+/// of the same bytes. `None` means either the type is byte-hashed (no
+/// decode ever happens) or the merkle-decode failed, in which case the
+/// id falls back to `hash(bytes)` exactly as [`object_id_from_bytes`]
+/// does, and the caller must decode for itself if it still wants an
+/// `Object` (which will fail the same way `deserialize` always did).
+#[must_use]
+pub(crate) fn verified_id_and_object(bytes: &[u8]) -> (Hash, Option<Object>) {
     let is_merkle = bytes
         .first()
         .and_then(|b| ObjectType::from_u8(*b).ok())
         .is_some_and(ObjectType::is_merkle);
     if is_merkle && let Ok(obj) = crate::serialize::deserialize(bytes) {
-        return id_from_object(&obj, bytes);
+        let id = id_from_object(&obj, bytes);
+        return (id, Some(obj));
     }
-    crate::hash::hash(bytes)
+    (crate::hash::hash(bytes), None)
 }
 
 /// [`object_id_from_bytes`] for an object supplied as `parts` whose

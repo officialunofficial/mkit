@@ -48,7 +48,7 @@ use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
 use crate::layout::RepoLayout;
-use crate::object::{MkitError, Object, object_id_from_bytes};
+use crate::object::{MkitError, Object, object_id_from_bytes, verified_id_and_object};
 use crate::serialize;
 
 mod source;
@@ -542,10 +542,29 @@ impl ObjectStore {
     }
 
     /// Convenience: read raw bytes and decode into a typed [`Object`].
+    ///
+    /// A merkelized type ([`Object::Tree`] / [`Object::ChunkedBlob`]) is
+    /// already decoded once by [`verified_id_and_object`] to compute its
+    /// BMT-root id for the integrity check below — reused directly here
+    /// instead of a second `deserialize` of the same bytes (the two
+    /// decodes this function used to pay for every tree/chunked-blob
+    /// read, once inside [`Self::read`]'s verification and once here).
+    /// Every other type was only ever decoded once (verification there is
+    /// a plain `BLAKE3(bytes)`, no decode), so this path is unchanged for
+    /// them.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        let bytes = self.read(h)?;
-        let obj = serialize::deserialize(&bytes)?;
-        Ok(obj)
+        let bytes = self.read_raw(h)?;
+        let (actual, decoded) = verified_id_and_object(&bytes);
+        if actual != *h {
+            return Err(StoreError::HashMismatch {
+                expected: to_hex(h),
+                actual: to_hex(&actual),
+            });
+        }
+        match decoded {
+            Some(obj) => Ok(obj),
+            None => Ok(serialize::deserialize(&bytes)?),
+        }
     }
 
     /// Hash-verifying variant of [`object_type`](Self::object_type): reads
