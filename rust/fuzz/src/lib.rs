@@ -347,6 +347,121 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
     }
 }
 
+/// Decode a partial-disclosure bundle (issue #1015 verifier kit PR 2,
+/// SPEC-DISCLOSURE) from arbitrary input against a fixed dummy commit id.
+/// `verify::verify_disclosure` decodes the bundle before ever comparing
+/// against the caller's id, so this exercises the decoder's bounds
+/// (oversize bundle, bad magic/version, over-cap `Vec`/`Proof` lengths,
+/// trailing bytes) on adversarial bytes: it must never panic, and must
+/// never allocate based on an unvalidated length.
+pub fn disclosure_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let commit_id = [0u8; 32];
+    let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
+}
+
+/// A small native `ObjectStore`-backed fixture for
+/// [`verify_disclosure_one_iteration`]: one committed file, disclosed as
+/// a real `Selector::Object` bundle. Built once by
+/// [`build_disclosure_fixture`] and reused across all iterations of the
+/// unit-test loop via [`run_iterated_unit_with`]; real libfuzzer runs
+/// build a fresh one per call for isolation (mirrors
+/// [`pack_one_iteration`] vs [`pack_one_iteration_with_store`]).
+pub struct DisclosureFixture {
+    _dir: tempfile::TempDir,
+    commit_id: [u8; 32],
+    good_bundle: Vec<u8>,
+}
+
+/// Build a [`DisclosureFixture`]. Never fails in practice (every step is
+/// a fixed, valid construction over fixed bytes); panics only on a
+/// genuine environment failure (no writable temp dir), same posture as
+/// [`pack_one_iteration_with_store`]'s `ObjectStore::init`.
+pub fn build_disclosure_fixture() -> DisclosureFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::verify::{self, Selector};
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let blob_id =
+        store_file_object(&store, b"disclosure fuzz fixture content").expect("store file");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob_id,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x42; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"disclosure fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_bytes =
+        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+    let commit_id = store.write(&commit_bytes).expect("write commit");
+    let good_bundle = verify::build_disclosure(&store, &commit_id, &[b"f.txt"], Selector::Object)
+        .expect("build disclosure");
+    DisclosureFixture {
+        _dir: dir,
+        commit_id,
+        good_bundle,
+    }
+}
+
+/// Exercise `verify::verify_disclosure` against a real fixture. Three
+/// properties per iteration: (1) the freshly built bundle MUST verify;
+/// (2) an input-driven single-byte mutation of that bundle MUST reject
+/// cleanly (never panic) — mutating one byte of a genuine bundle can
+/// never happen to re-verify unless the mutation lands in a truly
+/// don't-care byte, which `verify_disclosure`'s exhaustive checks (id,
+/// hash, every proof, every Bao slice) leave essentially none of; (3)
+/// raw fuzzer bytes verified directly against the fixture's real commit
+/// id must never panic.
+pub fn verify_disclosure_one_iteration(input: &[u8]) {
+    let fixture = build_disclosure_fixture();
+    verify_disclosure_one_iteration_with(input, &fixture);
+}
+
+/// As [`verify_disclosure_one_iteration`], but against a caller-provided
+/// [`DisclosureFixture`] instead of building a fresh one — lets the
+/// unit-test loop amortize the tempdir/store/signing cost across all
+/// `MAX_ITER` iterations.
+pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFixture) {
+    use mkit_core::verify;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    verify::verify_disclosure(&fixture.commit_id, &fixture.good_bundle)
+        .expect("freshly built disclosure must verify");
+
+    if !fixture.good_bundle.is_empty() && input.len() >= 2 {
+        let mut mutated = fixture.good_bundle.clone();
+        let pos = usize::from(input[0]) % mutated.len();
+        let flip = input[1].max(1); // guaranteed non-zero XOR
+        mutated[pos] ^= flip;
+        let _ = verify::verify_disclosure(&fixture.commit_id, &mutated);
+    }
+
+    let _ = verify::verify_disclosure(&fixture.commit_id, input);
+}
+
 /// Exercise the sparse-checkout build/verify pair on arbitrary input.
 /// `build_sparse` must never panic; a freshly built delivery must
 /// verify; and `verify_sparse` over adversarial proof/manifest bytes
@@ -544,6 +659,28 @@ mod tests {
         run_iterated_unit(merkle_proof_one_iteration).expect("guardrails held");
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             run_one(case, merkle_proof_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn disclosure_decode_target_runs_within_caps() {
+        run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
+            run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn verify_disclosure_target_runs_within_caps() {
+        // Amortize the tempdir/store/signing cost across all MAX_ITER
+        // iterations, same rationale as the pack target above.
+        let fixture = build_disclosure_fixture();
+        run_iterated_unit_with(&fixture, verify_disclosure_one_iteration_with)
+            .expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
+            let start = std::time::Instant::now();
+            verify_disclosure_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }
 

@@ -153,3 +153,19 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "disclosure_decode"
+path = "fuzz_targets/disclosure_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_disclosure"
+path = "fuzz_targets/verify_disclosure.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

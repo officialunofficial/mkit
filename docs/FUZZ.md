@@ -31,6 +31,8 @@ from recurring.
 | `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
 | `fuzz_targets/merkle_proof.rs` | `merkle::compute_{tree,chunked}_id` / `merkle::Proof::decode` / `merkle::verify_tree_entry` / `merkle::verify_chunk` (never panics; a freshly built proof verifies; adversarial proof bytes reject cleanly, whether at decode or at verify) |
 | `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |
+| `fuzz_targets/disclosure_decode.rs` | `verify::verify_disclosure` decode path (issue #1015 verifier kit PR 2, SPEC-DISCLOSURE) — never panics on adversarial bundle bytes, regardless of the commit id checked against; every `Vec`/`Proof` length is bounded before allocation |
+| `fuzz_targets/verify_disclosure.rs` | `verify::verify_disclosure` / `verify::build_disclosure` (never panics; a freshly built bundle over a real `ObjectStore` fixture verifies; a mutated bundle rejects cleanly) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in

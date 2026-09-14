@@ -1,0 +1,14 @@
+{
+  "bin": "neg_payload_id_mismatch.bin",
+  "blake3": "397abbf11c2a96d58f424c0779a421b99d9fedc23c20398653743556226f7862",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "The Object payload's last byte is flipped; its id no longer matches the leaf id.",
+  "expect": "reject",
+  "name": "neg_payload_id_mismatch",
+  "path_hex": [
+    "7368616c6c6f772e747874"
+  ],
+  "reject_reason": "payload id does not equal the authenticated leaf id",
+  "selector": "object",
+  "size": 501
+}

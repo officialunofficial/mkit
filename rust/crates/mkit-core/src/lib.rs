@@ -53,6 +53,12 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 pub mod transfer;
+// Partial-disclosure verification: prove and verify that a path, chunk, or
+// byte range belongs to a commit id, with no store access and no trust
+// beyond the id itself (issue #1015 verifier kit PR 2). `default-features
+// = false` wasm-safe; the one native-only item (`build_disclosure`) is
+// gated on nothing extra since `ObjectStore` is already `std`-only.
+pub mod verify;
 pub mod write_auth;
 
 // Repository path layout (issue #493 Phase 0): the single authority

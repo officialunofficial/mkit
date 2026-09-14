@@ -704,14 +704,23 @@ impl Proof {
 // Leaf digests
 // ---------------------------------------------------------------------------
 
+/// The position-0 metadata leaf digest for a `ChunkedBlob`'s
+/// `total_size`/`chunk_size`, without requiring a materialized
+/// [`ChunkedBlob`] value. Shared by [`chunked_meta_leaf`] (which has one)
+/// and [`verify_chunk_with_meta_leaf`] (which — by design — never does;
+/// see that function's docs).
+fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
+    let mut body = [0u8; 12];
+    body[..8].copy_from_slice(&total_size.to_le_bytes());
+    body[8..].copy_from_slice(&chunk_size.to_le_bytes());
+    domain_digest(CBLOB_META_DOMAIN, &body)
+}
+
 /// The position-0 metadata leaf for a `ChunkedBlob`, binding its
 /// `total_size` and `chunk_size` (neither is derivable from the chunk
 /// list, so without this they could be forged — a second-preimage hole).
 fn chunked_meta_leaf(cb: &ChunkedBlob) -> Hash {
-    let mut body = [0u8; 12];
-    body[..8].copy_from_slice(&cb.total_size.to_le_bytes());
-    body[8..].copy_from_slice(&cb.chunk_size.to_le_bytes());
-    domain_digest(CBLOB_META_DOMAIN, &body)
+    chunked_meta_leaf_raw(cb.total_size, cb.chunk_size)
 }
 
 /// The leaf digest for one `Tree` entry. The `name_len` u32-LE prefix is
@@ -944,6 +953,39 @@ pub fn verify_chunks_multi(
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
 
+/// Verify, in one multi-proof, that (a) a `ChunkedBlob`'s metadata leaf —
+/// computed HERE from the caller's *claimed* `total_size`/`chunk_size`,
+/// never accepted as an externally supplied leaf digest — and (b) the
+/// chunk `chunk_hash` at `chunk_position` (= chunk index + 1) both belong
+/// to the `ChunkedBlob` whose id is `chunked_id`.
+///
+/// This is the one sanctioned way a proof over position 0 is ever
+/// accepted from outside this module: the verifier derives the meta leaf
+/// itself from the very values it is simultaneously authenticating,
+/// rather than trusting a caller-supplied leaf digest at that position.
+/// [`verify_chunk`]'s "reject a caller-supplied position 0" rule is
+/// unaffected — that guards a different, single-leaf proof shape; this
+/// one always proves exactly `{0, chunk_position}` together. Used by
+/// `crate::verify` (issue #1015 verifier kit PR 2, SPEC-DISCLOSURE) to
+/// authenticate a disclosed chunk's `total_size`/`chunk_size`
+/// announcement alongside its content id, in a single proof.
+pub(crate) fn verify_chunk_with_meta_leaf(
+    chunked_id: &Hash,
+    total_size: u64,
+    chunk_size: u32,
+    chunk_hash: &Hash,
+    chunk_position: u32,
+    proof: &Proof,
+) -> Result<(), MerkleError> {
+    if chunk_position == 0 {
+        return Err(MerkleError::PositionOutOfRange(0));
+    }
+    let meta_leaf = chunked_meta_leaf_raw(total_size, chunk_size);
+    let elements = [(meta_leaf, 0u32), (*chunk_hash, chunk_position)];
+    let root = proof.reconstruct_multi_root(&elements)?;
+    check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
+}
+
 /// Wrap `root` with `kind`'s type domain and compare to `expected_id`.
 fn check_wrapped(kind: ObjectKind, root: &Hash, expected_id: &Hash) -> Result<(), MerkleError> {
     if &wrap_id(kind, root) == expected_id {
@@ -1077,6 +1119,30 @@ mod tests {
         // ...but `verify_chunk` MUST reject it: position 0 is never a chunk.
         assert_eq!(
             verify_chunk(&id, &meta_leaf, 0, &proof),
+            Err(MerkleError::PositionOutOfRange(0))
+        );
+    }
+
+    #[test]
+    fn verify_chunk_with_meta_leaf_round_trips_and_rejects_forgery() {
+        let c = cb(100, 0, &[10, 20, 30]);
+        let id = compute_chunked_id(&c);
+        let pos = chunk_position(&c, &[20; 32]).unwrap(); // index 1 -> position 2
+        let proof = build_chunks_multi_proof(&c, [0, pos]).unwrap();
+
+        verify_chunk_with_meta_leaf(&id, 100, 0, &[20; 32], pos, &proof).unwrap();
+
+        // Forged total_size must be rejected — the meta leaf the verifier
+        // computes no longer folds to the real root.
+        assert!(verify_chunk_with_meta_leaf(&id, 101, 0, &[20; 32], pos, &proof).is_err());
+        // Forged chunk_size, likewise.
+        assert!(verify_chunk_with_meta_leaf(&id, 100, 64, &[20; 32], pos, &proof).is_err());
+        // Wrong chunk hash at the right position.
+        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &[0xFF; 32], pos, &proof).is_err());
+        // Position 0 is never accepted as `chunk_position`, even though
+        // it is a structurally valid multi-proof position.
+        assert_eq!(
+            verify_chunk_with_meta_leaf(&id, 100, 0, &[10; 32], 0, &proof),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }

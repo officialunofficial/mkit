@@ -20,6 +20,17 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+# Verified streaming (BLAKE3 tree hashing: outboard + slice proof) for
+# `verify::verify_blob_slice`/`verify_blob_len_proof` (issue #1015 verifier
+# kit PR 2, SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
+# `io::Cursor`-style in-memory use — no filesystem, no threads — so it
+# builds cleanly for wasm32 (already proven: `mkit-wasm` depends on the
+# same version for its `/streaming` demo). Same major as that transitive
+# copy, and `blake3 = "1"` above is the same workspace pin `bao::Hash`
+# (a `blake3::Hash` re-export) resolves against, so no second major shows
+# up in the tree. Run `bash scripts/check-wasm-dep-graph.sh` after
+# touching this dependency.
+bao = "0.13"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
 bytes = "1"
