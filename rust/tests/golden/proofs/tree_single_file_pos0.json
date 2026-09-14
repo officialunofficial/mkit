@@ -1,0 +1,20 @@
+{
+  "bin": "tree_single_file_pos0.bin",
+  "blake3": "023a14bb4482dc2fb94463977df299bdc73dcc5cf7227b0f8a9772e18bce3e9a",
+  "description": "The `tree_single_file` object from ../objects/, single-leaf proof at position 0.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "524541444d452e6d64",
+      "object_hash_hex": "16d3d19d44264ac14ffabb3b590ee66192a8b6b415eca3e1d51c747fb100b63b"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "tree_single_file_pos0",
+  "object_id_hex": "30e70034cef54c0514cfb69182bb7713df0582ea1ec305351cd3447216d2b598",
+  "position": 0,
+  "proof_kind": "single",
+  "size": 5
+}

@@ -1,0 +1,34 @@
+{
+  "bin": "tree_9entry_multi_0_4_8.bin",
+  "blake3": "ab6741fe3c5a2f63e147a85e8232ab1a04fb4199ee12729c17ee316007c179c9",
+  "description": "9-entry tree, multi-leaf proof over positions {0, 4, 8}.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "61",
+      "object_hash_hex": "0101010101010101010101010101010101010101010101010101010101010101"
+    },
+    {
+      "mode": 1,
+      "name_hex": "65",
+      "object_hash_hex": "0505050505050505050505050505050505050505050505050505050505050505"
+    },
+    {
+      "mode": 1,
+      "name_hex": "69",
+      "object_hash_hex": "0909090909090909090909090909090909090909090909090909090909090909"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 3,
+  "name": "tree_9entry_multi_0_4_8",
+  "object_id_hex": "f7b4fac9b95763b06dce55551fb08e1303d059d5215f010b4bfce36298af2433",
+  "positions": [
+    0,
+    4,
+    8
+  ],
+  "proof_kind": "multi",
+  "size": 133
+}

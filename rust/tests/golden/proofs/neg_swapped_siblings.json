@@ -1,0 +1,21 @@
+{
+  "bin": "neg_swapped_siblings.bin",
+  "blake3": "9f62d5883a1fdaea56e3b60336ec9db0be02072734f464634941774dd7c8c6e5",
+  "description": "A valid tree_7entry proof with its first two sibling digests swapped.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "67",
+      "object_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_swapped_siblings",
+  "object_id_hex": "daaa5ae863925303757ff5a4d364ef34fff20900c20b428f7e69d8a264779b6e",
+  "position": 6,
+  "proof_kind": "single",
+  "reject_reason": "sibling order was tampered with (siblings 0 and 1 swapped)",
+  "size": 69
+}

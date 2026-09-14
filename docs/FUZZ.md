@@ -29,6 +29,8 @@ from recurring.
 | `fuzz_targets/git_tree_parse.rs` | `mkit-git-bridge gitparse::parse_tree` plus `map_mode` |
 | `fuzz_targets/rpc_decode.rs`   | `SignerFrame` / `SshFrame` wire decode (never panics) plus `Arbitrary`-driven encode/decode roundtrip |
 | `fuzz_targets/sparse_verify.rs` | `sparse::build_sparse` / `sparse::verify_sparse` (never panics on adversarial manifest/proof bytes) |
+| `fuzz_targets/merkle_proof.rs` | `merkle::compute_{tree,chunked}_id` / `merkle::Proof::decode` / `merkle::verify_tree_entry` / `merkle::verify_chunk` (never panics; a freshly built proof verifies; adversarial proof bytes reject cleanly, whether at decode or at verify) |
+| `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in

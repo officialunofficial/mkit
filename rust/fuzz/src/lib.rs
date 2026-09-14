@@ -305,16 +305,21 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
     };
     let cid = merkle::compute_chunked_id(&cb);
     assert_eq!(cid.len(), 32);
-    let root = merkle::chunked_inner_root(&cb);
     if !chunks.is_empty() {
         // position 0 is the meta leaf; chunk i is at position i+1.
         let pos = (input.first().copied().unwrap_or(0) as usize % chunks.len()) as u32 + 1;
-        if let Ok(proof) = merkle::build_chunk_inclusion_proof(&cb, pos) {
-            merkle::verify_chunk_inclusion_proof(&root, &chunks[(pos - 1) as usize], pos, &proof)
+        if let Ok(proof) = merkle::build_chunk_proof(&cb, pos) {
+            merkle::verify_chunk(&cid, &chunks[(pos - 1) as usize], pos, &proof)
                 .expect("freshly built chunk proof must verify");
         }
         // Adversarial proof bytes / position must reject without panicking.
-        let _ = merkle::verify_chunk_inclusion_proof(&root, &chunks[0], 0, input);
+        // `input` is arbitrary fuzzer bytes, not necessarily a valid encoded
+        // `Proof`; decode it first (bounded) and only pass a successfully
+        // decoded proof to `verify_chunk` — a decode failure is itself a
+        // clean rejection.
+        if let Ok(proof) = merkle::Proof::decode(input, 1) {
+            let _ = merkle::verify_chunk(&cid, &chunks[0], 0, &proof);
+        }
     }
 
     // A Tree from the same bytes (one entry, name derived from input).
@@ -329,13 +334,17 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
             object_hash: chunks.first().copied().unwrap_or([0u8; 32]),
         }],
     };
-    assert_eq!(merkle::compute_tree_id(&tree).len(), 32);
-    let troot = merkle::tree_inner_root(&tree);
-    if let Ok(p) = merkle::build_tree_inclusion_proof(&tree, 0) {
-        merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, &p)
+    let tid = merkle::compute_tree_id(&tree);
+    assert_eq!(tid.len(), 32);
+    if let Ok(p) = merkle::build_tree_entry_proof(&tree, 0) {
+        merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p)
             .expect("freshly built tree proof must verify");
     }
-    let _ = merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, input);
+    // Adversarial proof bytes must reject without panicking (see the
+    // chunk-proof comment above for why we decode first).
+    if let Ok(p) = merkle::Proof::decode(input, 1) {
+        let _ = merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p);
+    }
 }
 
 /// Exercise the sparse-checkout build/verify pair on arbitrary input.
