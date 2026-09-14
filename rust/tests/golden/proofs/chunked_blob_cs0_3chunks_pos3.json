@@ -1,0 +1,18 @@
+{
+  "bin": "chunked_blob_cs0_3chunks_pos3.bin",
+  "blake3": "269ed1475e79e44c38bbbf1cffbb4a84824d1b6300023451c0a74faa8afe935b",
+  "chunk_hashes_hex": [
+    "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+  ],
+  "chunk_size": 0,
+  "description": "`chunked_blob_cs0_3chunks` from ../objects/, single chunk proof.",
+  "expect": "accept",
+  "kind": "chunk",
+  "max_items": 1,
+  "name": "chunked_blob_cs0_3chunks_pos3",
+  "object_id_hex": "00a63a562fc5b0fbe3eda18138923dfff4f94f0ca60ef869e32825028199d63d",
+  "position": 3,
+  "proof_kind": "single",
+  "size": 69,
+  "total_size": 1000000
+}

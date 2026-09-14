@@ -400,3 +400,38 @@ or execute a command twice during recovery.
 **Always:** drafts stay in memory, survive route remounts and signing locks, and clear on logout or session replacement. Explicit logout asks before discarding drafts. Current file query keys include content hashes so terminal captures cannot leave cached contents stale.
 
 **Enforced by:** workspace draft-store, Account, auth-provider, and workspace query tests.
+
+## BMT inclusion-proof bytes and sibling selection match commonware exactly
+
+**Always:** `mkit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
+varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
+already-proven-sibling-omitting selection rule are byte-identical to
+`commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, for
+single, range, and multi-leaf proofs alike — both directions: mkit
+decodes and accepts upstream's proof bytes, and upstream decodes and
+accepts mkit's.
+
+**Because:** SPEC-MERKLE-OBJECTS §5.7 makes this byte-identity a
+normative compatibility promise, so a commonware-based verifier (for
+example, makechain) can decode and verify an mkit proof with the
+upstream type directly, applying only mkit's outer type-domain wrap
+(`wrap_id`) on top. mkit cannot depend on `commonware-storage`'s `bmt`
+module directly for this (it drags in `commonware-cryptography`'s
+unconditional `blst` C dependency, which does not build for
+`wasm32-unknown-unknown` — see `merkle.rs`'s module docs and issue
+#843), so the construction is vendored and the byte-identity claim has
+no compiler to enforce it.
+
+**If violated:** a proof mkit produces would fail to decode, or would
+decode but fail to verify, against an otherwise-correct commonware-based
+verifier (and vice versa) — silently breaking cross-implementation
+verification with no local test failure, since every mkit-only
+round-trip test would still pass.
+
+**Enforced by:** `mkit_core::merkle::tests::proofs_match_commonware`
+(native-only, dev-dependency on `commonware-storage`/`commonware-cryptography`),
+which builds many randomised trees and single/range/multi position sets,
+asserts mkit's encoded bytes equal upstream's `commonware_codec::Encode`
+output, cross-decodes each side's bytes with the other's type, and
+confirms both verifiers reject a mutated proof (flipped sibling byte,
+dropped/added sibling, wrong `leaf_count`).

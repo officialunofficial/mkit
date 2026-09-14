@@ -1,0 +1,30 @@
+{
+  "bin": "tree_8entry_range2to4.bin",
+  "blake3": "0dc7e396230e5dd29ae35f36ceb6cc0b9ccc0ae2f1459dff3d71df19ab95be60",
+  "description": "8-entry tree, range proof over positions 2..=4.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "63",
+      "object_hash_hex": "0303030303030303030303030303030303030303030303030303030303030303"
+    },
+    {
+      "mode": 1,
+      "name_hex": "64",
+      "object_hash_hex": "0404040404040404040404040404040404040404040404040404040404040404"
+    },
+    {
+      "mode": 1,
+      "name_hex": "65",
+      "object_hash_hex": "0505050505050505050505050505050505050505050505050505050505050505"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 3,
+  "name": "tree_8entry_range2to4",
+  "object_id_hex": "968a4670cdb49a0d3d543772a5787ef2cdbd66b6e067e1420d37e1a9bd94cc08",
+  "proof_kind": "range",
+  "size": 101,
+  "start": 2
+}
