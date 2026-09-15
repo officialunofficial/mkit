@@ -509,7 +509,7 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         description: "Verify a disclosure bundle against a trusted 64-hex commit id (not a \
                       revision). Pass `trusted` (or `trust_roots`) to also cross-check the \
                       disclosed signer against the trust-roots registry.",
-        hints: (true, false, true),
+        hints: (false, false, true),
         schema: || {
             schema(
                 vec![
@@ -1284,7 +1284,6 @@ mod tests {
                     | "mkit_cat_object"
                     | "mkit_verify"
                     | "mkit_verify_attest"
-                    | "mkit_verify_proof"
                     | "mkit_closure_verify"
             );
             assert_eq!(ro, expect_ro, "readOnlyHint wrong for {name}");
