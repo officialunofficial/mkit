@@ -17,8 +17,8 @@ complete -c mkit -f
 set -l __mkit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key keygen \
-    cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame verify \
-    attest verify-attest self version help
+    cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame prove verify \
+    verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
 complete -c mkit -n "not __fish_seen_subcommand_from $__mkit_subcommands" \
@@ -332,6 +332,40 @@ complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l trust-roots -d "Trust roots path" -r
 complete -c mkit -n "__fish_seen_subcommand_from verify-attest" \
     -l algorithm -d "Algorithm filter" -r
+
+# prove / verify-proof / closure.
+complete -c mkit -n "__fish_seen_subcommand_from prove" \
+    -l chunk -d "Chunk index" -r
+complete -c mkit -n "__fish_seen_subcommand_from prove" \
+    -l range -d "Byte range OFFSET:LEN" -r
+complete -c mkit -n "__fish_seen_subcommand_from prove" \
+    -l with-offsets -d "Authenticate absolute offsets with --range"
+complete -c mkit -n "__fish_seen_subcommand_from prove" \
+    -s o -l output -d "Write bundle to file" -r
+complete -c mkit -n "__fish_seen_subcommand_from prove" \
+    -l format -d "Output format" -xa "default json"
+complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
+    -l expect-path -d "Require this authenticated path" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
+    -l trusted -d "Cross-check signer against trust-roots"
+complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
+    -l trust-roots -d "Trust-roots TOML" -r
+complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
+    -l format -d "Output format" -xa "default json"
+complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
+    -l payload-out -d "Write verified payload bytes" -r
+complete -c mkit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify" \
+    -a "export verify"
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -l history -d "Full ancestry (history mode)"
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -s o -l output -d "Output directory" -r
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -l force -d "Overwrite a non-empty directory"
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -l from -d "Closure directory" -r
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -l format -d "Output format" -xa "default json"
 
 # pack-shard flags.
 complete -c mkit -n "__fish_seen_subcommand_from pack-shard" \

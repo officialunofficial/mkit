@@ -66,6 +66,11 @@ never blocks on an editor.
    accepted as git-compat aliases but are **non-authoritative** &mdash; they never set
    who signed.
 
+- **Partial and full disclosure (no git counterpart):** `mkit prove`,
+  `mkit verify-proof`, `mkit closure export`, and `mkit closure verify`
+  prove a path/chunk/range or a full object set against a commit id.
+  See `docs/CLI.md`.
+
 Accepted-but-no-op / out of scope (so you don't wait on them): `log --graph` is
 accepted but does nothing; submodules, hooks, `git notes`, and `.git/`-format
 interop are explicit non-goals. Linked working trees ARE supported:
@@ -204,10 +209,11 @@ passes `-f`):
 claude mcp add mkit-repo -- mkit mcp --repository /path/to/repo
 ```
 
-Its 18 tools cover the everyday flow (`mkit_status`, diffs, `mkit_log`,
+Its 21 tools cover the everyday flow (`mkit_status`, diffs, `mkit_log`,
 `mkit_show`, `mkit_branch`, `mkit_add`, `mkit_unstage`, `mkit_commit`,
 create-branch/checkout, `mkit_init`, `mkit_keygen`, `mkit_cat_object`) plus
-the differentiators (`mkit_verify`, `mkit_attest`, `mkit_verify_attest`).
+the differentiators (`mkit_verify`, `mkit_attest`, `mkit_verify_attest`,
+`mkit_prove`, `mkit_verify_proof`, `mkit_closure_verify`).
 
 **What the MCP deliberately does NOT expose &mdash; use the shell commands in this
 skill for these:** remotes (`push`/`pull`/`fetch`/`clone`), history surgery

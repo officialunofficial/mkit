@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `verify_closure`. **SemVer:** additive — new APIs;
   `PackReader` behavior unchanged.
 
+- *(cli)* `mkit prove`, `mkit verify-proof`, and `mkit closure
+  export|verify` (issue #1015 verifier kit PR 5): CLI for partial
+  disclosure (a path, chunk, or byte range against a commit id) and
+  full-disclosure closure packs. Hand-maintained surfaces updated
+  (`docs/CLI.md`, `man/mkit.1`, completions, MCP tools `mkit_prove` /
+  `mkit_verify_proof` / `mkit_closure_verify`). Distinct from `mkit git
+  export`. **SemVer:** additive.
+
 - *(wasm)* Disclosure and closure verification exports (issue #1015
   verifier kit PR 4): `verify_disclosure` / `disclosure_payload_bytes`,
   `verify_closure_packs` / `verify_closure_manifest`, `verify_tree_entry`
