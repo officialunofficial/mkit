@@ -525,6 +525,7 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
 /// committed file, exported as a snapshot closure.
 pub struct ClosureFixture {
     _dir: tempfile::TempDir,
+    store: mkit_core::store::ObjectStore,
     root: [u8; 32],
     manifest: Vec<u8>,
     packs: Vec<Vec<u8>>,
@@ -574,6 +575,7 @@ pub fn build_closure_fixture() -> ClosureFixture {
     let export = export_closure(&store, &root, ClosureMode::Snapshot).expect("export closure");
     ClosureFixture {
         _dir: dir,
+        store,
         root,
         manifest: export.manifest,
         packs: export.packs,
@@ -599,6 +601,35 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
         .is_complete()
         .then_some(())
         .expect("freshly exported closure must be complete");
+
+    let mut objects = Vec::new();
+    for pack in &fixture.packs {
+        for entry in
+            mkit_core::pack::PackEntries::new(pack).expect("freshly exported closure must parse")
+        {
+            let mkit_core::pack::PackEntry::Raw { bytes } =
+                entry.expect("freshly exported closure entries must parse")
+            else {
+                panic!("freshly exported closure must be raw-only");
+            };
+            objects.push(bytes.into_owned());
+        }
+    }
+    let map_report = verify::verify_closure(
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+        objects.iter().map(Vec::as_slice),
+    )
+    .expect("freshly exported closure map path must verify");
+    let store_report = verify::verify_closure_store(
+        &fixture.store,
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+    )
+    .expect("freshly exported closure store path must verify");
+    assert_eq!(map_report.missing, store_report.missing);
+    assert_eq!(map_report.verified, store_report.verified);
+    assert_eq!(map_report.is_complete(), store_report.is_complete());
 
     if !fixture.manifest.is_empty() && input.len() >= 2 {
         let mut mutated = fixture.manifest.clone();

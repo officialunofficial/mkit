@@ -363,6 +363,10 @@ fn closure_local_reports_missing_blob() {
     let text = stdout(&out);
     assert!(text.contains("bad: closure incomplete"), "{text}");
     assert!(text.contains("missing"), "{text}");
+    assert!(
+        text.contains("note: unreferenced not checked (use --show-unreferenced)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -393,6 +397,10 @@ fn closure_local_reports_corrupt_blob() {
         text.contains("bad: closure incomplete: 0 missing, 1 corrupt"),
         "{text}"
     );
+    assert!(
+        text.contains("note: unreferenced not checked (use --show-unreferenced)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -405,11 +413,29 @@ fn closure_local_hides_unreferenced_unless_flag() {
     let out = repo.ok(&["closure", "verify", &first]);
     let text = stdout(&out);
     assert!(text.contains("ok: closure complete"), "{text}");
-    assert!(!text.contains("unreferenced"), "{text}");
+    assert!(
+        text.contains("note: unreferenced not checked (use --show-unreferenced)"),
+        "{text}"
+    );
+
+    let out = repo.ok(&["closure", "verify", &first, "--format=json"]);
+    let json = stdout(&out);
+    assert!(json.contains("\"unreferenced_checked\":false"), "{json}");
 
     let out = repo.ok(&["closure", "verify", &first, "--show-unreferenced"]);
     let text = stdout(&out);
     assert!(text.contains("unreferenced"), "{text}");
+    assert!(!text.contains("unreferenced not checked"), "{text}");
+
+    let out = repo.ok(&[
+        "closure",
+        "verify",
+        &first,
+        "--show-unreferenced",
+        "--format=json",
+    ]);
+    let json = stdout(&out);
+    assert!(json.contains("\"unreferenced_checked\":true"), "{json}");
 }
 
 #[test]
@@ -445,6 +471,7 @@ fn closure_json_keys() {
         "missing",
         "corrupt",
         "unreferenced",
+        "unreferenced_checked",
     ] {
         assert!(json_has(&js, key), "verify json missing {key}: {js}");
     }

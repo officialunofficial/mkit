@@ -21,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(core)* Closure verification now has a pull-based
+  `ObjectSource`/`verify_closure_streaming` API and a native
+  `verify_closure_store` helper. `ClosureReport` gains the additive
+  `unreferenced_checked` field: map and pack verification set it to `true`,
+  while streaming verification leaves `unreferenced` empty and sets it to
+  `false`. **SemVer:** additive in this pre-release, but the new report field
+  is a struct-literal break for external constructors.
+
+- *(cli)* Local `mkit closure verify` now reads only reachable objects by
+  default; `--show-unreferenced` retains the full-store enumeration needed to
+  compute that list. JSON reports whether the list was checked, and text mode
+  explains how to request it when it was not.
+
+- *(wasm)* Closure pack and manifest verification now expose
+  `unreferenced_checked` in their JSON results and use borrowed raw pack
+  entries during verification. **SemVer:** additive.
+
 - *(wasm)* `verify_disclosure` JSON includes `step_inner_roots` (hex
   array) and `chunk_inner_root` (hex or `null`). **SemVer:** additive.
 

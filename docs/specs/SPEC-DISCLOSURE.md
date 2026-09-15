@@ -384,16 +384,22 @@ entry point directly and ignore the manifest.
 ### 7.4 Verifier MUSTs
 
 1. Re-hash every supplied object (`deserialize` then `id_from_object`).
-   A deserialize failure is `corrupt` under the BLAKE3 of those bytes.
-   A bit-flipped object that still deserializes is content-addressed
-   under a *different* id and surfaces as `missing` (the referenced id)
-   plus `unreferenced` (the supplied one), not `corrupt`.
+   In the store-less map path, a deserialize failure is `corrupt` under
+   the BLAKE3 of those bytes. A bit-flipped object that still deserializes
+   is content-addressed under a *different* id and surfaces as `missing`
+   (the referenced id) plus `unreferenced` (the supplied one), not
+   `corrupt`. A verifier that fetches by id MAY report a hash mismatch as
+   `corrupt` under the requested id; this is the useful classification when
+   a store returns bytes from the requested object slot.
 2. Walk from the root with `children(obj, mode)` over the resulting
-   `id → bytes` map (BFS, visited set). The walk is store-less.
+   `id → bytes` map or pull-based source (BFS, visited set). The map walk
+   is store-less; a pull-based source fetches only requested ids.
 3. Anything referenced and absent is `missing`. Anything supplied and
-   never visited is `unreferenced`. Completeness fails on `missing` or
-   `corrupt`; `unreferenced` is reported, not an error &mdash; a DA provider
-   MAY serve a superset.
+   never visited is `unreferenced` when the verifier can enumerate the
+   supplied set. Completeness fails on `missing` or `corrupt`;
+   `unreferenced` is reported, not an error &mdash; a DA provider MAY serve
+   a superset. A report that cannot enumerate the supplied set MUST set
+   `unreferenced_checked` to `false` and leave `unreferenced` empty.
 4. The root itself missing is `missing = [root]`, `verified = 0`.
 5. Delta or compressed pack entries are a profile violation (§7.2).
 6. The verifier MUST be given the trusted root by its caller and MUST
@@ -460,7 +466,7 @@ files.
 | checked against a bare inner root instead of the object id | every check here goes through the id-based `merkle::verify_*` (SPEC-MERKLE-OBJECTS §5.4) |
 | a claimed path not matching what was actually authenticated | callers compare the returned authenticated `path`, never a path string the bundle merely asserts |
 | a closure object omitted | the walk from the root reports it in `missing`; completeness fails |
-| a closure object's bytes tampered | deserialize failure is `corrupt`; a still-deserializable bit flip is `missing` plus `unreferenced` |
+| a closure object's bytes tampered | map verification reports a deserialize failure as `corrupt` and a still-deserializable bit flip as `missing` plus `unreferenced`; a verifier that fetches by id MAY report a hash mismatch as `corrupt` under the requested id |
 | a delta or compressed pack in a closure | profile violation, before any decompress |
 | a closure manifest pack hash swapped | `pack_key` mismatch against the supplied pack |
 | a closure verified against the wrong root | the requested root is `missing`; the supplied set is `unreferenced` |

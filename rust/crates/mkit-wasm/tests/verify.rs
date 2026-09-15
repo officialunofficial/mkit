@@ -156,6 +156,7 @@ fn golden_closure_vectors_via_wasm() {
                     &verify_closure_manifest(root, &manifest, &concat, &lengths).unwrap(),
                 )
                 .unwrap();
+                assert_eq!(json["unreferenced_checked"], true, "{name}");
                 let complete = json["complete"].as_bool().unwrap();
                 if sidecar["expect"] == "accept" {
                     assert!(complete, "{name}: expected complete");
@@ -175,6 +176,7 @@ fn golden_closure_vectors_via_wasm() {
                     .unwrap();
                     assert!(via_packs["complete"].as_bool().unwrap());
                     assert_eq!(via_packs["verified"], json["verified"]);
+                    assert_eq!(via_packs["unreferenced_checked"], true, "{name}");
                 } else {
                     assert!(!complete, "{name}: expected incomplete");
                 }
