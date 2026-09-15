@@ -1,0 +1,30 @@
+{
+  "bin": "executable_file.bin",
+  "blake3": "ebb7360c5bf025b9d708bd710a43b24f71f948592ed2c4f48ba48e6be7745ae2",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "A file with the Executable entry mode.",
+  "disclosed": {
+    "leaf_id_hex": "85ff71d42096942fc3cca82b4c790a8d8e5e553c403fcd271def9af76fd20c21",
+    "path": [
+      {
+        "mode": 4,
+        "name_hex": "657865632e7368"
+      }
+    ],
+    "payload": {
+      "bytes_blake3": "85ff71d42096942fc3cca82b4c790a8d8e5e553c403fcd271def9af76fd20c21",
+      "kind": "object",
+      "len": 28
+    },
+    "signature_valid": true,
+    "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
+  },
+  "expect": "accept",
+  "name": "executable_file",
+  "path_hex": [
+    "657865632e7368"
+  ],
+  "selector": "object",
+  "size": 495
+}

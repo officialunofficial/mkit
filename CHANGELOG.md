@@ -23,6 +23,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input size and reject invalid encodings; tree IDs retain their native Merkle
   semantics. No on-disk or wire format changes.
 
+- *(core)* New `mkit_core::verify` module (issue #1015 verifier kit PR 2) and
+  `docs/specs/SPEC-DISCLOSURE.md` (`draft-normative`): partial-disclosure
+  bundles that prove a single path, chunk, or byte range belongs to a commit
+  id, with proof bytes on the order of a few KiB regardless of repository
+  size. `verify_object_id`, `verify_path`, `verify_chunk_with_meta`,
+  `verify_blob_slice`, and `verify_blob_len_proof` are the small,
+  independently usable primitives (each corresponds to one hop of commit →
+  tree steps → leaf → chunk/slice); `verify_disclosure` decodes a
+  self-contained wire bundle (magic `"MKDP"`, `commonware-codec` conventions:
+  fixed integers big-endian, every length an LEB128 varint) and composes
+  them; the native-only `build_disclosure` (needs `ObjectStore`) is the
+  producer side, taking a `Selector::{Object, Chunk, Range}`. Every check is
+  stated against an object id — never a bare BMT inner root or an
+  unauthenticated path/offset claim (see `docs/INVARIANTS.md`). A
+  `ChunkedBlob` chunk's `total_size`/`chunk_size` is authenticated alongside
+  its content id in one multi-proof over BMT positions `{0, index + 1}`
+  (`merkle::verify_chunk_with_meta_leaf`, a new `pub(crate)` helper — the
+  verifier computes the metadata leaf itself, never accepting one as
+  caller-supplied input, preserving `verify_chunk`'s existing "reject
+  position 0" rule). Byte ranges are proven with Bao (BLAKE3 verified
+  streaming) over each object's canonical bytes, so the Bao root equals the
+  object's own id; a `ChunkedBlob` range additionally supports proving the
+  disclosed range's absolute file offset via a complete `0..index` set of
+  per-preceding-chunk length proofs. New dependency: `bao = "0.13"` (pure
+  Rust, wasm32-clean — already proven by `mkit-wasm`'s existing use of the
+  same crate). Golden vectors: `rust/tests/golden/disclosure/` (10 accept, 12
+  reject vectors), consumed by `rust/crates/mkit-core/tests/golden_disclosure.rs`.
+  New fuzz targets `disclosure_decode` and `verify_disclosure`
+  (`docs/FUZZ.md`, `.github/workflows/fuzz.yml`). Scope is partial
+  disclosure only; closure/full-disclosure export is a separate profile
+  (issue #1015 PR 3) and non-membership proofs are reserved as
+  `payload_kind 3`. **SemVer:** additive — a new module and a new optional
+  dependency; no existing public API, object id, signing byte, or wire
+  format changed.
+
 ### Security
 
 - *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
