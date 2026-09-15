@@ -68,10 +68,15 @@ child_id  (a Step's disclosed leaf; itself a Tree id if there's another
 ```
 
 Every layer verifies against the layer directly above it, and the whole
-chain terminates at the one id the caller already trusted going in. Nothing
-in this chain is ever compared against a bare, pre-domain-wrap BMT root
-(see [§5.4 of SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md#54-verification)
-for why that distinction is load-bearing, not cosmetic).
+chain terminates at the one id the caller already trusted going in. The
+rule this enforces is narrower than "never touch a bare root": **the
+comparison against a trusted value is always on the wrapped id**, never a
+bare, pre-domain-wrap BMT root accepted as trustworthy on its own. A bare
+inner root MAY appear as an *input* alongside a proof (§5 covers exactly
+this case, for a commonware-based verifier) &mdash; but only after that input
+itself has been checked against the trusted id via the domain wrap, never
+before. See [§5.4 of SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md#54-verification)
+for why that ordering is load-bearing, not cosmetic.
 
 ### Proof sizes
 
@@ -462,82 +467,109 @@ mkit's Binary Merkle Tree proofs (`mkit_core::merkle::Proof`) are,
 deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
 release train mkit pins (`2026.9.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
-selection algorithm, for single, range, and multi-leaf proofs alike. A
-verifier already built against the upstream `commonware-storage` crate
-(makechain, for instance) can decode an mkit proof directly with the
-upstream type &mdash; no mkit-specific decoder needed.
+selection algorithm, for single, range, and multi-leaf proofs alike (issue
+#1015 Decision 2). A verifier already built against the upstream
+`commonware-storage` crate (makechain, for instance) can decode an mkit
+proof directly with the upstream type and run upstream's own
+`verify_*_inclusion` **unchanged** &mdash; no mkit-specific decoder, and no
+mkit dependency, needed for the proof-checking step itself. One thing sits
+outside that byte-identity, though: `Proof::verify_element_inclusion(leaf,
+position, root)` checks against an already-known *bare* inner root, not an
+mkit id (it doesn't recover or return the folded value, only accept/reject
+against a `root` the caller supplies), and an mkit repository never
+publishes a bare inner root anywhere &mdash; only the domain-wrapped id. A
+commonware-native verifier therefore needs exactly one extra step around
+upstream's unmodified check: verify the wrap.
 
-Two things worth being precise about before reaching for upstream's own
-`verify_*_inclusion`, though:
+### Primary case: the prover supplies the inner root alongside the proof
 
-1. **It checks against an already-known *bare* inner root, not an mkit
-   id.** `Proof::verify_element_inclusion(leaf, position, root)` folds the
-   proof up and compares the result to the `root` you hand it &mdash; it does
-   not *recover* or return that folded value. An mkit repository never
-   publishes a bare inner root anywhere (only the domain-wrapped id), so
-   the caller has to supply that bare root itself, from wherever it
-   independently has one.
-2. **The natural place to get that bare root** is exactly the case where
-   the caller already holds the full `Tree`/`ChunkedBlob` object &mdash; an
-   `Object`-kind disclosure payload, or an object re-derived while walking
-   a closure. `mkit_core::merkle::tree_inner_root` / `chunked_inner_root`
-   compute it directly from that object's leaves, byte-identically to
-   building the same tree with `commonware_storage::bmt::Builder`
-   (`merkle::tests::proofs_match_commonware` pins this). A caller that only
-   has a *proof* (leaf + position + siblings, no full object) needs the
-   same fold-up upstream's function performs internally &mdash; precisely the
-   algorithm SPEC-MERKLE-OBJECTS §5.4 specifies in prose &mdash; and
-   `mkit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
-   `verify_chunk`, and their range/multi counterparts) already do exactly
-   that, tested and golden-vector-pinned; reach for those directly rather
-   than hand-rolling the fold loop.
+The most direct shape, and the one this section leads with because it
+needs no mkit code at all on the verifier's side: the prover hands the
+verifier the proof **and** the bare inner root it was built against. The
+verifier, in order:
 
-Either way, once a verifier has a bare inner root it trusts (from a full
-object, or from its own fold-up), one step remains that upstream's crate
-cannot do for it: mkit's outer type-domain wrap
-(`domain_digest("mkit.tree\x00" | "mkit.chunked\x00", inner_root)`,
-SPEC-MERKLE-OBJECTS §2). The domain strings themselves are private to
-`mkit_core::merkle` on purpose (so they never become de facto ABI); the
-supported way to apply the wrap is `merkle::wrap_id` (native) /
-`wrap_object_id` (wasm):
+1. **Checks the wrap first, before trusting `inner_root` for anything else:**
+   `domain_digest(TYPE_DOMAIN, inner_root) == trusted_id`, where
+   `TYPE_DOMAIN` is `"mkit.tree\x00"` for a `Tree` or `"mkit.chunked\x00"`
+   for a `ChunkedBlob`, and `domain_digest(d, b) = BLAKE3(le16(len(d)) ||
+   d || b)` &mdash; both normative, public spec constants (SPEC-MERKLE-OBJECTS
+   §2, SPEC-OBJECTS §9), not merely a detail of `mkit_core`'s own Rust
+   types. Because `domain_digest` is collision-resistant, a match proves
+   `inner_root` is *exactly* the root `trusted_id` commits to &mdash; the
+   prover cannot substitute a different tree/chunk set and still pass this
+   check, even though it supplied `inner_root` itself.
+2. **Only then** runs upstream's `Proof::verify_element_inclusion`
+   (or `verify_range_inclusion` / `verify_multi_inclusion`) **unmodified**,
+   against that now-trusted `inner_root`.
 
 ```rust
 use commonware_codec::Read as _;
 use commonware_cryptography::blake3::{Blake3, Digest};
 use commonware_storage::bmt::Proof as UpstreamProof;
 use mkit_core::hash::domain_digest;
-use mkit_core::merkle::{self, ObjectKind};
 
-// `tree` is a full, disclosed Tree object; `entry`/`position`/
-// `proof_bytes` came from one Step of a disclosure bundle (SPEC-DISCLOSURE
-// §3); `trusted_tree_id` is the id the caller already trusts (a commit's
-// `tree_hash`, or the previous step's `child_id`).
-let inner_root = merkle::tree_inner_root(&tree); // bare BMT root, pre-wrap
+// `trusted_tree_id` is the id the caller already trusts (a commit's
+// `tree_hash`, or the previous step's `child_id`). `prover_inner_root`,
+// `leaf`, `position`, and `proof_bytes` all came from the prover — none
+// of them are trusted yet.
 
-let leaf = domain_digest(
-    b"mkit-tree-entry-v1", // SPEC-MERKLE-OBJECTS §3.2
-    &[
-        &(entry.name.len() as u32).to_le_bytes()[..],
-        &entry.name,
-        &[entry.mode as u8],
-        &entry.object_hash,
-    ]
-    .concat(),
+// Step 1: the wrap check. Reject before step 2 even runs on a mismatch.
+assert_eq!(
+    domain_digest(b"mkit.tree\x00", &prover_inner_root), // or b"mkit.chunked\x00"
+    trusted_tree_id,
 );
+// A verifier with no mkit dependency at all computes the same check by
+// hand: BLAKE3(le16(9) || b"mkit.tree\x00" || prover_inner_root) — 9 is
+// len(b"mkit.tree\x00"); le16/le32 are 2/4-byte little-endian integers.
 
+// Step 2: upstream's own check, unmodified, against the now-trusted root.
 let mut r: &[u8] = proof_bytes;
 let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
-proof.verify_element_inclusion::<Blake3>(&Digest(leaf), position, &Digest(inner_root))?;
-
-// The step upstream's crate cannot perform on your behalf: apply mkit's
-// outer type-domain wrap before comparing to the id an mkit repository
-// (or an onchain anchor) actually publishes.
-let object_id = merkle::wrap_id(ObjectKind::Tree, &inner_root);
-assert_eq!(object_id, trusted_tree_id);
+proof.verify_element_inclusion::<Blake3>(&Digest(leaf), position, &Digest(prover_inner_root))?;
 ```
 
-(Verified by compiling and running this exact sequence, including the leaf
-formula, against a real `Tree` while writing this document.)
+(Verified by compiling and running this exact two-step sequence, including
+a negative case for a forged `prover_inner_root` failing step 1, against a
+real `Tree` while writing this document.)
+
+**One honest caveat:** today's disclosure bundle wire format
+(SPEC-DISCLOSURE §3) does not carry a `Step`'s inner root on the wire
+&mdash; only `(name, mode, child_id, position, proof)`. This pattern is the
+*recommended shape* for a commonware-native verifier receiving a proof
+through any channel that does carry the inner root (a bespoke transport
+between mkit and an onchain verifier, for instance), and is what a future
+optional wire field would formalize; see the tracked follow-up,
+[officialunofficial/mkit#1024](https://github.com/officialunofficial/mkit/issues/1024).
+Until then, a verifier consuming an actual mkit disclosure *bundle*
+(rather than a proof handed to it out of band with its inner root) falls
+back to one of the two cases below.
+
+### Secondary case: the verifier already holds the full object
+
+When the caller instead holds the full `Tree`/`ChunkedBlob` object &mdash; an
+`Object`-kind disclosure payload, or an object re-derived while walking a
+closure &mdash; it can compute the bare inner root itself, from that object's
+leaves, with `mkit_core::merkle::tree_inner_root` / `chunked_inner_root`.
+These are byte-identical to building the same tree with
+`commonware_storage::bmt::Builder`
+(`merkle::tests::proofs_match_commonware` pins this cross-check), so the
+same two-step pattern above applies with `prover_inner_root` replaced by
+this self-computed value &mdash; trivially "step 1" here, since the caller
+derived the root itself rather than received it as a claim.
+
+### Neither: only a proof, no inner root, no full object
+
+A caller that has *only* `(leaf, position, proof)` against a trusted id,
+with no inner root available from anywhere, needs the same fold-up
+upstream's `verify_element_inclusion` performs internally before it can
+even begin &mdash; precisely the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies
+in prose. `mkit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
+`verify_chunk`, and their range/multi counterparts) already do exactly
+that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
+for those directly (`merkle::wrap_id` / wasm's `wrap_object_id` apply the
+same wrap step) rather than hand-rolling the fold loop.
+
+### Leaf digest formulas
 
 The leaf digest formulas themselves are mkit-specific (they're what makes
 an mkit tree entry or chunked-blob metadata leaf what it is, not a generic
@@ -549,9 +581,15 @@ BMT property) and are normative in
 - **ChunkedBlob chunk leaf** (position `i + 1`): the chunk's own 32-byte
   `Blob` id, raw &mdash; no further wrapping.
 
-Where `domain_digest(d, b) = BLAKE3(le16(len(d)) || d || b)` (SPEC-OBJECTS
-§9), the same primitive `wrap_id`'s outer type-domain wrap uses, just with
-a different domain string and a different position in the chain.
+`domain_digest` itself, `"mkit.tree\x00"` / `"mkit.chunked\x00"` (the
+outer wrap, §2), and `"mkit-tree-entry-v1"` / `"mkit-cblob-meta-v1"` (the
+leaf domains, §3) are all normative spec byte strings &mdash; any independent
+implementation may hardcode them. What's private is only
+`mkit_core::merkle`'s own Rust `const`s for these same strings (so they
+never become a de facto *Rust* ABI commitment, i.e. so the crate stays
+free to restructure how it stores them internally); that privacy says
+nothing about the byte strings' own status, which is public and pinned by
+the golden vectors regardless of which language reads them.
 
 ## 6. Implementing a verifier from scratch (no Rust)
 
@@ -591,9 +629,15 @@ shape, common to both:
    *previous* step's output, never an independently-supplied root; for a
    closure, `children(obj, mode)` from the root).
 6. Only then interpret the payload/leaf content, and always **against the
-   authenticated id**, never a bare BMT inner root (§5.4 in
-   SPEC-MERKLE-OBJECTS) and never a caller-supplied path/offset/length that
-   wasn't itself part of what got verified.
+   authenticated id**, never a caller-supplied path/offset/length that
+   wasn't itself part of what got verified. Neither the disclosure bundle
+   nor the closure profile carries a bare (pre-wrap) inner root anywhere
+   on the wire, so within these two formats "the authenticated id" and
+   "the value everything is checked against" are the same thing (§5.4 in
+   SPEC-MERKLE-OBJECTS) &mdash; §5's commonware-interop pattern, which does
+   take a bare inner root as an *out-of-band* input, is a different
+   scenario with its own explicit wrap-check-first step, not an exception
+   to this rule.
 
 ### Bounds to enforce before allocation
 
@@ -683,6 +727,12 @@ own test harness should take.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
   reserved as disclosure `payload_kind 3` but not implemented; a
   disclosure bundle only ever proves inclusion.
+- **A disclosure `Step` does not carry its bare inner root on the wire.**
+  §5's commonware-interop pattern needs one as an input; today a verifier
+  gets it by deriving it itself (from a full object) or receiving it
+  through some channel outside the bundle format. An optional per-step
+  field to carry it natively is tracked as a follow-up, not implemented
+  here: [officialunofficial/mkit#1024](https://github.com/officialunofficial/mkit/issues/1024).
 - **wasm caps**, independent of the native crate's own bounds (`mkit_core::verify`,
   which mkit-wasm builds on top of): objects 16 MiB
   (`MAX_WORKSPACE_OBJECT_BYTES`, `mkit-wasm/src/objects.rs`); a disclosure
@@ -711,7 +761,7 @@ own test harness should take.
 | `verify_closure_packs(root, mode, packs) -> ClosureReport` | closure check over raw-only packs | SPEC-DISCLOSURE §7.2/§7.4 |
 | `verify_closure_manifest(expected_root, manifest, packs) -> ClosureReport` | closure check + manifest-root binding | SPEC-DISCLOSURE §7.3/§7.4 |
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
-| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap | SPEC-MERKLE-OBJECTS §2 |
+| `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1, for a commonware-native verifier) | SPEC-MERKLE-OBJECTS §2 |
 | `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
 | **mkit-wasm** | | |
 | `verify_disclosure(commit_id_hex, bundle) -> json` | JS-facing bundle verify (no payload bytes) | SPEC-DISCLOSURE §3&ndash;§4 |
@@ -720,7 +770,7 @@ own test harness should take.
 | `verify_tree_entry` / `verify_chunk` | JS-facing single-leaf proof verify | SPEC-MERKLE-OBJECTS §5.4 |
 | `chunked_blob_decode` | decode a `ChunkedBlob`'s manifest to JSON | SPEC-OBJECTS §7 |
 | `blob_bao_encode` / `blob_bao_slice` / `blob_bao_verify_slice` | Bao over **canonical** blob bytes | SPEC-DISCLOSURE §4 (Range) |
-| `wrap_object_id(kind, inner_root_hex) -> hex` | JS-facing `wrap_id` | SPEC-MERKLE-OBJECTS §2 |
+| `wrap_object_id(kind, inner_root_hex) -> hex` | JS-facing `wrap_id`; see §5 for a per-step inner root's own status (not yet on the wire, [#1024](https://github.com/officialunofficial/mkit/issues/1024)) | SPEC-MERKLE-OBJECTS §2 |
 | **MCP tools** (`mkit mcp`) | | |
 | `mkit_prove` / `mkit_verify_proof` / `mkit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
 
