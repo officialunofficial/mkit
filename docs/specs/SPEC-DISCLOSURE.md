@@ -1,23 +1,24 @@
 ---
 spec: SPEC-DISCLOSURE
-version: 1
+version: 2
 status: draft-normative
-audience: implementers of an mkit disclosure-bundle verifier (any language)
+audience: implementers of an mkit disclosure-bundle or closure-profile verifier (any language)
 ---
 
-# SPEC-DISCLOSURE &mdash; partial-disclosure bundle wire format and verification
+# SPEC-DISCLOSURE &mdash; partial-disclosure bundle and closure-profile verification
 
 Status: **Draft, normative.** The wire format and verification algorithm
-below are pinned by the golden vectors in §6 and are not expected to
+below are pinned by the golden vectors in §6 and §7.7 and are not expected to
 change incompatibly, but this document has not yet accumulated the
 implementation experience SPEC-CONVENTIONS §2.1 reserves `stable` for.
 Scope: proving that a single path, chunk, or byte range of a file belongs
 to a specific mkit commit id, with proof bytes on the order of a few KiB
-regardless of repository size ("partial disclosure").
+regardless of repository size ("partial disclosure"), **and** proving that
+a served object set is the full content that commit id commits to
+("closure profile" / full disclosure, §7).
 
-This is issue #1015 (verifier kit) PR 2. Out of scope, deliberately:
-**closure / full-disclosure export** (every reachable object, PR 3 &mdash;
-see §7), wasm bindings (PR 4), CLI commands (PR 5).
+This is issue #1015 (verifier kit). Out of scope, deliberately:
+wasm bindings (PR 4), CLI commands (PR 5), the docs guide (PR 6).
 
 ## 1. Purpose and trust model
 
@@ -276,18 +277,135 @@ signed object &mdash; just not one with a `tree_hash`).
 committed files, runs `verify::verify_disclosure`, and compares the
 result against each sidecar; it never calls the fixture generator.
 
-## 7. Later (out of scope for this document)
+## 7. Closure profile (full disclosure)
 
-- **Closure / full disclosure** (issue #1015 PR 3): a separate profile
-  proving an entire reachable object set against a commit id (every
-  tree, blob, and chunk present, none extra), rather than one path. A
-  distinct wire format and its own spec section/document; this document
-  covers partial disclosure only.
+Purpose: given a trusted commit (or remix, or tag) id and a set of
+object bytes &mdash; optionally wrapped in raw-only v1 packs plus a
+convenience manifest &mdash; a verifier checks that every object reachable
+from that id is present and re-hashes to the id it was supplied under.
+This is full disclosure against a commit id, for a DA provider, a light
+client, or an auditor. The root id is the **only** trust anchor. The
+manifest is an index of pack hashes; it does not authenticate the
+objects.
+
+### 7.1 Modes and `children`
+
+Two walk modes, because the on-chain anchor is per commit:
+
+| Mode | Byte | What is included |
+|---|---|---|
+| snapshot (default) | `0` | the root object and its tree closure (trees, blobs, chunked-blob manifests, chunks); tag &rarr; target; remix &rarr; tree. Parents are referenced but not included. |
+| history | `1` | today's `reachable_objects` semantics: every ancestor, identical to what push/fetch ship |
+
+`children(obj, mode)` is the single source of truth for "what does this
+object reference":
+
+- `Commit`: `tree_hash`, plus `parents` only in history.
+- `Remix`: `tree_hash`, plus `parents` only in history; never `sources`
+  (foreign-repo pointers, SPEC-OBJECTS §6).
+- `Tree`: every entry `object_hash`.
+- `ChunkedBlob`: every chunk.
+- `Tag`: `target`.
+- `Blob` / `Delta`: none (`Delta.base_hash` is not followed).
+
+The root, when present, MUST deserialize as a `Commit`, `Remix`, or
+`Tag`. A typed error is raised otherwise.
+
+### 7.2 Raw-only pack rule
+
+A closure pack is a [SPEC-PACKFILE](SPEC-PACKFILE.md) v1 pack of `0x00`
+(raw) entries only. The writer MUST NOT compress and MUST NOT emit
+deltas. This is so a wasm verifier, which is built without `pack-zstd`,
+can consume the profile: `0x03`/`0x04` entries error in that build via
+the existing stub, and a delta would require a store to resolve.
+
+A verifier that sees a delta entry or a compressed entry MUST fail with
+a profile-violation error naming the pack index and entry index. It MUST
+NOT decompress in order to decide this &mdash; scan entry types first.
+
+### 7.3 Manifest bytes
+
+Encoded with commonware-codec conventions (fixed integers big-endian,
+lengths LEB128 varint, arrays raw), matching §3:
+
+```
+magic "MKCL"            (4 raw bytes)
+version: u8 = 1
+root: [u8; 32]
+mode: u8                0 = snapshot, 1 = history
+packs: Vec<[u8; 32]>    pack_key of each pack, in order; length <= 65_536
+```
+
+Decoders MUST reject trailing bytes, an unknown version, and an unknown
+mode. `pack_key` is BLAKE3 of the entire pack including its trailer
+(SPEC-PACKFILE §7).
+
+The manifest is a convenience index. The root id remains the only trust
+anchor: a verifier that already has the packs MAY call the pack-set
+entry point directly and ignore the manifest.
+
+### 7.4 Verifier MUSTs
+
+1. Re-hash every supplied object (`deserialize` then `id_from_object`).
+   A deserialize failure is `corrupt` under the BLAKE3 of those bytes.
+   A bit-flipped object that still deserializes is content-addressed
+   under a *different* id and surfaces as `missing` (the referenced id)
+   plus `unreferenced` (the supplied one), not `corrupt`.
+2. Walk from the root with `children(obj, mode)` over the resulting
+   `id → bytes` map (BFS, visited set). The walk is store-less.
+3. Anything referenced and absent is `missing`. Anything supplied and
+   never visited is `unreferenced`. Completeness fails on `missing` or
+   `corrupt`; `unreferenced` is reported, not an error &mdash; a DA provider
+   MAY serve a superset.
+4. The root itself missing is `missing = [root]`, `verified = 0`.
+5. Delta or compressed pack entries are a profile violation (§7.2).
+6. The verifier MUST be given the trusted root by its caller and MUST
+   reject a manifest whose `root` differs; the manifest is a locator,
+   never a trust anchor.
+7. Manifest pack hashes MUST equal `pack_key` of the supplied packs, in
+   order, and the counts MUST match.
+8. Object count MUST NOT exceed SPEC-PACKFILE `MAX_ENTRIES`
+   (10,000,000). Pack payload sum and entry count reuse SPEC-PACKFILE
+   caps. Tree depth, tree entries, chunks, and parents reuse
+   `store::MAX_TREE_DEPTH`, `serialize::MAX_TREE_ENTRIES`,
+   `serialize::MAX_CHUNKS`, `serialize::MAX_PARENTS`.
+
+### 7.5 Bounds
+
+| Bound | Value | Applied to |
+|---|---|---|
+| pack entries | 10,000,000 | each pack, and the supplied object set |
+| pack payload sum | 4 GiB | each pack (SPEC-PACKFILE §5) |
+| raw object size | 1 GiB | each object (store cap) |
+| manifest packs | 65,536 | `packs` vector |
+| tree depth | 128 | inherited from object decode |
+| tree entries / chunks | 1,000,000 | inherited from object decode |
+| parents | 1,000 | inherited from object decode |
+
+### 7.6 Vectors
+
+`rust/tests/golden/closure/` pins the bytes. Accept vectors: `snapshot`
+(fixture head commit), `history` (a second commit so history &ne;
+snapshot; the parent's tree objects are present only in history),
+`tag_root` (tag &rarr; commit, snapshot). Sidecars record the root, mode,
+pack hashes, expected `verified` count, and the sorted id list.
+
+Reject / incomplete vectors: missing chunk; corrupt blob; unreferenced
+extra (still complete); a delta entry; a compressed entry; a manifest
+pack-hash mismatch; the wrong root id; a manifest whose `root` differs
+from the caller's trusted root; manifest version 2; a trailing byte on
+the manifest.
+
+`rust/crates/mkit-core/tests/golden_closure.rs` reads only the committed
+files.
+
+## 8. Later (out of scope for this document)
+
 - **Non-membership.** `payload_kind 3` is reserved for a future proof
   that a name is *absent* from a `Tree` (a range proof over the two
   lex-adjacent entries). Not implemented here.
 
-## 8. Invariants
+## 9. Invariants
 
 | Mutation | Detected because |
 |---|---|
@@ -301,6 +419,12 @@ result against each sidecar; it never calls the fixture generator.
 | oversize bundle / proof sibling count / chunk-length-proof count | bounded before any decode allocation (§5) |
 | checked against a bare inner root instead of the object id | every check here goes through the id-based `merkle::verify_*` (SPEC-MERKLE-OBJECTS §5.4) |
 | a claimed path not matching what was actually authenticated | callers compare the returned authenticated `path`, never a path string the bundle merely asserts |
+| a closure object omitted | the walk from the root reports it in `missing`; completeness fails |
+| a closure object's bytes tampered | deserialize failure is `corrupt`; a still-deserializable bit flip is `missing` plus `unreferenced` |
+| a delta or compressed pack in a closure | profile violation, before any decompress |
+| a closure manifest pack hash swapped | `pack_key` mismatch against the supplied pack |
+| a closure verified against the wrong root | the requested root is `missing`; the supplied set is `unreferenced` |
+| a closure manifest whose `root` differs from the caller's trusted root | typed `ClosureRootMismatch`; the manifest is a locator, never a trust anchor |
 
 ## Cross-references
 
@@ -308,5 +432,7 @@ result against each sidecar; it never calls the fixture generator.
   (leaf schemes), §5 (inclusion proofs, wire bytes, verification-against-id
   rule).
 - [SPEC-OBJECTS](SPEC-OBJECTS.md) §3 (Blob), §4 (Tree, entry-name rules),
-  §7 (ChunkedBlob).
+  §6 (Remix sources), §6a (Tag), §7 (ChunkedBlob).
+- [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; v1 raw (`0x00`) packs are the
+  closure-profile carrier.
 - [SPEC-SIGNING](SPEC-SIGNING.md) §3 (what a commit signature covers).

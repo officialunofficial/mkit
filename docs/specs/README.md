@@ -9,7 +9,7 @@ front matter.
 - [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md) &mdash; user-vs-repo config trust boundary and key classification rules.
 - [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) &mdash; shared vocabulary (RFC 2119 keywords, status vocabulary, encoding notation) for the SPEC-*.md corpus.
 - [SPEC-DELTA](SPEC-DELTA.md) &mdash; delta encoding for packfile objects.
-- [SPEC-DISCLOSURE](SPEC-DISCLOSURE.md) &mdash; partial-disclosure bundle wire format and verification (path/chunk/byte-range proofs against a commit id).
+- [SPEC-DISCLOSURE](SPEC-DISCLOSURE.md) &mdash; partial-disclosure bundle (path/chunk/byte-range proofs) and the closure profile (full disclosure against a commit id).
 - [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) &mdash; subprocess protocol for out-of-process signers (HSM, TPM, WebAuthn, …).
 - [SPEC-FASTCDC](SPEC-FASTCDC.md) &mdash; deterministic content-defined chunking for chunked blobs.
 - [SPEC-GC](SPEC-GC.md) &mdash; garbage collection, object pruning, and recovery.

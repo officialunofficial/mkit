@@ -1,0 +1,18 @@
+{
+  "bin": "neg_manifest_pack_hash.manifest.bin",
+  "blake3": "8f43827fecee891f0b32890138d166287c531dc61723c69684ce924aae96bbe2",
+  "description": "Manifest pack hash does not equal pack_key of the supplied pack.",
+  "expect": "reject",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_manifest_pack_hash",
+  "pack_hashes": [
+    "343cfb333a764722e2f907167cd2dac90954d3d7e7d94f8b61b9010716fe55bc"
+  ],
+  "reason": "pack-hash mismatch",
+  "root_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

@@ -490,3 +490,51 @@ malicious short-fill.
 **Enforced by:** `mkit_core::verify::tests::incomplete_length_proof_set_is_rejected`
 and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`
 (SPEC-DISCLOSURE §4.1).
+
+## Closure walks share one `children` function
+
+**Always:** every reachability walk &mdash; store-backed
+`reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
+store-less `verify_closure` BFS, and push/fetch pack planning &mdash; takes
+its edges from `ops::graph::children(obj, mode)`. Snapshot mode omits
+commit/remix parents; history mode includes them; remix `sources` and
+`Delta.base_hash` are never followed.
+
+**Because:** a snapshot-vs-history disagreement, or a walker that
+followed foreign remix sources, would let two "closures of the same
+commit" disagree on the object set, so a DA-layer verifier and a push
+could not be checking the same thing.
+
+**If violated:** a history export verified in snapshot mode (or the
+reverse) would silently drop or invent objects, and a wasm verifier
+walking a hand-rolled map would accept a different set than
+`reachable_objects`.
+
+**Enforced by:** `mkit_core::ops::graph::tests::children_snapshot_omits_parents_history_includes_them`,
+`reachable_snapshot_excludes_parent_commit`, and
+`mkit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
+/ `snapshot_on_history_reports_parent_unreferenced`.
+
+## Closure profile is raw-only
+
+**Always:** a closure pack is SPEC-PACKFILE v1 with only `0x00` entries.
+`PackWriter::new_raw_only` never compresses and rejects deltas.
+`verify_closure_packs` treats any delta or compressed entry as
+`VerifyError::ClosureProfileViolation` after a type scan that does not
+decompress.
+
+**Because:** `mkit-wasm` builds `mkit-core` with `default-features =
+false` (no zstd). A compressed or delta pack would be unreadable there,
+so the profile that a wasm verifier consumes has to be raw-only by
+construction.
+
+**If violated:** a native exporter could emit a v2 pack that a wasm
+verifier rejects (or, without the type scan, tries to decompress and
+hits the `pack-zstd` stub), splitting the verifier kit into two
+incompatible carriers.
+
+**Enforced by:** `mkit_core::pack::tests::raw_only_writer_emits_v1_raw_for_compressible_payload`,
+`raw_only_writer_rejects_deltas`,
+`mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
+and `rust/tests/golden/closure/neg_delta_entry.*` /
+`neg_compressed_entry.*`.
