@@ -54,6 +54,20 @@ impl ObjectSource for ObjectStore {
     fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         ObjectStore::read_unverified(self, h)
     }
+
+    /// Overrides the trait default (`deserialize(self.read(h)?)`, which
+    /// would decode a `Tree`/`ChunkedBlob` twice — once inside `read`'s
+    /// id verification, once again here) to delegate to the inherent
+    /// [`ObjectStore::read_object`], which decodes once and reuses the
+    /// result. Every caller generic over `S: ObjectSource` (`diff::load_tree`,
+    /// `LoadedBlob::load`, …) resolves `read_object` through this trait
+    /// impl rather than the inherent method even when `S = ObjectStore`,
+    /// so without this override those call sites — the primary
+    /// Tree/ChunkedBlob decoding paths — would keep paying for the
+    /// double decode the inherent method was written to avoid.
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        ObjectStore::read_object(self, h)
+    }
 }
 
 /// In-memory object overlay for **ephemeral worktree snapshots**
