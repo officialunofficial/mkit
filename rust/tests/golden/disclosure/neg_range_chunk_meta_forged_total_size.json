@@ -1,0 +1,14 @@
+{
+  "bin": "neg_range_chunk_meta_forged_total_size.bin",
+  "blake3": "3d732ed5833e2b38e25e8669b405504ee979d75d9ba0e7ff2a193476ba26b1cc",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "A Range payload over a chunked leaf (chunk = Some(hdr)) whose total_size is off by one from the real ChunkedBlob's.",
+  "expect": "reject",
+  "name": "neg_range_chunk_meta_forged_total_size",
+  "path_hex": [
+    "6368756e6b65642e62696e"
+  ],
+  "reject_reason": "forged total_size no longer folds to the ChunkedBlob id",
+  "selector": "range(offset=32,len=16,chunk=1) [forged total_size]",
+  "size": 2279
+}

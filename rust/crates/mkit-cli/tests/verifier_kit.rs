@@ -5,10 +5,14 @@
 mod common;
 
 use std::fs;
+use std::io::{self, Read};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use common::{KEY_SEED, Repo};
 use mkit_core::hash::to_hex_bytes;
 use mkit_core::sign::KeyPair;
+use mkit_core::verify::MAX_BUNDLE_BYTES;
 
 fn stdout(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -475,4 +479,58 @@ fn closure_json_keys() {
     ] {
         assert!(json_has(&js, key), "verify json missing {key}: {js}");
     }
+}
+
+#[test]
+fn verify_proof_stdin_bundle_is_capped() {
+    // A bundle piped via `-` that exceeds MAX_BUNDLE_BYTES must be rejected
+    // with DATAERR without buffering the whole (attacker-controlled) stream
+    // into memory first. Feed the cap plus one byte lazily via `io::repeat`
+    // so the test never allocates or writes 64+ MiB itself.
+    let repo = fixture_repo();
+    let commit = head(&repo);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mkit"))
+        .args(["verify-proof", &commit, "-"])
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", repo.xdg())
+        .env("HOME", repo.xdg())
+        .env("EDITOR", "true")
+        .env("VISUAL", "true")
+        .env("GIT_EDITOR", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mkit");
+
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let writer = std::thread::spawn(move || {
+        let mut source = io::repeat(0).take(MAX_BUNDLE_BYTES as u64 + 1);
+        // A broken pipe is expected once the child stops reading after the
+        // cap is reached; that's fine, not a test failure.
+        let _ = io::copy(&mut source, &mut stdin);
+    });
+
+    let start = Instant::now();
+    let out = child.wait_with_output().expect("wait mkit");
+    writer.join().expect("writer thread panicked");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "verify-proof took too long on an oversized stdin bundle: {elapsed:?}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "expected DATAERR, got status={:?} stderr={}",
+        out.status.code(),
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("exceeds") && stderr(&out).contains("byte cap"),
+        "stderr should explain the cap: {}",
+        stderr(&out)
+    );
 }

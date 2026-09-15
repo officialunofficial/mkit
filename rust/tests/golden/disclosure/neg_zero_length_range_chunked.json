@@ -1,0 +1,14 @@
+{
+  "bin": "neg_zero_length_range_chunked.bin",
+  "blake3": "9a2a2bd7fe136f84d635b2af361ed7cd205933a489912d8f7077eaa4457ff4dd",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "A Range payload over a chunked leaf (chunk = Some(hdr)) with len = 0.",
+  "expect": "reject",
+  "name": "neg_zero_length_range_chunked",
+  "path_hex": [
+    "6368756e6b65642e62696e"
+  ],
+  "reject_reason": "byte range length is zero",
+  "selector": "range(offset=32,len=0,chunk=1)",
+  "size": 2279
+}

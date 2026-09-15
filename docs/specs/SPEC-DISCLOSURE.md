@@ -298,17 +298,23 @@ a whole small blob (the first Bao block, and a last partial block).
 Reject vectors: a non-`Tree` intermediate step mode; a step's proof
 checked against the wrong parent (two steps swapped); an invalid entry
 name (trailing space); a payload whose id does not equal the leaf id; a
-`Chunk`/`Range` chunk header with a forged `total_size`; a Bao slice at
-the wrong offset; a zero-length range; an incomplete `chunk_len_proofs`
-set; a `chunk_len_proofs` entry present on a chunk-index-0 range
-(`neg_len_proofs_on_chunk0`); `steps.len() = 129`; `version = 3`;
-`version = 1` (`neg_bundle_version_1`); a declared inner root that does
-not wrap to the parent id (`neg_inner_root_forged`); a declared inner
-root that wraps correctly but whose proof was built for a different
-tree (`neg_inner_root_fold_mismatch`); a trailing byte after the
-declared body; and `commit_bytes` that decode to a `Tag` (a valid,
-signed object &mdash; just not one with a `tree_hash`). Accept sidecars
-record `step_inner_roots_hex` and `chunk_inner_root_hex`.
+`Chunk` payload with a forged `total_size`
+(`neg_chunk_meta_forged_total_size`); a `Range` payload over a chunked
+leaf with a forged `total_size` in its chunk header
+(`neg_range_chunk_meta_forged_total_size`); a Bao slice at the wrong
+offset; a zero-length range on a plain-`Blob` leaf
+(`neg_zero_length_range`) and on a chunked leaf
+(`neg_zero_length_range_chunked` &mdash; `len == 0` is checked before the
+chunk header's wrap/fold checks, per §4); an incomplete
+`chunk_len_proofs` set; a `chunk_len_proofs` entry present on a
+chunk-index-0 range (`neg_len_proofs_on_chunk0`); `steps.len() = 129`;
+`version = 3`; `version = 1` (`neg_bundle_version_1`); a declared inner
+root that does not wrap to the parent id (`neg_inner_root_forged`); a
+declared inner root that wraps correctly but whose proof was built for
+a different tree (`neg_inner_root_fold_mismatch`); a trailing byte
+after the declared body; and `commit_bytes` that decode to a `Tag` (a
+valid, signed object &mdash; just not one with a `tree_hash`). Accept
+sidecars record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
 `rust/crates/mkit-core/tests/golden_disclosure.rs` reads only the
 committed files, runs `verify::verify_disclosure`, and compares the

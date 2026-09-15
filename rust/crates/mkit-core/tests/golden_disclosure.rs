@@ -1030,6 +1030,101 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
+    // 17. Zero-length range on a chunked leaf (chunk = Some(hdr)). §4
+    //     requires `len == 0` to be rejected before the chunk header's
+    //     wrap/fold checks even here, not just on the plain-Blob path
+    //     (vector 7, `neg_zero_length_range`).
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &chunked_path);
+        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
+            panic!("expected ChunkedBlob");
+        };
+        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
+        let chunk1_canonical = f.store.read(&cb.chunks[1]).unwrap();
+        // A genuine, otherwise-valid slice; the payload's declared `len`
+        // (0) is what must be rejected, independent of the slice content.
+        let slice = bao_slice(&chunk1_canonical, 10 + 32, 1);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::range_payload(
+                Some(&wire::ChunkHdr {
+                    total_size: cb.total_size,
+                    chunk_size: cb.chunk_size,
+                    index: 1,
+                    inner_root: merkle::chunked_inner_root(&cb),
+                    chunk_id: cb.chunks[1],
+                    proof: hdr_proof,
+                }),
+                32,
+                0,
+                &slice,
+                &[],
+            ),
+        );
+        v.push(Vector {
+            name: "neg_zero_length_range_chunked",
+            description: "A Range payload over a chunked leaf (chunk = Some(hdr)) with len = 0.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &chunked_path,
+                "range(offset=32,len=0,chunk=1)",
+                false,
+                Some("byte range length is zero"),
+            ),
+        });
+    }
+
+    // 18. Range over a chunked leaf whose chunk header's total_size is
+    //     forged, mirroring vector 5 (`neg_chunk_meta_forged_total_size`,
+    //     the plain Chunk payload) for the Range/chunk variant.
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &chunked_path);
+        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
+            panic!("expected ChunkedBlob");
+        };
+        let position = merkle::chunk_position(&cb, &cb.chunks[1]).unwrap();
+        let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position]).unwrap();
+        let chunk1_canonical = f.store.read(&cb.chunks[1]).unwrap();
+        let slice = bao_slice(&chunk1_canonical, 10 + 32, 16);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::range_payload(
+                Some(&wire::ChunkHdr {
+                    total_size: cb.total_size + 1,
+                    chunk_size: cb.chunk_size,
+                    index: 1,
+                    inner_root: merkle::chunked_inner_root(&cb),
+                    chunk_id: cb.chunks[1],
+                    proof: hdr_proof,
+                }),
+                32,
+                16,
+                &slice,
+                &[],
+            ),
+        );
+        v.push(Vector {
+            name: "neg_range_chunk_meta_forged_total_size",
+            description: "A Range payload over a chunked leaf (chunk = Some(hdr)) whose total_size is off by one from the real ChunkedBlob's.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &chunked_path,
+                "range(offset=32,len=16,chunk=1) [forged total_size]",
+                false,
+                Some("forged total_size no longer folds to the ChunkedBlob id"),
+            ),
+        });
+    }
+
     v
 }
 

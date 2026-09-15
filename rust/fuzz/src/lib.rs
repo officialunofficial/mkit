@@ -639,6 +639,54 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     }
     let _ = verify::verify_closure(&fixture.root, mkit_core::ClosureMode::Snapshot, [input]);
     let _ = mkit_core::pack::PackEntries::new(input);
+
+    // Feed raw fuzzer input directly as closure pack buffers (not wrapped
+    // in valid PackEntries framing), both whole and split into two, so the
+    // profile/framing checks in verify_closure_packs and
+    // verify_closure_manifest see adversarial bytes a legitimate exporter
+    // could never produce. Any `Ok` report must still be internally
+    // consistent.
+    let single_pack: [&[u8]; 1] = [input];
+    if let Ok(report) = verify::verify_closure_packs(
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+        &single_pack,
+    ) {
+        assert_closure_report_consistent(&report);
+    }
+    if let Ok(report) =
+        verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &single_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+
+    let mid = input.len() / 2;
+    let split_pack: [&[u8]; 2] = [&input[..mid], &input[mid..]];
+    if let Ok(report) =
+        verify::verify_closure_packs(&fixture.root, mkit_core::ClosureMode::Snapshot, &split_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+    if let Ok(report) =
+        verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &split_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+}
+
+/// `is_complete()` must imply no `missing`/`corrupt` entries, for any
+/// report produced from adversarial pack bytes.
+fn assert_closure_report_consistent(report: &mkit_core::verify::ClosureReport) {
+    if report.is_complete() {
+        assert!(
+            report.missing.is_empty(),
+            "complete report has missing entries"
+        );
+        assert!(
+            report.corrupt.is_empty(),
+            "complete report has corrupt entries"
+        );
+    }
 }
 
 /// Exercise the sparse-checkout build/verify pair on arbitrary input.
