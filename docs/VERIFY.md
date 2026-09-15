@@ -184,13 +184,23 @@ first and fail there.
 
 A closure check (`verify_closure` / `verify_closure_packs` /
 `verify_closure_manifest`, or `mkit closure verify`) returns a report with
-three lists, not a single pass/fail bit:
+three lists, not a single pass/fail bit, plus `unreferenced_checked`:
 
 - **`missing`** &mdash; an id the walk reached but nobody supplied bytes for.
 - **`corrupt`** &mdash; supplied bytes that failed to *deserialize* at all,
-  keyed by the BLAKE3 of those bytes (not the id anyone claimed for them).
+  or whose derived id did not match a fetch-by-id request. Map-path decode
+  failures are keyed by the BLAKE3 of those bytes; streaming mismatches are
+  keyed by the requested id.
 - **`unreferenced`** &mdash; bytes that were supplied, deserialized fine, and
   got a real id, but the walk from the root never reached that id.
+
+There are two verifier shapes. The store-less map path (`verify_closure`) and
+the raw-pack path (`verify_closure_packs` and `verify_closure_manifest`) have
+the complete supplied set available, so they set `unreferenced_checked` to
+`true`. A pull-based source (`verify_closure_streaming`, including the native
+`verify_closure_store` path) fetches only ids reached by the walk; it sets the
+flag to `false` and leaves `unreferenced` empty because it cannot know what it
+was never asked to fetch.
 
 Completeness is `missing.is_empty() && corrupt.is_empty()`. An
 `unreferenced` extra is reported but is **not** a failure &mdash; a DA
@@ -204,13 +214,11 @@ land in `corrupt`. It deserializes fine, gets content-addressed under a
 surfaces as **`missing`** (the id the walk actually wanted, still absent)
 **plus `unreferenced`** (the id the tampered bytes actually hash to, never
 visited). `corrupt` is reserved for bytes that don't even parse as an mkit
-object. `mkit closure verify` (no `--from`, checking the **local**
-on-disk store) is the one exception worth knowing about: the local store
-already knows the *expected* id for every file from its filename, so a
-byte flip there is caught at the storage layer (`StoreError::HashMismatch`)
-before it ever reaches the store-less walk, and is reported directly under
-`corrupt` &mdash; the CLI is documented as an `fsck`-shaped local check, not a
-simulation of what an untrusted remote party could get away with.
+object. The local CLI's default (no `--from`, without
+`--show-unreferenced`) uses the pull-based store path, so a byte flip is
+reported directly as `corrupt` under the requested id; passing
+`--show-unreferenced` selects the enumerate-everything map path and retains
+the map classification above.
 
 ### Worked example
 
@@ -232,7 +240,7 @@ ok: closure complete (4 objects, snapshot)
 
 $ mkit closure verify 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
     --from snap.closure --format=json
-{"root":"767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519","mode":"snapshot","verified":4,"complete":true,"missing":[],"corrupt":[],"unreferenced":[]}
+{"root":"767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519","mode":"snapshot","verified":4,"complete":true,"unreferenced_checked":true,"missing":[],"corrupt":[],"unreferenced":[]}
 ```
 
 `<commit-id>` with `--from` is **always** a trusted 64-hex id, never
@@ -240,9 +248,8 @@ resolved as a revision (`HEAD`, a branch name, a short prefix) &mdash; that
 resolution would have to trust the very store whose output is being
 checked. Without `--from`, `mkit closure verify HEAD` checks the local
 repository instead and *does* accept a revision, since there the store is
-trusted by construction (see the memory note in [`docs/CLI.md`](CLI.md)
-about that mode's cost against a very large local store, and the
-`unreferenced`-hiding default there).
+trusted by construction; the default local check is pull-based, while
+`--show-unreferenced` deliberately selects the enumerate-everything map path.
 
 **Rust**, given the manifest and pack bytes from the export above:
 
@@ -766,6 +773,8 @@ own test harness should take.
 | `verify_disclosure(commit_id, bundle) -> Disclosed` | decode + fully verify a bundle | SPEC-DISCLOSURE §3&ndash;§4 |
 | `build_disclosure(store, commit_id, path, selector) -> Vec<u8>` (native) | producer side of a bundle | SPEC-DISCLOSURE §3 |
 | `verify_closure(root, mode, objects) -> ClosureReport` | store-less closure check over an id&rarr;bytes map | SPEC-DISCLOSURE §7.4 |
+| `verify_closure_streaming(root, mode, source) -> ClosureReport` | pull-based closure check over an `ObjectSource` | SPEC-DISCLOSURE §7.4 |
+| `verify_closure_store(store, root, mode) -> ClosureReport` (native) | on-demand closure check against a local object store | SPEC-DISCLOSURE §7.4 |
 | `verify_closure_packs(root, mode, packs) -> ClosureReport` | closure check over raw-only packs | SPEC-DISCLOSURE §7.2/§7.4 |
 | `verify_closure_manifest(expected_root, manifest, packs) -> ClosureReport` | closure check + manifest-root binding | SPEC-DISCLOSURE §7.3/§7.4 |
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |

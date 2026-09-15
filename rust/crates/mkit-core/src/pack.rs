@@ -65,6 +65,7 @@ use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ASCII magic ("MKIT") at the start of every pack, v1 or v2.
@@ -961,6 +962,7 @@ pub struct PackEntries<'a> {
     yielded: u32,
     raw_only: bool,
     first_non_raw: Option<u32>,
+    last_payload_range: Option<Range<usize>>,
     done: bool,
 }
 
@@ -1044,6 +1046,7 @@ impl<'a> PackEntries<'a> {
             yielded: 0,
             raw_only,
             first_non_raw,
+            last_payload_range: None,
             done: false,
         })
     }
@@ -1063,6 +1066,16 @@ impl<'a> PackEntries<'a> {
         self.first_non_raw
     }
 
+    /// Byte range of the payload returned by the most recent successful
+    /// iteration, relative to the original pack buffer. `None` before the
+    /// first item. For a raw-only pack, this is the borrowed object slice;
+    /// compressed entries, which are rejected by the closure profile, still
+    /// report the encoded payload range rather than the decompressed buffer.
+    #[must_use]
+    pub(crate) fn last_payload_range(&self) -> Option<Range<usize>> {
+        self.last_payload_range.clone()
+    }
+
     fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
         if self.pos + ENTRY_FRAME_LEN > self.split {
             return Err(PackError::UnexpectedEof);
@@ -1078,8 +1091,11 @@ impl<'a> PackEntries<'a> {
         if self.pos + payload_len > self.split {
             return Err(PackError::UnexpectedEof);
         }
-        let payload = &self.bytes[self.pos..self.pos + payload_len];
-        self.pos += payload_len;
+        let payload_start = self.pos;
+        let payload_end = self.pos + payload_len;
+        let payload = &self.bytes[payload_start..payload_end];
+        self.last_payload_range = Some(payload_start..payload_end);
+        self.pos = payload_end;
         self.yielded += 1;
         match etype {
             0x00 => Ok(PackEntry::Raw {

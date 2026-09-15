@@ -34,9 +34,10 @@
 //! [`verify_disclosure`] decodes a self-contained wire bundle (§ below)
 //! and composes them into one call. [`build_disclosure`] is the
 //! (native-only) producer side. Full disclosure — every reachable
-//! object against a commit id — is [`verify_closure`] /
-//! [`verify_closure_packs`] / [`verify_closure_manifest`], with
-//! [`export_closure`] as the native producer (issue #1015 PR 3).
+//! object against a commit id — is [`verify_closure`],
+//! [`verify_closure_streaming`], [`verify_closure_packs`], and
+//! [`verify_closure_manifest`], with [`verify_closure_store`] and
+//! [`export_closure`] as native store-backed operations (issue #1015 PR 3).
 //!
 //! Everything except [`build_disclosure`] compiles with
 //! `--no-default-features` and targets `wasm32-unknown-unknown`.
@@ -337,8 +338,9 @@ impl From<CodecError> for VerifyError {
 
 mod closure;
 pub use closure::{
-    ClosureExport, ClosureManifest, ClosureReport, MAX_CLOSURE_PACKS, export_closure,
-    verify_closure, verify_closure_manifest, verify_closure_packs,
+    ClosureExport, ClosureManifest, ClosureReport, MAX_CLOSURE_PACKS, ObjectSource, export_closure,
+    verify_closure, verify_closure_manifest, verify_closure_packs, verify_closure_store,
+    verify_closure_streaming,
 };
 
 // ---------------------------------------------------------------------------

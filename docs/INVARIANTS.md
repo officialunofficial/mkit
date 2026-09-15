@@ -529,7 +529,8 @@ and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
 
 **Always:** every reachability walk &mdash; store-backed
 `reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
-store-less `verify_closure` BFS, and push/fetch pack planning &mdash; takes
+store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
+walk, and push/fetch pack planning &mdash; takes
 its edges from `ops::graph::children(obj, mode)`. Snapshot mode omits
 commit/remix parents; history mode includes them; remix `sources` and
 `Delta.base_hash` are never followed.
@@ -548,6 +549,28 @@ walking a hand-rolled map would accept a different set than
 `reachable_snapshot_excludes_parent_commit`, and
 `mkit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
 / `snapshot_on_history_reports_parent_unreferenced`.
+
+## Streaming closure verification reads only reachable objects, each once
+
+**Always:** `verify_closure_streaming` fetches each visited id at most once,
+fetches no id outside the selected snapshot/history closure, and drops an
+object's bytes after extracting its child ids; it reports
+`unreferenced_checked = false` because it cannot enumerate objects it never
+requested.
+
+**Because:** local closure verification must scale with the checked closure,
+not with the size of the repository's unrelated object store, while a
+duplicate or out-of-closure fetch would defeat the source's bounded,
+pull-based contract.
+
+**If violated:** a large local store can turn a small closure check into an
+O(store-size) memory operation, or a buggy mode walk can silently inspect
+foreign/unreachable objects and misrepresent what was verified.
+
+**Enforced by:**
+`mkit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
+which uses a counting source that panics on unknown ids and checks the exact
+snapshot/history fetch sets.
 
 ## Closure profile is raw-only
 

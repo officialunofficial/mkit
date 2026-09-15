@@ -7,7 +7,9 @@
 //! packs can call [`verify_closure_packs`] directly. Wire format and
 //! verifier obligations are pinned in `docs/specs/SPEC-DISCLOSURE.md`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 
 use bytes::Buf;
 use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
@@ -16,7 +18,7 @@ use crate::hash::{Hash, hash};
 use crate::object::Object;
 use crate::ops::graph::{ClosureMode, children};
 use crate::pack::{self, PackEntries, PackEntry, PackWriter, pack_key};
-use crate::store::ObjectStore;
+use crate::store::{ObjectStore, StoreError};
 use crate::verify::VerifyError;
 
 /// Hard cap on the number of packs a closure manifest may list.
@@ -26,6 +28,19 @@ const MANIFEST_MAGIC: &[u8; 4] = b"MKCL";
 const MANIFEST_VERSION: u8 = 1;
 const MODE_SNAPSHOT: u8 = 0;
 const MODE_HISTORY: u8 = 1;
+
+/// Provides a pull-based source for canonical object bytes.
+pub trait ObjectSource {
+    /// Returns canonical bytes for `id`, or `Ok(None)` when it is absent.
+    /// Implementations MUST NOT use their own identity decision as the
+    /// verification result; the closure walker always deserializes the bytes
+    /// and re-derives the object id itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a source error when the requested object cannot be fetched.
+    fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError>;
+}
 
 /// Outcome of walking a supplied object set from `root` in `mode`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,16 +53,20 @@ pub struct ClosureReport {
     pub verified: usize,
     /// Referenced by a reachable object but not supplied, sorted.
     pub missing: Vec<Hash>,
-    /// Supplied bytes that failed to deserialize, keyed by BLAKE3 of
-    /// those bytes, sorted by id. A bit-flipped object that still
-    /// deserializes is content-addressed under a *different* id and
-    /// surfaces as [`Self::missing`] (the referenced id) plus
-    /// [`Self::unreferenced`] (the supplied one), not here.
+    /// Bytes that failed to deserialize or whose derived id did not match
+    /// the requested id, sorted by reported id. The map path keys decode
+    /// failures by BLAKE3 of the supplied bytes and preserves the
+    /// `missing` + `unreferenced` result for parsable bit flips; a streaming
+    /// fetch-by-id path reports either failure under the requested id.
     pub corrupt: Vec<(Hash, String)>,
     /// Supplied (and successfully identified) but not reachable from
     /// `root`, sorted. A DA provider may legitimately serve a superset;
     /// this field is reported, not an error.
     pub unreferenced: Vec<Hash>,
+    /// Whether the verifier could enumerate every supplied object to compute
+    /// [`Self::unreferenced`]. Streaming sources set this to `false` and
+    /// leave that list empty; map- and pack-backed paths set it to `true`.
+    pub unreferenced_checked: bool,
 }
 
 impl ClosureReport {
@@ -137,12 +156,179 @@ fn mode_byte(mode: ClosureMode) -> u8 {
     }
 }
 
-/// Re-hash every supplied object and walk from `root` with
+struct MapObjectSource<'a> {
+    objects: BTreeMap<Hash, &'a [u8]>,
+}
+
+impl ObjectSource for MapObjectSource<'_> {
+    fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError> {
+        Ok(self.objects.get(id).map(|bytes| Cow::Borrowed(*bytes)))
+    }
+}
+
+struct PackObjectSource<'a> {
+    packs: Vec<&'a [u8]>,
+    index: BTreeMap<Hash, (usize, Range<usize>)>,
+    corrupt: Vec<(Hash, String)>,
+}
+
+impl ObjectSource for PackObjectSource<'_> {
+    fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError> {
+        let Some((pack_index, range)) = self.index.get(id) else {
+            return Ok(None);
+        };
+        Ok(Some(Cow::Borrowed(&self.packs[*pack_index][range.clone()])))
+    }
+}
+
+impl ObjectSource for &ObjectStore {
+    fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError> {
+        // `read_raw_for_verification` is deliberately used instead of
+        // `ObjectStore::read`: the latter discards mismatching bytes, while
+        // this walker must see them so it can report `corrupt` under the
+        // requested id. The walker is the only identity authority here.
+        match (*self).read_raw_for_verification(id) {
+            Ok(bytes) => Ok(Some(Cow::Owned(bytes))),
+            Err(StoreError::ObjectNotFound(_)) => Ok(None),
+            Err(error) => Err(VerifyError::Store(error)),
+        }
+    }
+}
+
+fn walk_closure(
+    root: &Hash,
+    mode: ClosureMode,
+    source: &mut impl ObjectSource,
+) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
+    let mut visited = BTreeSet::new();
+    let mut missing = Vec::new();
+    let mut corrupt = Vec::new();
+    let mut queue = VecDeque::from([*root]);
+    let mut verified = 0usize;
+
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if visited.len() > pack::MAX_ENTRIES as usize {
+            return Err(VerifyError::TooManyClosureObjects);
+        }
+
+        let Some(bytes) = source.fetch(&id)? else {
+            missing.push(id);
+            continue;
+        };
+        let object = match crate::serialize::deserialize(bytes.as_ref()) {
+            Ok(object) => object,
+            Err(error) => {
+                corrupt.push((id, error.to_string()));
+                continue;
+            }
+        };
+        let derived = crate::object::id_from_object(&object, bytes.as_ref());
+        if derived != id {
+            corrupt.push((
+                id,
+                format!(
+                    "object bytes hash to {}, expected {}",
+                    crate::hash::to_hex(&derived),
+                    crate::hash::to_hex(&id)
+                ),
+            ));
+            continue;
+        }
+        if id == *root {
+            match &object {
+                Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
+                other => return Err(VerifyError::ClosureRootWrongType(other.object_type())),
+            }
+        }
+
+        let child_ids = children(&object, mode);
+        verified += 1;
+        drop(object);
+        drop(bytes);
+        queue.extend(child_ids);
+    }
+
+    missing.sort_unstable();
+    missing.dedup();
+    corrupt.sort_by_key(|(id, _)| *id);
+    Ok((
+        ClosureReport {
+            root: *root,
+            mode,
+            verified,
+            missing,
+            corrupt,
+            unreferenced: Vec::new(),
+            unreferenced_checked: false,
+        },
+        visited,
+    ))
+}
+
+/// Walks a closure by fetching each requested id only when the BFS reaches it.
+/// Bytes are deserialized, re-hashed, and discarded after their child ids are
+/// extracted, so the walk retains object ids rather than the complete object
+/// set. A fetch-by-id source that returns bytes whose derived id differs from
+/// the requested id reports `corrupt` under the requested id; this is
+/// intentionally different from the map path's legacy
+/// `missing` + `unreferenced` classification for a parsable bit flip.
+///
+/// The root itself missing yields `missing = [root]`, `verified = 0`. The
+/// root, when present and correctly identified, MUST deserialize as a
+/// `Commit`, `Remix`, or `Tag`. Since a streaming source cannot enumerate
+/// objects it never fetched, the returned report has an empty `unreferenced`
+/// list and `unreferenced_checked = false`.
+///
+/// # Errors
+///
+/// [`VerifyError::TooManyClosureObjects`] if the walk visits more than
+/// [`pack::MAX_ENTRIES`] ids; [`VerifyError::ClosureRootWrongType`] if the
+/// root is present but not a commit/remix/tag; or a source error.
+pub fn verify_closure_streaming(
+    root: &Hash,
+    mode: ClosureMode,
+    source: &mut impl ObjectSource,
+) -> Result<ClosureReport, VerifyError> {
+    walk_closure(root, mode, source).map(|(report, _visited)| report)
+}
+
+/// Verifies a closure by reading the local [`ObjectStore`] on demand.
+///
+/// The source reads only ids reached by the BFS. It uses the store's raw
+/// capped read so a file whose bytes no longer match its filename remains
+/// available to the walker; the walker then re-derives the id and reports a
+/// hash mismatch as `corrupt` under the requested id. This is the deliberate
+/// store-backed counterpart to the map path, whose parsable bit-flip behavior
+/// remains `missing` plus `unreferenced`.
+///
+/// # Errors
+///
+/// Returns [`VerifyError::TooManyClosureObjects`] if the walk visits more than
+/// [`pack::MAX_ENTRIES`] ids, [`VerifyError::ClosureRootWrongType`] if the root
+/// is not a commit/remix/tag, or [`VerifyError::Store`] for a store failure.
+pub fn verify_closure_store(
+    store: &ObjectStore,
+    root: &Hash,
+    mode: ClosureMode,
+) -> Result<ClosureReport, VerifyError> {
+    let mut source = store;
+    verify_closure_streaming(root, mode, &mut source)
+}
+
+/// Re-hashes every supplied object and walks from `root` with
 /// [`children`]`(obj, mode)`. Store-less: the caller provides the
-/// object bytes.
+/// object bytes. This compatibility path is implemented by the same
+/// pull-based walker as [`verify_closure_streaming`], with an in-memory
+/// source keyed by each successfully derived id, followed by the legacy
+/// supplied-set `unreferenced` pass.
 ///
 /// A deserialize failure is recorded as `corrupt` under the BLAKE3 of
-/// those bytes. The root itself missing yields `missing = [root]`,
+/// those bytes. A parsable bit flip remains `missing` (the requested id)
+/// plus `unreferenced` (the derived id), preserving the map path's existing
+/// semantics. The root itself missing yields `missing = [root]`,
 /// `verified = 0`. The root, when present, MUST deserialize as a
 /// `Commit`, `Remix`, or `Tag`.
 ///
@@ -157,76 +343,40 @@ pub fn verify_closure<'a>(
     mode: ClosureMode,
     objects: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<ClosureReport, VerifyError> {
-    let mut supplied: Vec<&'a [u8]> = Vec::new();
-    for obj in objects {
-        if supplied.len() >= pack::MAX_ENTRIES as usize {
+    let mut by_id: BTreeMap<Hash, &'a [u8]> = BTreeMap::new();
+    let mut corrupt: Vec<(Hash, String)> = Vec::new();
+    for (supplied, bytes) in objects.into_iter().enumerate() {
+        if supplied >= pack::MAX_ENTRIES as usize {
             return Err(VerifyError::TooManyClosureObjects);
         }
-        supplied.push(obj);
-    }
-
-    let mut by_id: BTreeMap<Hash, Object> = BTreeMap::new();
-    let mut corrupt: Vec<(Hash, String)> = Vec::new();
-    for bytes in &supplied {
         match crate::serialize::deserialize(bytes) {
             Err(e) => corrupt.push((hash(bytes), e.to_string())),
             Ok(obj) => {
                 let id = crate::object::id_from_object(&obj, bytes);
-                by_id.insert(id, obj);
+                by_id.insert(id, bytes);
             }
         }
     }
     corrupt.sort_by_key(|a| a.0);
 
-    if let Some(obj) = by_id.get(root) {
-        match obj {
-            Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
-            other => return Err(VerifyError::ClosureRootWrongType(other.object_type())),
-        }
-    }
-
-    let mut visited: BTreeSet<Hash> = BTreeSet::new();
-    let mut missing: Vec<Hash> = Vec::new();
-    let mut queue: VecDeque<Hash> = VecDeque::new();
-    queue.push_back(*root);
-    let mut verified = 0usize;
-
-    while let Some(h) = queue.pop_front() {
-        if !visited.insert(h) {
-            continue;
-        }
-        let Some(obj) = by_id.get(&h) else {
-            missing.push(h);
-            continue;
-        };
-        verified += 1;
-        for child in children(obj, mode) {
-            queue.push_back(child);
-        }
-    }
-    missing.sort_unstable();
-    missing.dedup();
-
-    let unreferenced: Vec<Hash> = by_id
+    let mut source = MapObjectSource { objects: by_id };
+    let (mut report, visited) = walk_closure(root, mode, &mut source)?;
+    report.corrupt = corrupt;
+    report.unreferenced = source
+        .objects
         .keys()
         .copied()
         .filter(|id| !visited.contains(id))
         .collect();
-
-    Ok(ClosureReport {
-        root: *root,
-        mode,
-        verified,
-        missing,
-        corrupt,
-        unreferenced,
-    })
+    report.unreferenced_checked = true;
+    Ok(report)
 }
 
-/// Iterate each pack with [`PackEntries`]. Any delta or compressed
+/// Iterates each pack with [`PackEntries`]. Any delta or compressed
 /// entry is a profile violation — the closure profile is raw-only so a
-/// wasm verifier (no `pack-zstd`) can consume it. Raw payloads are
-/// fed to [`verify_closure`].
+/// wasm verifier (no `pack-zstd`) can consume it. Raw payloads are indexed
+/// by their derived ids and served as borrowed slices into the original
+/// pack buffers.
 ///
 /// # Errors
 ///
@@ -238,7 +388,12 @@ pub fn verify_closure_packs(
     mode: ClosureMode,
     packs: &[&[u8]],
 ) -> Result<ClosureReport, VerifyError> {
-    let mut objects: Vec<Vec<u8>> = Vec::new();
+    let mut source = PackObjectSource {
+        packs: packs.to_vec(),
+        index: BTreeMap::new(),
+        corrupt: Vec::new(),
+    };
+    let mut supplied = 0usize;
     for (pack_index, pack) in packs.iter().enumerate() {
         let entries = PackEntries::new(pack)?;
         if !entries.is_raw_only() {
@@ -247,9 +402,24 @@ pub fn verify_closure_packs(
                 entry_index: entries.first_non_raw_index().unwrap_or(0) as usize,
             });
         }
-        for (entry_index, entry) in entries.enumerate() {
+        let mut entries = entries;
+        let mut entry_index = 0usize;
+        while let Some(entry) = entries.next() {
+            if supplied >= pack::MAX_ENTRIES as usize {
+                return Err(VerifyError::TooManyClosureObjects);
+            }
+            supplied += 1;
+            let payload_range = entries
+                .last_payload_range()
+                .ok_or(VerifyError::Pack(pack::PackError::UnexpectedEof))?;
             match entry? {
-                PackEntry::Raw { bytes } => objects.push(bytes.into_owned()),
+                PackEntry::Raw { bytes } => match crate::serialize::deserialize(bytes.as_ref()) {
+                    Err(e) => source.corrupt.push((hash(bytes.as_ref()), e.to_string())),
+                    Ok(obj) => {
+                        let id = crate::object::id_from_object(&obj, bytes.as_ref());
+                        source.index.insert(id, (pack_index, payload_range));
+                    }
+                },
                 PackEntry::Delta { .. } => {
                     return Err(VerifyError::ClosureProfileViolation {
                         pack_index,
@@ -257,9 +427,20 @@ pub fn verify_closure_packs(
                     });
                 }
             }
+            entry_index += 1;
         }
     }
-    verify_closure(root, mode, objects.iter().map(Vec::as_slice))
+    source.corrupt.sort_by_key(|a| a.0);
+    let (mut report, visited) = walk_closure(root, mode, &mut source)?;
+    report.corrupt = source.corrupt;
+    report.unreferenced = source
+        .index
+        .keys()
+        .copied()
+        .filter(|id| !visited.contains(id))
+        .collect();
+    report.unreferenced_checked = true;
+    Ok(report)
 }
 
 /// Decode the manifest, reject it if its `root` is not `expected_root`,
@@ -380,6 +561,9 @@ pub(crate) fn export_closure_with_limits(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+    use std::fs;
+
     use crate::hash::ZERO;
     use crate::layout::RepoLayout;
     use crate::object::{Blob, Commit, EntryMode, Identity, Object, ObjectType, Tree, TreeEntry};
@@ -452,6 +636,44 @@ mod tests {
         (dir, store, c1, c2)
     }
 
+    struct CountingSource {
+        objects: BTreeMap<Hash, Vec<u8>>,
+        missing: BTreeSet<Hash>,
+        fetches: BTreeMap<Hash, usize>,
+    }
+
+    impl CountingSource {
+        fn from_store(store: &ObjectStore) -> Self {
+            let mut objects = BTreeMap::new();
+            for id in store.iter_object_hashes().unwrap() {
+                objects.insert(id, store.read(&id).unwrap());
+            }
+            Self {
+                objects,
+                missing: BTreeSet::new(),
+                fetches: BTreeMap::new(),
+            }
+        }
+
+        fn fetched_ids(&self) -> BTreeSet<Hash> {
+            self.fetches.keys().copied().collect()
+        }
+    }
+
+    impl ObjectSource for CountingSource {
+        fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError> {
+            *self.fetches.entry(*id).or_default() += 1;
+            if self.missing.contains(id) {
+                return Ok(None);
+            }
+            let bytes = self
+                .objects
+                .get(id)
+                .unwrap_or_else(|| panic!("unexpected object fetch: {}", crate::hash::to_hex(id)));
+            Ok(Some(Cow::Borrowed(bytes)))
+        }
+    }
+
     #[test]
     fn export_verify_round_trip_snapshot_and_history() {
         let (_d, store, _c1, c2) = two_commit_fixture();
@@ -461,6 +683,7 @@ mod tests {
             let report = verify_closure_manifest(&c2, &export.manifest, &packs).unwrap();
             assert!(report.is_complete(), "{mode:?}: {report:?}");
             assert!(report.unreferenced.is_empty());
+            assert!(report.unreferenced_checked);
             assert_eq!(report.root, c2);
             assert_eq!(report.mode, mode);
             assert!(report.verified >= 3);
@@ -478,6 +701,7 @@ mod tests {
             "parent must be missing: {report:?}"
         );
         assert!(!report.is_complete());
+        assert!(report.unreferenced_checked);
     }
 
     #[test]
@@ -491,6 +715,125 @@ mod tests {
             "parent commit is history-only: {report:?}"
         );
         assert!(report.is_complete());
+        assert!(report.unreferenced_checked);
+    }
+
+    #[test]
+    fn streaming_fetches_each_reachable_object_once_and_only() {
+        let (_d, store, c1, c2) = two_commit_fixture();
+        let snapshot_expected = crate::ops::graph::reachable_snapshot(&store, &c2).unwrap();
+        let mut snapshot_source = CountingSource::from_store(&store);
+        let snapshot =
+            verify_closure_streaming(&c2, ClosureMode::Snapshot, &mut snapshot_source).unwrap();
+        assert!(snapshot.is_complete(), "{snapshot:?}");
+        assert_eq!(snapshot_source.fetched_ids(), snapshot_expected);
+        assert!(snapshot_source.fetches.values().all(|count| *count == 1));
+
+        let mut history_source = CountingSource::from_store(&store);
+        let history =
+            verify_closure_streaming(&c2, ClosureMode::History, &mut history_source).unwrap();
+        let history_expected = crate::ops::graph::reachable_objects(&store, &c2).unwrap();
+        assert!(history.is_complete(), "{history:?}");
+        assert_eq!(history_source.fetched_ids(), history_expected);
+        assert!(history_source.fetches.values().all(|count| *count == 1));
+
+        let parent_closure = crate::ops::graph::reachable_snapshot(&store, &c1).unwrap();
+        let history_only: BTreeSet<Hash> = history_expected
+            .difference(&snapshot_expected)
+            .copied()
+            .collect();
+        assert_eq!(history_only, parent_closure);
+    }
+
+    #[test]
+    fn streaming_reports_missing_and_corrupt_under_requested_id() {
+        let (_d, store, root, blob) = fixture();
+
+        let mut missing_source = CountingSource::from_store(&store);
+        missing_source.missing.insert(blob);
+        let missing =
+            verify_closure_streaming(&root, ClosureMode::Snapshot, &mut missing_source).unwrap();
+        assert!(missing.missing.contains(&blob), "{missing:?}");
+        assert!(missing.corrupt.is_empty(), "{missing:?}");
+        assert!(!missing.unreferenced_checked);
+
+        let mut corrupt_source = CountingSource::from_store(&store);
+        let bytes = corrupt_source.objects.get_mut(&blob).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        let corrupt =
+            verify_closure_streaming(&root, ClosureMode::Snapshot, &mut corrupt_source).unwrap();
+        assert!(
+            corrupt.corrupt.iter().any(|(id, _)| *id == blob),
+            "{corrupt:?}"
+        );
+        assert!(!corrupt.missing.contains(&blob), "{corrupt:?}");
+
+        let mut malformed_source = CountingSource::from_store(&store);
+        malformed_source
+            .objects
+            .insert(blob, b"not an object".to_vec());
+        let malformed =
+            verify_closure_streaming(&root, ClosureMode::Snapshot, &mut malformed_source).unwrap();
+        assert!(
+            malformed.corrupt.iter().any(|(id, _)| *id == blob),
+            "{malformed:?}"
+        );
+        assert!(!malformed.missing.contains(&blob), "{malformed:?}");
+    }
+
+    #[test]
+    fn map_path_keeps_parsable_bit_flip_as_missing_and_unreferenced() {
+        let (_d, store, root, blob) = fixture();
+        let mut objects = Vec::new();
+        let mut flipped_bytes = None;
+        for id in store.iter_object_hashes().unwrap() {
+            let mut bytes = store.read(&id).unwrap();
+            if id == blob {
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0x01;
+                flipped_bytes = Some(bytes.clone());
+            }
+            objects.push(bytes);
+        }
+        let flipped = flipped_bytes.expect("flipped blob");
+        let flipped_object = crate::serialize::deserialize(&flipped).unwrap();
+        let flipped_id = crate::object::id_from_object(&flipped_object, &flipped);
+        assert_ne!(flipped_id, blob);
+
+        let report = verify_closure(
+            &root,
+            ClosureMode::Snapshot,
+            objects.iter().map(Vec::as_slice),
+        )
+        .unwrap();
+        assert!(report.missing.contains(&blob), "{report:?}");
+        assert!(report.unreferenced.contains(&flipped_id), "{report:?}");
+        assert!(report.corrupt.is_empty(), "{report:?}");
+        assert!(report.unreferenced_checked);
+    }
+
+    #[test]
+    fn store_streaming_reports_missing_and_corrupt_files() {
+        let (_d, store, root, blob) = fixture();
+        fs::remove_file(store.path_for(&blob)).unwrap();
+        let missing = verify_closure_store(&store, &root, ClosureMode::Snapshot).unwrap();
+        assert!(missing.missing.contains(&blob), "{missing:?}");
+        assert!(!missing.unreferenced_checked);
+
+        let (_d, store, root, blob) = fixture();
+        let path = store.path_for(&blob);
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        fs::write(path, bytes).unwrap();
+        let corrupt = verify_closure_store(&store, &root, ClosureMode::Snapshot).unwrap();
+        assert!(
+            corrupt.corrupt.iter().any(|(id, _)| *id == blob),
+            "{corrupt:?}"
+        );
+        assert!(!corrupt.missing.contains(&blob), "{corrupt:?}");
+        assert!(!corrupt.unreferenced_checked);
     }
 
     #[test]
@@ -500,6 +843,7 @@ mod tests {
         assert_eq!(report.missing, vec![root]);
         assert_eq!(report.verified, 0);
         assert!(!report.is_complete());
+        assert!(report.unreferenced_checked);
     }
 
     #[test]
@@ -552,6 +896,7 @@ mod tests {
         .unwrap();
         assert!(report.is_complete());
         assert_eq!(report.unreferenced.len(), 1);
+        assert!(report.unreferenced_checked);
     }
 
     #[test]

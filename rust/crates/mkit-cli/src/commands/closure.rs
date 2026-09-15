@@ -8,7 +8,9 @@ use clap::{Parser, ValueEnum};
 use mkit_core::hash::{Hash, from_hex, to_hex};
 use mkit_core::pack_key;
 use mkit_core::store::{ObjectStore, StoreError};
-use mkit_core::verify::{ClosureReport, export_closure, verify_closure, verify_closure_manifest};
+use mkit_core::verify::{
+    ClosureReport, export_closure, verify_closure, verify_closure_manifest, verify_closure_store,
+};
 use mkit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 
 use super::revspec;
@@ -63,10 +65,10 @@ struct VerifyArgs {
     /// manifest's mode is used.
     #[arg(long)]
     history: bool,
-    /// Local (no `--from`) check only: also print the `unreferenced`
-    /// list. Hidden by default — the local store is expected to be a
-    /// superset of any single commit, so a long unreferenced list is
-    /// usually noise, not a finding.
+    /// Local (no `--from`) check only: enumerate every local object and
+    /// also print the `unreferenced` list. Without this flag, local mode
+    /// reads only objects reachable from the requested root and cannot
+    /// check unreferenced objects.
     #[arg(long)]
     show_unreferenced: bool,
     #[arg(long, value_enum, default_value = "default")]
@@ -243,34 +245,42 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     } else {
         ClosureMode::Snapshot
     };
-    let hashes = match store.iter_object_hashes() {
-        Ok(h) => h,
-        Err(e) => return emit_err(&format!("enumerate objects: {e}"), exit::GENERAL_ERROR),
-    };
-    let mut objects = Vec::new();
-    // `store.read` re-verifies each object's on-disk bytes against its
-    // filename hash and fails hard (`HashMismatch`) on a corrupt file. A
-    // local `closure verify` is documented as an fsck-shaped check, so a
-    // corrupt object is reported under `corrupt`, not a hard CLI error —
-    // captured here, merged into the report below.
-    let mut local_corrupt: Vec<(Hash, String)> = Vec::new();
-    for h in hashes {
-        match store.read(&h) {
-            Ok(b) => objects.push(b),
-            Err(StoreError::ObjectNotFound(_)) => {}
-            Err(e @ StoreError::HashMismatch { .. }) => local_corrupt.push((h, e.to_string())),
-            Err(e) => return emit_err(&format!("read {}: {e}", to_hex(&h)), exit::DATAERR),
+    let report = if opts.show_unreferenced {
+        let hashes = match store.iter_object_hashes() {
+            Ok(h) => h,
+            Err(e) => return emit_err(&format!("enumerate objects: {e}"), exit::GENERAL_ERROR),
+        };
+        let mut objects = Vec::new();
+        // `store.read` re-verifies each object's on-disk bytes against its
+        // filename hash and fails hard (`HashMismatch`) on a corrupt file. A
+        // local `closure verify --show-unreferenced` retains the old
+        // enumerate-everything path, so report that corruption under its
+        // filename id and continue with the map-backed walk.
+        let mut local_corrupt: Vec<(Hash, String)> = Vec::new();
+        for h in hashes {
+            match store.read(&h) {
+                Ok(b) => objects.push(b),
+                Err(StoreError::ObjectNotFound(_)) => {}
+                Err(e @ StoreError::HashMismatch { .. }) => local_corrupt.push((h, e.to_string())),
+                Err(e) => return emit_err(&format!("read {}: {e}", to_hex(&h)), exit::DATAERR),
+            }
         }
-    }
-    let mut report = match verify_closure(&root, mode, objects.iter().map(Vec::as_slice)) {
-        Ok(r) => r,
-        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        let mut report = match verify_closure(&root, mode, objects.iter().map(Vec::as_slice)) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        };
+        for (h, reason) in local_corrupt {
+            report.missing.retain(|m| *m != h);
+            report.corrupt.push((h, reason));
+        }
+        report.corrupt.sort_by_key(|(id, _)| *id);
+        report
+    } else {
+        match verify_closure_store(&store, &root, mode) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        }
     };
-    for (h, reason) in local_corrupt {
-        report.missing.retain(|m| *m != h);
-        report.corrupt.push((h, reason));
-    }
-    report.corrupt.sort_by_key(|(id, _)| *id);
     emit_report(&report, json, opts.show_unreferenced)
 }
 
@@ -307,7 +317,12 @@ fn emit_report_text(report: &ClosureReport, show_unreferenced: bool) {
         let corrupt_ids: Vec<Hash> = report.corrupt.iter().map(|(id, _)| *id).collect();
         print_id_list(&mut stdout, &corrupt_ids, Some(&report.corrupt));
     }
-    if show_unreferenced && !report.unreferenced.is_empty() {
+    if !show_unreferenced && !report.unreferenced_checked {
+        let _ = writeln!(
+            stdout,
+            "note: unreferenced not checked (use --show-unreferenced)"
+        );
+    } else if show_unreferenced && !report.unreferenced.is_empty() {
         let _ = writeln!(stdout, "note: {} unreferenced", report.unreferenced.len());
         print_id_list(&mut stdout, &report.unreferenced, None);
     }
@@ -349,6 +364,7 @@ fn emit_report_json(report: &ClosureReport, show_unreferenced: bool) {
         .field_str("mode", mode_name(report.mode))
         .field_u64("verified", report.verified as u64)
         .field_bool("complete", report.is_complete())
+        .field_bool("unreferenced_checked", report.unreferenced_checked)
         .field_raw("missing", &format::json_string_array(&missing))
         .field_raw("corrupt", &format!("[{}]", corrupt_items.join(",")))
         .field_raw("unreferenced", &format::json_string_array(&unreferenced));

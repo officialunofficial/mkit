@@ -304,8 +304,9 @@ commands:
   closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]
                     Verify a closure directory against a trusted id, or
                     check the local store (revision allowed without --from);
-                    --show-unreferenced reveals the unreferenced list in
-                    local mode (hidden there by default)
+                    local mode streams reachable objects by default;
+                    --show-unreferenced enumerates every local object and
+                    reveals the unreferenced list
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]... [--external-signer-arg <V>]...
                     Produce a signed DSSE attestation for a commit

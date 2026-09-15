@@ -574,7 +574,7 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
                     ),
                     (
                         "show_unreferenced",
-                        json!({ "type": "boolean", "description": "Local (no from) check only: include the unreferenced list, hidden there by default" }),
+                        json!({ "type": "boolean", "description": "Local (no from) check only: enumerate every local object and include the unreferenced list. Without this flag, local mode reads only reachable objects and cannot check unreferenced objects" }),
                     ),
                 ],
                 &["repo_path", "commit_id"],

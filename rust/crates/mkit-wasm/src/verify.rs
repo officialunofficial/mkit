@@ -182,6 +182,7 @@ fn report_to_json(r: &ClosureReport) -> Result<String, String> {
         "mode": closure_mode_str(r.mode),
         "verified": u64::try_from(r.verified).unwrap_or(u64::MAX),
         "complete": r.is_complete(),
+        "unreferenced_checked": r.unreferenced_checked,
         "missing": r.missing.iter().map(to_hex).collect::<Vec<_>>(),
         "corrupt": r.corrupt.iter().map(|(id, reason)| {
             serde_json::json!({ "id": to_hex(id), "reason": reason })
@@ -355,8 +356,8 @@ pub fn disclosure_payload_bytes(commit_id_hex: &str, bundle: &[u8]) -> Result<Ve
 /// lengths in the same order, e.g. `"[1024,2048]"`. Each pack and the
 /// concatenated buffer are capped at 64 MiB.
 ///
-/// Returns JSON `{ root, mode, verified, complete, missing, corrupt,
-/// unreferenced }`.
+/// Returns JSON `{ root, mode, verified, complete, unreferenced_checked,
+/// missing, corrupt, unreferenced }`.
 ///
 /// # Errors
 ///

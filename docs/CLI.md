@@ -1191,17 +1191,12 @@ Remote / sync:
   so a long unreferenced list is usually noise; `--from` always shows
   it). JSON matches mkit-wasm's `ClosureReport` shape (`root, mode,
   verified, complete, missing[], corrupt[{id, reason}],
-  unreferenced[]`); `unreferenced` is `[]` in local mode unless
-  `--show-unreferenced` is passed. Incomplete closures exit `65`
+  unreferenced[], unreferenced_checked`); `unreferenced` is `[]` in local
+  mode unless `--show-unreferenced` is passed, and the unchecked streaming
+  mode prints a note explaining how to opt in. Incomplete closures exit `65`
   (`DATAERR`).
 
-  **Memory note:** `verify_closure` takes every object's bytes in
-  memory at once (it is store-less by design, so a wasm or DA-provider
-  caller never needs a store). Local (no `--from`) mode therefore loads
-  the **whole local object store** into memory before walking it &mdash;
-  fine for a typical repository, but a cost to be aware of against a
-  very large one. A streaming, store-backed variant is tracked as a
-  follow-up: [officialunofficial/mkit#1022](https://github.com/officialunofficial/mkit/issues/1022).
+  The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
 - `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of

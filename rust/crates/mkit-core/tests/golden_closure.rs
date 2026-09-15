@@ -13,6 +13,8 @@
     clippy::too_many_arguments
 )]
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -24,7 +26,10 @@ use mkit_core::object::{
 use mkit_core::pack::{PackEntries, PackEntry, PackWriter, pack_key};
 use mkit_core::sign::{KeyPair, sign_commit, sign_tag};
 use mkit_core::store::ObjectStore;
-use mkit_core::verify::{ClosureManifest, export_closure, verify_closure_manifest};
+use mkit_core::verify::{
+    ClosureManifest, ObjectSource, export_closure, verify_closure, verify_closure_manifest,
+    verify_closure_streaming,
+};
 use mkit_core::worktree::store_file_object;
 use mkit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 use serde_json::{Value, json};
@@ -56,10 +61,31 @@ struct Vector {
     json: Value,
 }
 
+struct BorrowedSource<'a> {
+    objects: BTreeMap<Hash, &'a [u8]>,
+}
+
+impl ObjectSource for BorrowedSource<'_> {
+    fn fetch(
+        &mut self,
+        id: &Hash,
+    ) -> Result<Option<Cow<'_, [u8]>>, mkit_core::verify::VerifyError> {
+        Ok(self.objects.get(id).map(|bytes| Cow::Borrowed(*bytes)))
+    }
+}
+
 fn mode_str(mode: ClosureMode) -> &'static str {
     match mode {
         ClosureMode::Snapshot => "snapshot",
         ClosureMode::History => "history",
+    }
+}
+
+fn mode_from_str(mode: &str) -> ClosureMode {
+    match mode {
+        "snapshot" => ClosureMode::Snapshot,
+        "history" => ClosureMode::History,
+        other => panic!("unknown closure mode {other:?}"),
     }
 }
 
@@ -714,6 +740,37 @@ fn verify_vector(name: &str, want_digest: &str) {
                     .collect();
                 let got_unref: Vec<String> = report.unreferenced.iter().map(to_hex).collect();
                 assert_eq!(got_unref, want_unref, "{name}: unreferenced");
+                assert!(report.unreferenced_checked, "{name}: unreferenced check");
+
+                let objects = objects_from_packs(&packs);
+                let map_report = verify_closure(
+                    &expected_root,
+                    mode_from_str(sidecar["mode"].as_str().unwrap()),
+                    objects.iter().map(Vec::as_slice),
+                )
+                .unwrap_or_else(|e| panic!("{name}: map path failed: {e:?}"));
+                let mut source_objects = BTreeMap::new();
+                for bytes in &objects {
+                    let object = mkit_core::serialize::deserialize(bytes).unwrap();
+                    let id = mkit_core::object::id_from_object(&object, bytes);
+                    source_objects.insert(id, bytes.as_slice());
+                }
+                let mut source = BorrowedSource {
+                    objects: source_objects,
+                };
+                let streaming_report = verify_closure_streaming(
+                    &expected_root,
+                    mode_from_str(sidecar["mode"].as_str().unwrap()),
+                    &mut source,
+                )
+                .unwrap_or_else(|e| panic!("{name}: streaming path failed: {e:?}"));
+                assert_eq!(map_report.verified, streaming_report.verified, "{name}");
+                assert_eq!(map_report.missing, streaming_report.missing, "{name}");
+                assert_eq!(
+                    map_report.is_complete(),
+                    streaming_report.is_complete(),
+                    "{name}"
+                );
             } else {
                 assert!(
                     !report.is_complete(),
