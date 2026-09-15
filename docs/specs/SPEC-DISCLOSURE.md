@@ -38,8 +38,8 @@ A verified disclosure does **not** prove:
 
 - **completeness.** That the disclosed path is the *only* thing under its
   parent, or that nothing else exists in the repository. A disclosure
-  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §7's
-  note on non-membership.
+  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §8
+  and issue [#1027](https://github.com/officialunofficial/mkit/issues/1027).
 - **signer identity.** `signer`/`signature_valid` report whether the
   commit's (or remix's) embedded Ed25519 signature verifies against its
   embedded public key (SPEC-SIGNING §3). Binding that public key to a
@@ -446,7 +446,9 @@ files.
 
 - **Non-membership.** `payload_kind 3` is reserved for a future proof
   that a name is *absent* from a `Tree` (a range proof over the two
-  lex-adjacent entries). Not implemented here.
+  lex-adjacent entries). Tracked as
+  [#1027](https://github.com/officialunofficial/mkit/issues/1027). Not
+  implemented here.
 
 ## 9. Invariants
 
