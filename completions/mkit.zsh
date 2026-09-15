@@ -509,6 +509,7 @@ _mkit() {
                         '--output[output directory]:dir:_files -/' \
                         '--force[overwrite a non-empty directory]' \
                         '--from[closure directory]:dir:_files -/' \
+                        '--show-unreferenced[show unreferenced objects (local mode)]' \
                         '--format[output format]:fmt:(default json)' \
                         '--help[show help]' \
                         '1:subcommand:(export verify)' \

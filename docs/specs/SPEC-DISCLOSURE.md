@@ -203,8 +203,11 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       leaf) against the leaf id. **MUST** verify a Bao slice proving
       `len` bytes at content offset `offset_in_blob` (Bao offset
       `offset_in_blob + 10`) against `hdr.chunk_id`. If `hdr.index == 0`,
-      `absolute_offset` is `Some(offset_in_blob)` (nothing precedes the
-      first chunk, so it is already absolute). Otherwise, if
+      `chunk_len_proofs` **MUST** be empty &mdash; nothing precedes the
+      first chunk for an entry to describe, so a non-empty set here is a
+      typed error, exactly like the plain-`Blob` case above, **never**
+      silently ignored; `absolute_offset` is then
+      `Some(offset_in_blob)` (already absolute). Otherwise, if
       `chunk_len_proofs` is empty, `absolute_offset` is `None` (not
       requested). Otherwise, `chunk_len_proofs` **MUST** cover exactly
       the index set `0..hdr.index`, with no gaps and no duplicates &mdash; an
@@ -269,9 +272,11 @@ checked against the wrong parent (two steps swapped); an invalid entry
 name (trailing space); a payload whose id does not equal the leaf id; a
 `Chunk`/`Range` chunk header with a forged `total_size`; a Bao slice at
 the wrong offset; a zero-length range; an incomplete `chunk_len_proofs`
-set; `steps.len() = 129`; `version = 2`; a trailing byte after the
-declared body; and `commit_bytes` that decode to a `Tag` (a valid,
-signed object &mdash; just not one with a `tree_hash`).
+set; a `chunk_len_proofs` entry present on a chunk-index-0 range
+(`neg_len_proofs_on_chunk0`); `steps.len() = 129`; `version = 2`; a
+trailing byte after the declared body; and `commit_bytes` that decode
+to a `Tag` (a valid, signed object &mdash; just not one with a
+`tree_hash`).
 
 `rust/crates/mkit-core/tests/golden_disclosure.rs` reads only the
 committed files, runs `verify::verify_disclosure`, and compares the
@@ -416,6 +421,7 @@ files.
 | `ChunkedBlob` `total_size`/`chunk_size` forged | the multi-proof's metadata leaf (computed by the verifier, never accepted as input) no longer folds to the leaf id |
 | a `Range` payload's offset/length claim tampered | the Bao slice fails to verify at the claimed offset |
 | an incomplete/malformed `chunk_len_proofs` set | rejected as a typed error, never silently treated as "no offset available" |
+| a `chunk_len_proofs` entry present on a chunk-index-0 range | rejected outright (`UnexpectedLengthProofs`), the same as the plain-`Blob` case &mdash; index 0 has nothing preceding it to describe |
 | oversize bundle / proof sibling count / chunk-length-proof count | bounded before any decode allocation (§5) |
 | checked against a bare inner root instead of the object id | every check here goes through the id-based `merkle::verify_*` (SPEC-MERKLE-OBJECTS §5.4) |
 | a claimed path not matching what was actually authenticated | callers compare the returned authenticated `path`, never a path string the bundle merely asserts |

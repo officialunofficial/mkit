@@ -68,8 +68,10 @@ never blocks on an editor.
 
 - **Partial and full disclosure (no git counterpart):** `mkit prove`,
   `mkit verify-proof`, `mkit closure export`, and `mkit closure verify`
-  prove a path/chunk/range or a full object set against a commit id.
-  See `docs/CLI.md`.
+  prove a path/chunk/range or a full object set against a commit id, for
+  an external party with no repository access (a DA provider, a light
+  client, a browser). See `docs/VERIFY.md` for the verifier-facing guide;
+  `docs/CLI.md` for flags.
 
 Accepted-but-no-op / out of scope (so you don't wait on them): `log --graph` is
 accepted but does nothing; submodules, hooks, `git notes`, and `.git/`-format

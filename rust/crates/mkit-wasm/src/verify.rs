@@ -23,6 +23,16 @@ use crate::chunking::{BaoEncoded, BaoVerify};
 use crate::common::MAX_JSON_BYTES;
 use crate::objects::MAX_WORKSPACE_OBJECT_BYTES;
 
+/// Hard cap on the concatenated closure packs a wasm verifier will accept,
+/// checked independently of [`MAX_BUNDLE_BYTES`] (a disclosure bundle and a
+/// closure pack set are different shapes with different realistic sizes: a
+/// bundle is a handful of proofs, a closure is every object reachable from a
+/// commit). Matches `mkit_core::store::MAX_RAW_OBJECT_SIZE` (1 GiB) — the
+/// same ceiling the native store already applies to a single object, so a
+/// wasm closure verifier admits nothing a native `ObjectStore` would refuse
+/// to write in the first place.
+pub(crate) const MAX_CLOSURE_INPUT_BYTES: usize = 1024 * 1024 * 1024;
+
 fn hash_hex(s: &str) -> Result<[u8; 32], String> {
     mkit_core::hash::from_hex(s).map_err(|_| "expected 64 lowercase hex characters".into())
 }
@@ -180,9 +190,9 @@ fn report_to_json(r: &ClosureReport) -> Result<String, String> {
 }
 
 fn split_packs<'a>(packs: &'a [u8], lengths_json: &str) -> Result<Vec<&'a [u8]>, String> {
-    if packs.len() > MAX_BUNDLE_BYTES {
+    if packs.len() > MAX_CLOSURE_INPUT_BYTES {
         return Err(format!(
-            "closure packs exceed the {MAX_BUNDLE_BYTES} byte cap"
+            "closure packs exceed the {MAX_CLOSURE_INPUT_BYTES} byte cap"
         ));
     }
     if lengths_json.len() > MAX_JSON_BYTES {
@@ -202,8 +212,10 @@ fn split_packs<'a>(packs: &'a [u8], lengths_json: &str) -> Result<Vec<&'a [u8]>,
         let len = n
             .as_u64()
             .ok_or_else(|| format!("pack_lengths[{i}] must be a number"))?;
-        if len > MAX_BUNDLE_BYTES as u64 {
-            return Err(format!("pack {i} exceeds the {MAX_BUNDLE_BYTES} byte cap"));
+        if len > MAX_CLOSURE_INPUT_BYTES as u64 {
+            return Err(format!(
+                "pack {i} exceeds the {MAX_CLOSURE_INPUT_BYTES} byte cap"
+            ));
         }
         let len =
             usize::try_from(len).map_err(|_| format!("pack {i} length does not fit usize"))?;
@@ -574,6 +586,27 @@ mod tests {
         assert_eq!(json["total_size"], 3);
         assert_eq!(json["chunk_size"], 0);
         assert_eq!(json["chunks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn closure_input_cap_is_independent_of_bundle_cap() {
+        // A single "pack" bigger than the old (bundle) cap but under the
+        // closure cap must not be rejected by the size check — `split_packs`
+        // only slices by the declared lengths, so this succeeds (whether the
+        // resulting bytes form a real pack is checked later, by
+        // `verify_closure_packs`).
+        let over_bundle_cap = MAX_BUNDLE_BYTES + 1;
+        let packs = vec![0u8; over_bundle_cap];
+        let lengths = format!("[{over_bundle_cap}]");
+        let slices = split_packs(&packs, &lengths).unwrap();
+        assert_eq!(slices, vec![packs.as_slice()]);
+    }
+
+    #[test]
+    fn closure_input_cap_still_rejects_oversize_packs() {
+        let lengths = format!("[{}]", MAX_CLOSURE_INPUT_BYTES + 1);
+        let err = split_packs(&[], &lengths).unwrap_err();
+        assert!(err.contains("byte cap"), "got: {err}");
     }
 
     #[test]

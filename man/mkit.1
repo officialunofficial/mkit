@@ -1155,9 +1155,17 @@ With
 verify exported packs against a trusted 64-hex id.
 Without
 .Fl Fl from ,
-check the local store;
+check the local store
+(loading every local object into memory to do so);
 .Ar commit-id
-may then be a revision.
+may then be a revision, and a corrupt on-disk object is reported under
+.Cm corrupt
+rather than a hard read failure.
+The
+.Cm unreferenced
+list is hidden in local mode unless
+.Fl Fl show-unreferenced
+is passed.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple

@@ -94,6 +94,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (64 MiB). Native tests replay the `proofs/`, `disclosure/`, and
   `closure/` golden vectors through these exports. **SemVer:** additive.
 
+- *(docs)* `docs/VERIFY.md` (issue #1015 verifier kit PR 6, closing the
+  series): the user-facing guide to verifying an mkit commit hash for
+  someone building a verifier or a DA provider &mdash; the byte-level
+  authentication chain from commit id to leaf, the three-part trust model
+  (content&harr;commit id, commit&harr;signer, signer&harr;identity),
+  worked CLI/Rust/TypeScript examples for both full disclosure (closure
+  profile) and partial disclosure (bundle), commonware-BMT interop notes,
+  a from-scratch (no-Rust) conformance checklist against the golden-vector
+  corpus, and a reference table of every CLI command, wasm export, and
+  core function in the kit. Every command and code snippet on the page was
+  run (CLI against a real repository; Rust via a compiled scratch check;
+  TypeScript kept to the documented `mkit-wasm` API) while writing it.
+  Linked from `README.md`, `SKILL.md`, and `docs/ARCHITECTURE.md` (already
+  reachable through the docs MCP's existing `get_file`/`search_docs`
+  tools). **SemVer:** none, docs only.
+
+- *(wasm)* `MAX_CLOSURE_INPUT_BYTES` (1 GiB, matching
+  `mkit_core::store::MAX_RAW_OBJECT_SIZE`): `verify_closure_packs` and
+  `verify_closure_manifest` now cap their concatenated packs input
+  independently of `verify::MAX_BUNDLE_BYTES` (64 MiB), instead of
+  reusing the disclosure-bundle cap for both shapes. A closure is every
+  object reachable from a commit &mdash; a realistically much larger input
+  than a handful of disclosure proofs &mdash; so it gets its own, separately
+  tunable ceiling. **SemVer:** additive; strictly widens what a wasm
+  closure verifier accepts (a pack set between the old 64 MiB cap and the
+  new 1 GiB one, previously rejected on size alone, is now admitted and
+  verified normally).
+
 ### Security
 
 - *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
@@ -105,6 +133,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
+
+- *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
+  hard read error the moment it hits one corrupt on-disk object &mdash; it
+  now catches `StoreError::HashMismatch` per object, reports it under the
+  `ClosureReport`'s `corrupt` list (removing it from `missing` first, if
+  the walk had already reached it), and continues, matching the command's
+  documented fsck-shaped behavior. Also hides the `note: N unreferenced`
+  list (and the JSON `unreferenced` array) in local mode unless a new
+  `--show-unreferenced` flag is passed &mdash; the local store is expected to
+  be a superset of any single commit, so the list was noise by default.
+  New CLI test flips a byte in an object file and expects
+  `bad: closure incomplete: 0 missing, 1 corrupt`. **SemVer:** additive
+  (new flag; local-mode `corrupt`/`unreferenced` reporting changes for a
+  case that previously hard-failed the whole command).
+
+- *(core)* `verify::resolve_absolute_offset` now rejects a non-empty
+  `chunk_len_proofs` on a `Range` payload whose disclosed chunk is index
+  0, instead of silently ignoring it &mdash; index 0 has nothing preceding it
+  to describe, so any entry there is meaningless, exactly like the
+  existing rejection on a plain-`Blob` leaf
+  (`VerifyError::UnexpectedLengthProofs`, now shared by both cases). New
+  unit test `len_proofs_on_chunk0_are_rejected` and golden negative vector
+  `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*`;
+  SPEC-DISCLOSURE §4 states the rule normatively. **SemVer:** additive
+  &mdash; tightens verification; the only bundles affected are malformed
+  ones no conformant builder has ever produced.
 
 - *(core)* `advance`'s advisory `write_scrub_state` call (`history-mmr`) no longer fails the whole publish if the write itself fails — `finish` has already durably committed the ref move and ancestry snapshot by that point, so a caller must not see that succeeded operation reported as a failure; losing this purely-advisory bookkeeping write only costs the next publish some extra re-verification, never correctness. Found by code review alongside the `ScrubState` panic above; regression test forces the write to fail (a directory occupies the scrub file's path) and confirms the publish still succeeds.
 - *(core)* `decide_chain`'s full-walk fallback (`history-mmr`, on a completed scrub lap or a stale re-verification schedule) no longer re-walks and re-reads the fast-forward suffix a second time — it splices the suffix already verified moments earlier onto a fresh walk of just the reused prefix, which `first_parent_chain(store, target) == first_parent_chain(store, d.tip) ++ suffix` makes provably identical to a full walk of the whole chain. New regression test plants corruption deep in the prefix and confirms the spliced fallback still catches it, proving the optimization didn't drop real verification along with the redundant re-read.
