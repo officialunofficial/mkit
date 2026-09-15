@@ -186,6 +186,22 @@ fn read_chunk<S: crate::store::ObjectSource + ?Sized>(
     }
 }
 
+/// Same as [`read_chunk`], returning [`crate::store::StoreError`] directly
+/// instead of [`WorktreeError`] — for callers, like [`chunked_content_eq`],
+/// that live entirely in `StoreError`'s error domain (matching
+/// [`ContentCursor::remaining`]'s existing inline chunk-read match).
+fn read_manifest_chunk<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    chunk: &Hash,
+) -> Result<Vec<u8>, crate::store::StoreError> {
+    match store.read_object(chunk)? {
+        Object::Blob(b) => Ok(b.data),
+        _ => Err(crate::store::StoreError::Io(io::Error::other(
+            "manifest chunk is not a Blob",
+        ))),
+    }
+}
+
 /// The "expected a blob, found something else" error shared by every
 /// [`LoadedBlob`] read path; `what` is `"object"` for a top-level hash and
 /// `"chunk"` for a manifest chunk, preserving the historical wording of
@@ -240,6 +256,14 @@ pub fn content_fingerprint<S: crate::store::ObjectSource + ?Sized>(
 /// Compare file content independently of inline/chunked storage layout.
 /// Equal object IDs are a fast path; different IDs require verified content.
 ///
+/// A `ChunkedBlob`-vs-`ChunkedBlob` pair (the large-file case) takes the
+/// further [`chunked_content_eq`] fast path, which skips reading any chunk
+/// both sides reference by the same hash instead of reassembling and
+/// byte-comparing every chunk of both blobs — see that function's doc for
+/// what it trusts and what it still fully verifies. Any other pairing
+/// (inline vs inline, or a mixed inline/chunked pair) keeps the exact
+/// byte-cursor walk this function has always used.
+///
 /// # Errors
 /// Propagates errors from [`content_fingerprint`].
 pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
@@ -250,8 +274,13 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
     if a == b {
         return Ok(true);
     }
-    let mut left = ContentCursor::load(store, a)?;
-    let mut right = ContentCursor::load(store, b)?;
+    let obj_a = store.read_object(a)?;
+    let obj_b = store.read_object(b)?;
+    if let (Object::ChunkedBlob(ma), Object::ChunkedBlob(mb)) = (&obj_a, &obj_b) {
+        return chunked_content_eq(store, ma, mb);
+    }
+    let mut left = ContentCursor::from_object(obj_a)?;
+    let mut right = ContentCursor::from_object(obj_b)?;
     let mut equal = true;
     loop {
         let a = left.remaining(store)?;
@@ -271,6 +300,116 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
             left.offset += count;
             right.offset += count;
         }
+    }
+}
+
+/// Compare two [`ChunkedBlob`] manifests for content equality, skipping
+/// any chunk both sides reference by the same content-addressed hash:
+/// identical hash means identical bytes by construction — the same trust
+/// [`content_eq`]'s own `a == b` whole-object fast path already relies
+/// on, just applied per chunk instead of per object. Only chunks that
+/// diverge (a different hash at the same aligned position) are actually
+/// read and byte-compared, so a change confined to part of a large file
+/// costs only that part on both sides, not the whole file. In
+/// particular, an append needs zero chunk reads at all: every
+/// pre-existing chunk still lines up by hash (`FastCDC`'s boundaries
+/// never depend on bytes past them), so the walk skips straight to the
+/// new chunks at the end and stops as soon as one side runs out.
+///
+/// `total_size` is trusted without re-summing actual chunk bytes — the
+/// same trust [`LoadedBlob::len`] already documents: every reassembly
+/// path enforces it via [`ChunkedBlob::check_reassembled_size`], so a
+/// manifest with a wrong `total_size` cannot have been durably written
+/// through mkit's own writers (#550). A manifest deliberately
+/// constructed to violate that and whose *entire* chunk sequence still
+/// lines up by hash with the side it's compared against slips through
+/// this fast path unnoticed; one whose chunks diverge anywhere is still
+/// fully read from the first divergent chunk onward (any store-level
+/// corruption or missing chunk there still surfaces as an error) — it
+/// just stops draining once both sides run out, rather than continuing
+/// to re-verify chunks already known identical by id.
+///
+/// # Errors
+/// [`crate::store::StoreError`] if a chunk that must be read (either
+/// side has no matching chunk to skip against) is missing, corrupt, or
+/// not a `Blob`.
+fn chunked_content_eq<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    ma: &ChunkedBlob,
+    mb: &ChunkedBlob,
+) -> Result<bool, crate::store::StoreError> {
+    if ma.total_size != mb.total_size {
+        return Ok(false);
+    }
+
+    let mut ia = 0usize;
+    let mut ib = 0usize;
+    let mut buf_a: Vec<u8> = Vec::new();
+    let mut buf_b: Vec<u8> = Vec::new();
+    let mut pos_a = 0usize;
+    let mut pos_b = 0usize;
+    let mut equal = true;
+
+    loop {
+        // Both cursors sit at a chunk boundary: skip a run of chunks
+        // that match by id, with no read on either side.
+        while pos_a == buf_a.len()
+            && pos_b == buf_b.len()
+            && ia < ma.chunks.len()
+            && ib < mb.chunks.len()
+            && ma.chunks[ia] == mb.chunks[ib]
+        {
+            ia += 1;
+            ib += 1;
+        }
+
+        if pos_a == buf_a.len() {
+            buf_a = match ma.chunks.get(ia) {
+                Some(h) => {
+                    ia += 1;
+                    read_manifest_chunk(store, h)?
+                }
+                None => Vec::new(),
+            };
+            pos_a = 0;
+        }
+        if pos_b == buf_b.len() {
+            buf_b = match mb.chunks.get(ib) {
+                Some(h) => {
+                    ib += 1;
+                    read_manifest_chunk(store, h)?
+                }
+                None => Vec::new(),
+            };
+            pos_b = 0;
+        }
+
+        let a_rest = &buf_a[pos_a..];
+        let b_rest = &buf_b[pos_b..];
+        if a_rest.is_empty() && b_rest.is_empty() {
+            if ia >= ma.chunks.len() && ib >= mb.chunks.len() {
+                return Ok(equal);
+            }
+            // A zero-length trailing chunk on one or both sides; loop
+            // again to pull the next one via the boundary checks above.
+            continue;
+        }
+
+        let count = a_rest.len().min(b_rest.len());
+        if count == 0 {
+            // One side has run out of chunks for good; drain the other
+            // (matching the byte-cursor path's behavior) so a read
+            // error later in its remaining chunks still surfaces.
+            equal = false;
+            pos_a = buf_a.len();
+            pos_b = buf_b.len();
+            continue;
+        }
+        if a_rest[..count] != b_rest[..count] {
+            equal = false;
+        }
+        pos_a += count;
+        pos_b += count;
     }
 }
 
@@ -313,7 +452,15 @@ impl ContentCursor {
         store: &S,
         hash: &Hash,
     ) -> Result<Self, crate::store::StoreError> {
-        let (data, chunks, expected) = match store.read_object(hash)? {
+        Self::from_object(store.read_object(hash)?)
+    }
+
+    /// Build a cursor from an already-read top-level object, saving the
+    /// caller a second `read_object` when it needed the object anyway
+    /// (e.g. [`content_eq`] deciding whether the chunked fast path
+    /// applies).
+    fn from_object(object: Object) -> Result<Self, crate::store::StoreError> {
+        let (data, chunks, expected) = match object {
             Object::Blob(b) => {
                 let size = b.data.len() as u64;
                 (b.data, Vec::new(), size)
@@ -436,6 +583,229 @@ mod equality_tests {
             assert!(content_eq(&store, &bad, &b).is_err());
             assert!(content_eq_bytes(&store, &bad, b"b").is_err());
             assert!(content_fingerprint(&store, &bad).is_err());
+        }
+    }
+
+    fn chunk(store: &ObjectStore, data: &[u8]) -> Hash {
+        put(
+            store,
+            &Object::Blob(Blob {
+                data: data.to_vec(),
+            }),
+        )
+    }
+
+    fn manifest(store: &ObjectStore, parts: &[&[u8]]) -> ChunkedBlob {
+        let total_size: u64 = parts.iter().map(|p| p.len() as u64).sum();
+        ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: parts.iter().map(|p| chunk(store, p)).collect(),
+        }
+    }
+
+    fn fresh_store() -> (tempfile::TempDir, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    // Direct tests of `chunked_content_eq`'s merge logic against small,
+    // hand-built manifests — fast and deterministic, independent of real
+    // FastCDC boundaries, covering the id-skip fast path, the
+    // read-and-resync fallback, and the documented total_size trust gap.
+
+    #[test]
+    fn chunked_fast_path_all_chunks_match_by_id() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"hello ");
+        let y = chunk(&store, b"world");
+        let ma = ChunkedBlob {
+            total_size: 11,
+            chunk_size: 0,
+            chunks: vec![x, y],
+        };
+        let mb = ma.clone();
+        assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    #[test]
+    fn chunked_fully_misaligned_but_equal_content() {
+        let (_dir, store) = fresh_store();
+        // "ab"+"cd" vs "a"+"bcd" — no chunk hash ever matches, so every
+        // byte is read and compared through the resync fallback, yet the
+        // reassembled content is identical.
+        let ma = manifest(&store, &[b"ab", b"cd"]);
+        let mb = manifest(&store, &[b"a", b"bcd"]);
+        assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
+        assert!(super::chunked_content_eq(&store, &mb, &ma).unwrap());
+    }
+
+    #[test]
+    fn chunked_shared_prefix_then_misaligned_equal_suffix() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"shared-prefix-");
+        let ma = ChunkedBlob {
+            total_size: 14 + 4,
+            chunk_size: 0,
+            chunks: [x]
+                .into_iter()
+                .chain(manifest(&store, &[b"ab", b"cd"]).chunks)
+                .collect(),
+        };
+        let mb = ChunkedBlob {
+            total_size: 14 + 4,
+            chunk_size: 0,
+            chunks: [x]
+                .into_iter()
+                .chain(manifest(&store, &[b"a", b"bcd"]).chunks)
+                .collect(),
+        };
+        // `x` is skipped by id; "ab"+"cd" vs "a"+"bcd" is read and resynced.
+        assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    #[test]
+    fn chunked_append_differs_via_total_size_without_reading() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"shared");
+        let ma = ChunkedBlob {
+            total_size: 6,
+            chunk_size: 0,
+            chunks: vec![x],
+        };
+        let y = chunk(&store, b"-more");
+        let mb = ChunkedBlob {
+            total_size: 11,
+            chunk_size: 0,
+            chunks: vec![x, y],
+        };
+        assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
+        assert!(!super::chunked_content_eq(&store, &mb, &ma).unwrap());
+    }
+
+    #[test]
+    fn chunked_same_total_size_different_content_after_shared_prefix() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"shared-");
+        let ma = ChunkedBlob {
+            total_size: 7 + 2,
+            chunk_size: 0,
+            chunks: vec![x, chunk(&store, b"ab")],
+        };
+        let mb = ChunkedBlob {
+            total_size: 7 + 2,
+            chunk_size: 0,
+            chunks: vec![x, chunk(&store, b"ba")],
+        };
+        assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    #[test]
+    fn chunked_split_differently_but_actually_different_content() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"shared-");
+        let ma = ChunkedBlob {
+            total_size: 7 + 4,
+            chunk_size: 0,
+            chunks: vec![x, chunk(&store, b"abcd")],
+        };
+        let mb = ChunkedBlob {
+            total_size: 7 + 4,
+            chunk_size: 0,
+            chunks: vec![x, chunk(&store, b"ab"), chunk(&store, b"cX")],
+        };
+        assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    #[test]
+    fn chunked_empty_manifests_are_equal() {
+        let (_dir, store) = fresh_store();
+        let ma = ChunkedBlob {
+            total_size: 0,
+            chunk_size: 0,
+            chunks: vec![],
+        };
+        let mb = ma.clone();
+        assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    /// Documents the accepted trust gap: `total_size` is not re-summed
+    /// from actual chunk bytes on the chunked fast path (mirroring
+    /// `LoadedBlob::len`'s existing trust). Two manifests whose chunk
+    /// sequence fully matches by id, but whose shared `total_size`
+    /// field is wrong for that sequence, are reported equal without
+    /// ever reading a chunk to notice. A manifest this malformed cannot
+    /// be produced by any of mkit's own writers (`check_reassembled_size`
+    /// gates every one); this can only arise from an object constructed
+    /// directly, bypassing them, as this test does.
+    #[test]
+    fn chunked_wrong_shared_total_size_is_not_detected_when_ids_fully_match() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"ab"); // 2 real bytes
+        let ma = ChunkedBlob {
+            total_size: 999, // wrong on both sides, identically
+            chunk_size: 0,
+            chunks: vec![x],
+        };
+        let mb = ma.clone();
+        assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
+    }
+
+    /// End-to-end sanity check through the public `content_eq` entry
+    /// point (not the private merge function directly) over real
+    /// `FastCDC`-chunked content: an append, a single-byte in-place edit,
+    /// and a truncation each produce a different manifest and must all
+    /// compare unequal, exactly matching a ground-truth byte comparison.
+    #[test]
+    fn content_eq_real_chunked_mutations_match_ground_truth() {
+        let (_dir, store) = fresh_store();
+        let threshold = usize::try_from(super::super::CHUNK_THRESHOLD).unwrap();
+        // Deterministic pseudo-random bytes so FastCDC sees real cut
+        // points instead of one run-length-maxed chunk.
+        let mut data = Vec::with_capacity(threshold * 3);
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        for _ in 0..threshold * 3 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            data.push((state >> 56) as u8);
+        }
+
+        let base = super::super::store_file_object(&store, &data).unwrap();
+
+        let mut appended = data.clone();
+        appended.extend_from_slice(b"appended tail bytes");
+        let appended_hash = super::super::store_file_object(&store, &appended).unwrap();
+
+        let mut edited = data.clone();
+        let mid = edited.len() / 2;
+        edited[mid] ^= 0xFF;
+        let edited_hash = super::super::store_file_object(&store, &edited).unwrap();
+
+        let truncated = &data[..data.len() - 500];
+        let truncated_hash = super::super::store_file_object(&store, truncated).unwrap();
+
+        let unchanged_hash = super::super::store_file_object(&store, &data).unwrap();
+
+        assert_eq!(base, unchanged_hash, "identical content dedups to one id");
+        assert!(content_eq(&store, &base, &unchanged_hash).unwrap());
+
+        for (name, other, other_bytes) in [
+            ("append", appended_hash, appended.as_slice()),
+            ("edit", edited_hash, edited.as_slice()),
+            ("truncate", truncated_hash, truncated),
+        ] {
+            assert_ne!(base, other, "{name}: expected a different object id");
+            assert_eq!(
+                content_eq(&store, &base, &other).unwrap(),
+                data == other_bytes,
+                "{name}: content_eq must match ground truth"
+            );
+            assert!(
+                !content_eq(&store, &base, &other).unwrap(),
+                "{name}: bytes differ"
+            );
         }
     }
 }

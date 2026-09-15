@@ -59,6 +59,14 @@ harness = false
 name = "bulk_writer"
 harness = false
 
+# `worktree::content_eq`'s chunked fast path — id-skip vs. the byte
+# comparison every "did this file change?" call site (add/status/diff/
+# merge) used to pay in full on both sides. No feature gate: worktree
+# content comparison is always compiled.
+[[bench]]
+name = "content_eq"
+harness = false
+
 # Issue #644 — refs::update_ref CAS-variant latency + list_refs at
 # increasing ref counts. No feature gate: refs are always compiled.
 [[bench]]
