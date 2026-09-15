@@ -87,9 +87,9 @@ Chunking, delta, and streaming:
 - `blob_bao_verify_slice(blob_id_hex, slice, content_offset, len)` &mdash; delegates to `mkit_core::verify::verify_blob_slice`.
 
 Disclosure and closure (issue #1015 verifier kit):
-- `verify_disclosure(commit_id_hex, bundle) -> json` &mdash; path, leaf, signer, payload summary **without** bytes. Bundles are capped at 64 MiB.
+- `verify_disclosure(commit_id_hex, bundle) -> json` &mdash; path, leaf, signer, payload summary **without** bytes. Bundles are capped at 64 MiB (`MAX_BUNDLE_BYTES`).
 - `disclosure_payload_bytes(commit_id_hex, bundle) -> bytes` &mdash; verified payload bytes; re-verifies. Call `verify_disclosure` first; treat a failure of either as a failure.
-- `verify_closure_packs(root_hex, mode, packs, pack_lengths_json) -> json` &mdash; `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of each pack; `pack_lengths_json` is a JSON array of those lengths (for example `"[1024,2048]"`). Concatenated packs are capped at 64 MiB.
+- `verify_closure_packs(root_hex, mode, packs, pack_lengths_json) -> json` &mdash; `mode` is `"snapshot"` or `"history"`. `packs` is the concatenation of each pack; `pack_lengths_json` is a JSON array of those lengths (for example `"[1024,2048]"`). Concatenated packs are capped independently of a disclosure bundle, at 1 GiB (`MAX_CLOSURE_INPUT_BYTES`, matching the native store's per-object cap) &mdash; a closure is every object reachable from a commit, a realistically much larger shape than a handful of proofs.
 - `verify_closure_manifest(expected_root_hex, manifest, packs, pack_lengths_json) -> json` &mdash; same pack framing; the manifest is a locator, never a trust anchor.
 - `verify_tree_entry(tree_id_hex, entry_json, position, proof) -> bool` &mdash; `entry_json` is `{ "name" | "name_hex", "mode", "object_hash" }`. Returns `false` when the proof does not fold to the id; throws on malformed input.
 - `verify_chunk(chunked_id_hex, chunk_id_hex, position, proof) -> bool` &mdash; same accept/reject split. Position 0 is never a chunk.
