@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 use mkit_core::hash::{from_hex, hash, to_hex, to_hex_bytes};
 use mkit_core::object::EntryMode;
-use mkit_core::verify::{Disclosed, DisclosedPayload, verify_disclosure};
+use mkit_core::verify::{Disclosed, DisclosedPayload, MAX_BUNDLE_BYTES, verify_disclosure};
 
 use super::prove::display_path;
 use super::trust_roots;
@@ -172,8 +172,15 @@ fn read_bundle(spec: &str) -> Result<Vec<u8>, (String, u8)> {
     if spec == "-" {
         let mut buf = Vec::new();
         io::stdin()
+            .take(MAX_BUNDLE_BYTES as u64 + 1)
             .read_to_end(&mut buf)
             .map_err(|e| (format!("read stdin: {e}"), exit::NOINPUT))?;
+        if buf.len() > MAX_BUNDLE_BYTES {
+            return Err((
+                format!("disclosure bundle exceeds the {MAX_BUNDLE_BYTES} byte cap"),
+                exit::DATAERR,
+            ));
+        }
         return Ok(buf);
     }
     std::fs::read(spec).map_err(|e| (format!("read {spec}: {e}"), exit::NOINPUT))
