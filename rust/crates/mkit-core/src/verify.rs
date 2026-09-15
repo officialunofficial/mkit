@@ -1116,7 +1116,10 @@ fn resolve_absolute_offset(
         return Err(VerifyError::IncompleteLengthProofSet(index));
     }
     let sum: u64 = by_index.values().map(|&l| u64::from(l)).sum();
-    Ok(Some(sum + offset_in_blob))
+    let absolute = sum
+        .checked_add(offset_in_blob)
+        .ok_or(VerifyError::OffsetOverflow)?;
+    Ok(Some(absolute))
 }
 
 fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPayload, VerifyError> {
@@ -2008,6 +2011,48 @@ mod tests {
             verify_disclosure(&f.commit_id, &tampered),
             Err(VerifyError::IncompleteLengthProofSet(_))
         ));
+    }
+
+    #[test]
+    fn resolve_absolute_offset_rejects_overflow() {
+        // `resolve_absolute_offset` sums verified preceding-chunk lengths
+        // and adds `offset_in_blob`; that final addition must be checked
+        // like every neighbouring offset computation, not silently wrap.
+        let f = build_fixture();
+        let bundle = build_disclosure(
+            &f.store,
+            &f.commit_id,
+            &[b"chunked.bin"],
+            Selector::Range {
+                offset: 700_000,
+                len: 16,
+                with_offsets: true,
+            },
+        )
+        .unwrap();
+        let (_id, _commit_bytes, steps, payload) = decode_disclosure(&bundle).unwrap();
+        let leaf_id = steps[0].child_id;
+        let PayloadWire::Range {
+            chunk,
+            offset_in_blob,
+            chunk_len_proofs,
+            ..
+        } = payload
+        else {
+            panic!("expected Range payload");
+        };
+        let hdr = chunk.expect("chunked leaf");
+        assert!(hdr.index > 0, "test fixture assumption: chunk index > 0");
+
+        assert!(matches!(
+            resolve_absolute_offset(&leaf_id, hdr.index, &chunk_len_proofs, u64::MAX),
+            Err(VerifyError::OffsetOverflow)
+        ));
+
+        // Sanity: the same, real proof set still resolves with a
+        // non-overflowing offset.
+        resolve_absolute_offset(&leaf_id, hdr.index, &chunk_len_proofs, offset_in_blob)
+            .expect("freshly built length proofs must resolve");
     }
 
     #[test]
