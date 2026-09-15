@@ -448,8 +448,27 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
 
     let input = &input[..input.len().min(MAX_INPUT)];
 
-    verify::verify_disclosure(&fixture.commit_id, &fixture.good_bundle)
+    let disclosed = verify::verify_disclosure(&fixture.commit_id, &fixture.good_bundle)
         .expect("freshly built disclosure must verify");
+    // Builder fills `inner_root` from the parent tree; verify wrap-checks
+    // it then requires the proof fold to equal the declared field. Re-check
+    // the wrap of every authenticated root here so a builder/verifier
+    // disagreement cannot slip through a successful round-trip.
+    use mkit_core::merkle::{self, ObjectKind};
+    if let Some(root) = disclosed.step_inner_roots.first() {
+        assert_eq!(
+            merkle::wrap_id(ObjectKind::Tree, root),
+            disclosed.tree_hash,
+            "step 0 inner_root must wrap to tree_hash"
+        );
+    }
+    if let Some(root) = disclosed.chunk_inner_root {
+        assert_eq!(
+            merkle::wrap_id(ObjectKind::ChunkedBlob, &root),
+            disclosed.leaf_id,
+            "chunk inner_root must wrap to the leaf ChunkedBlob id"
+        );
+    }
 
     if !fixture.good_bundle.is_empty() && input.len() >= 2 {
         let mut mutated = fixture.good_bundle.clone();

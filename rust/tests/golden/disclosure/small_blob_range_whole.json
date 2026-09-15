@@ -1,9 +1,10 @@
 {
   "bin": "small_blob_range_whole.bin",
-  "blake3": "a4c1b8f4e2806c53ff174f8bcb6edfe1a47e977abe085d8f8ac46e5d00994e1d",
+  "blake3": "517ffd6749578d3d55e4f5d578b8b01beeab0d80c7ec771725cd3cd6a5eac600",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "The entire small blob, as one range.",
   "disclosed": {
+    "chunk_inner_root_hex": null,
     "leaf_id_hex": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
     "path": [
       {
@@ -22,6 +23,9 @@
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "step_inner_roots_hex": [
+      "1b1e50529b155e441db663c397e82660032e3344c5203c314c303b80d9da397c"
+    ],
     "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
   },
   "expect": "accept",
@@ -30,5 +34,5 @@
     "72616e67652e62696e"
   ],
   "selector": "range(offset=0,len=1536)",
-  "size": 2106
+  "size": 2138
 }

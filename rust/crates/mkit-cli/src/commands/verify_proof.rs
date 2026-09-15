@@ -251,7 +251,9 @@ fn emit_json(d: &Disclosed, signer_trusted: Option<bool>) {
         .field_hash("leaf_id", &d.leaf_id)
         .field_str("signer", &to_hex_bytes(&d.signer))
         .field_bool("signature_valid", d.signature_valid)
-        .field_raw("payload", &payload_json(&d.payload));
+        .field_raw("payload", &payload_json(&d.payload))
+        .field_raw("step_inner_roots", &hashes_json(&d.step_inner_roots))
+        .field_opt_hash("chunk_inner_root", d.chunk_inner_root.as_ref());
     match signer_trusted {
         Some(v) => {
             top.field_bool("signer_trusted", v);
@@ -262,6 +264,14 @@ fn emit_json(d: &Disclosed, signer_trusted: Option<bool>) {
     }
     let mut stdout = io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
+}
+
+fn hashes_json(hashes: &[mkit_core::hash::Hash]) -> String {
+    let items: Vec<String> = hashes
+        .iter()
+        .map(|h| format!("\"{}\"", to_hex(h)))
+        .collect();
+    format!("[{}]", items.join(","))
 }
 
 fn path_json(path: &[(Vec<u8>, EntryMode)]) -> String {

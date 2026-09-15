@@ -48,20 +48,22 @@
 //!
 //! ```text
 //! magic   = "MKDP"            (4 raw bytes)
-//! version: u8 = 1
+//! version: u8 = 2
 //! commit_id: [u8; 32]
 //! commit_bytes: Vec<u8>        <= 4 MiB
 //! steps: Vec<Step>             <= MAX_TREE_DEPTH (128), root first
 //!   Step { name: Vec<u8> (1..=255), mode: u8, child_id: [u8; 32],
-//!          position: u32, proof: Proof (max_items = 1) }
+//!          inner_root: [u8; 32], position: u32, proof: Proof (max_items = 1) }
 //! payload_kind: u8
 //!   0 Object { bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
 //!   1 Chunk  { total_size: u64, chunk_size: u32, index: u32,
-//!              proof: Proof (max_items = 2), bytes: Vec<u8> }
+//!              inner_root: [u8; 32], proof: Proof (max_items = 2),
+//!              bytes: Vec<u8> }
 //!   2 Range  { chunk: Option<ChunkHdr>, offset_in_blob: u64, len: u64,
 //!              slice: Vec<u8>, chunk_len_proofs: Vec<LenProof> }
 //!     ChunkHdr { total_size: u64, chunk_size: u32, index: u32,
-//!                chunk_id: [u8; 32], proof: Proof (max_items = 2) }
+//!                inner_root: [u8; 32], chunk_id: [u8; 32],
+//!                proof: Proof (max_items = 2) }
 //!     LenProof { index: u32, chunk_id: [u8; 32],
 //!                proof: Proof (max_items = 1), slice: Vec<u8> }
 //! ```
@@ -89,7 +91,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
-use crate::merkle::{self, MerkleError, Proof};
+use crate::merkle::{self, MerkleError, ObjectKind, Proof};
 use crate::object::{EntryMode, MAGIC, MkitError, Object, ObjectType, SCHEMA_VERSION, TreeEntry};
 use crate::sign::{verify_commit, verify_remix};
 use crate::store::MAX_TREE_DEPTH;
@@ -102,8 +104,10 @@ pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Fixed 4-byte magic at the start of every disclosure bundle.
 const BUNDLE_MAGIC: &[u8; 4] = b"MKDP";
-/// Current (and only) bundle version byte.
-const BUNDLE_VERSION: u8 = 1;
+/// Current (and only) bundle version byte. v1 is rejected with
+/// [`VerifyError::UnsupportedBundleVersion`]; there is no compatibility
+/// decoder (SPEC-DISCLOSURE v2, issue #1024).
+const BUNDLE_VERSION: u8 = 2;
 /// Cap on `commit_bytes` — comfortably above any real commit (~250 B) or
 /// remix (larger, due to `sources`), far below `MAX_RAW_OBJECT_SIZE`.
 const MAX_COMMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -127,9 +131,25 @@ pub enum VerifyError {
     /// magic bytes are not `"MKDP"`.
     #[error("disclosure bundle magic is not \"MKDP\"")]
     BadMagic,
-    /// The bundle's version byte is not `1`.
-    #[error("disclosure bundle version {0} is not supported (v1 only)")]
-    UnsupportedVersion(u8),
+    /// The bundle's version byte is not `2`. A version byte of `1` is
+    /// this error with payload `1`; there is no v1 compatibility decoder.
+    #[error("disclosure bundle version {0} is not supported (v2 only)")]
+    UnsupportedBundleVersion(u8),
+    /// A step's or chunk header's declared `inner_root` does not wrap to
+    /// the expected object id (`Tree` domain for steps, `ChunkedBlob` domain
+    /// for chunk headers). Checked before the field is used for anything.
+    #[error("declared inner root does not wrap to the expected object id")]
+    InnerRootMismatch {
+        /// The parent `Tree` id (steps) or `ChunkedBlob` leaf id (chunk headers).
+        expected: Hash,
+        /// The prover-supplied inner root that failed the wrap check.
+        inner_root: Hash,
+    },
+    /// The proof folds to a different root than the bundle declared,
+    /// even though the declared root wraps to the expected id (or vice
+    /// versa). Both must agree.
+    #[error("proof fold does not equal the declared inner root")]
+    InnerRootFoldMismatch,
     /// The codec body is malformed: truncated, an over-cap length, an
     /// invalid varint, or trailing bytes after the declared body.
     #[error("disclosure bundle body is malformed (bad codec payload or trailing bytes)")]
@@ -340,6 +360,11 @@ pub struct Step {
     pub mode: EntryMode,
     /// The entry's child object id.
     pub child_id: Hash,
+    /// Bare BMT root of the **parent** Tree this step's proof is verified
+    /// against (the tree whose id is the commit's `tree_hash` for step 0,
+    /// or the previous step's `child_id`). Wrap-checked against that id
+    /// before use; never a second trust anchor.
+    pub inner_root: Hash,
     /// The entry's BMT position (= index) within its parent `Tree`.
     pub position: u32,
     /// Single-leaf inclusion proof (`max_items = 1`) that `(name, mode,
@@ -388,6 +413,15 @@ pub struct Disclosed {
     /// Whether the commit/remix's embedded signature verifies. See
     /// [`PathVerified::signature_valid`].
     pub signature_valid: bool,
+    /// Authenticated bare BMT inner root of each step's parent Tree,
+    /// root first. Empty when `steps` is empty (root-tree disclosure).
+    /// Each value has been wrap-checked against the parent id and
+    /// cross-checked against the proof fold.
+    pub step_inner_roots: Vec<Hash>,
+    /// Authenticated bare BMT inner root of the leaf `ChunkedBlob`, when
+    /// the payload is `Chunk` or a `Range` over a chunk. `None` for an
+    /// `Object` payload or a `Range` over a plain `Blob`.
+    pub chunk_inner_root: Option<Hash>,
 }
 
 /// The disclosed content of a [`Disclosed`] result.
@@ -474,6 +508,41 @@ pub enum Selector {
 /// [`VerifyError::Decode`] if `bytes` does not decode; otherwise
 /// [`VerifyError::PayloadIdMismatch`] if the derived id disagrees with
 /// `expected`.
+/// Wrap-check-first: `domain_digest(TYPE_DOMAIN, inner_root) == expected_id`.
+/// The declared field is never a second trust anchor.
+fn check_inner_root_wrap(
+    kind: ObjectKind,
+    expected_id: &Hash,
+    inner_root: &Hash,
+) -> Result<(), VerifyError> {
+    if merkle::wrap_id(kind, inner_root) == *expected_id {
+        Ok(())
+    } else {
+        Err(VerifyError::InnerRootMismatch {
+            expected: *expected_id,
+            inner_root: *inner_root,
+        })
+    }
+}
+
+/// Proof fold equals the declared inner root, then wrap of the fold
+/// equals `expected_id` (today's id check). Both must hold.
+fn check_inner_root_fold(
+    folded: Hash,
+    declared: &Hash,
+    expected_id: &Hash,
+    kind: ObjectKind,
+) -> Result<(), VerifyError> {
+    if folded != *declared {
+        return Err(VerifyError::InnerRootFoldMismatch);
+    }
+    if merkle::wrap_id(kind, &folded) == *expected_id {
+        Ok(())
+    } else {
+        Err(VerifyError::Merkle(MerkleError::VerificationFailed))
+    }
+}
+
 pub fn verify_object_id(bytes: &[u8], expected: &Hash) -> Result<Object, VerifyError> {
     let obj = crate::serialize::deserialize(bytes)?;
     let got = crate::object::id_from_object(&obj, bytes);
@@ -531,7 +600,11 @@ pub fn verify_path(
             mode: step.mode,
             object_hash: step.child_id,
         };
-        merkle::verify_tree_entry(&expected_parent, &entry, step.position, &step.proof)?;
+        check_inner_root_wrap(ObjectKind::Tree, &expected_parent, &step.inner_root)?;
+        let folded = step
+            .proof
+            .reconstruct_element_root(&merkle::tree_entry_leaf(&entry), step.position)?;
+        check_inner_root_fold(folded, &step.inner_root, &expected_parent, ObjectKind::Tree)?;
         path.push((step.name.clone(), step.mode));
         expected_parent = step.child_id;
         leaf_id = step.child_id;
@@ -589,6 +662,41 @@ pub fn verify_chunk_with_meta(
         chunked_id, total_size, chunk_size, chunk_hash, position, proof,
     )
     .map_err(VerifyError::from)
+}
+
+/// Like [`verify_chunk_with_meta`], plus the two SPEC-DISCLOSURE v2
+/// inner-root rules: wrap-check-first against `chunked_id`, then the
+/// multi-proof fold equals `inner_root`.
+fn verify_chunk_with_declared_root(
+    chunked_id: &Hash,
+    inner_root: &Hash,
+    total_size: u64,
+    chunk_size: u32,
+    chunk_hash: &Hash,
+    index: u32,
+    proof: &Proof,
+) -> Result<(), VerifyError> {
+    let chunk_count = proof
+        .leaf_count
+        .checked_sub(1)
+        .ok_or(VerifyError::ChunkIndexOutOfRange {
+            index,
+            leaf_count: proof.leaf_count,
+        })?;
+    if chunk_count > crate::serialize::MAX_CHUNKS {
+        return Err(VerifyError::TooManyChunks);
+    }
+    let position = index
+        .checked_add(1)
+        .filter(|&p| p < proof.leaf_count)
+        .ok_or(VerifyError::ChunkIndexOutOfRange {
+            index,
+            leaf_count: proof.leaf_count,
+        })?;
+    check_inner_root_wrap(ObjectKind::ChunkedBlob, chunked_id, inner_root)?;
+    let meta_leaf = merkle::chunked_meta_leaf_raw(total_size, chunk_size);
+    let folded = proof.reconstruct_multi_root(&[(meta_leaf, 0u32), (*chunk_hash, position)])?;
+    check_inner_root_fold(folded, inner_root, chunked_id, ObjectKind::ChunkedBlob)
 }
 
 /// Verify a Bao slice against `root`/`bao_offset`/`len`, returning the
@@ -686,6 +794,7 @@ struct ChunkHdr {
     total_size: u64,
     chunk_size: u32,
     index: u32,
+    inner_root: Hash,
     chunk_id: Hash,
     proof: Proof,
 }
@@ -695,6 +804,7 @@ impl Write for ChunkHdr {
         self.total_size.write(writer);
         self.chunk_size.write(writer);
         self.index.write(writer);
+        self.inner_root.write(writer);
         self.chunk_id.write(writer);
         self.proof.write(writer);
     }
@@ -705,6 +815,7 @@ impl EncodeSize for ChunkHdr {
         self.total_size.encode_size()
             + self.chunk_size.encode_size()
             + self.index.encode_size()
+            + self.inner_root.encode_size()
             + self.chunk_id.encode_size()
             + self.proof.encode_size()
     }
@@ -717,12 +828,14 @@ impl Read for ChunkHdr {
         let total_size = u64::read(reader)?;
         let chunk_size = u32::read(reader)?;
         let index = u32::read(reader)?;
+        let inner_root = Hash::read(reader)?;
         let chunk_id = Hash::read(reader)?;
         let proof = Proof::read_cfg(reader, &2usize)?;
         Ok(Self {
             total_size,
             chunk_size,
             index,
+            inner_root,
             chunk_id,
             proof,
         })
@@ -779,6 +892,7 @@ impl Write for Step {
         self.name.as_slice().write(writer);
         (self.mode as u8).write(writer);
         self.child_id.write(writer);
+        self.inner_root.write(writer);
         self.position.write(writer);
         self.proof.write(writer);
     }
@@ -789,6 +903,7 @@ impl EncodeSize for Step {
         self.name.as_slice().encode_size()
             + 1
             + self.child_id.encode_size()
+            + self.inner_root.encode_size()
             + self.position.encode_size()
             + self.proof.encode_size()
     }
@@ -802,12 +917,14 @@ impl Read for Step {
         let mode_byte = u8::read(reader)?;
         let mode = EntryMode::from_u8(mode_byte).map_err(|_| CodecError::InvalidEnum(mode_byte))?;
         let child_id = Hash::read(reader)?;
+        let inner_root = Hash::read(reader)?;
         let position = u32::read(reader)?;
         let proof = Proof::read_cfg(reader, &1usize)?;
         Ok(Self {
             name,
             mode,
             child_id,
+            inner_root,
             position,
             proof,
         })
@@ -825,6 +942,7 @@ enum PayloadWire {
         total_size: u64,
         chunk_size: u32,
         index: u32,
+        inner_root: Hash,
         proof: Proof,
         bytes: Vec<u8>,
     },
@@ -850,7 +968,7 @@ fn decode_disclosure(bytes: &[u8]) -> Result<(Hash, Vec<u8>, Vec<Step>, PayloadW
     }
     let version = bytes[4];
     if version != BUNDLE_VERSION {
-        return Err(VerifyError::UnsupportedVersion(version));
+        return Err(VerifyError::UnsupportedBundleVersion(version));
     }
     let mut r: &[u8] = &bytes[5..];
     let commit_id = Hash::read(&mut r)?;
@@ -866,12 +984,14 @@ fn decode_disclosure(bytes: &[u8]) -> Result<(Hash, Vec<u8>, Vec<Step>, PayloadW
             let total_size = u64::read(&mut r)?;
             let chunk_size = u32::read(&mut r)?;
             let index = u32::read(&mut r)?;
+            let inner_root = Hash::read(&mut r)?;
             let proof = Proof::read_cfg(&mut r, &2usize)?;
             let bytes = Vec::<u8>::read_range(&mut r, ..=crate::store::MAX_RAW_OBJECT_SIZE)?;
             PayloadWire::Chunk {
                 total_size,
                 chunk_size,
                 index,
+                inner_root,
                 proof,
                 bytes,
             }
@@ -921,6 +1041,7 @@ fn encode_disclosure(
             total_size,
             chunk_size,
             index,
+            inner_root,
             proof,
             bytes,
         } => {
@@ -928,6 +1049,7 @@ fn encode_disclosure(
             total_size.write(&mut out);
             chunk_size.write(&mut out);
             index.write(&mut out);
+            inner_root.write(&mut out);
             proof.write(&mut out);
             bytes.as_slice().write(&mut out);
         }
@@ -1005,11 +1127,20 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             total_size,
             chunk_size,
             index,
+            inner_root,
             proof,
             bytes,
         } => {
             let chunk_hash = hash(&bytes);
-            verify_chunk_with_meta(&leaf_id, total_size, chunk_size, &chunk_hash, index, &proof)?;
+            verify_chunk_with_declared_root(
+                &leaf_id,
+                &inner_root,
+                total_size,
+                chunk_size,
+                &chunk_hash,
+                index,
+                &proof,
+            )?;
             Ok(DisclosedPayload::Chunk {
                 total_size,
                 chunk_size,
@@ -1043,8 +1174,9 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             slice,
             chunk_len_proofs,
         } => {
-            verify_chunk_with_meta(
+            verify_chunk_with_declared_root(
                 &leaf_id,
+                &hdr.inner_root,
                 hdr.total_size,
                 hdr.chunk_size,
                 &hdr.chunk_id,
@@ -1079,6 +1211,14 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
         return Err(VerifyError::CommitIdMismatch);
     }
     let verified = verify_path(commit_id, &commit_bytes, &steps)?;
+    let step_inner_roots: Vec<Hash> = steps.iter().map(|s| s.inner_root).collect();
+    let chunk_inner_root = match &payload {
+        PayloadWire::Chunk { inner_root, .. } => Some(*inner_root),
+        PayloadWire::Range {
+            chunk: Some(hdr), ..
+        } => Some(hdr.inner_root),
+        _ => None,
+    };
     let payload = compose_payload(verified.leaf_id, payload)?;
     Ok(Disclosed {
         commit_id: *commit_id,
@@ -1088,6 +1228,8 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
         payload,
         signer: verified.signer,
         signature_valid: verified.signature_valid,
+        step_inner_roots,
+        chunk_inner_root,
     })
 }
 
@@ -1152,6 +1294,7 @@ pub fn build_disclosure(
             name: name.to_vec(),
             mode: entry.mode,
             child_id: entry.object_hash,
+            inner_root: merkle::tree_inner_root(&tree),
             position,
             proof,
         });
@@ -1202,6 +1345,7 @@ fn build_payload(
                 total_size: cb.total_size,
                 chunk_size: cb.chunk_size,
                 index,
+                inner_root: merkle::chunked_inner_root(&cb),
                 proof,
                 bytes,
             })
@@ -1301,6 +1445,7 @@ fn build_chunked_range_payload(
             total_size: cb.total_size,
             chunk_size: cb.chunk_size,
             index: index_u32,
+            inner_root: merkle::chunked_inner_root(cb),
             chunk_id: cb.chunks[index],
             proof,
         }),
@@ -1656,7 +1801,7 @@ mod tests {
         steps.swap(0, 1);
         assert!(matches!(
             verify_path(&f.commit_id, &commit_bytes, &steps),
-            Err(VerifyError::Merkle(_))
+            Err(VerifyError::InnerRootMismatch { .. } | VerifyError::Merkle(_))
         ));
     }
 
@@ -1700,6 +1845,7 @@ mod tests {
             index,
             proof,
             bytes,
+            ..
         } = payload
         else {
             panic!("expected Chunk payload");
@@ -1940,10 +2086,10 @@ mod tests {
         ));
 
         let mut bad_version = bundle.clone();
-        bad_version[4] = 2;
+        bad_version[4] = 1;
         assert!(matches!(
             verify_disclosure(&f.commit_id, &bad_version),
-            Err(VerifyError::UnsupportedVersion(2))
+            Err(VerifyError::UnsupportedBundleVersion(1))
         ));
 
         let mut trailing = bundle.clone();
@@ -2017,6 +2163,45 @@ mod tests {
         assert!(matches!(
             verify_disclosure(&ZERO, &bundle),
             Err(VerifyError::CommitIdMismatch)
+        ));
+    }
+
+    #[test]
+    fn inner_root_forged_is_rejected() {
+        let f = build_fixture();
+        let bundle =
+            build_disclosure(&f.store, &f.commit_id, &[b"shallow.txt"], Selector::Object).unwrap();
+        let (commit_id, commit_bytes, mut steps, payload) = decode_disclosure(&bundle).unwrap();
+        steps[0].inner_root[0] ^= 0xFF;
+        let tampered = encode_disclosure(&commit_id, &commit_bytes, &steps, &payload);
+        assert!(matches!(
+            verify_disclosure(&f.commit_id, &tampered),
+            Err(VerifyError::InnerRootMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn inner_root_fold_mismatch_is_rejected() {
+        let f = build_fixture();
+        let nested = build_disclosure(
+            &f.store,
+            &f.commit_id,
+            &[b"sub", b"deep", b"deep.txt"],
+            Selector::Object,
+        )
+        .unwrap();
+        let shallow =
+            build_disclosure(&f.store, &f.commit_id, &[b"shallow.txt"], Selector::Object).unwrap();
+        let (commit_id, commit_bytes, mut steps, payload) = decode_disclosure(&shallow).unwrap();
+        let (_, _, nested_steps, _) = decode_disclosure(&nested).unwrap();
+        // Keep the wrap-correct inner_root of the root tree, but swap in
+        // a proof built against a different tree so the fold disagrees.
+        steps[0].proof = nested_steps[1].proof.clone();
+        steps[0].position = nested_steps[1].position;
+        let tampered = encode_disclosure(&commit_id, &commit_bytes, &steps, &payload);
+        assert!(matches!(
+            verify_disclosure(&f.commit_id, &tampered),
+            Err(VerifyError::InnerRootFoldMismatch)
         ));
     }
 }

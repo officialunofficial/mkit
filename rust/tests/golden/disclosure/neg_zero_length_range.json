@@ -1,6 +1,6 @@
 {
   "bin": "neg_zero_length_range.bin",
-  "blake3": "70f6b0a12ac13f6c286f77ed06a79cb2bf719a3e9b112c9d0ac347978e487a5a",
+  "blake3": "d89c7761312a3ff6b08bfddc9b4d599345ded62da26706261be28ba4fdc5f458",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "A Range payload with len = 0.",
   "expect": "reject",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "byte range length is zero",
   "selector": "range(offset=0,len=0)",
-  "size": 527
+  "size": 559
 }

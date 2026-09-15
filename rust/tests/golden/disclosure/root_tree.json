@@ -1,9 +1,10 @@
 {
   "bin": "root_tree.bin",
-  "blake3": "d1f98dc0cdc45b87d60fa712d4d4ac841b2b19cde11de1202c6538aef46a19dd",
+  "blake3": "515c93b3a15c426645c845581102a6b0e1b60abb513567b551e0ca239968acda",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "The commit's root tree, disclosed directly (empty path).",
   "disclosed": {
+    "chunk_inner_root_hex": null,
     "leaf_id_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20",
     "path": [],
     "payload": {
@@ -13,6 +14,7 @@
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "step_inner_roots_hex": [],
     "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
   },
   "expect": "accept",

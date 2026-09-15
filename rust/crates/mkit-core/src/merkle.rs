@@ -502,8 +502,9 @@ impl Proof {
     /// for `leaf` at `position`, without comparing it to anything. The
     /// shared building block for both the inner-root-comparing
     /// (commonware-parity) verifiers below and the public id-based
-    /// verifiers.
-    fn reconstruct_element_root(
+    /// verifiers. `pub(crate)` so `verify` can compare the fold to a
+    /// bundle-declared inner root without a second pass.
+    pub(crate) fn reconstruct_element_root(
         &self,
         leaf: &Hash,
         mut position: u32,
@@ -540,7 +541,10 @@ impl Proof {
     /// Reconstructs the tree's inner (pre-wrap) root implied by this proof
     /// for the non-contiguous `elements` (leaf, position pairs). Elements
     /// may be given in any order; duplicate positions are rejected.
-    fn reconstruct_multi_root(&self, elements: &[(Hash, u32)]) -> Result<Hash, MerkleError> {
+    pub(crate) fn reconstruct_multi_root(
+        &self,
+        elements: &[(Hash, u32)],
+    ) -> Result<Hash, MerkleError> {
         // A proof over zero positions is rejected unconditionally, even
         // when `leaf_count == 0` and `siblings` is empty (upstream's
         // `Default` proof, which would otherwise trivially "reconstruct"
@@ -709,7 +713,7 @@ impl Proof {
 /// [`ChunkedBlob`] value. Shared by [`chunked_meta_leaf`] (which has one)
 /// and [`verify_chunk_with_meta_leaf`] (which — by design — never does;
 /// see that function's docs).
-fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
+pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
     let mut body = [0u8; 12];
     body[..8].copy_from_slice(&total_size.to_le_bytes());
     body[8..].copy_from_slice(&chunk_size.to_le_bytes());
@@ -727,7 +731,7 @@ fn chunked_meta_leaf(cb: &ChunkedBlob) -> Hash {
 /// the anti-ambiguity guard so `("ab", m, h)` and `("a", m, "b"‖…)` cannot
 /// alias. Feeding this triple (not the raw `object_hash`) means a Tree
 /// inclusion proof attests the full `(name, mode, object_hash)`.
-fn tree_entry_leaf(e: &TreeEntry) -> Hash {
+pub(crate) fn tree_entry_leaf(e: &TreeEntry) -> Hash {
     let mut body = Vec::with_capacity(4 + e.name.len() + 1 + HASH_LEN);
     body.extend_from_slice(&u32_of(e.name.len()).to_le_bytes());
     body.extend_from_slice(&e.name);
