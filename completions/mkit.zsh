@@ -503,17 +503,34 @@ _mkit() {
                         '2:bundle:_files'
                     ;;
                 closure)
-                    _arguments \
-                        '--history[full ancestry (history mode)]' \
-                        '-o[output directory]:dir:_files -/' \
-                        '--output[output directory]:dir:_files -/' \
-                        '--force[overwrite a non-empty directory]' \
-                        '--from[closure directory]:dir:_files -/' \
-                        '--show-unreferenced[show unreferenced objects (local mode)]' \
-                        '--format[output format]:fmt:(default json)' \
-                        '--help[show help]' \
-                        '1:subcommand:(export verify)' \
-                        '2:revision-or-id:'
+                    case $words[2] in
+                        export)
+                            _arguments \
+                                '--history[full ancestry (history mode)]' \
+                                '-o[output directory]:dir:_files -/' \
+                                '--output[output directory]:dir:_files -/' \
+                                '--force[overwrite a non-empty directory]' \
+                                '--format[output format]:fmt:(default json)' \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify)' \
+                                '2:revision:'
+                            ;;
+                        verify)
+                            _arguments \
+                                '--from[closure directory]:dir:_files -/' \
+                                '--history[history vs snapshot mode (local store)]' \
+                                '--show-unreferenced[show unreferenced objects (local mode)]' \
+                                '--format[output format]:fmt:(default json)' \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify)' \
+                                '2:commit-id:'
+                            ;;
+                        *)
+                            _values 'closure subcommand' \
+                                'export[export a commit object-set closure]' \
+                                'verify[verify a commit object-set closure]'
+                            ;;
+                    esac
                     ;;
                 attest)
                     _arguments \

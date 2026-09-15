@@ -164,7 +164,17 @@ _mkit_complete() {
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "export verify" -- "$cur") )
             else
-                COMPREPLY=( $(compgen -W "--history -o --output --force --from --show-unreferenced --format --help" -- "$cur") )
+                case "${words[2]}" in
+                    export)
+                        COMPREPLY=( $(compgen -W "--history -o --output --force --format --help" -- "$cur") )
+                        ;;
+                    verify)
+                        COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "export verify --help" -- "$cur") )
+                        ;;
+                esac
             fi
             ;;
         keygen)

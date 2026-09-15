@@ -356,17 +356,19 @@ complete -c mkit -n "__fish_seen_subcommand_from verify-proof" \
     -l payload-out -d "Write verified payload bytes" -r
 complete -c mkit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify" \
     -a "export verify"
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l history -d "Full ancestry (history mode)"
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -s o -l output -d "Output directory" -r
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l force -d "Overwrite a non-empty directory"
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from verify" \
     -l from -d "Closure directory" -r
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from verify" \
+    -l history -d "History vs snapshot mode (local store)"
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from verify" \
     -l show-unreferenced -d "Show unreferenced objects (local mode)"
-complete -c mkit -n "__fish_seen_subcommand_from closure" \
+complete -c mkit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export verify" \
     -l format -d "Output format" -xa "default json"
 
 # pack-shard flags.
