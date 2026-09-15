@@ -647,9 +647,11 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     // could never produce. Any `Ok` report must still be internally
     // consistent.
     let single_pack: [&[u8]; 1] = [input];
-    if let Ok(report) =
-        verify::verify_closure_packs(&fixture.root, mkit_core::ClosureMode::Snapshot, &single_pack)
-    {
+    if let Ok(report) = verify::verify_closure_packs(
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+        &single_pack,
+    ) {
         assert_closure_report_consistent(&report);
     }
     if let Ok(report) =
@@ -676,8 +678,14 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
 /// report produced from adversarial pack bytes.
 fn assert_closure_report_consistent(report: &mkit_core::verify::ClosureReport) {
     if report.is_complete() {
-        assert!(report.missing.is_empty(), "complete report has missing entries");
-        assert!(report.corrupt.is_empty(), "complete report has corrupt entries");
+        assert!(
+            report.missing.is_empty(),
+            "complete report has missing entries"
+        );
+        assert!(
+            report.corrupt.is_empty(),
+            "complete report has corrupt entries"
+        );
     }
 }
 
