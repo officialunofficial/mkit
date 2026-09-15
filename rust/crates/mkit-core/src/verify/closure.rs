@@ -268,6 +268,14 @@ fn walk_closure(
     ))
 }
 
+fn merge_corrupt(report: &mut ClosureReport, extra: Vec<(Hash, String)>) {
+    // Walker corrupt is empty on these paths: the index is keyed by
+    // derived id, so fetch never returns bytes that fail the id check.
+    report.corrupt.extend(extra);
+    report.corrupt.sort_by_key(|(id, _)| *id);
+    report.corrupt.dedup_by_key(|(id, _)| *id);
+}
+
 /// Walks a closure by fetching each requested id only when the BFS reaches it.
 /// Bytes are deserialized, re-hashed, and discarded after their child ids are
 /// extracted, so the walk retains object ids rather than the complete object
@@ -361,7 +369,7 @@ pub fn verify_closure<'a>(
 
     let mut source = MapObjectSource { objects: by_id };
     let (mut report, visited) = walk_closure(root, mode, &mut source)?;
-    report.corrupt = corrupt;
+    merge_corrupt(&mut report, corrupt);
     report.unreferenced = source
         .objects
         .keys()
@@ -432,7 +440,7 @@ pub fn verify_closure_packs(
     }
     source.corrupt.sort_by_key(|a| a.0);
     let (mut report, visited) = walk_closure(root, mode, &mut source)?;
-    report.corrupt = source.corrupt;
+    merge_corrupt(&mut report, source.corrupt);
     report.unreferenced = source
         .index
         .keys()
@@ -780,6 +788,72 @@ mod tests {
             "{malformed:?}"
         );
         assert!(!malformed.missing.contains(&blob), "{malformed:?}");
+    }
+
+    struct MismatchSource {
+        objects: BTreeMap<Hash, Vec<u8>>,
+        mismatch_id: Hash,
+        mismatch_bytes: Vec<u8>,
+    }
+
+    impl ObjectSource for MismatchSource {
+        fn fetch(&mut self, id: &Hash) -> Result<Option<Cow<'_, [u8]>>, VerifyError> {
+            if *id == self.mismatch_id {
+                return Ok(Some(Cow::Borrowed(self.mismatch_bytes.as_slice())));
+            }
+            Ok(self.objects.get(id).map(|b| Cow::Borrowed(b.as_slice())))
+        }
+    }
+
+    #[test]
+    fn merge_keeps_walker_corrupt_when_source_bytes_hash_elsewhere() {
+        let (_d, store, root, blob) = fixture();
+        let blob_bytes = store.read(&blob).unwrap();
+        let derived = crate::object::id_from_object(
+            &crate::serialize::deserialize(&blob_bytes).unwrap(),
+            &blob_bytes,
+        );
+        assert_eq!(derived, blob);
+
+        let mut objects = BTreeMap::new();
+        for id in store.iter_object_hashes().unwrap() {
+            if id != blob {
+                objects.insert(id, store.read(&id).unwrap());
+            }
+        }
+        let mut source = MismatchSource {
+            objects,
+            mismatch_id: blob,
+            mismatch_bytes: crate::serialize::serialize(&Object::Blob(Blob {
+                data: b"different blob".to_vec(),
+            }))
+            .unwrap(),
+        };
+        let other_id = crate::object::id_from_object(
+            &crate::serialize::deserialize(&source.mismatch_bytes).unwrap(),
+            &source.mismatch_bytes,
+        );
+        assert_ne!(other_id, blob);
+
+        let (mut report, _) = walk_closure(&root, ClosureMode::Snapshot, &mut source).unwrap();
+        assert!(
+            report.corrupt.iter().any(|(id, _)| *id == blob),
+            "walker must classify the mismatch under the requested id: {report:?}"
+        );
+
+        let extra_id = hash(b"not an object");
+        merge_corrupt(
+            &mut report,
+            vec![(extra_id, "deserialize failed".to_string())],
+        );
+        assert!(
+            report.corrupt.iter().any(|(id, _)| *id == blob),
+            "walker entry must survive the merge: {report:?}"
+        );
+        assert!(
+            report.corrupt.iter().any(|(id, _)| *id == extra_id),
+            "index-time entry must survive the merge: {report:?}"
+        );
     }
 
     #[test]

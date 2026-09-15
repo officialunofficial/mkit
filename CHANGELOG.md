@@ -169,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(core)* `verify_closure` / `verify_closure_packs` merge the walker's
+  `corrupt` list with index-time deserialize failures instead of
+  overwriting it. The walker list is empty on these paths today (both
+  indexes are keyed by derived id), but a fetch that returned bytes
+  hashing to a different id would previously be dropped. **SemVer:**
+  additive.
+
 - *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
   hard read error the moment it hits one corrupt on-disk object &mdash; it
   now catches `StoreError::HashMismatch` per object, reports it under the
