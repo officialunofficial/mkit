@@ -170,6 +170,8 @@ fn disclosed_to_json(d: &Disclosed) -> Result<String, String> {
         "signer": to_hex(&d.signer),
         "signature_valid": d.signature_valid,
         "payload": payload_json(&d.payload),
+        "step_inner_roots": d.step_inner_roots.iter().map(to_hex).collect::<Vec<_>>(),
+        "chunk_inner_root": d.chunk_inner_root.as_ref().map(to_hex),
     }))
     .map_err(|e| format!("disclosed JSON: {e}"))
 }
@@ -311,7 +313,8 @@ fn verify_disclosure_inner(commit_id_hex: &str, bundle: &[u8]) -> Result<Disclos
 /// Verify a disclosure bundle against a trusted commit id.
 ///
 /// Returns JSON `{ commit_id, tree_hash, path, leaf_id, signer,
-/// signature_valid, payload }` **without** payload bytes. Call
+/// signature_valid, payload, step_inner_roots, chunk_inner_root }`
+/// **without** payload bytes. Call
 /// [`disclosure_payload_bytes`] for the verified bytes. Both functions
 /// re-verify; a caller that wants both should call this first and treat a
 /// failure of either as a failure.

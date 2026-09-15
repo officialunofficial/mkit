@@ -1,6 +1,6 @@
 {
   "bin": "neg_invalid_entry_name.bin",
-  "blake3": "831e76f0db21690a2feb1d78149cc301166e6e5a9d7e8682d169949a6870d0df",
+  "blake3": "d5850aef400ccfc245e9f366cdf4eb78ffe67852b0427a902e8c3e30cb40cf15",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "The step's entry name has a trailing space (SPEC-OBJECTS §4.1).",
   "expect": "reject",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "entry name fails SPEC-OBJECTS §4.1 validation",
   "selector": "object",
-  "size": 502
+  "size": 534
 }

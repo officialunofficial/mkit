@@ -1,6 +1,6 @@
 {
   "bin": "neg_chunk_meta_forged_total_size.bin",
-  "blake3": "aab07f14dfb2d280e07423d43443f4429b28f2dec65060c45d6bd15a3ad00158",
+  "blake3": "93cb7ae3528ceff683ab624e97761f82ea6cf35e6aacdcec7be4458d77c3f4a3",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "The Chunk payload's total_size is off by one from the real ChunkedBlob's.",
   "expect": "reject",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "forged total_size no longer folds to the ChunkedBlob id",
   "selector": "chunk(1) [forged total_size]",
-  "size": 69151
+  "size": 69215
 }

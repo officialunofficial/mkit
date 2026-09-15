@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
+  mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
+  ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
+  `UnsupportedBundleVersion(1)` with no compatibility decoder. The
+  verifier wrap-checks the field against the trusted id before use, then
+  requires the proof fold to equal the declared root. **SemVer:**
+  breaking for bundle bytes (pre-release format, no migration);
+  additive for APIs (`Disclosed.step_inner_roots` /
+  `Disclosed.chunk_inner_root`; `Step.inner_root`).
+
 ### Added
+
+- *(wasm)* `verify_disclosure` JSON includes `step_inner_roots` (hex
+  array) and `chunk_inner_root` (hex or `null`). **SemVer:** additive.
+
+- *(cli)* `mkit verify-proof --format=json` includes the same two keys.
+  **SemVer:** additive.
 
 - Redesigned the workspace around Files, Changes, and History with grouped version
   saves, attributed diffs, explicit conflict recovery, session-scoped drafts, and

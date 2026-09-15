@@ -70,7 +70,7 @@ mod wire {
     ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"MKDP");
-        out.push(1u8);
+        out.push(2u8);
         commit_id.write(&mut out);
         commit_bytes.write(&mut out);
         steps.write(&mut out);
@@ -88,6 +88,7 @@ mod wire {
         total_size: u64,
         chunk_size: u32,
         index: u32,
+        inner_root: &Hash,
         proof: &Proof,
         bytes: &[u8],
     ) -> Vec<u8> {
@@ -95,6 +96,7 @@ mod wire {
         total_size.write(&mut out);
         chunk_size.write(&mut out);
         index.write(&mut out);
+        inner_root.write(&mut out);
         proof.write(&mut out);
         bytes.write(&mut out);
         out
@@ -105,6 +107,7 @@ mod wire {
         pub(crate) total_size: u64,
         pub(crate) chunk_size: u32,
         pub(crate) index: u32,
+        pub(crate) inner_root: Hash,
         pub(crate) chunk_id: Hash,
         pub(crate) proof: Proof,
     }
@@ -132,6 +135,7 @@ mod wire {
                 c.total_size.write(&mut out);
                 c.chunk_size.write(&mut out);
                 c.index.write(&mut out);
+                c.inner_root.write(&mut out);
                 c.chunk_id.write(&mut out);
                 c.proof.write(&mut out);
             }
@@ -172,6 +176,7 @@ fn walk_path(store: &ObjectStore, tree_hash: Hash, path: &[&[u8]]) -> (Vec<Step>
             name: name.to_vec(),
             mode: entry.mode,
             child_id: entry.object_hash,
+            inner_root: merkle::tree_inner_root(&tree),
             position,
             proof,
         });
@@ -284,6 +289,8 @@ fn disclosed_summary(d: &Disclosed) -> Value {
         "payload": payload,
         "signer_hex": to_hex(&d.signer),
         "signature_valid": d.signature_valid,
+        "step_inner_roots_hex": d.step_inner_roots.iter().map(to_hex).collect::<Vec<_>>(),
+        "chunk_inner_root_hex": d.chunk_inner_root.as_ref().map(to_hex),
     })
 }
 
@@ -598,7 +605,14 @@ fn build_vectors() -> Vec<Vector> {
             &f.commit_id,
             &commit_bytes,
             &steps,
-            &wire::chunk_payload(cb.total_size + 1, cb.chunk_size, 1, &proof, &chunk_bytes),
+            &wire::chunk_payload(
+                cb.total_size + 1,
+                cb.chunk_size,
+                1,
+                &merkle::chunked_inner_root(&cb),
+                &proof,
+                &chunk_bytes,
+            ),
         );
         v.push(Vector {
             name: "neg_chunk_meta_forged_total_size",
@@ -737,6 +751,7 @@ fn build_vectors() -> Vec<Vector> {
                     total_size: cb.total_size,
                     chunk_size: cb.chunk_size,
                     index: u32::try_from(target_index).unwrap(),
+                    inner_root: merkle::chunked_inner_root(&cb),
                     chunk_id: cb.chunks[target_index],
                     proof: hdr_proof,
                 }),
@@ -786,7 +801,7 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // 10. version = 2.
+    // 10. version = 3 (unknown; v2 is the only supported value).
     {
         let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
         let bytes = canonical_bytes(&f.store, &leaf);
@@ -797,10 +812,10 @@ fn build_vectors() -> Vec<Vector> {
             &steps,
             &wire::object_payload(&bytes),
         );
-        bin[4] = 2;
+        bin[4] = 3;
         v.push(Vector {
             name: "neg_unsupported_version",
-            description: "The version byte is 2 instead of the only supported value, 1.",
+            description: "The version byte is 3 instead of the only supported value, 2.",
             bin,
             json: base_json(
                 &f.commit_id,
@@ -897,6 +912,7 @@ fn build_vectors() -> Vec<Vector> {
                     total_size: cb.total_size,
                     chunk_size: cb.chunk_size,
                     index: 0,
+                    inner_root: merkle::chunked_inner_root(&cb),
                     chunk_id: cb.chunks[0],
                     proof: hdr_proof,
                 }),
@@ -921,6 +937,95 @@ fn build_vectors() -> Vec<Vector> {
                 "range(offset=0,len=16) [chunk_len_proofs on chunk 0]",
                 false,
                 Some("chunk_len_proofs is only meaningful at chunk index > 0"),
+            ),
+        });
+    }
+
+    // 14. Declared inner_root does not wrap to the parent id.
+    {
+        let (mut steps, leaf) = walk_path(&f.store, f.tree_hash, &[b"shallow.txt"]);
+        steps[0].inner_root[0] ^= 0xFF;
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        v.push(Vector {
+            name: "neg_inner_root_forged",
+            description: "The step's declared inner_root does not wrap to the parent Tree id.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &[b"shallow.txt"],
+                "object",
+                false,
+                Some("declared inner root does not wrap to the parent id"),
+            ),
+        });
+    }
+
+    // 15. Declared inner_root wraps correctly, but the proof was built
+    //     for a different tree, so the fold disagrees.
+    {
+        let (mut steps, leaf) = walk_path(&f.store, f.tree_hash, &[b"shallow.txt"]);
+        let (nested, _) = walk_path(
+            &f.store,
+            f.tree_hash,
+            &[
+                b"sub".as_slice(),
+                b"deep".as_slice(),
+                b"deep.txt".as_slice(),
+            ],
+        );
+        steps[0].proof = nested[1].proof.clone();
+        steps[0].position = nested[1].position;
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        v.push(Vector {
+            name: "neg_inner_root_fold_mismatch",
+            description: "The declared inner_root wraps to the parent id, but the proof was built for a different tree so the fold disagrees.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &[b"shallow.txt"],
+                "object",
+                false,
+                Some("proof fold does not equal the declared inner root"),
+            ),
+        });
+    }
+
+    // 16. version = 1 (no compatibility decoder).
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &["shallow.txt".as_bytes()]);
+        let bytes = canonical_bytes(&f.store, &leaf);
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let mut bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::object_payload(&bytes),
+        );
+        bin[4] = 1;
+        v.push(Vector {
+            name: "neg_bundle_version_1",
+            description: "The version byte is 1; v2 is the only supported value and there is no compatibility decoder.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &[b"shallow.txt"],
+                "object",
+                false,
+                Some("unsupported bundle version 1"),
             ),
         });
     }
@@ -1051,6 +1156,31 @@ fn verify_vector(name: &str, want_digest: &str) {
                     want_abs.map(i128::from),
                     "{name}: absolute_offset mismatch"
                 );
+            }
+            let want_roots = want["step_inner_roots_hex"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: step_inner_roots_hex missing"));
+            assert_eq!(
+                want_roots.len(),
+                d.step_inner_roots.len(),
+                "{name}: step_inner_roots length"
+            );
+            for (got, want_hex) in d.step_inner_roots.iter().zip(want_roots) {
+                assert_eq!(
+                    to_hex(got),
+                    want_hex.as_str().unwrap(),
+                    "{name}: step_inner_roots mismatch"
+                );
+            }
+            match (
+                d.chunk_inner_root.as_ref(),
+                want["chunk_inner_root_hex"].as_str(),
+            ) {
+                (Some(got), Some(want_hex)) => {
+                    assert_eq!(to_hex(got), want_hex, "{name}: chunk_inner_root mismatch");
+                }
+                (None, None) => {}
+                other => panic!("{name}: chunk_inner_root presence mismatch: {other:?}"),
             }
         }
         (true, Err(e)) => panic!("{name}: expected accept, got {e:?}"),

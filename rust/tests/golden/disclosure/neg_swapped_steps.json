@@ -1,6 +1,6 @@
 {
   "bin": "neg_swapped_steps.bin",
-  "blake3": "95bd798e8bc1070d86d26426f2fc4acc4b5f8a3840f225ae17bbe27bf91d065f",
+  "blake3": "88fce7fb03aacadde9e763ad47e7dfcabd4c0ff6163b18e79b9ca1d9e508c047",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "The first two of three path steps are swapped.",
   "expect": "reject",
@@ -12,5 +12,5 @@
   ],
   "reject_reason": "a step's proof does not verify against the (now wrong) parent id",
   "selector": "object",
-  "size": 539
+  "size": 635
 }

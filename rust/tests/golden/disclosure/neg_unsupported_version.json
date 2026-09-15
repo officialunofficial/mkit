@@ -1,8 +1,8 @@
 {
   "bin": "neg_unsupported_version.bin",
-  "blake3": "c237853a570e864afa9e5847c3d123f0addf2c7337e59e3af42986529f251ea9",
+  "blake3": "120579fce6803b875a7db0c60cf9692d080edf5c79f782de89ec3ff15b95b857",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
-  "description": "The version byte is 2 instead of the only supported value, 1.",
+  "description": "The version byte is 3 instead of the only supported value, 2.",
   "expect": "reject",
   "name": "neg_unsupported_version",
   "path_hex": [
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "unsupported version",
   "selector": "object",
-  "size": 501
+  "size": 533
 }

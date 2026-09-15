@@ -245,6 +245,8 @@ fn prove_and_verify_json_keys() {
         "signature_valid",
         "payload",
         "signer_trusted",
+        "step_inner_roots",
+        "chunk_inner_root",
     ] {
         assert!(json_has(&js, key), "verify-proof json missing {key}: {js}");
     }

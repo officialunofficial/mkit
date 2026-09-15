@@ -1,6 +1,6 @@
 {
   "bin": "neg_trailing_byte.bin",
-  "blake3": "60eaacc177a5830f49726112d46ccdd3f14353ddf8be49e7cc3e9bcef0d11932",
+  "blake3": "0240c3aad807ffbbaf5734b5c80fdfd325cfb10cd4b1e20fbbc25ccab1303b44",
   "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "description": "One extra trailing byte after the declared body.",
   "expect": "reject",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "trailing bytes",
   "selector": "object",
-  "size": 502
+  "size": 534
 }
