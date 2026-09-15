@@ -179,6 +179,16 @@ train).
 
 ### Fixed
 
+- *(workspace-worker)* `authenticate` now drains the request body before
+  any envelope-header check can reject it, instead of after. An
+  unauthenticated (or otherwise malformed-envelope) POST with a body of
+  roughly 200 KiB or more previously got its rejection response written
+  while the client was still writing that body, which the local
+  Miniflare/workerd HTTP stack surfaces as a connection reset
+  (`ECONNRESET`) instead of delivering the intended 401/403/415 — seen as
+  an intermittent `workspace.integration.test.ts` failure. **SemVer:**
+  none — worker-only, no public API.
+
 - *(core)* `verify_closure` / `verify_closure_packs` merge the walker's
   `corrupt` list with index-time deserialize failures instead of
   overwriting it. The walker list is empty on these paths today (both
