@@ -18,7 +18,7 @@ use crate::common::{
 };
 
 // Edge/browser workspace admission limit, not an on-disk format limit.
-const MAX_WORKSPACE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_WORKSPACE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
 
 fn decode_workspace_object(bytes: &[u8]) -> Result<Object, String> {
     if bytes.len() > MAX_WORKSPACE_OBJECT_BYTES {

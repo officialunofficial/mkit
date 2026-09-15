@@ -74,6 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `verify_closure`. **SemVer:** additive — new APIs;
   `PackReader` behavior unchanged.
 
+- *(wasm)* Disclosure and closure verification exports (issue #1015
+  verifier kit PR 4): `verify_disclosure` / `disclosure_payload_bytes`,
+  `verify_closure_packs` / `verify_closure_manifest`, `verify_tree_entry`
+  / `verify_chunk`, `chunked_blob_decode`, `blob_bao_encode` /
+  `blob_bao_slice` / `blob_bao_verify_slice` (canonical blob bytes;
+  existing raw `bao_*` exports are unchanged for the web streaming demo),
+  and `wrap_object_id`. Structured results are JSON; hashes are 64-char
+  lowercase hex. Objects stay at the 16 MiB workspace cap; bundles and
+  concatenated closure packs are capped at `verify::MAX_BUNDLE_BYTES`
+  (64 MiB). Native tests replay the `proofs/`, `disclosure/`, and
+  `closure/` golden vectors through these exports. **SemVer:** additive.
+
 ### Security
 
 - *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.

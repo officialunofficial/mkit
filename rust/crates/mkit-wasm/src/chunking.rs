@@ -408,6 +408,12 @@ pub struct BaoEncoded {
     outboard: Vec<u8>,
 }
 
+impl BaoEncoded {
+    pub(crate) fn new(hash_hex: String, outboard: Vec<u8>) -> Self {
+        Self { hash_hex, outboard }
+    }
+}
+
 #[wasm_bindgen]
 impl BaoEncoded {
     #[wasm_bindgen(getter)]
@@ -428,6 +434,24 @@ pub struct BaoVerify {
     ok: bool,
     bytes: Option<Box<[u8]>>,
     error: Option<String>,
+}
+
+impl BaoVerify {
+    pub(crate) fn ok_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            ok: true,
+            bytes: Some(bytes.into_boxed_slice()),
+            error: None,
+        }
+    }
+
+    pub(crate) fn fail(error: String) -> Self {
+        Self {
+            ok: false,
+            bytes: None,
+            error: Some(error),
+        }
+    }
 }
 
 #[wasm_bindgen]
