@@ -809,51 +809,99 @@ impl PackReader {
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
         // One frame parser: [`PackEntries`] owns header/trailer/cap/type
-        // validation and decompression. This loop only resolves deltas
-        // against the store and stages into the batch.
-        let entries = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
+        // validation and decompression.
+        let pack_entries = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
 
-        let mut report = UnpackReport::default();
-        // Track entries resolved in *this* pack so subsequent delta
-        // entries can resolve their base from memory before falling
-        // back to the on-disk store: `WriteBatch::write_prehashed`
-        // stages bytes durably-pending but NOT visible until
-        // `commit()`, so a not-yet-committed entry can only be found
-        // here, never via `store`. Raw entries borrow straight out of
-        // `pack_bytes` — it's already resident for the whole call, so
-        // keeping a second owned copy alongside it would just double
-        // the memory a large pack needs (issue #647). Only
-        // delta-resolved entries need an owned buffer, since
-        // `delta::decode` produces bytes that don't alias `pack_bytes`.
+        // Track entries resolved in *this* pack so delta entries can
+        // resolve their base from memory before falling back to the
+        // on-disk store: `WriteBatch::write_prehashed` stages bytes
+        // durably-pending but NOT visible until `commit()`, so a
+        // not-yet-committed entry can only be found here, never via
+        // `store`.
         let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
             std::collections::HashMap::new();
 
-        // Stage each entry into the batch as soon as it's parsed and
-        // validated, rather than collecting every entry's bytes into a
-        // second list first and writing them all out after the loop.
-        // `commit()` still runs exactly once, after the loop below, so
-        // the "durable and visible together" contract (see the
-        // `WriteBatch` module docs) is unaffected — only the point at
-        // which each entry's bytes are handed to the batch moves
-        // earlier, from "after every entry is parsed" to "as each
-        // entry is parsed".
         let batch = store.batch();
 
-        for entry in entries {
-            match entry? {
-                PackEntry::Raw { bytes } => {
-                    stage_raw_object(&batch, &mut in_pack, &mut report, owned_bytes, bytes)?;
+        // Phase 1 (sequential, cheap relative to phase 2): drain
+        // `PackEntries` — already validated and decompressed — into one
+        // `Vec<Entry>` indexed by pack position. `PackEntries::new`
+        // already ran the framing/cap/type validation before yielding
+        // anything, so a malformed pack fails via the `?` above before
+        // any staging; a mid-stream error from `.next()` (re-running
+        // that same per-entry validation, since the iterator has to
+        // stay store-less/reusable — see `PackEntries`'s doc) surfaces
+        // here, equally before any staging.
+        let mut entries: Vec<Entry<'_>> = Vec::new();
+        for entry in pack_entries {
+            entries.push(match entry? {
+                PackEntry::Raw { bytes } => Entry::Raw(bytes),
+                PackEntry::Delta { base, stream } => Entry::Delta { base, stream },
+            });
+        }
+
+        // Phase 2: raw entries. Validate and hash each one — independent
+        // per entry, so on a native build with enough of them this fans
+        // out across a scoped thread pool instead of running one at a
+        // time on the calling thread (see `stage_raw_entries`). This is
+        // the read-side counterpart of `PackWriter::prepare_raw`/
+        // `push_prepared_raw` on the write side. Staging into `batch`
+        // also happens here (concurrently — `write_prehashed` is safe
+        // for that), but staging into `in_pack` is deferred to phase 3
+        // below: SPEC-PACKFILE §4 requires a delta's base to appear
+        // *earlier in the pack*, so a raw entry must only become
+        // visible to delta resolution once phase 3's scan actually
+        // reaches its pack position, not the instant phase 2 happens to
+        // finish computing it. Each raw entry's bytes stay right where
+        // phase 1 put them (`entries[idx]`) — phase 2 only hands back
+        // the hash it computed, via `raw_hashes`, so there is nothing
+        // written back into `entries` and nothing that can fall out of
+        // sync with it.
+        let raw_frames: Vec<(usize, &[u8])> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| match e {
+                Entry::Raw(payload) => Some((idx, payload.as_ref())),
+                Entry::Delta { .. } => None,
+            })
+            .collect();
+        let mut raw_hashes: Vec<Option<Hash>> = vec![None; entries.len()];
+        for (idx, stored_hash) in stage_raw_entries(&batch, &raw_frames)? {
+            raw_hashes[idx] = Some(stored_hash);
+        }
+
+        // Phase 3 (sequential, single pass over `entries` in original
+        // pack order): replay every position exactly as the old
+        // single-loop reader did. A raw entry stages its
+        // phase-2-computed hash into `in_pack` (the CPU-heavy work is
+        // already done; this is just bookkeeping); a delta entry
+        // resolves its base from `in_pack`/`store` and stages the
+        // decoded target — so a delta can only ever see raw entries at
+        // strictly earlier positions, preserving the base-before-delta
+        // ordering rule.
+        let mut report = UnpackReport::default();
+        for (idx, entry) in entries.into_iter().enumerate() {
+            match entry {
+                Entry::Raw(payload) => {
+                    let stored_hash = raw_hashes[idx].expect("every Entry::Raw has a phase-2 hash");
+                    if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
+                        c.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    }
+                    in_pack.insert(stored_hash, payload);
+                    report.raw_count += 1;
+                    report.stored.push(stored_hash);
                 }
-                PackEntry::Delta { base, stream } => {
-                    stage_delta_target(
+                Entry::Delta { base, stream } => {
+                    let stored_hash = stage_delta_target(
                         store,
                         &batch,
                         &mut in_pack,
-                        &mut report,
                         owned_bytes,
                         base,
                         stream.as_ref(),
                     )?;
+                    report.delta_count += 1;
+                    report.stored.push(stored_hash);
                 }
             }
         }
@@ -865,6 +913,133 @@ impl PackReader {
 
         Ok(report)
     }
+}
+
+/// One packfile entry, tracked through [`PackReader::read_inner`]'s
+/// three phases at the `entries[pack_position]` index it was parsed
+/// at (`PackEntries` already validated framing/types and decompressed
+/// `0x03`/`0x04`, so there is nothing left to classify here beyond raw
+/// vs. delta). Phase 2 (see [`stage_raw_entries`]) computes each `Raw`
+/// entry's hash into a side table (`raw_hashes` in `read_inner`)
+/// instead of writing back into this vec, so entries never move
+/// between variants and there is no separate ordering that could fall
+/// out of sync with the vec's own index.
+enum Entry<'p> {
+    Raw(Cow<'p, [u8]>),
+    Delta { base: Hash, stream: Cow<'p, [u8]> },
+}
+
+/// `(pack position, stored hash)` pairs returned by
+/// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in arbitrary
+/// order — [`PackReader::read_inner`] writes each one back into
+/// `raw_hashes` at its recorded position.
+type RawStageResults = Vec<(usize, Hash)>;
+
+/// Validate and hash every raw entry in `frames` — already decompressed
+/// by [`PackEntries`] — staging each one into `batch` as it's hashed.
+/// Independent per entry (`WriteBatch::write_prehashed` is documented
+/// safe to call concurrently — see its doc comment, which was written
+/// anticipating exactly this), so below a small-pack threshold this
+/// runs a plain sequential loop, and at or above it (native builds
+/// only — wasm32 has no threads) fans the work out across a scoped
+/// thread pool sized to the machine. This is the read-side counterpart
+/// of the write path's `PackWriter::prepare_raw`/`push_prepared_raw`
+/// split.
+fn stage_raw_entries(
+    batch: &crate::batch::WriteBatch<'_>,
+    frames: &[(usize, &[u8])],
+) -> Result<RawStageResults, PackError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Below this many entries per available thread, thread-spawn
+        // overhead isn't worth it — the same sequential/parallel
+        // crossover shape `mkit-cli`'s own fan-outs use (see
+        // `fanout::threshold` there), tuned here by the
+        // `pack_unpack_fanout` bench.
+        const ENTRIES_PER_THREAD: usize = 8;
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return stage_raw_entries_parallel(batch, frames, threads);
+        }
+    }
+    frames
+        .iter()
+        .map(|&(idx, payload)| prepare_and_stage_raw(batch, payload).map(|h| (idx, h)))
+        .collect()
+}
+
+/// Parallel branch of [`stage_raw_entries`]: split `frames` into
+/// `threads` contiguous chunks and process each chunk sequentially on
+/// its own scoped thread. `std::thread::scope` (not a persistent pool)
+/// is deliberate — `mkit-core` stays dependency-neutral and wasm-clean
+/// (unlike `mkit-cli`, which already carries `rayon` for its own
+/// fan-outs — see that crate's `Cargo.toml`), and this call is already
+/// gated by [`stage_raw_entries`]'s threshold so the per-call spawn
+/// cost is only paid when there is enough work to amortize it.
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_raw_entries_parallel(
+    batch: &crate::batch::WriteBatch<'_>,
+    frames: &[(usize, &[u8])],
+    threads: usize,
+) -> Result<RawStageResults, PackError> {
+    let chunk_size = frames.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(frames.len());
+    // On a pack with more than one malformed raw entry, the specific
+    // `PackError` surfaced here depends on chunk/thread scheduling, not
+    // pack position — the same accepted nondeterminism as
+    // `mkit-cli`'s own `try_map_seq_or_par` fan-outs (see that
+    // function's doc). The pack is rejected either way; only which
+    // error variant/message is reported can vary between runs.
+    let mut first_err: Option<PackError> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = frames
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|&(idx, payload)| {
+                            prepare_and_stage_raw(batch, payload).map(|h| (idx, h))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle.join().expect("pack unpack worker thread panicked") {
+                match result {
+                    Ok(v) => out.push(v),
+                    Err(e) if first_err.is_none() => first_err = Some(e),
+                    Err(_) => {}
+                }
+            }
+        }
+    });
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+/// Pure per-entry step shared by both branches of [`stage_raw_entries`]:
+/// validate `payload` (already decompressed by [`PackEntries`]) as a
+/// canonical storable object, compute its dispatched id, and stage it
+/// into `batch`. Touches no state shared across entries — `batch` is
+/// the one exception, and it is `&self`-based with its own internal
+/// locking specifically so this is safe to call from many threads at
+/// once.
+fn prepare_and_stage_raw(
+    batch: &crate::batch::WriteBatch<'_>,
+    payload: &[u8],
+) -> Result<Hash, PackError> {
+    let obj = validate_storable_object(payload)?;
+    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
+    // BLAKE3 otherwise) from the object we just decoded, so the
+    // unpacked object lands under the same key every sink uses without
+    // a second decode.
+    let stored_hash = crate::object::id_from_object(&obj, payload);
+    batch.write_prehashed(stored_hash, &[payload])?;
+    Ok(stored_hash)
 }
 
 /// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
@@ -1154,52 +1329,22 @@ impl<'a> Iterator for PackEntries<'a> {
     }
 }
 
-/// Validate `payload` as a canonical storable object and stage it into
-/// `batch`/`in_pack`/`report`. Shared by the `0x00` and `0x03` branches
-/// of [`PackReader::read_inner`] — they differ only in whether
-/// `payload` is a zero-copy borrow straight out of `pack_bytes` (`0x00`)
-/// or an owned buffer produced by decompression (`0x03`); `owned_bytes`
-/// is credited only for the latter (`Cow::Owned`), preserving the
-/// zero-copy accounting issue #647 established for raw entries.
-fn stage_raw_object<'p>(
-    batch: &crate::batch::WriteBatch<'_>,
-    in_pack: &mut std::collections::HashMap<Hash, Cow<'p, [u8]>>,
-    report: &mut UnpackReport,
-    owned_bytes: Option<&AtomicU64>,
-    payload: Cow<'p, [u8]>,
-) -> Result<(), PackError> {
-    let obj = validate_storable_object(&payload)?;
-    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
-    // BLAKE3 otherwise) from the object we just decoded, so the
-    // unpacked object lands under the same key every sink uses without
-    // a second decode.
-    let stored_hash = crate::object::id_from_object(&obj, &payload);
-    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
-    if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
-        c.fetch_add(payload.len() as u64, Ordering::Relaxed);
-    }
-    in_pack.insert(stored_hash, payload);
-    report.raw_count += 1;
-    report.stored.push(stored_hash);
-    Ok(())
-}
-
 /// Resolve a delta's base, decode `stream` against it, and stage the
-/// reconstructed target into `batch`/`in_pack`/`report`. Shared by the
-/// `0x02` and `0x04` branches of [`PackReader::read_inner`] — `0x04`
-/// differs only in how `stream` was sourced (decompressed vs. borrowed
-/// straight from `pack_bytes`), not in how base resolution, delta
-/// decoding, or staging work.
-#[allow(clippy::too_many_arguments)]
+/// reconstructed target into `batch`/`in_pack`. `0x04` deltas differ
+/// from `0x02` only in how `stream` was sourced by [`PackEntries`]
+/// (decompressed vs. borrowed straight from `pack_bytes`), not in how
+/// base resolution, delta decoding, or staging work here. Returns the
+/// stored hash; `read_inner`'s phase 3 builds [`UnpackReport`] itself
+/// as it walks `entries` in pack order, so this function doesn't need
+/// to touch it.
 fn stage_delta_target(
     store: &ObjectStore,
     batch: &crate::batch::WriteBatch<'_>,
     in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
-    report: &mut UnpackReport,
     owned_bytes: Option<&AtomicU64>,
     base_hash: Hash,
     stream: &[u8],
-) -> Result<(), PackError> {
+) -> Result<Hash, PackError> {
     let resolved = resolve_delta_target(store, in_pack, base_hash, stream)?;
     let obj = validate_storable_object(&resolved)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved);
@@ -1208,9 +1353,7 @@ fn stage_delta_target(
         c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
     }
     in_pack.insert(stored_hash, Cow::Owned(resolved));
-    report.delta_count += 1;
-    report.stored.push(stored_hash);
-    Ok(())
+    Ok(stored_hash)
 }
 
 /// Resolve a delta's base (in-pack first, then on-disk store) and decode
@@ -1560,6 +1703,86 @@ mod tests {
         assert_eq!(report.delta_count, 1);
         assert_eq!(report.stored, vec![base_hash, target_hash]);
         assert_eq!(store.read(&target_hash).unwrap(), target_obj);
+    }
+
+    #[test]
+    fn delta_before_its_base_in_pack_order_is_rejected() {
+        // SPEC-PACKFILE §4: a delta's base MUST appear earlier in the
+        // pack as a raw entry (or already exist in the destination
+        // store) — never later. Same fixture as
+        // `raw_then_delta_resolves_in_pack`, but with the delta and its
+        // raw base swapped so the base comes *after* the delta that
+        // references it. The base is genuinely absent from both the
+        // pack-so-far and the (empty) store at the point the delta is
+        // read, so this must fail exactly like a base that's missing
+        // outright — never silently succeed by resolving against a
+        // same-pack entry the reader hasn't reached yet.
+        let mut content_base = vec![0u8; 1024];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let mut content_target = content_base.clone();
+        content_target[500] = 0xFF;
+        content_target[501] = 0xFE;
+
+        let base_obj = write_blob_via_serialize(&content_base);
+        let target_obj = write_blob_via_serialize(&content_target);
+        let base_hash = hash::hash(&base_obj);
+
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::DeltaBaseMissing(_)), "got {err:?}");
+        // Nothing from this rejected pack should be visible — not even
+        // the raw base entry that appeared after the bad delta.
+        assert!(!store.contains(&base_hash));
+    }
+
+    #[test]
+    fn delta_before_its_base_is_rejected_under_parallel_raw_fanout() {
+        // Same defect as `delta_before_its_base_in_pack_order_is_rejected`,
+        // but with enough raw entries ahead of the base (200 — comfortably
+        // over `stage_raw_entries`'s `ENTRIES_PER_THREAD * threads` on any
+        // CI runner up to dozens of cores) to force phase 2's parallel
+        // `std::thread::scope` fan-out rather than its small-pack
+        // sequential fallback. The base-before-delta rule must hold
+        // regardless of how phase 2 schedules raw-entry work across
+        // threads.
+        let mut content_base = vec![0u8; 256];
+        for (i, b) in content_base.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let mut content_target = content_base.clone();
+        content_target[10] = 0xFF;
+
+        let base_obj = write_blob_via_serialize(&content_base);
+        let target_obj = write_blob_via_serialize(&content_target);
+        let base_hash = hash::hash(&base_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        for i in 0..200u32 {
+            let mut filler = vec![0u8; 64];
+            for (j, b) in filler.iter_mut().enumerate() {
+                *b = u8::try_from((i as usize + j) % 251).expect("modulo < 256");
+            }
+            let obj = write_blob_via_serialize(&filler);
+            w.push_raw(hash::hash(&obj), &obj).unwrap();
+        }
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(matches!(err, PackError::DeltaBaseMissing(_)), "got {err:?}");
+        assert!(!store.contains(&base_hash));
     }
 
     #[test]

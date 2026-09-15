@@ -38,6 +38,14 @@ harness = false
 name = "pack_create"
 harness = false
 
+# Read-side counterpart of `pack_build_fanout` (below): wallclock of
+# `PackReader::read` (unpack) across entry counts, spanning the
+# raw-entry parallel-fan-out threshold in `mkit-core`'s
+# `stage_raw_entries`.
+[[bench]]
+name = "pack_unpack_fanout"
+harness = false
+
 # `ObjectStore::read_object`/`serialize::deserialize` decode cost for a
 # many-entry `Tree` — regression guard for the read_object double-decode
 # fix (a merkelized object's bytes used to be `deserialize`d once for
