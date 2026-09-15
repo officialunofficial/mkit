@@ -472,8 +472,9 @@ History / commits:
   verify`: `ok: <kind> <path> @ <short id>, <bytes> B, signer <keyid>
   (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`.
   `--format=json` matches mkit-wasm's `verify_disclosure` shape plus
-  `signer_trusted` (`true`/`false`/`null`). `--payload-out FILE` writes
-  the verified payload bytes.
+  `signer_trusted` (`true`/`false`/`null`), including `step_inner_roots`
+  (hex array) and `chunk_inner_root` (hex or `null`). `--payload-out FILE`
+  writes the verified payload bytes.
 - `mkit cat <hash>` &mdash; display an object by its hash.
 - `mkit hash <file>` &mdash; hash a file and store it as a blob.
 - `mkit tree` &mdash; snapshot the working directory as a tree object.

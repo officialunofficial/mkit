@@ -440,11 +440,13 @@ dropped/added sibling, wrong `leaf_count`).
 
 **Always:** every check `mkit_core::verify` performs — a path step, a
 chunk, a byte range — is stated against an authenticated object id
-(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id), reached via
-`merkle::verify_tree_entry`/`verify_chunk_with_meta`/a Bao slice keyed by
-that id. No verification step ever compares against a bare (pre-wrap)
-BMT inner root, a caller-claimed path string, or an unauthenticated
-length/offset value.
+(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v2
+bundle carries a bare inner root on each step and chunk header; that
+field is wrap-checked against the trusted id (`domain_digest(TYPE_DOMAIN,
+inner_root) == expected_id`) **before** it is used for anything, then
+cross-checked against the proof fold. No verification step ever treats
+a bare inner root, a caller-claimed path string, or an unauthenticated
+length/offset as a trust anchor.
 
 **Because:** an inner root is not type-distinct (SPEC-MERKLE-OBJECTS §2),
 so accepting one directly would let a `Tree` proof pass for a
@@ -464,6 +466,31 @@ the claimed location.
 `rust/tests/golden/disclosure/`'s negative vectors (swapped steps, a
 wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
 §4 states this as a numbered MUST at every dispatch point.
+
+## Declared disclosure inner roots wrap and match the proof fold
+
+**Always:** for every v2 disclosure `Step` and chunk header,
+`domain_digest(TYPE_DOMAIN, inner_root)` equals the parent Tree id or
+ChunkedBlob leaf id, and the proof folds to exactly that declared
+`inner_root`. Version byte `1` is rejected.
+
+**Because:** a commonware-native verifier runs upstream
+`verify_element_inclusion` / `verify_multi_inclusion` against the
+declared root. Without wrap-check-first, a prover could substitute any
+tree whose proof verifies against a forged root. Without the fold
+cross-check, a bundle could declare a wrap-correct root while attaching
+a proof built for a different tree.
+
+**If violated:** an external verifier that trusted the field would
+accept content from the wrong tree, or mkit and a commonware-native
+verifier would disagree on the same bundle.
+
+**Enforced by:** `rust/crates/mkit-core/tests/native_commonware_disclosure.rs`
+(every accept golden verified with only bundle fields, upstream
+`commonware_storage::bmt::Proof`, and `hash::domain_digest`; the three
+v2 negatives fail at wrap or upstream verify) and
+`rust/tests/golden/disclosure/neg_inner_root_forged.*`,
+`neg_inner_root_fold_mismatch.*`, `neg_bundle_version_1.*`.
 
 ## Disclosed absolute offsets require a complete length-proof set
 

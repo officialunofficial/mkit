@@ -1,6 +1,6 @@
 ---
 spec: SPEC-DISCLOSURE
-version: 2
+version: 3
 status: draft-normative
 audience: implementers of an mkit disclosure-bundle or closure-profile verifier (any language)
 ---
@@ -82,7 +82,7 @@ followed by `T` when present):
 
 ```
 magic   = "MKDP"              (4 raw bytes)
-version: u8 = 1
+version: u8 = 2
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB
 steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
@@ -90,26 +90,38 @@ steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
     name: Vec<u8> (1..=255)     entry name, SPEC-OBJECTS §4.1 rules
     mode: u8                    EntryMode (SPEC-OBJECTS §4)
     child_id: [u8; 32]
+    inner_root: [u8; 32]        bare BMT root of the parent Tree
     position: u32                BMT position (= entry index) in the parent Tree
     proof: Proof (max_items = 1) SPEC-MERKLE-OBJECTS §5.1/§5.2
   }
 payload_kind: u8
   0  Object { bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
   1  Chunk  { total_size: u64, chunk_size: u32, index: u32,
-              proof: Proof (max_items = 2), bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
+              inner_root: [u8; 32], proof: Proof (max_items = 2),
+              bytes: Vec<u8> <= MAX_RAW_OBJECT_SIZE }
   2  Range  { chunk: Option<ChunkHdr>,
               offset_in_blob: u64, len: u64, slice: Vec<u8>,
               chunk_len_proofs: Vec<LenProof> <= MAX_CHUNKS }
      ChunkHdr { total_size: u64, chunk_size: u32, index: u32,
-                chunk_id: [u8; 32], proof: Proof (max_items = 2) }
+                inner_root: [u8; 32], chunk_id: [u8; 32],
+                proof: Proof (max_items = 2) }
      LenProof { index: u32, chunk_id: [u8; 32],
                 proof: Proof (max_items = 1), slice: Vec<u8> }
 ```
 
+`Step.inner_root` is the bare BMT root of the **parent** Tree this
+step's proof is verified against (the tree whose id is the commit's
+`tree_hash` for step 0, or the previous step's `child_id`).
+`Chunk`/`ChunkHdr.inner_root` is the bare BMT root of the ChunkedBlob
+whose id is the leaf id. `LenProof` entries reuse that same root (same
+object) and gain nothing.
+
 The whole bundle MUST be `<= MAX_BUNDLE_BYTES` (64 MiB), checked before
 any decode work. Trailing bytes after the declared body MUST be
-rejected. `version != 1`, an unrecognized `payload_kind`, and an
+rejected. `version != 2`, an unrecognized `payload_kind`, and an
 unrecognized `mode` byte are typed decode errors, never a bare "invalid".
+A version byte of `1` is a typed `UnsupportedBundleVersion(1)` error;
+there is no compatibility decoder.
 
 `Step` and `ChunkHdr`/`LenProof`'s `proof` fields decode with
 [`merkle::Proof::decode`](../../rust/crates/mkit-core/src/merkle.rs)'s
@@ -164,11 +176,19 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       rules ([`TreeEntry::validate_name`](../../rust/crates/mkit-core/src/object.rs)) &mdash;
       an invalid name (trailing space, `.mkit`, a reserved Windows device
       name, etc.) is rejected here, before its proof is even checked.
-   2. **MUST** verify `(name, mode, child_id)` at `position` against the
-      *previous* step's `child_id` (step 0 against `tree_hash` itself),
-      via [`merkle::verify_tree_entry`](../../rust/crates/mkit-core/src/merkle.rs)
-      (SPEC-MERKLE-OBJECTS §5.4) &mdash; **stated against the object id**,
-      never a bare inner root.
+    2. **MUST** check `domain_digest(b"mkit.tree\x00", inner_root) == expected_id`
+       first, where `expected_id` is the previous step's `child_id` (step 0
+       against `tree_hash` itself). A mismatch is a typed `InnerRootMismatch`.
+       The field is never a second trust anchor (wrap-check-first,
+       `docs/VERIFY.md` §5). **MUST** then require that the proof folds to
+       exactly `inner_root`; a bundle whose proof folds to a different root
+       than it declares is rejected even if the wrap of the declared root
+       happens to match, and vice versa. **MUST** then wrap the folded
+       value and compare to `expected_id` (SPEC-MERKLE-OBJECTS §5.4).
+       A commonware-native verifier performs the wrap check itself and
+       then runs upstream `bmt::Proof::verify_element_inclusion` against
+       `inner_root` unmodified, needing no mkit code beyond the public
+       domain constants.
    3. **MUST** reject the whole bundle if `i` is not the last step and
       `mode != Tree` &mdash; every step but the last MUST descend into a
       directory.
@@ -181,15 +201,21 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
     - **`Object`**: **MUST** deserialize `bytes` and check its
       content-address (BLAKE3, or the BMT root for a `Tree`/`ChunkedBlob`
       &mdash; SPEC-MERKLE-OBJECTS §2) equals the leaf id.
-    - **`Chunk`**: **MUST** hash `bytes` (its BLAKE3 IS the chunk's Blob
-      id, SPEC-OBJECTS §3) and verify, in one multi-proof over BMT
-      positions `{0, index + 1}` against the leaf id, that (a) the
-      metadata leaf the verifier computes **itself** from `total_size`/
-      `chunk_size` and (b) that chunk hash at position `index + 1` both
-      fold to the leaf id (SPEC-MERKLE-OBJECTS §3.1, §5.5). The metadata
-      leaf is **never** accepted as an externally supplied value at
-      position 0 &mdash; only ever recomputed from the very fields being
-      authenticated.
+    - **`Chunk`**: **MUST** first check
+       `domain_digest(b"mkit.chunked\x00", inner_root) == leaf_id`, else
+       reject with `InnerRootMismatch`. **MUST** then require that the
+       multi-proof folds to exactly `inner_root`. **MUST** hash `bytes`
+       (its BLAKE3 IS the chunk's Blob id, SPEC-OBJECTS §3) and verify, in
+       one multi-proof over BMT positions `{0, index + 1}` against the
+       leaf id, that (a) the metadata leaf the verifier computes
+       **itself** from `total_size`/`chunk_size` and (b) that chunk hash
+       at position `index + 1` both fold to the leaf id
+       (SPEC-MERKLE-OBJECTS §3.1, §5.5). The metadata leaf is **never**
+       accepted as an externally supplied value at position 0 &mdash; only
+       ever recomputed from the very fields being authenticated. A
+       commonware-native verifier runs the wrap check and then upstream
+       `bmt::Proof::verify_multi_inclusion` against `inner_root`
+       unmodified.
     - **`Range`**, `chunk = None` (the leaf is a plain `Blob`): **MUST**
       reject `len == 0`. **MUST** verify a Bao slice proving `len` bytes
       at content offset `offset_in_blob` (Bao offset `offset_in_blob +
@@ -198,9 +224,11 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
       `chunk_len_proofs` MUST be empty; a non-empty set here is a typed
       error (it has no target chunk to describe).
     - **`Range`**, `chunk = Some(hdr)` (the leaf is a `ChunkedBlob`):
-      **MUST** reject `len == 0`. **MUST** run the same `{0, index + 1}`
-      multi-proof as `Chunk` above (using `hdr.chunk_id` as the second
-      leaf) against the leaf id. **MUST** verify a Bao slice proving
+       **MUST** reject `len == 0`. **MUST** apply the same wrap-check-first
+       and fold-equals-declared rules as `Chunk` to `hdr.inner_root`.
+       **MUST** run the same `{0, index + 1}` multi-proof as `Chunk` above
+       (using `hdr.chunk_id` as the second leaf) against the leaf id.
+       **MUST** verify a Bao slice proving
       `len` bytes at content offset `offset_in_blob` (Bao offset
       `offset_in_blob + 10`) against `hdr.chunk_id`. If `hdr.index == 0`,
       `chunk_len_proofs` **MUST** be empty &mdash; nothing precedes the
@@ -273,10 +301,14 @@ name (trailing space); a payload whose id does not equal the leaf id; a
 `Chunk`/`Range` chunk header with a forged `total_size`; a Bao slice at
 the wrong offset; a zero-length range; an incomplete `chunk_len_proofs`
 set; a `chunk_len_proofs` entry present on a chunk-index-0 range
-(`neg_len_proofs_on_chunk0`); `steps.len() = 129`; `version = 2`; a
-trailing byte after the declared body; and `commit_bytes` that decode
-to a `Tag` (a valid, signed object &mdash; just not one with a
-`tree_hash`).
+(`neg_len_proofs_on_chunk0`); `steps.len() = 129`; `version = 3`;
+`version = 1` (`neg_bundle_version_1`); a declared inner root that does
+not wrap to the parent id (`neg_inner_root_forged`); a declared inner
+root that wraps correctly but whose proof was built for a different
+tree (`neg_inner_root_fold_mismatch`); a trailing byte after the
+declared body; and `commit_bytes` that decode to a `Tag` (a valid,
+signed object &mdash; just not one with a `tree_hash`). Accept sidecars
+record `step_inner_roots_hex` and `chunk_inner_root_hex`.
 
 `rust/crates/mkit-core/tests/golden_disclosure.rs` reads only the
 committed files, runs `verify::verify_disclosure`, and compares the
@@ -416,6 +448,8 @@ files.
 |---|---|
 | any disclosed byte tampered | the Bao slice / BLAKE3 check against the authenticated id fails |
 | a step's `(name, mode, child_id)` tampered | that step's inclusion proof no longer folds to the expected parent id |
+| declared inner root does not wrap to the parent id | wrap-check-first (`domain_digest(TYPE_DOMAIN, inner_root) == expected_id`) fails with `InnerRootMismatch` |
+| proof fold does not equal the declared inner root | rejected even if the wrap of the declared root happens to match |
 | step order/parent tampered (steps swapped) | each step verifies against the *previous* step's `child_id`, not an independent root |
 | a non-final step's mode misreported as non-`Tree` | rejected outright (§4 step 8.3), before its proof is even checked |
 | `ChunkedBlob` `total_size`/`chunk_size` forged | the multi-proof's metadata leaf (computed by the verifier, never accepted as input) no longer folds to the leaf id |
