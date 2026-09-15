@@ -53,10 +53,16 @@ fn setup(
     (dir, store, a, b)
 }
 
+/// A mutation scenario: a name and the function producing the mutated
+/// bytes from the fixture base. Named so clippy's `type_complexity`
+/// lint (`-D warnings` under `--all-features`) doesn't flag the bare
+/// slice-of-tuple-of-function-pointer type spelled out inline.
+type Scenario = (&'static str, fn(&[u8]) -> Vec<u8>);
+
 fn bench_content_eq(c: &mut Criterion) {
     let mut samples: Vec<Sample> = Vec::new();
 
-    let scenarios: &[(&str, fn(&[u8]) -> Vec<u8>)] = &[
+    let scenarios: &[Scenario] = &[
         ("identical", |base| base.to_vec()),
         ("append_1mib", |base| {
             let mut v = base.to_vec();
