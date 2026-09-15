@@ -1179,6 +1179,12 @@ fn compose_payload(leaf_id: Hash, payload: PayloadWire) -> Result<DisclosedPaylo
             slice,
             chunk_len_proofs,
         } => {
+            // SPEC-DISCLOSURE §4: `len == 0` is rejected before the
+            // wrap/fold checks below, so it wins over e.g. InnerRootMismatch
+            // when a bundle is malformed both ways.
+            if len == 0 {
+                return Err(VerifyError::ZeroLengthRange);
+            }
             verify_chunk_with_declared_root(
                 &leaf_id,
                 &hdr.inner_root,
