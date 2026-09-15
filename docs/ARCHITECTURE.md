@@ -14,7 +14,7 @@ responsibility boundaries &mdash; there is no "common" or "utils" crate.
 
 | Crate                          | Path                                  | Purpose                                                                |
 |--------------------------------|---------------------------------------|------------------------------------------------------------------------|
-| `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing |
+| `mkit-core`                    | `rust/crates/mkit-core/`              | Object store, packs, refs, index, worktree, ignore, repo lock, ops, signing, protocol framing, `verify`/`verify::closure` (partial/full disclosure) |
 | `mkit-attest`                  | `rust/crates/mkit-attest/`            | JCS canonical JSON, in-toto v1 Statement, DSSE envelope, signers, verifiers |
 | `mkit-keystore`                | `rust/crates/mkit-keystore/`          | Key vault interface and backends (`specs/SPEC-KEYSTORE.md`)                  |
 | `mkit-git-bridge`              | `rust/crates/mkit-git-bridge/`        | Git import/export bridge incl. fork mode (`specs/SPEC-GIT-BRIDGE.md`)        |
@@ -110,6 +110,17 @@ is missing or different, rather than misreading objects under the
 wrong addressing rule. The marker governs object identity only: the
 serialized wire format and the `schema_version` field are independent
 of it.
+
+**Verification.** The BMT inclusion proofs this section's identity
+scheme makes possible are exposed as a first-class capability, not just
+an internal read-time check: `mkit_core::merkle`'s id-based proof
+verifiers plus `mkit_core::verify`/`verify::closure` (partial and full
+disclosure against a commit id, for an external party with no repository
+access &mdash; a DA provider, a light client, a browser) round out the
+picture the diagram above starts. See `docs/VERIFY.md` for the
+user-facing guide and `docs/specs/SPEC-MERKLE-OBJECTS.md` /
+`docs/specs/SPEC-DISCLOSURE.md` for the normative wire formats and
+verification algorithms.
 
 ---
 

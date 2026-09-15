@@ -94,6 +94,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (64 MiB). Native tests replay the `proofs/`, `disclosure/`, and
   `closure/` golden vectors through these exports. **SemVer:** additive.
 
+- *(docs)* `docs/VERIFY.md` (issue #1015 verifier kit PR 6, closing the
+  series): the user-facing guide to verifying an mkit commit hash for
+  someone building a verifier or a DA provider &mdash; the byte-level
+  authentication chain from commit id to leaf, the three-part trust model
+  (content&harr;commit id, commit&harr;signer, signer&harr;identity),
+  worked CLI/Rust/TypeScript examples for both full disclosure (closure
+  profile) and partial disclosure (bundle), commonware-BMT interop notes,
+  a from-scratch (no-Rust) conformance checklist against the golden-vector
+  corpus, and a reference table of every CLI command, wasm export, and
+  core function in the kit. Every command and code snippet on the page was
+  run (CLI against a real repository; Rust via a compiled scratch check;
+  TypeScript kept to the documented `mkit-wasm` API) while writing it.
+  Linked from `README.md`, `SKILL.md`, `docs/ARCHITECTURE.md`, and the
+  mkit MCP's new `get_verify_guide` tool. **SemVer:** none, docs only.
+
 - *(wasm)* `MAX_CLOSURE_INPUT_BYTES` (1 GiB, matching
   `mkit_core::store::MAX_RAW_OBJECT_SIZE`): `verify_closure_packs` and
   `verify_closure_manifest` now cap their concatenated packs input

@@ -239,6 +239,14 @@ Object kinds (full schema in
 | Delta        | Bsdiff-like delta between two blobs (pack-internal)        |
 | Tag          | Annotated, optionally signed pointer to another object     |
 
+**Verifying a commit hash.** An external party holding a trusted mkit
+commit id and untrusted bytes &mdash; a DA provider, a light client, a
+browser &mdash; can prove a single path/chunk/byte range (`mkit prove` /
+`verify-proof`) or a whole object set (`mkit closure export` / `verify`)
+belongs to that id, with public mkit tooling only (CLI, `mkit-core`, or
+`@officialunofficial/mkit-wasm`). See
+[`docs/VERIFY.md`](docs/VERIFY.md).
+
 ## Attestations
 
 mkit ships **native attestation as a first-class object type**, not a
@@ -388,6 +396,7 @@ series.
 |---|---|
 | [`docs/INSTALL.md`](docs/INSTALL.md) | End users &mdash; install channels, verification, hardware signers |
 | [`docs/CLI.md`](docs/CLI.md) | End users &mdash; subcommands, env vars, exit codes |
+| [`docs/VERIFY.md`](docs/VERIFY.md) | Verifier/DA-provider builders &mdash; verifying an mkit commit hash (full and partial disclosure) with no repository access |
 | [`docs/GUIDE-GIT-WORKFLOWS.md`](docs/GUIDE-GIT-WORKFLOWS.md) | End users &mdash; migrate from git, track a git upstream, push work back |
 | [`docs/specs/`](docs/specs/README.md) | Implementers plus integrators &mdash; the wire-format and subsystem specifications, indexed with one-line summaries |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors &mdash; module layering and design notes |
