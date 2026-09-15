@@ -1174,16 +1174,33 @@ Remote / sync:
   pack(s), <total> B -> DIR`. JSON: `{root, mode, packs: [{file,
   blake3, bytes}], objects, manifest}`.
 - `mkit closure verify <commit-id> [--from DIR] [--history]
-  [--format=json]` &mdash; verify a closure. With `--from DIR`, reads
-  `MANIFEST.mkcl` and every pack it names and checks them against a
-  trusted 64-hex `<commit-id>` (not a revision). Without `--from`,
-  checks the **local repository** (`<commit-id>` may be a revision;
-  `--history` selects history vs snapshot). Output: `ok: closure
-  complete (<verified> objects, <mode>)` or `bad: closure incomplete:
-  <m> missing, <c> corrupt` plus up to 10 ids each; `unreferenced` is a
-  note, not a failure. JSON matches mkit-wasm's `ClosureReport` shape
-  (`root, mode, verified, complete, missing[], corrupt[{id, reason}],
-  unreferenced[]`). Incomplete closures exit `65` (`DATAERR`).
+  [--show-unreferenced] [--format=json]` &mdash; verify a closure. With
+  `--from DIR`, reads `MANIFEST.mkcl` and every pack it names and
+  checks them against a trusted 64-hex `<commit-id>` (not a revision).
+  Without `--from`, checks the **local repository** (`<commit-id>` may
+  be a revision; `--history` selects history vs snapshot); a corrupt
+  on-disk object (its bytes no longer hash to its filename) is reported
+  under `corrupt`, the same as a corrupt object in a served pack &mdash;
+  local `closure verify` is an fsck-shaped check, not a hard read
+  failure. Output: `ok: closure complete (<verified> objects, <mode>)`
+  or `bad: closure incomplete: <m> missing, <c> corrupt` plus up to 10
+  ids each; `unreferenced` is a note, not a failure, and &mdash; local
+  mode only &mdash; is hidden unless `--show-unreferenced` is passed
+  (the local store is expected to be a superset of any single commit,
+  so a long unreferenced list is usually noise; `--from` always shows
+  it). JSON matches mkit-wasm's `ClosureReport` shape (`root, mode,
+  verified, complete, missing[], corrupt[{id, reason}],
+  unreferenced[]`); `unreferenced` is `[]` in local mode unless
+  `--show-unreferenced` is passed. Incomplete closures exit `65`
+  (`DATAERR`).
+
+  **Memory note:** `verify_closure` takes every object's bytes in
+  memory at once (it is store-less by design, so a wasm or DA-provider
+  caller never needs a store). Local (no `--from`) mode therefore loads
+  the **whole local object store** into memory before walking it &mdash;
+  fine for a typical repository, but a cost to be aware of against a
+  very large one. A streaming, store-backed variant is tracked as a
+  follow-up: [officialunofficial/mkit#1022](https://github.com/officialunofficial/mkit/issues/1022).
 - `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of

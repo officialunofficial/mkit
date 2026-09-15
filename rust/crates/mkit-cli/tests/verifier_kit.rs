@@ -364,6 +364,53 @@ fn closure_local_reports_missing_blob() {
 }
 
 #[test]
+fn closure_local_reports_corrupt_blob() {
+    let repo = Repo::new();
+    repo.commit_file("keep.txt", b"keep\n", "base");
+    repo.commit_file("only-head.txt", b"unique-to-head\n", "head");
+    let listing = stdout(&repo.ok(&["ls-tree", "-r", "HEAD"]));
+    let blob_hex = listing
+        .lines()
+        .find(|l| l.contains("only-head.txt"))
+        .and_then(|l| l.split_whitespace().nth(2))
+        .expect("blob hex")
+        .to_owned();
+    let obj = repo
+        .mkit_dir()
+        .join("objects")
+        .join(&blob_hex[..2])
+        .join(&blob_hex[2..]);
+    let mut bytes = fs::read(&obj).unwrap();
+    let i = bytes.len() / 2;
+    bytes[i] ^= 0xff;
+    fs::write(&obj, bytes).unwrap();
+    let out = repo.run(&["closure", "verify", "HEAD"]);
+    assert_eq!(out.status.code(), Some(65), "stderr={}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("bad: closure incomplete: 0 missing, 1 corrupt"),
+        "{text}"
+    );
+}
+
+#[test]
+fn closure_local_hides_unreferenced_unless_flag() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"first\n", "first");
+    let first = head(&repo);
+    repo.commit_file("b.txt", b"second\n", "second");
+
+    let out = repo.ok(&["closure", "verify", &first]);
+    let text = stdout(&out);
+    assert!(text.contains("ok: closure complete"), "{text}");
+    assert!(!text.contains("unreferenced"), "{text}");
+
+    let out = repo.ok(&["closure", "verify", &first, "--show-unreferenced"]);
+    let text = stdout(&out);
+    assert!(text.contains("unreferenced"), "{text}");
+}
+
+#[test]
 fn closure_json_keys() {
     let repo = fixture_repo();
     let commit = head(&repo);

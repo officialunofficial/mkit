@@ -365,6 +365,8 @@ complete -c mkit -n "__fish_seen_subcommand_from closure" \
 complete -c mkit -n "__fish_seen_subcommand_from closure" \
     -l from -d "Closure directory" -r
 complete -c mkit -n "__fish_seen_subcommand_from closure" \
+    -l show-unreferenced -d "Show unreferenced objects (local mode)"
+complete -c mkit -n "__fish_seen_subcommand_from closure" \
     -l format -d "Output format" -xa "default json"
 
 # pack-shard flags.

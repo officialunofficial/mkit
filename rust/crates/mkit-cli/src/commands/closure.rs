@@ -63,6 +63,12 @@ struct VerifyArgs {
     /// manifest's mode is used.
     #[arg(long)]
     history: bool,
+    /// Local (no `--from`) check only: also print the `unreferenced`
+    /// list. Hidden by default — the local store is expected to be a
+    /// superset of any single commit, so a long unreferenced list is
+    /// usually noise, not a finding.
+    #[arg(long)]
+    show_unreferenced: bool,
     #[arg(long, value_enum, default_value = "default")]
     format: ClosureFormat,
 }
@@ -212,7 +218,7 @@ fn run_verify_from(opts: &VerifyArgs, dir: &Path, json: bool) -> u8 {
         Ok(r) => r,
         Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
     };
-    emit_report(&report, json)
+    emit_report(&report, json, true)
 }
 
 fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
@@ -242,25 +248,37 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
         Err(e) => return emit_err(&format!("enumerate objects: {e}"), exit::GENERAL_ERROR),
     };
     let mut objects = Vec::new();
+    // `store.read` re-verifies each object's on-disk bytes against its
+    // filename hash and fails hard (`HashMismatch`) on a corrupt file. A
+    // local `closure verify` is documented as an fsck-shaped check, so a
+    // corrupt object is reported under `corrupt`, not a hard CLI error —
+    // captured here, merged into the report below.
+    let mut local_corrupt: Vec<(Hash, String)> = Vec::new();
     for h in hashes {
         match store.read(&h) {
             Ok(b) => objects.push(b),
             Err(StoreError::ObjectNotFound(_)) => {}
+            Err(e @ StoreError::HashMismatch { .. }) => local_corrupt.push((h, e.to_string())),
             Err(e) => return emit_err(&format!("read {}: {e}", to_hex(&h)), exit::DATAERR),
         }
     }
-    let report = match verify_closure(&root, mode, objects.iter().map(Vec::as_slice)) {
+    let mut report = match verify_closure(&root, mode, objects.iter().map(Vec::as_slice)) {
         Ok(r) => r,
         Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
     };
-    emit_report(&report, json)
+    for (h, reason) in local_corrupt {
+        report.missing.retain(|m| *m != h);
+        report.corrupt.push((h, reason));
+    }
+    report.corrupt.sort_by_key(|(id, _)| *id);
+    emit_report(&report, json, opts.show_unreferenced)
 }
 
-fn emit_report(report: &ClosureReport, json: bool) -> u8 {
+fn emit_report(report: &ClosureReport, json: bool, show_unreferenced: bool) -> u8 {
     if json {
-        emit_report_json(report);
+        emit_report_json(report, show_unreferenced);
     } else {
-        emit_report_text(report);
+        emit_report_text(report, show_unreferenced);
     }
     if report.is_complete() {
         exit::OK
@@ -269,7 +287,7 @@ fn emit_report(report: &ClosureReport, json: bool) -> u8 {
     }
 }
 
-fn emit_report_text(report: &ClosureReport) {
+fn emit_report_text(report: &ClosureReport, show_unreferenced: bool) {
     let mut stdout = std::io::stdout().lock();
     let mode = mode_name(report.mode);
     if report.is_complete() {
@@ -289,7 +307,7 @@ fn emit_report_text(report: &ClosureReport) {
         let corrupt_ids: Vec<Hash> = report.corrupt.iter().map(|(id, _)| *id).collect();
         print_id_list(&mut stdout, &corrupt_ids, Some(&report.corrupt));
     }
-    if !report.unreferenced.is_empty() {
+    if show_unreferenced && !report.unreferenced.is_empty() {
         let _ = writeln!(stdout, "note: {} unreferenced", report.unreferenced.len());
         print_id_list(&mut stdout, &report.unreferenced, None);
     }
@@ -313,9 +331,13 @@ fn print_id_list(stdout: &mut impl Write, ids: &[Hash], corrupt: Option<&[(Hash,
     }
 }
 
-fn emit_report_json(report: &ClosureReport) {
+fn emit_report_json(report: &ClosureReport, show_unreferenced: bool) {
     let missing: Vec<String> = report.missing.iter().map(to_hex).collect();
-    let unreferenced: Vec<String> = report.unreferenced.iter().map(to_hex).collect();
+    let unreferenced: Vec<String> = if show_unreferenced {
+        report.unreferenced.iter().map(to_hex).collect()
+    } else {
+        Vec::new()
+    };
     let mut corrupt_items = Vec::new();
     for (id, reason) in &report.corrupt {
         let mut obj = JsonObject::new();
@@ -435,5 +457,16 @@ mod tests {
         };
         assert!(p.from.is_some());
         assert!(!p.history);
+        assert!(!p.show_unreferenced);
+    }
+
+    #[test]
+    fn parse_verify_show_unreferenced() {
+        let Cmd::Verify(p) =
+            parse_args(&["verify".into(), "HEAD".into(), "--show-unreferenced".into()]).unwrap()
+        else {
+            panic!("expected verify");
+        };
+        assert!(p.show_unreferenced);
     }
 }

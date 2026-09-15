@@ -572,6 +572,10 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
                         "history",
                         json!({ "type": "boolean", "description": "History mode for a local (no from) check" }),
                     ),
+                    (
+                        "show_unreferenced",
+                        json!({ "type": "boolean", "description": "Local (no from) check only: include the unreferenced list, hidden there by default" }),
+                    ),
                 ],
                 &["repo_path", "commit_id"],
             )
@@ -1050,6 +1054,9 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             }
             if args.get("history").and_then(Value::as_bool) == Some(true) {
                 out.push("--history".into());
+            }
+            if args.get("show_unreferenced").and_then(Value::as_bool) == Some(true) {
+                out.push("--show-unreferenced".into());
             }
         }
         "mkit_add" => {

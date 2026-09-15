@@ -118,6 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
+  hard read error the moment it hits one corrupt on-disk object &mdash; it
+  now catches `StoreError::HashMismatch` per object, reports it under the
+  `ClosureReport`'s `corrupt` list (removing it from `missing` first, if
+  the walk had already reached it), and continues, matching the command's
+  documented fsck-shaped behavior. Also hides the `note: N unreferenced`
+  list (and the JSON `unreferenced` array) in local mode unless a new
+  `--show-unreferenced` flag is passed &mdash; the local store is expected to
+  be a superset of any single commit, so the list was noise by default.
+  New CLI test flips a byte in an object file and expects
+  `bad: closure incomplete: 0 missing, 1 corrupt`. **SemVer:** additive
+  (new flag; local-mode `corrupt`/`unreferenced` reporting changes for a
+  case that previously hard-failed the whole command).
+
 - *(core)* `verify::resolve_absolute_offset` now rejects a non-empty
   `chunk_len_proofs` on a `Range` payload whose disclosed chunk is index
   0, instead of silently ignoring it &mdash; index 0 has nothing preceding it
