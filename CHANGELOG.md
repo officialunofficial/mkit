@@ -176,6 +176,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hashing to a different id would previously be dropped. **SemVer:**
   additive.
 
+- *(core)* `cargo check -p mkit-core --no-default-features --target
+  wasm32-unknown-unknown` now compiles: on wasm32, `getrandom` 0.4 is
+  enabled with the `wasm_js` feature (same posture as `mkit-wasm`), so
+  the crate no longer fails the getrandom "unknown-unknown not supported
+  by default" compile error. Native builds are unchanged. **SemVer:**
+  none.
+
 - *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
   hard read error the moment it hits one corrupt on-disk object &mdash; it
   now catches `StoreError::HashMismatch` per object, reports it under the
