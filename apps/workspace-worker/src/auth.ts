@@ -26,6 +26,10 @@ export async function authenticate(
         );
     if (url.origin !== audience || url.search || request.method !== "POST")
         throw new HttpError(401, "Invalid signing destination.");
+    // Drain the body before any check below can reject the request: responding while the
+    // client is still writing a large body resets the connection instead of delivering the
+    // rejection (observed as ECONNRESET under Miniflare/workerd for bodies of ~200KB+).
+    const bytes = await readBytes(request, maxBodyBytes);
     if (headers.get("origin") && headers.get("origin") !== audience)
         throw new HttpError(403, "Open this workspace on mkit.sh.");
     if (headers.get("content-type")?.split(";")[0] !== "application/json")
@@ -57,7 +61,6 @@ export async function authenticate(
     ) {
         throw new HttpError(401, "Unlock your passkey identity and try again.");
     }
-    const bytes = await readBytes(request, maxBodyBytes);
     if (mkit.blake3_hex(bytes) !== digest) throw new HttpError(401, "The signed request changed.");
     const canonical = [
         "mkit-write:v2",
