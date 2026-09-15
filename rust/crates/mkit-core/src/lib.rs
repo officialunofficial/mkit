@@ -134,8 +134,8 @@ pub use delta::{
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
     HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
-    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackError, PackReader, PackWriter,
-    TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackEntries, PackEntry, PackError, PackReader,
+    PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
 };
 
 // Refs, index, worktree, ignore, and repo_lock.
@@ -170,7 +170,8 @@ pub use protocol::{
 // at the crate root — the submodule is typically the right import scope
 // for state-machine APIs.
 pub use ops::{
-    CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffError, DiffKind,
-    DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, collect_ancestor_set,
-    diff_trees, find_merge_base, is_ancestor, merge_trees, status_diff,
+    CherryPickError, CherryPickResult, ClosureMode, Conflict, ConflictKind, DiffEntry, DiffError,
+    DiffKind, DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, children,
+    collect_ancestor_set, diff_trees, find_merge_base, is_ancestor, merge_trees, reachable_closure,
+    reachable_objects, reachable_snapshot, status_diff,
 };

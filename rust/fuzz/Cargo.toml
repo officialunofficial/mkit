@@ -169,3 +169,19 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack_entries"
+path = "fuzz_targets/pack_entries.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_closure"
+path = "fuzz_targets/verify_closure.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

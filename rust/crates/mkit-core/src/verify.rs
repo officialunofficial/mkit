@@ -33,7 +33,10 @@
 //! authentication chain: commit → tree steps → leaf → chunk/slice).
 //! [`verify_disclosure`] decodes a self-contained wire bundle (§ below)
 //! and composes them into one call. [`build_disclosure`] is the
-//! (native-only) producer side.
+//! (native-only) producer side. Full disclosure — every reachable
+//! object against a commit id — is [`verify_closure`] /
+//! [`verify_closure_packs`] / [`verify_closure_manifest`], with
+//! [`export_closure`] as the native producer (issue #1015 PR 3).
 //!
 //! Everything except [`build_disclosure`] compiles with
 //! `--no-default-features` and targets `wasm32-unknown-unknown`.
@@ -242,6 +245,52 @@ pub enum VerifyError {
     /// error.
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
+    /// The supplied object set exceeds [`crate::pack::MAX_ENTRIES`].
+    #[error("closure object set exceeds the pack MAX_ENTRIES cap")]
+    TooManyClosureObjects,
+    /// The closure root deserialized but is not a `Commit`, `Remix`, or `Tag`.
+    #[error("closure root is a {0:?}, which is not a Commit, Remix, or Tag")]
+    ClosureRootWrongType(ObjectType),
+    /// A pack in the closure profile contained a delta or compressed entry.
+    #[error(
+        "closure pack {pack_index} entry {entry_index} is not a raw (0x00) entry (closure profile is raw-only)"
+    )]
+    ClosureProfileViolation {
+        /// Index of the offending pack in the caller-supplied list.
+        pack_index: usize,
+        /// Index of the offending entry inside that pack.
+        entry_index: usize,
+    },
+    /// The encoded closure manifest is shorter than the magic+version
+    /// header, or the magic bytes are not `"MKCL"`.
+    #[error("closure manifest magic is not \"MKCL\"")]
+    ClosureManifestBadMagic,
+    /// The manifest's version byte is not `1`.
+    #[error("closure manifest version {0} is not supported (v1 only)")]
+    ClosureManifestUnsupportedVersion(u8),
+    /// The manifest body is malformed: truncated, an over-cap pack
+    /// list, an unknown mode byte, or trailing bytes.
+    #[error(
+        "closure manifest body is malformed (bad codec payload, unknown mode, or trailing bytes)"
+    )]
+    ClosureManifestMalformed,
+    /// The number of packs supplied does not match the manifest.
+    #[error("closure manifest lists {expected} packs but {got} were supplied")]
+    ClosurePackCountMismatch {
+        /// Pack count recorded in the manifest.
+        expected: usize,
+        /// Number of pack buffers the caller handed the verifier.
+        got: usize,
+    },
+    /// `pack_key(packs[index])` does not equal the manifest entry.
+    #[error("pack {index} hash does not match the closure manifest")]
+    ClosurePackKeyMismatch {
+        /// Index of the mismatched pack.
+        index: usize,
+    },
+    /// A packfile framing/decode error while iterating a closure pack.
+    #[error(transparent)]
+    Pack(#[from] crate::pack::PackError),
 }
 
 impl From<CodecError> for VerifyError {
@@ -254,6 +303,12 @@ impl From<CodecError> for VerifyError {
         Self::Malformed
     }
 }
+
+mod closure;
+pub use closure::{
+    ClosureExport, ClosureManifest, ClosureReport, MAX_CLOSURE_PACKS, export_closure,
+    verify_closure, verify_closure_manifest, verify_closure_packs,
+};
 
 // ---------------------------------------------------------------------------
 // Public types

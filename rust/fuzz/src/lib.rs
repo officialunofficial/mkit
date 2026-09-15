@@ -462,6 +462,135 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
     let _ = verify::verify_disclosure(&fixture.commit_id, input);
 }
 
+/// Store-less pack iterator: never panics on adversarial bytes. When
+/// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
+/// and yields `raw_count + delta_count` items.
+pub fn pack_entries_one_iteration(input: &[u8]) {
+    let Some(input) = pack_validated_input(input) else {
+        return;
+    };
+    let parsed = mkit_core::pack::PackEntries::new(input);
+    if let Ok(entries) = parsed {
+        let mut n = 0usize;
+        for item in entries {
+            match item {
+                Ok(_) => n += 1,
+                Err(_) => break,
+            }
+        }
+        let _ = n;
+    }
+
+    let dir = match tempfile::TempDir::new() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let layout = mkit_core::layout::RepoLayout::single(dir.path());
+    let store = match mkit_core::store::ObjectStore::init(&layout) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if let Ok(report) = mkit_core::pack::PackReader::read(input, &store) {
+        let entries = mkit_core::pack::PackEntries::new(input)
+            .expect("PackReader-accepted pack must parse as PackEntries");
+        let got = entries.filter(|e| e.is_ok()).count();
+        assert_eq!(
+            got,
+            (report.raw_count + report.delta_count) as usize,
+            "PackEntries must yield one item per PackReader-stored entry"
+        );
+    }
+}
+
+/// A tiny native fixture for [`verify_closure_one_iteration`]: one
+/// committed file, exported as a snapshot closure.
+pub struct ClosureFixture {
+    _dir: tempfile::TempDir,
+    root: [u8; 32],
+    manifest: Vec<u8>,
+    packs: Vec<Vec<u8>>,
+}
+
+/// Build a [`ClosureFixture`]. Panics only on a genuine environment
+/// failure (no writable temp dir).
+pub fn build_closure_fixture() -> ClosureFixture {
+    use mkit_core::ClosureMode;
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::verify::export_closure;
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let blob_id = store_file_object(&store, b"closure fuzz fixture").expect("store file");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob_id,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x43; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"closure fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_bytes =
+        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+    let root = store.write(&commit_bytes).expect("write commit");
+    let export = export_closure(&store, &root, ClosureMode::Snapshot).expect("export closure");
+    ClosureFixture {
+        _dir: dir,
+        root,
+        manifest: export.manifest,
+        packs: export.packs,
+    }
+}
+
+/// Never panics. A freshly exported closure MUST verify; a mutated
+/// manifest or pack MUST reject cleanly; raw input as a pack MUST not
+/// panic.
+pub fn verify_closure_one_iteration(input: &[u8]) {
+    let fixture = build_closure_fixture();
+    verify_closure_one_iteration_with(input, &fixture);
+}
+
+/// As [`verify_closure_one_iteration`], amortizing fixture construction.
+pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture) {
+    use mkit_core::verify;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let pack_refs: Vec<&[u8]> = fixture.packs.iter().map(Vec::as_slice).collect();
+    verify::verify_closure_manifest(&fixture.manifest, &pack_refs)
+        .expect("freshly exported closure must verify")
+        .is_complete()
+        .then_some(())
+        .expect("freshly exported closure must be complete");
+
+    if !fixture.manifest.is_empty() && input.len() >= 2 {
+        let mut mutated = fixture.manifest.clone();
+        let pos = usize::from(input[0]) % mutated.len();
+        mutated[pos] ^= input[1].max(1);
+        let _ = verify::verify_closure_manifest(&mutated, &pack_refs);
+    }
+    let _ = verify::verify_closure(&fixture.root, mkit_core::ClosureMode::Snapshot, [input]);
+    let _ = mkit_core::pack::PackEntries::new(input);
+}
+
 /// Exercise the sparse-checkout build/verify pair on arbitrary input.
 /// `build_sparse` must never panic; a freshly built delivery must
 /// verify; and `verify_sparse` over adversarial proof/manifest bytes
@@ -667,6 +796,30 @@ mod tests {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
         for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn pack_entries_target_runs_within_caps() {
+        run_iterated_unit(pack_entries_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            b"MKIT\x01\x00\x00\x00\x00\x00\x00\x00",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, pack_entries_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn verify_closure_target_runs_within_caps() {
+        let fixture = build_closure_fixture();
+        run_iterated_unit_with(&fixture, verify_closure_one_iteration_with)
+            .expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
+            let start = std::time::Instant::now();
+            verify_closure_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }
 
