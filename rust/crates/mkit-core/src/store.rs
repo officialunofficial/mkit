@@ -538,7 +538,7 @@ impl ObjectStore {
     /// Convenience: read raw bytes and decode into a typed [`Object`].
     ///
     /// A merkelized type ([`Object::Tree`] / [`Object::ChunkedBlob`]) is
-    /// already decoded once by [`verified_id_and_object`] to compute its
+    /// already decoded once by `verified_id_and_object` to compute its
     /// BMT-root id for the integrity check below — reused directly here
     /// instead of a second `deserialize` of the same bytes (the two
     /// decodes this function used to pay for every tree/chunked-blob
