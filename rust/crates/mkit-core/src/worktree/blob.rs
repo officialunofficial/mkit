@@ -256,11 +256,12 @@ pub fn content_fingerprint<S: crate::store::ObjectSource + ?Sized>(
 /// Compare file content independently of inline/chunked storage layout.
 /// Equal object IDs are a fast path; different IDs require verified content.
 ///
-/// A `ChunkedBlob`-vs-`ChunkedBlob` pair (the large-file case) takes the
-/// further [`chunked_content_eq`] fast path, which skips reading any chunk
-/// both sides reference by the same hash instead of reassembling and
-/// byte-comparing every chunk of both blobs — see that function's doc for
-/// what it trusts and what it still fully verifies. Any other pairing
+/// A `ChunkedBlob`-vs-`ChunkedBlob` pair (the large-file case) takes a
+/// further internal fast path (`chunked_content_eq`, private to this
+/// module), which skips reading any chunk both sides reference by the
+/// same hash instead of reassembling and byte-comparing every chunk of
+/// both blobs — see that function's doc for what it trusts and what it
+/// still fully verifies. Any other pairing
 /// (inline vs inline, or a mixed inline/chunked pair) keeps the exact
 /// byte-cursor walk this function has always used.
 ///
