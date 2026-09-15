@@ -310,20 +310,27 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
 /// on, just applied per chunk instead of per object. Only chunks that
 /// diverge (a different hash at the same aligned position) are actually
 /// read and byte-compared, so a change confined to part of a large file
-/// costs only that part on both sides, not the whole file. In
-/// particular, an append needs zero chunk reads at all: every
-/// pre-existing chunk still lines up by hash (`FastCDC`'s boundaries
-/// never depend on bytes past them), so the walk skips straight to the
-/// new chunks at the end and stops as soon as one side runs out.
+/// costs only that part on both sides, not the whole file. An in-place
+/// edit of unchanged length walks straight past the shared, unaffected
+/// tail with no reads once the edited region resyncs by hash again.
 ///
 /// `total_size` is trusted without re-summing actual chunk bytes — the
 /// same trust [`LoadedBlob::len`] already documents: every reassembly
 /// path enforces it via [`ChunkedBlob::check_reassembled_size`], so a
 /// manifest with a wrong `total_size` cannot have been durably written
-/// through mkit's own writers (#550). A manifest deliberately
-/// constructed to violate that and whose *entire* chunk sequence still
-/// lines up by hash with the side it's compared against slips through
-/// this fast path unnoticed; one whose chunks diverge anywhere is still
+/// through mkit's own writers (#550). This is also *why* an append or a
+/// truncation needs zero chunk reads at all: the two sides' declared
+/// sizes differ, so the check above returns before the merge walk ever
+/// starts — the id-skip walk itself never gets a chance to read
+/// anything for that case, size-different or not. The same trust means
+/// this fast path does not re-derive a "real" total size from actual
+/// chunk bytes the way the old byte-cursor walk did as a side effect of
+/// reading everything: two manifests whose declared `total_size` fields
+/// happen to be equal to each other, but wrong for their own real chunk
+/// bytes — whether identically wrong or each wrong in its own way — are
+/// never caught by this check; if their chunk sequences also line up
+/// entirely by hash, this fast path reports them equal without reading
+/// a single chunk to notice. One whose chunks diverge anywhere is still
 /// fully read from the first divergent chunk onward (any store-level
 /// corruption or missing chunk there still surfaces as an error) — it
 /// just stops draining once both sides run out, rather than continuing
