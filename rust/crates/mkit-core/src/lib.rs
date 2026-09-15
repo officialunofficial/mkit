@@ -53,6 +53,12 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 pub mod transfer;
+// Partial-disclosure verification: prove and verify that a path, chunk, or
+// byte range belongs to a commit id, with no store access and no trust
+// beyond the id itself (issue #1015 verifier kit PR 2). `default-features
+// = false` wasm-safe; the one native-only item (`build_disclosure`) is
+// gated on nothing extra since `ObjectStore` is already `std`-only.
+pub mod verify;
 pub mod write_auth;
 
 // Repository path layout (issue #493 Phase 0): the single authority
@@ -71,11 +77,11 @@ pub mod worktree;
 // Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
-// Issue #157 — append-only MMR over the commit chain for
-// O(log n) inclusion proofs. Feature-gated so the `commonware-storage`
-// dep tree only materialises for downstream callers that opt in.
-// Persisted (journaled) MMR is in this build; commit-field integration
-// is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
+// Issue #157 — append-only MMB (Merkle Mountain Belt) over the commit
+// chain for O(log n) inclusion proofs. Feature-gated so the
+// `commonware-storage` dep tree only materialises for downstream callers
+// that opt in. Persisted (journaled) MMB is in this build; commit-field
+// integration is planned — see docs/specs/SPEC-HISTORY-PROOF.md.
 #[cfg(feature = "history-mmr")]
 pub mod history;
 
@@ -128,8 +134,8 @@ pub use delta::{
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
     HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
-    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackError, PackReader, PackWriter,
-    TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackEntries, PackEntry, PackError, PackReader,
+    PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
 };
 
 // Refs, index, worktree, ignore, and repo_lock.
@@ -164,7 +170,8 @@ pub use protocol::{
 // at the crate root — the submodule is typically the right import scope
 // for state-machine APIs.
 pub use ops::{
-    CherryPickError, CherryPickResult, Conflict, ConflictKind, DiffEntry, DiffError, DiffKind,
-    DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, collect_ancestor_set,
-    diff_trees, find_merge_base, is_ancestor, merge_trees, status_diff,
+    CherryPickError, CherryPickResult, ClosureMode, Conflict, ConflictKind, DiffEntry, DiffError,
+    DiffKind, DiffResult, MergeResult, StatusEntry, StatusStaging, cherry_pick, children,
+    collect_ancestor_set, diff_trees, find_merge_base, is_ancestor, merge_trees, reachable_closure,
+    reachable_objects, reachable_snapshot, status_diff,
 };

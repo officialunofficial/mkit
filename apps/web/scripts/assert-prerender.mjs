@@ -33,6 +33,12 @@ for (const page of pages) {
     if (html.length < 1024 || !html.includes('<h1')) {
       failures.push(`prerendered HTML looks like an empty CSR shell (${html.length} bytes): ${htmlPath}`)
     }
+    if ((page === 'index' || page === 'multiplayer') && !html.includes('href="/create"')) {
+      failures.push(`missing create entry point: ${htmlPath}`)
+    }
+    if (page === 'create' && !html.includes('Create with mkit')) {
+      failures.push(`missing workspace page heading: ${htmlPath}`)
+    }
   }
   if (!existsSync(rscPath)) {
     failures.push(`missing RSC payload: ${rscPath}`)

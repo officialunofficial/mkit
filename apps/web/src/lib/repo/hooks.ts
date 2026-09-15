@@ -14,7 +14,6 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo } from 'react'
-import { bytesToHex, hexToBytes } from '../../components/use-mkit'
 import { useIdentityStore } from '../identity-store'
 import { usePresenceStore } from '../presence-store'
 import { type MkitApi, mkit } from '../mkit'
@@ -236,7 +235,8 @@ function scheduleRefsInvalidate(qc: QueryClient, room: string): void {
 
 export type PushArgs = {
   api: MkitApi
-  seedHex: string
+  /** Public fallback author for opaque/mock objects; never retain signing authority in Query variables. */
+  authorPubkey: string
   room: string
   ref: string
   /**
@@ -274,13 +274,11 @@ export function buildPushLogEntry(args: PushArgs): CommitLogEntry {
       ...(args.sources ? { sources: args.sources } : {}),
     }
   }
-  // Fallback: derive the author from the in-memory seed; stamp "now" (seconds,
-  // rendered ISO) to stay consistent with the walked `createdAt` format.
-  const authorPubkey = bytesToHex(args.api.ed25519_pubkey_from_seed(hexToBytes(args.seedHex)))
+  // Opaque objects use the caller's public author; timestamps retain the walked ISO format.
   return {
     hash: args.commitHash,
     message: args.message,
-    authorPubkey,
+    authorPubkey: args.authorPubkey,
     ref: args.ref,
     createdAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString(),
     kind: args.kind ?? 'commit',

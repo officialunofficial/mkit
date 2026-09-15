@@ -113,6 +113,17 @@ pub enum StoreError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Decode(#[from] MkitError),
+    /// [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback
+    /// returned a different number of results than the candidate slice it
+    /// was given — a contract violation by the caller (see that
+    /// function's docs), never a normal runtime condition. Reported as a
+    /// typed error rather than a panic: the built-in caller
+    /// (`mkit-cli`'s push path) can never trigger this since rayon's
+    /// `IndexedParallelIterator::collect` always preserves length, but a
+    /// future or third-party `encode_deltas` with a bug should fail the
+    /// `push` cleanly rather than crash the process.
+    #[error("encode_deltas callback returned {actual} results for {expected} candidates")]
+    DeltaBatchLengthMismatch { expected: usize, actual: usize },
 }
 
 /// Deferred-fsync writer returned by [`ObjectStore::bulk_writer`].
@@ -453,6 +464,18 @@ impl ObjectStore {
         let mut bytes = Vec::with_capacity(cap);
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// Reads raw bytes for a verifier that must classify a hash mismatch
+    /// under the requested id. Unlike [`Self::read`], this deliberately
+    /// leaves identity verification to the caller; it is crate-private so
+    /// only verification code can use the raw bytes as data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same store errors as [`Self::read_raw`].
+    pub(crate) fn read_raw_for_verification(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_raw(h)
     }
 
     /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk

@@ -35,6 +35,16 @@ export default function HomePage() {
           <h2 className='ds-h2 rule-square mt-8 pb-2'>Get started</h2>
           <div className='mt-2 space-y-6'>
             <div>
+              <h3 className='ds-h3'>Create in your browser</h3>
+              <p className='mt-2 max-w-prose text-xs leading-4'>
+                Remix the public demo repository into your own project. Edit files, use a terminal, and ask nanocodex to
+                help. Unlock your passkey to get started.
+              </p>
+              <Link to='/create' className='ds-link mt-2 inline-block'>
+                Remix the demo
+              </Link>
+            </div>
+            <div>
               <h3 className='ds-h3'>Install the CLI</h3>
               {/* Bare `mkit.sh` sniffs the curl User-Agent and serves the signed
                   installer (see src/install-route.ts). */}

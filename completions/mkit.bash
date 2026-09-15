@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame verify attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -153,6 +153,29 @@ _mkit_complete() {
             ;;
         git)
             COMPREPLY=( $(compgen -W "export import fetch pull verify status format-patch --remote-name --ref --no-attest --algorithm --signer --key --json --passthrough --fork-audit --stdout -o --output-directory --help" -- "$cur") )
+            ;;
+        prove)
+            COMPREPLY=( $(compgen -W "--chunk --range --with-offsets -o --output --format --help" -- "$cur") )
+            ;;
+        verify-proof)
+            COMPREPLY=( $(compgen -W "--expect-path --trusted --trust-roots --format --payload-out --help" -- "$cur") )
+            ;;
+        closure)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "export verify" -- "$cur") )
+            else
+                case "${words[2]}" in
+                    export)
+                        COMPREPLY=( $(compgen -W "--history -o --output --force --format --help" -- "$cur") )
+                        ;;
+                    verify)
+                        COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "export verify --help" -- "$cur") )
+                        ;;
+                esac
+            fi
             ;;
         keygen)
             COMPREPLY=( $(compgen -W "--algorithm --force --print-pubkey --help" -- "$cur") )

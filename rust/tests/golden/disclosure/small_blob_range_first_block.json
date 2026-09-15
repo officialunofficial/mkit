@@ -1,0 +1,38 @@
+{
+  "bin": "small_blob_range_first_block.bin",
+  "blake3": "37d49ae68e243a8307b5c7652a057e9ef665137c82df2ec5c9a11c090af1f146",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "The first 1 KiB Bao block of a 1536-byte blob.",
+  "disclosed": {
+    "chunk_inner_root_hex": null,
+    "leaf_id_hex": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
+    "path": [
+      {
+        "mode": 1,
+        "name_hex": "72616e67652e62696e"
+      }
+    ],
+    "payload": {
+      "absolute_offset": 0,
+      "blob_id_hex": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
+      "bytes_blake3": "12b3e7d43253d5f00c2b8176e40a2f43c668d6a6befbfcc65eb2d8c1e4689d30",
+      "chunk": null,
+      "kind": "range",
+      "len": 1024,
+      "offset_in_blob": 0
+    },
+    "signature_valid": true,
+    "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "step_inner_roots_hex": [
+      "1b1e50529b155e441db663c397e82660032e3344c5203c314c303b80d9da397c"
+    ],
+    "tree_hash_hex": "cece38b8a6a76cbdbba11ed1de928916c9d201808755fd9bbb9b8d3414999f20"
+  },
+  "expect": "accept",
+  "name": "small_blob_range_first_block",
+  "path_hex": [
+    "72616e67652e62696e"
+  ],
+  "selector": "range(offset=0,len=1024)",
+  "size": 2138
+}

@@ -61,11 +61,11 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let mut rows: Vec<RefRow> = Vec::new();
-    let heads = match refs::list_refs(&layout) {
+    let heads = match super::list_refs_parallel(&layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list refs: {e}"), exit::GENERAL_ERROR),
     };
-    let tags = match refs::list_tags(&layout) {
+    let tags = match super::list_tags_parallel(&layout) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("list tags: {e}"), exit::GENERAL_ERROR),
     };
@@ -74,7 +74,7 @@ pub fn run(args: &[String]) -> u8 {
     match refs::list_remote_names(&layout) {
         Ok(remotes) => {
             for remote in remotes {
-                match refs::list_remote_refs(&layout, &remote) {
+                match super::list_remote_refs_parallel(&layout, &remote) {
                     Ok(rs) => {
                         push_rows(&store, &mut rows, &rs, &format!("refs/remotes/{remote}/"));
                     }

@@ -19,7 +19,7 @@
 export const PERSIST_STORAGE_KEY = 'mkit-query-cache'
 
 /** Bump to invalidate every previously-persisted cache (policy/schema change). */
-export const PERSIST_BUSTER = 'v1'
+export const PERSIST_BUSTER = 'v2'
 
 /**
  * Discard a persisted cache older than this. The persisted queries' `gcTime` must be >= this value or they're evicted
@@ -29,5 +29,5 @@ export const PERSIST_MAX_AGE = 24 * 60 * 60 * 1000 // 24h
 
 /** True for query keys whose cached value is safe AND worth persisting to disk. */
 export function shouldPersistQuery(queryKey: readonly unknown[]): boolean {
-  return queryKey[0] === 'keys'
+  return queryKey.length === 3 && queryKey[0] === 'keys' && queryKey[1] === 'name' && typeof queryKey[2] === 'string'
 }

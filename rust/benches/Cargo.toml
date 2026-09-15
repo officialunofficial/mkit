@@ -59,6 +59,14 @@ harness = false
 name = "bulk_writer"
 harness = false
 
+# `worktree::content_eq`'s chunked fast path — id-skip vs. the byte
+# comparison every "did this file change?" call site (add/status/diff/
+# merge) used to pay in full on both sides. No feature gate: worktree
+# content comparison is always compiled.
+[[bench]]
+name = "content_eq"
+harness = false
+
 # Issue #644 — refs::update_ref CAS-variant latency + list_refs at
 # increasing ref counts. No feature gate: refs are always compiled.
 [[bench]]
@@ -110,6 +118,17 @@ harness = false
 name = "verify_fanout"
 harness = false
 
+# Intra-file chunk-hashing fan-out for a single large file's `add`
+# (`worktree::store_large_file_streaming_with`'s `hash_chunks` batch
+# callback, wired to rayon by `mkit-cli`'s `commands::add::hash_pending`)
+# — same sequential-vs-rayon crossover shape as the other fan-outs
+# above, but across chunks of one file rather than across files, so it
+# helps a worktree with a single huge file (no other file to fan out
+# across). No feature gate: worktree chunking is always compiled.
+[[bench]]
+name = "chunk_hash_fanout"
+harness = false
+
 # Push planning's per-candidate delta encoding
 # (`transfer::encode_delta_candidate`, fanned out via `mkit-cli`'s
 # `remote_dispatch::encode_delta_candidates_batch`) — per-candidate
@@ -129,6 +148,15 @@ harness = false
 name = "delta_encode_scan"
 harness = false
 
+# Streaming `ChunkReader` (FastCDC over a `Read`, the only chunker used
+# for files above `worktree::CHUNK_THRESHOLD`) windowing overhead vs. the
+# in-memory `ChunkIterator` floor — regression guard for the
+# allocate-and-copy-per-chunk window management fixed alongside this
+# suite. No feature gate: the chunker is always compiled.
+[[bench]]
+name = "chunker_streaming"
+harness = false
+
 # Issue #159 — sharded vs monolithic 100 MiB pack transfer
 # with simulated network jitter. Default-off (the `pack-shards`
 # feature on mkit-core pulls in the commonware dep stack, which is
@@ -143,7 +171,7 @@ name = "pack_shard_transfer"
 harness = false
 required-features = ["pack-shards"]
 
-# Issue #157 / #644 — journaled commit-history MMR: open_at (cold +
+# Issue #157 / #644 — journaled commit-history MMB: open_at (cold +
 # warm), a warm single append, and a backfill series. Default-off (the
 # `history-mmr` feature on mkit-core pulls in the same heavy
 # commonware-storage/-runtime + tokio stack as `pack-shards`). Run
@@ -176,7 +204,9 @@ serde_json = "1"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["plotters", "cargo_bench_support", "html_reports"] }
-mkit-core = { path = "../crates/mkit-core" }
+# `batch-verify` (not a default feature) is required by
+# `verify_fanout.rs`'s `sign::verify_batch` series.
+mkit-core = { path = "../crates/mkit-core", features = ["batch-verify"] }
 # add_staging.rs drives the real `mkit add -A` CLI path in-process (issue
 # #708) — mkit-cli's library surface is unstable/internal-only (see its
 # Cargo.toml header), which is fine for a dev-dependency exercising it as

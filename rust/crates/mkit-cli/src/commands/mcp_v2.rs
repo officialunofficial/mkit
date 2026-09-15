@@ -104,10 +104,24 @@ fn tool_from_spec(spec: &ToolSpec) -> Tool {
     tool
 }
 
+/// Environment-variable fallback for `--http-token`, checked when the flag
+/// is omitted — mirrors `mkit serve --http`'s `--http-token`/
+/// `mkit_transport_http::TOKEN_ENV` sourcing, but under a name of its own:
+/// `mkit mcp --http` and `mkit serve --http` are different threat models
+/// (a high-privilege, agent-facing tool catalog including `mkit_checkout`,
+/// versus a Git transport) and MUST NOT share a secret — a token leaked to
+/// one surface would otherwise also grant the other.
+const MCP_TOKEN_ENV: &str = "MKIT_MCP_TOKEN";
+
 /// Entry point for `mkit mcp` under `--features mcp-v2`: serve over stdio,
 /// or over streamable HTTP when `--http <addr>` was given. `mcp.rs::dispatch`
 /// is the only caller.
-pub(crate) fn serve(allowed: Option<&Path>, http: Option<&str>) -> u8 {
+pub(crate) fn serve(
+    allowed: Option<&Path>,
+    http: Option<&str>,
+    http_token: Option<&str>,
+    unsafe_allow_any_http_peer: bool,
+) -> u8 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -121,7 +135,13 @@ pub(crate) fn serve(allowed: Option<&Path>, http: Option<&str>) -> u8 {
     let allowed = allowed.map(Path::to_path_buf);
 
     let result = match http {
-        Some(addr) => runtime.block_on(serve_http(allowed, addr)),
+        Some(addr) => {
+            let auth = match resolve_http_auth(http_token, unsafe_allow_any_http_peer) {
+                Ok(a) => a,
+                Err(code) => return code,
+            };
+            runtime.block_on(serve_http(allowed, addr, auth))
+        }
         None => runtime.block_on(serve_stdio(allowed)),
     };
 
@@ -130,6 +150,58 @@ pub(crate) fn serve(allowed: Option<&Path>, http: Option<&str>) -> u8 {
         Err(e) => {
             eprintln!("mkit mcp: {e}");
             1
+        }
+    }
+}
+
+/// The bearer token `serve_http`'s `BearerAuthHttp` wrapper requires on
+/// every request, or `None` under the explicit `--unsafe-allow-any-http-peer`
+/// escape hatch (in which case every request is accepted unchecked).
+type HttpAuth = Option<Arc<str>>;
+
+/// Resolve `--http`'s fail-closed auth gate — FAIL-CLOSED, mirroring `mkit
+/// serve --http`'s `--http-token`/`--unsafe-allow-any-http-peer` gate
+/// (`commands/serve/http.rs`): refuses to report a usable auth
+/// configuration unless either a non-empty token is available (flag or
+/// [`MCP_TOKEN_ENV`]) or the operator explicitly opted into the unsafe
+/// escape. Exit-code side effects (printing + returning early) live here
+/// rather than in `serve_http` so the async listener never starts without
+/// a resolved auth decision.
+fn resolve_http_auth(token: Option<&str>, unsafe_allow_any: bool) -> Result<HttpAuth, u8> {
+    let env_token = std::env::var(MCP_TOKEN_ENV).ok();
+    let token = token.map(str::to_owned).or(env_token);
+    match (token, unsafe_allow_any) {
+        (Some(_), true) => {
+            eprintln!(
+                "mkit mcp --http: --http-token (or MKIT_MCP_TOKEN) and \
+                 --unsafe-allow-any-http-peer are mutually exclusive"
+            );
+            Err(exit::USAGE)
+        }
+        (Some(t), false) if t.is_empty() => {
+            eprintln!("mkit mcp --http: bearer token MUST NOT be empty; refusing to bind");
+            Err(exit::CONFIG_ERROR)
+        }
+        (Some(t), false) => Ok(Some(Arc::from(t))),
+        (None, true) => {
+            eprintln!(
+                "============================================================\n\
+                 WARNING: mkit mcp --http --unsafe-allow-any-http-peer\n\
+                 This HTTP listener accepts ANY caller with NO authentication.\n\
+                 Every tool call — including mutating ones like mkit_checkout —\n\
+                 is open. Use this only for local development, NEVER in production.\n\
+                 ============================================================"
+            );
+            Ok(None)
+        }
+        (None, false) => {
+            eprintln!(
+                "mkit mcp --http: refusing to bind without a bearer token.\n\
+                 Pass --http-token <TOKEN> (or set MKIT_MCP_TOKEN) to require it on \
+                 every request, or --unsafe-allow-any-http-peer to accept any caller \
+                 (development only)."
+            );
+            Err(exit::CONFIG_ERROR)
         }
     }
 }
@@ -153,12 +225,13 @@ async fn serve_stdio(allowed: Option<PathBuf>) -> Result<(), String> {
 /// Serve over rmcp's streamable-HTTP transport, hyper-direct (no axum — see
 /// the `hyper`/`hyper-util` Cargo.toml entries' doc comment): `StreamableHttpService`
 /// already implements `tower::Service`, so `TowerToHyperService` is all the
-/// glue this needs. One fresh `MkitServer` per session (`LocalSessionManager`,
+/// glue this needs (plus [`BearerAuthHttp`] wrapped around it — see that
+/// type's doc). One fresh `MkitServer` per session (`LocalSessionManager`,
 /// the documented default), same `allowed` scope for every session — this
 /// process serves one repository, not a multi-tenant fleet. `Ctrl-C` is the
 /// only shutdown path, matching rmcp's own documented example
 /// (`examples/servers/src/counter_hyper_streamable_http.rs` upstream).
-async fn serve_http(allowed: Option<PathBuf>, addr: &str) -> Result<(), String> {
+async fn serve_http(allowed: Option<PathBuf>, addr: &str, auth: HttpAuth) -> Result<(), String> {
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use hyper_util::server::conn::auto::Builder;
     use hyper_util::service::TowerToHyperService;
@@ -177,15 +250,18 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str) -> Result<(), String> 
         .map_err(|e| format!("failed to read bound address: {e}"))?;
     eprintln!("mkit mcp: listening on http://{bound}");
 
-    let service = TowerToHyperService::new(StreamableHttpService::new(
-        move || {
-            Ok(MkitServer {
-                allowed: allowed.clone(),
-            })
-        },
-        LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
-    ));
+    let service = TowerToHyperService::new(BearerAuthHttp {
+        inner: StreamableHttpService::new(
+            move || {
+                Ok(MkitServer {
+                    allowed: allowed.clone(),
+                })
+            },
+            LocalSessionManager::default().into(),
+            StreamableHttpServerConfig::default(),
+        ),
+        expected: auth,
+    });
 
     loop {
         let (stream, _peer) = tokio::select! {
@@ -199,5 +275,99 @@ async fn serve_http(allowed: Option<PathBuf>, addr: &str) -> Result<(), String> 
                 .serve_connection(io, service)
                 .await;
         });
+    }
+}
+
+/// Constant-time `Authorization: Bearer <token>` gate wrapped around
+/// `StreamableHttpService`, applied to every request before it reaches
+/// `rmcp`'s handler — mirrors `mkit serve --http`'s `BearerAuth`
+/// interceptor (`commands/serve/http.rs`), reimplemented against
+/// `tower_service::Service` directly rather than `connectrpc::Interceptor`
+/// since this transport is raw hyper/tower, not connect-rpc.
+///
+/// `expected: None` is the explicit `--unsafe-allow-any-http-peer` escape
+/// hatch (every request accepted unchecked); `resolve_http_auth` is the
+/// only place that constructs this type, and it never returns `Ok(None)`
+/// without first printing the loud unsafe-mode warning.
+#[derive(Clone)]
+struct BearerAuthHttp<S> {
+    inner: S,
+    expected: HttpAuth,
+}
+
+impl<S> BearerAuthHttp<S> {
+    /// `false` when `expected` is `Some` and `headers` lacks a matching
+    /// `Authorization: Bearer <token>` value. Constant-time comparison:
+    /// an HTTP-timing side channel on a bearer-token check is a real
+    /// attack (the whole point of the check is to gate write access,
+    /// including `mkit_checkout`), so this is not a place to reach for
+    /// `==` — same reasoning as `serve/http.rs`'s `BearerAuth::check`.
+    fn authorized(&self, headers: &http::HeaderMap) -> bool {
+        let Some(expected) = &self.expected else {
+            return true;
+        };
+        let got = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        let want = format!("Bearer {expected}");
+        got.len() == want.len()
+            && subtle::ConstantTimeEq::ct_eq(got.as_bytes(), want.as_bytes()).into()
+    }
+}
+
+/// `401 Unauthorized` in exactly [`StreamableHttpService`]'s response type
+/// (`Response<BoxBody<Bytes, Infallible>>`, `rmcp`'s `BoxResponse` — not
+/// nameable here since that alias is private to `rmcp`, but Rust type
+/// aliases are structural, so writing the same type out works) — returned
+/// instead of ever calling into `inner` for a request that fails
+/// [`BearerAuthHttp::authorized`].
+fn unauthorized_response()
+-> http::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>> {
+    use http_body_util::BodyExt;
+
+    let body = http_body_util::Full::new(bytes::Bytes::from_static(
+        b"missing or invalid Authorization: Bearer <token>",
+    ))
+    .map_err(|never: std::convert::Infallible| match never {});
+    http::Response::builder()
+        .status(http::StatusCode::UNAUTHORIZED)
+        .body(http_body_util::combinators::BoxBody::new(body))
+        .expect("static status + boxed body always build a valid response")
+}
+
+impl<S> tower_service::Service<http::Request<hyper::body::Incoming>> for BearerAuthHttp<S>
+where
+    S: tower_service::Service<
+            http::Request<hyper::body::Incoming>,
+            Response = http::Response<
+                http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>,
+            >,
+            Error = std::convert::Infallible,
+        > + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<hyper::body::Incoming>) -> Self::Future {
+        if self.authorized(req.headers()) {
+            let fut = self.inner.call(req);
+            Box::pin(fut)
+        } else {
+            Box::pin(std::future::ready(Ok(unauthorized_response())))
+        }
     }
 }

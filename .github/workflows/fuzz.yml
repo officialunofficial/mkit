@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse, merkle_packlist, merkle_proof, sparse_verify]
+        target: [delta, pack, tree, software_key_record, rpc_decode, git_commit_parse, git_tag_parse, git_tree_parse, merkle_packlist, merkle_proof, sparse_verify, disclosure_decode, verify_disclosure, pack_entries, verify_closure]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

@@ -6,6 +6,7 @@ import { Link, useRouter } from 'waku'
 import { GridLogo } from './grid-logo'
 import { ExpandedNav } from './site-nav'
 import { ThemeToggle } from './theme-toggle'
+import { Account } from './account'
 
 /**
  * Page chrome masthead, matching polychrome's PageChrome construction: the whole header — brand row, disclosed nav,
@@ -41,6 +42,7 @@ export const Header = () => {
             <span className='font-semibold tracking-(--header-tracking) text-primary'>mkit</span>
           </Link>
           <div className='ml-auto flex items-center gap-2'>
+            <Account />
             <ThemeToggle />
             <button
               ref={triggerRef}

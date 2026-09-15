@@ -47,6 +47,24 @@ updates:
           - "minor"
           - "patch"
 
+  - package-ecosystem: "npm"
+    directory: "/apps/workspace-worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps(workspace-worker)"
+    groups:
+      npm-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "cargo"
     directory: "/rust"
     # buffa & connectrpc are vendored-codegen deps: their generated code is

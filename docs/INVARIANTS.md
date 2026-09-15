@@ -263,7 +263,7 @@ range), AND every `Cargo.lock` in those same trees that contains a
 **Because:** the commonware crates (`-storage`, `-cryptography`,
 `-runtime`, `-coding`, `-codec`, `-parallel`, `-utils`, `-stream`,
 `-invariants`) ship as one coordinated release; mkit's on-disk formats
-(the ancestry MMR, the BLS threshold derivation) and wire
+(the ancestry MMB, the BLS threshold derivation) and wire
 compatibility depend on the exact same version being linked everywhere a
 crate touches them. A manifest bump without a matching `cargo update` in
 every workspace leaves the *text* aligned while the *lockfile* — what
@@ -342,3 +342,256 @@ crate manifests, `install.sh`, or the web app's installer-staging scripts.
 `mkit-keystore`'s `windows_credential_backend_name_is_not_recognized` test
 (`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
 unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
+
+## Hosted workspaces separate public projects from owner execution
+
+**Always:** workspace files and signed versions are public; conversation messages,
+current task details, and PTY access require the owner's session. Writes require
+an exact, unexpired auth-v2 signature. The browser uses a saved PRF passkey identity;
+its signing seed never leaves the browser. The server holds a separate agent key
+whose owner-signed grant must remain valid for new execution and version publication.
+
+**Because:** public remixing must not disclose private prompts or give visitors
+shell access under another person's delegated identity.
+
+**If violated:** a public link can leak conversations or execute commands without
+owner authorization; replaying a request can affect an unrelated later task.
+
+**Enforced by:** `apps/workspace-worker/src/auth.test.ts`,
+`apps/workspace-worker/src/workspace.integration.test.ts`, and the workspace client
+identity tests under `apps/web/src/components/workspace/`.
+
+## Hosted task completion publishes a recoverable signed version
+
+**Always:** only a completed, currently authorized agent task publishes its new
+signed version with its completed status and saved conversation snapshot. Failed
+or cancelled tasks retain captured draft files without claiming completion.
+Captures cannot overwrite another workspace generation. A worker restart does
+not replay shell commands whose outcome is uncertain.
+
+**Because:** the browser can close while the agent works, and container lifetime
+is independent of the project's durable files and versions.
+
+**If violated:** users lose completed work, see a completed task with no version,
+or execute a command twice during recovery.
+
+**Enforced by:** `apps/workspace-worker/src/workspace-state.test.ts`,
+`apps/workspace-worker/src/workspace-runner.test.ts`, and
+`apps/workspace-worker/src/sandbox-files.test.ts`.
+
+## Browser login and signing authority have separate lifetimes
+
+**Always:** one shared session query and Account region represent login on every page. A refresh can preserve the HttpOnly login cookie, but cannot recover or persist a signing seed. Locking signing preserves the login; sign-out revokes the server session and clears private query and mutation caches. Workspace reads remain disabled during logout, and late responses cannot replace another identity's state. Workspace activation never issues a login cookie.
+
+**Because:** page navigation and cache reuse must not change identity or revive access after sign-out. Public recovery metadata is safe to persist; signing keys and private workspace state are not.
+
+**Enforced by:** `apps/web/src/components/auth-provider.test.tsx`, workspace query/editor tests, `apps/workspace-worker/src/browser-session.test.ts`, workspace integration tests, and `bun run verify:auth` in `apps/web`.
+
+## A workspace version saves one coherent project state
+
+**Always:** a batch save checks every draft's expected file hash before publishing any edit or version. A conflict preserves browser edits and requires explicit review against current content. Terminal working changes and accepted drafts become one named version. Restore appends a new version and retains saved history.
+
+**Because:** a project version must not silently combine stale edits or leave half a batch applied.
+
+**Enforced by:** workspace worker version-edit integration tests, file-editor conflict tests, and workspace save orchestration tests.
+
+## Browser drafts belong to the authenticated session
+
+**Always:** drafts stay in memory, survive route remounts and signing locks, and clear on logout or session replacement. Explicit logout asks before discarding drafts. Current file query keys include content hashes so terminal captures cannot leave cached contents stale.
+
+**Enforced by:** workspace draft-store, Account, auth-provider, and workspace query tests.
+
+## BMT inclusion-proof bytes and sibling selection match commonware exactly
+
+**Always:** `mkit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
+varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
+already-proven-sibling-omitting selection rule are byte-identical to
+`commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, for
+single, range, and multi-leaf proofs alike — both directions: mkit
+decodes and accepts upstream's proof bytes, and upstream decodes and
+accepts mkit's.
+
+**Because:** SPEC-MERKLE-OBJECTS §5.7 makes this byte-identity a
+normative compatibility promise, so a commonware-based verifier (for
+example, makechain) can decode and verify an mkit proof with the
+upstream type directly, applying only mkit's outer type-domain wrap
+(`wrap_id`) on top. mkit cannot depend on `commonware-storage`'s `bmt`
+module directly for this (it drags in `commonware-cryptography`'s
+unconditional `blst` C dependency, which does not build for
+`wasm32-unknown-unknown` — see `merkle.rs`'s module docs and issue
+#843), so the construction is vendored and the byte-identity claim has
+no compiler to enforce it.
+
+**If violated:** a proof mkit produces would fail to decode, or would
+decode but fail to verify, against an otherwise-correct commonware-based
+verifier (and vice versa) — silently breaking cross-implementation
+verification with no local test failure, since every mkit-only
+round-trip test would still pass.
+
+**Enforced by:** `mkit_core::merkle::tests::proofs_match_commonware`
+(native-only, dev-dependency on `commonware-storage`/`commonware-cryptography`),
+which builds many randomised trees and single/range/multi position sets,
+asserts mkit's encoded bytes equal upstream's `commonware_codec::Encode`
+output, cross-decodes each side's bytes with the other's type, and
+confirms both verifiers reject a mutated proof (flipped sibling byte,
+dropped/added sibling, wrong `leaf_count`).
+
+## Disclosure verification is against object ids only
+
+**Always:** every check `mkit_core::verify` performs — a path step, a
+chunk, a byte range — is stated against an authenticated object id
+(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v2
+bundle carries a bare inner root on each step and chunk header; that
+field is wrap-checked against the trusted id (`domain_digest(TYPE_DOMAIN,
+inner_root) == expected_id`) **before** it is used for anything, then
+cross-checked against the proof fold. No verification step ever treats
+a bare inner root, a caller-claimed path string, or an unauthenticated
+length/offset as a trust anchor.
+
+**Because:** an inner root is not type-distinct (SPEC-MERKLE-OBJECTS §2),
+so accepting one directly would let a `Tree` proof pass for a
+`ChunkedBlob` id or vice versa; and a caller-claimed path or offset that
+was never itself checked against a proof is exactly the kind of
+unauthenticated metadata a disclosure bundle exists to replace with a
+proof.
+
+**If violated:** a verifier could be tricked into accepting content at
+the wrong path, or into reporting an offset/length nothing in the bundle
+actually proves — silently, since the disclosed bytes themselves might
+still be genuine content from *somewhere* in the repository, just not at
+the claimed location.
+
+**Enforced by:** `mkit_core::verify::tests` (`verify_path_rejects_*`,
+`verify_chunk_with_meta_bounds`, `commit_id_mismatch_is_rejected`) and
+`rust/tests/golden/disclosure/`'s negative vectors (swapped steps, a
+wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
+§4 states this as a numbered MUST at every dispatch point.
+
+## Declared disclosure inner roots wrap and match the proof fold
+
+**Always:** for every v2 disclosure `Step` and chunk header,
+`domain_digest(TYPE_DOMAIN, inner_root)` equals the parent Tree id or
+ChunkedBlob leaf id, and the proof folds to exactly that declared
+`inner_root`. Version byte `1` is rejected.
+
+**Because:** a commonware-native verifier runs upstream
+`verify_element_inclusion` / `verify_multi_inclusion` against the
+declared root. Without wrap-check-first, a prover could substitute any
+tree whose proof verifies against a forged root. Without the fold
+cross-check, a bundle could declare a wrap-correct root while attaching
+a proof built for a different tree.
+
+**If violated:** an external verifier that trusted the field would
+accept content from the wrong tree, or mkit and a commonware-native
+verifier would disagree on the same bundle.
+
+**Enforced by:** `rust/crates/mkit-core/tests/native_commonware_disclosure.rs`
+(every accept golden verified with only bundle fields, upstream
+`commonware_storage::bmt::Proof`, and `hash::domain_digest`; the three
+v2 negatives fail at wrap or upstream verify) and
+`rust/tests/golden/disclosure/neg_inner_root_forged.*`,
+`neg_inner_root_fold_mismatch.*`, `neg_bundle_version_1.*`.
+
+## Disclosed absolute offsets require a complete length-proof set
+
+**Always:** `DisclosedPayload::Range::absolute_offset` is `Some(...)`
+only when either the leaf is a plain `Blob` (nothing to sum) or the
+disclosed chunk is index 0 (nothing precedes it), or `chunk_len_proofs`
+verifiably covers exactly the index set `0..index` with no gaps and no
+duplicates. Any other shape of `chunk_len_proofs` — a gap, a duplicate,
+an index `>= index`, or one entry that fails to verify — is a typed
+[`VerifyError::IncompleteLengthProofSet`], never a silent `None`. A
+*non-empty* `chunk_len_proofs` on a chunk-index-0 range, or on a plain
+`Blob` leaf, has nothing preceding it to describe and is rejected
+outright as `VerifyError::UnexpectedLengthProofs`, never silently
+ignored either.
+
+**Because:** a partial or malformed length-proof set does not sum to a
+value that means anything; treating it as "absent" (`None`) rather than
+rejecting it outright would let a caller silently miss that an absolute
+offset was *claimed but not actually provable*, rather than being told
+plainly that the request failed. The chunk-0/plain-`Blob` case is the
+same principle at its edge: an entry that describes nothing real is not
+merely irrelevant, it is evidence of a malformed or lying builder.
+
+**If violated:** an application relying on `absolute_offset` for, say,
+byte-accurate DA-layer indexing could be handed a value derived from an
+incomplete sum — or worse, silently receive `None` for a bundle that
+*looked* like it was trying to prove one, masking a builder bug or a
+malicious short-fill.
+
+**Enforced by:** `mkit_core::verify::tests::incomplete_length_proof_set_is_rejected`
+and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
+`mkit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
+`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
+
+## Closure walks share one `children` function
+
+**Always:** every reachability walk &mdash; store-backed
+`reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
+store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
+walk, and push/fetch pack planning &mdash; takes
+its edges from `ops::graph::children(obj, mode)`. Snapshot mode omits
+commit/remix parents; history mode includes them; remix `sources` and
+`Delta.base_hash` are never followed.
+
+**Because:** a snapshot-vs-history disagreement, or a walker that
+followed foreign remix sources, would let two "closures of the same
+commit" disagree on the object set, so a DA-layer verifier and a push
+could not be checking the same thing.
+
+**If violated:** a history export verified in snapshot mode (or the
+reverse) would silently drop or invent objects, and a wasm verifier
+walking a hand-rolled map would accept a different set than
+`reachable_objects`.
+
+**Enforced by:** `mkit_core::ops::graph::tests::children_snapshot_omits_parents_history_includes_them`,
+`reachable_snapshot_excludes_parent_commit`, and
+`mkit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
+/ `snapshot_on_history_reports_parent_unreferenced`.
+
+## Streaming closure verification reads only reachable objects, each once
+
+**Always:** `verify_closure_streaming` fetches each visited id at most once,
+fetches no id outside the selected snapshot/history closure, and drops an
+object's bytes after extracting its child ids; it reports
+`unreferenced_checked = false` because it cannot enumerate objects it never
+requested.
+
+**Because:** local closure verification must scale with the checked closure,
+not with the size of the repository's unrelated object store, while a
+duplicate or out-of-closure fetch would defeat the source's bounded,
+pull-based contract.
+
+**If violated:** a large local store can turn a small closure check into an
+O(store-size) memory operation, or a buggy mode walk can silently inspect
+foreign/unreachable objects and misrepresent what was verified.
+
+**Enforced by:**
+`mkit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
+which uses a counting source that panics on unknown ids and checks the exact
+snapshot/history fetch sets.
+
+## Closure profile is raw-only
+
+**Always:** a closure pack is SPEC-PACKFILE v1 with only `0x00` entries.
+`PackWriter::new_raw_only` never compresses and rejects deltas.
+`verify_closure_packs` treats any delta or compressed entry as
+`VerifyError::ClosureProfileViolation` after a type scan that does not
+decompress.
+
+**Because:** `mkit-wasm` builds `mkit-core` with `default-features =
+false` (no zstd). A compressed or delta pack would be unreadable there,
+so the profile that a wasm verifier consumes has to be raw-only by
+construction.
+
+**If violated:** a native exporter could emit a v2 pack that a wasm
+verifier rejects (or, without the type scan, tries to decompress and
+hits the `pack-zstd` stub), splitting the verifier kit into two
+incompatible carriers.
+
+**Enforced by:** `mkit_core::pack::tests::raw_only_writer_emits_v1_raw_for_compressible_payload`,
+`raw_only_writer_rejects_deltas`,
+`mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
+and `rust/tests/golden/closure/neg_delta_entry.*` /
+`neg_compressed_entry.*`.

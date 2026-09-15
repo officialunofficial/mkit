@@ -6,7 +6,7 @@
 //! [`super::gc`]).
 //!
 //! Why this exists: the per-branch history journal stores only opaque
-//! MMR digests, so a superseded tip is otherwise unrecoverable the moment
+//! MMB digests, so a superseded tip is otherwise unrecoverable the moment
 //! it leaves the ref set — and `mkit gc` (#233) would reclaim it. Each
 //! rewrite appends the old tip here; gc treats every logged hash as a
 //! root (clock-free), and [`expire`] drops entries older than the

@@ -1,10 +1,10 @@
 // Client identity / session state (design note §6).
 //
-// Boundary rule: TanStack Query owns *the repo* (server state); this Zustand
-// store owns *who I am this session*. Only client-side, UI-owned, synchronous
+// Boundary rule: TanStack Query owns server login and repository state. This
+// Zustand store owns signing keys and public passkey recovery metadata. Only client-side, UI-owned, synchronous
 // identity lives here — never server data (refs, objects, commit logs).
 //
-// PERSISTENCE INVARIANT: only `{ credentialId, p256PubkeyHex, room, name }` are
+// PERSISTENCE INVARIANT: only `{ credentialId, p256PubkeyHex, knownPublicKey, room, name }` are
 // written to localStorage (see `partialize`) — all non-secret (a P-256 PUBLIC
 // key is safe to cache). The Ed25519 `seedHex` — and the derived
 // `ed25519PubkeyHex` / `unlocked` flags — are transient and held in memory
@@ -17,6 +17,8 @@ import { create } from 'zustand'
 import { type PersistStorage, createJSONStorage, persist } from 'zustand/middleware'
 
 export type IdentityState = {
+  /** Public identity associated with persisted recovery metadata, never signing authority. */
+  knownPublicKey: string | null
   /** Base64url credential id of the enrolled passkey, or null before enrolment. */
   credentialId: string | null
   /**
@@ -78,14 +80,23 @@ export const IDENTITY_PERSIST_VERSION = 1
  * unlike the Ed25519 signing material, a P-256 public key reveals nothing secret — it's the whole point of a public key
  * — so caching it means a returning user doesn't need a passkey prompt just to re-enable the attest button.
  */
-export type PersistedIdentity = Pick<IdentityState, 'credentialId' | 'p256PubkeyHex' | 'room' | 'name'>
+export type PersistedIdentity = Pick<
+  IdentityState,
+  'credentialId' | 'p256PubkeyHex' | 'room' | 'name' | 'knownPublicKey'
+>
 
 /**
  * Persisted slice: which passkey to recover, the last room, and this player's own handle. Exported so the invariant (no
  * seed material on disk) is directly testable.
  */
 export function partializeIdentity(s: IdentityState): PersistedIdentity {
-  return { credentialId: s.credentialId, p256PubkeyHex: s.p256PubkeyHex, room: s.room, name: s.name }
+  return {
+    knownPublicKey: s.knownPublicKey,
+    credentialId: s.credentialId,
+    p256PubkeyHex: s.p256PubkeyHex,
+    room: s.room,
+    name: s.name,
+  }
 }
 
 /**
@@ -125,6 +136,7 @@ function identityStorage(): PersistStorage<PersistedIdentity> | undefined {
 export const useIdentityStore = create<IdentityState>()(
   persist(
     (set) => ({
+      knownPublicKey: null,
       credentialId: null,
       p256PubkeyHex: null,
       ed25519PubkeyHex: null,
@@ -137,7 +149,13 @@ export const useIdentityStore = create<IdentityState>()(
       setCredentialId: (id) => set({ credentialId: id }),
       setP256PubkeyHex: (hex) => set({ p256PubkeyHex: hex }),
       unlock: ({ seedHex, ed25519PubkeyHex, ephemeral = false }) =>
-        set({ seedHex, ed25519PubkeyHex, unlocked: true, ephemeral }),
+        set({
+          seedHex,
+          ed25519PubkeyHex,
+          knownPublicKey: ephemeral ? null : ed25519PubkeyHex,
+          unlocked: true,
+          ephemeral,
+        }),
       setName: (name) => set({ name }),
       // Clearing the seed also clears `ephemeral`: that flag describes the
       // now-gone in-memory seed, so leaving it stuck `true` would mislabel the
@@ -148,6 +166,7 @@ export const useIdentityStore = create<IdentityState>()(
       // now writes `room`, so a "forget everything" must reset it too).
       reset: () =>
         set({
+          knownPublicKey: null,
           credentialId: null,
           p256PubkeyHex: null,
           ed25519PubkeyHex: null,
@@ -168,6 +187,18 @@ export const useIdentityStore = create<IdentityState>()(
       migrate: migrateIdentity,
       // Degrades to no persistence when localStorage is absent (SSR / tests).
       storage: identityStorage(),
+      merge: (persisted, current) => mergeIdentity(persisted, current),
     },
   ),
 )
+
+/** Hydration accepts public metadata only, even from an older or modified cache. */
+export function mergeIdentity(persisted: unknown, current: IdentityState): IdentityState {
+  const p = persisted && typeof persisted === 'object' ? (persisted as Record<string, unknown>) : {}
+  const result = { ...current }
+  for (const key of ['credentialId', 'p256PubkeyHex', 'name', 'knownPublicKey'] as const) {
+    if (p[key] === null || typeof p[key] === 'string') result[key] = p[key]
+  }
+  if (typeof p.room === 'string') result.room = p.room
+  return result
+}

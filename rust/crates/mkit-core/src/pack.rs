@@ -65,6 +65,7 @@ use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// ASCII magic ("MKIT") at the start of every pack, v1 or v2.
@@ -177,6 +178,11 @@ pub enum PackError {
     /// The zstd frame itself is corrupt / not a valid zstd stream.
     #[error("zstd decompression failed: {0}")]
     ZstdDecompress(String),
+    /// [`PackWriter::new_raw_only`] refuses delta entries (`push_delta` /
+    /// `push_prepared_delta`). Compression is skipped rather than
+    /// rejected on the raw path.
+    #[error("pack writer is in raw-only mode and does not accept delta entries")]
+    RawOnly,
 }
 
 /// Result of an unpack: which entries were stored, plus a count of
@@ -269,6 +275,11 @@ pub struct PackWriter {
     // field (SPEC-PACKFILE §1's writer version-selection rule) — v2
     // the moment ANY entry ended up compressed, v1 otherwise.
     has_compressed_entry: bool,
+    // When true, `push_raw` never compresses, `push_delta` /
+    // `push_prepared_delta` return [`PackError::RawOnly`], and `finish`
+    // always emits a v1 pack of `0x00` entries. The closure profile
+    // (SPEC-DISCLOSURE) is the consumer: a wasm verifier has no zstd.
+    raw_only: bool,
 }
 
 impl Default for PackWriter {
@@ -290,7 +301,23 @@ impl PackWriter {
             entry_count: 0,
             total_payload: 0,
             has_compressed_entry: false,
+            raw_only: false,
         }
+    }
+
+    /// A writer that never compresses and never accepts deltas.
+    ///
+    /// Every `push_raw` emits a `0x00` entry even when the `pack-zstd`
+    /// feature is on and the payload is highly compressible.
+    /// `push_delta` / `push_prepared_delta` return [`PackError::RawOnly`].
+    /// [`Self::finish`] always emits a v1 pack. This is the closure
+    /// profile's carrier (SPEC-DISCLOSURE): a wasm verifier is built
+    /// without `pack-zstd` and can only consume raw v1 packs.
+    #[must_use]
+    pub fn new_raw_only() -> Self {
+        let mut w = Self::new();
+        w.raw_only = true;
+        w
     }
 
     /// Append a raw object entry. `bytes` is the fully serialised object
@@ -309,7 +336,11 @@ impl PackWriter {
     /// never need to opt in. Either way the returned/stored identity
     /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
     pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
-        let frame = maybe_compress(bytes);
+        let frame = if self.raw_only {
+            None
+        } else {
+            maybe_compress(bytes)
+        };
         self.append_raw_frame(hash_of_bytes, bytes, frame)
     }
 
@@ -342,7 +373,8 @@ impl PackWriter {
     /// called on the same bytes — compression already happened, so
     /// this only replays the cheap bookkeeping + buffer append.
     pub fn push_prepared_raw(&mut self, entry: PreparedRaw) -> Result<Hash, PackError> {
-        self.append_raw_frame(entry.hash, &entry.bytes, entry.frame)
+        let frame = if self.raw_only { None } else { entry.frame };
+        self.append_raw_frame(entry.hash, &entry.bytes, frame)
     }
 
     /// Shared tail of `push_raw`/`push_prepared_raw`: given `bytes` and
@@ -387,6 +419,9 @@ impl PackWriter {
     /// zstd-delta when the stream compresses strictly smaller on the
     /// wire and is long enough to bother; `0x02` delta otherwise.
     pub fn push_delta(&mut self, base_hash: &Hash, delta_stream: &[u8]) -> Result<(), PackError> {
+        if self.raw_only {
+            return Err(PackError::RawOnly);
+        }
         let frame = maybe_compress(delta_stream);
         self.append_delta_frame(base_hash, delta_stream, frame)
     }
@@ -410,6 +445,9 @@ impl PackWriter {
     /// Identical wire result and cap-check semantics to `push_delta`
     /// called on the same base/stream.
     pub fn push_prepared_delta(&mut self, entry: PreparedDelta) -> Result<(), PackError> {
+        if self.raw_only {
+            return Err(PackError::RawOnly);
+        }
         self.append_delta_frame(&entry.base, &entry.stream, entry.frame)
     }
 
@@ -770,11 +808,10 @@ impl PackReader {
         payload_cap: u64,
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
-        // Steps 1-5 (length/magic/version/trailer/entry-count) live in
-        // `validate_pack_header` — pulled out purely to keep this
-        // function's entry-parsing loop under clippy's line-count cap;
-        // no behavior moves, just where it's written.
-        let (version, split, count) = validate_pack_header(pack_bytes)?;
+        // One frame parser: [`PackEntries`] owns header/trailer/cap/type
+        // validation and decompression. This loop only resolves deltas
+        // against the store and stages into the batch.
+        let entries = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
 
         let mut report = UnpackReport::default();
         // Track entries resolved in *this* pack so subsequent delta
@@ -790,8 +827,6 @@ impl PackReader {
         // `delta::decode` produces bytes that don't alias `pack_bytes`.
         let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
             std::collections::HashMap::new();
-        let mut total_payload: u64 = 0;
-        let mut pos = HEADER_LEN;
 
         // Stage each entry into the batch as soon as it's parsed and
         // validated, rather than collecting every entry's bytes into a
@@ -804,95 +839,23 @@ impl PackReader {
         // entry is parsed".
         let batch = store.batch();
 
-        for _ in 0..count {
-            // Frame: [type][payload_len].
-            if pos + ENTRY_FRAME_LEN > split {
-                return Err(PackError::UnexpectedEof);
-            }
-            let etype = pack_bytes[pos];
-            pos += 1;
-            let payload_len =
-                u32::from_le_bytes(pack_bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
-            pos += 4;
-
-            total_payload = total_payload.saturating_add(payload_len as u64);
-            if total_payload > payload_cap {
-                return Err(PackError::PackfileTooLarge);
-            }
-            if pos + payload_len > split {
-                return Err(PackError::UnexpectedEof);
-            }
-            let payload = &pack_bytes[pos..pos + payload_len];
-            pos += payload_len;
-
-            match etype {
-                0x00 => {
-                    // raw — validate, then stage into the batch immediately.
-                    stage_raw_object(
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        Cow::Borrowed(payload),
-                    )?;
+        for entry in entries {
+            match entry? {
+                PackEntry::Raw { bytes } => {
+                    stage_raw_object(&batch, &mut in_pack, &mut report, owned_bytes, bytes)?;
                 }
-                0x02 => {
-                    // delta — payload is [32B base_hash][stream].
-                    if payload.len() < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
-                    }
-                    let mut base_hash = [0u8; hash::HASH_LEN];
-                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
-                    let stream = &payload[hash::HASH_LEN..];
+                PackEntry::Delta { base, stream } => {
                     stage_delta_target(
                         store,
                         &batch,
                         &mut in_pack,
                         &mut report,
                         owned_bytes,
-                        base_hash,
-                        stream,
+                        base,
+                        stream.as_ref(),
                     )?;
                 }
-                0x03 if version == VERSION_V2 => {
-                    // zstd-raw — payload is [4B uncompressed_len][zstd frame]
-                    // (SPEC-PACKFILE §3.3). Decompress, then treat exactly
-                    // like a 0x00 raw entry.
-                    let obj_bytes = decompress_zstd_entry(payload)?;
-                    stage_raw_object(
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        Cow::Owned(obj_bytes),
-                    )?;
-                }
-                0x04 if version == VERSION_V2 => {
-                    // zstd-delta — payload is [32B base_hash (uncompressed)]
-                    // [4B uncompressed_len][zstd frame] (SPEC-PACKFILE §3.4).
-                    if payload.len() < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
-                    }
-                    let mut base_hash = [0u8; hash::HASH_LEN];
-                    base_hash.copy_from_slice(&payload[..hash::HASH_LEN]);
-                    let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
-                    stage_delta_target(
-                        store,
-                        &batch,
-                        &mut in_pack,
-                        &mut report,
-                        owned_bytes,
-                        base_hash,
-                        &stream,
-                    )?;
-                }
-                0x01 => return Err(PackError::InvalidEntryType(0x01)),
-                other => return Err(PackError::InvalidEntryType(other)),
             }
-        }
-
-        if pos != split {
-            return Err(PackError::TrailingData);
         }
 
         // Batched durability: one full flush for the whole pack instead
@@ -958,6 +921,237 @@ fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackErro
         return Err(PackError::TooManyObjects(count));
     }
     Ok((version, split, count))
+}
+
+/// One decoded pack entry, with `0x03`/`0x04` already decompressed into
+/// the matching uncompressed variant when the `pack-zstd` feature is
+/// compiled in.
+///
+/// The closure profile (SPEC-DISCLOSURE) accepts only [`Self::Raw`]
+/// produced from a `0x00` wire type — see [`PackEntries::is_raw_only`].
+#[derive(Debug)]
+pub enum PackEntry<'a> {
+    /// A fully serialised mkit object (`0x00`, or decompressed `0x03`).
+    /// Raw (`0x00`) payloads borrow the pack bytes; decompressed `0x03`
+    /// payloads own a buffer.
+    Raw { bytes: Cow<'a, [u8]> },
+    /// A delta (`0x02`, or decompressed `0x04`) against `base`.
+    Delta { base: Hash, stream: Cow<'a, [u8]> },
+}
+
+/// Store-less iterator over a packfile's entries.
+///
+/// [`Self::new`] validates the header, trailer, entry-count cap, and
+/// the running payload-sum cap *before* yielding anything, and scans
+/// entry types (without decompressing) so [`Self::is_raw_only`] is
+/// known up front. Iteration then walks the same frames, decompressing
+/// `0x03`/`0x04` when `pack-zstd` is compiled in. Canonical-object
+/// validation of raw payloads is left to the consumer
+/// ([`PackReader::read`] still rejects non-storable objects before
+/// they touch the store).
+///
+/// [`PackReader::read`] consumes this iterator so there is one frame
+/// parser.
+#[derive(Debug)]
+pub struct PackEntries<'a> {
+    bytes: &'a [u8],
+    version: u32,
+    split: usize,
+    count: u32,
+    pos: usize,
+    yielded: u32,
+    raw_only: bool,
+    first_non_raw: Option<u32>,
+    last_payload_range: Option<Range<usize>>,
+    done: bool,
+}
+
+impl<'a> PackEntries<'a> {
+    /// Validate `bytes` as a packfile and prepare to iterate its entries.
+    ///
+    /// # Errors
+    ///
+    /// The same framing [`PackError`] variants as [`PackReader::read`]:
+    /// short input, bad magic/version/trailer, over-cap entry count or
+    /// payload sum, unknown entry type, trailing data.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, PackError> {
+        Self::new_with_payload_cap(bytes, MAX_TOTAL_PAYLOAD)
+    }
+
+    pub(crate) fn new_with_payload_cap(
+        bytes: &'a [u8],
+        payload_cap: u64,
+    ) -> Result<Self, PackError> {
+        let (version, split, count) = validate_pack_header(bytes)?;
+        let mut pos = HEADER_LEN;
+        let mut total_payload: u64 = 0;
+        let mut raw_only = true;
+        let mut first_non_raw = None;
+        for i in 0..count {
+            if pos + ENTRY_FRAME_LEN > split {
+                return Err(PackError::UnexpectedEof);
+            }
+            let etype = bytes[pos];
+            pos += 1;
+            let payload_len =
+                u32::from_le_bytes(bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+            pos += 4;
+            total_payload = total_payload.saturating_add(payload_len as u64);
+            if total_payload > payload_cap {
+                return Err(PackError::PackfileTooLarge);
+            }
+            if pos + payload_len > split {
+                return Err(PackError::UnexpectedEof);
+            }
+            match etype {
+                0x00 => {}
+                0x02 => {
+                    if payload_len < hash::HASH_LEN {
+                        return Err(PackError::DeltaEntryTruncated);
+                    }
+                    if first_non_raw.is_none() {
+                        first_non_raw = Some(i);
+                    }
+                    raw_only = false;
+                }
+                0x03 if version == VERSION_V2 => {
+                    if first_non_raw.is_none() {
+                        first_non_raw = Some(i);
+                    }
+                    raw_only = false;
+                }
+                0x04 if version == VERSION_V2 => {
+                    if payload_len < hash::HASH_LEN {
+                        return Err(PackError::DeltaEntryTruncated);
+                    }
+                    if first_non_raw.is_none() {
+                        first_non_raw = Some(i);
+                    }
+                    raw_only = false;
+                }
+                0x01 => return Err(PackError::InvalidEntryType(0x01)),
+                other => return Err(PackError::InvalidEntryType(other)),
+            }
+            pos += payload_len;
+        }
+        if pos != split {
+            return Err(PackError::TrailingData);
+        }
+        Ok(Self {
+            bytes,
+            version,
+            split,
+            count,
+            pos: HEADER_LEN,
+            yielded: 0,
+            raw_only,
+            first_non_raw,
+            last_payload_range: None,
+            done: false,
+        })
+    }
+
+    /// True iff every entry is wire type `0x00` (including the empty
+    /// pack). Computed during [`Self::new`] by scanning entry types
+    /// without decompressing — a wasm verifier can reject a non-raw
+    /// pack before touching zstd.
+    #[must_use]
+    pub fn is_raw_only(&self) -> bool {
+        self.raw_only
+    }
+
+    /// Index of the first non-`0x00` entry, if any.
+    #[must_use]
+    pub fn first_non_raw_index(&self) -> Option<u32> {
+        self.first_non_raw
+    }
+
+    /// Byte range of the payload returned by the most recent successful
+    /// iteration, relative to the original pack buffer. `None` before the
+    /// first item. For a raw-only pack, this is the borrowed object slice;
+    /// compressed entries, which are rejected by the closure profile, still
+    /// report the encoded payload range rather than the decompressed buffer.
+    #[must_use]
+    pub(crate) fn last_payload_range(&self) -> Option<Range<usize>> {
+        self.last_payload_range.clone()
+    }
+
+    fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
+        if self.pos + ENTRY_FRAME_LEN > self.split {
+            return Err(PackError::UnexpectedEof);
+        }
+        let etype = self.bytes[self.pos];
+        self.pos += 1;
+        let payload_len = u32::from_le_bytes(
+            self.bytes[self.pos..self.pos + 4]
+                .try_into()
+                .expect("4 bytes"),
+        ) as usize;
+        self.pos += 4;
+        if self.pos + payload_len > self.split {
+            return Err(PackError::UnexpectedEof);
+        }
+        let payload_start = self.pos;
+        let payload_end = self.pos + payload_len;
+        let payload = &self.bytes[payload_start..payload_end];
+        self.last_payload_range = Some(payload_start..payload_end);
+        self.pos = payload_end;
+        self.yielded += 1;
+        match etype {
+            0x00 => Ok(PackEntry::Raw {
+                bytes: Cow::Borrowed(payload),
+            }),
+            0x02 => {
+                if payload.len() < hash::HASH_LEN {
+                    return Err(PackError::DeltaEntryTruncated);
+                }
+                let mut base = [0u8; hash::HASH_LEN];
+                base.copy_from_slice(&payload[..hash::HASH_LEN]);
+                Ok(PackEntry::Delta {
+                    base,
+                    stream: Cow::Borrowed(&payload[hash::HASH_LEN..]),
+                })
+            }
+            0x03 if self.version == VERSION_V2 => {
+                let obj_bytes = decompress_zstd_entry(payload)?;
+                Ok(PackEntry::Raw {
+                    bytes: Cow::Owned(obj_bytes),
+                })
+            }
+            0x04 if self.version == VERSION_V2 => {
+                if payload.len() < hash::HASH_LEN {
+                    return Err(PackError::DeltaEntryTruncated);
+                }
+                let mut base = [0u8; hash::HASH_LEN];
+                base.copy_from_slice(&payload[..hash::HASH_LEN]);
+                let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
+                Ok(PackEntry::Delta {
+                    base,
+                    stream: Cow::Owned(stream),
+                })
+            }
+            0x01 => Err(PackError::InvalidEntryType(0x01)),
+            other => Err(PackError::InvalidEntryType(other)),
+        }
+    }
+}
+
+impl<'a> Iterator for PackEntries<'a> {
+    type Item = Result<PackEntry<'a>, PackError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.yielded >= self.count {
+            self.done = true;
+            return None;
+        }
+        match self.next_entry() {
+            Ok(entry) => Some(Ok(entry)),
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
 }
 
 /// Validate `payload` as a canonical storable object and stage it into
@@ -2089,5 +2283,79 @@ mod tests {
             matches!(err, PackError::DecompressedSizeOverCap(n) if n == claimed_len as usize),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn raw_only_writer_emits_v1_raw_for_compressible_payload() {
+        let payload = compressible_bytes(1024 * 1024);
+        let blob = write_blob_via_serialize(&payload);
+        let h = hash::hash(&blob);
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(h, &blob).unwrap();
+        let pack = w.finish().unwrap();
+
+        assert_eq!(
+            u32::from_le_bytes(pack[VERSION_OFFSET..VERSION_OFFSET + 4].try_into().unwrap()),
+            VERSION,
+            "raw-only writer must finish as v1"
+        );
+        assert_eq!(pack[HEADER_LEN], 0x00, "every entry must be 0x00");
+        let entries = PackEntries::new(&pack).unwrap();
+        assert!(entries.is_raw_only());
+        assert_eq!(entries.first_non_raw_index(), None);
+
+        let (_dir, store) = fresh_store();
+        let report = PackReader::read(&pack, &store).unwrap();
+        assert_eq!(report.raw_count, 1);
+        assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    #[test]
+    fn raw_only_writer_rejects_deltas() {
+        let mut w = PackWriter::new_raw_only();
+        let err = w.push_delta(&[0u8; 32], &[0u8; 16]).unwrap_err();
+        assert!(matches!(err, PackError::RawOnly));
+        let prepared = PackWriter::prepare_delta([1u8; 32], vec![0u8; 16]);
+        let err = w.push_prepared_delta(prepared).unwrap_err();
+        assert!(matches!(err, PackError::RawOnly));
+    }
+
+    #[test]
+    fn pack_entries_agrees_with_reader_on_empty_and_raw() {
+        let mut w = PackWriter::new_raw_only();
+        let blob = write_blob_via_serialize(b"pack-entries");
+        let h = hash::hash(&blob);
+        w.push_raw(h, &blob).unwrap();
+        let pack = w.finish().unwrap();
+
+        let entries: Vec<_> = PackEntries::new(&pack)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            PackEntry::Raw { bytes } => assert_eq!(bytes.as_ref(), blob.as_slice()),
+            PackEntry::Delta { .. } => panic!("expected raw"),
+        }
+
+        let (_dir, store) = fresh_store();
+        PackReader::read(&pack, &store).unwrap();
+        assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    #[test]
+    fn pack_entries_is_raw_only_false_for_delta() {
+        let base = write_blob_via_serialize(b"base-for-delta-scan");
+        let base_hash = hash::hash(&base);
+        let target = write_blob_via_serialize(b"target-for-delta-scan!");
+        let stream = delta::encode(&base, &target).unwrap();
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base).unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let pack = w.finish().unwrap();
+        let entries = PackEntries::new(&pack).unwrap();
+        assert!(!entries.is_raw_only());
+        assert_eq!(entries.first_non_raw_index(), Some(1));
     }
 }

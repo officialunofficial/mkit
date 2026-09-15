@@ -1,0 +1,14 @@
+{
+  "bin": "neg_incomplete_length_proof_set.bin",
+  "blake3": "69db786be3e670725fdd827c13eab361bd99eb6279a8e2117a4d68ee484ae14c",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "chunk_len_proofs is missing the proof for index 0, an incomplete 0..index set.",
+  "expect": "reject",
+  "name": "neg_incomplete_length_proof_set",
+  "path_hex": [
+    "6368756e6b65642e62696e"
+  ],
+  "reject_reason": "chunk_len_proofs does not cover exactly 0..index",
+  "selector": "range [chunk_len_proofs missing index 0]",
+  "size": 3994
+}

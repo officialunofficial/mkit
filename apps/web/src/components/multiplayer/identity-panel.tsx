@@ -159,9 +159,11 @@ export function LockedView({
 export function UnlockedHeader({
   api,
   ed25519PubkeyHex,
+  proofOnly = false,
 }: {
   api: ReturnType<typeof useMkit>
   ed25519PubkeyHex: string
+  proofOnly?: boolean
 }) {
   const id = useIdentityStore()
   const attest = useAttest(api, id.credentialId, id.p256PubkeyHex, ed25519PubkeyHex)
@@ -195,12 +197,14 @@ export function UnlockedHeader({
           stays at the far right — the same spot Unlock occupies while locked.
           Stacks on mobile, single row on sm+. */}
       <div className='flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center'>
-        <span className='min-w-0' title={ed25519PubkeyHex}>
-          <span className='text-base'>
-            <OwnPlayerName />
-          </span>{' '}
-          <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
-        </span>
+        {!proofOnly ? (
+          <span className='min-w-0' title={ed25519PubkeyHex}>
+            <span className='text-base'>
+              <OwnPlayerName />
+            </span>{' '}
+            <code className='font-mono text-xs break-all text-muted'>{ed25519PubkeyHex.slice(0, 10)}…</code>
+          </span>
+        ) : null}
         <span className='flex items-center gap-1.5'>
           <button
             type='button'
@@ -219,14 +223,16 @@ export function UnlockedHeader({
             <p className='mt-2'>Linking is optional.</p>
           </InfoTip>
         </span>
-        <button
-          type='button'
-          className={`${BTN} sm:ml-auto`}
-          onClick={onLock}
-          title='Remove the signing key from memory. Unlock to derive it again from your passkey.'
-        >
-          Lock
-        </button>
+        {!proofOnly ? (
+          <button
+            type='button'
+            className={`${BTN} sm:ml-auto`}
+            onClick={onLock}
+            title='Remove the signing key from memory. Unlock to derive it again from your passkey.'
+          >
+            Lock
+          </button>
+        ) : null}
       </div>
       {attest.result ? (
         <FieldList>

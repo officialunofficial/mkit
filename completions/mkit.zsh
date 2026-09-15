@@ -65,7 +65,10 @@ _mkit() {
         'pack-shard:Encode a stored pack into Reed-Solomon shards'
         'git:Git-bridge subcommands (git export, feature-gated)'
         'blame:Show line-level commit attribution'
+        'prove:Build a disclosure bundle for a path, chunk, or byte range'
         'verify:Verify the signature on a commit'
+        'verify-proof:Verify a disclosure bundle against a trusted commit id'
+        'closure:Export or verify a commit object-set closure'
         'attest:Produce a signed DSSE attestation for a commit'
         'verify-attest:Verify every attestation attached to a commit'
         'self:Self-management (self update)'
@@ -475,6 +478,59 @@ _mkit() {
                         '--help[show help]' \
                         '1:subcommand:(export import fetch pull verify status format-patch)' \
                         '2:dest:_files -/'
+                    ;;
+                prove)
+                    _arguments \
+                        '--chunk[chunk index]:N:' \
+                        '--range[byte range OFFSET:LEN]:range:' \
+                        '--with-offsets[authenticate absolute offsets with --range]' \
+                        '-o[write bundle to file]:file:_files' \
+                        '--output[write bundle to file]:file:_files' \
+                        '--format[output format]:fmt:(default json)' \
+                        '--help[show help]' \
+                        '1:revision:' \
+                        '2:path:_files'
+                    ;;
+                verify-proof)
+                    _arguments \
+                        '--expect-path[require this authenticated path]:path:' \
+                        '--trusted[cross-check signer against trust-roots]' \
+                        '--trust-roots[trust-roots TOML]:path:_files' \
+                        '--format[output format]:fmt:(default json)' \
+                        '--payload-out[write verified payload bytes]:file:_files' \
+                        '--help[show help]' \
+                        '1:commit-id:' \
+                        '2:bundle:_files'
+                    ;;
+                closure)
+                    case $words[2] in
+                        export)
+                            _arguments \
+                                '--history[full ancestry (history mode)]' \
+                                '-o[output directory]:dir:_files -/' \
+                                '--output[output directory]:dir:_files -/' \
+                                '--force[overwrite a non-empty directory]' \
+                                '--format[output format]:fmt:(default json)' \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify)' \
+                                '2:revision:'
+                            ;;
+                        verify)
+                            _arguments \
+                                '--from[closure directory]:dir:_files -/' \
+                                '--history[history vs snapshot mode (local store)]' \
+                                '--show-unreferenced[show unreferenced objects (local mode)]' \
+                                '--format[output format]:fmt:(default json)' \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify)' \
+                                '2:commit-id:'
+                            ;;
+                        *)
+                            _values 'closure subcommand' \
+                                'export[export a commit object-set closure]' \
+                                'verify[verify a commit object-set closure]'
+                            ;;
+                    esac
                     ;;
                 attest)
                     _arguments \

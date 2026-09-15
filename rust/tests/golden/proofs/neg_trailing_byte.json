@@ -1,0 +1,21 @@
+{
+  "bin": "neg_trailing_byte.bin",
+  "blake3": "509cac4ffb20805cf10e3e7f652961c973ffd858b4697e354002236bc10417cb",
+  "description": "A valid tree_7entry proof with one extra trailing byte appended. Must fail to decode (trailing bytes are rejected).",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "67",
+      "object_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_trailing_byte",
+  "object_id_hex": "daaa5ae863925303757ff5a4d364ef34fff20900c20b428f7e69d8a264779b6e",
+  "position": 6,
+  "proof_kind": "single",
+  "reject_reason": "trailing byte after the encoded proof (decode must fail)",
+  "size": 70
+}

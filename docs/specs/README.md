@@ -9,12 +9,13 @@ front matter.
 - [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md) &mdash; user-vs-repo config trust boundary and key classification rules.
 - [SPEC-CONVENTIONS](SPEC-CONVENTIONS.md) &mdash; shared vocabulary (RFC 2119 keywords, status vocabulary, encoding notation) for the SPEC-*.md corpus.
 - [SPEC-DELTA](SPEC-DELTA.md) &mdash; delta encoding for packfile objects.
+- [SPEC-DISCLOSURE](SPEC-DISCLOSURE.md) &mdash; partial-disclosure bundle (path/chunk/byte-range proofs) and the closure profile (full disclosure against a commit id).
 - [SPEC-EXTERNAL-SIGNER](SPEC-EXTERNAL-SIGNER.md) &mdash; subprocess protocol for out-of-process signers (HSM, TPM, WebAuthn, …).
 - [SPEC-FASTCDC](SPEC-FASTCDC.md) &mdash; deterministic content-defined chunking for chunked blobs.
 - [SPEC-GC](SPEC-GC.md) &mdash; garbage collection, object pruning, and recovery.
 - [SPEC-GIT-BRIDGE](SPEC-GIT-BRIDGE.md) &mdash; mkit→git export bridge (fork mode) and its verifiers.
 - [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md) &mdash; git→mkit import bridge (one-way fork) and its verifiers.
-- [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMR-based history proofs for light-client verification.
+- [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMB-based history proofs for light-client verification.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `mkit key` CLI surface.
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.

@@ -65,7 +65,7 @@ for (const ext of ['svg', 'png', 'ico', 'webp']) {
 // The prerendered demo pages + their RSC payloads are real content that can change on a
 // redeploy at the same path — they need a short-TTL rule (not immutable) or they inherit
 // the must-revalidate default same as everything else.
-for (const route of ['/concepts', '/multiplayer', '/parity', '/performance', '/specs', '/RSC/*']) {
+for (const route of ['/concepts', '/create', '/multiplayer', '/parity', '/performance', '/specs', '/RSC/*']) {
   if (!contents.includes(`${route}\n  Cache-Control: public, max-age=300, stale-while-revalidate=86400`)) {
     failures.push(`missing or mismatched short-TTL Cache-Control rule for ${route}`)
   }

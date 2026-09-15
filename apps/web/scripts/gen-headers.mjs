@@ -23,7 +23,7 @@ const headersPath = resolve(here, '..', 'public', '_headers')
 // Kept as the single source of truth for both the extensions and the routes below —
 // assert-headers.mjs loops over the identical lists to verify each rule survived.
 const IMMUTABLE_IMAGE_EXTS = ['svg', 'png', 'ico', 'webp']
-const SHORT_TTL_ROUTES = ['/concepts', '/multiplayer', '/parity', '/performance', '/specs', '/RSC/*']
+const SHORT_TTL_ROUTES = ['/concepts', '/create', '/multiplayer', '/parity', '/performance', '/specs', '/RSC/*']
 
 const body = SECURITY_HEADERS.map(([name, value]) => `  ${name}: ${value}`).join('\n')
 const immutableImageRules = IMMUTABLE_IMAGE_EXTS.map(

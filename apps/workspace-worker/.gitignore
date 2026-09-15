@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.dev.vars*
+dist/
+vendor/mkit-wasm/
+worker-configuration.d.ts
+
+/vendor/nanocodex.wasm

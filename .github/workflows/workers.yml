@@ -28,6 +28,9 @@ name: "CI: Workers"
 #
 # Deploys live elsewhere (Cloudflare Workers Builds on merge to main, same
 # model as apps/web) — this workflow is validation only.
+# The TypeScript workspace Worker has a separate job below: rebuild the Rust
+# WASM codec, generate binding types, test nanocodex integration, and bundle
+# the Worker plus its Sandbox image. Both jobs feed the existing stable gate.
 
 on:
   push:
@@ -38,6 +41,14 @@ on:
       - 'apps/keys-worker/**'
       - 'apps/vcs-worker/**'
       - 'apps/mkit-worker-common/**'
+      - 'apps/workspace-worker/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/rust-toolchain.toml'
+      - 'rust/crates/mkit-core/**'
+      - 'rust/crates/mkit-attest/**'
+      - 'rust/crates/mkit-rpc/**'
+      - 'rust/crates/mkit-wasm/**'
       - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
@@ -71,6 +82,7 @@ jobs:
       pull-requests: read
     outputs:
       workers: ${{ steps.filter.outputs.workers }}
+      workspace: ${{ steps.filter.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
@@ -84,6 +96,16 @@ jobs:
               - 'apps/vcs-worker/**'
               - 'apps/mkit-worker-common/**'
               - 'proto/mkit/transport/v1/**'
+            workspace:
+              - '.github/workflows/workers.yml'
+              - 'apps/workspace-worker/**'
+              - 'rust/Cargo.lock'
+              - 'rust/Cargo.toml'
+              - 'rust/rust-toolchain.toml'
+              - 'rust/crates/mkit-core/**'
+              - 'rust/crates/mkit-attest/**'
+              - 'rust/crates/mkit-rpc/**'
+              - 'rust/crates/mkit-wasm/**'
 
   ci:
     name: fmt, clippy, test, wasm build, buf lint
@@ -211,29 +233,95 @@ jobs:
         working-directory: apps/vcs-worker
         run: cargo test --lib
 
+  workspace:
+    name: Workspace typecheck, tests, and production bundle
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.workspace == 'true')
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust 1.95.0 + wasm32 target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.95.0'
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build dependencies
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: rust-ci-workspace
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/workspace-worker/package-lock.json
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b  # v3.0.0
+        with:
+          version: '31.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.13.1
+
+      - name: Install workspace dependencies
+        working-directory: apps/workspace-worker
+        run: npm ci
+
+      - name: Build workspace object codec from current Rust sources
+        run: wasm-pack build rust/crates/mkit-wasm --release --target web --out-dir "$GITHUB_WORKSPACE/apps/workspace-worker/vendor/mkit-wasm"
+
+      - name: Generate current binding types
+        working-directory: apps/workspace-worker
+        run: npm run types
+
+      - name: Typecheck workspace
+        working-directory: apps/workspace-worker
+        run: npm run typecheck
+
+      - name: Test workspace and real nanocodex protocol integration
+        working-directory: apps/workspace-worker
+        run: npm test
+
+      # ubuntu-latest includes Docker, required to build the Sandbox image.
+      # This is a bundle/image validation; no deployment or secret is needed.
+      - name: Build workspace deployment
+        working-directory: apps/workspace-worker
+        run: npm run build
+
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
-  # "required-but-skipped" trap. Passes when the `ci` job succeeded OR was
-  # legitimately skipped because the PR touched no worker-relevant paths;
-  # fails if `ci` actually failed or was cancelled.
+  # "required-but-skipped" trap. Both jobs must succeed or be legitimately
+  # skipped because their relevant paths did not change. A failure or
+  # cancellation in either job fails this gate.
   workers-gate:
     name: Workers CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: ci
+    needs: [ci, workspace]
     runs-on: ubuntu-latest
     steps:
       - name: Check ci job result
         shell: bash
         env:
           CI: ${{ needs.ci.result }}
+          WORKSPACE: ${{ needs.workspace.result }}
         run: |
-          echo "ci: ${CI}"
-          case "${CI}" in
-            success|skipped)
-              echo "Workers CI gate satisfied."
-              ;;
-            *)
-              echo "::error::ci job did not succeed (result=${CI})"
-              exit 1
-              ;;
-          esac
+          for result in "${CI}" "${WORKSPACE}"; do
+            case "${result}" in
+              success|skipped) ;;
+              *)
+                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE})"
+                exit 1
+                ;;
+            esac
+          done
+          echo "Workers CI gate satisfied."

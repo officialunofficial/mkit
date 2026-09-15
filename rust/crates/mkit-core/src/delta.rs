@@ -87,6 +87,44 @@ pub const HEADER_LEN: usize = 1 + 4 + 4;
 /// alignment math. Not part of the wire format — readers don't care.
 const BLOCK_SIZE: usize = 16;
 
+/// [`std::collections::HashMap`] pre-configured with `rustc_hash`'s
+/// `FxHasher` for `encode`'s block-hash index, whose keys are already
+/// the output of [`block_hash`] (FNV-1a over 16 bytes) — `std`'s
+/// default `SipHash`-1-3 hasher spends extra cycles on a keyed,
+/// hash-flooding-resistant design this index doesn't need *if* it's
+/// seeded per call (see [`random_seed`]'s docs for the "if").
+///
+/// Seeded via [`rustc_hash::FxSeededState`] rather than the crate's
+/// bare `FxBuildHasher`/`BuildHasherDefault<FxHasher>` (both always
+/// start from a fixed, compile-time state): `block_hash` is itself
+/// unkeyed, so an attacker who controls `base`'s bytes could otherwise
+/// solve for many distinct blocks whose `block_hash` outputs all land
+/// in the same table bucket under a known, fixed seed, degrading this
+/// index's build from O(n) to O(n²) — the exact hash-flooding attack
+/// `SipHash` exists to prevent. `encode` reseeds via [`random_seed`] on
+/// every call, denying an attacker the one thing that attack needs: a
+/// bucket mapping it can predict in advance.
+type FxIndexMap = std::collections::HashMap<u64, u32, rustc_hash::FxSeededState>;
+
+/// A fresh random seed for [`FxIndexMap`], drawn from `std`'s own
+/// randomized hasher — the same source `HashMap`'s default `SipHash`
+/// hasher seeds itself from — rather than pulling in `rustc-hash`'s
+/// optional `rand` feature (and its `rand` dependency) just for one
+/// `usize` per `encode()` call. Called once per `encode()` call, not
+/// once per lookup — cheap relative to building an index of up to
+/// thousands of entries.
+fn random_seed() -> usize {
+    use std::hash::{BuildHasher, Hasher};
+    // Any subset of these 64 random bits is still a valid, still-random
+    // seed, including the truncated one a 32-bit `usize` gets here — the
+    // cast doesn't need to be lossless.
+    #[allow(clippy::cast_possible_truncation)]
+    let seed = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish() as usize;
+    seed
+}
+
 /// Multiplier applied to `stream.len()` when bounding the decoder's
 /// initial `Vec::with_capacity`. The worst-case expansion of a COPY op
 /// is 7 bytes of stream → `u16::MAX` output bytes (≈ 9363×), but in
@@ -138,8 +176,6 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
 /// (insert-buffer length > 127, match length > `u16::MAX`); both are
 /// guarded above and unreachable for any valid input.
 pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
-    use std::collections::HashMap;
-
     check_length_bounds(base.len(), result.len())?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + result.len());
@@ -149,7 +185,10 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, MkitError> {
     // `base.len()` at `u32::MAX` for COPY offsets — bases over 4 GiB
     // are out of scope for v1 (SPEC-PACKFILE caps individual payloads).
     let num_blocks = base.len() / BLOCK_SIZE;
-    let mut index: HashMap<u64, u32> = HashMap::with_capacity(num_blocks);
+    let mut index: FxIndexMap = FxIndexMap::with_capacity_and_hasher(
+        num_blocks,
+        rustc_hash::FxSeededState::with_seed(random_seed()),
+    );
     for i in 0..num_blocks {
         let pos = i * BLOCK_SIZE;
         if let Ok(pos_u32) = u32::try_from(pos) {
@@ -481,6 +520,45 @@ mod tests {
         h[1..5].copy_from_slice(&base_len.to_le_bytes());
         h[5..9].copy_from_slice(&result_len.to_le_bytes());
         h
+    }
+
+    /// `random_seed` and `FxSeededState` are the two pieces of this
+    /// module's own contribution to `FxIndexMap` — `FxHasher`'s mixing
+    /// quality is `rustc_hash`'s own tested contract, not this module's
+    /// to re-verify. What this module must get right: two seeds drawn
+    /// from `random_seed()` actually differ (or `encode`'s index would
+    /// be no better than a fixed-seed `FxHasher`, exactly the
+    /// hash-flooding gap `FxIndexMap`'s docs describe), and
+    /// `FxSeededState` wires a seed through consistently enough for a
+    /// `HashMap` to find keys it just inserted.
+    #[test]
+    fn random_seed_differs_across_calls_and_seeds_a_usable_map() {
+        use std::hash::BuildHasher;
+
+        fn hash_u64_with(state: &rustc_hash::FxSeededState, i: u64) -> u64 {
+            state.hash_one(i)
+        }
+
+        // Astronomically likely to differ by chance alone (1 in 2^64 not
+        // to), so a single inequality here is a meaningful regression
+        // signal for "reseeding isn't happening", not a flaky test.
+        let seed_a = random_seed();
+        let seed_b = random_seed();
+        assert_ne!(
+            seed_a, seed_b,
+            "random_seed() returned the same value twice in a row"
+        );
+
+        let a = rustc_hash::FxSeededState::with_seed(seed_a);
+        let b = rustc_hash::FxSeededState::with_seed(seed_b);
+        assert_ne!(
+            hash_u64_with(&a, 42),
+            hash_u64_with(&b, 42),
+            "two different seeds produced the same hash for the same key"
+        );
+        // Within one seed (i.e. one `encode()` call's index), hashing
+        // must still be internally consistent.
+        assert_eq!(hash_u64_with(&a, 42), hash_u64_with(&a, 42));
     }
 
     #[test]

@@ -1,0 +1,16 @@
+{
+  "bin": "neg_non_tree_intermediate_mode.bin",
+  "blake3": "8629ba66a06ce84b92e03bd5429d0826807df717b7112ad0667c93e6087031c4",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "The 2nd of 3 steps has mode Blob though it is not the final step.",
+  "expect": "reject",
+  "name": "neg_non_tree_intermediate_mode",
+  "path_hex": [
+    "737562",
+    "64656570",
+    "646565702e747874"
+  ],
+  "reject_reason": "non-final step's mode is not Tree",
+  "selector": "object",
+  "size": 635
+}

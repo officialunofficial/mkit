@@ -16,7 +16,14 @@ zig-out/
 
 # Test-generated private keys (older path; retained to avoid accidental leaks)
 mkit/test-key
-.claude/
+
+# Local Claude Code state (worktrees, workflows, per-user overrides) stays
+# untracked; the SessionStart hook that wires sandbox sccache is the one
+# exception, since a fresh cloud-sandbox clone needs it committed to run.
+.claude/*
+!.claude/hooks/
+!.claude/hooks/session-start.sh
+!.claude/settings.json
 
 # Keys, secrets, and local env files — never commit these
 *.pem

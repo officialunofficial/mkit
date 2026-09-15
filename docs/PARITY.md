@@ -50,6 +50,9 @@ creeping; revisit post-v1 if demand warrants.
   *(exception: the translation bridge, see the scope amendment above &mdash;
   export mirroring and importer-signed import, never byte-sharing or
   bidirectional sync)*
+- `mkit closure` &mdash; no git counterpart (`git bundle` is the nearest
+  relative). Native full-disclosure packs plus `MANIFEST.mkcl`, not
+  git-bundle interop.
 - Shadowing the real `git` binary on `PATH` by default
 - `log --graph` ASCII commit-graph rendering (the flag is accepted as a
   no-op for script compatibility). Full byte-parity is unachievable because

@@ -75,6 +75,60 @@ pub fn collect_ancestor_set<S: BuildHasher>(
 /// pushes — the push-path is the only caller for now.
 pub const MAX_REACHABLE: usize = 10_000_000;
 
+/// How a closure walk treats commit/remix parents.
+///
+/// [`ClosureMode::Snapshot`] includes a commit (or remix, or tag) and the tree
+/// closure it names — trees, blobs, chunked-blob manifests, chunks —
+/// but not parent commits. [`ClosureMode::History`] is today's
+/// [`reachable_objects`] semantics: every ancestor, identical to what
+/// push/fetch ship. Remix `sources` are never followed in either mode
+/// (they are foreign-repo pointers, SPEC-OBJECTS §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClosureMode {
+    /// Commit/remix/tag + its tree closure. Parents are referenced
+    /// but not included.
+    Snapshot,
+    /// Full history: commit/remix → tree + every parent, recursively.
+    History,
+}
+
+/// The single source of truth for "what does this object reference".
+///
+/// * [`Object::Commit`]: `tree_hash`, plus `parents` only in
+///   [`ClosureMode::History`].
+/// * [`Object::Remix`]: `tree_hash`, plus `parents` only in
+///   [`ClosureMode::History`]; never `sources`.
+/// * [`Object::Tree`]: every entry's `object_hash`.
+/// * [`Object::ChunkedBlob`]: every chunk.
+/// * [`Object::Tag`][]: `target`.
+/// * [`Object::Blob`] / [`Object::Delta`]: none (`Delta.base_hash` is
+///   not followed — deltas are pack-only leaves).
+#[must_use]
+pub fn children(obj: &Object, mode: ClosureMode) -> Vec<Hash> {
+    match obj {
+        Object::Commit(c) => {
+            let mut out = Vec::with_capacity(1 + c.parents.len());
+            out.push(c.tree_hash);
+            if mode == ClosureMode::History {
+                out.extend(c.parents.iter().copied());
+            }
+            out
+        }
+        Object::Remix(r) => {
+            let mut out = Vec::with_capacity(1 + r.parents.len());
+            out.push(r.tree_hash);
+            if mode == ClosureMode::History {
+                out.extend(r.parents.iter().copied());
+            }
+            out
+        }
+        Object::Tree(t) => t.entries.iter().map(|e| e.object_hash).collect(),
+        Object::ChunkedBlob(cb) => cb.chunks.clone(),
+        Object::Tag(t) => vec![t.target],
+        Object::Blob(_) | Object::Delta(_) => Vec::new(),
+    }
+}
+
 /// Collect every object reachable from commit `root` — the full closure
 /// needed to reconstruct the commit on a fresh store. Walks, in order:
 ///
@@ -167,6 +221,24 @@ where
     reachable_closure_checked_with_cap(store, roots, MAX_REACHABLE)
 }
 
+/// Collect every object reachable from `root` in [`ClosureMode::Snapshot`]:
+/// the commit (or remix, or tag) and its tree closure, but not parent
+/// commits. Same walker as [`reachable_objects`], driven by
+/// [`children`]`(obj, Snapshot)`.
+///
+/// # Errors
+///
+/// Propagates [`StoreError`] as [`reachable_objects`] does.
+pub fn reachable_snapshot(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Hash>, StoreError> {
+    reachable_with_mode(
+        store,
+        std::iter::once(root),
+        ClosureMode::Snapshot,
+        MAX_REACHABLE,
+    )
+    .map(|(out, _truncated)| out)
+}
+
 /// Same walk as [`reachable_closure_checked`], but with a caller-supplied
 /// cap instead of the hardcoded [`MAX_REACHABLE`] (10 million).
 ///
@@ -178,6 +250,18 @@ where
 pub(crate) fn reachable_closure_checked_with_cap<'a, I>(
     store: &ObjectStore,
     roots: I,
+    cap: usize,
+) -> Result<(BTreeSet<Hash>, bool), StoreError>
+where
+    I: IntoIterator<Item = &'a Hash>,
+{
+    reachable_with_mode(store, roots, ClosureMode::History, cap)
+}
+
+fn reachable_with_mode<'a, I>(
+    store: &ObjectStore,
+    roots: I,
+    mode: ClosureMode,
     cap: usize,
 ) -> Result<(BTreeSet<Hash>, bool), StoreError>
 where
@@ -218,44 +302,11 @@ where
 
         // Every other kind needs its decoded body to find its children,
         // so this still pays for a full read+verify+decode.
+        // [`children`] is the single source of truth for the edges;
+        // History mode preserves the pre-existing walk exactly.
         let obj = store.read_object(&h)?;
-        match obj {
-            Object::Commit(c) => {
-                queue.push_back(c.tree_hash);
-                for p in c.parents {
-                    queue.push_back(p);
-                }
-            }
-            Object::Remix(r) => {
-                queue.push_back(r.tree_hash);
-                for p in r.parents {
-                    queue.push_back(p);
-                }
-                // Remix `sources` are foreign-repo pointers (SPEC-OBJECTS
-                // §6) — by definition NOT in our store, so don't queue them.
-            }
-            Object::Tree(t) => {
-                for e in t.entries {
-                    queue.push_back(e.object_hash);
-                }
-            }
-            Object::ChunkedBlob(cb) => {
-                for c in cb.chunks {
-                    queue.push_back(c);
-                }
-            }
-            Object::Tag(t) => {
-                // An annotated/signed tag points at one target object
-                // (SPEC-OBJECTS §6a). Walk it so a tag is a valid pack
-                // root.
-                queue.push_back(t.target);
-            }
-            Object::Blob(_) | Object::Delta(_) => {
-                // Unreachable: `object_type` already filtered these out
-                // above. Kept so the match stays exhaustive if a new
-                // object kind is ever added.
-                unreachable!("blob/delta leaves are short-circuited before read_object")
-            }
+        for child in children(&obj, mode) {
+            queue.push_back(child);
         }
     }
     Ok((out, truncated))
@@ -631,5 +682,49 @@ mod tests {
 
         let err = reachable_closure_checked(&s, [c1].iter()).unwrap_err();
         assert!(matches!(err, StoreError::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn children_snapshot_omits_parents_history_includes_them() {
+        let t = [1u8; 32];
+        let p = [2u8; 32];
+        let commit = Object::Commit(Commit {
+            tree_hash: t,
+            parents: vec![p],
+            author: Identity::ed25519([0; 32]),
+            signer: [0; 32],
+            message: b"m".to_vec(),
+            timestamp: 1,
+            message_hash: [0; 32],
+            content_digest: [0; 32],
+            signature: [0; 64],
+        });
+        assert_eq!(children(&commit, ClosureMode::Snapshot), vec![t]);
+        assert_eq!(children(&commit, ClosureMode::History), vec![t, p]);
+        let blob = Object::Blob(Blob {
+            data: b"x".to_vec(),
+        });
+        assert!(children(&blob, ClosureMode::History).is_empty());
+        assert!(children(&blob, ClosureMode::Snapshot).is_empty());
+    }
+
+    #[test]
+    fn reachable_snapshot_excludes_parent_commit() {
+        let (_d, s) = store();
+        let t1 = make_single_file_tree(&s, b"old", b"parent-only");
+        let c1 = make_commit(&s, t1, &[], "c1");
+        let t2 = make_single_file_tree(&s, b"new", b"child-only");
+        let c2 = make_commit(&s, t2, &[c1], "c2");
+
+        let history = reachable_objects(&s, &c2).unwrap();
+        let snapshot = reachable_snapshot(&s, &c2).unwrap();
+
+        assert!(history.contains(&c1));
+        assert!(history.contains(&t1));
+        assert!(!snapshot.contains(&c1), "snapshot must not walk parents");
+        assert!(!snapshot.contains(&t1), "parent tree is history-only");
+        assert!(snapshot.contains(&c2));
+        assert!(snapshot.contains(&t2));
+        assert!(history.is_superset(&snapshot));
     }
 }

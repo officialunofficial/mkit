@@ -1,0 +1,17 @@
+{
+  "bin": "chunked_blob_cs0_3chunks_metapos0_reject.bin",
+  "blake3": "d5c9796b21e0561c4ae0470293f6fe8b45405442d0c3d46e1553d3dc97f1a8f6",
+  "chunk_hashes_hex": [],
+  "chunk_size": 0,
+  "description": "Position 0 (the metadata leaf) is a structurally valid BMT proof, but MUST be rejected by chunk verification: position 0 is never a chunk.",
+  "expect": "reject",
+  "kind": "chunk",
+  "max_items": 1,
+  "name": "chunked_blob_cs0_3chunks_metapos0_reject",
+  "object_id_hex": "00a63a562fc5b0fbe3eda18138923dfff4f94f0ca60ef869e32825028199d63d",
+  "position": 0,
+  "proof_kind": "single",
+  "reject_reason": "position 0 is the ChunkedBlob metadata leaf, not a chunk",
+  "size": 69,
+  "total_size": 1000000
+}
