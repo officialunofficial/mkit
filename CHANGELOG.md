@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Verifier kit.** First-class commit-hash verification for an untrusted
+object set or a few-KiB disclosure bundle: CLI `mkit prove`,
+`mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
+wasm exports `verify_disclosure` / `verify_closure_*` (and related
+primitives) in `@officialunofficial/mkit-wasm`; specs
+SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
+[`docs/VERIFY.md`](docs/VERIFY.md). BMT proof bytes are
+commonware-identical (`commonware_storage::bmt::Proof` at the pinned
+train).
+
 ### Changed
 
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
