@@ -575,7 +575,7 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
 
     let input = &input[..input.len().min(MAX_INPUT)];
     let pack_refs: Vec<&[u8]> = fixture.packs.iter().map(Vec::as_slice).collect();
-    verify::verify_closure_manifest(&fixture.manifest, &pack_refs)
+    verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &pack_refs)
         .expect("freshly exported closure must verify")
         .is_complete()
         .then_some(())
@@ -585,7 +585,7 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
         let mut mutated = fixture.manifest.clone();
         let pos = usize::from(input[0]) % mutated.len();
         mutated[pos] ^= input[1].max(1);
-        let _ = verify::verify_closure_manifest(&mutated, &pack_refs);
+        let _ = verify::verify_closure_manifest(&fixture.root, &mutated, &pack_refs);
     }
     let _ = verify::verify_closure(&fixture.root, mkit_core::ClosureMode::Snapshot, [input]);
     let _ = mkit_core::pack::PackEntries::new(input);

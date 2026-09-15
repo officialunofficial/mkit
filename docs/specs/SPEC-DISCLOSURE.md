@@ -348,6 +348,9 @@ entry point directly and ignore the manifest.
 
 1. Re-hash every supplied object (`deserialize` then `id_from_object`).
    A deserialize failure is `corrupt` under the BLAKE3 of those bytes.
+   A bit-flipped object that still deserializes is content-addressed
+   under a *different* id and surfaces as `missing` (the referenced id)
+   plus `unreferenced` (the supplied one), not `corrupt`.
 2. Walk from the root with `children(obj, mode)` over the resulting
    `id → bytes` map (BFS, visited set). The walk is store-less.
 3. Anything referenced and absent is `missing`. Anything supplied and
@@ -356,9 +359,12 @@ entry point directly and ignore the manifest.
    MAY serve a superset.
 4. The root itself missing is `missing = [root]`, `verified = 0`.
 5. Delta or compressed pack entries are a profile violation (§7.2).
-6. Manifest pack hashes MUST equal `pack_key` of the supplied packs, in
+6. The verifier MUST be given the trusted root by its caller and MUST
+   reject a manifest whose `root` differs; the manifest is a locator,
+   never a trust anchor.
+7. Manifest pack hashes MUST equal `pack_key` of the supplied packs, in
    order, and the counts MUST match.
-7. Object count MUST NOT exceed SPEC-PACKFILE `MAX_ENTRIES`
+8. Object count MUST NOT exceed SPEC-PACKFILE `MAX_ENTRIES`
    (10,000,000). Pack payload sum and entry count reuse SPEC-PACKFILE
    caps. Tree depth, tree entries, chunks, and parents reuse
    `store::MAX_TREE_DEPTH`, `serialize::MAX_TREE_ENTRIES`,
@@ -386,8 +392,9 @@ pack hashes, expected `verified` count, and the sorted id list.
 
 Reject / incomplete vectors: missing chunk; corrupt blob; unreferenced
 extra (still complete); a delta entry; a compressed entry; a manifest
-pack-hash mismatch; the wrong root id; manifest version 2; a trailing
-byte on the manifest.
+pack-hash mismatch; the wrong root id; a manifest whose `root` differs
+from the caller's trusted root; manifest version 2; a trailing byte on
+the manifest.
 
 `rust/crates/mkit-core/tests/golden_closure.rs` reads only the committed
 files.
@@ -413,10 +420,11 @@ files.
 | checked against a bare inner root instead of the object id | every check here goes through the id-based `merkle::verify_*` (SPEC-MERKLE-OBJECTS §5.4) |
 | a claimed path not matching what was actually authenticated | callers compare the returned authenticated `path`, never a path string the bundle merely asserts |
 | a closure object omitted | the walk from the root reports it in `missing`; completeness fails |
-| a closure object's bytes tampered | re-hash disagrees (`corrupt`) or the id is absent (`missing`) |
+| a closure object's bytes tampered | deserialize failure is `corrupt`; a still-deserializable bit flip is `missing` plus `unreferenced` |
 | a delta or compressed pack in a closure | profile violation, before any decompress |
 | a closure manifest pack hash swapped | `pack_key` mismatch against the supplied pack |
 | a closure verified against the wrong root | the requested root is `missing`; the supplied set is `unreferenced` |
+| a closure manifest whose `root` differs from the caller's trusted root | typed `ClosureRootMismatch`; the manifest is a locator, never a trust anchor |
 
 ## Cross-references
 

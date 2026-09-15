@@ -288,6 +288,15 @@ pub enum VerifyError {
         /// Index of the mismatched pack.
         index: usize,
     },
+    /// The manifest's `root` does not equal the caller-supplied trusted root.
+    /// The manifest is a locator, never a trust anchor.
+    #[error("closure manifest root does not match the caller's trusted root")]
+    ClosureRootMismatch {
+        /// Root the caller asked to verify against.
+        expected: Hash,
+        /// Root the manifest named.
+        got: Hash,
+    },
     /// A packfile framing/decode error while iterating a closure pack.
     #[error(transparent)]
     Pack(#[from] crate::pack::PackError),

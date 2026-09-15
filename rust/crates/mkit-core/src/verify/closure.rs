@@ -38,8 +38,11 @@ pub struct ClosureReport {
     pub verified: usize,
     /// Referenced by a reachable object but not supplied, sorted.
     pub missing: Vec<Hash>,
-    /// Supplied bytes that failed to deserialize, or whose recomputed
-    /// id did not match the id they were filed under. Sorted by id.
+    /// Supplied bytes that failed to deserialize, keyed by BLAKE3 of
+    /// those bytes, sorted by id. A bit-flipped object that still
+    /// deserializes is content-addressed under a *different* id and
+    /// surfaces as [`Self::missing`] (the referenced id) plus
+    /// [`Self::unreferenced`] (the supplied one), not here.
     pub corrupt: Vec<(Hash, String)>,
     /// Supplied (and successfully identified) but not reachable from
     /// `root`, sorted. A DA provider may legitimately serve a superset;
@@ -68,9 +71,9 @@ pub struct ClosureExport {
 /// Convenience index of a closure export: magic `"MKCL"`, version 1,
 /// root id, mode, and the [`pack_key`] of each pack in order.
 ///
-/// The root id remains the only trust anchor — the manifest does not
-/// authenticate the objects; it only tells a verifier which pack
-/// hashes to expect.
+/// The caller supplies the trusted root to [`verify_closure_manifest`];
+/// the manifest does not authenticate the objects and is not itself a
+/// trust anchor. It only tells a verifier which pack hashes to expect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosureManifest {
     /// Commit, remix, or tag id the closure is claimed to cover.
@@ -244,13 +247,13 @@ pub fn verify_closure_packs(
                 entry_index: entries.first_non_raw_index().unwrap_or(0) as usize,
             });
         }
-        for entry in entries {
+        for (entry_index, entry) in entries.enumerate() {
             match entry? {
                 PackEntry::Raw { bytes } => objects.push(bytes.into_owned()),
                 PackEntry::Delta { .. } => {
                     return Err(VerifyError::ClosureProfileViolation {
                         pack_index,
-                        entry_index: objects.len(),
+                        entry_index,
                     });
                 }
             }
@@ -259,21 +262,31 @@ pub fn verify_closure_packs(
     verify_closure(root, mode, objects.iter().map(Vec::as_slice))
 }
 
-/// Decode the manifest, check pack count and `pack_key` equality in
-/// order, then [`verify_closure_packs`]. The root id in the manifest
-/// is the walk root; it is not authenticated by the manifest itself
-/// (the objects re-hash to it).
+/// Decode the manifest, reject it if its `root` is not `expected_root`,
+/// check pack count and `pack_key` equality in order, then
+/// [`verify_closure_packs`]. `mode` comes from the manifest (it only
+/// widens or narrows the walk; the report carries it). The caller
+/// supplies the trusted root; the manifest is a locator, never a
+/// trust anchor.
 ///
 /// # Errors
 ///
-/// Manifest decode errors, [`VerifyError::ClosurePackCountMismatch`],
+/// Manifest decode errors, [`VerifyError::ClosureRootMismatch`],
+/// [`VerifyError::ClosurePackCountMismatch`],
 /// [`VerifyError::ClosurePackKeyMismatch`], plus
 /// [`verify_closure_packs`]'s errors.
 pub fn verify_closure_manifest(
+    expected_root: &Hash,
     manifest: &[u8],
     packs: &[&[u8]],
 ) -> Result<ClosureReport, VerifyError> {
     let decoded = ClosureManifest::decode(manifest)?;
+    if decoded.root != *expected_root {
+        return Err(VerifyError::ClosureRootMismatch {
+            expected: *expected_root,
+            got: decoded.root,
+        });
+    }
     if decoded.packs.len() != packs.len() {
         return Err(VerifyError::ClosurePackCountMismatch {
             expected: decoded.packs.len(),
@@ -445,7 +458,7 @@ mod tests {
         for mode in [ClosureMode::Snapshot, ClosureMode::History] {
             let export = export_closure(&store, &c2, mode).unwrap();
             let packs: Vec<&[u8]> = export.packs.iter().map(Vec::as_slice).collect();
-            let report = verify_closure_manifest(&export.manifest, &packs).unwrap();
+            let report = verify_closure_manifest(&c2, &export.manifest, &packs).unwrap();
             assert!(report.is_complete(), "{mode:?}: {report:?}");
             assert!(report.unreferenced.is_empty());
             assert_eq!(report.root, c2);
@@ -624,10 +637,24 @@ mod tests {
         decoded.packs[0] = [0xFF; 32];
         let bad = decoded.encode();
         let packs: Vec<&[u8]> = export.packs.iter().map(Vec::as_slice).collect();
-        let err = verify_closure_manifest(&bad, &packs).unwrap_err();
+        let err = verify_closure_manifest(&commit_id, &bad, &packs).unwrap_err();
         assert!(matches!(
             err,
             VerifyError::ClosurePackKeyMismatch { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn manifest_root_mismatch() {
+        let (_d, store, commit_id, _) = fixture();
+        let export = export_closure(&store, &commit_id, ClosureMode::Snapshot).unwrap();
+        let packs: Vec<&[u8]> = export.packs.iter().map(Vec::as_slice).collect();
+        let other = [0x11u8; 32];
+        let err = verify_closure_manifest(&other, &export.manifest, &packs).unwrap_err();
+        assert!(matches!(
+            err,
+            VerifyError::ClosureRootMismatch { expected, got }
+                if expected == other && got == commit_id
         ));
     }
 

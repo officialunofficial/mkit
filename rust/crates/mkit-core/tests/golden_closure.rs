@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use mkit_core::hash::{Hash, ZERO, hash, to_hex};
+use mkit_core::hash::{Hash, ZERO, from_hex, hash, to_hex};
 use mkit_core::object::{
     Blob, Commit, EntryMode, Identity, Object, ObjectType, Tag, Tree, TreeEntry,
 };
@@ -518,6 +518,32 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
+    // manifest root replaced; caller still supplies the trusted root
+    {
+        let mut bytes = snap.manifest.clone();
+        bytes[5..37].copy_from_slice(&[0x22u8; 32]);
+        v.push(Vector {
+            name: "neg_manifest_wrong_root",
+            description:
+                "A valid snapshot export whose manifest root was replaced by another 32-byte value."
+                    .into(),
+            json: accept_json(
+                "neg_manifest_wrong_root",
+                "A valid snapshot export whose manifest root was replaced by another 32-byte value.",
+                &f.commit_id,
+                ClosureMode::Snapshot,
+                &snap.packs,
+                0,
+                &[],
+                &[],
+                "reject",
+                Some("manifest root differs from the caller's trusted root"),
+            ),
+            manifest: bytes,
+            packs: snap.packs.clone(),
+        });
+    }
+
     // manifest version 2
     {
         let mut bytes = snap.manifest.clone();
@@ -659,15 +685,17 @@ fn verify_vector(name: &str, want_digest: &str) {
         );
     }
     let pack_refs: Vec<&[u8]> = packs.iter().map(Vec::as_slice).collect();
+    let expected_root: Hash =
+        from_hex(sidecar["root_hex"].as_str().unwrap()).expect("sidecar root_hex");
     let expect = sidecar["expect"].as_str().unwrap();
 
     match expect {
         "reject" => {
-            let err = verify_closure_manifest(&manifest, &pack_refs);
+            let err = verify_closure_manifest(&expected_root, &manifest, &pack_refs);
             assert!(err.is_err(), "{name}: expected reject, got {err:?}");
         }
         "accept" | "incomplete" => {
-            let report = verify_closure_manifest(&manifest, &pack_refs)
+            let report = verify_closure_manifest(&expected_root, &manifest, &pack_refs)
                 .unwrap_or_else(|e| panic!("{name}: expected {expect}, got {e:?}"));
             if expect == "accept" {
                 assert!(
