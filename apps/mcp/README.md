@@ -22,11 +22,9 @@ API instead of guessing or scraping GitHub.
 | `get_command` | One CLI subcommand's reference (for example `attest`); omit `name` to list all. |
 | `get_cli_reference` | The agent-oriented CLI guide (the repo's `SKILL.md`). |
 | `search_docs` | Ranked snippet search over the prose docs. |
-| `get_verify_guide` | `docs/VERIFY.md` — verifying an mkit commit hash (full/partial disclosure) with no repository access. |
 
 The first seven mirror the [Commonware MCP](https://mcp.commonware.xyz); the
-last six are mkit-specific (SPEC corpus, CLI reference, and the verifier
-guide).
+last five are mkit-specific (SPEC corpus and CLI reference).
 
 ## Sibling: the local `mkit mcp` server
 

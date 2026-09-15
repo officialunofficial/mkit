@@ -106,8 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   core function in the kit. Every command and code snippet on the page was
   run (CLI against a real repository; Rust via a compiled scratch check;
   TypeScript kept to the documented `mkit-wasm` API) while writing it.
-  Linked from `README.md`, `SKILL.md`, `docs/ARCHITECTURE.md`, and the
-  mkit MCP's new `get_verify_guide` tool. **SemVer:** none, docs only.
+  Linked from `README.md`, `SKILL.md`, and `docs/ARCHITECTURE.md` (already
+  reachable through the docs MCP's existing `get_file`/`search_docs`
+  tools). **SemVer:** none, docs only.
 
 - *(wasm)* `MAX_CLOSURE_INPUT_BYTES` (1 GiB, matching
   `mkit_core::store::MAX_RAW_OBJECT_SIZE`): `verify_closure_packs` and

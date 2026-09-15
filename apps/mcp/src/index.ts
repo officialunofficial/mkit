@@ -7,11 +7,10 @@
  * scripts/build-index.mjs, so this Worker serves everything from D1 with
  * no runtime credentials.
  *
- * Tools (7 mirror the Commonware MCP, 6 are mkit-specific):
+ * Tools (7 mirror the Commonware MCP, 5 are mkit-specific):
  *   get_overview, list_crates, get_crate_readme, list_files, get_file,
  *   search_code, list_versions,
- *   list_specs, get_spec, get_command, get_cli_reference, search_docs,
- *   get_verify_guide
+ *   list_specs, get_spec, get_command, get_cli_reference, search_docs
  *
  * Protocol: served via `createMcpHandler` (`@modelcontextprotocol/server`),
  * which speaks the 2026-07-28 stateless revision on its modern path and
@@ -452,20 +451,6 @@ function buildServer(env: Env): McpServer {
       if (skill !== null) return ok(skill);
       const cli = await fetchFile(env, ver, "docs/CLI.md");
       return cli === null ? err("Error: no CLI reference indexed") : ok(cli);
-    },
-  );
-
-  // --- get_verify_guide ----------------------------------------------------
-  tool(
-    "get_verify_guide",
-    "Get docs/VERIFY.md — the guide to verifying an mkit commit hash (full and " +
-      "partial disclosure) with no repository access, for a DA provider, a light " +
-      "client, or a browser holding a trusted commit id and untrusted bytes.",
-    { version: z.string().optional() },
-    async ({ version }) => {
-      const ver = version || (await latestVersion(env));
-      const guide = await fetchFile(env, ver, "docs/VERIFY.md");
-      return guide === null ? err("Error: docs/VERIFY.md not indexed for this version") : ok(guide);
     },
   );
 
