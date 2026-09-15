@@ -18,6 +18,8 @@
 //!   signing lifecycle.
 //! * `chunking` — `FastCDC` chunker, chunked-blob manifest, delta, and
 //!   Bao verified streaming.
+//! * `verify` — disclosure bundles, closure packs, Merkle proofs, and
+//!   canonical-blob Bao (`blob_bao_*`).
 //! * `common` — shared private helpers (hex / JSON parsing, count /
 //!   index policy, object encoding) and the internal `CommitCore`.
 
@@ -29,6 +31,7 @@ mod chunking;
 mod common;
 mod crypto;
 mod objects;
+mod verify;
 
 // Re-export every `#[wasm_bindgen]`-exported item at the crate root.
 // wasm-bindgen registers exports wherever the item is defined, so these
@@ -51,4 +54,9 @@ pub use objects::{
     CommitInfoJs, EncodedCommit, EncodedObject, RemixInfoJs, RemixSourceJs, blob_decode,
     blob_encode, commit_decode, commit_encode_and_sign, commit_verify, object_id, object_kind,
     remix_decode, remix_encode_and_sign, remix_verify, tree_decode, tree_encode,
+};
+pub use verify::{
+    blob_bao_encode, blob_bao_slice, blob_bao_verify_slice, chunked_blob_decode,
+    disclosure_payload_bytes, verify_chunk, verify_closure_manifest, verify_closure_packs,
+    verify_disclosure, verify_tree_entry, wrap_object_id,
 };
