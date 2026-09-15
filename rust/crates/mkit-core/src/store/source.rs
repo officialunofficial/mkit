@@ -54,6 +54,20 @@ impl ObjectSource for ObjectStore {
     fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         ObjectStore::read_unverified(self, h)
     }
+
+    /// Overrides the trait default (`deserialize(self.read(h)?)`, which
+    /// would decode a `Tree`/`ChunkedBlob` twice — once inside `read`'s
+    /// id verification, once again here) to delegate to the inherent
+    /// [`ObjectStore::read_object`], which decodes once and reuses the
+    /// result. Every caller generic over `S: ObjectSource` (`diff::load_tree`,
+    /// `LoadedBlob::load`, …) resolves `read_object` through this trait
+    /// impl rather than the inherent method even when `S = ObjectStore`,
+    /// so without this override those call sites — the primary
+    /// Tree/ChunkedBlob decoding paths — would keep paying for the
+    /// double decode the inherent method was written to avoid.
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        ObjectStore::read_object(self, h)
+    }
 }
 
 /// In-memory object overlay for **ephemeral worktree snapshots**
@@ -153,6 +167,22 @@ impl ObjectSource for EphemeralSink<'_> {
         match self.overlay_get(h) {
             Some(bytes) => Ok(bytes),
             None => self.store.read(h),
+        }
+    }
+
+    /// Overrides the trait default for the same reason `impl ObjectSource
+    /// for ObjectStore` does: a private-map hit only ever needs one
+    /// decode (the default's `deserialize(self.read(h)?)` already gives
+    /// that), but a store fall-through would otherwise re-decode a
+    /// `Tree`/`ChunkedBlob` a second time on top of the decode
+    /// `ObjectStore::read`'s id verification already does internally.
+    /// Delegating to `self.store.read_object` on a miss reuses that
+    /// store-side decode instead — `diff`/`status`, which resolve staged
+    /// trees through this overlay, are the paths this matters for.
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        match self.overlay_get(h) {
+            Some(bytes) => Ok(serialize::deserialize(&bytes)?),
+            None => self.store.read_object(h),
         }
     }
 
@@ -268,6 +298,49 @@ mod tests {
             corrupted,
             "DisplaySource::read must delegate to the store's unverified read"
         );
+    }
+
+    /// Regression test for the `EphemeralSink::read_object` override:
+    /// both a private-map (overlay) hit and a store fall-through must
+    /// decode a `Tree` correctly, and the store fall-through must still
+    /// surface `HashMismatch` on corruption — through `&dyn ObjectSource`,
+    /// the shape every `diff`/`status` caller actually uses.
+    #[test]
+    fn ephemeral_sink_read_object_tree_overlay_and_fallthrough() {
+        use crate::object::{EntryMode, Tree, TreeEntry};
+        let tree = |name: &[u8]| {
+            Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: name.to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::hash(b"x"),
+                }],
+            })
+        };
+
+        let (_dir, store) = fresh_store();
+
+        // Store fall-through: object lives only in the durable store.
+        let durable_obj = tree(b"durable.txt");
+        let durable_bytes = serialize::serialize(&durable_obj).unwrap();
+        let durable_h = store.write(&durable_bytes).unwrap();
+
+        // Overlay hit: object lives only in the sink's private map.
+        let overlay_obj = tree(b"overlay.txt");
+        let overlay_bytes = serialize::serialize(&overlay_obj).unwrap();
+
+        let sink = EphemeralSink::new(&store);
+        let overlay_h = sink.put(&overlay_bytes).unwrap();
+
+        let via_trait: &dyn ObjectSource = &sink;
+        assert_eq!(via_trait.read_object(&durable_h).unwrap(), durable_obj);
+        assert_eq!(via_trait.read_object(&overlay_h).unwrap(), overlay_obj);
+
+        corrupt_first_byte(&store, &durable_h, durable_bytes[0]);
+        assert!(matches!(
+            via_trait.read_object(&durable_h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
     }
 
     #[test]

@@ -48,7 +48,7 @@ use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
 use crate::hash::{self, Hash, object_path, to_hex};
 use crate::layout::RepoLayout;
-use crate::object::{MkitError, Object, object_id_from_bytes};
+use crate::object::{MkitError, Object, object_id_from_bytes, verified_id_and_object};
 use crate::serialize;
 
 mod source;
@@ -484,13 +484,7 @@ impl ObjectStore {
     /// accidentally use corrupt data).
     pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         let bytes = self.read_raw(h)?;
-        let actual = object_id_from_bytes(&bytes);
-        if actual != *h {
-            return Err(StoreError::HashMismatch {
-                expected: to_hex(h),
-                actual: to_hex(&actual),
-            });
-        }
+        check_hash(h, &object_id_from_bytes(&bytes))?;
         Ok(bytes)
     }
 
@@ -554,10 +548,24 @@ impl ObjectStore {
     }
 
     /// Convenience: read raw bytes and decode into a typed [`Object`].
+    ///
+    /// A merkelized type ([`Object::Tree`] / [`Object::ChunkedBlob`]) is
+    /// already decoded once by `verified_id_and_object` to compute its
+    /// BMT-root id for the integrity check below — reused directly here
+    /// instead of a second `deserialize` of the same bytes (the two
+    /// decodes this function used to pay for every tree/chunked-blob
+    /// read, once inside [`Self::read`]'s verification and once here).
+    /// Every other type was only ever decoded once (verification there is
+    /// a plain `BLAKE3(bytes)`, no decode), so this path is unchanged for
+    /// them.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        let bytes = self.read(h)?;
-        let obj = serialize::deserialize(&bytes)?;
-        Ok(obj)
+        let bytes = self.read_raw(h)?;
+        let (actual, decoded) = verified_id_and_object(&bytes);
+        check_hash(h, &actual)?;
+        match decoded {
+            Some(obj) => Ok(obj),
+            None => Ok(serialize::deserialize(&bytes)?),
+        }
     }
 
     /// Hash-verifying variant of [`object_type`](Self::object_type): reads
@@ -655,6 +663,22 @@ impl ObjectStore {
             Err(e) => Err(StoreError::Io(e)),
         }
     }
+}
+
+/// Shared by [`ObjectStore::read`] and [`ObjectStore::read_object`]: both
+/// compute an `actual` id from the on-disk bytes their own way (plain
+/// `object_id_from_bytes`, or the decode-reusing [`verified_id_and_object`])
+/// and then need the exact same requested-vs-actual check and
+/// [`StoreError::HashMismatch`] shape — kept in one place so the two can't
+/// drift apart.
+fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
+    if actual != expected {
+        return Err(StoreError::HashMismatch {
+            expected: to_hex(expected),
+            actual: to_hex(actual),
+        });
+    }
+    Ok(())
 }
 
 /// Create a uniquely-named sibling temp file in `parent` for the object
@@ -856,6 +880,83 @@ mod tests {
         let h = store.write(&bytes).unwrap();
         let parsed = store.read_object(&h).unwrap();
         assert_eq!(parsed, obj);
+    }
+
+    /// `read_object` on a merkelized type (the path `verified_id_and_object`
+    /// added a decoded-object fast path for) round-trips correctly — the
+    /// non-merkle `read_object_deserialises` case above can't exercise the
+    /// `Some(obj)` branch at all.
+    #[test]
+    fn read_object_deserialises_tree() {
+        use crate::object::{EntryMode, Tree, TreeEntry};
+        let (_dir, store) = fresh_store();
+        let obj = Object::Tree(Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"a.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::hash(b"a"),
+                },
+                TreeEntry {
+                    name: b"b.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::hash(b"b"),
+                },
+            ],
+        });
+        let bytes = serialize::serialize(&obj).unwrap();
+        let h = store.write(&bytes).unwrap();
+        let parsed = store.read_object(&h).unwrap();
+        assert_eq!(parsed, obj);
+        // Every `S: ObjectSource + ?Sized` caller (diff/blame/worktree
+        // blob loading) resolves `read_object` through this trait impl,
+        // not the inherent method above — pin that it agrees.
+        let via_trait: &dyn ObjectSource = &store;
+        assert_eq!(via_trait.read_object(&h).unwrap(), obj);
+    }
+
+    /// Regression test for the double-decode fix: corrupting a stored
+    /// `Tree`'s bytes must still surface `HashMismatch` through
+    /// `read_object`'s merkle (`Some(obj)`-reusing) branch, not just
+    /// through `read`'s. Also exercises `read_object` via the
+    /// `ObjectSource` trait object — the actual call shape every
+    /// `S: ObjectSource + ?Sized` caller (`diff::load_tree`,
+    /// `LoadedBlob::load`) uses — to pin `impl ObjectSource for
+    /// ObjectStore`'s `read_object` override against regressing back to
+    /// the trait's double-decoding default.
+    #[test]
+    fn read_object_detects_tree_corruption_via_store_and_trait() {
+        use crate::object::{EntryMode, Tree, TreeEntry};
+        let (_dir, store) = fresh_store();
+        let obj = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::hash(b"a"),
+            }],
+        });
+        let bytes = serialize::serialize(&obj).unwrap();
+        let h = store.write(&bytes).unwrap();
+
+        let path = store.path_for(&h);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(io::SeekFrom::Start(0)).unwrap();
+        f.write_all(&[bytes[0] ^ 0xFF]).unwrap();
+        f.sync_all().unwrap();
+
+        assert!(matches!(
+            store.read_object(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
+        let via_trait: &dyn ObjectSource = &store;
+        assert!(matches!(
+            via_trait.read_object(&h).unwrap_err(),
+            StoreError::HashMismatch { .. }
+        ));
     }
 
     #[test]
