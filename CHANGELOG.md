@@ -106,6 +106,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(core)* `verify::resolve_absolute_offset` now rejects a non-empty
+  `chunk_len_proofs` on a `Range` payload whose disclosed chunk is index
+  0, instead of silently ignoring it &mdash; index 0 has nothing preceding it
+  to describe, so any entry there is meaningless, exactly like the
+  existing rejection on a plain-`Blob` leaf
+  (`VerifyError::UnexpectedLengthProofs`, now shared by both cases). New
+  unit test `len_proofs_on_chunk0_are_rejected` and golden negative vector
+  `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*`;
+  SPEC-DISCLOSURE §4 states the rule normatively. **SemVer:** additive
+  &mdash; tightens verification; the only bundles affected are malformed
+  ones no conformant builder has ever produced.
+
 - *(core)* `advance`'s advisory `write_scrub_state` call (`history-mmr`) no longer fails the whole publish if the write itself fails — `finish` has already durably committed the ref move and ancestry snapshot by that point, so a caller must not see that succeeded operation reported as a failure; losing this purely-advisory bookkeeping write only costs the next publish some extra re-verification, never correctness. Found by code review alongside the `ScrubState` panic above; regression test forces the write to fail (a directory occupies the scrub file's path) and confirms the publish still succeeds.
 - *(core)* `decide_chain`'s full-walk fallback (`history-mmr`, on a completed scrub lap or a stale re-verification schedule) no longer re-walks and re-reads the fast-forward suffix a second time — it splices the suffix already verified moments earlier onto a fresh walk of just the reused prefix, which `first_parent_chain(store, target) == first_parent_chain(store, d.tip) ++ suffix` makes provably identical to a full walk of the whole chain. New regression test plants corruption deep in the prefix and confirms the spliced fallback still catches it, proving the optimization didn't drop real verification along with the redundant re-read.
 - *(cli)* `mkit fetch`'s tracking-ref snapshot (used to report which refs moved) now uses the same parallel `list_remote_refs_parallel` fan-out every other ref-listing call site already got when that fan-out was added — this one spot was missed.

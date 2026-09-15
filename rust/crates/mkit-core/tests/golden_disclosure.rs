@@ -867,6 +867,64 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
+    // 13. chunk_len_proofs present when the disclosed chunk is index 0.
+    //     Nothing precedes chunk 0, so any entry here — however
+    //     plausible-looking — MUST be rejected outright, the same as the
+    //     plain-Blob path already rejects a non-empty set.
+    {
+        let (steps, leaf) = walk_path(&f.store, f.tree_hash, &chunked_path);
+        let Object::ChunkedBlob(cb) = f.store.read_object(&leaf).unwrap() else {
+            panic!("expected ChunkedBlob");
+        };
+        let position0 = merkle::chunk_position(&cb, &cb.chunks[0]).unwrap();
+        let hdr_proof = merkle::build_chunks_multi_proof(&cb, [0, position0]).unwrap();
+        let chunk0_canonical = f.store.read(&cb.chunks[0]).unwrap();
+        let slice = bao_slice(&chunk0_canonical, 10, 16); // offset 0, len 16 inside chunk 0
+
+        // A plausible-looking but structurally invalid entry: it claims
+        // to describe "the chunk before index 0" using chunk 0's own
+        // (otherwise genuine) proof and length slice.
+        let len_proof_entry_proof = merkle::build_chunk_proof(&cb, position0).unwrap();
+        let len_slice = bao_slice(&chunk0_canonical, 0, 10);
+
+        let commit_bytes = canonical_bytes(&f.store, &f.commit_id);
+        let bin = wire::bundle(
+            &f.commit_id,
+            &commit_bytes,
+            &steps,
+            &wire::range_payload(
+                Some(&wire::ChunkHdr {
+                    total_size: cb.total_size,
+                    chunk_size: cb.chunk_size,
+                    index: 0,
+                    chunk_id: cb.chunks[0],
+                    proof: hdr_proof,
+                }),
+                0,
+                16,
+                &slice,
+                &[wire::LenProof {
+                    index: 0,
+                    chunk_id: cb.chunks[0],
+                    proof: len_proof_entry_proof,
+                    slice: len_slice,
+                }],
+            ),
+        );
+        v.push(Vector {
+            name: "neg_len_proofs_on_chunk0",
+            description: "A Range payload discloses chunk index 0 but still carries a chunk_len_proofs entry; index 0 has nothing preceding it to describe, so any entry there is rejected outright.",
+            bin,
+            json: base_json(
+                &f.commit_id,
+                &chunked_path,
+                "range(offset=0,len=16) [chunk_len_proofs on chunk 0]",
+                false,
+                Some("chunk_len_proofs is only meaningful at chunk index > 0"),
+            ),
+        });
+    }
+
     v
 }
 

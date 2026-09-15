@@ -194,9 +194,11 @@ pub enum VerifyError {
     /// set is a typed error, never silently treated as "absent".
     #[error("chunk_len_proofs does not cover exactly indices 0..{0} with no gaps or duplicates")]
     IncompleteLengthProofSet(u32),
-    /// `chunk_len_proofs` was non-empty on a `Range` payload whose leaf is
-    /// a plain `Blob` (no chunk to prove preceding lengths for).
-    #[error("chunk_len_proofs is only meaningful when the leaf is a ChunkedBlob")]
+    /// `chunk_len_proofs` was non-empty on a `Range` payload that has no
+    /// chunk before it to describe: either the leaf is a plain `Blob` (no
+    /// chunk at all), or the disclosed chunk is index 0 (nothing precedes
+    /// the first chunk).
+    #[error("chunk_len_proofs is only meaningful for a ChunkedBlob range at chunk index > 0")]
     UnexpectedLengthProofs,
     /// A Bao slice failed to verify against the expected root/offset/len.
     #[error("Bao slice verification failed: {0}")]
@@ -425,11 +427,14 @@ pub enum DisclosedPayload {
         offset_in_blob: u64,
         /// The range's offset within the *whole* disclosed file, when
         /// provable: `Some(offset_in_blob)` for a plain `Blob` (nothing
-        /// further to prove); for a `ChunkedBlob`, `Some(sum of every
-        /// preceding chunk's authenticated length + offset_in_blob)` when
-        /// a complete `0..index` length-proof set was supplied, else
-        /// `None` (not requested) when `index == 0` needs no such
-        /// set — there is nothing preceding to sum.
+        /// further to prove) or for a `ChunkedBlob` at `index == 0`
+        /// (nothing precedes the first chunk, so no proof set is needed —
+        /// and [`VerifyError::UnexpectedLengthProofs`] rejects a
+        /// non-empty one there rather than silently ignoring it); for a
+        /// `ChunkedBlob` at `index > 0`, `Some(sum of every preceding
+        /// chunk's authenticated length + offset_in_blob)` when a complete
+        /// `0..index` length-proof set was supplied, else `None` (not
+        /// requested).
         absolute_offset: Option<u64>,
         /// The disclosed bytes.
         bytes: Vec<u8>,
@@ -961,7 +966,13 @@ fn resolve_absolute_offset(
 ) -> Result<Option<u64>, VerifyError> {
     if index == 0 {
         // Nothing precedes the first chunk; the offset is already
-        // absolute regardless of whether the caller bothered to ask.
+        // absolute regardless of whether the caller bothered to ask. A
+        // non-empty `chunk_len_proofs` here has no chunk before index 0 to
+        // describe, so it is rejected the same way the plain-blob path
+        // rejects one — never silently ignored.
+        if !chunk_len_proofs.is_empty() {
+            return Err(VerifyError::UnexpectedLengthProofs);
+        }
         return Ok(Some(offset_in_blob));
     }
     if chunk_len_proofs.is_empty() {
@@ -1848,6 +1859,70 @@ mod tests {
         assert!(matches!(
             verify_disclosure(&f.commit_id, &tampered),
             Err(VerifyError::IncompleteLengthProofSet(_))
+        ));
+    }
+
+    #[test]
+    fn len_proofs_on_chunk0_are_rejected() {
+        // Chunk 0 has nothing preceding it, so `chunk_len_proofs` MUST be
+        // empty there too — the same rule the plain-`Blob` path already
+        // enforces (`UnexpectedLengthProofs`). `resolve_absolute_offset`'s
+        // `index == 0` early return must not silently ignore a non-empty
+        // set (SPEC-DISCLOSURE §4).
+        let f = build_fixture();
+        let bundle = build_disclosure(
+            &f.store,
+            &f.commit_id,
+            &[b"chunked.bin"],
+            Selector::Range {
+                offset: 0,
+                len: 8,
+                with_offsets: false,
+            },
+        )
+        .unwrap();
+        let (commit_id, commit_bytes, steps, payload) = decode_disclosure(&bundle).unwrap();
+        let PayloadWire::Range {
+            chunk,
+            offset_in_blob,
+            len,
+            slice,
+            chunk_len_proofs,
+        } = payload
+        else {
+            panic!("expected Range payload");
+        };
+        let hdr = chunk.clone().expect("chunked leaf");
+        assert_eq!(hdr.index, 0, "test fixture assumption: offset 0 is chunk 0");
+        assert!(
+            chunk_len_proofs.is_empty(),
+            "builder never emits proofs for chunk 0"
+        );
+
+        // Forge a bogus (but structurally valid) length-proof entry — its
+        // content doesn't matter, because it must be rejected before any
+        // proof inside it is even checked.
+        let forged = vec![LenProof {
+            index: 0,
+            chunk_id: [0u8; 32],
+            proof: Proof::default(),
+            slice: Vec::new(),
+        }];
+        let tampered = encode_disclosure(
+            &commit_id,
+            &commit_bytes,
+            &steps,
+            &PayloadWire::Range {
+                chunk,
+                offset_in_blob,
+                len,
+                slice,
+                chunk_len_proofs: forged,
+            },
+        );
+        assert!(matches!(
+            verify_disclosure(&f.commit_id, &tampered),
+            Err(VerifyError::UnexpectedLengthProofs)
         ));
     }
 

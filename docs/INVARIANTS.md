@@ -473,13 +473,19 @@ disclosed chunk is index 0 (nothing precedes it), or `chunk_len_proofs`
 verifiably covers exactly the index set `0..index` with no gaps and no
 duplicates. Any other shape of `chunk_len_proofs` — a gap, a duplicate,
 an index `>= index`, or one entry that fails to verify — is a typed
-[`VerifyError::IncompleteLengthProofSet`], never a silent `None`.
+[`VerifyError::IncompleteLengthProofSet`], never a silent `None`. A
+*non-empty* `chunk_len_proofs` on a chunk-index-0 range, or on a plain
+`Blob` leaf, has nothing preceding it to describe and is rejected
+outright as `VerifyError::UnexpectedLengthProofs`, never silently
+ignored either.
 
 **Because:** a partial or malformed length-proof set does not sum to a
 value that means anything; treating it as "absent" (`None`) rather than
 rejecting it outright would let a caller silently miss that an absolute
 offset was *claimed but not actually provable*, rather than being told
-plainly that the request failed.
+plainly that the request failed. The chunk-0/plain-`Blob` case is the
+same principle at its edge: an entry that describes nothing real is not
+merely irrelevant, it is evidence of a malformed or lying builder.
 
 **If violated:** an application relying on `absolute_offset` for, say,
 byte-accurate DA-layer indexing could be handed a value derived from an
@@ -488,8 +494,9 @@ incomplete sum — or worse, silently receive `None` for a bundle that
 malicious short-fill.
 
 **Enforced by:** `mkit_core::verify::tests::incomplete_length_proof_set_is_rejected`
-and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`
-(SPEC-DISCLOSURE §4.1).
+and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
+`mkit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
+`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
 
 ## Closure walks share one `children` function
 
