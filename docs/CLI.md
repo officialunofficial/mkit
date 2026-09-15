@@ -440,7 +440,40 @@ History / commits:
   failure) on an unlisted signer. `--trust-roots` defaults to
   `$XDG_CONFIG_HOME/mkit/trust-roots.toml`; an in-repo path is refused
   unless passed explicitly (see `mkit trust` below and
-  `docs/THREAT-MODEL.md` §5).
+  `docs/THREAT-MODEL.md` §5). A verified signature proves the embedded
+  signer produced the commit; it does not bind that signer to a person
+  or organization.
+- `mkit prove <revision> [<path>] [--chunk N | --range OFFSET:LEN]
+  [--with-offsets] [-o FILE] [--format=json]` &mdash; build a disclosure
+  bundle proving that `<path>` (repository-relative, split on `/`;
+  omitted: the root tree), chunk `N` of a ChunkedBlob, or byte range
+  `OFFSET:LEN` belongs to `<revision>` (a commit or remix). `--chunk`
+  and `--range` are mutually exclusive; `--with-offsets` is only valid
+  with `--range`. `LEN` must be greater than 0. Writes the bundle to
+  `-o FILE`, or to stdout when stdout is not a TTY (refuses to write
+  binary to a TTY). Default status line: `proof: <bytes> B for <path>
+  @ <short id> (<kind>)` (stderr when the bundle goes to stdout).
+  `--format=json` emits `{commit_id, path, selector, bundle_bytes,
+  bundle_blake3, output}`. Missing path/object exits `66` (`NOINPUT`);
+  a range that crosses a chunk boundary or an invalid selector exits
+  `65` (`DATAERR`).
+- `mkit verify-proof <commit-id> <bundle-file|-> [--expect-path PATH]
+  [--trusted] [--trust-roots PATH] [--format=json] [--payload-out FILE]`
+  &mdash; verify a disclosure bundle against a trusted 64-hex commit id.
+  `<commit-id>` is not resolved as a revision. `-` reads the bundle from
+  stdin. `--expect-path` compares the authenticated path to `PATH` and
+  fails with `65` (`DATAERR`) on mismatch &mdash; the SPEC-DISCLOSURE rule
+  that the caller compares the returned path. `--trusted` /
+  `--trust-roots` reuse `mkit verify`'s trust-roots flow against
+  `Disclosed.signer`; `signature_valid == false` is reported and, with
+  `--trusted`, is a failure. A verified bundle proves the content
+  belongs to the commit id; binding the signer to a person or org stays
+  application policy (trust roots). Default output mirrors `mkit
+  verify`: `ok: <kind> <path> @ <short id>, <bytes> B, signer <keyid>
+  (valid|INVALID signature)[, signer trusted]` or `bad: <reason>`.
+  `--format=json` matches mkit-wasm's `verify_disclosure` shape plus
+  `signer_trusted` (`true`/`false`/`null`). `--payload-out FILE` writes
+  the verified payload bytes.
 - `mkit cat <hash>` &mdash; display an object by its hash.
 - `mkit hash <file>` &mdash; hash a file and store it as a blob.
 - `mkit tree` &mdash; snapshot the working directory as a tree object.
@@ -1128,6 +1161,29 @@ Remote / sync:
   so racing readers either see "no manifest" (clean fall-through to
   the monolithic pack) or "manifest plus all shards". Requires building
   the binary with `--features pack-shards`.
+- `mkit closure export <revision> [--history] [-o DIR] [--force]
+  [--format=json]` &mdash; write a full-disclosure closure of `<revision>`
+  as `DIR/MANIFEST.mkcl` plus `DIR/<pack_key hex>.pack` files (raw-only
+  v1 packs). Default mode is snapshot (the commit and its tree
+  closure; parents referenced but not included); `--history` exports
+  the full ancestry. Default `DIR` is `./<short id>.closure/`. Refuses
+  to write into a non-empty directory without `--force`. This is not
+  `mkit git export`, which publishes refs to a git mirror; `closure
+  export` is mkit's native object-set disclosure (nearest git relative:
+  `git bundle`). Status line: `closure: <mode>, <n> objects in <k>
+  pack(s), <total> B -> DIR`. JSON: `{root, mode, packs: [{file,
+  blake3, bytes}], objects, manifest}`.
+- `mkit closure verify <commit-id> [--from DIR] [--history]
+  [--format=json]` &mdash; verify a closure. With `--from DIR`, reads
+  `MANIFEST.mkcl` and every pack it names and checks them against a
+  trusted 64-hex `<commit-id>` (not a revision). Without `--from`,
+  checks the **local repository** (`<commit-id>` may be a revision;
+  `--history` selects history vs snapshot). Output: `ok: closure
+  complete (<verified> objects, <mode>)` or `bad: closure incomplete:
+  <m> missing, <c> corrupt` plus up to 10 ids each; `unreferenced` is a
+  note, not a failure. JSON matches mkit-wasm's `ClosureReport` shape
+  (`root, mode, verified, complete, missing[], corrupt[{id, reason}],
+  unreferenced[]`). Incomplete closures exit `65` (`DATAERR`).
 - `mkit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of

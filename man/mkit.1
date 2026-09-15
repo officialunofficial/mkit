@@ -1099,12 +1099,65 @@ instead emits JSONL with
 and
 .Cm text
 keys.
+.It Cm prove Ar rev Op Ar path
+Build a disclosure bundle proving that
+.Ar path
+(omitted: the root tree), a
+.Fl Fl chunk
+of a large file, or a
+.Fl Fl range Ar OFFSET:LEN
+byte range belongs to
+.Ar rev .
+.Fl Fl chunk
+and
+.Fl Fl range
+are mutually exclusive;
+.Fl Fl with-offsets
+is only valid with
+.Fl Fl range .
+Writes the bundle to
+.Fl o Ar file
+or to stdout when stdout is not a TTY.
 .It Cm verify Ar rev
 Verify the signature on a commit, remix, or signed tag.
 .Ar rev
 is an object hash, a branch or tag name, or
 .Cm HEAD ;
 a tag name resolves to its annotated-tag object when one exists.
+.It Cm verify-proof Ar commit-id Ar bundle
+Verify a disclosure bundle against a trusted 64-hex commit id.
+.Ar commit-id
+is not resolved as a revision.
+.Ar bundle
+is a file or
+.Cm -
+for stdin.
+.Fl Fl expect-path
+compares the authenticated path (SPEC-DISCLOSURE: the caller compares
+the returned path) and fails on mismatch.
+.Fl Fl trusted
+and
+.Fl Fl trust-roots
+reuse
+.Cm verify Ns 's
+trust-roots flow against the disclosed signer.
+.It Cm closure Cm export Ar rev
+Export a commit's object-set closure as
+.Pa MANIFEST.mkcl
+plus raw-only v1 packs (default snapshot;
+.Fl Fl history
+for full ancestry). Distinct from
+.Cm git Cm export
+(the git-bridge mirror).
+.It Cm closure Cm verify Ar commit-id
+With
+.Fl Fl from Ar dir ,
+verify exported packs against a trusted 64-hex id.
+Without
+.Fl Fl from ,
+check the local store;
+.Ar commit-id
+may then be a revision.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple

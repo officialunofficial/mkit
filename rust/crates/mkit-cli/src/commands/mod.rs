@@ -16,6 +16,7 @@ pub mod checkout;
 pub mod cherry_pick;
 pub mod clean;
 pub mod clone;
+pub mod closure;
 pub mod commit;
 pub mod config_cmd;
 pub mod conflict;
@@ -44,6 +45,7 @@ pub mod merge_base;
 pub mod mv;
 #[cfg(feature = "pack-shards")]
 pub mod pack_shard;
+pub mod prove;
 pub mod pull;
 pub mod push;
 pub mod rebase;
@@ -74,6 +76,7 @@ pub mod trust_roots;
 pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
+pub mod verify_proof;
 pub mod worktree;
 
 use crate::exit;

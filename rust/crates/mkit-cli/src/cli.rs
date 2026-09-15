@@ -287,11 +287,23 @@ commands:
                     forward, <rev> blames as of a revision (default HEAD; JSONL
                     with --format=json, or git-shaped
                     --porcelain/--line-porcelain)
+  prove <rev> [<path>] [--chunk N | --range OFFSET:LEN] [--with-offsets] [-o FILE] [--format=json]
+                    Build a disclosure bundle proving a path, chunk, or
+                    byte range belongs to a commit (or remix)
   verify <rev> [--trusted] [--trust-roots <path>]
                     Verify the signature on a commit, remix, or signed tag;
                     --trusted (or --trust-roots) also cross-checks the
                     signer against the trust-roots registry, failing
                     closed on an unlisted signer
+  verify-proof <commit-id> <bundle|-> [--expect-path PATH] [--trusted] [--trust-roots PATH] [--format=json] [--payload-out FILE]
+                    Verify a disclosure bundle against a trusted 64-hex
+                    commit id (does not resolve refs)
+  closure export <rev> [--history] [-o DIR] [--force] [--format=json]
+                    Export a commit's object-set closure as MANIFEST.mkcl
+                    plus raw-only packs (not `mkit git export`)
+  closure verify <commit-id> [--from DIR] [--history] [--format=json]
+                    Verify a closure directory against a trusted id, or
+                    check the local store (revision allowed without --from)
   attest [--commit <hash>] [--algorithm <alg>] [--signer <kind>] [--predicate-type <URI>] [--predicate-file <path>]
          [--additional-signer \"algorithm=<alg>,signer=<kind>[,path=<p>]\"]... [--external-signer-arg <V>]...
                     Produce a signed DSSE attestation for a commit
@@ -401,7 +413,10 @@ mod tests {
             "mcp",
             "pack-shard",
             "blame",
+            "prove",
             "verify",
+            "verify-proof",
+            "closure",
             "trust",
             "version",
             "worktree",
