@@ -259,7 +259,16 @@ fn decode_descriptor_and_chain(
     bytes: &[u8],
 ) -> Result<(AncestryDescriptor, Vec<Hash>), HistoryError> {
     let invalid = descriptor_header_invalid;
-    if bytes.len() < 175 || bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+    // `DESCRIPTOR_HEADER_LEN` (header) + 32 (trailing payload checksum,
+    // `decode_descriptor_and_chain`'s own — not part of the header
+    // itself) is the shortest a valid snapshot payload can be: a header
+    // with a zero-length ref name plus its checksum, before any leaf
+    // hash. `MAX_ANCESTRY_LEAVES` (0 blocked above by
+    // `parse_descriptor_header`'s own `count == 0` check) means every
+    // real payload is longer, but this is the floor a malformed one is
+    // rejected below.
+    let len = bytes.len() as u64;
+    if !(DESCRIPTOR_HEADER_LEN + 32..=MAX_SNAPSHOT_BYTES).contains(&len) {
         return Err(invalid());
     }
     let (payload, checksum) = bytes.split_at(bytes.len() - 32);
@@ -278,26 +287,40 @@ fn decode_descriptor_and_chain(
     Ok((descriptor, chain))
 }
 
+/// Fixed size of a descriptor header up to (not including) the ref
+/// name: magic (5 bytes) + repository (32) + generation (32) + tip (32)
+/// + leaf count (8) + root (32) + name length (2) = 143 bytes. The one place
+/// this size lives — [`DESCRIPTOR_HEADER_MAX_LEN`] and
+/// [`decode_descriptor_and_chain`]'s own minimum-length check both
+/// derive from it, rather than each hand-computing the same total, so
+/// a future header field can't update one and silently miss the other.
+const DESCRIPTOR_HEADER_LEN: u64 = 143;
+
 /// Prefix length generous enough for any ref name a snapshot could
-/// actually contain: the fixed header (5+32+32+32+8+32+2 = 143 bytes)
-/// plus the largest possible `name_len` (a `u16`). Reading this many
-/// bytes up front — one bounded read via [`read_prefix`] — means
+/// actually contain: [`DESCRIPTOR_HEADER_LEN`] plus the largest
+/// possible `name_len` (a `u16`). Reading this many bytes up front —
+/// one bounded read via [`read_prefix`] — means
 /// [`read_current_descriptor`] never needs a second read regardless of
 /// ref name length, while still stopping far short of the up-to-32 MiB
 /// leaf-hash chain that follows for any history of meaningful size.
-const DESCRIPTOR_HEADER_MAX_LEN: u64 = 143 + u16::MAX as u64;
+const DESCRIPTOR_HEADER_MAX_LEN: u64 = DESCRIPTOR_HEADER_LEN + u16::MAX as u64;
 
 /// Read up to `max_bytes` from `path`, without erroring if the file is
 /// larger — the caller wants only a prefix, not an exact-length read.
 /// `Ok(None)` if the file does not exist, matching
-/// [`ancestry_state::read_bounded`]'s convention.
+/// [`ancestry_state::read_bounded`]'s convention. `max_bytes` is small
+/// in every call this crate makes (currently just
+/// [`DESCRIPTOR_HEADER_MAX_LEN`], well under 64 KiB), so preallocating
+/// the whole bound up front is cheap and avoids `read_to_end`'s
+/// generic doubling-growth strategy paying for reallocations the known
+/// bound already rules out.
 fn read_prefix(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, HistoryError> {
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(HistoryError::Io(e)),
     };
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(usize::try_from(max_bytes).unwrap_or(usize::MAX));
     file.take(max_bytes)
         .read_to_end(&mut bytes)
         .map_err(HistoryError::Io)?;
@@ -563,7 +586,19 @@ fn verify_scrub_window(
 ) -> Result<(), HistoryError> {
     let start = usize::try_from(start).expect("bounded by MAX_ANCESTRY_LEAVES");
     let end = usize::try_from(end).expect("bounded by MAX_ANCESTRY_LEAVES");
-    for h in &prefix[start..end] {
+    // `start`/`end` come from an on-disk `ScrubState` that `decide_chain`
+    // already treats as untrusted bookkeeping — `ScrubState::decode`'s
+    // checksum and `generation` binding rule out most divergence from
+    // `prefix`, but not a restored/rolled-back snapshot file paired with
+    // a newer `scrub` file for the same generation. `decide_chain`
+    // guards against exactly that case before ever calling this
+    // function, but a bare slice index here would still be one future
+    // caller away from a panic instead of a typed, recoverable error —
+    // `get` makes that impossible regardless of caller.
+    let window = prefix.get(start..end).ok_or_else(|| {
+        HistoryError::Corrupted("scrub window bounds exceed the on-disk ancestry prefix".into())
+    })?;
+    for h in window {
         match store.read_object(h)? {
             Object::Commit(_) | Object::Remix(_) => {}
             _ => return Err(ancestry_not_commit_or_remix()),
@@ -712,14 +747,23 @@ fn scrub_path(dir: &Path) -> PathBuf {
     dir.join("scrub")
 }
 
-/// Missing or corrupt scrub state is not an error — see [`ScrubState`]'s
-/// docs on why the caller treats `None` as "no prior full verification on
-/// record" and falls back to a full walk.
-fn read_scrub_state(dir: &Path) -> Result<Option<ScrubState>, HistoryError> {
-    let Some(bytes) = ancestry_state::read_bounded(&scrub_path(dir), 93)? else {
-        return Ok(None);
-    };
-    Ok(ScrubState::decode(&bytes))
+/// Missing, corrupt, or unreadable scrub state is not an error — see
+/// [`ScrubState`]'s docs on why the caller treats `None` as "no prior
+/// full verification on record" and falls back to a full walk. This is
+/// deliberately more permissive than propagating `read_bounded`'s `Err`
+/// (a stray directory at this path, a permission change, or a file that
+/// grew past its length cap all produced an `Err` before this comment)
+/// — `write_scrub_state`'s caller already treats a *write* failure here
+/// as advisory-only (`let _ = write_scrub_state(...)`), and the read
+/// side must match: this file is bookkeeping for how much of an
+/// already-published prefix gets re-scrubbed on a given publish, never
+/// what gets persisted, so an I/O failure reading it should degrade the
+/// verification *schedule*, not fail the publish outright.
+fn read_scrub_state(dir: &Path) -> Option<ScrubState> {
+    ancestry_state::read_bounded(&scrub_path(dir), 93)
+        .ok()
+        .flatten()
+        .and_then(|bytes| ScrubState::decode(&bytes))
 }
 
 fn write_scrub_state(dir: &Path, state: ScrubState) -> Result<(), HistoryError> {
@@ -761,6 +805,22 @@ fn write_scrub_state(dir: &Path, state: ScrubState) -> Result<(), HistoryError> 
 /// (new branch, rewrite, reset, or unrelated history) always gets a full
 /// [`first_parent_chain`] walk, exactly as before — there is no prefix to
 /// reuse safely in that case.
+///
+/// Builds a fresh [`ChainDecision::NewGeneration`] via a full,
+/// from-scratch [`first_parent_chain`] walk of `target` — [`decide_chain`]'s
+/// two call sites for this (no previous generation to compare against
+/// at all, and a fast-forward search that never reaches the previous
+/// tip) hit this identical construction.
+fn new_generation(
+    store: &ObjectStore,
+    target: Hash,
+    now: u64,
+) -> Result<ChainDecision, HistoryError> {
+    let chain = first_parent_chain(store, target)?;
+    let scrub = ScrubState::fresh(chain.len() as u64, now);
+    Ok(ChainDecision::NewGeneration { chain, scrub })
+}
+
 fn decide_chain(
     store: &ObjectStore,
     dir: &Path,
@@ -769,18 +829,12 @@ fn decide_chain(
     now: u64,
 ) -> Result<ChainDecision, HistoryError> {
     let Some(d) = compatible else {
-        let chain = first_parent_chain(store, target)?;
-        let scrub = ScrubState::fresh(chain.len() as u64, now);
-        return Ok(ChainDecision::NewGeneration { chain, scrub });
+        return new_generation(store, target, now);
     };
     let prefix_len = usize::try_from(d.leaf_count).expect("bounded by MAX_ANCESTRY_LEAVES");
     let suffix = match first_parent_suffix_to(store, target, d.tip, prefix_len)? {
         SuffixWalk::Reached(suffix) => suffix,
-        SuffixWalk::NotFound => {
-            let chain = first_parent_chain(store, target)?;
-            let scrub = ScrubState::fresh(chain.len() as u64, now);
-            return Ok(ChainDecision::NewGeneration { chain, scrub });
-        }
+        SuffixWalk::NotFound => return new_generation(store, target, now),
     };
     // A genuine fast-forward from here on — the generation is reused no
     // matter which branch below actually verifies the reused prefix.
@@ -790,7 +844,7 @@ fn decide_chain(
     // file — `d.generation` is the generation being fast-forwarded from,
     // so anything else on disk was computed against a chain this
     // publish isn't extending.
-    let scrub = read_scrub_state(dir)?.filter(|s| s.generation == d.generation);
+    let scrub = read_scrub_state(dir).filter(|s| s.generation == d.generation);
     let stale =
         scrub.is_none_or(|s| now.saturating_sub(s.last_full_verify_unix) > SCRUB_MAX_AGE_SECS);
     if !stale {
@@ -802,20 +856,30 @@ fn decide_chain(
             .min(scrub.verified_through);
         if end < scrub.verified_through {
             let prefix = read_snapshot_chain(dir, d.generation)?;
-            verify_scrub_window(store, &prefix, scrub.cursor, end)?;
-            let mut chain = prefix;
-            chain.extend(suffix);
-            return Ok(ChainDecision::SameGeneration {
-                chain,
-                scrub: ScrubState {
-                    cursor: end,
-                    ..scrub
-                },
-            });
+            if end <= prefix.len() as u64 {
+                verify_scrub_window(store, &prefix, scrub.cursor, end)?;
+                let mut chain = prefix;
+                chain.extend(suffix);
+                return Ok(ChainDecision::SameGeneration {
+                    chain,
+                    scrub: ScrubState {
+                        cursor: end,
+                        ..scrub
+                    },
+                });
+            }
+            // `scrub.verified_through` (and so `end`) exceeds the actual
+            // on-disk prefix length for this generation — e.g. a
+            // restored/rolled-back snapshot file paired with a newer
+            // `scrub` file. `ScrubState`'s generation binding doesn't
+            // catch this case (the generation genuinely matches), so
+            // treat it exactly like corrupt scrub state: fall through to
+            // the full walk below rather than handing `verify_scrub_window`
+            // a range it can't satisfy.
         }
-        // Lap complete: fall through to the full walk below, which
-        // re-verifies everything, including the window this lap didn't
-        // reach yet.
+        // Lap complete (or the mismatch above): fall through to the full
+        // walk below, which re-verifies everything, including the window
+        // this lap didn't reach yet.
     }
     // A full walk of the *prefix* (up through `d.tip`) is exactly what's
     // needed to freshly re-verify everything a completed lap or a stale
@@ -1351,6 +1415,83 @@ mod tests {
         assert!(dir.join("scrub").is_dir());
     }
 
+    /// Regression: an unreadable `scrub` file must not permanently brick
+    /// a branch's publishes. `a_write_scrub_state_failure_does_not_fail_the_publish`
+    /// (above) only exercises a *first* publish, where `compatible` is
+    /// `None` and `read_scrub_state` is never reached — so it gives no
+    /// coverage of the read side at all. This test publishes twice: the
+    /// first publish leaves a directory at the `scrub` path (exactly as
+    /// above), and the second is a genuine fast-forward that must call
+    /// `read_scrub_state` on that same, still-unreadable path. Before the
+    /// fix, `read_scrub_state` propagated `read_bounded`'s `IsADirectory`
+    /// error with `?`, so this second publish failed outright — silently
+    /// contradicting the "missing or corrupt scrub state is not an
+    /// error" contract [`ScrubState`]'s own docs promise.
+    #[test]
+    fn an_unreadable_scrub_file_does_not_brick_later_publishes() {
+        let (_dir, layout, store) = repo();
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        fs::create_dir_all(dir.join("scrub")).unwrap();
+
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, "main", a);
+        assert!(dir.join("scrub").is_dir(), "still unreadable as a file");
+
+        // A fast-forward: `d.tip == a`, so `decide_chain` takes the
+        // `SameGeneration` path and calls `read_scrub_state`.
+        let b = commit(&store, vec![a], b"b");
+        refs::update_ref_with_ancestry(&layout, "main", RefWriteCondition::Any, &b, &store)
+            .expect("an unreadable scrub file must degrade the schedule, not fail the publish");
+
+        let snapshot = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(snapshot.descriptor().tip, b);
+    }
+
+    /// Regression: `verify_scrub_window` must not panic when a `scrub`
+    /// file's `verified_through` exceeds the actual on-disk prefix
+    /// length for its generation — e.g. a restored/rolled-back snapshot
+    /// file paired with a newer `scrub` file for the same generation.
+    /// `ScrubState.generation`'s binding (added alongside the original
+    /// crash this module already fixed) does not catch this case, since
+    /// the generation genuinely matches; only an explicit bounds check
+    /// does. Constructs the mismatch directly (real production code
+    /// never *produces* `verified_through > prefix.len()`, by the
+    /// monotonic-append argument in `decide_chain`'s docs — this pins
+    /// the defensive fallback for when something else, e.g. a restored
+    /// backup, does).
+    #[test]
+    fn scrub_state_ahead_of_the_actual_prefix_falls_back_to_a_full_walk_instead_of_panicking() {
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        update(&layout, &store, "main", a);
+        let b = commit(&store, vec![a], b"b");
+        update(&layout, &store, "main", b);
+
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        let mut scrub = read_scrub_state(&dir).unwrap();
+        // Claim a prefix far longer than the 2 leaves actually on disk.
+        // `scrub_window`'s `SCRUB_MIN_WINDOW` (512) dominates for any
+        // `verified_through` under ~32768, so `window == 512` here and
+        // `end = min(0 + 512, verified_through) == 512` — comfortably
+        // past the real 2-leaf prefix, and still `< verified_through`
+        // (so `decide_chain` takes the windowed branch, not the "lap
+        // complete" full-walk one, which this test isn't exercising).
+        scrub.verified_through = 5_000;
+        scrub.cursor = 0;
+        write_scrub_state(&dir, scrub).unwrap();
+
+        let c = commit(&store, vec![b], b"c");
+        refs::update_ref_with_ancestry(&layout, "main", RefWriteCondition::Any, &c, &store)
+            .expect("an out-of-range scrub window must fall back to a full walk, not panic");
+
+        let snapshot = AncestrySnapshot::load(&layout, "main").unwrap();
+        assert_eq!(snapshot.descriptor().tip, c);
+        // The fallback did a full walk, which resets scrub state to a
+        // fresh, in-bounds one rather than leaving the bogus value.
+        let after = read_scrub_state(&dir).unwrap();
+        assert_eq!(after.verified_through, snapshot.descriptor().leaf_count);
+    }
+
     /// `read_current_descriptor` is a new, narrower read path introduced
     /// specifically so `advance` doesn't have to load `old.chain` — pin
     /// that its fields agree exactly with the full `read_current`/`decode`
@@ -1597,7 +1738,7 @@ mod tests {
             .unwrap()
             .descriptor()
             .generation;
-        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(
             scrub,
             ScrubState {
@@ -1612,7 +1753,7 @@ mod tests {
         tips.push(next);
         update(&layout, &store, "main", next);
 
-        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(
             scrub.cursor, SCRUB_MIN_WINDOW,
             "window must be bounded, not full-prefix"
@@ -1645,14 +1786,14 @@ mod tests {
         let step1 = commit(&store, vec![tips[599]], b"600");
         tips.push(step1);
         update(&layout, &store, "main", step1);
-        assert_eq!(read_scrub_state(&dir).unwrap().unwrap().cursor, 512);
+        assert_eq!(read_scrub_state(&dir).unwrap().cursor, 512);
 
         let before = now_unix();
         let step2 = commit(&store, vec![step1], b"601");
         tips.push(step2);
         update(&layout, &store, "main", step2);
 
-        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(
             scrub.cursor, 0,
             "a completed lap resets to a fresh full verify"
@@ -1740,14 +1881,14 @@ mod tests {
         set_now(1_000_000);
         update(&layout, &store, "main", tips[1499]);
         let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
-        assert_eq!(read_scrub_state(&dir).unwrap().unwrap().cursor, 0);
+        assert_eq!(read_scrub_state(&dir).unwrap().cursor, 0);
 
         // Far short of a lap (window is 512 of 1500), but past the age bound.
         set_now(1_000_000 + SCRUB_MAX_AGE_SECS + 1);
         let step = commit(&store, vec![tips[1499]], b"1500");
         update(&layout, &store, "main", step);
 
-        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(scrub.cursor, 0, "a forced full walk resets the cursor");
         assert_eq!(scrub.verified_through, 1501);
         assert_eq!(
@@ -1843,7 +1984,7 @@ mod tests {
         let next = commit(&store, vec![short_tips[4]], b"5");
         update(&layout, &store, "main", next);
 
-        let scrub = read_scrub_state(&dir).unwrap().unwrap();
+        let scrub = read_scrub_state(&dir).unwrap();
         assert_eq!(
             scrub.generation, new_generation,
             "the discarded stale state must be replaced with one bound to the current generation"

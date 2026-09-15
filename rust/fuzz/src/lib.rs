@@ -305,16 +305,21 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
     };
     let cid = merkle::compute_chunked_id(&cb);
     assert_eq!(cid.len(), 32);
-    let root = merkle::chunked_inner_root(&cb);
     if !chunks.is_empty() {
         // position 0 is the meta leaf; chunk i is at position i+1.
         let pos = (input.first().copied().unwrap_or(0) as usize % chunks.len()) as u32 + 1;
-        if let Ok(proof) = merkle::build_chunk_inclusion_proof(&cb, pos) {
-            merkle::verify_chunk_inclusion_proof(&root, &chunks[(pos - 1) as usize], pos, &proof)
+        if let Ok(proof) = merkle::build_chunk_proof(&cb, pos) {
+            merkle::verify_chunk(&cid, &chunks[(pos - 1) as usize], pos, &proof)
                 .expect("freshly built chunk proof must verify");
         }
         // Adversarial proof bytes / position must reject without panicking.
-        let _ = merkle::verify_chunk_inclusion_proof(&root, &chunks[0], 0, input);
+        // `input` is arbitrary fuzzer bytes, not necessarily a valid encoded
+        // `Proof`; decode it first (bounded) and only pass a successfully
+        // decoded proof to `verify_chunk` — a decode failure is itself a
+        // clean rejection.
+        if let Ok(proof) = merkle::Proof::decode(input, 1) {
+            let _ = merkle::verify_chunk(&cid, &chunks[0], 0, &proof);
+        }
     }
 
     // A Tree from the same bytes (one entry, name derived from input).
@@ -329,13 +334,359 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
             object_hash: chunks.first().copied().unwrap_or([0u8; 32]),
         }],
     };
-    assert_eq!(merkle::compute_tree_id(&tree).len(), 32);
-    let troot = merkle::tree_inner_root(&tree);
-    if let Ok(p) = merkle::build_tree_inclusion_proof(&tree, 0) {
-        merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, &p)
+    let tid = merkle::compute_tree_id(&tree);
+    assert_eq!(tid.len(), 32);
+    if let Ok(p) = merkle::build_tree_entry_proof(&tree, 0) {
+        merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p)
             .expect("freshly built tree proof must verify");
     }
-    let _ = merkle::verify_tree_inclusion_proof(&troot, &tree.entries[0], 0, input);
+    // Adversarial proof bytes must reject without panicking (see the
+    // chunk-proof comment above for why we decode first).
+    if let Ok(p) = merkle::Proof::decode(input, 1) {
+        let _ = merkle::verify_tree_entry(&tid, &tree.entries[0], 0, &p);
+    }
+}
+
+/// Decode a partial-disclosure bundle (issue #1015 verifier kit PR 2,
+/// SPEC-DISCLOSURE) from arbitrary input against a fixed dummy commit id.
+/// `verify::verify_disclosure` decodes the bundle before ever comparing
+/// against the caller's id, so this exercises the decoder's bounds
+/// (oversize bundle, bad magic/version, over-cap `Vec`/`Proof` lengths,
+/// trailing bytes) on adversarial bytes: it must never panic, and must
+/// never allocate based on an unvalidated length.
+pub fn disclosure_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let commit_id = [0u8; 32];
+    let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
+}
+
+/// A small native `ObjectStore`-backed fixture for
+/// [`verify_disclosure_one_iteration`]: one committed file, disclosed as
+/// a real `Selector::Object` bundle. Built once by
+/// [`build_disclosure_fixture`] and reused across all iterations of the
+/// unit-test loop via [`run_iterated_unit_with`]; real libfuzzer runs
+/// build a fresh one per call for isolation (mirrors
+/// [`pack_one_iteration`] vs [`pack_one_iteration_with_store`]).
+pub struct DisclosureFixture {
+    _dir: tempfile::TempDir,
+    commit_id: [u8; 32],
+    good_bundle: Vec<u8>,
+}
+
+/// Build a [`DisclosureFixture`]. Never fails in practice (every step is
+/// a fixed, valid construction over fixed bytes); panics only on a
+/// genuine environment failure (no writable temp dir), same posture as
+/// [`pack_one_iteration_with_store`]'s `ObjectStore::init`.
+pub fn build_disclosure_fixture() -> DisclosureFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::verify::{self, Selector};
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let blob_id =
+        store_file_object(&store, b"disclosure fuzz fixture content").expect("store file");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob_id,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x42; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"disclosure fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_bytes =
+        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+    let commit_id = store.write(&commit_bytes).expect("write commit");
+    let good_bundle = verify::build_disclosure(&store, &commit_id, &[b"f.txt"], Selector::Object)
+        .expect("build disclosure");
+    DisclosureFixture {
+        _dir: dir,
+        commit_id,
+        good_bundle,
+    }
+}
+
+/// Exercise `verify::verify_disclosure` against a real fixture. Three
+/// properties per iteration: (1) the freshly built bundle MUST verify;
+/// (2) an input-driven single-byte mutation of that bundle MUST reject
+/// cleanly (never panic) — mutating one byte of a genuine bundle can
+/// never happen to re-verify unless the mutation lands in a truly
+/// don't-care byte, which `verify_disclosure`'s exhaustive checks (id,
+/// hash, every proof, every Bao slice) leave essentially none of; (3)
+/// raw fuzzer bytes verified directly against the fixture's real commit
+/// id must never panic.
+pub fn verify_disclosure_one_iteration(input: &[u8]) {
+    let fixture = build_disclosure_fixture();
+    verify_disclosure_one_iteration_with(input, &fixture);
+}
+
+/// As [`verify_disclosure_one_iteration`], but against a caller-provided
+/// [`DisclosureFixture`] instead of building a fresh one — lets the
+/// unit-test loop amortize the tempdir/store/signing cost across all
+/// `MAX_ITER` iterations.
+pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFixture) {
+    use mkit_core::verify;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+
+    let disclosed = verify::verify_disclosure(&fixture.commit_id, &fixture.good_bundle)
+        .expect("freshly built disclosure must verify");
+    // Builder fills `inner_root` from the parent tree; verify wrap-checks
+    // it then requires the proof fold to equal the declared field. Re-check
+    // the wrap of every authenticated root here so a builder/verifier
+    // disagreement cannot slip through a successful round-trip.
+    use mkit_core::merkle::{self, ObjectKind};
+    if let Some(root) = disclosed.step_inner_roots.first() {
+        assert_eq!(
+            merkle::wrap_id(ObjectKind::Tree, root),
+            disclosed.tree_hash,
+            "step 0 inner_root must wrap to tree_hash"
+        );
+    }
+    if let Some(root) = disclosed.chunk_inner_root {
+        assert_eq!(
+            merkle::wrap_id(ObjectKind::ChunkedBlob, &root),
+            disclosed.leaf_id,
+            "chunk inner_root must wrap to the leaf ChunkedBlob id"
+        );
+    }
+
+    if !fixture.good_bundle.is_empty() && input.len() >= 2 {
+        let mut mutated = fixture.good_bundle.clone();
+        let pos = usize::from(input[0]) % mutated.len();
+        let flip = input[1].max(1); // guaranteed non-zero XOR
+        mutated[pos] ^= flip;
+        let _ = verify::verify_disclosure(&fixture.commit_id, &mutated);
+    }
+
+    let _ = verify::verify_disclosure(&fixture.commit_id, input);
+}
+
+/// Store-less pack iterator: never panics on adversarial bytes. When
+/// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
+/// and yields `raw_count + delta_count` items.
+pub fn pack_entries_one_iteration(input: &[u8]) {
+    let Some(input) = pack_validated_input(input) else {
+        return;
+    };
+    let parsed = mkit_core::pack::PackEntries::new(input);
+    if let Ok(entries) = parsed {
+        let mut n = 0usize;
+        for item in entries {
+            match item {
+                Ok(_) => n += 1,
+                Err(_) => break,
+            }
+        }
+        let _ = n;
+    }
+
+    let dir = match tempfile::TempDir::new() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let layout = mkit_core::layout::RepoLayout::single(dir.path());
+    let store = match mkit_core::store::ObjectStore::init(&layout) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if let Ok(report) = mkit_core::pack::PackReader::read(input, &store) {
+        let entries = mkit_core::pack::PackEntries::new(input)
+            .expect("PackReader-accepted pack must parse as PackEntries");
+        let got = entries.filter(|e| e.is_ok()).count();
+        assert_eq!(
+            got,
+            (report.raw_count + report.delta_count) as usize,
+            "PackEntries must yield one item per PackReader-stored entry"
+        );
+    }
+}
+
+/// A tiny native fixture for [`verify_closure_one_iteration`]: one
+/// committed file, exported as a snapshot closure.
+pub struct ClosureFixture {
+    _dir: tempfile::TempDir,
+    store: mkit_core::store::ObjectStore,
+    root: [u8; 32],
+    manifest: Vec<u8>,
+    packs: Vec<Vec<u8>>,
+}
+
+/// Build a [`ClosureFixture`]. Panics only on a genuine environment
+/// failure (no writable temp dir).
+pub fn build_closure_fixture() -> ClosureFixture {
+    use mkit_core::ClosureMode;
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::verify::export_closure;
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let blob_id = store_file_object(&store, b"closure fuzz fixture").expect("store file");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob_id,
+        }],
+    };
+    let tree_hash = store
+        .write(&mkit_core::serialize::serialize(&Object::Tree(tree)).expect("serialize tree"))
+        .expect("write tree");
+    let kp = KeyPair::from_seed([0x43; 32]);
+    let mut commit = Commit {
+        tree_hash,
+        parents: vec![],
+        author: Identity::ed25519(kp.public.0),
+        signer: kp.public.0,
+        message: b"closure fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0u8; 64],
+    };
+    commit.signature = sign_commit(&commit, &kp).expect("sign commit").0;
+    let commit_bytes =
+        mkit_core::serialize::serialize(&Object::Commit(commit)).expect("serialize commit");
+    let root = store.write(&commit_bytes).expect("write commit");
+    let export = export_closure(&store, &root, ClosureMode::Snapshot).expect("export closure");
+    ClosureFixture {
+        _dir: dir,
+        store,
+        root,
+        manifest: export.manifest,
+        packs: export.packs,
+    }
+}
+
+/// Never panics. A freshly exported closure MUST verify; a mutated
+/// manifest or pack MUST reject cleanly; raw input as a pack MUST not
+/// panic.
+pub fn verify_closure_one_iteration(input: &[u8]) {
+    let fixture = build_closure_fixture();
+    verify_closure_one_iteration_with(input, &fixture);
+}
+
+/// As [`verify_closure_one_iteration`], amortizing fixture construction.
+pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture) {
+    use mkit_core::verify;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let pack_refs: Vec<&[u8]> = fixture.packs.iter().map(Vec::as_slice).collect();
+    verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &pack_refs)
+        .expect("freshly exported closure must verify")
+        .is_complete()
+        .then_some(())
+        .expect("freshly exported closure must be complete");
+
+    let mut objects = Vec::new();
+    for pack in &fixture.packs {
+        for entry in
+            mkit_core::pack::PackEntries::new(pack).expect("freshly exported closure must parse")
+        {
+            let mkit_core::pack::PackEntry::Raw { bytes } =
+                entry.expect("freshly exported closure entries must parse")
+            else {
+                panic!("freshly exported closure must be raw-only");
+            };
+            objects.push(bytes.into_owned());
+        }
+    }
+    let map_report = verify::verify_closure(
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+        objects.iter().map(Vec::as_slice),
+    )
+    .expect("freshly exported closure map path must verify");
+    let store_report = verify::verify_closure_store(
+        &fixture.store,
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+    )
+    .expect("freshly exported closure store path must verify");
+    assert_eq!(map_report.missing, store_report.missing);
+    assert_eq!(map_report.verified, store_report.verified);
+    assert_eq!(map_report.is_complete(), store_report.is_complete());
+
+    if !fixture.manifest.is_empty() && input.len() >= 2 {
+        let mut mutated = fixture.manifest.clone();
+        let pos = usize::from(input[0]) % mutated.len();
+        mutated[pos] ^= input[1].max(1);
+        let _ = verify::verify_closure_manifest(&fixture.root, &mutated, &pack_refs);
+    }
+    let _ = verify::verify_closure(&fixture.root, mkit_core::ClosureMode::Snapshot, [input]);
+    let _ = mkit_core::pack::PackEntries::new(input);
+
+    // Feed raw fuzzer input directly as closure pack buffers (not wrapped
+    // in valid PackEntries framing), both whole and split into two, so the
+    // profile/framing checks in verify_closure_packs and
+    // verify_closure_manifest see adversarial bytes a legitimate exporter
+    // could never produce. Any `Ok` report must still be internally
+    // consistent.
+    let single_pack: [&[u8]; 1] = [input];
+    if let Ok(report) = verify::verify_closure_packs(
+        &fixture.root,
+        mkit_core::ClosureMode::Snapshot,
+        &single_pack,
+    ) {
+        assert_closure_report_consistent(&report);
+    }
+    if let Ok(report) =
+        verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &single_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+
+    let mid = input.len() / 2;
+    let split_pack: [&[u8]; 2] = [&input[..mid], &input[mid..]];
+    if let Ok(report) =
+        verify::verify_closure_packs(&fixture.root, mkit_core::ClosureMode::Snapshot, &split_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+    if let Ok(report) =
+        verify::verify_closure_manifest(&fixture.root, &fixture.manifest, &split_pack)
+    {
+        assert_closure_report_consistent(&report);
+    }
+}
+
+/// `is_complete()` must imply no `missing`/`corrupt` entries, for any
+/// report produced from adversarial pack bytes.
+fn assert_closure_report_consistent(report: &mkit_core::verify::ClosureReport) {
+    if report.is_complete() {
+        assert!(
+            report.missing.is_empty(),
+            "complete report has missing entries"
+        );
+        assert!(
+            report.corrupt.is_empty(),
+            "complete report has corrupt entries"
+        );
+    }
 }
 
 /// Exercise the sparse-checkout build/verify pair on arbitrary input.
@@ -535,6 +886,52 @@ mod tests {
         run_iterated_unit(merkle_proof_one_iteration).expect("guardrails held");
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             run_one(case, merkle_proof_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn disclosure_decode_target_runs_within_caps() {
+        run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
+            run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn pack_entries_target_runs_within_caps() {
+        run_iterated_unit(pack_entries_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            b"MKIT\x01\x00\x00\x00\x00\x00\x00\x00",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, pack_entries_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn verify_closure_target_runs_within_caps() {
+        let fixture = build_closure_fixture();
+        run_iterated_unit_with(&fixture, verify_closure_one_iteration_with)
+            .expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
+            let start = std::time::Instant::now();
+            verify_closure_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
+        }
+    }
+
+    #[test]
+    fn verify_disclosure_target_runs_within_caps() {
+        // Amortize the tempdir/store/signing cost across all MAX_ITER
+        // iterations, same rationale as the pack target above.
+        let fixture = build_disclosure_fixture();
+        run_iterated_unit_with(&fixture, verify_disclosure_one_iteration_with)
+            .expect("guardrails held");
+        for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
+            let start = std::time::Instant::now();
+            verify_disclosure_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }
 

@@ -272,7 +272,8 @@ Ed25519-signed commits and in-toto/DSSE attestation). Every tool takes a repo_pa
 Typical flow: mkit_init -> mkit_keygen (REQUIRED before the first commit) -> mkit_add -> \
 mkit_commit -> mkit_log/mkit_show. Differentiators: mkit_verify (check a commit/tag \
 signature), mkit_attest (attach a signed DSSE attestation), mkit_verify_attest (verify \
-attestations against trust roots), mkit_cat_object (inspect content-addressed objects). \
+attestations against trust roots), mkit_prove / mkit_verify_proof (partial disclosure), \
+mkit_closure_verify (full-disclosure check), mkit_cat_object (inspect content-addressed objects). \
 This server runs no network operations (push/pull/fetch/clone), no history surgery \
 (merge/rebase/cherry-pick), and never overrides mkit's data-loss guards; a 'refuses \
 without -f' error means run that operation outside the MCP, deliberately. Path rules: an \
@@ -464,6 +465,119 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
                     ),
                 ],
                 &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_prove",
+        description: "Build a disclosure bundle proving a path, chunk, or byte range belongs to a \
+                      commit. Writes the bundle to `output` (required: binary must not go to the \
+                      MCP stdout capture).",
+        hints: (false, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "revision",
+                        prop("Revision (commit or remix) to prove against"),
+                    ),
+                    (
+                        "path",
+                        prop("Repository-relative path (omit for the root tree)"),
+                    ),
+                    (
+                        "chunk",
+                        json!({ "type": "integer", "description": "0-based ChunkedBlob chunk index (conflicts with range)" }),
+                    ),
+                    (
+                        "range",
+                        prop("Byte range as OFFSET:LEN (conflicts with chunk)"),
+                    ),
+                    (
+                        "with_offsets",
+                        json!({ "type": "boolean", "description": "Authenticate absolute offsets; only valid with range" }),
+                    ),
+                    ("output", prop("File to write the disclosure bundle to")),
+                ],
+                &["repo_path", "revision", "output"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_verify_proof",
+        description: "Verify a disclosure bundle against a trusted 64-hex commit id (not a \
+                      revision). Pass `trusted` (or `trust_roots`) to also cross-check the \
+                      disclosed signer against the trust-roots registry.",
+        hints: (false, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "commit_id",
+                        prop("Trusted 64-hex commit id (not a revision)"),
+                    ),
+                    (
+                        "bundle_file",
+                        prop("Path to the disclosure bundle, or \"-\" for stdin"),
+                    ),
+                    (
+                        "expect_path",
+                        prop(
+                            "Fail if the authenticated path does not match (SPEC-DISCLOSURE caller-compares-path rule)",
+                        ),
+                    ),
+                    (
+                        "trusted",
+                        json!({ "type": "boolean", "description": "Cross-check the signer against the default trust-roots registry" }),
+                    ),
+                    (
+                        "trust_roots",
+                        prop(
+                            "Path to a trust-roots TOML file OUTSIDE the repo (default: \
+                             $XDG_CONFIG_HOME/mkit/trust-roots.toml). Implies trusted=true. An \
+                             in-repo path is rejected.",
+                        ),
+                    ),
+                    (
+                        "payload_out",
+                        prop("Write the verified payload bytes to this file"),
+                    ),
+                ],
+                &["repo_path", "commit_id", "bundle_file"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_closure_verify",
+        description: "Verify a commit's object-set closure. With `from`, checks exported \
+                      MANIFEST.mkcl plus packs against a trusted 64-hex id. Without `from`, \
+                      checks the local store (`commit_id` may be a revision; `history` selects \
+                      history vs snapshot).",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    repo_prop(),
+                    (
+                        "commit_id",
+                        prop("Trusted 64-hex id with `from`; otherwise a local revision"),
+                    ),
+                    (
+                        "from",
+                        prop("Directory containing MANIFEST.mkcl and pack files"),
+                    ),
+                    (
+                        "history",
+                        json!({ "type": "boolean", "description": "History mode for a local (no from) check" }),
+                    ),
+                    (
+                        "show_unreferenced",
+                        json!({ "type": "boolean", "description": "Local (no from) check only: enumerate every local object and include the unreferenced list. Without this flag, local mode reads only reachable objects and cannot check unreferenced objects" }),
+                    ),
+                ],
+                &["repo_path", "commit_id"],
             )
         },
     },
@@ -705,7 +819,7 @@ fn confine_path_args(name: &str, args: &Value, repo: &Path) -> Result<(), String
                 confine_path(repo, &f, Containment::Inside, "predicate_file")?;
             }
         }
-        "mkit_verify_attest" | "mkit_verify" => {
+        "mkit_verify_attest" | "mkit_verify" | "mkit_verify_proof" => {
             if let Some(f) = opt_str(args, "trust_roots") {
                 confine_path(repo, &f, Containment::Outside, "trust_roots")?;
             }
@@ -883,6 +997,67 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 out.extend(["--trust-roots".into(), roots]);
             }
             push_algorithm(&mut out, args)?;
+        }
+        "mkit_prove" => {
+            let rev = req_str(args, "revision")?;
+            no_dash(&rev, "revision")?;
+            out.extend(["prove".into(), rev]);
+            if let Some(path) = opt_str(args, "path") {
+                no_dash(&path, "path")?;
+                out.push(path);
+            }
+            if let Some(chunk) = args.get("chunk").and_then(Value::as_u64) {
+                out.extend(["--chunk".into(), chunk.to_string()]);
+            }
+            if let Some(range) = opt_str(args, "range") {
+                no_dash(&range, "range")?;
+                out.extend(["--range".into(), range]);
+            }
+            if args.get("with_offsets").and_then(Value::as_bool) == Some(true) {
+                out.push("--with-offsets".into());
+            }
+            let output = req_str(args, "output")?;
+            no_dash(&output, "output")?;
+            out.extend(["-o".into(), output]);
+        }
+        "mkit_verify_proof" => {
+            let commit_id = req_str(args, "commit_id")?;
+            no_dash(&commit_id, "commit_id")?;
+            let bundle = req_str(args, "bundle_file")?;
+            if bundle != "-" {
+                no_dash(&bundle, "bundle_file")?;
+            }
+            out.extend(["verify-proof".into(), commit_id, bundle]);
+            if let Some(path) = opt_str(args, "expect_path") {
+                no_dash(&path, "expect_path")?;
+                out.extend(["--expect-path".into(), path]);
+            }
+            if args.get("trusted").and_then(Value::as_bool) == Some(true) {
+                out.push("--trusted".into());
+            }
+            if let Some(roots) = opt_str(args, "trust_roots") {
+                no_dash(&roots, "trust_roots")?;
+                out.extend(["--trust-roots".into(), roots]);
+            }
+            if let Some(payload) = opt_str(args, "payload_out") {
+                no_dash(&payload, "payload_out")?;
+                out.extend(["--payload-out".into(), payload]);
+            }
+        }
+        "mkit_closure_verify" => {
+            let commit_id = req_str(args, "commit_id")?;
+            no_dash(&commit_id, "commit_id")?;
+            out.extend(["closure".into(), "verify".into(), commit_id]);
+            if let Some(from) = opt_str(args, "from") {
+                no_dash(&from, "from")?;
+                out.extend(["--from".into(), from]);
+            }
+            if args.get("history").and_then(Value::as_bool) == Some(true) {
+                out.push("--history".into());
+            }
+            if args.get("show_unreferenced").and_then(Value::as_bool) == Some(true) {
+                out.push("--show-unreferenced".into());
+            }
         }
         "mkit_add" => {
             out.push("add".into());
@@ -1074,7 +1249,7 @@ mod tests {
     fn tool_table_is_complete_and_annotated() {
         let tools = tool_descriptors();
         let arr = tools.as_array().unwrap();
-        assert_eq!(arr.len(), 18, "tool count is part of the public surface");
+        assert_eq!(arr.len(), 21, "tool count is part of the public surface");
         for t in arr {
             assert!(t.get("name").is_some());
             assert!(t.get("description").is_some());
@@ -1109,6 +1284,7 @@ mod tests {
                     | "mkit_cat_object"
                     | "mkit_verify"
                     | "mkit_verify_attest"
+                    | "mkit_closure_verify"
             );
             assert_eq!(ro, expect_ro, "readOnlyHint wrong for {name}");
         }
@@ -1288,7 +1464,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            18
+            21
         );
 
         // Notifications produce no response.

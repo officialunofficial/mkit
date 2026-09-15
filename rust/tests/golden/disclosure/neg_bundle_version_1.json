@@ -1,0 +1,14 @@
+{
+  "bin": "neg_bundle_version_1.bin",
+  "blake3": "9f6f9d6a3e298a21d5245a7b854edd34b0fc679ab5180c1a7a1423804b37855a",
+  "commit_id_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "description": "The version byte is 1; v2 is the only supported value and there is no compatibility decoder.",
+  "expect": "reject",
+  "name": "neg_bundle_version_1",
+  "path_hex": [
+    "7368616c6c6f772e747874"
+  ],
+  "reject_reason": "unsupported bundle version 1",
+  "selector": "object",
+  "size": 533
+}

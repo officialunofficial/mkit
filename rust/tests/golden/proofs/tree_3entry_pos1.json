@@ -1,0 +1,20 @@
+{
+  "bin": "tree_3entry_pos1.bin",
+  "blake3": "3f40bd18999555b72367379c552f1ae84755464dfda78ae4a3be50633d69e60a",
+  "description": "3-entry tree, single-leaf proof — exercises the odd trailing node.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "62",
+      "object_hash_hex": "0202020202020202020202020202020202020202020202020202020202020202"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "tree_3entry_pos1",
+  "object_id_hex": "c3985570a1d3adf9d16eb59ce99ff96674388c59a2dbc79c2648bb03a0679047",
+  "position": 1,
+  "proof_kind": "single",
+  "size": 69
+}

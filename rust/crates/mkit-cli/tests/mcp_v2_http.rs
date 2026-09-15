@@ -216,7 +216,7 @@ fn tools_list_over_http_matches_the_stdio_catalog() {
         .pointer("/result/tools")
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("{resp}"));
-    assert_eq!(tools.len(), 18, "tool count is part of the public surface");
+    assert_eq!(tools.len(), 21, "tool count is part of the public surface");
     assert!(
         tools
             .iter()

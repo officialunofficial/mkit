@@ -1,0 +1,18 @@
+{
+  "bin": "neg_missing_chunk.manifest.bin",
+  "blake3": "c046d61fe0f3f09654df46d5958897853430aaf3e6dee5ea8a900b13b3961a4b",
+  "description": "One chunk blob dropped from the snapshot export.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_missing_chunk",
+  "pack_hashes": [
+    "4cf2aae63542d2bff7b6ce6e5ce7447a0dced09c765be9a5400b8d4c778053c0"
+  ],
+  "reason": "missing",
+  "root_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

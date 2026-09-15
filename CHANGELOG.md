@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Verifier kit.** First-class commit-hash verification for an untrusted
+object set or a few-KiB disclosure bundle: CLI `mkit prove`,
+`mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
+wasm exports `verify_disclosure` / `verify_closure_*` (and related
+primitives) in `@officialunofficial/mkit-wasm`; specs
+SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
+[`docs/VERIFY.md`](docs/VERIFY.md). BMT proof bytes are
+commonware-identical (`commonware_storage::bmt::Proof` at the pinned
+train).
+
+### Changed
+
+- *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
+  mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
+  ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
+  `UnsupportedBundleVersion(1)` with no compatibility decoder. The
+  verifier wrap-checks the field against the trusted id before use, then
+  requires the proof fold to equal the declared root. **SemVer:**
+  breaking for bundle bytes (pre-release format, no migration);
+  additive for APIs (`Disclosed.step_inner_roots` /
+  `Disclosed.chunk_inner_root`; `Step.inner_root`).
+
 ### Added
+
+- *(core)* Closure verification now has a pull-based
+  `ObjectSource`/`verify_closure_streaming` API and a native
+  `verify_closure_store` helper. `ClosureReport` gains the additive
+  `unreferenced_checked` field: map and pack verification set it to `true`,
+  while streaming verification leaves `unreferenced` empty and sets it to
+  `false`. **SemVer:** additive in this pre-release, but the new report field
+  is a struct-literal break for external constructors.
+
+- *(cli)* Local `mkit closure verify` now reads only reachable objects by
+  default; `--show-unreferenced` retains the full-store enumeration needed to
+  compute that list. JSON reports whether the list was checked, and text mode
+  explains how to request it when it was not.
+
+- *(wasm)* Closure pack and manifest verification now expose
+  `unreferenced_checked` in their JSON results and use borrowed raw pack
+  entries during verification. **SemVer:** additive.
+
+- *(wasm)* `verify_disclosure` JSON includes `step_inner_roots` (hex
+  array) and `chunk_inner_root` (hex or `null`). **SemVer:** additive.
+
+- *(cli)* `mkit verify-proof --format=json` includes the same two keys.
+  **SemVer:** additive.
 
 - Redesigned the workspace around Files, Changes, and History with grouped version
   saves, attributed diffs, explicit conflict recovery, session-scoped drafts, and
@@ -23,18 +68,201 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input size and reject invalid encodings; tree IDs retain their native Merkle
   semantics. No on-disk or wire format changes.
 
+- *(core)* New `mkit_core::verify` module (issue #1015 verifier kit PR 2) and
+  `docs/specs/SPEC-DISCLOSURE.md` (`draft-normative`): partial-disclosure
+  bundles that prove a single path, chunk, or byte range belongs to a commit
+  id, with proof bytes on the order of a few KiB regardless of repository
+  size. `verify_object_id`, `verify_path`, `verify_chunk_with_meta`,
+  `verify_blob_slice`, and `verify_blob_len_proof` are the small,
+  independently usable primitives (each corresponds to one hop of commit →
+  tree steps → leaf → chunk/slice); `verify_disclosure` decodes a
+  self-contained wire bundle (magic `"MKDP"`, `commonware-codec` conventions:
+  fixed integers big-endian, every length an LEB128 varint) and composes
+  them; the native-only `build_disclosure` (needs `ObjectStore`) is the
+  producer side, taking a `Selector::{Object, Chunk, Range}`. Every check is
+  stated against an object id — never a bare BMT inner root or an
+  unauthenticated path/offset claim (see `docs/INVARIANTS.md`). A
+  `ChunkedBlob` chunk's `total_size`/`chunk_size` is authenticated alongside
+  its content id in one multi-proof over BMT positions `{0, index + 1}`
+  (`merkle::verify_chunk_with_meta_leaf`, a new `pub(crate)` helper — the
+  verifier computes the metadata leaf itself, never accepting one as
+  caller-supplied input, preserving `verify_chunk`'s existing "reject
+  position 0" rule). Byte ranges are proven with Bao (BLAKE3 verified
+  streaming) over each object's canonical bytes, so the Bao root equals the
+  object's own id; a `ChunkedBlob` range additionally supports proving the
+  disclosed range's absolute file offset via a complete `0..index` set of
+  per-preceding-chunk length proofs. New dependency: `bao = "0.13"` (pure
+  Rust, wasm32-clean — already proven by `mkit-wasm`'s existing use of the
+  same crate). Golden vectors: `rust/tests/golden/disclosure/` (10 accept, 12
+  reject vectors), consumed by `rust/crates/mkit-core/tests/golden_disclosure.rs`.
+  New fuzz targets `disclosure_decode` and `verify_disclosure`
+  (`docs/FUZZ.md`, `.github/workflows/fuzz.yml`). Scope is partial
+  disclosure only; closure/full-disclosure export is a separate profile
+  (issue #1015 PR 3) and non-membership proofs are reserved as
+  `payload_kind 3`. **SemVer:** additive — a new module and a new optional
+  dependency; no existing public API, object id, signing byte, or wire
+  format changed.
+
+- *(core)* Closure profile (issue #1015 verifier kit PR 3, SPEC-DISCLOSURE
+  §7): full disclosure against a commit id. `children` / `ClosureMode`
+  `{Snapshot, History}` is the single source of truth for object
+  references; store-backed `reachable_snapshot` joins `reachable_objects`
+  (history). `PackWriter::new_raw_only` never compresses and rejects
+  deltas, always finishing as v1 with only `0x00` entries.
+  `PackEntries` is a store-less pack iterator (`PackReader::read`
+  consumes it; existing pack goldens and the `pack` fuzz target are
+  unchanged). `verify_closure` / `verify_closure_packs` /
+  `verify_closure_manifest` / `export_closure` are wasm-safe except the
+  native `export_closure`. The `"MKCL"` v1 manifest is a convenience
+  index of pack hashes; the root id is the only trust anchor. Golden
+  vectors: `rust/tests/golden/closure/`. New fuzz targets `pack_entries`
+  and `verify_closure`. **SemVer:** additive — new APIs;
+  `PackReader` behavior unchanged.
+
+- *(cli)* `mkit prove`, `mkit verify-proof`, and `mkit closure
+  export|verify` (issue #1015 verifier kit PR 5): CLI for partial
+  disclosure (a path, chunk, or byte range against a commit id) and
+  full-disclosure closure packs. Hand-maintained surfaces updated
+  (`docs/CLI.md`, `man/mkit.1`, completions, MCP tools `mkit_prove` /
+  `mkit_verify_proof` / `mkit_closure_verify`). Distinct from `mkit git
+  export`. **SemVer:** additive.
+
+- *(wasm)* Disclosure and closure verification exports (issue #1015
+  verifier kit PR 4): `verify_disclosure` / `disclosure_payload_bytes`,
+  `verify_closure_packs` / `verify_closure_manifest`, `verify_tree_entry`
+  / `verify_chunk`, `chunked_blob_decode`, `blob_bao_encode` /
+  `blob_bao_slice` / `blob_bao_verify_slice` (canonical blob bytes;
+  existing raw `bao_*` exports are unchanged for the web streaming demo),
+  and `wrap_object_id`. Structured results are JSON; hashes are 64-char
+  lowercase hex. Objects stay at the 16 MiB workspace cap; bundles and
+  concatenated closure packs are capped at `verify::MAX_BUNDLE_BYTES`
+  (64 MiB). Native tests replay the `proofs/`, `disclosure/`, and
+  `closure/` golden vectors through these exports. **SemVer:** additive.
+
+- *(docs)* `docs/VERIFY.md` (issue #1015 verifier kit PR 6, closing the
+  series): the user-facing guide to verifying an mkit commit hash for
+  someone building a verifier or a DA provider &mdash; the byte-level
+  authentication chain from commit id to leaf, the three-part trust model
+  (content&harr;commit id, commit&harr;signer, signer&harr;identity),
+  worked CLI/Rust/TypeScript examples for both full disclosure (closure
+  profile) and partial disclosure (bundle), commonware-BMT interop notes,
+  a from-scratch (no-Rust) conformance checklist against the golden-vector
+  corpus, and a reference table of every CLI command, wasm export, and
+  core function in the kit. Every command and code snippet on the page was
+  run (CLI against a real repository; Rust via a compiled scratch check;
+  TypeScript kept to the documented `mkit-wasm` API) while writing it.
+  Linked from `README.md`, `SKILL.md`, and `docs/ARCHITECTURE.md` (already
+  reachable through the docs MCP's existing `get_file`/`search_docs`
+  tools). **SemVer:** none, docs only.
+
+- *(wasm)* `MAX_CLOSURE_INPUT_BYTES` (1 GiB, matching
+  `mkit_core::store::MAX_RAW_OBJECT_SIZE`): `verify_closure_packs` and
+  `verify_closure_manifest` now cap their concatenated packs input
+  independently of `verify::MAX_BUNDLE_BYTES` (64 MiB), instead of
+  reusing the disclosure-bundle cap for both shapes. A closure is every
+  object reachable from a commit &mdash; a realistically much larger input
+  than a handful of disclosure proofs &mdash; so it gets its own, separately
+  tunable ceiling. **SemVer:** additive; strictly widens what a wasm
+  closure verifier accepts (a pack set between the old 64 MiB cap and the
+  new 1 GiB one, previously rejected on size alone, is now admitted and
+  verified normally).
+
 ### Security
 
 - *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
+
+- *(core)* Closed a second, independent way to hit `verify_scrub_window`'s `slice index out of range` panic (above), found by a follow-up code review of that same fix: the `generation` binding rules out a *stale* scrub file (computed against a different, superseded generation), but not one whose `verified_through` simply exceeds the actual on-disk prefix length for a generation it genuinely does match — e.g. a snapshot file restored from an older backup paired with a newer `scrub` file. `decide_chain` now checks the scrub window's end bound against the real prefix length before calling `verify_scrub_window`, falling back to a full walk (the same fail-safe path a generation mismatch already takes) instead of handing it a range it can't satisfy; `verify_scrub_window` itself now also bounds-checks via `slice::get` and returns a typed `HistoryError::Corrupted` rather than a bare index, so a future caller with the same class of bug fails closed instead of panicking. New regression test constructs the exact mismatch directly (real production code cannot produce it, by the monotonic-append argument `decide_chain`'s own docs make) and confirms it panics without the fix, falls back to a full walk with it. **SemVer:** none.
+
+- *(core)* `read_scrub_state` (`history-mmr`) no longer propagates an I/O error reading the advisory `scrub` file — found alongside the panic fixes above while auditing the same fail-safe contract from the read side. `ScrubState`'s own docs promise "missing or corrupt scrub state is not an error", and `write_scrub_state`'s caller already treats a write failure as advisory-only (`let _ = write_scrub_state(...)`), but `read_scrub_state` still used `?` on `read_bounded`'s result — so anything that made the file briefly unreadable (a stray directory at that path, exactly the state an existing test already constructs to exercise the write-side fix; a permission change; a file that grew past the 93-byte cap) turned every subsequent fast-forward publish on that branch into a hard failure instead of degrading the verification schedule. Now maps any read failure the same way a missing file already is: `Ok(None)`, falling back to a full walk. New regression test publishes twice with a directory blocking the `scrub` path throughout and confirms the *second* publish — the first fast-forward that actually reaches `read_scrub_state` — no longer fails; the existing write-side test only ever exercises a first publish, where `read_scrub_state` isn't reached at all. **SemVer:** none.
 
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
 
+- *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
+  rejects `len == 0` before running the chunk header's wrap/fold checks,
+  matching SPEC-DISCLOSURE §4's stated order &mdash; the bundle is rejected
+  either way, only the specific typed error changes. New golden negatives
+  `neg_zero_length_range_chunked` and
+  `neg_range_chunk_meta_forged_total_size`. **SemVer:** none.
+
+- *(core)* `verify::resolve_absolute_offset`'s final `sum +
+  offset_in_blob` addition now uses `checked_add`, matching every
+  neighbouring offset computation, and returns
+  `VerifyError::OffsetOverflow` on overflow instead of wrapping.
+  **SemVer:** none &mdash; the affected inputs are far outside anything a
+  conformant bundle can produce.
+
+- *(cli)* `mkit verify-proof <commit-id> -` now caps the stdin read at
+  `MAX_BUNDLE_BYTES` instead of buffering an unbounded stream before the
+  size check ran, rejecting an oversized bundle with `DATAERR` instead of
+  blocking or exhausting memory on an adversarial or unbounded input.
+  **SemVer:** none.
+
+- *(cli)* `mkit_verify_proof`'s MCP tool descriptor no longer claims
+  `readOnlyHint = true` &mdash; its `payload_out` field writes a file, so it
+  now matches `mkit_prove`'s hints (not read-only, not destructive,
+  idempotent). **SemVer:** none (annotation-only).
+
+- *(workspace-worker)* `authenticate` now drains the request body before
+  any envelope-header check can reject it, instead of after. An
+  unauthenticated (or otherwise malformed-envelope) POST with a body of
+  roughly 200 KiB or more previously got its rejection response written
+  while the client was still writing that body, which the local
+  Miniflare/workerd HTTP stack surfaces as a connection reset
+  (`ECONNRESET`) instead of delivering the intended 401/403/415 — seen as
+  an intermittent `workspace.integration.test.ts` failure. **SemVer:**
+  none — worker-only, no public API.
+
+- *(core)* `verify_closure` / `verify_closure_packs` merge the walker's
+  `corrupt` list with index-time deserialize failures instead of
+  overwriting it. The walker list is empty on these paths today (both
+  indexes are keyed by derived id), but a fetch that returned bytes
+  hashing to a different id would previously be dropped. **SemVer:**
+  additive.
+
+- *(core)* `cargo check -p mkit-core --no-default-features --target
+  wasm32-unknown-unknown` now compiles: on wasm32, `getrandom` 0.4 is
+  enabled with the `wasm_js` feature (same posture as `mkit-wasm`), so
+  the crate no longer fails the getrandom "unknown-unknown not supported
+  by default" compile error. Native builds are unchanged. **SemVer:**
+  none.
+
+- *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
+  hard read error the moment it hits one corrupt on-disk object &mdash; it
+  now catches `StoreError::HashMismatch` per object, reports it under the
+  `ClosureReport`'s `corrupt` list (removing it from `missing` first, if
+  the walk had already reached it), and continues, matching the command's
+  documented fsck-shaped behavior. Also hides the `note: N unreferenced`
+  list (and the JSON `unreferenced` array) in local mode unless a new
+  `--show-unreferenced` flag is passed &mdash; the local store is expected to
+  be a superset of any single commit, so the list was noise by default.
+  New CLI test flips a byte in an object file and expects
+  `bad: closure incomplete: 0 missing, 1 corrupt`. **SemVer:** additive
+  (new flag; local-mode `corrupt`/`unreferenced` reporting changes for a
+  case that previously hard-failed the whole command).
+
+- *(core)* `verify::resolve_absolute_offset` now rejects a non-empty
+  `chunk_len_proofs` on a `Range` payload whose disclosed chunk is index
+  0, instead of silently ignoring it &mdash; index 0 has nothing preceding it
+  to describe, so any entry there is meaningless, exactly like the
+  existing rejection on a plain-`Blob` leaf
+  (`VerifyError::UnexpectedLengthProofs`, now shared by both cases). New
+  unit test `len_proofs_on_chunk0_are_rejected` and golden negative vector
+  `rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*`;
+  SPEC-DISCLOSURE §4 states the rule normatively. **SemVer:** additive
+  &mdash; tightens verification; the only bundles affected are malformed
+  ones no conformant builder has ever produced.
+
 - *(core)* `advance`'s advisory `write_scrub_state` call (`history-mmr`) no longer fails the whole publish if the write itself fails — `finish` has already durably committed the ref move and ancestry snapshot by that point, so a caller must not see that succeeded operation reported as a failure; losing this purely-advisory bookkeeping write only costs the next publish some extra re-verification, never correctness. Found by code review alongside the `ScrubState` panic above; regression test forces the write to fail (a directory occupies the scrub file's path) and confirms the publish still succeeds.
 - *(core)* `decide_chain`'s full-walk fallback (`history-mmr`, on a completed scrub lap or a stale re-verification schedule) no longer re-walks and re-reads the fast-forward suffix a second time — it splices the suffix already verified moments earlier onto a fresh walk of just the reused prefix, which `first_parent_chain(store, target) == first_parent_chain(store, d.tip) ++ suffix` makes provably identical to a full walk of the whole chain. New regression test plants corruption deep in the prefix and confirms the spliced fallback still catches it, proving the optimization didn't drop real verification along with the redundant re-read.
 - *(cli)* `mkit fetch`'s tracking-ref snapshot (used to report which refs moved) now uses the same parallel `list_remote_refs_parallel` fan-out every other ref-listing call site already got when that fan-out was added — this one spot was missed.
 - *(core)* `HistoryError` is now `#[non_exhaustive]`, matching `GcRootsError`'s existing convention in the same crate — which `commonware-storage` structure backs the ancestry proof (the `Mmb` variant's own name is already the result of one such internal rename) is an implementation detail, not part of this error type's contract, and should not force a breaking change on downstream exhaustive matches the next time it changes.
+- *(core)* `RefError` is now `#[non_exhaustive]` too, for the same reason and found in the same code-review pass — it gained `RefBatchLengthMismatch` in this same set of changes with no such marker, which would have made that addition a breaking change for any downstream exhaustive match.
+- *(core)* `decide_chain`'s two "no compatible previous generation to fast-forward from" branches (no prior publish at all, and a first-parent search that never reaches the previous tip) built an identical fresh `ChainDecision::NewGeneration` — full walk plus a fresh `ScrubState` — via separately hand-copied code; factored into one `new_generation` helper both branches call, found as duplication by code review. No behavior change.
+- *(core)* `decode_descriptor_and_chain`'s minimum-payload-length check and `DESCRIPTOR_HEADER_MAX_LEN` each independently hard-coded the 143-byte fixed descriptor header size (as `175` — `143 + 32` for the trailing checksum — and `143`, respectively), found as duplication by code review. Both now derive from one new `DESCRIPTOR_HEADER_LEN` constant. No behavior change.
+- *(core)* `read_prefix` (`history-mmr`'s bounded prefix read, used by `read_current_descriptor`) now preallocates its buffer to the caller's known `max_bytes` bound instead of letting `read_to_end` grow it via generic doubling — found as a minor inefficiency by code review; `max_bytes` is small in every call this crate makes (currently `DESCRIPTOR_HEADER_MAX_LEN`, under 64 KiB), so the bound was always cheap to preallocate outright. No behavior change.
+- *(cli)* `remote_dispatch::packmap::verify_slice` (post-fetch signature verification's per-chunk read step) now drops each read object immediately unless it's a Commit/Remix/Tag, instead of retaining every object in a chunk — Blob/Tree/ChunkedBlob/Delta included — for the rest of the call even though neither the batch path (`collect_batch_entries`) nor the fallback (`verify_one_object`) ever inspects them. Found by code review: a single `Blob` can be up to `worktree::CHUNK_THRESHOLD` (1 MiB — mkit chunks anything larger), so a `verify_chunk_size()`-sized chunk (up to 512 entries) dominated by such blobs could previously hold up to ~512 MiB of fully decoded, never-inspected object bytes resident at once on a fetch a hostile or simply blob-heavy remote controls the shape of. New regression test interleaves unsigned Blob entries with signed (and, separately, tampered) commits and confirms verification still correctly accepts/rejects — the filtering doesn't drop or misattribute a neighboring entry. No behavior change to what's accepted or rejected, only what's held in memory while deciding.
 
 - Shared browser login across all seven web pages, with a seven-day HttpOnly session, separate in-memory signing unlock, session-scoped workspace queries, and a repeatable navigation/refresh/sign-out verification workflow.
 
@@ -75,6 +303,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts; shard downloads share process-wide memory and concurrency budgets.
 
 ### Performance
+
+- *(core)* `worktree::content_eq` (the "did this file's content actually change?" check behind `add`, `status`, `diff`, and `merge` once two sides' object ids already differ) gained a fast path for the `ChunkedBlob`-vs-`ChunkedBlob` case — every file above `CHUNK_THRESHOLD` (1 MiB). The old code always fully reassembled and byte-compared both sides, chunk by chunk, even when most chunks were byte-identical between versions: appending 1 MiB to a 100 MiB file — the flagship "commit a 1 MiB change to a 100 MiB file" row on the [performance page](https://mkit.sh/performance) — re-read and re-verified the whole 100 MiB on both sides just to answer "not equal". New `chunked_content_eq` walks both manifests' chunk-hash lists with two pointers, skipping any run of chunks that share a hash with no read at all — identical hash means identical bytes by construction, the same trust `content_eq`'s pre-existing `a == b` whole-object fast path already relies on, just applied per chunk. Only chunks that actually diverge are read and byte-compared, with the walk able to resync once ids match again at the same aligned offset (pinned by `chunked_fully_misaligned_but_equal_content`/`chunked_shared_prefix_then_misaligned_equal_suffix` and the pre-existing `large_inline_fixed_and_cdc_content_agree`, which compares two independently-chunked manifests — fixed 64 KiB blocks vs. real FastCDC — of the same content). An append needs zero chunk reads at all: FastCDC's cut points never depend on bytes past them, so every pre-existing chunk still lines up by hash and the walk runs straight to the new tail. `ma.total_size != mb.total_size` is also checked up front without reading anything, trusting the manifest's declared size the same way `LoadedBlob::len`'s doc comment already documents (every reassembly path enforces it via `ChunkedBlob::check_reassembled_size`, so it cannot be wrong on anything durably written through mkit's own writers) — a manifest deliberately constructed to violate that, whose entire chunk sequence still lines up by hash with its counterpart, slips through unnoticed by this fast path specifically (pinned, not just asserted, by `chunked_wrong_shared_total_size_is_not_detected_when_ids_fully_match`); one whose chunks diverge anywhere is still fully read from the first divergent chunk on, so store-level corruption or a missing chunk there still surfaces as an error, same as before.
+
+  New `cargo bench -p mkit-benches --bench content_eq` suite (append/edit-middle-byte/truncate-1MiB against an 8 MiB and a 32 MiB FastCDC-chunked base, 4-core host, `--quick`): 8 MiB append 13.78ms → 3.51ms, edit 11.05ms → 3.70ms, truncate 11.18ms → 3.35ms; 32 MiB append 44.80ms → 12.42ms, edit 43.80ms → 11.99ms, truncate 43.76ms → 10.60ms — roughly 66-76% faster wall-clock across every mutated-content case at both sizes (the `identical` series, which hits the pre-existing `a == b` fast path before ever reaching `chunked_content_eq`, is unchanged, as expected). New tests: direct coverage of `chunked_content_eq`'s merge logic against small hand-built manifests (all-ids-match, fully-misaligned-but-equal, shared-prefix-then-resync, append via total_size, same-total-size-different-content, split-differently-but-different-content, empty manifests, the documented total_size gap above), a real-`FastCDC` insertion test that confirms at the manifest level (shared first/last chunk, differing middle) that a genuine divergence-then-resync actually happens before checking `content_eq` against ground truth, and `content_eq_real_chunked_mutations_match_ground_truth`, which runs `content_eq` over real `FastCDC`-chunked append/edit/truncate mutations of a 3 MiB fixture and cross-checks every result against a direct byte comparison.
+
+  An independent code review (correctness + reuse/simplification pass) caught a real gap in the first version of this change before it merged: `chunked_content_eq` only ever compared the two manifests' declared `total_size` fields against *each other*, never against either side's own real chunk bytes, so two manifests whose chunk sequences diverged *everywhere* (no id ever matched, so nothing was ever skipped) but happened to declare the same wrong `total_size` were reported merely "unequal" instead of raising `ChunkedBlobSizeMismatch` the way the old byte-cursor walk always did. Fixed by tracking, per side, the real bytes actually read (as opposed to skipped by id) and whether that side had any chunk skipped at all: a side with zero skips has every one of its chunks read regardless, so its accumulated real length is now checked against its declared `total_size` before returning, erroring exactly as before if they disagree. This narrows the documented trust gap to only what it was always meant to cover — a side that skipped at least one chunk by id, which is the one case this fast path cannot validate without giving up the read it just avoided. New `chunked_wrong_total_size_is_detected_when_no_chunk_is_skipped` and `chunked_wrong_total_size_on_one_side_only_is_detected` pin the fix directly (both previously-missed error cases; both now assert `ChunkedBlobSizeMismatch`). The review also found three call sites in this file (`content_fingerprint`, `ContentCursor::remaining`, and `chunked_content_eq`) had each hand-rolled the identical "read a manifest chunk, require `Blob`" match; factored into one shared `read_blob_chunk` helper (`read_chunk`, the pre-existing `WorktreeError`-domain sibling with its own hash-and-type-qualified error text, is kept separate since unifying it would have changed that error's wording). No wire-format or public-behavior change beyond the bug fix itself — every other case this fast path was already correct for is unaffected, confirmed by the full pre-existing test suite passing unchanged alongside the new tests. All `mkit-core` tests (842, up from the base branch's 839) pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean, and the `content_eq` bench numbers above are unaffected (re-measured after the fix). **SemVer:** none — `chunked_content_eq`, `read_blob_chunk`, and `ContentCursor::from_object` are private to `worktree::blob`; `content_eq`'s public signature and documented error behavior are unchanged (the fix restores documented behavior for the no-skip case rather than changing it).
+
+- *(core)* replace `delta::encode`'s block-hash index (`HashMap<u64, u32>`, `std`'s default `SipHash`-1-3 hasher) with the same map keyed by `rustc_hash::FxHasher`, seeded per `encode()` call. The index's keys are already the output of `encode`'s own FNV-1a `block_hash` over each 16-byte block of `base`, so `SipHash`'s extra per-byte cost buys little — *if* the replacement is still reseeded per call: an earlier version of this change used a bare, fixed-seed hasher (via `BuildHasherDefault`/the crate's own bare `FxBuildHasher`, both always starting from the same compile-time state), caught in review as a real regression — `block_hash` is itself unkeyed, so an attacker who controls `base`'s bytes could solve for many distinct blocks whose `block_hash` outputs collide in the same table bucket under a *known* seed, degrading the index's build from O(n) to O(n²): the exact hash-flooding attack `SipHash` exists to prevent, reopened. `encode` now seeds via `rustc_hash::FxSeededState::with_seed`, drawing a fresh random `usize` per call from `std`'s own randomized hasher (`random_seed`, avoiding a new `rand`/`getrandom` dependency for one value per call) — denying an attacker the one thing that attack needs: a bucket mapping it can predict in advance. Also switched from a hand-rolled reimplementation of the FxHash algorithm to the `rustc-hash` crate directly (already resolved transitively via `mkit-cli`'s `reqwest → quinn` chain, caught in the same review as needless duplication of an already-available, better-tested implementation) — `rustc_hash::FxSeededState` (added upstream specifically for this "seed a fast hasher yourself" use case) supplied the seeding API a bare `FxHasher`/`BuildHasherDefault` doesn't, so no hand-rolled `BuildHasher` wrapper was needed either. `cargo bench -p mkit-benches --bench delta_plan_fanout -- --quick` (sequential series, 4-core host, near-duplicate 64 KiB chunks) with the final, reseeded implementation: 32 candidates 3.25ms → ~2.9-3.0ms, 64 8.50-8.65ms → ~6.15-6.23ms, 128 14.0-17.0ms → ~12.7-12.9ms, 256 candidates 36.6-37.1ms → ~25.7-26.3ms (~29-30% faster) — smaller than the fixed-seed version's initial (unsafe) ~36-39%, since reseeding costs one `RandomState` construction per `encode()` call, but still a clear, real win. New `random_seed_differs_across_calls_and_seeds_a_usable_map` test pins this module's own contribution — `FxHasher`'s mixing quality is `rustc_hash`'s tested contract, not this module's to reverify — confirming two `random_seed()` calls differ (the load-bearing security property) and that `FxSeededState` wires a seed through consistently enough for a `HashMap` to find keys it just inserted. No wire-format or public-API change — `FxIndexMap`/`random_seed` are private to `delta.rs`, and `encode`'s output is byte-for-byte identical to before (all `mkit-core` tests, including `delta`'s roundtrip and corruption-rejection suite, pass unchanged). **SemVer:** none.
 
 - *(core,cli)* batch Ed25519 signature verification in `remote_dispatch::packmap::verify_new_object_signatures` (clone/pull/fetch's post-download check, issue #692). Every commit/remix/tag a fetch introduced was checked with a separate `verify_strict` call — one scalar-multiplication-plus-comparison per object. New `mkit_core::sign::verify_batch` (behind a new, non-default `batch-verify` feature) instead runs `ed25519_dalek::verify_batch`'s randomized-coefficient multiscalar-multiplication check over many signatures in one pass — strictly less total scalar-multiplication work than one `verify_strict` per signature — at the cost of not learning *which* entry failed on a batch rejection; `verify_new_object_signatures` falls back to the pre-existing per-object loop whenever the batch check fails (or wasn't attempted) to locate and report the exact offending hash, unchanged from before this commit. `ed25519-dalek`'s batch equation deliberately omits two of `verify_strict`'s malleability checks (see its README's "Malleability" section for the public-key half; the signature-`R` half is the same class of check, just undocumented as a batch caveat) — `verify_batch` performs both itself, per entry, before running the batch equation: `VerifyingKey::is_weak` on the public key, and a direct `curve25519-dalek` small-order check on the signature's `R`. Each is backed by a dedicated regression test constructing a genuine forgery specific to that check (a weak identity public key with an all-zero signature; and, isolating the `R` check from the public-key one, a real full-order key's own secret scalar used to solve `[s]B = R + [k]A` for `R = identity`) — both confirmed to satisfy `ed25519-dalek`'s own loose `verify` (proving the gap is real, not just theoretical) and confirmed load-bearing by deliberately disabling each precheck in turn and watching the corresponding test fail.
 
@@ -120,6 +356,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(core,cli)* `mkit-cli`'s parallel delta-encoding fan-out (`encode_delta_candidates_batch`, added above) now caches repeated base objects within batches of at most 64 candidates and a 64 MiB cache budget, with per-candidate reads for singleton or nonfitting bases — several chunks of one file commonly diff against the same prior chunk, and fanning that out across rayon without deduping turned what used to be redundant-but-serialized reads into concurrent redundant reads and concurrent redundant in-memory copies of the same bytes. New `transfer::encode_delta_candidate_with_base` (mkit-core) is the per-candidate unit that takes already-read base bytes instead of reading `base` itself; `transfer::encode_delta_candidate` is unchanged for the sequential default's benefit. **SemVer:** additive — new public `transfer::encode_delta_candidate_with_base`; existing behavior unchanged.
 
 ### Changed
+
+- *(core)* `mkit-core::merkle`'s BMT inclusion-proof construction is now byte-identical to `commonware_storage::bmt::Proof` at the pinned `2026.9.0` train, replacing the prior provisional format. `Proof` is a new public struct (`leaf_count: u32`, `siblings: Vec<Hash>`) encoded as `u32 BE leaf_count ‖ varint(n) ‖ n × 32-byte digest` via `commonware-codec`, decoded through `Proof::decode(bytes, max_items)` with allocation bounded to `max_items * MAX_LEVELS` (`MAX_LEVELS = 32`) before any sibling is read. Sibling selection is ported from upstream: level-major bottom-up, index-ascending, omitting a sibling that would be a node's own odd-trailing duplicate or is already covered by another proven position in the same proof — the prior format always emitted the self-duplicate. Range (`build_tree_entries_range_proof`/`build_chunks_range_proof`) and multi-leaf (`build_tree_entries_multi_proof`/`build_chunks_multi_proof`) proofs are new. `build_{chunk,tree_entry}_inclusion_proof`/`verify_{chunk,tree,}_inclusion_proof` are replaced by `build_{chunk,tree_entry}_proof` and id-based verifiers — `verify_tree_entry`, `verify_chunk`, and their range/multi counterparts — which check against the object's **id** (via the new `wrap_id(ObjectKind, inner_root)` helper) rather than the bare pre-domain-wrap inner root the old API handed callers, closing an inner-root-vs-id confusion footgun (issue #1015 §Security); `verify_chunk` and its range/multi counterparts additionally reject position 0 (the `ChunkedBlob` metadata leaf) outright. A new native-only cross-check test (`merkle::tests::proofs_match_commonware`) proves byte-identity and mutual verifier acceptance against `commonware_storage::bmt` across randomised trees and single/range/multi positions; golden vectors live under `rust/tests/golden/proofs/` (SPEC-MERKLE-OBJECTS §5.6). No change to any object id, signing byte, or existing golden vector — only the *proof* bytes and API move. **SemVer:** breaking — `mkit-core::merkle`'s proof-related public API (types and function signatures/bytes) changed; `compute_tree_id`/`compute_chunked_id` and every other object-identity function are unchanged. Sanctioned by SPEC-MERKLE-OBJECTS §5's now-removed provisional carve-out and CONTRIBUTING's pre-production policy; the crate version bump itself happens in the release-prep PR, not here.
 
 - *(core)* SPEC-HISTORY-PROOF's ancestry primitive switches from a Merkle Mountain Range (MMR) to a Merkle Mountain Belt (MMB) — `commonware-storage`'s newer structure (<https://arxiv.org/abs/2511.13582>), already available in the exact pinned version (`=2026.9.0`) mkit depends on, so this needed no dependency bump. An MMR requires strictly decreasing peak heights, so a single append can cascade up to `O(log N)` internal-node merges whenever a run of same-height peaks collapses at once (e.g. crossing a power-of-two leaf count); an MMB allows up to two same-height peaks and merges at most one pair per append, bounding the worst case to a constant instead of only the amortized average — the property that matters for `mkit commit`'s one-append-per-publish pattern. `CommitHistory` (`mkit-core::history`) now wraps `commonware_storage::merkle::mmb::mem::Mmb` instead of `merkle::mmr::mem::Mmr`; both are the same generic `Mem<Family, Digest>` machinery (`Clone`, batch API, pruning, proof verification) with only the `Family` (peak/position topology) differing, so the swap was a mechanical type-and-terminology change confined to `history.rs` — `ancestry.rs` and everywhere else in the codebase only ever used mkit's own `Position`/`InclusionProof`/`CommitHistory` wrappers, never MMR types directly. `HistoryError::Mmr` is renamed `HistoryError::Mmb`; the `history-mmr` Cargo feature and `.mkit/history*` paths keep their names (identifiers, not a structural claim) per SPEC-HISTORY-PROOF's updated preamble.
 

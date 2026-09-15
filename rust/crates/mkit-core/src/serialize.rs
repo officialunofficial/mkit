@@ -24,7 +24,11 @@ const PROLOGUE_LEN: usize = 6;
 pub const MAX_TREE_ENTRIES: u32 = 1_000_000;
 const MAX_PARENTS: u32 = 1_000;
 const MAX_REMIX_SOURCES: u32 = 10_000;
-const MAX_CHUNKS: u32 = 1_000_000;
+/// Decode-side cap on `ChunkedBlob` chunk count. `pub(crate)` (not
+/// private) so `crate::verify` can bound a disclosure bundle's claimed
+/// chunk count against the same limit a real `ChunkedBlob` is decoded
+/// under (issue #1015 verifier kit PR 2).
+pub(crate) const MAX_CHUNKS: u32 = 1_000_000;
 
 // ---------------------------------------------------------------------
 // Public API

@@ -135,7 +135,7 @@ fn lists_all_tools_with_annotations() {
 
     let resp = client.request("tools/list", &json!({}));
     let tools = resp.pointer("/result/tools").unwrap().as_array().unwrap();
-    assert_eq!(tools.len(), 18);
+    assert_eq!(tools.len(), 21);
 
     let names: Vec<&str> = tools
         .iter()
@@ -152,6 +152,9 @@ fn lists_all_tools_with_annotations() {
         "mkit_cat_object",
         "mkit_verify",
         "mkit_verify_attest",
+        "mkit_prove",
+        "mkit_verify_proof",
+        "mkit_closure_verify",
         "mkit_add",
         "mkit_unstage",
         "mkit_commit",
@@ -718,7 +721,7 @@ fn batch_requests_get_a_single_array_response() {
             .as_array()
             .unwrap()
             .len(),
-        18
+        21
     );
 
     drop(stdin);

@@ -101,6 +101,11 @@ Notes:
 
 ### 3.1 `raw` (0x00)
 
+A raw-only v1 pack (every entry `0x00`, header `version = 1`) is the
+closure-profile carrier in [SPEC-DISCLOSURE](SPEC-DISCLOSURE.md) §7:
+wasm verifiers are built without `pack-zstd` and consume this shape
+only.
+
 Payload is exactly the bytes you would get from SPEC-OBJECTS
 serialization, starting with the object prologue. Unpackers insert
 these bytes into the object store verbatim (writing

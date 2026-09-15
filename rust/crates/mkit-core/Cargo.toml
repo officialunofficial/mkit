@@ -20,6 +20,17 @@ workspace = true
 
 [dependencies]
 blake3 = "1"
+# Verified streaming (BLAKE3 tree hashing: outboard + slice proof) for
+# `verify::verify_blob_slice`/`verify_blob_len_proof` (issue #1015 verifier
+# kit PR 2, SPEC-DISCLOSURE). Pure Rust, `std`-based but only via
+# `io::Cursor`-style in-memory use — no filesystem, no threads — so it
+# builds cleanly for wasm32 (already proven: `mkit-wasm` depends on the
+# same version for its `/streaming` demo). Same major as that transitive
+# copy, and `blake3 = "1"` above is the same workspace pin `bao::Hash`
+# (a `blake3::Hash` re-export) resolves against, so no second major shows
+# up in the tree. Run `bash scripts/check-wasm-dep-graph.sh` after
+# touching this dependency.
+bao = "0.13"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
 bytes = "1"
@@ -49,6 +60,16 @@ ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] 
 # feature's doc below and `sign::verify_batch`.
 curve25519-dalek = { version = "5", optional = true }
 getrandom = "0.4"
+# `delta::encode`'s block-hash index (a `HashMap<u64, u32>` keyed by an
+# already well-distributed hash, not attacker-facing key material) uses
+# `FxHasher`/`FxSeededState` instead of the default `SipHash` — see
+# `delta.rs`'s module docs. Already resolved transitively (via
+# `mkit-cli`'s `reqwest` → `quinn` chain) at the pinned `2.1` line; this
+# direct dependency makes that explicit rather than relying on it.
+# `no_std`-by-default (this crate enables its default `std` feature) and
+# pure arithmetic, so it stays wasm32-clean like the rest of this
+# dependency list.
+rustc-hash = "2.1"
 # `subtle` is a constant-time-equality primitive used by the Ed25519
 # `SecretSeed` PartialEq. dalek pulls it transitively but we depend on
 # it directly so the constant-time guarantee is explicit at this crate
@@ -71,6 +92,16 @@ zstd = { version = "0.14", optional = true }
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Keep the untargeted `getrandom = "0.4"` above for native builds
+# (`KeyPair::generate`, ancestry ids). On wasm32-unknown-unknown the 0.4
+# crate needs `wasm_js` (`Crypto.getRandomValues` via wasm-bindgen);
+# without it, `cargo check -p mkit-core --no-default-features --target
+# wasm32-unknown-unknown` fails even though `mkit-wasm` builds — that
+# crate declares this feature on the root package, which unifies onto
+# this copy. Do not enable on native.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [features]
 # `pack-zstd` is on by default for every normal (native) consumer —

@@ -23,13 +23,13 @@
     "tiktoken": "1.0.22"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260908.1",
-    "@types/node": "^26.4.1",
+    "@cloudflare/workers-types": "5.20260911.1",
+    "@types/node": "^26.5.1",
     "@types/ws": "^8.18.1",
     "esbuild": "0.28.2",
     "miniflare": "5.20260908.0-alpha",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.0",
-    "wrangler": "^4.130.0"
+    "wrangler": "^4.131.0"
   }
 }

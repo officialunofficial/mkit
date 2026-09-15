@@ -528,11 +528,23 @@ multi-version readers.
    `mkit.tag\0` domain &mdash; a permanent domain separator per
    SPEC-CONVENTIONS §4): record serialized bytes, the canonical tag
    signing bytes, the signing hash, and the 64-byte Ed25519 signature.
+10. **Tree entry inclusion proof**: a single-leaf BMT inclusion proof
+    (SPEC-MERKLE-OBJECTS §5) for the `tree_single_file` object of §13.3,
+    at position 0. Record the encoded proof bytes and the object id it
+    verifies against.
+11. **ChunkedBlob chunk inclusion proof**: a single-leaf BMT inclusion
+    proof (SPEC-MERKLE-OBJECTS §5) for a chunk of the `chunked_blob_cs0_3chunks`
+    object of §13.7. Record the encoded proof bytes, the proven chunk's
+    position (chunk index + 1, per SPEC-MERKLE-OBJECTS §3.1/§5.5), and
+    the object id it verifies against.
 
 Vectors 1–7 are committed under `rust/tests/golden/objects/`; the tag
-vectors 8–9 under `rust/tests/golden/tags/`. Each set ships a
-`MANIFEST.txt` and per-vector `.json` sidecar carrying the BLAKE3
-digest, so external implementations can cross-verify byte-for-byte.
+vectors 8–9 under `rust/tests/golden/tags/`; the proof vectors 10–11
+(alongside range/multi-leaf and negative proof vectors not individually
+enumerated above) under `rust/tests/golden/proofs/`, per
+SPEC-MERKLE-OBJECTS §5.6. Each set ships a `MANIFEST.txt` and per-vector
+`.json` sidecar carrying the BLAKE3 digest, so external implementations
+can cross-verify byte-for-byte.
 
 ---
 

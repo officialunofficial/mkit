@@ -1,0 +1,20 @@
+{
+  "bin": "tree_1entry_pos0.bin",
+  "blake3": "023a14bb4482dc2fb94463977df299bdc73dcc5cf7227b0f8a9772e18bce3e9a",
+  "description": "1-entry tree, single-leaf proof at position 0 (zero siblings).",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "61",
+      "object_hash_hex": "0101010101010101010101010101010101010101010101010101010101010101"
+    }
+  ],
+  "expect": "accept",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "tree_1entry_pos0",
+  "object_id_hex": "fd005e89af23b758ce1298730e1b0b85991e948200b616546f7b2a20e5de105a",
+  "position": 0,
+  "proof_kind": "single",
+  "size": 5
+}

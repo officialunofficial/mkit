@@ -1,0 +1,21 @@
+{
+  "bin": "neg_leaf_count_off_by_one.bin",
+  "blake3": "42d8b4eaa61dd11df9ec5242ebfbec07b90021eba9ed97b0cdbe841814d76754",
+  "description": "A valid tree_7entry proof with leaf_count incremented by one.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "67",
+      "object_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_leaf_count_off_by_one",
+  "object_id_hex": "daaa5ae863925303757ff5a4d364ef34fff20900c20b428f7e69d8a264779b6e",
+  "position": 6,
+  "proof_kind": "single",
+  "reject_reason": "leaf_count was tampered with (off by one)",
+  "size": 69
+}

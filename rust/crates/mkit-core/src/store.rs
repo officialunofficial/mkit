@@ -466,6 +466,18 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    /// Reads raw bytes for a verifier that must classify a hash mismatch
+    /// under the requested id. Unlike [`Self::read`], this deliberately
+    /// leaves identity verification to the caller; it is crate-private so
+    /// only verification code can use the raw bytes as data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same store errors as [`Self::read_raw`].
+    pub(crate) fn read_raw_for_verification(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_raw(h)
+    }
+
     /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
     /// bytes equals `h` and returns [`StoreError::HashMismatch`] on
     /// failure (the bytes are still discarded so callers cannot

@@ -1,0 +1,21 @@
+{
+  "bin": "neg_wrong_position.bin",
+  "blake3": "117c8c76e7c05d521915f513e5a847d7df26984bdf634a2e8feb250a1a132796",
+  "description": "A valid tree_7entry proof for position 6, verified against position 5.",
+  "entries": [
+    {
+      "mode": 1,
+      "name_hex": "67",
+      "object_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ],
+  "expect": "reject",
+  "kind": "tree_entry",
+  "max_items": 1,
+  "name": "neg_wrong_position",
+  "object_id_hex": "daaa5ae863925303757ff5a4d364ef34fff20900c20b428f7e69d8a264779b6e",
+  "position": 5,
+  "proof_kind": "single",
+  "reject_reason": "proof was built for position 6, not the position it is checked against",
+  "size": 69
+}
