@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Verifier kit.** First-class commit-hash verification for an untrusted
+object set or a few-KiB disclosure bundle: CLI `mkit prove`,
+`mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;
+wasm exports `verify_disclosure` / `verify_closure_*` (and related
+primitives) in `@officialunofficial/mkit-wasm`; specs
+SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
+[`docs/VERIFY.md`](docs/VERIFY.md). BMT proof bytes are
+commonware-identical (`commonware_storage::bmt::Proof` at the pinned
+train).
+
 ### Changed
 
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
@@ -168,6 +178,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
+
+- *(core)* `verify_closure` / `verify_closure_packs` merge the walker's
+  `corrupt` list with index-time deserialize failures instead of
+  overwriting it. The walker list is empty on these paths today (both
+  indexes are keyed by derived id), but a fetch that returned bytes
+  hashing to a different id would previously be dropped. **SemVer:**
+  additive.
+
+- *(core)* `cargo check -p mkit-core --no-default-features --target
+  wasm32-unknown-unknown` now compiles: on wasm32, `getrandom` 0.4 is
+  enabled with the `wasm_js` feature (same posture as `mkit-wasm`), so
+  the crate no longer fails the getrandom "unknown-unknown not supported
+  by default" compile error. Native builds are unchanged. **SemVer:**
+  none.
 
 - *(cli)* `mkit closure verify` (local, no `--from`) no longer exits with a
   hard read error the moment it hits one corrupt on-disk object &mdash; it

@@ -71,7 +71,7 @@ out from a red PR check. Install
 root:
 
 ```sh
-just ci            # host-appropriate subset (Linux/macOS + security/docs/geiger)
+just ci            # host-appropriate subset (Linux/macOS + security/docs/geiger/scripts)
 just --list        # see every ci-* target and what it mirrors
 ```
 
@@ -328,7 +328,8 @@ Before requesting review:
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
 - [ ] `cargo t` (or `cargo nextest run --workspace`) passes
 - [ ] CHANGELOG entry under "Unreleased" if user-visible
-- [ ] Spec plus golden vector updated if format changed
+- [ ] Spec plus golden vector updated if format changed; `just ci-scripts`
+      (spec-status, wasm dep-graph, wasm32 check)
 - [ ] No new dependencies added without justification in the PR body
 - [ ] If this PR fixes a bug, a regression test demonstrating it lives
       in this diff (see "Test-first discipline" above)

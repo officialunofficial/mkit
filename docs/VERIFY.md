@@ -87,10 +87,10 @@ for why that ordering is load-bearing, not cosmetic.
 | One chunk step | `32 * ceil(log2(N + 1))` sibling bytes, `N` = the file's chunk count (`+1` for the metadata leaf) |
 | A Bao slice of `len` content bytes | roughly one 1 KiB Bao leaf block per 1 KiB of `len`, plus `~64 * log2(blocks)` bytes of Bao tree-hash overhead |
 
-A concrete example, captured from a real run against a small demo repo
-(commit `767a2e0…`, a two-level path `src/lib.rs`, a 40-byte range at
-offset 100): the whole disclosure bundle &mdash; commit bytes, two tree-entry
-steps, and a Bao-slice range payload &mdash; was **1555 bytes**. A single file
+A concrete example, captured from a real v2-bundle run against a small
+demo repo (commit `64ccb22…`, a two-level path `src/lib.rs`, a 40-byte
+range at offset 100): the whole disclosure bundle &mdash; commit bytes, two
+tree-entry steps, and a Bao-slice range payload &mdash; was **684 bytes**. A single file
 directly under the root instead of two levels deep would be smaller still;
 a 1 GiB chunked file's chunk step costs about 14 sibling digests (`log2` of
 ~16,384 chunks), regardless of how large the file itself is. Proof size
@@ -399,14 +399,16 @@ against a trusted commit id, and recover exactly the disclosed bytes:
 
 ```console
 $ mkit prove HEAD src/lib.rs --range 100:40 -o p.bin
-proof: 1555 B for src/lib.rs @ 767a2e0 (range)
+proof: 684 B for src/lib.rs @ 64ccb22 (range)
 
-$ mkit verify-proof 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
+$ mkit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --payload-out slice.bin
-ok: range src/lib.rs @ 767a2e0, 40 B, signer 990560bd443f0559… (valid signature)
+ok: range src/lib.rs @ 64ccb22, 40 B, signer 0a486e59affe8fb5… (valid signature)
 
 $ cat slice.bin
-e 1: erdsjrvfdssugldrwcsbtgpvrnykosoljhz
+tuvwxyz
+abcdefghijklmnopqrstuvwxyz
+abcde
 ```
 
 `--expect-path` is the CLI's version of §2's "never trust a claimed path"
@@ -417,9 +419,9 @@ mismatch &mdash; it is not merely an informational filter.
 **JSON output**, from the same bundle:
 
 ```console
-$ mkit verify-proof 767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519 \
+$ mkit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --format=json
-{"commit_id":"767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519","tree_hash":"e476e9696afe304637a3eb76f5c4c01d2cd9c12b74f2c5705992e7d5154e197b","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"497b2c21769714ae9e50224a7f7de6e313c6807e2b9a8abf81cd3c73f4421bed","signer":"990560bd443f0559b1350c7c505a6768df19b5d86bf97615de3042d6f8bf961d","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"14e9347847027f991e5a3ee1709e5b330da3e4d22633f6b3e7f60dde8807a578","blob_id":"497b2c21769714ae9e50224a7f7de6e313c6807e2b9a8abf81cd3c73f4421bed","chunk":null,"offset_in_blob":100,"absolute_offset":100},"signer_trusted":null}
+{"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
 ```
 
 This is the same shape `mkit-wasm`'s `verify_disclosure` produces
@@ -431,7 +433,7 @@ This is the same shape `mkit-wasm`'s `verify_disclosure` produces
 use mkit_core::hash::from_hex;
 use mkit_core::verify::verify_disclosure;
 
-let commit_id = from_hex("767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519")?;
+let commit_id = from_hex("64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93")?;
 let bundle = std::fs::read("p.bin")?;
 
 let disclosed = verify_disclosure(&commit_id, &bundle)?;
@@ -451,7 +453,7 @@ import {
 } from "@officialunofficial/mkit-wasm";
 
 const commitId =
-  "767a2e0c226ae58d6534d454825e8c739e05b09560b4b0e1003c14a02ae91519";
+  "64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93";
 const bundle: Uint8Array = /* p.bin bytes */;
 
 const disclosed = JSON.parse(verify_disclosure(commitId, bundle));
@@ -746,7 +748,8 @@ own test harness should take.
   "this shard is part of that committed erasure-coded set," respectively.
   Neither is implemented here.
 - **Non-membership proofs** (proving a name is *absent* from a `Tree`) are
-  reserved as disclosure `payload_kind 3` but not implemented; a
+  reserved as disclosure `payload_kind 3` (`Absent`); see
+  [#1027](https://github.com/officialunofficial/mkit/issues/1027). A
   disclosure bundle only ever proves inclusion.
 - **wasm caps**, independent of the native crate's own bounds (`mkit_core::verify`,
   which mkit-wasm builds on top of): objects 16 MiB

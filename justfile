@@ -4,19 +4,27 @@
 # — no new logic lives here, so keep this file in sync with those when they
 # change instead of letting it drift into a second source of truth.
 #
+# `ci-scripts` is the local stand-in for gates those jobs do not run as
+# these exact commands: docs-lint.yml's check-spec-status.sh,
+# scripts/check-wasm-dep-graph.sh, and `cargo check -p mkit-wasm --target
+# wasm32-unknown-unknown`. It is not a 1:1 extract of web.yml (wasm-pack
+# bundler + bun) or the worker wasm32 builds.
+#
 # Not mirrored (CI-infra-specific, not part of the test surface):
 #   - cloudbuild/ci.yaml's swtpm/TPM harness (mkit-sign-tpm's real-device
 #     test) and sccache/GCS wiring.
 #   - cloudbuild/ci.yaml's apps/repo-worker and apps/keys-worker legs
-#     (separate Cloudflare Workers builds, own toolchain/workspace).
+#     (separate Cloudflare Workers builds, own toolchain/workspace,
+#     including their wasm32 cargo builds).
 #   - rust.yml's keystore-backends matrix (2-OS native keystore backends —
 #     stays workflow_dispatch-only by design; run it on GitHub, not here).
+#   - web.yml's wasm-pack bundler smoke and bun test/lint/build.
 #
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
 # `just ci-macos` / `just ci-security` / `just ci-docs` /
-# `just ci-geiger` to check one gate in isolation. Windows is not a
-# supported target (MKIT-6; see docs/INVARIANTS.md), so there is no
-# `just ci-windows`.
+# `just ci-geiger` / `just ci-scripts` to check one gate in isolation.
+# Windows is not a supported target (MKIT-6; see docs/INVARIANTS.md), so
+# there is no `just ci-windows`.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -31,6 +39,7 @@ ci:
     just ci-security
     just ci-docs
     just ci-geiger
+    just ci-scripts
 
 # Mirrors cloudbuild/ci.yaml's rust/ + contrib/signers/ steps.
 ci-linux:
@@ -106,6 +115,18 @@ ci-security:
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
+
+# Spec-status, wasm dep-graph, and mkit-wasm wasm32 check.
+ci-scripts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/check-spec-status.sh
+    bash scripts/check-wasm-dep-graph.sh
+    if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+      echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
+      exit 1
+    fi
+    ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

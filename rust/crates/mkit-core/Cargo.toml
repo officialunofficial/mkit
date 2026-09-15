@@ -93,6 +93,16 @@ zstd = { version = "0.14", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Keep the untargeted `getrandom = "0.4"` above for native builds
+# (`KeyPair::generate`, ancestry ids). On wasm32-unknown-unknown the 0.4
+# crate needs `wasm_js` (`Crypto.getRandomValues` via wasm-bindgen);
+# without it, `cargo check -p mkit-core --no-default-features --target
+# wasm32-unknown-unknown` fails even though `mkit-wasm` builds — that
+# crate declares this feature on the root package, which unifies onto
+# this copy. Do not enable on native.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [features]
 # `pack-zstd` is on by default for every normal (native) consumer —
 # `PackWriter`/`PackReader` transparently compress/decompress pack
