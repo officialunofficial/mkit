@@ -442,21 +442,19 @@ fn read_tree(r: &mut Reader<'_>) -> Result<Tree, MkitError> {
     if (count as usize).saturating_mul(4 + 1 + 1 + HASH_LEN) > r.remaining() {
         return Err(MkitError::UnexpectedEof);
     }
-    let mut entries = Vec::with_capacity(count as usize);
-    let mut prev: Option<Vec<u8>> = None;
+    let mut entries: Vec<TreeEntry> = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let name = r.read_lp_bytes()?;
         if !TreeEntry::validate_name(&name) {
             return Err(MkitError::InvalidEntryName);
         }
-        if let Some(p) = &prev
-            && p.as_slice() >= name.as_slice()
+        if let Some(prev) = entries.last()
+            && prev.name.as_slice() >= name.as_slice()
         {
             return Err(MkitError::InvalidEntryOrder);
         }
         let mode = EntryMode::from_u8(r.read_u8()?)?;
         let object_hash = r.read_hash()?;
-        prev = Some(name.clone());
         entries.push(TreeEntry {
             name,
             mode,
