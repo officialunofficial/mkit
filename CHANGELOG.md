@@ -179,6 +179,31 @@ train).
 
 ### Fixed
 
+- *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
+  rejects `len == 0` before running the chunk header's wrap/fold checks,
+  matching SPEC-DISCLOSURE §4's stated order &mdash; the bundle is rejected
+  either way, only the specific typed error changes. New golden negatives
+  `neg_zero_length_range_chunked` and
+  `neg_range_chunk_meta_forged_total_size`. **SemVer:** none.
+
+- *(core)* `verify::resolve_absolute_offset`'s final `sum +
+  offset_in_blob` addition now uses `checked_add`, matching every
+  neighbouring offset computation, and returns
+  `VerifyError::OffsetOverflow` on overflow instead of wrapping.
+  **SemVer:** none &mdash; the affected inputs are far outside anything a
+  conformant bundle can produce.
+
+- *(cli)* `mkit verify-proof <commit-id> -` now caps the stdin read at
+  `MAX_BUNDLE_BYTES` instead of buffering an unbounded stream before the
+  size check ran, rejecting an oversized bundle with `DATAERR` instead of
+  blocking or exhausting memory on an adversarial or unbounded input.
+  **SemVer:** none.
+
+- *(cli)* `mkit_verify_proof`'s MCP tool descriptor no longer claims
+  `readOnlyHint = true` &mdash; its `payload_out` field writes a file, so it
+  now matches `mkit_prove`'s hints (not read-only, not destructive,
+  idempotent). **SemVer:** none (annotation-only).
+
 - *(core)* `verify_closure` / `verify_closure_packs` merge the walker's
   `corrupt` list with index-time deserialize failures instead of
   overwriting it. The walker list is empty on these paths today (both
