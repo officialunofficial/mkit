@@ -860,25 +860,21 @@ impl PackReader {
         // position 5 must not be reported ahead of, say, a delta at
         // position 0 with a missing base: the old single-loop reader
         // would have hit position 0 first and never looked at position
-        // 5 at all. `raw_results` keeps every phase-2 outcome — success
-        // or failure — indexed by position instead of failing the whole
-        // batch on the first bad one, so phase 3 below only *reports* a
-        // raw entry's problem once its sequential scan actually reaches
-        // that position, exactly like the old reader.
-        let raw_frames: Vec<(usize, &[u8])> = entries
+        // 5 at all. `stage_raw_entries` never fails the whole batch on
+        // the first bad one — it returns every raw entry's own outcome,
+        // success or failure, in the same relative order `raw_frames`
+        // lists them in (both its sequential and parallel branch
+        // preserve that order — see its doc) — so phase 3 below only
+        // *reports* a raw entry's problem once its sequential scan
+        // actually reaches that entry, exactly like the old reader.
+        let raw_frames: Vec<&[u8]> = entries
             .iter()
-            .enumerate()
-            .filter_map(|(idx, e)| match e {
-                Entry::Raw(payload) => Some((idx, payload.as_ref())),
+            .filter_map(|e| match e {
+                Entry::Raw(payload) => Some(payload.as_ref()),
                 Entry::Delta { .. } => None,
             })
             .collect();
-        let mut raw_results: Vec<Option<Result<Hash, PackError>>> = std::iter::repeat_with(|| None)
-            .take(entries.len())
-            .collect();
-        for (idx, result) in stage_raw_entries(&batch, &raw_frames) {
-            raw_results[idx] = Some(result);
-        }
+        let mut raw_results = stage_raw_entries(&batch, &raw_frames).into_iter();
 
         // Phase 3 (sequential, single pass over `entries` in original
         // pack order): replay every position exactly as the old
@@ -891,11 +887,11 @@ impl PackReader {
         // delta can only ever see raw entries at strictly earlier
         // positions, preserving the base-before-delta ordering rule.
         let mut report = UnpackReport::default();
-        for (idx, entry) in entries.into_iter().enumerate() {
+        for entry in entries {
             match entry {
                 Entry::Raw(payload) => {
-                    let stored_hash = raw_results[idx]
-                        .take()
+                    let stored_hash = raw_results
+                        .next()
                         .expect("every Entry::Raw has a phase-2 result")?;
                     if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
                         c.fetch_add(payload.len() as u64, Ordering::Relaxed);
@@ -929,26 +925,25 @@ impl PackReader {
 }
 
 /// One packfile entry, tracked through [`PackReader::read_inner`]'s
-/// three phases at the `entries[pack_position]` index it was parsed
-/// at (`PackEntries` already validated framing/types and decompressed
+/// three phases in the original pack order they were parsed in
+/// (`PackEntries` already validated framing/types and decompressed
 /// `0x03`/`0x04`, so there is nothing left to classify here beyond raw
-/// vs. delta). Phase 2 (see [`stage_raw_entries`]) computes each `Raw`
-/// entry's result into a side table (`raw_results` in `read_inner`)
-/// instead of writing back into this vec, so entries never move
-/// between variants and there is no separate ordering that could fall
-/// out of sync with the vec's own index.
+/// vs. delta). Phase 2 (see [`stage_raw_entries`]) computes each
+/// `Raw` entry's result — success or failure — into a queue
+/// (`raw_results` in `read_inner`) consumed in the same relative order
+/// this vec's `Raw` entries appear in, so there is nothing that can
+/// fall out of sync between the two.
 enum Entry<'p> {
     Raw(Cow<'p, [u8]>),
     Delta { base: Hash, stream: Cow<'p, [u8]> },
 }
 
-/// `(pack position, result)` pairs returned by
-/// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in arbitrary
-/// order — [`PackReader::read_inner`] writes each one back into
-/// `raw_results` at its recorded position. A per-entry `Err` is data,
+/// Per-raw-entry results returned by
+/// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in the same
+/// relative order `frames` listed them in. A per-entry `Err` is data,
 /// not a reason to stop early: see [`stage_raw_entries`]'s doc for why
 /// the whole batch always runs to completion.
-type RawStageResults = Vec<(usize, Result<Hash, PackError>)>;
+type RawStageResults = Vec<Result<Hash, PackError>>;
 
 /// Validate and hash every raw entry in `frames` — already decompressed
 /// by [`PackEntries`] — staging each one into `batch` as it's hashed.
@@ -961,19 +956,16 @@ type RawStageResults = Vec<(usize, Result<Hash, PackError>)>;
 /// of the write path's `PackWriter::prepare_raw`/`push_prepared_raw`
 /// split.
 ///
-/// Never fails as a whole: every frame's own `Result` is returned
-/// alongside its position instead of short-circuiting the batch on the
+/// Never fails as a whole: every frame's own `Result` is returned,
+/// in `frames`' order, instead of short-circuiting the batch on the
 /// first bad one. A raw entry's validation can't depend on any other
 /// entry, so there's no correctness reason to stop early — and doing
-/// so would let a malformed raw entry at, say, position 5 preempt a
-/// delta at position 0 with a missing base, which the pre-fan-out
+/// so would let a malformed raw entry at, say, pack position 5 preempt
+/// a delta at position 0 with a missing base, which the pre-fan-out
 /// single-loop reader would have rejected first (it never got past
 /// position 0). [`PackReader::read_inner`]'s phase 3 is what decides,
-/// in pack order, which position's problem is actually reported.
-fn stage_raw_entries(
-    batch: &crate::batch::WriteBatch<'_>,
-    frames: &[(usize, &[u8])],
-) -> RawStageResults {
+/// in pack order, which entry's problem is actually reported.
+fn stage_raw_entries(batch: &crate::batch::WriteBatch<'_>, frames: &[&[u8]]) -> RawStageResults {
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Below this many entries per available thread, thread-spawn
@@ -989,22 +981,25 @@ fn stage_raw_entries(
     }
     frames
         .iter()
-        .map(|&(idx, payload)| (idx, prepare_and_stage_raw(batch, payload)))
+        .map(|payload| prepare_and_stage_raw(batch, payload))
         .collect()
 }
 
 /// Parallel branch of [`stage_raw_entries`]: split `frames` into
 /// `threads` contiguous chunks and process each chunk sequentially on
-/// its own scoped thread. `std::thread::scope` (not a persistent pool)
-/// is deliberate — `mkit-core` stays dependency-neutral and wasm-clean
-/// (unlike `mkit-cli`, which already carries `rayon` for its own
-/// fan-outs — see that crate's `Cargo.toml`), and this call is already
-/// gated by [`stage_raw_entries`]'s threshold so the per-call spawn
-/// cost is only paid when there is enough work to amortize it.
+/// its own scoped thread, preserving `frames`' order in the returned
+/// `Vec` (chunks are joined in creation order, and each chunk's own
+/// results stay in its slice order). `std::thread::scope` (not a
+/// persistent pool) is deliberate — `mkit-core` stays
+/// dependency-neutral and wasm-clean (unlike `mkit-cli`, which already
+/// carries `rayon` for its own fan-outs — see that crate's
+/// `Cargo.toml`), and this call is already gated by
+/// [`stage_raw_entries`]'s threshold so the per-call spawn cost is only
+/// paid when there is enough work to amortize it.
 #[cfg(not(target_arch = "wasm32"))]
 fn stage_raw_entries_parallel(
     batch: &crate::batch::WriteBatch<'_>,
-    frames: &[(usize, &[u8])],
+    frames: &[&[u8]],
     threads: usize,
 ) -> RawStageResults {
     let chunk_size = frames.len().div_ceil(threads).max(1);
@@ -1016,7 +1011,7 @@ fn stage_raw_entries_parallel(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|&(idx, payload)| (idx, prepare_and_stage_raw(batch, payload)))
+                        .map(|payload| prepare_and_stage_raw(batch, payload))
                         .collect::<Vec<_>>()
                 })
             })
@@ -1814,8 +1809,8 @@ mod tests {
         // well-formed raw fillers keep phase 2 on its parallel branch
         // (comfortably over `stage_raw_entries`'s threshold on any CI
         // runner), with one malformed entry mixed in among them.
-        let base_obj = write_blob_via_serialize(&vec![0u8; 64]);
-        let target_obj = write_blob_via_serialize(&vec![1u8; 64]);
+        let base_obj = write_blob_via_serialize(&[0u8; 64]);
+        let target_obj = write_blob_via_serialize(&[1u8; 64]);
         let base_hash = hash::hash(&base_obj);
         let stream = delta::encode(&base_obj, &target_obj).unwrap();
 
