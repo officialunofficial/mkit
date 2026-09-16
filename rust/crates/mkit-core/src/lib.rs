@@ -40,6 +40,7 @@ pub mod merkle;
 pub mod object;
 pub mod ops;
 pub mod pack;
+pub mod partial;
 // Erasure-coded pack delivery (Reed-Solomon). Feature-gated because
 // the dep stack (`commonware-coding` + `commonware-cryptography` +
 // `commonware-parallel` + `commonware-storage`) is large and only
@@ -106,6 +107,11 @@ pub use object::{
     Blob, ChunkedBlob, Commit, Delta, EntryMode, IDENTITY_MAX_LEN, Identity, IdentityKind, MAGIC,
     MkitError, Object, ObjectType, Remix, RemixSource, SCHEMA_VERSION, TAG_NAME_MAX_LEN, Tag, Tree,
     TreeEntry,
+};
+pub use partial::{
+    PartialCoverage, PartialError, PartialLimits, PartialObject, PartialPath,
+    PartialSnapshotBundle, SelectedFile, VerifiedPartialSnapshot, VerifiedTree,
+    build_partial_snapshot, verify_partial_snapshot,
 };
 pub use serialize::{deserialize, serialize};
 pub use sign::{

@@ -1,0 +1,14 @@
+{
+  "blake3": "4b7b06c1b84dd9a09d100e394a61e88d0c704218bf1288149f4b1907ce414f97",
+  "description": "Valid bytes are checked against an independent wrong base.",
+  "error": "BaseMismatch",
+  "expect": "reject",
+  "expected_base_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+  "expected_paths_hex": [
+    [
+      "7368616c6c6f772e747874"
+    ]
+  ],
+  "name": "neg_wrong_expected_base",
+  "size": 698
+}

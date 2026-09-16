@@ -1,0 +1,14 @@
+{
+  "blake3": "e23449de0b75c8d539bc005f13d616f67fe6dc829d437b58c90af7a041ae7c26",
+  "description": "The selected ChunkedBlob omits a referenced chunk.",
+  "error": "InsufficientWitness",
+  "expect": "reject",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "6368756e6b65642e62696e"
+    ]
+  ],
+  "name": "neg_missing_chunk",
+  "size": 3073330
+}

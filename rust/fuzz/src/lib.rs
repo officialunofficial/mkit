@@ -481,6 +481,90 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
     let _ = verify::verify_disclosure(&fixture.commit_id, input);
 }
 
+/// Valid `MKWB` fixture reused by the bounded partial-workspace target.
+pub struct PartialWorkspaceFixture {
+    _dir: tempfile::TempDir,
+    base: [u8; 32],
+    paths: Vec<mkit_core::PartialPath>,
+    bundle: Vec<u8>,
+}
+
+pub fn build_partial_workspace_fixture() -> PartialWorkspaceFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let blob = store_file_object(&store, b"partial workspace fuzz fixture").expect("file");
+    let tree = Tree {
+        entries: vec![TreeEntry {
+            name: b"f.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob,
+        }],
+    };
+    let tree = store
+        .write(&mkit_core::serialize(&Object::Tree(tree)).expect("tree bytes"))
+        .expect("tree");
+    let key = KeyPair::from_seed([0x24; 32]);
+    let mut commit = Commit {
+        tree_hash: tree,
+        parents: Vec::new(),
+        author: Identity::ed25519(key.public.0),
+        signer: key.public.0,
+        message: b"partial workspace fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0; 64],
+    };
+    commit.signature = sign_commit(&commit, &key).expect("sign").0;
+    let base = store
+        .write(&mkit_core::serialize(&Object::Commit(commit)).expect("commit bytes"))
+        .expect("commit");
+    let paths = vec![vec![b"f.txt".to_vec()]];
+    let bundle = mkit_core::build_partial_snapshot(
+        &store,
+        base,
+        &paths,
+        &mkit_core::PartialLimits::default(),
+    )
+    .expect("partial bundle")
+    .encode(&mkit_core::PartialLimits::default())
+    .expect("encode partial bundle");
+    PartialWorkspaceFixture {
+        _dir: dir,
+        base,
+        paths,
+        bundle,
+    }
+}
+
+/// Verify a valid bundle, a deterministic one-byte mutation, and arbitrary
+/// untrusted bytes. All decode allocations are bounded by `PartialLimits`.
+pub fn partial_workspace_one_iteration(input: &[u8]) {
+    let fixture = build_partial_workspace_fixture();
+    partial_workspace_one_iteration_with(input, &fixture);
+}
+
+pub fn partial_workspace_one_iteration_with(input: &[u8], fixture: &PartialWorkspaceFixture) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let limits = mkit_core::PartialLimits::default();
+    mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, &fixture.bundle, &limits)
+        .expect("fresh partial fixture verifies");
+    if input.len() >= 2 {
+        let mut mutated = fixture.bundle.clone();
+        let position = usize::from(input[0]) % mutated.len();
+        mutated[position] ^= input[1].max(1);
+        let _ = mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, &mutated, &limits);
+    }
+    let _ = mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, input, &limits);
+}
+
 /// Store-less pack iterator: never panics on adversarial bytes. When
 /// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
 /// and yields `raw_count + delta_count` items.
@@ -931,6 +1015,18 @@ mod tests {
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             let start = std::time::Instant::now();
             verify_disclosure_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
+        }
+    }
+
+    #[test]
+    fn partial_workspace_target_runs_within_caps() {
+        let fixture = build_partial_workspace_fixture();
+        run_iterated_unit_with(&fixture, partial_workspace_one_iteration_with)
+            .expect("guardrails held");
+        for case in [&b""[..], b"MKWB\x01", &[0xFF; 64][..]] {
+            let start = std::time::Instant::now();
+            partial_workspace_one_iteration_with(case, &fixture);
             assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
     }

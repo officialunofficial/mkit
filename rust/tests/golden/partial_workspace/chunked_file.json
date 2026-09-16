@@ -1,0 +1,14 @@
+{
+  "blake3": "8779bf33e28c623c67f564301ca6e390f85d58879dcdb6f6d1bcdfbc879d7bef",
+  "description": "One ChunkedBlob with every ordered Blob chunk.",
+  "error": null,
+  "expect": "accept",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "6368756e6b65642e62696e"
+    ]
+  ],
+  "name": "chunked_file",
+  "size": 3149499
+}

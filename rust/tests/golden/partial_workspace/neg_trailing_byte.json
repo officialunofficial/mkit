@@ -1,0 +1,14 @@
+{
+  "blake3": "4fcffc24958a378dfc761e801b93a189ba4c9568acc046db1f916dc8ebf24665",
+  "description": "A byte follows the declared bundle body.",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "7368616c6c6f772e747874"
+    ]
+  ],
+  "name": "neg_trailing_byte",
+  "size": 699
+}

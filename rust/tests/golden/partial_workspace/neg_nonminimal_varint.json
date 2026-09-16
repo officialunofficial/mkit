@@ -1,0 +1,14 @@
+{
+  "blake3": "1f878bbbdb410dea6a43b9fbfe1f978e9c34997d429e1779bf05284dfc458326",
+  "description": "The selected-path count uses a non-minimal varint.",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "7368616c6c6f772e747874"
+    ]
+  ],
+  "name": "neg_nonminimal_varint",
+  "size": 39
+}
