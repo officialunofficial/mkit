@@ -55,6 +55,16 @@ harness = false
 name = "object_read"
 harness = false
 
+# `status`/`diff`'s ephemeral index-tree snapshot
+# (`worktree::build_tree_from_index_with(.., verify = false)`) at
+# increasing tracked-file counts — regression guard for the batched
+# object-type probe (`worktree::probe_staged_object_types`), which
+# replaced a per-entry serialized `open`+`read`+`close` loop that
+# dominated `status`/`diff` wall time on many-file repos.
+[[bench]]
+name = "status_snapshot"
+harness = false
+
 # Issue #646 — SPEC-PACKFILE v2 zstd compression: pack-byte comparison
 # ({v1 uncompressed, v2 compressed}) for a small multi-commit text-file
 # corpus. Not gated on any feature — `pack-zstd` is a default feature

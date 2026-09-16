@@ -442,6 +442,9 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     let mut root = Node::default();
     let mut seen_paths = std::collections::HashSet::with_capacity(index.entries.len());
 
+    // Pass 1: validate paths/status and collect the surviving entries'
+    // (path, mode, staged hash) — cheap, pure-CPU work, no store access.
+    let mut kept: Vec<(&str, EntryMode, Hash)> = Vec::with_capacity(index.entries.len());
     for entry in &index.entries {
         if !seen_paths.insert(entry.path.as_str()) {
             return Err(WorktreeError::Io(io::Error::other(format!(
@@ -466,6 +469,23 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
             }
             EntryStatus::Removed => unreachable!("filtered above"),
         };
+        kept.push((entry.path.as_str(), mode, entry.object_hash));
+    }
+
+    // Pass 2: one batched object-type probe for every surviving entry,
+    // instead of interleaving it one-at-a-time with the pass-3 tree
+    // walk below. `probe_staged_object_types` fans this out across
+    // threads once there's enough work to amortize it (native builds
+    // only) — a `status`/`diff` snapshot over a many-file repo was
+    // paying one serialized `open`+`read`(+`close`) per tracked file
+    // here, dominating wall time well before hashing or
+    // tree-materialization cost did.
+    let hashes: Vec<Hash> = kept.iter().map(|&(_, _, h)| h).collect();
+    let object_types = probe_staged_object_types(store, &hashes, verify)?;
+
+    // Pass 3: shape-check each probed type and walk the entry into the
+    // in-memory node tree.
+    for ((path, mode, object_hash), object_type) in kept.into_iter().zip(object_types) {
         // A regular file (Blob/Executable) may be stored as a single
         // Blob or, for content above CHUNK_THRESHOLD, a ChunkedBlob
         // manifest — `add`/`hash_file`/`build_tree` all route through
@@ -479,25 +499,19 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         // post-`add` corruption. Ephemeral status/diff snapshots skip it
         // — re-reading every staged blob on every status dominates large
         // repos of small files, and they publish nothing durable.
-        let object_type = if verify {
-            store.verify_object_type(&entry.object_hash)?
-        } else {
-            store.object_type(&entry.object_hash)?
-        };
         match object_type {
             crate::object::ObjectType::Blob => {}
             crate::object::ObjectType::ChunkedBlob if mode != EntryMode::Symlink => {}
             other => {
                 return Err(WorktreeError::Io(io::Error::other(format!(
-                    "index entry '{}' points to a non-blob object (got {})",
-                    entry.path,
+                    "index entry '{path}' points to a non-blob object (got {})",
                     other.name()
                 ))));
             }
         }
 
         // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
-        let segments: Vec<&str> = entry.path.split('/').collect();
+        let segments: Vec<&str> = path.split('/').collect();
         let Some((leaf, dirs)) = segments.split_last() else {
             return Err(WorktreeError::Io(io::Error::other("empty index path")));
         };
@@ -553,7 +567,7 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         }
         if node
             .leaves
-            .insert((*leaf).to_string(), (mode, entry.object_hash))
+            .insert((*leaf).to_string(), (mode, object_hash))
             .is_some()
         {
             let duplicate = if walked.is_empty() {
@@ -609,6 +623,109 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     }
 
     write_node(sink, &root)
+}
+
+/// Object-type probe for every hash in `hashes`, in order —
+/// [`build_tree_from_index_with`]'s batched pass-2 step.
+/// `verify_object_type` (full read + rehash) when `verify`, else the
+/// cheap prologue-only `object_type`. Below a small-batch threshold
+/// this runs a plain sequential loop; at or above it (native builds
+/// only — wasm32 has no threads) fans out across a scoped thread pool
+/// sized to the machine, same shape as [`crate::pack`]'s
+/// `stage_raw_entries`/`stage_raw_entries_parallel`: each probe is one
+/// `open`+`read`(+`close`) syscall triplet on an independent loose
+/// object file, so the calls parallelize with none of the ordering or
+/// shared-mutable-state concerns a write path has to account for.
+fn probe_staged_object_types(
+    store: &ObjectStore,
+    hashes: &[Hash],
+    verify: bool,
+) -> WorktreeResult<Vec<crate::object::ObjectType>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Below this many entries per available thread, thread-spawn
+        // overhead isn't worth it — same crossover shape as
+        // `pack::stage_raw_entries`, tuned here by the
+        // `status_snapshot` bench.
+        const ENTRIES_PER_THREAD: usize = 32;
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && hashes.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return probe_staged_object_types_parallel(store, hashes, verify, threads);
+        }
+    }
+    hashes
+        .iter()
+        .map(|h| probe_one_object_type(store, h, verify))
+        .collect()
+}
+
+/// Parallel branch of [`probe_staged_object_types`]: split `hashes`
+/// into `threads` contiguous chunks and probe each chunk sequentially
+/// on its own scoped thread — preserving `hashes`' order in the
+/// returned `Vec` (chunks are joined in creation order, and each
+/// chunk's own results stay in its slice order). `std::thread::scope`
+/// (not a persistent pool) mirrors `pack::stage_raw_entries_parallel`'s
+/// choice for the same reason: `mkit-core` stays dependency-neutral
+/// and wasm-clean.
+#[cfg(not(target_arch = "wasm32"))]
+fn probe_staged_object_types_parallel(
+    store: &ObjectStore,
+    hashes: &[Hash],
+    verify: bool,
+    threads: usize,
+) -> WorktreeResult<Vec<crate::object::ObjectType>> {
+    let chunk_size = hashes.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(hashes.len());
+    // On an index with more than one entry pointing at a missing or
+    // malformed object, the specific error surfaced here depends on
+    // chunk/thread scheduling, not index position — the same accepted
+    // nondeterminism as `mkit-cli`'s `try_map_seq_or_par` fan-outs and
+    // `pack::stage_raw_entries_parallel`. The tree build is rejected
+    // either way; only which error is reported can vary between runs.
+    let mut first_err: Option<WorktreeError> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = hashes
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|h| probe_one_object_type(store, h, verify))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle
+                .join()
+                .expect("object-type probe worker thread panicked")
+            {
+                match result {
+                    Ok(v) => out.push(v),
+                    Err(e) if first_err.is_none() => first_err = Some(e),
+                    Err(_) => {}
+                }
+            }
+        }
+    });
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+/// Pure per-hash step shared by both branches of
+/// [`probe_staged_object_types`].
+fn probe_one_object_type(
+    store: &ObjectStore,
+    h: &Hash,
+    verify: bool,
+) -> WorktreeResult<crate::object::ObjectType> {
+    Ok(if verify {
+        store.verify_object_type(h)?
+    } else {
+        store.object_type(h)?
+    })
 }
 
 /// Read a file from disk, hash it, store it, and return the
