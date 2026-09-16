@@ -185,3 +185,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "partial_workspace"
+path = "fuzz_targets/partial_workspace.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

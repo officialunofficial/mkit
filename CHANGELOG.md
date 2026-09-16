@@ -31,6 +31,18 @@ train).
 
 ### Added
 
+- *(core)* `mkit_core::partial` adds bounded `MKWB` v1 portable partial
+  snapshot production and verification against an independently supplied base
+  id and exact path selection. The private verified value retains complete
+  authenticated ancestor Trees and selected Blob/ChunkedBlob/chunk bytes with
+  explicit `SelectedOnly` coverage; it has no grant, owner, clock, host policy,
+  or full-closure meaning. SPEC-PARTIAL-WORKSPACES, committed goldens, and a
+  bounded fuzz target pin the new opt-in format. Production incrementally
+  enforces the exact encoded bundle budget before retaining each unique object
+  and stops at known selected-length or chunk-layout failures. Existing object,
+  signing, pack, ref bytes and ordinary full-clone defaults are unchanged.
+  **SemVer:** additive.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

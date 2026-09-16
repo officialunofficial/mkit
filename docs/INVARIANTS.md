@@ -5,6 +5,28 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Partial snapshots prove selected coverage, never authority or closure
+
+**Always:** a verified partial snapshot is bound to an independently supplied
+base id and exact selection, retains complete authenticated ancestor Trees and
+complete selected file representations, and reports `SelectedOnly` coverage.
+It neither grants permission nor claims that hidden snapshot/history objects
+were supplied.
+
+**Because:** content integrity, signer identity trust, host authorization and
+complete-repository availability are different facts. Conflating them lets an
+untrusted bundle choose its own trust root or turn omitted data into a false
+completeness claim.
+
+**If violated:** fabricated selected entries, widened selections, hidden reads,
+or incomplete object sets can be treated as authenticated full repositories or
+publication authority.
+
+**Enforced by:** `mkit_core::partial::verify::tests` for independent context,
+exact inventory, hidden-source reads and incomplete ordinary closure;
+`rust/crates/mkit-core/tests/golden_partial_workspace.rs`; and the bounded
+`partial_workspace` fuzz target.
+
 ## Git audit establishes correspondence without a signing key
 
 **Always:** imported graph edges and translated unsigned fields are derived

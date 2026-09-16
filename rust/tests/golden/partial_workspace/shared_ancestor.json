@@ -1,0 +1,20 @@
+{
+  "blake3": "9f44aae6929bf0d5764a580ffd46cba3d5a5c81f326c367393a9a9a1b1603904",
+  "description": "Three selected files share one deduplicated ancestor Tree.",
+  "error": null,
+  "expect": "accept",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "657865632e7368"
+    ],
+    [
+      "72616e67652e62696e"
+    ],
+    [
+      "7368616c6c6f772e747874"
+    ]
+  ],
+  "name": "shared_ancestor",
+  "size": 2359
+}

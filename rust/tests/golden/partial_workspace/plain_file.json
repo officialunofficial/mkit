@@ -1,0 +1,14 @@
+{
+  "blake3": "4b7b06c1b84dd9a09d100e394a61e88d0c704218bf1288149f4b1907ce414f97",
+  "description": "One inline Blob with its complete root Tree.",
+  "error": null,
+  "expect": "accept",
+  "expected_base_hex": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expected_paths_hex": [
+    [
+      "7368616c6c6f772e747874"
+    ]
+  ],
+  "name": "plain_file",
+  "size": 698
+}
