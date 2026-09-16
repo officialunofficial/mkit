@@ -157,7 +157,7 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
 /// The writer is a rolling-polynomial-hash-on-16-byte-blocks scan (see
-/// [`block_hash`]/[`roll_forward`]). Any conformant writer is
+/// `block_hash`/`roll_forward`). Any conformant writer is
 /// acceptable; this one is greedy. Output is always at least
 /// [`HEADER_LEN`] bytes.
 ///
