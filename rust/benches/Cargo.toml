@@ -156,6 +156,15 @@ harness = false
 name = "delta_plan_fanout"
 harness = false
 
+# delta::encode's byte-by-byte miss-scan cost across a similarity
+# spectrum (near-duplicate through fully-random no-match content) —
+# isolates the per-byte block_hash recompute delta_plan_fanout.rs's
+# near-duplicate-only fixture doesn't stress. No feature gate: delta
+# encoding is always compiled.
+[[bench]]
+name = "delta_encode_scan"
+harness = false
+
 # Streaming `ChunkReader` (FastCDC over a `Read`, the only chunker used
 # for files above `worktree::CHUNK_THRESHOLD`) windowing overhead vs. the
 # in-memory `ChunkIterator` floor — regression guard for the
