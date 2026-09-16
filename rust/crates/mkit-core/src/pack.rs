@@ -832,7 +832,7 @@ impl PackReader {
         // that same per-entry validation, since the iterator has to
         // stay store-less/reusable — see `PackEntries`'s doc) surfaces
         // here, equally before any staging.
-        let mut entries: Vec<Entry<'_>> = Vec::new();
+        let mut entries: Vec<Entry<'_>> = Vec::with_capacity(pack_entries.entry_count());
         for entry in pack_entries {
             entries.push(match entry? {
                 PackEntry::Raw { bytes } => Entry::Raw(bytes),
@@ -852,11 +852,19 @@ impl PackReader {
         // *earlier in the pack*, so a raw entry must only become
         // visible to delta resolution once phase 3's scan actually
         // reaches its pack position, not the instant phase 2 happens to
-        // finish computing it. Each raw entry's bytes stay right where
-        // phase 1 put them (`entries[idx]`) — phase 2 only hands back
-        // the hash it computed, via `raw_hashes`, so there is nothing
-        // written back into `entries` and nothing that can fall out of
-        // sync with it.
+        // finish computing it.
+        //
+        // Each raw entry's *own* validation is independent of every
+        // other entry, so phase 2 always runs it for the whole pack
+        // regardless of position — but a malformed raw entry at
+        // position 5 must not be reported ahead of, say, a delta at
+        // position 0 with a missing base: the old single-loop reader
+        // would have hit position 0 first and never looked at position
+        // 5 at all. `raw_results` keeps every phase-2 outcome — success
+        // or failure — indexed by position instead of failing the whole
+        // batch on the first bad one, so phase 3 below only *reports* a
+        // raw entry's problem once its sequential scan actually reaches
+        // that position, exactly like the old reader.
         let raw_frames: Vec<(usize, &[u8])> = entries
             .iter()
             .enumerate()
@@ -865,25 +873,30 @@ impl PackReader {
                 Entry::Delta { .. } => None,
             })
             .collect();
-        let mut raw_hashes: Vec<Option<Hash>> = vec![None; entries.len()];
-        for (idx, stored_hash) in stage_raw_entries(&batch, &raw_frames)? {
-            raw_hashes[idx] = Some(stored_hash);
+        let mut raw_results: Vec<Option<Result<Hash, PackError>>> = std::iter::repeat_with(|| None)
+            .take(entries.len())
+            .collect();
+        for (idx, result) in stage_raw_entries(&batch, &raw_frames) {
+            raw_results[idx] = Some(result);
         }
 
         // Phase 3 (sequential, single pass over `entries` in original
         // pack order): replay every position exactly as the old
-        // single-loop reader did. A raw entry stages its
-        // phase-2-computed hash into `in_pack` (the CPU-heavy work is
-        // already done; this is just bookkeeping); a delta entry
-        // resolves its base from `in_pack`/`store` and stages the
-        // decoded target — so a delta can only ever see raw entries at
-        // strictly earlier positions, preserving the base-before-delta
-        // ordering rule.
+        // single-loop reader did. A raw entry reports its
+        // phase-2-computed result (the CPU-heavy work is already done;
+        // this is just bookkeeping, and an `Err` surfaces here — at
+        // this position — instead of back in phase 2) and, on success,
+        // stages it into `in_pack`; a delta entry resolves its base
+        // from `in_pack`/`store` and stages the decoded target — so a
+        // delta can only ever see raw entries at strictly earlier
+        // positions, preserving the base-before-delta ordering rule.
         let mut report = UnpackReport::default();
         for (idx, entry) in entries.into_iter().enumerate() {
             match entry {
                 Entry::Raw(payload) => {
-                    let stored_hash = raw_hashes[idx].expect("every Entry::Raw has a phase-2 hash");
+                    let stored_hash = raw_results[idx]
+                        .take()
+                        .expect("every Entry::Raw has a phase-2 result")?;
                     if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
                         c.fetch_add(payload.len() as u64, Ordering::Relaxed);
                     }
@@ -920,7 +933,7 @@ impl PackReader {
 /// at (`PackEntries` already validated framing/types and decompressed
 /// `0x03`/`0x04`, so there is nothing left to classify here beyond raw
 /// vs. delta). Phase 2 (see [`stage_raw_entries`]) computes each `Raw`
-/// entry's hash into a side table (`raw_hashes` in `read_inner`)
+/// entry's result into a side table (`raw_results` in `read_inner`)
 /// instead of writing back into this vec, so entries never move
 /// between variants and there is no separate ordering that could fall
 /// out of sync with the vec's own index.
@@ -929,11 +942,13 @@ enum Entry<'p> {
     Delta { base: Hash, stream: Cow<'p, [u8]> },
 }
 
-/// `(pack position, stored hash)` pairs returned by
+/// `(pack position, result)` pairs returned by
 /// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in arbitrary
 /// order — [`PackReader::read_inner`] writes each one back into
-/// `raw_hashes` at its recorded position.
-type RawStageResults = Vec<(usize, Hash)>;
+/// `raw_results` at its recorded position. A per-entry `Err` is data,
+/// not a reason to stop early: see [`stage_raw_entries`]'s doc for why
+/// the whole batch always runs to completion.
+type RawStageResults = Vec<(usize, Result<Hash, PackError>)>;
 
 /// Validate and hash every raw entry in `frames` — already decompressed
 /// by [`PackEntries`] — staging each one into `batch` as it's hashed.
@@ -945,10 +960,20 @@ type RawStageResults = Vec<(usize, Hash)>;
 /// thread pool sized to the machine. This is the read-side counterpart
 /// of the write path's `PackWriter::prepare_raw`/`push_prepared_raw`
 /// split.
+///
+/// Never fails as a whole: every frame's own `Result` is returned
+/// alongside its position instead of short-circuiting the batch on the
+/// first bad one. A raw entry's validation can't depend on any other
+/// entry, so there's no correctness reason to stop early — and doing
+/// so would let a malformed raw entry at, say, position 5 preempt a
+/// delta at position 0 with a missing base, which the pre-fan-out
+/// single-loop reader would have rejected first (it never got past
+/// position 0). [`PackReader::read_inner`]'s phase 3 is what decides,
+/// in pack order, which position's problem is actually reported.
 fn stage_raw_entries(
     batch: &crate::batch::WriteBatch<'_>,
     frames: &[(usize, &[u8])],
-) -> Result<RawStageResults, PackError> {
+) -> RawStageResults {
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Below this many entries per available thread, thread-spawn
@@ -964,7 +989,7 @@ fn stage_raw_entries(
     }
     frames
         .iter()
-        .map(|&(idx, payload)| prepare_and_stage_raw(batch, payload).map(|h| (idx, h)))
+        .map(|&(idx, payload)| (idx, prepare_and_stage_raw(batch, payload)))
         .collect()
 }
 
@@ -981,16 +1006,9 @@ fn stage_raw_entries_parallel(
     batch: &crate::batch::WriteBatch<'_>,
     frames: &[(usize, &[u8])],
     threads: usize,
-) -> Result<RawStageResults, PackError> {
+) -> RawStageResults {
     let chunk_size = frames.len().div_ceil(threads).max(1);
     let mut out = Vec::with_capacity(frames.len());
-    // On a pack with more than one malformed raw entry, the specific
-    // `PackError` surfaced here depends on chunk/thread scheduling, not
-    // pack position — the same accepted nondeterminism as
-    // `mkit-cli`'s own `try_map_seq_or_par` fan-outs (see that
-    // function's doc). The pack is rejected either way; only which
-    // error variant/message is reported can vary between runs.
-    let mut first_err: Option<PackError> = None;
     std::thread::scope(|scope| {
         let handles: Vec<_> = frames
             .chunks(chunk_size)
@@ -998,27 +1016,16 @@ fn stage_raw_entries_parallel(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|&(idx, payload)| {
-                            prepare_and_stage_raw(batch, payload).map(|h| (idx, h))
-                        })
+                        .map(|&(idx, payload)| (idx, prepare_and_stage_raw(batch, payload)))
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
         for handle in handles {
-            for result in handle.join().expect("pack unpack worker thread panicked") {
-                match result {
-                    Ok(v) => out.push(v),
-                    Err(e) if first_err.is_none() => first_err = Some(e),
-                    Err(_) => {}
-                }
-            }
+            out.extend(handle.join().expect("pack unpack worker thread panicked"));
         }
     });
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(out),
-    }
+    out
 }
 
 /// Pure per-entry step shared by both branches of [`stage_raw_entries`]:
@@ -1142,6 +1149,16 @@ pub struct PackEntries<'a> {
 }
 
 impl<'a> PackEntries<'a> {
+    /// Total entry count declared in the pack header — the header
+    /// field this iterator validates every position against (`self.pos
+    /// == self.count`⇒ done), exposed so a caller collecting every
+    /// entry into a `Vec` up front (as [`PackReader::read_inner`]'s
+    /// phase 1 does) can size it exactly instead of growing it one
+    /// `push` at a time.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.count as usize
+    }
+
     /// Validate `bytes` as a packfile and prepare to iterate its entries.
     ///
     /// # Errors
@@ -1782,6 +1799,52 @@ mod tests {
         let (_dir, store) = fresh_store();
         let err = PackReader::read(&pack, &store).unwrap_err();
         assert!(matches!(err, PackError::DeltaBaseMissing(_)), "got {err:?}");
+        assert!(!store.contains(&base_hash));
+    }
+
+    #[test]
+    fn earlier_delta_base_missing_wins_over_later_malformed_raw_entry() {
+        // Phase 2 validates every raw entry in the pack up front
+        // (independent per entry, so it can fan out across threads),
+        // but phase 3 decides *in pack order* which single problem is
+        // actually reported. A delta at position 0 with a missing base
+        // must win over a malformed raw entry at a later position —
+        // the pre-fan-out single-loop reader would have rejected
+        // position 0 and never even looked at the later one. 200
+        // well-formed raw fillers keep phase 2 on its parallel branch
+        // (comfortably over `stage_raw_entries`'s threshold on any CI
+        // runner), with one malformed entry mixed in among them.
+        let base_obj = write_blob_via_serialize(&vec![0u8; 64]);
+        let target_obj = write_blob_via_serialize(&vec![1u8; 64]);
+        let base_hash = hash::hash(&base_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        for i in 0..200u32 {
+            if i == 100 {
+                // Not a canonical storable object — fails phase 2's
+                // `validate_storable_object` with `PackError::InvalidObject`.
+                w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
+                continue;
+            }
+            let mut filler = vec![0u8; 64];
+            for (j, b) in filler.iter_mut().enumerate() {
+                *b = u8::try_from((i as usize + j) % 251).expect("modulo < 256");
+            }
+            let obj = write_blob_via_serialize(&filler);
+            w.push_raw(hash::hash(&obj), &obj).unwrap();
+        }
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, store) = fresh_store();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(err, PackError::DeltaBaseMissing(_)),
+            "position 0's missing-base error must win over the malformed raw \
+             entry at a later position, got {err:?}"
+        );
         assert!(!store.contains(&base_hash));
     }
 
