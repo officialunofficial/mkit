@@ -15,7 +15,7 @@ on:
   # "required-but-skipped" trap where a path-filtered trigger leaves a
   # required status stuck pending on PRs that don't touch og paths.
   pull_request:
-    branches: [main]
+    branches: [main, feat/scoped-workspaces]
 
 permissions:
   contents: read

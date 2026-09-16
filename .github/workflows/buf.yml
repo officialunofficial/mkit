@@ -19,7 +19,7 @@ name: "CI: Buf"
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/scoped-workspaces]
   push:
     branches: [main]
 

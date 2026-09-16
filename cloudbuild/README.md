@@ -48,9 +48,12 @@ layout.
 
 ## Triggers
 
-All on branch `^main$`. Every PR trigger auto-runs for org collaborators and
-needs a maintainer **`/gcbrun`** only for external/fork PRs. See
-`scripts/setup-cloud-build.sh` for the exact `--included-files`/
+Push triggers remain on branch `^main$`. PR triggers match
+`^(main|feat/scoped-workspaces)$`, so the scoped-workspaces development stack
+gets the same validation without enabling feature-branch pushes, coverage,
+release, deployment or publishing. Every PR trigger auto-runs for org
+collaborators and needs a maintainer **`/gcbrun`** only for external/fork PRs.
+See `scripts/setup-cloud-build.sh` for the exact `--included-files`/
 `--ignored-files` filters.
 
 | Trigger | Config | PR gate |
@@ -71,6 +74,30 @@ gcloud config set project <gcp-project-id>   # shared GCP project
 
 This creates the sccache bucket, builds and pushes the CI image, (optionally)
 stores a Codecov token, and creates the triggers. It is idempotent.
+
+Existing triggers are deliberately skipped rather than updated. To add the
+scoped-workspaces base to an already-provisioned installation, an authorized
+operator must update only the five PR trigger patterns:
+
+```bash
+for trigger_name in \
+  mkit-ci-pr \
+  mkit-codegen-pr \
+  mkit-security-pr \
+  mkit-docs-pr \
+  mkit-geiger-pr
+do
+  gcloud builds triggers update github "$trigger_name" \
+    --project=official-unofficial \
+    --region=us-east4 \
+    --pull-request-pattern='^(main|feat/scoped-workspaces)$' \
+    --comment-control=COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY
+done
+```
+
+Do not rerun the broad provisioning script for this change: it also manages
+storage, IAM, the builder image and secrets, and it will not update existing
+triggers. Leave the `*-main` push triggers and `mkit-coverage-main` unchanged.
 
 ## Rebuilding the CI image
 

@@ -96,7 +96,7 @@ mk() {
   gcloud builds triggers create github --project="$PROJECT" --region="$REGION" \
     --repository="$REPO_RES" --name="$name" "$@"
 }
-mk_pr()   { local n="$1"; shift; mk "$n" --pull-request-pattern='^main$' "$@"; }
+mk_pr()   { local n="$1"; shift; mk "$n" --pull-request-pattern='^(main|feat/scoped-workspaces)$' "$@"; }
 mk_push() { local n="$1"; shift; mk "$n" --branch-pattern='^main$' "$@"; }
 
 echo "== triggers =="

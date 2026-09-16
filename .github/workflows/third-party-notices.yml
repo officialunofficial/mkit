@@ -30,7 +30,7 @@ on:
   # required status stuck pending on PRs that don't touch the dependency
   # graph. Mirrors the same pattern already used by mcp.yml/web.yml.
   pull_request:
-    branches: [main]
+    branches: [main, feat/scoped-workspaces]
 
 permissions:
   contents: read
