@@ -31,10 +31,10 @@ carried unchanged from the planning worktree.
 GitHub validation workflows accept pull requests targeting both `main` and
 `feat/scoped-workspaces`; their push filters remain main-only. Release,
 deployment, publishing, scheduled and manual workflows are unchanged.
-The initial setup PR cannot bootstrap target filters that are still main-only
-in its base branch, so absent GitHub checks on that PR are missing coverage,
-not successful runs. The widened filters take effect for subsequent feature-
-target PR events after this setup lands.
+The initial setup PR demonstrated that GitHub evaluated the widened filters
+from the pull request: all ten newly covered workflow runs started against the
+feature target. Their actual conclusions are recorded on PR #1037; a skipped
+job is not treated as a successful validation run.
 
 The five live Cloud Build PR triggers were inspected read-only in project
 `official-unofficial`, region `us-east4`. At setup time their base-branch regex
