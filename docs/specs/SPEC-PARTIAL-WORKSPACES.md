@@ -107,9 +107,18 @@ MUST NOT raise it while claiming v1 profile conformance.
 All additions and integer conversions MUST be checked. A producer's generic
 object source returns already allocated bytes; source implementations MUST
 bound their own reads. The producer MUST check the returned size immediately,
-before object decode or copy. This limitation of the source interface MUST NOT
-be described as producer-controlled allocation safety. Bundle decoding itself
-MUST enforce the table before allocation.
+before object decode or copy, and MUST charge the complete encoded bundle
+framing before retaining each new id. That incremental charge includes the
+header and selected paths, object-count varint growth, and each object's id,
+length prefix, and canonical bytes. Object bytes are charged once per id;
+selected file bytes and chunk lengths are counted per occurrence. The producer
+MUST stop collecting after a detectable layout or resource failure.
+
+The current `ObjectSource` return allocation, decoded-object and cache
+overhead remain separate bounded costs, so the bundle limit is not an exact
+process-RSS cap. This limitation of the source interface MUST NOT be described
+as producer-controlled allocation safety. Bundle decoding itself MUST enforce
+the table before allocation.
 
 ## 5. Producer
 
@@ -125,7 +134,12 @@ producer MUST:
 3. Require canonical decode/serialize equality and strict base signature
    verification.
 4. Deduplicate bytes by id but validate every edge occurrence in its expected
-   role.
+   role. Once a selected file's authenticated length is known, enforce the
+   per-file and aggregate selected-byte limits before collecting its chunks.
+   Reject a chunk layout as soon as its running occurrence length exceeds the
+   manifest's declared `total_size`; exact equality remains required at the
+   end. Resource-limit failures detected first take precedence over latent
+   object or layout failures.
 5. Emit exactly the object union required by §6, sorted by id.
 
 No fallback to a full pack/clone is permitted when a selected witness exceeds

@@ -35,7 +35,7 @@ from recurring.
 | `fuzz_targets/verify_disclosure.rs` | `verify::verify_disclosure` / `verify::build_disclosure` (never panics; a freshly built bundle over a real `ObjectStore` fixture verifies; a mutated bundle rejects cleanly) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
-| `fuzz_targets/partial_workspace.rs` | `partial::verify_partial_snapshot` (fresh `MKWB` bundle verifies; mutated and arbitrary bytes reject without panic; nested counts and byte lengths are bounded before allocation) |
+| `fuzz_targets/partial_workspace.rs` | `partial::verify_partial_snapshot` (fresh `MKWB` bundle verifies; a full-range byte mutation plus a guaranteed trailing byte rejects; arbitrary bytes remain bounded and never panic; nested counts and byte lengths are bounded before allocation) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in

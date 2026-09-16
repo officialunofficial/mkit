@@ -1,5 +1,5 @@
 {
-  "blake3": "1f878bbbdb410dea6a43b9fbfe1f978e9c34997d429e1779bf05284dfc458326",
+  "blake3": "c90010901750e666adead7b315df550b748bf812a3b530cea1e1bb6f4aa2432e",
   "description": "The selected-path count uses a non-minimal varint.",
   "error": "NonCanonical",
   "expect": "reject",
@@ -10,5 +10,5 @@
     ]
   ],
   "name": "neg_nonminimal_varint",
-  "size": 39
+  "size": 699
 }

@@ -544,8 +544,9 @@ pub fn build_partial_workspace_fixture() -> PartialWorkspaceFixture {
     }
 }
 
-/// Verify a valid bundle, a deterministic one-byte mutation, and arbitrary
-/// untrusted bytes. All decode allocations are bounded by `PartialLimits`.
+/// Verify a valid bundle, a deliberately invalid full-range mutation, and
+/// arbitrary untrusted bytes. All decode allocations are bounded by
+/// `PartialLimits`.
 pub fn partial_workspace_one_iteration(input: &[u8]) {
     let fixture = build_partial_workspace_fixture();
     partial_workspace_one_iteration_with(input, &fixture);
@@ -556,11 +557,18 @@ pub fn partial_workspace_one_iteration_with(input: &[u8], fixture: &PartialWorks
     let limits = mkit_core::PartialLimits::default();
     mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, &fixture.bundle, &limits)
         .expect("fresh partial fixture verifies");
-    if input.len() >= 2 {
+    if input.len() >= 9 {
         let mut mutated = fixture.bundle.clone();
-        let position = usize::from(input[0]) % mutated.len();
-        mutated[position] ^= input[1].max(1);
-        let _ = mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, &mutated, &limits);
+        let selector = u64::from_le_bytes(input[..8].try_into().expect("eight-byte selector"));
+        let position = (selector % mutated.len() as u64) as usize;
+        mutated[position] ^= input[8].max(1);
+        // The trailing byte makes rejection unconditional even if a mutation
+        // happens to transform one valid field encoding into another.
+        mutated.push(0);
+        assert!(
+            mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, &mutated, &limits)
+                .is_err()
+        );
     }
     let _ = mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, input, &limits);
 }
@@ -1029,6 +1037,17 @@ mod tests {
             partial_workspace_one_iteration_with(case, &fixture);
             assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
+    }
+
+    #[test]
+    fn partial_workspace_mutation_rejects_beyond_first_256_bytes() {
+        let fixture = build_partial_workspace_fixture();
+        assert!(fixture.bundle.len() > 256);
+        let position = fixture.bundle.len() - 1;
+        let mut input = [0u8; 9];
+        input[..8].copy_from_slice(&(position as u64).to_le_bytes());
+        input[8] = 1;
+        partial_workspace_one_iteration_with(&input, &fixture);
     }
 
     #[test]

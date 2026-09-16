@@ -180,10 +180,10 @@ fn build_vectors() -> Vec<Vector> {
         error: Some("NonCanonical"),
     });
 
-    let mut nonminimal = Vec::from(&b"MKWB"[..]);
-    nonminimal.push(1);
-    nonminimal.extend_from_slice(&fixture.commit_id);
-    nonminimal.extend_from_slice(&[0x81, 0x00]);
+    let mut nonminimal = plain.encode(&limits).unwrap();
+    let path_count_offset = 5 + fixture.commit_id.len();
+    assert_eq!(nonminimal[path_count_offset], 1);
+    nonminimal.splice(path_count_offset..=path_count_offset, [0x81, 0x00]);
     vectors.push(Vector {
         name: "neg_nonminimal_varint",
         description: "The selected-path count uses a non-minimal varint.",

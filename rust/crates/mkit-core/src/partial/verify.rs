@@ -9,6 +9,7 @@ use crate::serialize::{deserialize, serialize};
 use crate::sign::{verify_commit, verify_remix};
 use crate::store::{ObjectSource, StoreError};
 
+use super::bundle::BundleBudget;
 use super::{PartialError, PartialLimits, PartialPath, PartialSnapshotBundle, validate_paths};
 
 /// Honest coverage label for a verified partial snapshot.
@@ -141,8 +142,11 @@ impl VerifiedPartialSnapshot {
 /// Build a portable selected snapshot from a caller-bounded source.
 ///
 /// `ObjectSource::read` returns an already allocated `Vec`; source
-/// implementations therefore MUST impose their own read-allocation bound. This
-/// function checks every returned length immediately, before decode or copy.
+/// implementations therefore MUST impose their own per-read allocation bound.
+/// This function checks every returned length immediately and charges the exact
+/// encoded bundle framing before retaining it. The current returned `Vec`,
+/// decoded objects, and caches are separate bounded overhead, so the bundle
+/// limit is not an exact process-RSS limit.
 pub fn build_partial_snapshot<S: ObjectSource + ?Sized>(
     source: &S,
     base_id: Hash,
@@ -150,11 +154,17 @@ pub fn build_partial_snapshot<S: ObjectSource + ?Sized>(
     limits: &PartialLimits,
 ) -> Result<PartialSnapshotBundle, PartialError> {
     validate_request(selected_paths, limits)?;
-    let mut objects = BTreeMap::new();
-    let base_bytes = read_source(source, &base_id, limits.max_base_object_bytes)?;
-    let base = decode_checked(&base_id, &base_bytes, limits, DecodeRole::Base)?;
+    let mut objects = ProducerObjects::new(selected_paths, limits)?;
+    objects.ensure(source, base_id, limits.max_base_object_bytes, limits)?;
+    let base = decode_checked(
+        &base_id,
+        objects
+            .get(&base_id)
+            .ok_or(PartialError::InsufficientWitness)?,
+        limits,
+        DecodeRole::Base,
+    )?;
     let root = verify_base(&base)?;
-    objects.insert(base_id, base_bytes);
 
     let mut witness_ids = BTreeSet::new();
     let mut witness_bytes = 0usize;
@@ -171,13 +181,7 @@ pub fn build_partial_snapshot<S: ObjectSource + ?Sized>(
             if visits > limits.max_tree_visits {
                 return Err(PartialError::ValidationBudgetExceeded);
             }
-            ensure_source_object(
-                source,
-                &mut objects,
-                tree_id,
-                limits.max_tree_object_bytes,
-                limits,
-            )?;
+            objects.ensure(source, tree_id, limits.max_tree_object_bytes, limits)?;
             let tree_bytes = objects
                 .get(&tree_id)
                 .ok_or(PartialError::InsufficientWitness)?;
@@ -224,7 +228,7 @@ pub fn build_partial_snapshot<S: ObjectSource + ?Sized>(
             )?;
         }
     }
-    let object_vec = objects.into_iter().collect();
+    let object_vec = objects.into_object_vec();
     let bundle = PartialSnapshotBundle::new(base_id, selected_paths.to_vec(), object_vec, limits)?;
     // Self-verify the exact inventory before returning producer output.
     let encoded = bundle.encode(limits)?;
@@ -365,12 +369,18 @@ fn verify_file(
         let object = decode_checked(&id, bytes, limits, DecodeRole::File)?;
         required.insert(id);
         let representation = match object {
-            Object::Blob(blob) => VerifiedFileRepresentation {
-                content_len: blob.data.len() as u64,
-                chunk_ids: Arc::from([]),
-            },
+            Object::Blob(blob) => {
+                selected_after(*total_selected, blob.data.len(), limits)?;
+                VerifiedFileRepresentation {
+                    content_len: blob.data.len() as u64,
+                    chunk_ids: Arc::from([]),
+                }
+            }
             Object::ChunkedBlob(manifest) => {
                 validate_manifest_size(&manifest, limits)?;
+                let declared = usize::try_from(manifest.total_size)
+                    .map_err(|_| PartialError::WorkspaceTooLarge)?;
+                selected_after(*total_selected, declared, limits)?;
                 let mut sum = 0u64;
                 for (index, chunk_id) in manifest.chunks.iter().enumerate() {
                     let chunk_len = if let Some(len) = cache.chunks.get(chunk_id) {
@@ -390,9 +400,7 @@ fn verify_file(
                     };
                     required.insert(*chunk_id);
                     validate_chunk_occurrence(&manifest, index, chunk_len)?;
-                    sum = sum
-                        .checked_add(chunk_len as u64)
-                        .ok_or(PartialError::InvalidChunkLayout)?;
+                    sum = add_chunk_len(sum, chunk_len, manifest.total_size)?;
                 }
                 if sum != manifest.total_size {
                     return Err(PartialError::InvalidChunkLayout);
@@ -443,9 +451,48 @@ struct ProducerRepresentationCache {
     chunks: BTreeMap<Hash, usize>,
 }
 
+struct ProducerObjects {
+    objects: BTreeMap<Hash, Vec<u8>>,
+    budget: BundleBudget,
+}
+
+impl ProducerObjects {
+    fn new(paths: &[PartialPath], limits: &PartialLimits) -> Result<Self, PartialError> {
+        Ok(Self {
+            objects: BTreeMap::new(),
+            budget: BundleBudget::new(paths, limits)?,
+        })
+    }
+
+    fn ensure<S: ObjectSource + ?Sized>(
+        &mut self,
+        source: &S,
+        id: Hash,
+        cap: usize,
+        limits: &PartialLimits,
+    ) -> Result<(), PartialError> {
+        if self.objects.contains_key(&id) {
+            return Ok(());
+        }
+        self.budget.ensure_object_read_possible()?;
+        let bytes = read_source(source, &id, cap.min(limits.max_object_bytes))?;
+        self.budget.charge_object(bytes.len())?;
+        self.objects.insert(id, bytes);
+        Ok(())
+    }
+
+    fn get(&self, id: &Hash) -> Option<&Vec<u8>> {
+        self.objects.get(id)
+    }
+
+    fn into_object_vec(self) -> Vec<(Hash, Vec<u8>)> {
+        self.objects.into_iter().collect()
+    }
+}
+
 fn collect_file<S: ObjectSource + ?Sized>(
     source: &S,
-    objects: &mut BTreeMap<Hash, Vec<u8>>,
+    objects: &mut ProducerObjects,
     id: Hash,
     total_selected: &mut usize,
     cache: &mut ProducerRepresentationCache,
@@ -454,20 +501,26 @@ fn collect_file<S: ObjectSource + ?Sized>(
     if let Some(file_len) = cache.files.get(&id) {
         return add_selected(total_selected, *file_len, limits);
     }
-    ensure_source_object(source, objects, id, limits.max_object_bytes, limits)?;
+    objects.ensure(source, id, limits.max_object_bytes, limits)?;
     let object = decode_checked(
         &id,
         objects.get(&id).ok_or(PartialError::InsufficientWitness)?,
         limits,
         DecodeRole::File,
     )?;
-    let file_len = match object {
-        Object::Blob(blob) => blob.data.len(),
+    let (file_len, next_total_selected) = match object {
+        Object::Blob(blob) => {
+            let file_len = blob.data.len();
+            (file_len, selected_after(*total_selected, file_len, limits)?)
+        }
         Object::ChunkedBlob(manifest) => {
             validate_manifest_size(&manifest, limits)?;
+            let file_len = usize::try_from(manifest.total_size)
+                .map_err(|_| PartialError::WorkspaceTooLarge)?;
+            let next_total_selected = selected_after(*total_selected, file_len, limits)?;
             let mut sum = 0u64;
             for (index, chunk_id) in manifest.chunks.iter().copied().enumerate() {
-                ensure_source_object(source, objects, chunk_id, limits.max_object_bytes, limits)?;
+                objects.ensure(source, chunk_id, limits.max_object_bytes, limits)?;
                 let chunk_len = if let Some(len) = cache.chunks.get(&chunk_id) {
                     *len
                 } else {
@@ -487,19 +540,18 @@ fn collect_file<S: ObjectSource + ?Sized>(
                     len
                 };
                 validate_chunk_occurrence(&manifest, index, chunk_len)?;
-                sum = sum
-                    .checked_add(chunk_len as u64)
-                    .ok_or(PartialError::InvalidChunkLayout)?;
+                sum = add_chunk_len(sum, chunk_len, manifest.total_size)?;
             }
             if sum != manifest.total_size {
                 return Err(PartialError::InvalidChunkLayout);
             }
-            usize::try_from(manifest.total_size).map_err(|_| PartialError::WorkspaceTooLarge)?
+            (file_len, next_total_selected)
         }
         _ => return Err(PartialError::WrongObjectType),
     };
     cache.files.insert(id, file_len);
-    add_selected(total_selected, file_len, limits)
+    *total_selected = next_total_selected;
+    Ok(())
 }
 
 fn add_selected(
@@ -507,14 +559,34 @@ fn add_selected(
     file_len: usize,
     limits: &PartialLimits,
 ) -> Result<(), PartialError> {
+    *total = selected_after(*total, file_len, limits)?;
+    Ok(())
+}
+
+fn selected_after(
+    total: usize,
+    file_len: usize,
+    limits: &PartialLimits,
+) -> Result<usize, PartialError> {
     if file_len > limits.max_selected_file_bytes {
         return Err(PartialError::WorkspaceTooLarge);
     }
-    *total = checked_add(*total, file_len)?;
-    if *total > limits.max_total_selected_bytes {
+    let next = checked_add(total, file_len)?;
+    if next > limits.max_total_selected_bytes {
         return Err(PartialError::WorkspaceTooLarge);
     }
-    Ok(())
+    Ok(next)
+}
+
+fn add_chunk_len(sum: u64, chunk_len: usize, declared: u64) -> Result<u64, PartialError> {
+    let chunk_len = u64::try_from(chunk_len).map_err(|_| PartialError::InvalidChunkLayout)?;
+    let next = sum
+        .checked_add(chunk_len)
+        .ok_or(PartialError::InvalidChunkLayout)?;
+    if next > declared {
+        return Err(PartialError::InvalidChunkLayout);
+    }
+    Ok(next)
 }
 
 fn validate_manifest_size(
@@ -654,24 +726,6 @@ fn verify_base(base: &Object) -> Result<Hash, PartialError> {
     }
 }
 
-fn ensure_source_object<S: ObjectSource + ?Sized>(
-    source: &S,
-    objects: &mut BTreeMap<Hash, Vec<u8>>,
-    id: Hash,
-    cap: usize,
-    limits: &PartialLimits,
-) -> Result<(), PartialError> {
-    if objects.contains_key(&id) {
-        return Ok(());
-    }
-    if objects.len() >= limits.max_objects {
-        return Err(PartialError::ValidationBudgetExceeded);
-    }
-    let bytes = read_source(source, &id, cap.min(limits.max_object_bytes))?;
-    objects.insert(id, bytes);
-    Ok(())
-}
-
 fn read_source<S: ObjectSource + ?Sized>(
     source: &S,
     id: &Hash,
@@ -728,12 +782,35 @@ mod tests {
         }
     }
 
+    struct GuardedSource {
+        objects: BTreeMap<Hash, Vec<u8>>,
+        reads: RefCell<Vec<Hash>>,
+        forbidden: BTreeSet<Hash>,
+    }
+
+    impl ObjectSource for GuardedSource {
+        fn read(&self, id: &Hash) -> StoreResult<Vec<u8>> {
+            self.reads.borrow_mut().push(*id);
+            if self.forbidden.contains(id) {
+                return Err(StoreError::ObjectNotFound(format!(
+                    "unexpected read of {}",
+                    crate::hash::to_hex(id)
+                )));
+            }
+            self.objects
+                .get(id)
+                .cloned()
+                .ok_or_else(|| StoreError::ObjectNotFound(crate::hash::to_hex(id)))
+        }
+    }
+
     struct Fixture {
         source: CountingSource,
         base_id: Hash,
         paths: Vec<PartialPath>,
         hidden_tree: Hash,
         hidden_blob: Hash,
+        chunked: Hash,
         chunk: Hash,
     }
 
@@ -848,6 +925,7 @@ mod tests {
             ],
             hidden_tree,
             hidden_blob,
+            chunked,
             chunk,
         }
     }
@@ -895,6 +973,39 @@ mod tests {
         .encode(limits)
         .unwrap();
         (base_id, paths, bundle)
+    }
+
+    fn signed_source(
+        mut objects: BTreeMap<Hash, Vec<u8>>,
+        entries: Vec<TreeEntry>,
+        forbidden: BTreeSet<Hash>,
+    ) -> (GuardedSource, Hash, Vec<PartialPath>) {
+        let paths = entries
+            .iter()
+            .map(|entry| vec![entry.name.clone()])
+            .collect();
+        let root = insert(&mut objects, Object::Tree(Tree { entries }));
+        let key = KeyPair::from_seed([23; 32]);
+        let mut commit = Commit::new_unannotated(
+            root,
+            Vec::new(),
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            b"partial producer budget fixture".to_vec(),
+            1_700_000_002,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key).unwrap().0;
+        let base_id = insert(&mut objects, Object::Commit(commit));
+        (
+            GuardedSource {
+                objects,
+                reads: RefCell::new(Vec::new()),
+                forbidden,
+            },
+            base_id,
+            paths,
+        )
     }
 
     #[test]
@@ -1233,6 +1344,266 @@ mod tests {
     }
 
     #[test]
+    fn producer_stops_when_chunk_sum_exceeds_declared_total() {
+        let mut objects = BTreeMap::new();
+        let oversized = insert(
+            &mut objects,
+            Object::Blob(Blob {
+                data: b"ab".to_vec(),
+            }),
+        );
+        let sentinel = insert(&mut objects, Object::Blob(Blob { data: vec![1] }));
+        let manifest = insert(
+            &mut objects,
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks: vec![oversized, sentinel],
+            }),
+        );
+        let entries = vec![TreeEntry {
+            name: b"bad.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: manifest,
+        }];
+        let (source, base, paths) = signed_source(objects, entries, BTreeSet::from([sentinel]));
+
+        assert!(matches!(
+            build_partial_snapshot(&source, base, &paths, &PartialLimits::default()),
+            Err(PartialError::InvalidChunkLayout)
+        ));
+        assert!(!source.reads.borrow().contains(&sentinel));
+    }
+
+    #[test]
+    fn producer_enforces_encoded_bundle_budget_before_retaining_more_objects() {
+        let mut objects = BTreeMap::new();
+        let one = insert(&mut objects, Object::Blob(Blob { data: vec![1] }));
+        let empty = insert(&mut objects, Object::Blob(Blob { data: Vec::new() }));
+        let mut manifests = Vec::new();
+        for empty_count in [8, 9, 10] {
+            let mut chunks = vec![one];
+            chunks.resize(empty_count + 1, empty);
+            manifests.push(insert(
+                &mut objects,
+                Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 1,
+                    chunk_size: 0,
+                    chunks,
+                }),
+            ));
+        }
+        let entries = [b'a', b'b', b'c']
+            .into_iter()
+            .zip(manifests.iter().copied())
+            .map(|(name, object_hash)| TreeEntry {
+                name: vec![name],
+                mode: EntryMode::Blob,
+                object_hash,
+            })
+            .collect::<Vec<_>>();
+        let (source, base, paths) = signed_source(objects, entries, BTreeSet::from([manifests[2]]));
+        let retained = [base, manifests[0], one, empty]
+            .into_iter()
+            .chain(source.objects.iter().filter_map(|(id, bytes)| {
+                matches!(deserialize(bytes), Ok(Object::Tree(_))).then_some(*id)
+            }))
+            .collect::<BTreeSet<_>>();
+        let retained_objects = source
+            .objects
+            .iter()
+            .filter(|(id, _)| retained.contains(*id))
+            .map(|(id, bytes)| (*id, bytes.clone()))
+            .collect();
+        let exact_retained = PartialSnapshotBundle::new(
+            base,
+            paths.clone(),
+            retained_objects,
+            &PartialLimits::default(),
+        )
+        .unwrap()
+        .encode(&PartialLimits::default())
+        .unwrap()
+        .len();
+        let limits = PartialLimits {
+            max_bundle_bytes: exact_retained + 40,
+            ..PartialLimits::default()
+        };
+
+        assert!(matches!(
+            build_partial_snapshot(&source, base, &paths, &limits),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+        let reads = source.reads.borrow();
+        assert!(
+            reads.contains(&manifests[1]),
+            "the crossing object may be read"
+        );
+        assert!(
+            !reads.contains(&manifests[2]),
+            "collection must stop after overflow"
+        );
+    }
+
+    #[test]
+    fn producer_checks_declared_selected_bytes_before_chunk_reads() {
+        let mut objects = BTreeMap::new();
+        let first = insert(&mut objects, Object::Blob(Blob { data: vec![1] }));
+        let sentinel = insert(&mut objects, Object::Blob(Blob { data: vec![2] }));
+        let manifest = insert(
+            &mut objects,
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks: vec![sentinel],
+            }),
+        );
+        let entries = vec![
+            TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: first,
+            },
+            TreeEntry {
+                name: b"b".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            },
+        ];
+        let (source, base, paths) = signed_source(objects, entries, BTreeSet::from([sentinel]));
+        let limits = PartialLimits {
+            max_total_selected_bytes: 1,
+            ..PartialLimits::default()
+        };
+
+        assert!(matches!(
+            build_partial_snapshot(&source, base, &paths, &limits),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+        assert!(!source.reads.borrow().contains(&sentinel));
+    }
+
+    #[test]
+    fn producer_budget_is_exact_across_object_count_varint_boundary() {
+        let limits = PartialLimits::default();
+        let mut objects = BTreeMap::new();
+        let chunks = (0u8..125)
+            .map(|byte| insert(&mut objects, Object::Blob(Blob { data: vec![byte] })))
+            .collect::<Vec<_>>();
+        let manifest = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 125,
+            chunk_size: 1,
+            chunks,
+        });
+        let (base, paths, bytes) =
+            signed_file_bundle(objects, manifest, &[b"boundary.bin"], &limits);
+        let (_, _, object_pairs) = PartialSnapshotBundle::decode(&bytes, &limits)
+            .unwrap()
+            .into_parts();
+        assert_eq!(object_pairs.len(), 128);
+
+        let source = CountingSource {
+            objects: object_pairs.iter().cloned().collect(),
+            reads: RefCell::new(Vec::new()),
+        };
+        let exact = PartialLimits {
+            max_bundle_bytes: bytes.len(),
+            ..limits
+        };
+        let produced = build_partial_snapshot(&source, base, &paths, &exact).unwrap();
+        assert_eq!(produced.encode(&exact).unwrap().len(), bytes.len());
+
+        let source = CountingSource {
+            objects: object_pairs.into_iter().collect(),
+            reads: RefCell::new(Vec::new()),
+        };
+        let one_byte_short = PartialLimits {
+            max_bundle_bytes: bytes.len() - 1,
+            ..limits
+        };
+        assert!(matches!(
+            build_partial_snapshot(&source, base, &paths, &one_byte_short),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+    }
+
+    #[test]
+    fn shared_representations_charge_storage_once_and_content_per_path() {
+        let initial_fixture = fixture();
+        let default_bundle = build_partial_snapshot(
+            &initial_fixture.source,
+            initial_fixture.base_id,
+            &initial_fixture.paths,
+            &PartialLimits::default(),
+        )
+        .unwrap();
+        let exact_bundle_bytes = default_bundle
+            .encode(&PartialLimits::default())
+            .unwrap()
+            .len();
+        let exact_selected_bytes = b"plain selected bytes".len() + 48;
+        let exact_fixture = fixture();
+        let exact = PartialLimits {
+            max_bundle_bytes: exact_bundle_bytes,
+            max_total_selected_bytes: exact_selected_bytes,
+            ..PartialLimits::default()
+        };
+        let bundle = build_partial_snapshot(
+            &exact_fixture.source,
+            exact_fixture.base_id,
+            &exact_fixture.paths,
+            &exact,
+        )
+        .unwrap();
+        assert_eq!(bundle.encode(&exact).unwrap().len(), exact_bundle_bytes);
+        assert_eq!(
+            exact_fixture
+                .source
+                .reads
+                .borrow()
+                .iter()
+                .filter(|id| **id == exact_fixture.chunk)
+                .count(),
+            1
+        );
+        assert_eq!(
+            exact_fixture
+                .source
+                .reads
+                .borrow()
+                .iter()
+                .filter(|id| **id == exact_fixture.chunked)
+                .count(),
+            1
+        );
+        let verified = verify_partial_snapshot(
+            exact_fixture.base_id,
+            &exact_fixture.paths,
+            &bundle.encode(&exact).unwrap(),
+            &exact,
+        )
+        .unwrap();
+        assert_eq!(verified.files()[1].content_len(), 24);
+        assert_eq!(verified.files()[2].content_len(), 24);
+
+        let limited_fixture = fixture();
+        let too_little_selected = PartialLimits {
+            max_bundle_bytes: exact_bundle_bytes,
+            max_total_selected_bytes: exact_selected_bytes - 1,
+            ..PartialLimits::default()
+        };
+        assert!(matches!(
+            build_partial_snapshot(
+                &limited_fixture.source,
+                limited_fixture.base_id,
+                &limited_fixture.paths,
+                &too_little_selected
+            ),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+    }
+
+    #[test]
     fn decoder_enforces_joined_path_and_raw_count_and_size_caps() {
         let limits = PartialLimits {
             max_path_bytes: 8,
@@ -1328,11 +1699,17 @@ mod tests {
     #[test]
     fn malformed_nonminimal_length_is_noncanonical() {
         let limits = PartialLimits::default();
-        let mut bytes = Vec::from(&b"MKWB"[..]);
-        bytes.push(1);
-        bytes.extend_from_slice(&ZERO);
-        // Non-minimal varint for path count 1.
-        bytes.extend_from_slice(&[0x81, 0x00]);
+        let fixture = fixture();
+        let valid =
+            build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits)
+                .unwrap()
+                .encode(&limits)
+                .unwrap();
+        assert!(PartialSnapshotBundle::decode(&valid, &limits).is_ok());
+        let mut bytes = valid;
+        let path_count_offset = 5 + ZERO.len();
+        assert_eq!(bytes[path_count_offset], 3);
+        bytes.splice(path_count_offset..=path_count_offset, [0x83, 0x00]);
         assert!(matches!(
             PartialSnapshotBundle::decode(&bytes, &limits),
             Err(PartialError::NonCanonical)

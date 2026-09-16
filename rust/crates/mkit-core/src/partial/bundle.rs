@@ -14,6 +14,78 @@ const VERSION: u8 = 1;
 
 pub(crate) type BundleParts = (Hash, Vec<PartialPath>, Vec<(Hash, Vec<u8>)>);
 
+/// Incremental accounting for the exact encoded size of an `MKWB` bundle.
+///
+/// The object-count prefix is adjusted at each varint boundary. Callers must
+/// charge an object only once, after deduplicating it by id.
+pub(crate) struct BundleBudget {
+    encoded_bytes: usize,
+    object_count: usize,
+    max_bytes: usize,
+    max_objects: usize,
+}
+
+impl BundleBudget {
+    pub(crate) fn new(paths: &[PartialPath], limits: &PartialLimits) -> Result<Self, PartialError> {
+        let mut encoded_bytes = checked_add(5, 32)?;
+        encoded_bytes = checked_add(encoded_bytes, varint_len(paths.len()))?;
+        for path in paths {
+            encoded_bytes = checked_add(encoded_bytes, varint_len(path.len()))?;
+            for component in path {
+                encoded_bytes = checked_add(encoded_bytes, varint_len(component.len()))?;
+                encoded_bytes = checked_add(encoded_bytes, component.len())?;
+            }
+        }
+        encoded_bytes = checked_add(encoded_bytes, varint_len(0))?;
+        if encoded_bytes > limits.max_bundle_bytes {
+            return Err(PartialError::WorkspaceTooLarge);
+        }
+        Ok(Self {
+            encoded_bytes,
+            object_count: 0,
+            max_bytes: limits.max_bundle_bytes,
+            max_objects: limits.max_objects,
+        })
+    }
+
+    /// Reject before a source read when even the smallest legal object record
+    /// cannot fit. The exact returned object length is charged after that one
+    /// caller-bounded read and before the bytes are retained.
+    pub(crate) fn ensure_object_read_possible(&self) -> Result<(), PartialError> {
+        self.next_encoded_bytes(1).map(|_| ())
+    }
+
+    pub(crate) fn charge_object(&mut self, bytes_len: usize) -> Result<(), PartialError> {
+        let next = self.next_encoded_bytes(bytes_len)?;
+        self.encoded_bytes = next;
+        self.object_count += 1;
+        Ok(())
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    fn next_encoded_bytes(&self, bytes_len: usize) -> Result<usize, PartialError> {
+        let next_count = self
+            .object_count
+            .checked_add(1)
+            .ok_or(PartialError::ValidationBudgetExceeded)?;
+        if next_count > self.max_objects {
+            return Err(PartialError::ValidationBudgetExceeded);
+        }
+        let count_prefix_growth = varint_len(next_count) - varint_len(self.object_count);
+        let mut next = checked_add(self.encoded_bytes, count_prefix_growth)?;
+        next = checked_add(next, 32)?;
+        next = checked_add(next, varint_len(bytes_len))?;
+        next = checked_add(next, bytes_len)?;
+        if next > self.max_bytes {
+            return Err(PartialError::WorkspaceTooLarge);
+        }
+        Ok(next)
+    }
+}
+
 /// One canonical object carried by a partial snapshot bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartialObject {
@@ -62,9 +134,7 @@ impl PartialSnapshotBundle {
             objects,
         };
         bundle.validate_shape(limits)?;
-        if bundle.encoded_len()? > limits.max_bundle_bytes {
-            return Err(PartialError::WorkspaceTooLarge);
-        }
+        bundle.encoded_len(limits)?;
         Ok(bundle)
     }
 
@@ -97,10 +167,7 @@ impl PartialSnapshotBundle {
     /// Encode with fixed integers big-endian and minimal commonware varints.
     pub fn encode(&self, limits: &PartialLimits) -> Result<Vec<u8>, PartialError> {
         self.validate_shape(limits)?;
-        let capacity = self.encoded_len()?;
-        if capacity > limits.max_bundle_bytes {
-            return Err(PartialError::WorkspaceTooLarge);
-        }
+        let capacity = self.encoded_len(limits)?;
         let mut out = Vec::with_capacity(capacity);
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
@@ -224,20 +291,12 @@ impl PartialSnapshotBundle {
         Ok(())
     }
 
-    fn encoded_len(&self) -> Result<usize, PartialError> {
-        let mut total = 5usize + 32 + varint_len(self.paths.len()) + varint_len(self.objects.len());
-        for path in &self.paths {
-            total = checked_add(total, varint_len(path.len()))?;
-            for component in path {
-                total = checked_add(total, varint_len(component.len()))?;
-                total = checked_add(total, component.len())?;
-            }
-        }
+    fn encoded_len(&self, limits: &PartialLimits) -> Result<usize, PartialError> {
+        let mut budget = BundleBudget::new(&self.paths, limits)?;
         for object in &self.objects {
-            total = checked_add(total, 32 + varint_len(object.canonical_bytes.len()))?;
-            total = checked_add(total, object.canonical_bytes.len())?;
+            budget.charge_object(object.canonical_bytes.len())?;
         }
-        Ok(total)
+        Ok(budget.encoded_bytes())
     }
 }
 
@@ -256,4 +315,47 @@ fn varint_len(mut value: usize) -> usize {
         len += 1;
     }
     len
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_budget_matches_encoder_at_varint_boundaries() {
+        let paths = vec![vec![b"a".to_vec()]];
+        let objects = (0u8..128)
+            .map(|index| {
+                let mut id = [0; 32];
+                id[31] = index;
+                let bytes_len = match index {
+                    0 => 127,
+                    1 => 128,
+                    _ => 1,
+                };
+                (id, vec![index; bytes_len])
+            })
+            .collect::<Vec<_>>();
+        let default = PartialLimits::default();
+        let encoded = PartialSnapshotBundle::new([9; 32], paths.clone(), objects.clone(), &default)
+            .unwrap()
+            .encode(&default)
+            .unwrap();
+        let exact = PartialLimits {
+            max_bundle_bytes: encoded.len(),
+            ..default
+        };
+        let exact_bundle =
+            PartialSnapshotBundle::new([9; 32], paths.clone(), objects.clone(), &exact).unwrap();
+        assert_eq!(exact_bundle.encode(&exact).unwrap().len(), encoded.len());
+
+        let one_byte_short = PartialLimits {
+            max_bundle_bytes: encoded.len() - 1,
+            ..default
+        };
+        assert!(matches!(
+            PartialSnapshotBundle::new([9; 32], paths, objects, &one_byte_short),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+    }
 }
