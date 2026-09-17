@@ -65,8 +65,9 @@ train).
 - *(workspace-worker)* Opt-in `public-partial-v1` consumes a trusted static
   `MKWB` origin, verifies selected files in wasm, and exports one ordinary
   candidate as `MKWU`. AgentGrant remains execution consent, not proof
-  validity. No full-source fetch, HostGrant, or remote publication.
-  **SemVer:** additive.
+  validity. Enablement requires both `PUBLIC_PARTIAL_BUNDLE_ORIGIN` and
+  `PUBLIC_PARTIAL_RESOURCE_OK=1`. No full-source fetch, HostGrant, or remote
+  publication. **SemVer:** additive.
 
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native

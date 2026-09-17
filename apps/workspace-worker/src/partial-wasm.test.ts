@@ -53,6 +53,9 @@ describe("executed wasm partial adapters", () => {
         ).toThrow();
         const huge = `{"max_bundle_bytes":1${" ".repeat(16 * 1024)}}`;
         expect(() => verifyPartialSnapshot(PLAIN, BASE, PATHS, huge)).toThrow(/16 KiB/);
+        expect(() =>
+            verifyPartialSnapshot(PLAIN, BASE, PATHS, JSON.stringify({ max_witness_bytes: 8 })),
+        ).toThrow(/witness|workspace/i);
     });
 
     it("shares edit/export bytes between default and omitted limits", () => {
@@ -86,13 +89,27 @@ describe("executed wasm partial adapters", () => {
         expect(limited.updateBytes.byteLength).toBeGreaterThan(32);
     });
 
-    it("records local memory near the chunked fixture", () => {
-        const before = process.memoryUsage();
-        const snapshot = verifyPartialSnapshot(CHUNKED, BASE, CHUNKED_PATHS, "{}");
-        const after = process.memoryUsage();
-        expect(snapshot.files[0]!.bytes.byteLength).toBeGreaterThan(0);
-        expect(after.heapUsed).toBeGreaterThan(0);
-        expect(after.rss).toBeGreaterThan(before.rss - 32 * 1024 * 1024);
+    it("materializes empty Blob and empty ChunkedBlob without signing", () => {
+        const testdata = fileURLToPath(new NodeURL("./testdata/", import.meta.url));
+        const blob = verifyPartialSnapshot(
+            readFileSync(`${testdata}empty_blob.mkwb`),
+            readFileSync(`${testdata}empty_blob.base`, "utf8").trim(),
+            readFileSync(`${testdata}empty_blob.paths`, "utf8").trim(),
+        );
+        expect(blob.files[0]!.bytes.byteLength).toBe(0);
+        expect(blob.files[0]!.representationId).toBe(
+            readFileSync(`${testdata}empty_blob.repr`, "utf8").trim(),
+        );
+        const chunked = verifyPartialSnapshot(
+            readFileSync(`${testdata}empty_chunked.mkwb`),
+            readFileSync(`${testdata}empty_chunked.base`, "utf8").trim(),
+            readFileSync(`${testdata}empty_chunked.paths`, "utf8").trim(),
+        );
+        expect(chunked.files[0]!.bytes.byteLength).toBe(0);
+        expect(chunked.files[0]!.representationId).toBe(
+            readFileSync(`${testdata}empty_chunked.repr`, "utf8").trim(),
+        );
+        expect(chunked.files[0]!.representationId).not.toBe(blob.files[0]!.representationId);
     });
 
     it("classifies wasm adapter errors", () => {

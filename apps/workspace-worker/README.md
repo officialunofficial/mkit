@@ -43,9 +43,15 @@ Oversized source files fail capture; they are not silently omitted. File reads a
 
 ## Public partial bundles
 
-`public-partial-v1` is optional and off unless `PUBLIC_PARTIAL_BUNDLE_ORIGIN` is
-a trusted HTTPS origin with no credentials, query, fragment, or path. The
-service then accepts owner-signed `POST /api/workspaces/prepare` bodies:
+`public-partial-v1` stays unavailable unless both `PUBLIC_PARTIAL_BUNDLE_ORIGIN`
+is a trusted HTTPS origin (no credentials, query, fragment, or path) and
+`PUBLIC_PARTIAL_RESOURCE_OK` is the exact value `1`. Origin alone does not
+enable the path. Resource validation for the 12 MiB bundle / 6 MiB witness
+caps is documented in
+[partial-resource.md](partial-resource.md); until that report records a
+passing workerd measurement, leave `PUBLIC_PARTIAL_RESOURCE_OK` unset.
+
+When both are set, the service accepts owner-signed `POST /api/workspaces/prepare` bodies:
 
 ```json
 {
@@ -71,7 +77,9 @@ or a candidate. The first explicit save or successful task that changes
 selected files signs an ordinary Commit whose sole parent is the supplied base
 and stores `MKWU` as `candidate_ready`. Unchanged files are a typed no-op.
 One pending candidate blocks further edits, tasks, restore, and terminal
-capture. `GET /api/workspaces/<id>/partial-update` returns those bytes to the
+capture. Partial capture does not apply the legacy `node_modules` / `target`
+ignore list: selected paths under those names are read, and extras there fail
+the exact-selection check. `GET /api/workspaces/<id>/partial-update` returns those bytes to the
 current owner session only (`Cache-Control: no-store`). Owner-only download is
 not a confidentiality guarantee: selected files stay public.
 

@@ -6,6 +6,7 @@ import {
     bundleObjectUrl,
     fetchPublicBundle,
     importPartialBundle,
+    publicPartialOrigin,
     trustedBundleOrigin,
     validatePartialPrepare,
 } from "./partial-source";
@@ -39,6 +40,15 @@ describe("public partial bundle origin and prepare", () => {
         expect(() => trustedBundleOrigin("https://user:pass@bundles.example")).toThrow(/credentials/);
         expect(() => trustedBundleOrigin("https://bundles.example/?q=1")).toThrow(/query/);
         expect(() => trustedBundleOrigin("https://bundles.example/path")).toThrow(/path/);
+        expect(() =>
+            publicPartialOrigin({ PUBLIC_PARTIAL_BUNDLE_ORIGIN: "https://bundles.example" }),
+        ).toThrow(/resource-validated/);
+        expect(
+            publicPartialOrigin({
+                PUBLIC_PARTIAL_BUNDLE_ORIGIN: "https://bundles.example",
+                PUBLIC_PARTIAL_RESOURCE_OK: "1",
+            }),
+        ).toBe("https://bundles.example");
     });
 
     it("rejects malformed selections before import", () => {

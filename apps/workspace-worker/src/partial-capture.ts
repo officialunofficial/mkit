@@ -8,7 +8,7 @@ export async function captureSelected(
     generation: string,
     selected: FileManifest,
 ): Promise<FileManifest> {
-    const captured = await sandbox.capture(generation);
+    const captured = await sandbox.captureExact(generation);
     const selectedPaths = Object.keys(selected).sort();
     const capturedPaths = Object.keys(captured).sort();
     if (selectedPaths.length !== capturedPaths.length)

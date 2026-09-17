@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { captureSelected } from "./partial-capture";
 import { SANDBOX_FILES_PROGRAM, SandboxWorkspace, shellQuote } from "./sandbox-files";
 import { getBlob, putBlob, type ObjectStorage } from "./objects";
 
@@ -129,6 +130,57 @@ describe("safe filesystem capture", () => {
             "binary.dat": { content: "AP+A", mode: "blob" },
             "run.sh": { content: Buffer.from("echo hello").toString("base64"), mode: "exec" },
         });
+    });
+    it("captures selected paths under legacy-ignored names when ignore is empty", async () => {
+        await mkdir(join(root, "target"));
+        await writeFile(join(root, "target", "app.rs"), "fn main() {}");
+        await mkdir(join(root, ".venv"));
+        await writeFile(join(root, ".venv", "config"), "x");
+        const ignored = await helper({ action: "capture", generation: "one" });
+        expect(ignored).toEqual({});
+        const exact = await helper({ action: "capture", generation: "one", ignore: [] });
+        expect(exact["target/app.rs"]?.mode).toBe("blob");
+        expect(exact[".venv/config"]?.mode).toBe("blob");
+    });
+    it("surfaces new files and rejects symlinks under legacy-ignored names during exact capture", async () => {
+        await mkdir(join(root, "target"));
+        await writeFile(join(root, "target", "app.rs"), "fn main() {}");
+        await writeFile(join(root, "target", "extra.rs"), "extra");
+        const exact = await helper({ action: "capture", generation: "one", ignore: [] });
+        expect(Object.keys(exact).sort()).toEqual(["target/app.rs", "target/extra.rs"]);
+        await rm(join(root, "target", "extra.rs"));
+        await symlink(join(root, "target", "app.rs"), join(root, "target", "link.rs"));
+        await expect(helper({ action: "capture", generation: "one", ignore: [] })).rejects.toThrow(
+            "regular",
+        );
+    });
+    it("keeps the last coherent selected draft when exact capture sees an extra ignored-name file", async () => {
+        await mkdir(join(root, "target"));
+        await writeFile(join(root, "target", "app.rs"), "fn main() {}");
+        const objects = new MemoryObjects();
+        const toManifest = async () => {
+            const raw = await helper({ action: "capture", generation: "one", ignore: [] }) as Record<
+                string,
+                { content: string; mode: "blob" | "exec" }
+            >;
+            const files: Record<string, { hash: string; size: number; mode: "blob" | "exec" }> =
+                Object.create(null);
+            for (const [path, file] of Object.entries(raw)) {
+                const bytes = Buffer.from(file.content, "base64");
+                files[path] = {
+                    hash: await putBlob(objects, bytes),
+                    size: bytes.length,
+                    mode: file.mode,
+                };
+            }
+            return files;
+        };
+        const selected = await toManifest();
+        await writeFile(join(root, "target", "extra.rs"), "nope");
+        await expect(
+            captureSelected({ captureExact: toManifest } as never, "one", selected),
+        ).rejects.toThrow(/exactly the selected/);
+        expect(Object.keys(selected)).toEqual(["target/app.rs"]);
     });
     it("refuses stale generation and oversized source files without dropping them", async () => {
         await expect(helper({ action: "capture", generation: "two" })).rejects.toThrow(

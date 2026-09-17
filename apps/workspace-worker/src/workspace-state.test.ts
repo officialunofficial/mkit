@@ -457,4 +457,44 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         expect(replay.headers.get("x-operation")).toBe("legacy");
         expect(await replay.json()).toEqual(body);
     });
+
+    it("does not advertise a candidate when agent consent is invalid at admission", async () => {
+        const { id } = await setup({
+            grant: {
+                grant: {
+                    version: 1,
+                    workspaceId: "x",
+                    ownerPublicKey: hash("1"),
+                    agentPublicKey: hash("2"),
+                    source: { kind: "demo", repository: "demo", commitHash: hash("3") },
+                    permissions: ["files", "commands", "versions"],
+                    createdAt: 1,
+                    expiresAt: Date.now() - 1,
+                },
+                signature: hash("s").slice(0, 128),
+            },
+        });
+        const result = await request(id, {
+            op: "apply",
+            auth: auth("c"),
+            mutation: {
+                requireAgent: true,
+                writes: {
+                    candidate: {
+                        id: hash("f"),
+                        digest: hash("a"),
+                        key: "partial/x/update",
+                        rootHex: hash("r"),
+                        baseCommit: hash("b"),
+                        coverage: "selected-only",
+                    },
+                },
+            },
+        });
+        expect(result.status).toBe(403);
+        const inspection = (await (await request(id, { op: "inspect" })).json()) as {
+            values: Record<string, unknown>;
+        };
+        expect(inspection.values.candidate).toBeUndefined();
+    });
 });

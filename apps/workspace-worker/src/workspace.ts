@@ -394,6 +394,7 @@ export class Workspace extends DurableObject<Env> {
                                     ...completed.writes,
                                     generation: randomToken(),
                                 },
+                                requireAgent: true,
                             };
                         } else {
                             mutation = await this.state.publishedVersion(files, message);

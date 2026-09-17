@@ -22,6 +22,7 @@ export type Mutation = {
     deletes?: string[];
     headers?: Record<string, string>;
     alarm?: number;
+    requireAgent?: boolean;
 };
 type Receipt = {
     digest: string;
@@ -75,6 +76,7 @@ export class WorkspaceState {
     constructor(
         readonly storage: DurableObjectStorage,
         readonly objects: R2Bucket,
+        private readonly now: () => number = Date.now,
     ) {}
 
     async summary(storage: ReadStorage = this.storage): Promise<WorkspaceSummary> {
@@ -123,17 +125,18 @@ export class WorkspaceState {
     async completePartial(
         files: FileManifest,
         message: string,
-    ): Promise<{ writes: Record<string, unknown>; versionHash?: string; noChanges: boolean }> {
-        await this.requireAgent();
+    ): Promise<Mutation & { versionHash?: string; noChanges: boolean }> {
         await this.requireNotPending();
         const meta = await this.summary();
         const partial = await this.partialState();
         const seedHex = await this.storage.get<string>("seed");
         if (!seedHex) throw new Error("Missing workspace signer");
+        const bundle = await this.loadBundle();
+        await this.requireAgent();
         const result = await createPartialCandidate({
             workspaceId: meta.id,
             objects: this.objects,
-            bundle: await this.loadBundle(),
+            bundle,
             baseCommit: partial.baseCommit,
             selectedPaths: partial.selectedPaths,
             original: partial.original,
@@ -141,12 +144,17 @@ export class WorkspaceState {
             seedHex,
             agentPublicKey: meta.agentPublicKey,
             message,
+            beforeSign: async () => {
+                await this.requireAgent();
+            },
         });
-        if (result.status === "no_changes") return { writes: { files }, noChanges: true };
+        if (result.status === "no_changes")
+            return { writes: { files }, noChanges: true, requireAgent: true };
         return {
             writes: { files, candidate: result.candidate },
             versionHash: result.candidate.id,
             noChanges: false,
+            requireAgent: true,
         };
     }
 
@@ -154,9 +162,9 @@ export class WorkspaceState {
         if (!(await storage.get("activated"))) throw new HttpError(404, "Workspace not found.");
     }
 
-    async requireAgent(): Promise<SignedAgentGrant> {
-        const grant = await this.storage.get<SignedAgentGrant>("grant");
-        if (!grant || grant.grant.expiresAt <= Date.now() || (await this.storage.get("revoked")))
+    async requireAgent(storage: ReadStorage = this.storage): Promise<SignedAgentGrant> {
+        const grant = await storage.get<SignedAgentGrant>("grant");
+        if (!grant || grant.grant.expiresAt <= this.now() || (await storage.get("revoked")))
             throw new HttpError(
                 403,
                 "Agent access is disabled or expired. Remix this project to start a new authorized workspace.",
@@ -296,6 +304,7 @@ export class WorkspaceState {
                 limit: 20,
             }))
                 if (expires <= Date.now()) expired.push(sessionKey);
+            if (mutation.requireAgent) await this.requireAgent(storage);
             if (mutation.writes) await storage.put(mutation.writes);
             const deletes = [...expired, ...(mutation.deletes ?? [])];
             for (let start = 0; start < deletes.length; start += 128)

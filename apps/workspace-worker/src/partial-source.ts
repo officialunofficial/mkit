@@ -27,6 +27,20 @@ export type PartialPrepareRequest = {
     bundleDigest: string;
 };
 
+export function publicPartialOrigin(env: {
+    PUBLIC_PARTIAL_BUNDLE_ORIGIN?: string;
+    PUBLIC_PARTIAL_RESOURCE_OK?: string;
+}): string {
+    const origin = trustedBundleOrigin(env.PUBLIC_PARTIAL_BUNDLE_ORIGIN);
+    if (!origin) throw new HttpError(400, "Public partial bundles are not enabled.");
+    if (env.PUBLIC_PARTIAL_RESOURCE_OK !== "1")
+        throw new HttpError(
+            400,
+            "Public partial bundles are not resource-validated on this deployment.",
+        );
+    return origin;
+}
+
 export function trustedBundleOrigin(value: string | undefined): string | undefined {
     if (!value) return undefined;
     let url: URL;

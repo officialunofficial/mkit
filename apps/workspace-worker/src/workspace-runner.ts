@@ -247,6 +247,7 @@ export async function runWorkspaceTask({
                 const current = await storage.get<WorkspaceTask>("task");
                 if (current?.id !== task.id || current.status !== "running")
                     throw new Error("Task is no longer running.");
+                if (partial) await state.requireAgent(storage);
                 await storage.put({
                     ...publication.writes,
                     task: {

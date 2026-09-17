@@ -4,7 +4,7 @@ import type { AuthenticatedOperation } from "./auth";
 import { type PreparedWorkspace, type RemixRequest, type WorkspaceSummary } from "./contracts";
 import {
     importPartialBundle,
-    trustedBundleOrigin,
+    publicPartialOrigin,
     validatePartialPrepare,
 } from "./partial-source";
 import { HttpError, errorResponse, json } from "./http";
@@ -97,8 +97,7 @@ export class WorkspaceDirectory extends DurableObject<Env> {
                 selectedPaths: sourceRequest.selectedPaths,
                 bundleDigest: sourceRequest.bundleDigest,
             });
-            if (!trustedBundleOrigin(this.env.PUBLIC_PARTIAL_BUNDLE_ORIGIN))
-                throw new HttpError(400, "Public partial bundles are not enabled.");
+            publicPartialOrigin(this.env);
         }
         const key = `prepare:${auth.publicKey}:${auth.nonce}`;
         const id = mkit.blake3_hex(encoder.encode(`${auth.publicKey}:${auth.nonce}`)).slice(0, 32);
@@ -145,7 +144,7 @@ export class WorkspaceDirectory extends DurableObject<Env> {
                             sourceRequest.commitHash,
                         )
                       : await importPartialBundle(
-                            this.env.PUBLIC_PARTIAL_BUNDLE_ORIGIN,
+                            publicPartialOrigin(this.env),
                             this.env.OBJECTS,
                             id,
                             sourceRequest,

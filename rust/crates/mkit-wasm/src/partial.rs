@@ -302,30 +302,61 @@ fn materialize_selected_file(
             "selected file exceeds the selected-file limit",
         ));
     }
-    if file.chunk_ids().is_empty() {
-        return blob_payload(verified, file.object_id(), expected);
-    }
-    let mut bytes = Vec::new();
-    for chunk_id in file.chunk_ids() {
-        let chunk = blob_payload(verified, chunk_id, usize::MAX)?;
-        let next = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
-            BindingError::new("workspace_too_large", "chunk concatenation overflow")
-        })?;
-        if next > expected {
-            return Err(BindingError::new(
-                "invalid_chunk_layout",
-                "chunk bytes exceed the verified file length",
-            ));
+    let object_bytes = verified.object_bytes(file.object_id()).ok_or_else(|| {
+        BindingError::new(
+            "insufficient_witness",
+            "verified snapshot lacks selected representation bytes",
+        )
+    })?;
+    match deserialize(object_bytes)
+        .map_err(|error| BindingError::new("wrong_object_type", error.to_string()))?
+    {
+        Object::Blob(blob) => {
+            if blob.data.len() != expected {
+                return Err(BindingError::new(
+                    "workspace_too_large",
+                    "blob payload does not match the verified file length",
+                ));
+            }
+            Ok(blob.data)
         }
-        bytes.extend_from_slice(&chunk);
+        Object::ChunkedBlob(manifest) => {
+            if manifest.chunks.is_empty() {
+                if expected != 0 || manifest.total_size != 0 {
+                    return Err(BindingError::new(
+                        "invalid_chunk_layout",
+                        "empty chunked representation is only valid at length zero",
+                    ));
+                }
+                return Ok(Vec::new());
+            }
+            let mut bytes = Vec::new();
+            for chunk_id in file.chunk_ids() {
+                let chunk = blob_payload(verified, chunk_id, usize::MAX)?;
+                let next = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+                    BindingError::new("workspace_too_large", "chunk concatenation overflow")
+                })?;
+                if next > expected {
+                    return Err(BindingError::new(
+                        "invalid_chunk_layout",
+                        "chunk bytes exceed the verified file length",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if bytes.len() != expected {
+                return Err(BindingError::new(
+                    "invalid_chunk_layout",
+                    "chunk bytes do not equal the verified file length",
+                ));
+            }
+            Ok(bytes)
+        }
+        _ => Err(BindingError::new(
+            "wrong_object_type",
+            "selected representation is not a Blob or ChunkedBlob",
+        )),
     }
-    if bytes.len() != expected {
-        return Err(BindingError::new(
-            "invalid_chunk_layout",
-            "chunk bytes do not equal the verified file length",
-        ));
-    }
-    Ok(bytes)
 }
 
 fn blob_payload(
@@ -1043,5 +1074,134 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "invalid_replacements");
+    }
+
+    fn insert(
+        objects: &mut std::collections::BTreeMap<mkit_core::Hash, Vec<u8>>,
+        object: &Object,
+    ) -> mkit_core::Hash {
+        let bytes = serialize(object).unwrap();
+        let id = mkit_core::object::id_from_object(object, &bytes);
+        objects.insert(id, bytes);
+        id
+    }
+
+    struct MapSource(std::collections::BTreeMap<mkit_core::Hash, Vec<u8>>);
+    impl mkit_core::store::ObjectSource for MapSource {
+        fn read(&self, id: &mkit_core::Hash) -> mkit_core::StoreResult<Vec<u8>> {
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| mkit_core::StoreError::ObjectNotFound(to_hex(id)))
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn empty_file_bundle(
+        file: Object,
+        name: &[u8],
+        mode: EntryMode,
+    ) -> Result<(String, String, Vec<u8>, String), PartialError> {
+        use mkit_core::{Commit, Identity, Tree, TreeEntry, build_partial_snapshot};
+        let limits = PartialLimits::V1;
+        let mut objects = std::collections::BTreeMap::new();
+        let file_id = insert(&mut objects, &file);
+        let representation = to_hex(&file_id);
+        let root = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: name.to_vec(),
+                    mode,
+                    object_hash: file_id,
+                }],
+            }),
+        );
+        let key_pair = KeyPair::from_seed([19; 32]);
+        let mut commit = Commit::new_unannotated(
+            root,
+            Vec::new(),
+            Identity::ed25519(key_pair.public.0),
+            key_pair.public.0,
+            b"empty file fixture".to_vec(),
+            1_700_000_001,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key_pair).unwrap().0;
+        let base_id = insert(&mut objects, &Object::Commit(commit));
+        let paths = vec![vec![name.to_vec()]];
+        let bundle = build_partial_snapshot(&MapSource(objects), base_id, &paths, &limits)?
+            .encode(&limits)?;
+        Ok((
+            to_hex(&base_id),
+            serde_json::to_string(&vec![vec![hex::encode(name)]]).unwrap(),
+            bundle,
+            representation,
+        ))
+    }
+
+    #[test]
+    fn read_only_verify_materializes_empty_blob_and_empty_chunked_blob() {
+        use mkit_core::{Blob, ChunkedBlob};
+        for mode in [EntryMode::Blob, EntryMode::Executable] {
+            let (base, paths, bundle, representation) =
+                empty_file_bundle(Object::Blob(Blob { data: Vec::new() }), b"empty.txt", mode)
+                    .unwrap();
+            let snapshot = partial_verify_snapshot_inner(&bundle, &base, &paths, None).unwrap();
+            assert_eq!(snapshot.coverage, "selected-only");
+            assert_eq!(snapshot.files.len(), 1);
+            assert_eq!(snapshot.files[0].bytes, Vec::<u8>::new());
+            assert_eq!(snapshot.files[0].representation_id_hex, representation);
+            assert_eq!(
+                snapshot.files[0].mode,
+                if mode == EntryMode::Blob {
+                    "blob"
+                } else {
+                    "exec"
+                }
+            );
+
+            let (base, paths, bundle, representation) = empty_file_bundle(
+                Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 0,
+                    chunk_size: 0,
+                    chunks: Vec::new(),
+                }),
+                b"empty.bin",
+                mode,
+            )
+            .unwrap();
+            let snapshot = partial_verify_snapshot_inner(&bundle, &base, &paths, None).unwrap();
+            assert_eq!(snapshot.files[0].bytes, Vec::<u8>::new());
+            assert_eq!(snapshot.files[0].representation_id_hex, representation);
+            assert!(
+                verify_partial_snapshot(
+                    from_hex(&base).unwrap(),
+                    &[vec![b"empty.bin".to_vec()]],
+                    &bundle,
+                    &PartialLimits::V1,
+                )
+                .unwrap()
+                .files()[0]
+                    .chunk_ids()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_chunked_layout_mismatch_fails_verification() {
+        use mkit_core::ChunkedBlob;
+        let error = empty_file_bundle(
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks: Vec::new(),
+            }),
+            b"bad.bin",
+            EntryMode::Blob,
+        )
+        .unwrap_err();
+        assert!(matches!(error, PartialError::InvalidChunkLayout));
     }
 }

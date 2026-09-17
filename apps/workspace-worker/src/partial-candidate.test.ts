@@ -92,5 +92,54 @@ describe("partial candidate export", () => {
         const update = storage.objects.get(result.candidate.key);
         expect(update?.byteLength).toBeGreaterThan(32);
         expect(mkit.blake3_hex(update!)).toBe(result.candidate.digest);
+        const commit = mkit.commit_decode(storage.objects.get(`objects/${result.candidate.id}`)!);
+        try {
+            expect(commit.parent(0)).toBe(BASE);
+            expect(mkit.commit_verify(storage.objects.get(`objects/${result.candidate.id}`)!)).toBe(
+                true,
+            );
+        } finally {
+            commit.free();
+        }
+    });
+
+    it("does not sign when consent is invalid after public reads", async () => {
+        const { storage, imported: value } = await imported();
+        const next = new TextEncoder().encode("changed");
+        const current = {
+            "shallow.txt": {
+                hash: await putBlob(storage, next),
+                size: next.length,
+                mode: "blob" as const,
+            },
+        };
+        const reads: string[] = [];
+        const wrapped = {
+            get: async (key: string) => {
+                reads.push(key);
+                return storage.get(key);
+            },
+            put: async (key: string, value: Uint8Array) => storage.put(key, value),
+        };
+        const { HttpError } = await import("./http");
+        await expect(
+            createPartialCandidate({
+                workspaceId: "ab".repeat(16),
+                objects: wrapped,
+                bundle: PLAIN,
+                baseCommit: BASE,
+                selectedPaths: PATHS,
+                original: value.files,
+                current,
+                seedHex: "41".repeat(32),
+                agentPublicKey: hex(mkit.ed25519_pubkey_from_seed(fromHex("41".repeat(32)))),
+                message: "partial edit",
+                beforeSign: async () => {
+                    throw new HttpError(403, "Agent access is disabled or expired.");
+                },
+            }),
+        ).rejects.toThrow(/disabled or expired/);
+        expect(reads.length).toBeGreaterThan(0);
+        expect([...storage.objects.keys()].some((key) => key.includes("/update/"))).toBe(false);
     });
 });

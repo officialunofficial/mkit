@@ -1,6 +1,6 @@
 import { HttpError } from "./http";
 import { encoder, fromHex, mkit } from "./mkit";
-import { getBlob, type FileManifest, type ObjectStorage } from "./objects";
+import { getBlob, putObject, type FileManifest, type ObjectStorage } from "./objects";
 import { pathFromHex } from "./partial-source";
 import { PartialNoChanges, bytesHex, editAndExportPartial } from "./partial-wasm";
 
@@ -31,6 +31,7 @@ export async function createPartialCandidate(input: {
     seedHex: string;
     agentPublicKey: string;
     message: string;
+    beforeSign?: () => Promise<void>;
 }): Promise<{ status: "no_changes" } | { status: "ready"; candidate: PartialCandidate }> {
     const replacements = await replacementRecords(
         input.objects,
@@ -38,6 +39,7 @@ export async function createPartialCandidate(input: {
         input.original,
         input.current,
     );
+    await input.beforeSign?.();
     if (!replacements.length) return { status: "no_changes" };
     let exported;
     try {
@@ -58,6 +60,9 @@ export async function createPartialCandidate(input: {
     }
     if (exported.coverage !== "selected-only")
         throw new HttpError(500, "Partial export coverage must be selected-only.");
+    const commitId = await putObject(input.objects, exported.signedCommitBytes);
+    if (commitId !== exported.candidateHex)
+        throw new HttpError(500, "Signed candidate identity mismatch.");
     const key = candidateStorageKey(input.workspaceId, exported.candidateHex);
     await input.objects.put(key, exported.updateBytes);
     const stored = await input.objects.get(key);

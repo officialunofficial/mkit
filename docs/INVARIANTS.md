@@ -405,11 +405,13 @@ unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 ## Public partial workspaces prove selected files, not confidentiality or publication
 
 **Always:** `public-partial-v1` fetches a digest-addressed bundle only from a
-configured HTTPS origin, verifies independently supplied base and selection in
-portable wasm, materializes selected regular/executable files, and signs at most
-one ordinary candidate whose parent is that base. AgentGrant is live execution
-consent. Export is `candidate_ready`, never remotely accepted. Omitted paths are
-not deletions.
+configured HTTPS origin after resource validation is explicitly enabled,
+verifies independently supplied base and selection in portable wasm, materializes
+selected regular/executable files, and signs at most one ordinary candidate
+whose parent is that base. AgentGrant is rechecked after asynchronous public
+reads, immediately before signing, and inside the durable admission
+transaction. Export is `candidate_ready`, never remotely accepted. Omitted paths
+are not deletions. Selected capture does not silently drop legacy-ignored names.
 
 **Because:** a public static bundle is not a private host, and a signed
 candidate is not a published ref. Conflating those lets omitted files look
