@@ -109,9 +109,10 @@ pub use object::{
     TreeEntry,
 };
 pub use partial::{
-    PartialCoverage, PartialError, PartialLimits, PartialObject, PartialPath,
-    PartialSnapshotBundle, SelectedFile, VerifiedPartialSnapshot, VerifiedTree,
-    build_partial_snapshot, verify_partial_snapshot,
+    FileReplacement, PartialCoverage, PartialError, PartialLimits, PartialObject, PartialPath,
+    PartialSnapshotBundle, PartialUpdate, PreparedPartialEdit, SelectedFile,
+    VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot, export_partial_update,
+    prepare_partial_commit, replace_files, verify_partial_snapshot,
 };
 pub use serialize::{deserialize, serialize};
 pub use sign::{

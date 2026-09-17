@@ -573,6 +573,199 @@ pub fn partial_workspace_one_iteration_with(input: &[u8], fixture: &PartialWorks
     let _ = mkit_core::verify_partial_snapshot(fixture.base, &fixture.paths, input, &limits);
 }
 
+/// Verified selected-file fixture reused by the bounded replacement-overlay target.
+pub struct PartialOverlayFixture {
+    verified: mkit_core::VerifiedPartialSnapshot,
+    original_root: [u8; 32],
+    untouched: mkit_core::TreeEntry,
+}
+
+pub fn build_partial_overlay_fixture() -> PartialOverlayFixture {
+    use mkit_core::hash::ZERO;
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::object::{Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+    use mkit_core::store::ObjectStore;
+    use mkit_core::worktree::store_file_object;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+    let first = store_file_object(&store, b"first").expect("first file");
+    let second = store_file_object(&store, b"second").expect("second file");
+    let hidden = store_file_object(&store, b"unselected").expect("hidden file");
+    let untouched = TreeEntry {
+        name: b"hidden.txt".to_vec(),
+        mode: EntryMode::Blob,
+        object_hash: hidden,
+    };
+    let tree = Tree {
+        entries: vec![
+            TreeEntry {
+                name: b"f.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: first,
+            },
+            TreeEntry {
+                name: b"g.txt".to_vec(),
+                mode: EntryMode::Executable,
+                object_hash: second,
+            },
+            untouched.clone(),
+        ],
+    };
+    let original_root = store
+        .write(&mkit_core::serialize(&Object::Tree(tree)).expect("tree bytes"))
+        .expect("tree");
+    let key = KeyPair::from_seed([0x42; 32]);
+    let mut commit = Commit {
+        tree_hash: original_root,
+        parents: Vec::new(),
+        author: Identity::ed25519(key.public.0),
+        signer: key.public.0,
+        message: b"partial overlay fuzz fixture".to_vec(),
+        timestamp: 1,
+        message_hash: ZERO,
+        content_digest: ZERO,
+        signature: [0; 64],
+    };
+    commit.signature = sign_commit(&commit, &key).expect("sign").0;
+    let base = store
+        .write(&mkit_core::serialize(&Object::Commit(commit)).expect("commit bytes"))
+        .expect("commit");
+    let paths = vec![vec![b"f.txt".to_vec()], vec![b"g.txt".to_vec()]];
+    let limits = mkit_core::PartialLimits::default();
+    let bundle = mkit_core::build_partial_snapshot(&store, base, &paths, &limits)
+        .expect("partial bundle")
+        .encode(&limits)
+        .expect("encode partial bundle");
+    let verified = mkit_core::verify_partial_snapshot(base, &paths, &bundle, &limits)
+        .expect("verify partial bundle");
+    PartialOverlayFixture {
+        verified,
+        original_root,
+        untouched,
+    }
+}
+
+/// Exercise bounded structured replacement batches against the public overlay API.
+/// A generated batch may be valid or invalid. Successful batches must be
+/// deterministic, preserve the unselected entry triple and file modes, and emit
+/// canonical produced objects under their type-dependent ids.
+pub fn partial_overlay_one_iteration(input: &[u8]) {
+    let fixture = build_partial_overlay_fixture();
+    partial_overlay_one_iteration_with(input, &fixture);
+}
+
+pub fn partial_overlay_one_iteration_with(input: &[u8], fixture: &PartialOverlayFixture) {
+    let limits = mkit_core::PartialLimits {
+        max_selected_file_bytes: 4 * 1024,
+        max_total_selected_bytes: 8 * 1024,
+        max_changed_paths: 4,
+        ..mkit_core::PartialLimits::default()
+    };
+    let _ = partial_overlay_one_iteration_with_limits(input, fixture, &limits);
+}
+
+fn partial_overlay_one_iteration_with_limits(
+    input: &[u8],
+    fixture: &PartialOverlayFixture,
+    limits: &mkit_core::PartialLimits,
+) -> Result<(), mkit_core::PartialError> {
+    use mkit_core::object::{EntryMode, Object, id_from_object};
+    use mkit_core::replace_files;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let replacements = overlay_replacements(input);
+    let prepared = replace_files(&fixture.verified, &replacements, limits)?;
+    let replay = replace_files(&fixture.verified, &replacements, limits)
+        .expect("a successful overlay must replay successfully");
+    assert_eq!(prepared.root_id(), replay.root_id());
+    assert_eq!(
+        prepared.produced_objects().collect::<Vec<_>>(),
+        replay.produced_objects().collect::<Vec<_>>(),
+        "overlay output must be deterministic"
+    );
+
+    let changed = prepared.changed_paths().collect::<Vec<_>>();
+    assert!(!changed.is_empty());
+    assert!(changed.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(changed.iter().all(|path| {
+        path.as_slice() == [b"f.txt".to_vec()] || path.as_slice() == [b"g.txt".to_vec()]
+    }));
+
+    let mut rebuilt_root = None;
+    for (id, bytes) in prepared.produced_objects() {
+        let object = mkit_core::deserialize(bytes).expect("produced object must decode");
+        assert_eq!(*id, id_from_object(&object, bytes));
+        assert_eq!(
+            bytes,
+            mkit_core::serialize(&object).expect("canonical object")
+        );
+        if id == prepared.root_id() {
+            rebuilt_root = Some(object);
+        }
+    }
+    let Some(Object::Tree(root)) = rebuilt_root else {
+        panic!("successful overlay must emit its rebuilt root Tree");
+    };
+    assert_ne!(*prepared.root_id(), fixture.original_root);
+    assert!(root.entries.contains(&fixture.untouched));
+    for entry in &root.entries {
+        if entry.name == b"f.txt" {
+            assert_eq!(entry.mode, EntryMode::Blob);
+        } else if entry.name == b"g.txt" {
+            assert_eq!(entry.mode, EntryMode::Executable);
+        }
+    }
+    Ok(())
+}
+
+fn overlay_replacements(input: &[u8]) -> Vec<mkit_core::FileReplacement> {
+    use mkit_core::FileReplacement;
+
+    let Some((&count, mut rest)) = input.split_first() else {
+        return Vec::new();
+    };
+    let mut replacements = Vec::with_capacity(usize::from(count % 5));
+    for _ in 0..count % 5 {
+        if rest.len() < 2 {
+            break;
+        }
+        let destination = overlay_path(rest[0]);
+        let kind = rest[1];
+        rest = &rest[2..];
+        if kind & 1 == 0 {
+            if rest.len() < 2 {
+                break;
+            }
+            let declared = usize::from(u16::from_le_bytes([rest[0], rest[1]])) % 4097;
+            rest = &rest[2..];
+            let take = declared.min(rest.len());
+            replacements.push(FileReplacement::bytes(destination, rest[..take].to_vec()));
+            rest = &rest[take..];
+        } else {
+            let Some((&source, tail)) = rest.split_first() else {
+                break;
+            };
+            replacements.push(FileReplacement::reuse_selected(
+                destination,
+                overlay_path(source),
+            ));
+            rest = tail;
+        }
+    }
+    replacements
+}
+
+fn overlay_path(selector: u8) -> mkit_core::PartialPath {
+    match selector % 4 {
+        0 => vec![b"f.txt".to_vec()],
+        1 => vec![b"g.txt".to_vec()],
+        2 => vec![b"hidden.txt".to_vec()],
+        _ => vec![b"missing.txt".to_vec()],
+    }
+}
+
 /// Store-less pack iterator: never panics on adversarial bytes. When
 /// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
 /// and yields `raw_count + delta_count` items.
@@ -1048,6 +1241,48 @@ mod tests {
         input[..8].copy_from_slice(&(position as u64).to_le_bytes());
         input[8] = 1;
         partial_workspace_one_iteration_with(&input, &fixture);
+    }
+
+    #[test]
+    fn partial_overlay_target_runs_within_caps() {
+        let fixture = build_partial_overlay_fixture();
+        run_iterated_unit_with(&fixture, partial_overlay_one_iteration_with)
+            .expect("guardrails held");
+        for case in [
+            &b""[..],
+            &b"\x01\x00\x00\x03\x00new"[..],
+            &b"\x01\x00\x01\x01"[..],
+            &b"\x02\x00\x00\x01\x00a\x00\x00\x01\x00b"[..],
+        ] {
+            let start = std::time::Instant::now();
+            partial_overlay_one_iteration_with(case, &fixture);
+            assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
+        }
+    }
+
+    #[test]
+    fn partial_overlay_fixed_case_reaches_aggregate_content_bound() {
+        let fixture = build_partial_overlay_fixture();
+        let payload = vec![0xA5; 4 * 1024];
+        let mut input = vec![2, 0, 0, 0, 16];
+        input.extend_from_slice(&payload);
+        input.extend_from_slice(&[1, 0, 0, 16]);
+        input.extend_from_slice(&payload);
+        let exact = mkit_core::PartialLimits {
+            max_selected_file_bytes: 4 * 1024,
+            max_total_selected_bytes: 8 * 1024,
+            max_changed_paths: 2,
+            ..mkit_core::PartialLimits::V1
+        };
+        assert!(partial_overlay_one_iteration_with_limits(&input, &fixture, &exact).is_ok());
+        let one_short = mkit_core::PartialLimits {
+            max_total_selected_bytes: exact.max_total_selected_bytes - 1,
+            ..exact
+        };
+        assert!(matches!(
+            partial_overlay_one_iteration_with_limits(&input, &fixture, &one_short),
+            Err(mkit_core::PartialError::WorkspaceTooLarge)
+        ));
     }
 
     #[test]

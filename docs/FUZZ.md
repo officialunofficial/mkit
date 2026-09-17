@@ -36,6 +36,7 @@ from recurring.
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 | `fuzz_targets/partial_workspace.rs` | `partial::verify_partial_snapshot` (fresh `MKWB` bundle verifies; a full-range byte mutation plus a guaranteed trailing byte rejects; arbitrary bytes remain bounded and never panic; nested counts and byte lengths are bounded before allocation) |
+| `fuzz_targets/partial_overlay.rs` | `partial::replace_files` (bounded structured replacement/reuse batches may succeed or reject; every success replays deterministically, preserves unselected entry triples and selected modes, and emits canonical objects under their type-dependent ids; a hand-built two-destination case accepts the exact aggregate-content bound and rejects the same input when that bound is lowered by one byte) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
@@ -72,6 +73,12 @@ Target-specific invariants:
 - **Delta**: a `COPY` instruction's `offset + length` stays within the
   base slice; a truncated `COPY` header or `INSERT` literal produces
   `DeltaCorrupt`; opcode `0x00` is always rejected.
+- **Partial overlay**: inputs describe at most four complete-byte or
+  verified-representation reuse operations. Each byte payload is at most
+  4 KiB, and the whole batch is at most 8 KiB. Invalid, duplicate,
+  unselected, and all-no-op batches may reject. A successful batch must
+  replay to the same root and object set, keep every unselected entry triple
+  unchanged, preserve regular/executable modes, and emit canonical objects.
 
 ## How to run
 
@@ -93,6 +100,7 @@ cargo +nightly fuzz run pack
 cargo +nightly fuzz run tree
 cargo +nightly fuzz run software_key_record
 cargo +nightly fuzz run rpc_decode
+cargo +nightly fuzz run partial_overlay
 ```
 
 ## In-process minifuzz (`rpc_decode` pilot)
@@ -160,8 +168,10 @@ Every target body must satisfy all six:
   (oversize counts, truncated headers, invalid modes, etc.) that
   random bytes rarely hit. Coverage-guided `cargo fuzz` runs fill in
   the rest.
-- Fuzz outputs are only checked for "no panic, no runaway". This does not
-  diff against a reference decoder.
+- Most parser targets check only for no panic and no runaway. The partial
+  overlay target adds deterministic replay, canonical-object, mode, and
+  untouched-triple invariants, but it does not compare against an independent
+  overlay implementation.
 
 ## Adding a new target
 

@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "2000c7997b97de39a4deb2e8bddaa00f3949a6744481feae331903dd3a95dbdf",
+  "bytes": 4685,
+  "expected_error": "submission_too_large",
+  "name": "neg_trailing",
+  "reason": "trailing update byte"
+}

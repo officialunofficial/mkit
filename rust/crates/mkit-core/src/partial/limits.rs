@@ -22,6 +22,11 @@ pub struct PartialLimits {
     pub max_bundle_bytes: usize,
     pub max_objects: usize,
     pub max_object_bytes: usize,
+    pub max_update_bytes: usize,
+    pub max_raw_pack_bytes: usize,
+    pub max_update_objects: usize,
+    pub max_commit_message_bytes: usize,
+    pub max_changed_paths: usize,
 }
 
 impl PartialLimits {
@@ -41,6 +46,11 @@ impl PartialLimits {
         max_bundle_bytes: 56 * 1024 * 1024,
         max_objects: 65_536,
         max_object_bytes: 16 * 1024 * 1024,
+        max_update_bytes: 56 * 1024 * 1024,
+        max_raw_pack_bytes: 48 * 1024 * 1024,
+        max_update_objects: 65_536,
+        max_commit_message_bytes: 4 * 1024,
+        max_changed_paths: 256,
     };
 
     pub(crate) fn is_v1_subset(&self) -> bool {
@@ -59,6 +69,11 @@ impl PartialLimits {
             && self.max_bundle_bytes <= Self::V1.max_bundle_bytes
             && self.max_objects <= Self::V1.max_objects
             && self.max_object_bytes <= Self::V1.max_object_bytes
+            && self.max_update_bytes <= Self::V1.max_update_bytes
+            && self.max_raw_pack_bytes <= Self::V1.max_raw_pack_bytes
+            && self.max_update_objects <= Self::V1.max_update_objects
+            && self.max_commit_message_bytes <= Self::V1.max_commit_message_bytes
+            && self.max_changed_paths <= Self::V1.max_changed_paths
     }
 }
 

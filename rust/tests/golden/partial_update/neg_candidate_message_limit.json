@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "4f2bc7aa2da508c5584aef9581a5efd66769801b88d41ff0aa0134754c799a39",
+  "bytes": 8760,
+  "expected_error": "submission_too_large",
+  "name": "neg_candidate_message_limit",
+  "reason": "candidate message exceeds the partial-update bound"
+}

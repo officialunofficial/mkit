@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "a5daafa6df74babcd0b4c4a7d0b6c4baba3045fe6f03a223cd27ccc70a6280fe",
+  "bytes": 564,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_compressed_entry",
+  "reason": "well-formed compressed entry forbidden"
+}

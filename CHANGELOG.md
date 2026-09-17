@@ -43,6 +43,19 @@ train).
   signing, pack, ref bytes and ordinary full-clone defaults are unchanged.
   **SemVer:** additive.
 
+- *(core)* Authenticated partial overlays add `FileReplacement`,
+  `PreparedPartialEdit`, `PartialUpdate`, `replace_files`,
+  `prepare_partial_commit`, and `export_partial_update`. A verified selected
+  snapshot can replace existing regular/executable file contents, preserve
+  hidden Tree commitments and modes, prepare an ordinary one-parent Commit for
+  the existing signer interface, and export deterministic `MKWU` v1 bytes with
+  an exact raw-only object inventory. Reused representation dependencies are
+  retained once per unique id, and every operation rechecks its active resource
+  limits so exported bytes decode under the same bounds. Export has no grant, owner, clock,
+  hosting-service, remote-ref publication, or complete-closure meaning.
+  Existing object, signing, pack, ref formats and full-clone defaults are
+  unchanged. **SemVer:** additive.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

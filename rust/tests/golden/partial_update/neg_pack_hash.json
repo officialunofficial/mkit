@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "ac57a5d2f07e517be37f2f91911cb98bce1ad2645967fb15bfcb34e57621ef97",
+  "bytes": 4684,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_pack_hash",
+  "reason": "outer pack identity mismatch"
+}

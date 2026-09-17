@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "09cff0ea7ce79ba1e8137399345b78526efe531dc2bbb226a830e0c4877f0d86",
+  "bytes": 4726,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_delta_entry",
+  "reason": "well-formed delta entry forbidden"
+}

@@ -578,7 +578,11 @@ fn selected_after(
     Ok(next)
 }
 
-fn add_chunk_len(sum: u64, chunk_len: usize, declared: u64) -> Result<u64, PartialError> {
+pub(crate) fn add_chunk_len(
+    sum: u64,
+    chunk_len: usize,
+    declared: u64,
+) -> Result<u64, PartialError> {
     let chunk_len = u64::try_from(chunk_len).map_err(|_| PartialError::InvalidChunkLayout)?;
     let next = sum
         .checked_add(chunk_len)
@@ -589,7 +593,7 @@ fn add_chunk_len(sum: u64, chunk_len: usize, declared: u64) -> Result<u64, Parti
     Ok(next)
 }
 
-fn validate_manifest_size(
+pub(crate) fn validate_manifest_size(
     manifest: &crate::object::ChunkedBlob,
     limits: &PartialLimits,
 ) -> Result<(), PartialError> {
@@ -602,7 +606,7 @@ fn validate_manifest_size(
     Ok(())
 }
 
-fn validate_chunk_occurrence(
+pub(crate) fn validate_chunk_occurrence(
     manifest: &crate::object::ChunkedBlob,
     index: usize,
     actual: usize,
@@ -661,7 +665,7 @@ fn decode_checked(
     Ok(object)
 }
 
-fn preflight_tree(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialError> {
+pub(crate) fn preflight_tree(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialError> {
     if bytes.len() > limits.max_tree_object_bytes {
         return Err(PartialError::WitnessTooLarge);
     }
@@ -679,7 +683,7 @@ fn preflight_tree(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialErr
     Ok(())
 }
 
-fn preflight_file(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialError> {
+pub(crate) fn preflight_file(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialError> {
     match bytes.first().copied() {
         Some(tag) if tag == ObjectType::Blob as u8 => {
             if bytes.len() < 10 {

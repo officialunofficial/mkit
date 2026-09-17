@@ -22,7 +22,7 @@ front matter.
 - [SPEC-OBJECTS](SPEC-OBJECTS.md) &mdash; on-disk object model and canonical serialization over BLAKE3 IDs.
 - [SPEC-PACK-SHARDS](SPEC-PACK-SHARDS.md) &mdash; sharded pack production and transport delivery.
 - [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; packfile wire format for object exchange.
-- [SPEC-PARTIAL-WORKSPACES](SPEC-PARTIAL-WORKSPACES.md) &mdash; portable authenticated selected-file snapshot bundles and explicit selected-only coverage.
+- [SPEC-PARTIAL-WORKSPACES](SPEC-PARTIAL-WORKSPACES.md) &mdash; portable selected-file snapshots, authenticated replacement overlays, and explicit partial-update export.
 - [SPEC-REFS](SPEC-REFS.md) &mdash; ref names, storage, and CAS update variants.
 - [SPEC-RELEASE-THRESHOLD](SPEC-RELEASE-THRESHOLD.md) &mdash; BLS threshold signatures for release-party attestation.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
