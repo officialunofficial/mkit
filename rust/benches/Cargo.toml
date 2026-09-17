@@ -205,7 +205,7 @@ harness = false
 required-features = ["history-mmr"]
 
 # `ops::unified_hunks`'s Myers edit script (diff/show/add -p/3-way merge)
-# at increasing file sizes — regression guard for the common-prefix/suffix
+# at increasing file sizes — regression guard for the common-prefix
 # elision in `myers_changed`. No feature gate: diff is always compiled.
 [[bench]]
 name = "diff_edit_script"

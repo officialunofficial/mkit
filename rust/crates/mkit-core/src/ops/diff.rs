@@ -1004,8 +1004,6 @@ fn myers_changed(
 ) -> (Vec<bool>, Vec<bool>) {
     let n = old.len();
     let m = new.len();
-    let mut old_changed = vec![false; n];
-    let mut new_changed = vec![false; m];
 
     let max_prefix = n.min(m);
     let mut prefix = 0;
@@ -1015,8 +1013,18 @@ fn myers_changed(
 
     let (mid_old_changed, mid_new_changed) =
         myers_changed_core(&old[prefix..], &new[prefix..], mode);
-    old_changed[prefix..].copy_from_slice(&mid_old_changed);
-    new_changed[prefix..].copy_from_slice(&mid_new_changed);
+
+    // Build the full-length result directly instead of zero-filling `n`/`m`
+    // elements up front and then overwriting the post-prefix half via
+    // `copy_from_slice` — the leading `resize` only zero-inits the elided
+    // run, and reserving `n`/`m` capacity up front means `extend` never
+    // reallocates.
+    let mut old_changed = Vec::with_capacity(n);
+    old_changed.resize(prefix, false);
+    old_changed.extend(mid_old_changed);
+    let mut new_changed = Vec::with_capacity(m);
+    new_changed.resize(prefix, false);
+    new_changed.extend(mid_new_changed);
     (old_changed, new_changed)
 }
 
@@ -2321,22 +2329,20 @@ mod tests {
         /// `myers_changed` (prefix-elided) must produce byte-identical
         /// change-flags to `myers_changed_core` (the unmodified original
         /// algorithm) run directly on the same, un-elided `old`/`new` — not
-        /// just an equally-minimal edit script. This is the regression test
-        /// for the suffix-elision bug review caught before this shipped: an
-        /// earlier version of `myers_changed` also elided a common trailing
-        /// run by matching backward from the ends, which is unsound because
-        /// the core's actual backtrack can land on a *different* minimal
-        /// alignment when repeated lines near a change boundary admit more
-        /// than one (its tie-break depends on the whole search, not just the
-        /// tail). A tiny 3-symbol alphabet maximizes exactly this kind of
-        /// repeat/collision near the boundary in a short random sequence.
+        /// just an equally-minimal edit script. Regression test for the
+        /// suffix-elision bug caught in review (see `myers_changed`'s doc
+        /// comment for the full counterexample and why it's unsound). A
+        /// tiny 3-symbol alphabet maximizes repeat/collision near a change
+        /// boundary in a short random sequence — exactly what that bug
+        /// needed to surface.
         #[test]
         fn proptest_myers_changed_matches_unelided_core(
             old in proptest::collection::vec(0u8..3, 0..10),
             new in proptest::collection::vec(0u8..3, 0..10),
         ) {
             fn to_lines(v: &[u8]) -> Vec<DiffLine<'_>> {
-                v.iter().map(|&n| DiffLine { text: if n == 0 { b"0" } else if n == 1 { b"1" } else { b"2" }, has_newline: true }).collect()
+                const SYMBOLS: [&[u8]; 3] = [b"0", b"1", b"2"];
+                v.iter().map(|&n| DiffLine { text: SYMBOLS[n as usize], has_newline: true }).collect()
             }
             let old_lines = to_lines(&old);
             let new_lines = to_lines(&new);
@@ -2344,17 +2350,17 @@ mod tests {
             let ground_truth = myers_changed_core(&old_lines, &new_lines, WhitespaceMode::Exact);
             proptest::prop_assert_eq!(elided, ground_truth);
         }
-    }
 
-    proptest::proptest! {
         /// Patch round-trip on lines built from a random shared prefix/suffix
-        /// (the run `myers_changed` now elides before its O(ND) core) plus a
-        /// random differing middle: applying every hunk reproduces `new`
-        /// from `old`, and applying none reproduces `old`. Small line-index
-        /// alphabet (0..6) lets the generator produce shared runs, exact
-        /// duplicates, and fully disjoint content all in the same search
-        /// space, so this exercises the trim path (long shared prefix),
-        /// the untrimmed path (no shared prefix), and everything between.
+        /// plus a random differing middle: applying every hunk reproduces
+        /// `new` from `old`, and applying none reproduces `old`. Small
+        /// line-index alphabet (0..6) lets the generator produce shared
+        /// runs, exact duplicates, and fully disjoint content all in the
+        /// same search space, so this exercises the trim path (long shared
+        /// prefix), the untrimmed path (no shared prefix), and everything
+        /// between — including a trailing run shared for reasons other than
+        /// elision (`myers_changed` no longer elides one, but the O(ND) core
+        /// must still handle it correctly on its own).
         #[test]
         fn proptest_hunks_roundtrip_with_shared_affix(
             prefix in proptest::collection::vec(0u8..6, 0..8),
